@@ -20,6 +20,7 @@ use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
 use mago_database::file::File;
 use mago_database::file::FileId;
+use mago_database::process;
 
 use crate::error::Error;
 use crate::utils::write_by_rename;
@@ -175,11 +176,9 @@ pub struct Committed {
 /// the repository: outside one, or in a linked worktree whose git folder isn't there, as in a container that mounts
 /// the worktree alone.
 pub fn committed_files(workspace: &Path) -> Result<Committed, Error> {
-    let head = Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-        .current_dir(workspace)
-        .output()
-        .map_err(|source| Error::RunningGit { command: "rev-parse", source })?;
+    let head =
+        process::output(Command::new("git").args(["rev-parse", "--verify", "--quiet", "HEAD"]).current_dir(workspace))
+            .map_err(|source| Error::RunningGit { command: "rev-parse", source })?;
     // `--verify --quiet` exits 1 when `HEAD` names no commit, and git exits 128 when it can't read the repository.
     if head.status.code() == Some(1) {
         return Ok(Committed::default());
@@ -387,13 +386,10 @@ fn repository(workspace: &Path) -> Result<Option<(PathBuf, PathBuf)>, (PathBuf, 
 /// Whether git, run in `folder`, ignores `path`. A git that fails there ignores nothing, and [`ignored_by_gitignore`]
 /// gives its reason.
 fn ignores(folder: &Path, path: &Path) -> bool {
-    Command::new("git")
-        .args(["check-ignore", "--quiet", "--"])
-        .arg(path)
-        .current_dir(folder)
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    process::status(
+        Command::new("git").args(["check-ignore", "--quiet", "--"]).arg(path).current_dir(folder).stderr(Stdio::null()),
+    )
+    .is_ok_and(|status| status.success())
 }
 
 /// The untracked files and folders under `workspace` that its repository's `.gitignore` files ignore, relative to it.
@@ -402,11 +398,11 @@ fn ignores(folder: &Path, path: &Path) -> bool {
 /// repository another user owns, none is listed either, and the warning gives git's reason, as cargo warns and goes on
 /// when it can't read a repository's status.
 fn ignored_by_gitignore(workspace: &Path) -> Vec<PathBuf> {
-    let reason = match Command::new("git")
-        .args(["ls-files", "-z", "--others", "--ignored", "--directory", "--exclude-per-directory=.gitignore"])
-        .current_dir(workspace)
-        .output()
-    {
+    let reason = match process::output(
+        Command::new("git")
+            .args(["ls-files", "-z", "--others", "--ignored", "--directory", "--exclude-per-directory=.gitignore"])
+            .current_dir(workspace),
+    ) {
         Ok(output) if output.status.success() => {
             return output
                 .stdout
@@ -460,10 +456,7 @@ fn pattern(relative: &Path) -> String {
 ///
 /// `true` if the workspace is inside a git repository, `false` otherwise.
 fn is_git_repository(workspace: &Path) -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(workspace)
-        .output()
+    process::output(Command::new("git").args(["rev-parse", "--git-dir"]).current_dir(workspace))
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -519,15 +512,16 @@ fn get_files_with_unstaged_changes(workspace: &Path) -> Result<HashSet<PathBuf>,
 ///
 /// A string containing the id of the newly created blob
 fn create_blob(workspace: &Path, path: &Path, content: Vec<u8>) -> Result<String, Error> {
-    let mut child = Command::new("git")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .args(["hash-object", "-w", "--stdin", "--path"])
-        .arg(path)
-        .current_dir(workspace)
-        .spawn()
-        .map_err(|source| Error::RunningGit { command: "hash-object", source })?;
+    let mut child = process::spawn(
+        Command::new("git")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .args(["hash-object", "-w", "--stdin", "--path"])
+            .arg(path)
+            .current_dir(workspace),
+    )
+    .map_err(|source| Error::RunningGit { command: "hash-object", source })?;
 
     let mut stdin = child.stdin.take().expect("failed to get stdin");
     std::thread::spawn(move || {
@@ -567,7 +561,7 @@ fn get_mode(workspace: &Path, path: &Path) -> Result<String, Error> {
 ///
 /// Returns [`Error::RunningGit`] when git can't start, and [`Error::GitFailed`] when it exits with an error.
 fn run_git(command: &'static str, git: &mut Command) -> Result<Output, Error> {
-    let output = git.output().map_err(|source| Error::RunningGit { command, source })?;
+    let output = process::output(git).map_err(|source| Error::RunningGit { command, source })?;
 
     succeeded(command, output)
 }

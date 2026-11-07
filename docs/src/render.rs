@@ -6,6 +6,7 @@ use std::process::Command;
 
 use anyhow::Context;
 use anyhow::Result;
+use mago_database::process;
 use regex::Regex;
 use tera::Context as TeraContext;
 use tera::Tera;
@@ -414,19 +415,18 @@ fn build_pagefind_index(root: &Path, current_version: &str) -> Result<()> {
     // every snippet that mentions it.
     let exclude = "pre";
 
-    let status = Command::new("npm")
-        .args(["exec", "--", "pagefind", "--site", &site, "--root-selector", "main", "--exclude-selectors", exclude])
-        .current_dir(root)
-        .status();
+    let mut npm = Command::new("npm");
+    npm.args(["exec", "--", "pagefind", "--site", &site, "--root-selector", "main", "--exclude-selectors", exclude])
+        .current_dir(root);
+    let status = process::status(&mut npm);
 
     let success = match status {
         Ok(status) if status.success() => true,
         _ => {
-            let fallback = Command::new("npx")
-                .args(["--yes", "pagefind", "--site", &site, "--root-selector", "main", "--exclude-selectors", exclude])
-                .current_dir(root)
-                .status()
-                .context("failed to spawn pagefind CLI via npx")?;
+            let mut npx = Command::new("npx");
+            npx.args(["--yes", "pagefind", "--site", &site, "--root-selector", "main", "--exclude-selectors", exclude])
+                .current_dir(root);
+            let fallback = process::status(&mut npx).context("failed to spawn pagefind CLI via npx")?;
             fallback.success()
         }
     };

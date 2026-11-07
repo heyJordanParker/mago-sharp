@@ -47,9 +47,10 @@ const STATE_FAILED: u8 = 3;
 const IO_THREAD_STACK_SIZE: usize = 256 * 1024;
 const INITIAL_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_micros(50);
 const MAXIMUM_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(1);
-/// The longest a failed worker's error waits for the stderr reader to read the rest of the worker's stderr. A dead
-/// worker's stderr ends when it exits, so only a process it started that still holds its stderr reaches this. Eight PHP
-/// workers that died at startup on a loaded Mac waited from 5 µs to 179 µs.
+/// The longest a failed worker's error waits for the stderr reader to read the rest of the worker's stderr, which each
+/// worker Mago spawns keeps as its `stderr_end_timeout`. A dead worker's stderr ends when it exits, so only a process it
+/// started that still holds its stderr reaches this. Eight PHP workers that died at startup on a loaded Mac waited from
+/// 5 µs to 179 µs.
 const STDERR_END_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(windows)]
 const INPUT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -214,6 +215,8 @@ struct WorkerInner {
     stderr: Mutex<StderrTail>,
     /// Notified when the stderr reader reaches the end of the worker's stderr.
     stderr_ended: Condvar,
+    /// The longest a failure waits for the stderr reader to reach the end of the worker's stderr: `STDERR_END_TIMEOUT`.
+    stderr_end_timeout: Duration,
     /// Why the worker failed, with the tail of its stderr. `fail` sets it once, after the worker's state turns failed.
     failure: OnceLock<String>,
     trace_enabled: bool,
@@ -390,7 +393,7 @@ impl WorkerInner {
         }
         if !ended {
             failure.message =
-                format!("{}; stderr still open after {} ms", failure.message, STDERR_END_TIMEOUT.as_millis());
+                format!("{}; stderr still open after {} ms", failure.message, self.stderr_end_timeout.as_millis());
         }
         if !stderr.is_empty() {
             failure.message.push_str("; stderr: ");
@@ -413,11 +416,11 @@ impl WorkerInner {
 
     /// The tail of the worker's stderr, and whether it holds all the worker wrote. A worker that dies writes why just
     /// before it exits, and the stdout reader can see it exit before the stderr reader has read that, so this waits up
-    /// to `STDERR_END_TIMEOUT` for the stderr reader to reach the end.
+    /// to `stderr_end_timeout` for the stderr reader to reach the end.
     fn stderr_tail(&self) -> (String, bool) {
         let (tail, _) = self
             .stderr_ended
-            .wait_timeout_while(lock(&self.stderr), STDERR_END_TIMEOUT, |tail| !tail.ended)
+            .wait_timeout_while(lock(&self.stderr), self.stderr_end_timeout, |tail| !tail.ended)
             .unwrap_or_else(PoisonError::into_inner);
 
         (tail.display(), tail.ended)
@@ -505,6 +508,17 @@ pub(crate) struct Worker {
 
 impl Worker {
     pub fn spawn(id: usize, command: &WorkerCommand, options: &WorkerPoolOptions) -> Result<Arc<Self>, WorkerError> {
+        Self::spawn_with_stderr_end_timeout(id, command, options, STDERR_END_TIMEOUT)
+    }
+
+    /// Spawns the worker as [`Self::spawn`] does, whose failure waits up to `stderr_end_timeout` for the end of its
+    /// stderr.
+    fn spawn_with_stderr_end_timeout(
+        id: usize,
+        command: &WorkerCommand,
+        options: &WorkerPoolOptions,
+        stderr_end_timeout: Duration,
+    ) -> Result<Arc<Self>, WorkerError> {
         let trace_enabled = tracing::enabled!(tracing::Level::TRACE);
         let started_at = trace_enabled.then(Instant::now);
         tracing::trace!(
@@ -554,6 +568,7 @@ impl Worker {
             pending: Mutex::new(BTreeMap::new()),
             stderr: Mutex::new(StderrTail::new(options.stderr_tail_size)),
             stderr_ended: Condvar::new(),
+            stderr_end_timeout,
             failure: OnceLock::new(),
             trace_enabled,
             trace_summary_emitted: AtomicBool::new(false),
@@ -912,6 +927,7 @@ impl Worker {
             // A peer on streams has no stderr.
             stderr: Mutex::new(StderrTail { ended: true, ..StderrTail::new(options.stderr_tail_size) }),
             stderr_ended: Condvar::new(),
+            stderr_end_timeout: STDERR_END_TIMEOUT,
             failure: OnceLock::new(),
             trace_enabled: tracing::enabled!(tracing::Level::TRACE),
             trace_summary_emitted: AtomicBool::new(false),
@@ -1578,7 +1594,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_request_to_a_worker_that_died_at_startup_names_its_host_and_its_stderr() {
-        let worker = dead_shell_worker(&format!("echo '{FATAL_ERROR}' >&2; exit 255"));
+        let worker = dead_shell_worker(&format!("echo '{FATAL_ERROR}' >&2; exit 255"), UNREACHED_STDERR_END_TIMEOUT);
 
         let error = worker.request(b"describe".to_vec(), None).expect_err("the dead worker should fail the request");
 
@@ -1590,11 +1606,15 @@ mod tests {
     }
 
     /// The stdout reader can see a worker exit before the stderr reader reads what it wrote last, here written by a
-    /// process the worker started that writes it 200 ms later, so the failure waits for the end of the stderr.
+    /// process the worker started that writes it 200 ms later, so the failure waits for the end of the stderr. The
+    /// worker's stderr budget outlasts any load's delay to that process.
     #[cfg(unix)]
     #[test]
     fn a_failure_holds_the_stderr_the_worker_writes_after_its_stdout_closes() {
-        let worker = dead_shell_worker(&format!("( exec >&-; sleep 0.2; echo '{FATAL_ERROR}' >&2 ) & exit 255"));
+        let worker = dead_shell_worker(
+            &format!("( exec >&-; sleep 0.2; echo '{FATAL_ERROR}' >&2 ) & exit 255"),
+            UNREACHED_STDERR_END_TIMEOUT,
+        );
 
         let error = worker.request(b"describe".to_vec(), None).expect_err("the dead worker should fail the request");
 
@@ -1607,12 +1627,14 @@ mod tests {
 
     /// A wrapper that forks its worker rather than replacing itself with it, as `docker compose exec` does, leaves a
     /// child that runs until its stdin ends. The failure closes stdin before it waits for the end of the stderr, so the
-    /// child's last words make it into the error.
+    /// child's last words make it into the error. The worker's stderr budget outlasts any load's delay to the child.
     #[cfg(unix)]
     #[test]
     fn a_failure_closes_stdin_before_it_waits_for_the_end_of_the_stderr() {
-        let worker =
-            dead_shell_worker("exec 3<&0; ( exec >&- 0<&3; cat >/dev/null; echo 'stdin closed' >&2 ) & exit 255");
+        let worker = dead_shell_worker(
+            "exec 3<&0; ( exec >&- 0<&3; cat >/dev/null; echo 'stdin closed' >&2 ) & exit 255",
+            UNREACHED_STDERR_END_TIMEOUT,
+        );
 
         let error = worker.request(b"describe".to_vec(), None).expect_err("the dead worker should fail the request");
 
@@ -1628,7 +1650,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_failure_says_when_the_stderr_was_still_open_at_the_end_of_the_wait() {
-        let worker = dead_shell_worker(&format!("( exec >&-; {SLEEP_UNTIL_ENDED} ) & exit 255"));
+        let worker = dead_shell_worker(&format!("( exec >&-; {SLEEP_UNTIL_ENDED} ) & exit 255"), STDERR_END_TIMEOUT);
 
         let error = worker.request(b"describe".to_vec(), None).expect_err("the dead worker should fail the request");
 
@@ -1666,7 +1688,8 @@ mod tests {
             });
 
             for _ in 0..8 {
-                let worker = shell_worker(&script);
+                let request_timeout = WorkerPoolOptions::default().request_timeout;
+                let worker = shell_worker_within(&script, request_timeout, UNREACHED_STDERR_END_TIMEOUT);
                 wait_until_stderr_arrives(&worker);
 
                 let error =
@@ -1716,7 +1739,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_request_to_a_worker_that_stopped_reading_its_stdin_fails_at_the_deadline() {
-        let worker = shell_worker_within(&format!("exec {SLEEP_UNTIL_ENDED}"), STUCK_DEADLINE);
+        let worker = shell_worker_within(&format!("exec {SLEEP_UNTIL_ENDED}"), STUCK_DEADLINE, STDERR_END_TIMEOUT);
 
         let (error, elapsed) = request_larger_than_a_pipe_and_shut_down(worker);
 
@@ -1740,6 +1763,7 @@ mod tests {
                 stuck.display(),
             ),
             STUCK_DEADLINE,
+            STDERR_END_TIMEOUT,
         );
 
         let (error, elapsed) = request_larger_than_a_pipe_and_shut_down(worker);
@@ -1829,19 +1853,12 @@ mod tests {
         const TIMEOUT: Duration = Duration::from_secs(10);
 
         let runs = || {
-            let mut ps = std::process::Command::new("ps");
-            ps.args(["-o", "stat=", "-p", id]).stdout(std::process::Stdio::piped());
-            // `ProcessGroup::spawn` starts ps under the lock every worker starts under, so ps never holds the pipes of a
-            // worker another test starts at the same moment.
-            let mut group = ProcessGroup::spawn(&mut ps).expect("ps should run");
-            let mut state = Vec::new();
-            group
-                .leader()
-                .stdout
-                .take()
-                .expect("ps should have a stdout")
-                .read_to_end(&mut state)
-                .expect("ps should print the state");
+            // ps starts under the lock every worker starts under, so it never holds the pipes of a worker another test
+            // starts at the same moment.
+            let state =
+                mago_database::process::output(std::process::Command::new("ps").args(["-o", "stat=", "-p", id]))
+                    .expect("ps should run")
+                    .stdout;
             let state = state.trim_ascii();
             !state.is_empty() && !state.starts_with(b"Z")
         };
@@ -1862,26 +1879,33 @@ mod tests {
     #[cfg(unix)]
     const SLEEP_UNTIL_ENDED: &str = "sleep 2147483647";
 
-    /// A worker of the host `acme` that runs `script` in `sh`.
+    /// The stderr budget of a test whose worker's stderr ends, as the hosts' default deadline is, so a busy machine never
+    /// uses it up and the test fails only when the stderr never ends.
+    #[cfg(unix)]
+    const UNREACHED_STDERR_END_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// A worker of the host `acme` that runs `script` in `sh`, with Mago's stderr budget.
     #[cfg(unix)]
     fn shell_worker(script: &str) -> Arc<Worker> {
-        shell_worker_within(script, WorkerPoolOptions::default().request_timeout)
+        shell_worker_within(script, WorkerPoolOptions::default().request_timeout, STDERR_END_TIMEOUT)
     }
 
-    /// A worker of the host `acme` that runs `script` in `sh`, and fails a request that makes no progress for
-    /// `request_timeout`.
+    /// A worker of the host `acme` that runs `script` in `sh`, fails a request that makes no progress for
+    /// `request_timeout`, and waits up to `stderr_end_timeout` for the end of its stderr once it fails.
     #[cfg(unix)]
-    fn shell_worker_within(script: &str, request_timeout: Duration) -> Arc<Worker> {
+    fn shell_worker_within(script: &str, request_timeout: Duration, stderr_end_timeout: Duration) -> Arc<Worker> {
         let command = WorkerCommand::new("sh").with_arguments(["-c", script]);
         let options = WorkerPoolOptions { host: "acme".to_owned(), request_timeout, ..WorkerPoolOptions::default() };
 
-        Worker::spawn(0, &command, &options).expect("worker process should start")
+        Worker::spawn_with_stderr_end_timeout(0, &command, &options, stderr_end_timeout)
+            .expect("worker process should start")
     }
 
-    /// A worker that runs `script` and has stopped, as a pool's restarted worker has when a request reaches it.
+    /// A worker that runs `script`, waits up to `stderr_end_timeout` for the end of its stderr once it fails, and has
+    /// stopped, as a pool's restarted worker has when a request reaches it.
     #[cfg(unix)]
-    fn dead_shell_worker(script: &str) -> Arc<Worker> {
-        let worker = shell_worker(script);
+    fn dead_shell_worker(script: &str, stderr_end_timeout: Duration) -> Arc<Worker> {
+        let worker = shell_worker_within(script, WorkerPoolOptions::default().request_timeout, stderr_end_timeout);
         wait_until_stopped(&worker);
 
         worker

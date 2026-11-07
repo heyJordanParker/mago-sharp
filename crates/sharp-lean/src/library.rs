@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
+use mago_database::process;
 use mago_extension::ProcessGroup;
 use sha2::Digest;
 use sha2::Sha256;
@@ -355,7 +356,7 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
     if !fs::read(&toolchain).is_ok_and(|bytes| bytes == TOOLCHAIN.as_bytes()) {
         fs::write(&toolchain, TOOLCHAIN).map_err(|error| DatabaseError::io(IOAction::WriteFile, &toolchain, error))?;
     }
-    let version = lake.command().arg("--version").current_dir(builds).output()?;
+    let version = process::output(lake.command().arg("--version").current_dir(builds))?;
     if !version.status.success() {
         return Err(unbuilt(format!("lake --version in {} printed:\n{}", builds.display(), printed(&version))));
     }
@@ -375,7 +376,7 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
         fs::write(&target, source).map_err(|error| DatabaseError::io(IOAction::WriteFile, &target, error))?;
     }
 
-    let output = lake.command().arg("build").current_dir(&staging).output()?;
+    let output = process::output(lake.command().arg("build").current_dir(&staging))?;
     if !output.status.success() {
         return Err(unbuilt(format!("lake build in {} printed:\n{}", staging.display(), printed(&output))));
     }
@@ -430,7 +431,7 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
     }
 
     remove_folder(&home.join("tmp"))?;
-    let output = elan(&home).args(["toolchain", "install", TOOLCHAIN.trim()]).output()?;
+    let output = process::output(elan(&home).args(["toolchain", "install", TOOLCHAIN.trim()]))?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "its download failed: {}",
@@ -451,7 +452,7 @@ pub(crate) fn first_call(command: &mut Command) -> io::Result<Output> {
         .is_some_and(|path| std::env::split_paths(&path).any(|folder| folder.join(&program).is_file()));
     let _lock = if found { Some(install_lock(&cache_root()?)?) } else { None };
 
-    command.output()
+    process::output(command)
 }
 
 /// The exclusive lock on `elan.lock` in `cache`, held across threads and processes alike until it is dropped.
@@ -523,7 +524,7 @@ fn install_elan(url: &str, archive: &Archive, home: &Path) -> io::Result<()> {
 /// starts its own program, and Linux refuses to start a file open for writing.
 fn run_unpacked(command: &mut Command) -> io::Result<Output> {
     for _ in 0..50 {
-        match command.output() {
+        match process::output(command) {
             Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy => {
                 std::thread::sleep(Duration::from_millis(20))
             }
@@ -531,12 +532,12 @@ fn run_unpacked(command: &mut Command) -> io::Result<Output> {
         }
     }
 
-    command.output()
+    process::output(command)
 }
 
 /// Whether the elan in `home` has the library's Lean version installed.
 fn has_toolchain(home: &Path) -> io::Result<bool> {
-    let output = elan(home).args(["toolchain", "list"]).output()?;
+    let output = process::output(elan(home).args(["toolchain", "list"]))?;
 
     Ok(output.status.success()
         && String::from_utf8_lossy(&output.stdout)

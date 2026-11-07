@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::process::Stdio;
 
 use clap::Parser;
+use mago_database::process;
 use sha2::Digest;
 use sha2::Sha256;
 use tempfile::TempDir;
@@ -200,12 +201,14 @@ fn verify_archive(release: &Release, archive: &ReleaseAsset, archive_path: &Path
 
     if gh_verifies_attestations() {
         info!("Verifying the build attestation of `{}`, signed by {signer}...", archive.name);
-        let verified = Command::new("gh")
-            .args(["attestation", "verify"])
-            .arg(archive_path)
-            .args(["--repo", &repository, "--signer-workflow", &signer])
-            .status()?
-            .success();
+        let mut verify = Command::new("gh");
+        verify.args(["attestation", "verify"]).arg(archive_path).args([
+            "--repo",
+            &repository,
+            "--signer-workflow",
+            &signer,
+        ]);
+        let verified = process::status(&mut verify)?.success();
         if !verified {
             return Err(UpdateError::Update(format!(
                 "`{}` could not be matched to a build attestation signed by {signer}, so nothing was extracted or installed.",
@@ -240,11 +243,7 @@ fn verify_archive(release: &Release, archive: &ReleaseAsset, archive_path: &Path
 
 /// Returns `true` when a `gh` on the `PATH` has the `gh attestation` subcommand.
 fn gh_verifies_attestations() -> bool {
-    Command::new("gh")
-        .args(["attestation", "--help"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+    process::status(Command::new("gh").args(["attestation", "--help"]).stdout(Stdio::null()).stderr(Stdio::null()))
         .is_ok_and(|status| status.success())
 }
 

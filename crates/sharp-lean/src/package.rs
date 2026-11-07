@@ -13,6 +13,7 @@ use mago_analyzer::graph::strongly_connected_parts;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
 use mago_database::file::FileId;
+use mago_database::process;
 use mago_sharp_bridge::unit::COMPILED_FOLDER;
 use serde::Serialize;
 
@@ -392,7 +393,7 @@ impl Package {
                     Ok(None) => return Ok(Toolchain::Unsupported),
                     Err(error) => return Ok(Toolchain::Failed(error.to_string())),
                 };
-                self.lake.command().arg("--version").current_dir(&self.directory).output()?
+                process::output(self.lake.command().arg("--version").current_dir(&self.directory))?
             }
             output => output?,
         };
