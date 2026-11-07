@@ -590,7 +590,6 @@ pub fn cache_root() -> io::Result<PathBuf> {
 mod tests {
     use std::io::BufRead;
     use std::io::BufReader;
-    use std::io::Write as _;
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
