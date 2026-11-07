@@ -71,7 +71,6 @@ where
         if self.is_at_type_hint()? { Ok(Some(self.parse_type_hint()?)) } else { Ok(None) }
     }
 
-    /// A union or intersection nests its right side, so a long one recurses once for each of its types.
     pub(crate) fn parse_type_hint(&mut self) -> Result<Hint<'arena>, ParseError<'arena>> {
         ensure_sufficient_stack(|| self.parse_type_hint_inner(false))
     }
@@ -81,7 +80,57 @@ where
         ensure_sufficient_stack(|| self.parse_type_hint_inner(true))
     }
 
+    /// Reads the types of a union or intersection in a loop and nests them from the right afterwards, so a union of
+    /// 100,000 types takes one call frame, not one per type.
     fn parse_type_hint_inner(&mut self, in_expression: bool) -> Result<Hint<'arena>, ParseError<'arena>> {
+        // Each type followed by a `|` or an `&`, with that operator.
+        let mut joined = std::vec::Vec::new();
+        let mut hint = loop {
+            let hint = self.parse_joined_type_hint(in_expression)?;
+            // `readonly` covers the whole type after it, and a `>>` that closed this type's arguments also closed the
+            // enclosing list, so nothing after either belongs here.
+            if matches!(hint, Hint::Readonly(_)) || self.state.closing_angle.is_some() {
+                break hint;
+            }
+
+            match self.stream.lookahead(0)?.map(|t| t.kind) {
+                Some(T!["|"]) => joined.push((hint, T!["|"], self.stream.eat_span(T!["|"])?)),
+                Some(T!["&"]) if !matches!(self.stream.peek_kind(1)?, Some(T!["$variable"] | T!["..."] | T!["&"])) => {
+                    joined.push((hint, T!["&"], self.stream.eat_span(T!["&"])?));
+                }
+                _ => break hint,
+            }
+        };
+
+        while let Some((left, operator, span)) = joined.pop() {
+            let left = self.arena.alloc(left);
+            hint = if operator == T!["|"] {
+                Hint::Union(UnionHint { left, pipe: span, right: self.arena.alloc(hint) })
+            } else {
+                match hint {
+                    // PHP#'s `&` binds tighter than `|`, as TypeScript's does, spec section 24, so `A & B | C` joins
+                    // `A` with `B` only, and the union holds that intersection and `C`.
+                    Hint::Union(union) if self.dialect.is_sharp() => Hint::Union(UnionHint {
+                        left: self.arena.alloc(Hint::Intersection(IntersectionHint {
+                            left,
+                            ampersand: span,
+                            right: union.left,
+                        })),
+                        pipe: union.pipe,
+                        right: union.right,
+                    }),
+                    right => {
+                        Hint::Intersection(IntersectionHint { left, ampersand: span, right: self.arena.alloc(right) })
+                    }
+                }
+            };
+        }
+
+        Ok(hint)
+    }
+
+    /// One type of a union or intersection, or a `readonly` type, which covers the whole type after it.
+    fn parse_joined_type_hint(&mut self, in_expression: bool) -> Result<Hint<'arena>, ParseError<'arena>> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         let hint = match &token.kind {
@@ -189,41 +238,7 @@ where
             self.errors.push(ParseError::UsesAfterFunctionTypeInSharp(misplaced.span()));
         }
 
-        let next = self.stream.lookahead(0)?;
-        Ok(match next.map(|t| t.kind) {
-            Some(T!["|"]) => {
-                let left = hint;
-                let pipe = self.stream.eat_span(T!["|"])?;
-                let right = ensure_sufficient_stack(|| self.parse_type_hint_inner(in_expression))?;
-
-                Hint::Union(UnionHint { left: self.arena.alloc(left), pipe, right: self.arena.alloc(right) })
-            }
-            Some(T!["&"]) if !matches!(self.stream.peek_kind(1)?, Some(T!["$variable"] | T!["..."] | T!["&"])) => {
-                let left = hint;
-                let ampersand = self.stream.eat_span(T!["&"])?;
-                let right = ensure_sufficient_stack(|| self.parse_type_hint_inner(in_expression))?;
-
-                match right {
-                    // PHP#'s `&` binds tighter than `|`, as TypeScript's does, spec section 24, so `A & B | C` joins
-                    // `A` with `B` only, and the union holds that intersection and `C`.
-                    Hint::Union(union) if self.dialect.is_sharp() => Hint::Union(UnionHint {
-                        left: self.arena.alloc(Hint::Intersection(IntersectionHint {
-                            left: self.arena.alloc(left),
-                            ampersand,
-                            right: union.left,
-                        })),
-                        pipe: union.pipe,
-                        right: union.right,
-                    }),
-                    right => Hint::Intersection(IntersectionHint {
-                        left: self.arena.alloc(left),
-                        ampersand,
-                        right: self.arena.alloc(right),
-                    }),
-                }
-            }
-            _ => hint,
-        })
+        Ok(hint)
     }
 
     /// Whether the `?` after a type that can end an expression starts a `? :` instead of making the type nullable, as
