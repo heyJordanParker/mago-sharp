@@ -8,7 +8,8 @@
 //! Beside each of the project's own PHP# sources that declares a type, outside `vendor/` and `autoload-dev` folders, it
 //! also writes a PHP file of the type's name that loads the source and states the type's declaration, so PHP code that
 //! finds classes by listing `*.php` files or reading their source finds PHP# classes too, spec section 27. A removed
-//! source loses its PHP file, and git's `info/exclude` keeps the files no `.gitignore` covers out of git.
+//! source loses its PHP file, and a `.gitignore` the compile writes in each folder that holds such files keeps them
+//! out of git in that checkout alone.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -35,6 +36,7 @@ use mago_database::file::COMPANION_START;
 use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
+use mago_database::loader::ExcludedFolders;
 use mago_database::membership::WorkspaceMatcher;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::OrchestratorError;
@@ -57,6 +59,7 @@ use mago_sharp_lean::PACKAGE_FOLDER;
 use mago_syntax::cst::Statement;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file;
+use mago_syntax_core::utils::is_part_of_identifier;
 
 use crate::baseline::unserialize_baseline;
 use crate::commands::analyze::analyze_the_whole_workspace_without_paths;
@@ -326,7 +329,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     // Written before the compile stamps its inputs, which hold the PHP file a default class's name could name in
     // a file's folder, so a compiled file is current once it is written.
     let mut failed = false;
-    let mut written_beside = BTreeSet::new();
+    let mut written_beside: HashMap<PathBuf, BTreeSet<String>> = HashMap::new();
     let mut folders = BTreeSet::new();
     let mut listings = HashMap::new();
     for file in database.files().filter(|file| {
@@ -382,22 +385,26 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         {
             write_by_rename(&path, contents.as_bytes())?;
         }
-        written_beside.insert(path);
+        written_beside.entry(folder).or_default().insert(php);
     }
-    // A removed source's PHP file is in a folder that holds a source, or held one at the last compile.
+    // A removed source's PHP file, and the `.gitignore` that lists it, are in a folder that holds a source, held one at
+    // the last compile, or holds the compile's `.gitignore`, as the folder of a refused source does.
     let compiled_folder = root.join(unit::COMPILED_FOLDER);
     source_folders(&root, &compiled_folder, &compiled_folder, &mut folders)?;
+    gitignore_folders(&root, &orchestrator.database_configuration(workspace, false), &mut folders)?;
     for folder in folders {
+        let written = written_beside.remove(&folder).unwrap_or_default();
         for name in file_names(&folder)? {
             let path = folder.join(&name);
-            if name.ends_with(".php") && !written_beside.contains(&path) && written_by_compile(&path)? {
+            if name.ends_with(".php") && !written.contains(&name) && written_by_compile(&path)? {
                 std::fs::remove_file(&path)
                     .or_else(ignore_missing)
                     .map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))?;
             }
         }
+        keep_out_of_git(&root, &folder, &written)?;
     }
-    git::exclude(&root, "mago compile", &written_beside.into_iter().collect::<Vec<_>>())?;
+    git::remove_exclude_blocks(&root, "mago compile")?;
 
     let library = match standard_library(&root, &database) {
         Ok(library) => library,
@@ -764,6 +771,177 @@ fn written_by_compile(path: &Path) -> Result<bool, DatabaseError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(DatabaseError::io(IOAction::ReadFile, path, error)),
     }
+}
+
+/// The first line of the `.gitignore` [`keep_out_of_git`] writes, which marks the file as the compile's own.
+const GITIGNORE_START: &str =
+    "# mago compile writes this file and the files it lists. It rewrites it on every compile.\n";
+
+/// Keeps `written`, the names of the PHP files the compile wrote in `folder`, out of git through the folder's
+/// `.gitignore`, which lists itself and each of them. Each checkout of a repository has its own `.gitignore`, so git
+/// ignores the files of this checkout alone, where the `info/exclude` every checkout shares hid them in all of them. A
+/// file's name is a type's name and `.php`, which holds no character a pattern reads as a wildcard.
+///
+/// The compile's own file, as [`gitignore_written_by_compile`] tells it, is rewritten when the list changes, and is
+/// deleted once the folder holds no such file. A `.gitignore` the compile didn't write, tracked or not, is left as it
+/// is, and the compile warns of each file it doesn't list, as [`lists`] reads it, since git may show that file as
+/// untracked. So it does of a `.gitignore` that is a link, which git doesn't read, and of one it can't read, which fails
+/// no compile.
+fn keep_out_of_git(root: &Path, folder: &Path, written: &BTreeSet<String>) -> Result<(), DatabaseError> {
+    let path = folder.join(".gitignore");
+    let relative = folder.strip_prefix(root).unwrap_or(folder);
+    let shown = relative.join(".gitignore");
+    let shown = shown.display();
+    // The files git may show for `names`, and the lines that list them, each joined by commas.
+    let named = |names: &[&String]| -> (String, String) {
+        let files: Vec<String> = names.iter().map(|name| relative.join(name).display().to_string()).collect();
+        let lines: Vec<String> = names.iter().map(|name| format!("/{name}")).collect();
+        (files.join(", "), lines.join(", "))
+    };
+    let all: Vec<&String> = written.iter().collect();
+    if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        if !all.is_empty() {
+            let (files, lines) = named(&all);
+            tracing::warn!(
+                "{shown} is a link, which git doesn't read, so git may show {files} as untracked: make it a file that lists {lines}."
+            );
+        }
+        return Ok(());
+    }
+    let before = match std::fs::read(&path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            if !all.is_empty() {
+                let (files, _) = named(&all);
+                tracing::warn!(
+                    "{shown} can't be read: {}, so git may show {files} as untracked. Make it a file mago compile can read, and run vendor/bin/mago compile again.",
+                    error.kind()
+                );
+            }
+            return Ok(());
+        }
+    };
+    match before {
+        Some(theirs) if !gitignore_written_by_compile(&theirs) => {
+            let unlisted: Vec<&String> = written.iter().filter(|name| !lists(&theirs, name)).collect();
+            if !unlisted.is_empty() {
+                let (files, lines) = named(&unlisted);
+                tracing::warn!(
+                    "{shown} doesn't list {lines}, so git may show {files} as untracked: add {lines} to it."
+                );
+            }
+        }
+        Some(_) if written.is_empty() => {
+            std::fs::remove_file(&path)
+                .or_else(ignore_missing)
+                .map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))?;
+        }
+        None if written.is_empty() => {}
+        before => {
+            let mut after = format!("{GITIGNORE_START}/.gitignore\n");
+            for name in written {
+                after.push_str(&format!("/{name}\n"));
+            }
+            if before.as_deref() != Some(after.as_bytes()) {
+                write_by_rename(&path, after.as_bytes())?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Whether `contents` is a `.gitignore` [`keep_out_of_git`] wrote: [`GITIGNORE_START`], then lines that each name the
+/// file itself or a PHP file, as `/` and its name. Any other line makes the file someone else's, so the compile never
+/// rewrites or deletes a line someone added.
+fn gitignore_written_by_compile(contents: &[u8]) -> bool {
+    contents.strip_prefix(GITIGNORE_START.as_bytes()).is_some_and(|lines| {
+        lines.split_inclusive(|byte| *byte == b'\n').all(|line| {
+            line.strip_suffix(b"\n").and_then(|line| line.strip_prefix(b"/")).is_some_and(|name| {
+                name == b".gitignore"
+                    || name
+                        .strip_suffix(b".php")
+                        .is_some_and(|stem| !stem.is_empty() && stem.iter().all(is_part_of_identifier))
+            })
+        })
+    })
+}
+
+/// Whether git reads the `.gitignore` `contents`, which someone else wrote, as ignoring the PHP file `name` of its
+/// folder: a line names it as `/` and its name, and no `!` line after that names it again, which git reads as showing
+/// it. A byte order mark before the first line, and the spaces and the carriage return that end a line, are no part of
+/// the line.
+fn lists(contents: &[u8], name: &str) -> bool {
+    let contents = contents.strip_prefix(b"\xef\xbb\xbf").unwrap_or(contents);
+    let mut listed = false;
+    for line in contents.split(|byte| *byte == b'\n').map(<[u8]>::trim_ascii_end) {
+        match line.strip_prefix(b"!") {
+            Some(shown) => listed &= shown.strip_prefix(b"/").unwrap_or(shown) != name.as_bytes(),
+            None => listed |= line.strip_prefix(b"/") == Some(name.as_bytes()),
+        }
+    }
+
+    listed
+}
+
+/// Adds to `folders` each folder under the project's own source `paths` that holds a `.gitignore` the compile wrote, so
+/// the compile comes back to a folder whose every source is gone even when none of them was compiled, as a refused one
+/// isn't. `configuration` is the one the analysis walks the project's own files by. A path that holds a wildcard is
+/// walked from its folder before the wildcard, and no path walks the workspace. The walk skips each folder that walk
+/// skips, as [`ExcludedFolders`] tells it: the `excludes`, the `includes` and the `.sharp` folder. It skips `vendor/`
+/// too, and a path inside a skipped folder, where the compile writes no PHP file, each `.git` folder, and every link,
+/// which the compile never writes through. A folder it can't open is skipped, as the analysis's own walk skips it with
+/// a warning.
+fn gitignore_folders(
+    root: &Path,
+    configuration: &DatabaseConfiguration<'_>,
+    folders: &mut BTreeSet<PathBuf>,
+) -> Result<(), DatabaseError> {
+    let excluded = ExcludedFolders::from_configuration(configuration)?;
+    let vendor = root.join("vendor");
+    let skipped = |folder: &Path| folder.starts_with(&vendor) || excluded.contains(folder);
+    let mut pending: Vec<PathBuf> = if configuration.paths.is_empty() {
+        vec![root.to_path_buf()]
+    } else {
+        configuration
+            .paths
+            .iter()
+            .map(|path| {
+                // The folder a configured path names, before any wildcard, with its `.` parts gone.
+                let path = String::from_utf8_lossy(path);
+                let literal = match path.find(['*', '?', '[', '{']) {
+                    Some(wildcard) => &path[..path[..wildcard].rfind('/').unwrap_or(0)],
+                    None => path.as_ref(),
+                };
+                root.join(literal).components().collect::<PathBuf>()
+            })
+            .filter(|folder| !skipped(folder))
+            .collect()
+    };
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                if entry.file_name() != ".git" && !skipped(&path) {
+                    pending.push(path);
+                }
+            } else if file_type.is_file()
+                && entry.file_name() == ".gitignore"
+                && std::fs::read(&path).is_ok_and(|contents| gitignore_written_by_compile(&contents))
+            {
+                folders.insert(folder.clone());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// The type a PHP# source declares named like its file, spec section 27.

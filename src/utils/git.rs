@@ -250,197 +250,80 @@ pub fn stage_rename(workspace: &Path, from: &Path, to: &Path) -> Result<(), Erro
     Ok(())
 }
 
-/// Keeps `paths`, each a file under `workspace`, out of git: the ones no `.gitignore` already ignores become the block
-/// of the repository's `info/exclude` that `owner` holds for `workspace`. A workspace git ignores, as a build folder,
-/// has no block, and neither has one whose paths are all ignored. Every other line of the file stays as it is, except
-/// the blocks of `owner` for a folder that is gone or that git now ignores, which keep nothing out of git.
+/// Removes from the `info/exclude` file git reads for `workspace` every block `owner` wrote there, whichever folder it
+/// names. `owner` kept its files out of git in those blocks, but every checkout of a repository shares the file, so one
+/// checkout's block hid the same paths in every other checkout. It is for checkouts upgraded from mago 0.6.3 or
+/// earlier, which wrote the blocks.
 ///
-/// [`repository`] names the file, so a worktree and a submodule write the one git reads for them, with or without a
-/// `git` to run. The worktrees of a repository share that file, so each workspace keeps a block of its own, named by its
-/// path, and one worktree's compile never drops another's paths. The file is replaced by rename, so a compile that reads
-/// it while another writes it never reads part of it. With no `git` to run, or one that fails there, no `.gitignore` is
-/// read, so the block lists every path. A workspace outside a git repository writes nothing. One whose `.git` names a
-/// missing folder, or whose file can't be written, writes nothing and warns that git shows `paths` as untracked.
-pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), Error> {
-    let (top, file) = match repository(workspace) {
-        Ok(Some(found)) => found,
-        Ok(None) => return Ok(()),
-        Err((dot_git, missing)) => {
-            warn_untracked(
-                workspace,
-                paths,
-                &format!("{} names {}, which is missing", dot_git.display(), missing.display()),
-                "Make the repository's .git folder reachable here",
-            );
-            return Ok(());
-        }
+/// A block is a heading, the lines right after it that start with `/`, and the end line when it comes next, so a block
+/// torn before its end line loses only its own `/` lines. Every other byte stays, a CRLF line end, a byte that is no
+/// UTF-8 and a last line with no line end included. [`exclude_file`] names the file, with or without a `git` to run.
+/// The file is replaced by rename, so a compile that reads it while another writes it never reads part of it. A file
+/// with no block is left as it is. One that can't be written keeps its blocks, and the compile warns.
+pub fn remove_exclude_blocks(workspace: &Path, owner: &str) -> Result<(), Error> {
+    let Some(file) = exclude_file(workspace) else {
+        return Ok(());
     };
-    let top = top.as_path();
-    let heading = format!("# {owner}: the files it writes in ");
-    let end = format!("# {owner}: end");
-
-    let before = match std::fs::read_to_string(&file) {
+    let before = match std::fs::read(&file) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &file, error).into()),
     };
-    let mut after = String::new();
-    let mut kept = true;
-    for line in before.lines() {
-        if let Some(folder) = line.strip_prefix(&heading) {
-            let folder = Path::new(folder);
-            kept = folder != workspace && folder.is_dir() && !ignores(folder, folder);
+    let heading = format!("# {owner}: the files it writes in ");
+    let end = format!("# {owner}: end");
+    let mut after = Vec::with_capacity(before.len());
+    let mut in_block = false;
+    for line in before.split_inclusive(|byte| *byte == b'\n') {
+        let text = line.strip_suffix(b"\n").unwrap_or(line);
+        let text = text.strip_suffix(b"\r").unwrap_or(text);
+        if in_block && text.starts_with(b"/") {
+            continue;
         }
-        if kept {
-            after.push_str(line);
-            after.push('\n');
+        if in_block && text == end.as_bytes() {
+            in_block = false;
+            continue;
         }
-        kept |= line == end;
-    }
-    let mut block = String::new();
-    if !paths.is_empty() && !ignores(workspace, workspace) {
-        let ignored = ignored_by_gitignore(workspace);
-        for path in paths {
-            let (Ok(relative), Ok(local)) = (path.strip_prefix(top), path.strip_prefix(workspace)) else {
-                continue;
-            };
-            if !ignored.iter().any(|entry| local.starts_with(entry)) {
-                block.push_str(&pattern(relative));
-                block.push('\n');
-            }
+        in_block = text.starts_with(heading.as_bytes());
+        if !in_block {
+            after.extend_from_slice(line);
         }
     }
-    if !block.is_empty() {
-        after.push_str(&format!("{heading}{}\n{block}{end}\n", workspace.display()));
+    if after == before {
+        return Ok(());
     }
-    if after != before
-        && let Err(error) = write_by_rename(&file, after.as_bytes())
-    {
-        // A file an earlier block lists stays out of git. The new file is written beside the old one and renamed over it,
-        // so it is the folder that must be writable, and the error's own path names the temporary file.
-        let untracked: Vec<PathBuf> = paths
-            .iter()
-            .filter(|path| {
-                path.strip_prefix(top).is_ok_and(|relative| !before.lines().any(|line| line == pattern(relative)))
-            })
-            .cloned()
-            .collect();
+    if let Err(error) = write_by_rename(&file, &after) {
+        // The new file is written beside the old one and renamed over it, so it is the folder that must be writable,
+        // and the error's own path names the temporary file.
         let folder = file.parent().unwrap_or(&file).display();
-        warn_untracked(
-            workspace,
-            &untracked,
-            &format!(
-                "{} can't be replaced, as {folder} can't be written: {}",
-                file.display(),
-                std::io::Error::from(error).kind()
-            ),
-            &format!("Make {folder} writable"),
+        tracing::warn!(
+            "{} can't be replaced, as {folder} can't be written: {}, so its {owner} blocks still hide their files in every checkout of the repository. Make {folder} writable, and run vendor/bin/mago compile again.",
+            file.display(),
+            std::io::Error::from(error).kind()
         );
     }
 
     Ok(())
 }
 
-/// Warns that git shows `paths`, files under `workspace`, as untracked because of `cause`, and that `fix` and another
-/// compile hide them.
-fn warn_untracked(workspace: &Path, paths: &[PathBuf], cause: &str, fix: &str) {
-    if paths.is_empty() {
-        return;
-    }
-    let listed: Vec<String> =
-        paths.iter().map(|path| path.strip_prefix(workspace).unwrap_or(path).display().to_string()).collect();
-    tracing::warn!(
-        "{cause}, so git shows {} as untracked. {fix}, and run vendor/bin/mago compile again.",
-        listed.join(", ")
-    );
-}
-
-/// The top folder of the git repository that holds `workspace`, and the `info/exclude` file git reads for it, found as
-/// git finds them: the nearest `.git` is the repository's folder, or a file that names it, as a linked worktree's and
-/// a submodule's is, and a `commondir` there names the folder every checkout of the repository shares. Reading the
-/// files needs no `git` to run, as libgit2 and JGit read a repository. `Err` holds a `.git` file and the missing folder
-/// it names.
-fn repository(workspace: &Path) -> Result<Option<(PathBuf, PathBuf)>, (PathBuf, PathBuf)> {
-    let Some(top) = workspace.ancestors().find(|folder| folder.join(".git").exists()) else {
-        return Ok(None);
-    };
+/// The `info/exclude` file git reads for the repository that holds `workspace`, found as git finds it: the nearest
+/// `.git` is the repository's folder, or a file that names it, as a linked worktree's and a submodule's is, and a
+/// `commondir` there names the folder every checkout of the repository shares. Reading the files needs no `git` to
+/// run, as libgit2 and JGit read a repository. None outside a git repository.
+fn exclude_file(workspace: &Path) -> Option<PathBuf> {
+    let top = workspace.ancestors().find(|folder| folder.join(".git").exists())?;
     let dot_git = top.join(".git");
     let folder = if dot_git.is_dir() {
         dot_git
     } else {
         let contents = std::fs::read_to_string(&dot_git).unwrap_or_default();
-        let named = top.join(contents.strip_prefix("gitdir:").unwrap_or(&contents).trim());
-        if !named.is_dir() {
-            return Err((dot_git, named));
-        }
-        named
+        top.join(contents.strip_prefix("gitdir:").unwrap_or(&contents).trim())
     };
     let shared = match std::fs::read_to_string(folder.join("commondir")) {
         Ok(common) => folder.join(common.trim()),
         Err(_) => folder,
     };
 
-    Ok(Some((top.to_path_buf(), shared.join("info").join("exclude"))))
-}
-
-/// Whether git, run in `folder`, ignores `path`. A git that fails there ignores nothing, and [`ignored_by_gitignore`]
-/// gives its reason.
-fn ignores(folder: &Path, path: &Path) -> bool {
-    process::status(
-        Command::new("git").args(["check-ignore", "--quiet", "--"]).arg(path).current_dir(folder).stderr(Stdio::null()),
-    )
-    .is_ok_and(|status| status.success())
-}
-
-/// The untracked files and folders under `workspace` that its repository's `.gitignore` files ignore, relative to it.
-/// `info/exclude` is not read, so the block [`exclude`] writes there never counts. A workspace git ignores as a whole
-/// is not listed: git refuses to list from inside one. With no `git` to run, none is listed. When git fails, as in a
-/// repository another user owns, none is listed either, and the warning gives git's reason, as cargo warns and goes on
-/// when it can't read a repository's status.
-fn ignored_by_gitignore(workspace: &Path) -> Vec<PathBuf> {
-    let reason = match process::output(
-        Command::new("git")
-            .args(["ls-files", "-z", "--others", "--ignored", "--directory", "--exclude-per-directory=.gitignore"])
-            .current_dir(workspace),
-    ) {
-        Ok(output) if output.status.success() => {
-            return output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|entry| !entry.is_empty())
-                .map(|entry| PathBuf::from(String::from_utf8_lossy(entry).as_ref()))
-                .collect();
-        }
-        Ok(output) => reason(&output.stderr),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        Err(error) => error.to_string(),
-    };
-    tracing::warn!(
-        "git can't read the .gitignore files of {}: {reason}. The repository's info/exclude lists every file mago compile writes there.",
-        workspace.display()
-    );
-
-    Vec::new()
-}
-
-/// The gitignore pattern that names exactly the path `relative` to the repository's top folder: anchored with `/`,
-/// with `\` before each character a pattern reads as a wildcard and before a trailing space.
-fn pattern(relative: &Path) -> String {
-    let mut pattern = String::new();
-    for part in relative.components() {
-        pattern.push('/');
-        for character in part.as_os_str().to_string_lossy().chars() {
-            if matches!(character, '\\' | '*' | '?' | '[') {
-                pattern.push('\\');
-            }
-            pattern.push(character);
-        }
-    }
-    if pattern.ends_with(' ') {
-        pattern.insert(pattern.len() - 1, '\\');
-    }
-
-    pattern
+    Some(shared.join("info").join("exclude"))
 }
 
 /// Check if we're inside a git repository.
