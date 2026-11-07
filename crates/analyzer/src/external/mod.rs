@@ -7,6 +7,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
@@ -130,6 +131,20 @@ pub struct ExternalAnalysisSession {
     generation: u64,
     sources: foldhash::HashMap<FileId, Arc<File>>,
     reads: Mutex<SessionReads>,
+    member_reads: MemberReads,
+}
+
+/// What the metadata a session writes resolves a PHP# member read in an attribute argument against, spec section 23.
+#[derive(Debug, Default)]
+enum MemberReads {
+    /// The codebase the metadata is written from, which holds every file once the analysis runs.
+    #[default]
+    Codebase,
+    /// Nothing yet: a file's codebase-scan payload is written before the other files' scans are merged, so it notes
+    /// whether it met a member read, and is written again against the merged scan.
+    Later(AtomicBool),
+    /// The merged scan of every file.
+    Scan(Arc<CodebaseMetadata>),
 }
 
 impl ExternalAnalysisSession {
@@ -138,7 +153,39 @@ impl ExternalAnalysisSession {
         let generation = NEXT_ANALYSIS_GENERATION.fetch_add(1, Ordering::Relaxed);
         let sources = files.into_iter().map(|file| (file.id, file)).collect();
 
-        Self { generation, sources, reads: Mutex::default() }
+        Self { generation, sources, reads: Mutex::default(), member_reads: MemberReads::Codebase }
+    }
+
+    /// The session that writes the codebase-scan payload of `file`, whose member reads resolve against `scan`, the
+    /// merged scan, or are left for it when there is none yet.
+    fn for_scan(file: &Arc<File>, scan: Option<&Arc<CodebaseMetadata>>) -> Self {
+        Self {
+            member_reads: scan
+                .map_or_else(|| MemberReads::Later(AtomicBool::new(false)), |scan| MemberReads::Scan(Arc::clone(scan))),
+            ..Self::from_files([Arc::clone(file)])
+        }
+    }
+
+    /// The codebase a PHP# member read written with `codebase` resolves against, or None when it waits for the merged
+    /// scan, which this notes.
+    fn member_reads<'codebase>(
+        &'codebase self,
+        codebase: &'codebase CodebaseMetadata,
+    ) -> Option<&'codebase CodebaseMetadata> {
+        match &self.member_reads {
+            MemberReads::Codebase => Some(codebase),
+            MemberReads::Later(met) => {
+                met.store(true, Ordering::Relaxed);
+
+                None
+            }
+            MemberReads::Scan(scan) => Some(scan),
+        }
+    }
+
+    /// Whether this session met a PHP# member read it left for the merged scan.
+    fn left_member_reads(&self) -> bool {
+        matches!(&self.member_reads, MemberReads::Later(met) if met.load(Ordering::Relaxed))
     }
 
     /// Takes what the hooks, issue filters and providers read from the codebase in this run.
