@@ -235,59 +235,89 @@ pub(crate) fn output_before_deadline(command: &mut Command, input: &[u8]) -> io:
         mago_extension::process_group::block_sigpipe(&stdin);
         stdin.write_all(&input)
     });
-    let output = wait_before_deadline(&mut group);
-    let written = writer.join().map_err(|_| io::Error::other("a writer of a law checker process panicked"))?;
-    let output = output?;
+    let output = wait_before_deadline(&mut group, deadline(), ProcessGroup::end)?;
+    // Only a command that succeeded must have read its input. The writer to one that failed ends on its own, or never,
+    // when a process of the group outlived its end and never reads.
     if output.0.status.success() {
-        written?;
+        writer.join().map_err(|_| io::Error::other("a writer of a law checker process panicked"))??;
     }
 
     Ok(output)
 }
 
-/// What `group`'s leader wrote and how it exited, and whether Mago ended the group at `deadline()`.
-fn wait_before_deadline(group: &mut ProcessGroup) -> io::Result<(Output, bool)> {
+/// What `group`'s leader wrote and how it exited, and whether `end` ended the group once it wrote nothing for
+/// `deadline`. A process of the group that outlives the end, as one the kernel holds on a stalled disk, keeps the
+/// group's pipes open, so the output is what the group wrote before the end, and a leader that still runs counts as
+/// ended by SIGKILL, since waiting for it could wait forever.
+fn wait_before_deadline(
+    group: &mut ProcessGroup,
+    deadline: Duration,
+    mut end: impl FnMut(&mut ProcessGroup) -> io::Result<()>,
+) -> io::Result<(Output, bool)> {
     let missing = || io::Error::other("a law checker process has no output stream");
     let leader = group.leader();
     let (stdout, stderr) = (leader.stdout.take().ok_or_else(missing)?, leader.stderr.take().ok_or_else(missing)?);
     let (wrote, written) = mpsc::channel();
-    let stdout = read_all(stdout, wrote.clone());
-    let stderr = read_all(stderr, wrote);
-    let waited = loop {
-        match written.recv_timeout(deadline()) {
-            Ok(()) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break false,
+    read_all(stdout, 0, wrote.clone());
+    read_all(stderr, 1, wrote);
+    let mut streams = [Vec::new(), Vec::new()];
+    let mut open = streams.len();
+    let mut waited = false;
+    while open > 0 {
+        match written.recv_timeout(deadline) {
+            Ok((_, Ok(chunk))) if chunk.is_empty() => open -= 1,
+            Ok((stream, Ok(chunk))) => streams[stream].extend_from_slice(&chunk),
+            Ok((_, Err(error))) => return Err(error),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("a reader of a law checker process panicked"));
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                group.end()?;
-                break true;
+                waited = true;
+                match end(group) {
+                    Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                        tracing::warn!("The law checker's {error}, so Mago stops waiting for it.");
+                        let status = group.leader().try_wait()?.unwrap_or_else(killed);
+                        let [stdout, stderr] = streams;
+
+                        return Ok((Output { status, stdout, stderr }, true));
+                    }
+                    ended => ended?,
+                }
             }
         }
-    };
+    }
     let status = group.leader().wait()?;
-    let joined = |reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
-        reader.join().map_err(|_| io::Error::other("a reader of a law checker process panicked"))?
-    };
+    let [stdout, stderr] = streams;
 
-    Ok((Output { status, stdout: joined(stdout)?, stderr: joined(stderr)? }, waited))
+    Ok((Output { status, stdout, stderr }, waited))
 }
 
-/// Reads `stream` to its end on a thread of its own, and sends on `wrote` each time it reads something.
-fn read_all(
-    mut stream: impl Read + Send + 'static,
-    wrote: mpsc::Sender<()>,
-) -> thread::JoinHandle<io::Result<Vec<u8>>> {
+/// The status of a process that SIGKILL ended.
+fn killed() -> ExitStatus {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::from_raw(libc::SIGKILL)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::process::ExitStatusExt::from_raw(1)
+    }
+}
+
+/// Reads `stream` on a thread of its own and sends on `wrote` each chunk it reads with `index`, then an empty chunk
+/// at its end, or the error that ends it.
+fn read_all(mut stream: impl Read + Send + 'static, index: usize, wrote: mpsc::Sender<(usize, io::Result<Vec<u8>>)>) {
     thread::spawn(move || {
-        let mut bytes = Vec::new();
         let mut chunk = [0; 8192];
         loop {
-            let read = stream.read(&mut chunk)?;
-            if read == 0 {
-                return Ok(bytes);
+            let read = stream.read(&mut chunk).map(|read| chunk[..read].to_vec());
+            let ended = !read.as_ref().is_ok_and(|read| !read.is_empty());
+            let _ = wrote.send((index, read));
+            if ended {
+                return;
             }
-            bytes.extend_from_slice(&chunk[..read]);
-            let _ = wrote.send(());
         }
-    })
+    });
 }
 
 /// The runner executable in the library's build.
@@ -606,6 +636,32 @@ mod tests {
         let output = process::output(lake.command().args(["-c", "ulimit -t; ulimit -c"]))?;
 
         assert_eq!(String::from_utf8_lossy(&output.stdout), "120\n0\n");
+
+        Ok(())
+    }
+
+    /// A law checker process that outlives Mago's end at the deadline, as one the kernel holds on a stalled disk, keeps
+    /// the group's pipes open. The wait still returns what the group wrote before the deadline, as a check the deadline
+    /// stopped, with the leader ended by SIGKILL, where the compile failed with the end's error.
+    #[test]
+    fn a_group_that_outlives_its_end_at_the_deadline_gives_what_it_wrote_as_a_stopped_check() -> io::Result<()> {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo 'module 0 Code.App.Shared.Money' >&2; echo answer; exec sleep 2147483647"]);
+        let mut group = ProcessGroup::spawn(command.stdout(Stdio::piped()).stderr(Stdio::piped()))?;
+        let outlived = |_: &mut ProcessGroup| {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "process group 4321 still ran 1000 ms after SIGKILL"))
+        };
+
+        let waited = wait_before_deadline(&mut group, Duration::from_millis(200), outlived);
+        drop(group);
+        let (output, waited) = waited?;
+
+        assert_eq!(
+            (output.status.signal(), output.stdout.as_slice(), output.stderr.as_slice(), waited),
+            (Some(libc::SIGKILL), b"answer\n".as_slice(), b"module 0 Code.App.Shared.Money\n".as_slice(), true)
+        );
 
         Ok(())
     }

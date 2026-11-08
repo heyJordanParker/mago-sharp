@@ -225,6 +225,9 @@ struct WorkerInner {
     started_at: Option<Instant>,
     /// The request the worker last sent a progress frame for, when, and what it said the request started then.
     progress: Mutex<Option<(u64, Instant, String)>>,
+    /// The pipe the stdin writer writes the worker's requests to, which a test polls to see the worker's end close.
+    #[cfg(all(test, unix))]
+    stdin_pipe: Option<std::os::fd::RawFd>,
 }
 
 impl WorkerInner {
@@ -387,9 +390,13 @@ impl WorkerInner {
         let (stderr, ended) = self.stderr_tail();
         let stderr_wait = stderr_wait_start.elapsed();
         // What the worker started and still runs, such as the worker a wrapper forked, can hold the pipe the stdin
-        // writer is stuck on, and the worker's stdout and stderr, so the failure ends it too.
-        if let Some(group) = lock(&self.child).as_mut() {
-            let _result = group.end();
+        // writer is stuck on, and the worker's stdout and stderr, so the failure ends it too. A process of the group that
+        // SIGKILL cannot end stops the end at its timeout, and the failure says so.
+        if let Some(group) = lock(&self.child).as_mut()
+            && let Err(error) = group.end()
+            && error.kind() == std::io::ErrorKind::TimedOut
+        {
+            failure.message = format!("{}; {error}", failure.message);
         }
         if !ended {
             failure.message =
@@ -552,6 +559,8 @@ impl Worker {
             }
             Err(source) => return Err(WorkerError::Spawn { program: command.program().to_owned(), source }),
         };
+        #[cfg(all(test, unix))]
+        let stdin_pipe = std::os::fd::AsRawFd::as_raw_fd(&process_stdin);
         #[cfg(not(windows))]
         let stdin = WorkerStdin::Process(process_stdin);
 
@@ -575,6 +584,8 @@ impl Worker {
             telemetry: WorkerTelemetry::default(),
             started_at,
             progress: Mutex::new(None),
+            #[cfg(all(test, unix))]
+            stdin_pipe: Some(stdin_pipe),
         });
         tracing::trace!(worker = id, process_id, "Extension worker process spawned.");
 
@@ -876,15 +887,18 @@ impl Worker {
         };
 
         let child = lock(&self.inner.child).take();
-        if let Some(group) = child {
+        // A process of the group that SIGKILL cannot end holds the worker's pipes, so the I/O threads never end.
+        let mut outlived = false;
+        if let Some(mut group) = child {
             if !group.leader_exited() {
                 if self.inner.trace_enabled {
                     self.inner.telemetry.forced_shutdowns.fetch_add(1, Ordering::Relaxed);
                 }
                 tracing::trace!(worker = self.id(), "Killing extension worker after shutdown grace period.");
             }
-            // Dropping the group ends it, whether its leader still runs past the grace period or exited and left a
-            // process it started running, which would keep the worker's pipes open, and then reaps the leader.
+            // The group ends whether its leader still runs past the grace period or exited and left a process it started
+            // running, which would keep the worker's pipes open. Dropping it then reaps the leader.
+            outlived = group.end().is_err_and(|error| error.kind() == std::io::ErrorKind::TimedOut);
             drop(group);
         }
 
@@ -894,7 +908,11 @@ impl Worker {
             let _result = sender.send(PendingEvent::Stopped);
         }
 
-        self.join_threads();
+        if outlived {
+            self.leave_threads();
+        } else {
+            self.join_threads();
+        }
         if let Some(start) = trace_start {
             tracing::trace!(
                 worker = self.id(),
@@ -934,6 +952,8 @@ impl Worker {
             telemetry: WorkerTelemetry::default(),
             started_at: tracing::enabled!(tracing::Level::TRACE).then(Instant::now),
             progress: Mutex::new(None),
+            #[cfg(unix)]
+            stdin_pipe: None,
         });
         let reader_inner = Arc::clone(&inner);
         let reader_thread = std::thread::spawn(move || read_worker_stream(&reader_inner, reader));
@@ -967,6 +987,19 @@ impl Worker {
         tracing::trace!(worker = self.id(), "Joining extension worker I/O threads.");
         for thread in threads.into_iter().flatten() {
             let _result = thread.join();
+        }
+    }
+
+    /// Lets the I/O threads run on without waiting for them, as each waits on a pipe that a process of the worker's
+    /// group, which outlived its end, holds open. Each ends once that process does.
+    fn leave_threads(&self) {
+        tracing::warn!(
+            "A process of extension host `{}`'s worker {} outlived its end, so Mago stops waiting for the worker.",
+            self.inner.host,
+            self.id()
+        );
+        for thread in [&self.reader_thread, &self.stderr_thread, &self.writer_thread] {
+            drop(lock(thread).take());
         }
     }
 }
@@ -1661,18 +1694,15 @@ mod tests {
         worker.shutdown();
     }
 
-    /// A worker that closed its stdin refuses the request as Mago writes it, and the error says so with its stderr.
+    /// A worker that closed its stdin refuses the request as Mago writes it, and the error says so with its stderr. The
+    /// request goes out once no process holds the stdin's read end, which on a loaded Mac can outlive the worker's
+    /// close, as `wait_until_stdin_has_no_reader` says.
     #[cfg(unix)]
     #[test]
     fn a_request_written_to_a_worker_that_closed_its_stdin_holds_the_write_error_and_the_stderr() {
-        const TIMEOUT: Duration = Duration::from_secs(10);
-
         let worker = shell_worker(&format!("exec 0<&-; echo '{FATAL_ERROR}' >&2; exec {SLEEP_UNTIL_ENDED}"));
-        let deadline = Instant::now() + TIMEOUT;
-        while lock(&worker.inner.stderr).display().is_empty() {
-            assert!(Instant::now() < deadline, "the worker wrote no stderr within {TIMEOUT:?}");
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        wait_until_stderr_arrives(&worker);
+        wait_until_stdin_has_no_reader(&worker);
 
         let error = worker.request(b"describe".to_vec(), None).expect_err("the closed stdin should fail the request");
 
@@ -1898,6 +1928,30 @@ mod tests {
         let deadline = Instant::now() + TIMEOUT;
         while lock(&worker.inner.stderr).display().is_empty() {
             assert!(Instant::now() < deadline, "the worker wrote no stderr within {TIMEOUT:?}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Waits until no process holds the read end of the pipe Mago writes `worker`'s requests to, so a write to it fails
+    /// at once. A process that closed its end is not always the last to hold it: on a Mac loaded by the workspace's
+    /// tests, 6 of 3000 runs of `exec 0<&-; echo x >&2` from a program that started nothing else found the read end
+    /// alive once the stderr line arrived, for 204 µs to 18.7 ms, held by no process the user could read. Beside the
+    /// same tests, this test's write found it alive in 9 of 20 runs, for up to 183 ms more.
+    #[cfg(unix)]
+    fn wait_until_stdin_has_no_reader(worker: &Worker) {
+        const TIMEOUT: Duration = Duration::from_secs(10);
+
+        let pipe = worker.inner.stdin_pipe.expect("a worker Mago started writes to a pipe");
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let mut entry = libc::pollfd { fd: pipe, events: libc::POLLOUT, revents: 0 };
+            // SAFETY: `poll` reads the fd `entry` names, which the stdin writer holds open, and writes only `revents`.
+            let ready = unsafe { libc::poll(&raw mut entry, 1, 0) };
+            // macOS says a pipe whose read end is gone hung up, and Linux says it failed.
+            if ready == 1 && entry.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the worker's stdin still had a reader after {TIMEOUT:?}");
             std::thread::sleep(Duration::from_millis(1));
         }
     }
