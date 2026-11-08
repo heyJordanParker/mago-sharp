@@ -2171,15 +2171,9 @@ pub enum SharpType<'atomic> {
 
 /// `atomic` as PHP# writes it, or `None` for a type only a PHP docblock writes, such as `array-key`, `scalar`,
 /// `numeric`, `resource` or an `array{…}` shape.
-///
-/// A class named before the codebase resolves it, as a declaration's type is when an extension host refines it, is that
-/// class.
 #[must_use]
 pub fn get_sharp_type(atomic: &TAtomic) -> Option<SharpType<'_>> {
     Some(match atomic {
-        TAtomic::Reference(TReference::Symbol { name, parameters, .. }) => {
-            SharpType::Class(*name, parameters.as_deref().unwrap_or_default())
-        }
         TAtomic::Scalar(TScalar::Integer(_)) => SharpType::Int,
         TAtomic::Scalar(TScalar::Float(_)) => SharpType::Float,
         TAtomic::Scalar(TScalar::Bool(_)) => SharpType::Bool,
@@ -2203,13 +2197,17 @@ pub fn get_sharp_type(atomic: &TAtomic) -> Option<SharpType<'_>> {
 }
 
 /// Whether PHP# can write `union`, each member, each type it intersects and each type inside them, as
-/// [`get_sharp_type`] reads them. `mixed` is `Any?`.
+/// [`get_sharp_type`] reads them. `mixed` is `Any?`. A class named before the codebase resolves it, as a declaration's
+/// type is when an extension host refines it, is a class PHP# writes by its name.
 #[must_use]
 pub fn is_written_in_sharp(union: &TUnion) -> bool {
     union.types.iter().all(|atomic| {
         atomic.is_null()
             || atomic.is_mixed()
             || std::iter::once(atomic).chain(atomic.get_intersection_types().unwrap_or_default()).all(|member| {
+                if let TAtomic::Reference(TReference::Symbol { parameters, .. }) = member {
+                    return parameters.iter().flatten().all(is_written_in_sharp);
+                }
                 match get_sharp_type(member) {
                     None => false,
                     Some(SharpType::Class(_, inner)) => inner.iter().all(is_written_in_sharp),
