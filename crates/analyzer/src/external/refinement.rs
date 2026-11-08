@@ -703,6 +703,8 @@ mod tests {
     use mago_allocator::LocalArena;
     use mago_codex::scanner::scan_program;
     use mago_codex::ttype::get_arraykey;
+    use mago_codex::ttype::get_named_object;
+    use mago_codex::ttype::get_string;
     use mago_names::resolver::NameResolver;
     use mago_syntax::parser::parse_file;
 
@@ -723,6 +725,11 @@ mod tests {
         RefinedType { type_union: get_arraykey(), span: Span::new(file.id, Position::new(0), Position::new(0)) }
     }
 
+    /// `type_union`, a type PHP# writes, with no place in a file.
+    fn written(type_union: TUnion) -> RefinedType {
+        RefinedType { type_union, span: Span::dummy(0, 0) }
+    }
+
     fn signature() -> SignatureRefinement {
         SignatureRefinement {
             templates: Vec::new(),
@@ -737,7 +744,8 @@ mod tests {
     /// Spec section 1: a host refines each part of a PHP# declaration only to a type PHP# can write, where the
     /// refinement enters the codebase: a type parameter's bound, a parent's type argument, the `this` of a lambda a
     /// parameter takes, and a lambda's own `this`, parameter and result, which declare no type here. Each refused part
-    /// keeps no refinement, and its error names the host and the part.
+    /// keeps no refinement, and its error names the host and the part. A type parameter's bound and a lambda's `this`
+    /// PHP# writes apply.
     #[test]
     fn a_host_refines_each_part_of_a_sharp_declaration_only_to_a_type_sharp_writes() {
         let file = File::ephemeral(Cow::Borrowed(b"src/Proof/Notice.sharp"), Cow::Borrowed(NOTICE.as_bytes()));
@@ -746,7 +754,7 @@ mod tests {
         let names = NameResolver::new(&arena).resolve(program);
         let mut codebase = scan_program(&arena, &file, program, &names, Settings::default().version);
         let notice = word("proof\\notice");
-        let lambda = *codebase
+        let lambda_key = *codebase
             .function_likes
             .iter()
             .find_map(|(key, function)| function.kind.is_arrow_function().then_some(key))
@@ -769,11 +777,24 @@ mod tests {
                     word("each"),
                     SignatureRefinement { closure_this: vec![(word("$run"), unwritable(&file))], ..signature() },
                 ),
-                (word("pick"), SignatureRefinement { templates: vec![template("U")], ..signature() }),
+                (
+                    word("pick"),
+                    SignatureRefinement {
+                        templates: vec![
+                            template("U"),
+                            RefinedTemplate {
+                                name: word("V"),
+                                bound: written(get_string()),
+                                variance: Variance::Invariant,
+                            },
+                        ],
+                        ..signature()
+                    },
+                ),
             ],
         };
         let lambda_refinement = Declaration::FunctionLike {
-            key: lambda,
+            key: lambda_key,
             signature: Box::new(SignatureRefinement {
                 parameters: vec![(word("$value"), unwritable(&file))],
                 return_type: Some(unwritable(&file)),
@@ -788,7 +809,7 @@ mod tests {
         let class = codebase.class_likes.get(&notice).expect("the file declares `Notice`");
         let each = codebase.function_likes.get(&(notice, word("each"))).expect("`Notice` declares `each`");
         let pick = codebase.function_likes.get(&(notice, word("pick"))).expect("`Notice` declares `pick`");
-        let lambda = codebase.function_likes.get(&lambda).expect("the file declares a lambda");
+        let lambda = codebase.function_likes.get(&lambda_key).expect("the file declares a lambda");
 
         assert_eq!(
             messages(&class.issues),
@@ -822,7 +843,19 @@ mod tests {
             "{:?}",
             class.template_types
         );
+        assert_eq!(pick.template_types.get(&word("V")).map(|template| &template.constraint), Some(&get_string()));
         assert!(lambda.refined_this_type.is_none());
         assert!(lambda.return_type_metadata.is_none());
+
+        let this = Box::new(SignatureRefinement { this: Some(written(get_named_object(notice, None))), ..signature() });
+        refinement(&file, Declaration::FunctionLike { key: lambda_key, signature: this })
+            .apply(&mut codebase)
+            .expect("the lambda refinement applies");
+        let lambda = codebase.function_likes.get(&lambda_key).expect("the file declares a lambda");
+
+        assert_eq!(
+            lambda.refined_this_type.as_ref().map(|this| &this.type_union),
+            Some(&get_named_object(notice, None))
+        );
     }
 }
