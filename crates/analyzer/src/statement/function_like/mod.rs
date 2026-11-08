@@ -566,7 +566,9 @@ where
 
     if let Some(return_type) = &function_like_metadata.return_type_metadata {
         report_undefined_type_references(context, return_type);
-        report_invalid_template_arguments(context, return_type, HintPlace::Declaration);
+        let written =
+            written_type(context, return_type, function_like_metadata.return_type_declaration_metadata.as_ref());
+        report_invalid_template_arguments(context, written, HintPlace::Declaration);
 
         // Only check native declaration if effective type is from docblock (to avoid duplicates)
         if return_type.from_docblock
@@ -896,7 +898,8 @@ where
 
         if let Some(parameter_type) = parameter_metadata.get_type_metadata() {
             report_undefined_type_references(context, parameter_type);
-            report_invalid_template_arguments(context, parameter_type, HintPlace::Declaration);
+            let written = written_type(context, parameter_type, parameter_metadata.get_type_declaration_metadata());
+            report_invalid_template_arguments(context, written, HintPlace::Declaration);
 
             // Only check native declaration if effective type is from docblock (to avoid duplicates)
             if parameter_type.from_docblock
@@ -2700,6 +2703,24 @@ where
         let key_id = display_sharp_type(context, key_type);
         let error = collection_key_error(context.codebase, key_type, key_id.as_str(), in_set, span);
         context.collector.report_with_code(IssueCode::TemplateConstraintViolation, error);
+    }
+}
+
+/// The type a check of a declaration reads, for a member whose type is `effective` and whose source writes `declared`:
+/// for a PHP# member, the type its source writes, since a host's refinement, or the result a host takes from the body,
+/// only narrows a valid declaration and never hides an error in it. A PHP# file is then valid or not whatever hosts
+/// are loaded. For plain PHP, `effective`, which its docblock may write.
+pub(crate) fn written_type<'member, A>(
+    context: &Context<'_, '_, A>,
+    effective: &'member TypeMetadata,
+    declared: Option<&'member TypeMetadata>,
+) -> &'member TypeMetadata
+where
+    A: Arena,
+{
+    match declared {
+        Some(declared) if context.dialect.is_sharp() => declared,
+        _ => effective,
     }
 }
 

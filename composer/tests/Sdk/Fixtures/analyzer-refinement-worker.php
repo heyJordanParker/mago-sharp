@@ -83,6 +83,14 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
                         'Proof\Holder' => self::holder($file, $attribute->location->span),
                         'Proof\Factory' => self::factory($file, $attribute->location->span),
                         'Proof\Notice' => self::notice($context, $file, $attribute->location->span),
+                        'Proof\Shelf' => new ClassLikeRefinement($file->path, 'Proof\Shelf', methods: [
+                            'make' => new SignatureRefinement(
+                                return: new RefinedType(
+                                    self::symbol('Proof\Crate', self::symbol('Proof\Spec')),
+                                    $attribute->location->span,
+                                ),
+                            ),
+                        ]),
                         'Proof\Relay', 'Proof\Outer', 'Proof\Top', 'Proof\Ping', 'Proof\Pong' => self::relay(
                             $file,
                             $classLike->originalName,

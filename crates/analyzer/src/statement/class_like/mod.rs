@@ -106,6 +106,7 @@ use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_bound_types;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::function_like::report_union_for_a_class_bound;
+use crate::statement::function_like::written_type;
 use crate::utils::missing_type_hints;
 use crate::utils::names::and_list;
 use crate::utils::names::article;
@@ -1675,7 +1676,8 @@ where
                         && let Some(type_meta) = &prop_meta.type_metadata
                     {
                         report_undefined_type_references(context, type_meta);
-                        report_invalid_template_arguments(context, type_meta, HintPlace::Declaration);
+                        let written = written_type(context, type_meta, prop_meta.type_declaration_metadata.as_ref());
+                        report_invalid_template_arguments(context, written, HintPlace::Declaration);
                         if type_meta.from_docblock
                             && let Some(type_decl_meta) = &prop_meta.type_declaration_metadata
                         {

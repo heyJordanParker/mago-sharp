@@ -359,6 +359,35 @@ fn a_host_refines_a_sharp_member_only_to_a_type_sharp_writes_that_fits_it() {
     assert_eq!(messages, expected);
 }
 
+/// Every check of a PHP# declaration reads the declaration as written, whatever a host refines it to. `Shelf.make`
+/// writes a bare `Crate`, whose type argument PHP# requires, and the worker refines its result to `Crate<Spec>`, as a
+/// result it takes from the body replaces it. The bare `Crate` is still the error it is with no host loaded.
+#[test]
+fn a_host_refinement_never_hides_an_error_in_a_sharp_declaration() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the PHP# declaration check test") {
+        return;
+    }
+
+    let crate_class = "<?php\n\nnamespace Proof;\n\n/** @template T */\nfinal class Crate\n{\n    /** @param T $item */\n    public function __construct(public mixed $item) {}\n}\n";
+    let shelf = "namespace Proof;\n\n[Refined]\npublic class Shelf\n{\n    public Crate make()\n    {\n        return new Crate<Spec>(new Spec());\n    }\n}\n";
+    let refined = "<?php\n\nnamespace Proof;\n\nfinal class Refined {}\n";
+    let mut database = Database::new(common::database_configuration("/refinement-proof", vec![Cow::Borrowed(b".")]));
+    for (name, code) in
+        [("src/Box.php", BOX), ("src/Refined.php", refined), ("src/Crate.php", crate_class), ("src/Shelf.sharp", shelf)]
+    {
+        database.add(File::new(Cow::Borrowed(name.as_bytes()), FileType::Host, None, Cow::Borrowed(code.as_bytes())));
+    }
+    let issues = service(&database, registry(repository)).analyze().expect("the analysis goes on").issues;
+    let codes: Vec<&str> = issues
+        .iter()
+        .filter_map(|issue| issue.code.as_deref())
+        .filter(|code| *code != "class-not-marked-as-attribute")
+        .collect();
+
+    assert_eq!(codes, ["missing-template-parameter"]);
+}
+
 /// A refined class whose `make` returns what the `make` of class `inner` returns, which the worker takes from its body.
 /// Only the body names `inner`, so no signature edge leads from this class to it.
 fn relay(class: &str, inner: &str) -> String {
