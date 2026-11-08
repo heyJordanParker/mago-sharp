@@ -580,7 +580,7 @@ where
     if let Some(declared) = &function_like_metadata.return_type_metadata
         && let Some(HostRefinement { host, refused: Some(refused) }) = declared.host_refinement.as_deref()
     {
-        let member = format!("the result of `{}`", display_signature(context, block_context, function_like_metadata));
+        let member = format!("the result of {}", display_signature(context, block_context, function_like_metadata));
         report_host_refinement(context, *host, &member, declared, Err(refused));
     }
 
@@ -607,8 +607,7 @@ where
             && context.dialect.is_sharp()
             && let Some(refinement) = &effective_return.host_refinement
         {
-            let member =
-                format!("the result of `{}`", display_signature(context, block_context, function_like_metadata));
+            let member = format!("the result of {}", display_signature(context, block_context, function_like_metadata));
             report_host_refinement(context, refinement.host, &member, native_return, Ok(effective_return));
         } else if !is_compatible {
             let docblock_type_str = effective_return.type_union.get_id();
@@ -2691,15 +2690,16 @@ where
     }
 
     for type_ref in type_union.get_all_child_nodes() {
-        let (key_type, in_set) = match type_ref {
+        let Some((key_type, in_set)) = (match type_ref {
             // An `array{…}` shape keys by its fields' `int` and `string` keys alone. PHP# writes none, and a host's
             // refinement of a PHP# member to one is refused where it enters the codebase.
-            TypeRef::Atomic(TAtomic::Array(TArray::Keyed(keyed_array))) => match keyed_array.get_generic_parameters() {
-                Some((key_type, _)) => (key_type, false),
-                None => continue,
-            },
-            TypeRef::Atomic(TAtomic::Array(TArray::Set(element_type))) => (element_type.as_ref(), true),
-            _ => continue,
+            TypeRef::Atomic(TAtomic::Array(TArray::Keyed(keyed_array))) => {
+                keyed_array.get_generic_parameters().map(|(key_type, _)| (key_type, false))
+            }
+            TypeRef::Atomic(TAtomic::Array(TArray::Set(element_type))) => Some((element_type.as_ref(), true)),
+            _ => None,
+        }) else {
+            continue;
         };
         if is_key_type(key_type, context.codebase) {
             report_class_held_by_key(context, key_type, in_set, span);
@@ -2760,7 +2760,7 @@ pub(crate) fn report_host_refinement<A>(
     );
 }
 
-/// `function_like` as the analyzed file names it: a method through its class, as `Notice.merged`.
+/// `function_like` as a message names it: a method through its class, as "`Notice.merged`", and a lambda as "a lambda".
 fn display_signature<A>(
     context: &Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -2770,8 +2770,10 @@ where
     A: Arena,
 {
     match block_context.scope.get_class_like_name() {
-        Some(class) if function_like.kind.is_method() => display_member(context, class, function_like.original_name),
-        _ => function_like.original_name.to_string(),
+        Some(class) if function_like.kind.is_method() => {
+            format!("`{}`", display_member(context, class, function_like.original_name))
+        }
+        _ => "a lambda".to_owned(),
     }
 }
 
@@ -2786,7 +2788,7 @@ where
     A: Arena,
 {
     format!(
-        "the parameter `{}` of `{}`",
+        "the parameter `{}` of {}",
         display_variable_name(context, parameter.get_name().0),
         display_signature(context, block_context, function_like)
     )

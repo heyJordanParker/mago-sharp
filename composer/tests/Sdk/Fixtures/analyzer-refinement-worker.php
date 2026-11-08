@@ -9,10 +9,12 @@ use Mago\Sdk\Analyzer\CodebaseScanContext;
 use Mago\Sdk\Analyzer\CodebaseScanFile;
 use Mago\Sdk\Analyzer\CodebaseScanHook;
 use Mago\Sdk\Analyzer\Declaration\ClassLikeRefinement;
+use Mago\Sdk\Analyzer\Declaration\FunctionLikeRefinement;
 use Mago\Sdk\Analyzer\Declaration\RefinedType;
 use Mago\Sdk\Analyzer\Declaration\RefinementIssue;
 use Mago\Sdk\Analyzer\Declaration\SignatureRefinement;
 use Mago\Sdk\Analyzer\Declaration\TypeParameter;
+use Mago\Sdk\Analyzer\Metadata\FunctionLikeKind;
 use Mago\Sdk\Analyzer\Plugin;
 use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
@@ -40,6 +42,7 @@ require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
  * applications of that class on another class's members, all read from the scanned source.
  *
  * @mago-expect lint:file-name
+ * @mago-expect lint:cyclomatic-complexity
  */
 final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
 {
@@ -79,7 +82,7 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
                         'Proof\Box' => self::box($file, $attribute->location->span),
                         'Proof\Holder' => self::holder($file, $attribute->location->span),
                         'Proof\Factory' => self::factory($file, $attribute->location->span),
-                        'Proof\Notice' => self::notice($file, $attribute->location->span),
+                        'Proof\Notice' => self::notice($context, $file, $attribute->location->span),
                         'Proof\Relay', 'Proof\Outer', 'Proof\Top', 'Proof\Ping', 'Proof\Pong' => self::relay(
                             $file,
                             $classLike->originalName,
@@ -154,11 +157,32 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
     }
 
     /**
-     * A PHP# class whose `Map` members a host refines to an array shape, which PHP# can't write, and whose two `Spec`
-     * members it refines to `Special`, which fits, and to `Other`, which doesn't.
+     * A PHP# class whose `Map` members a host refines to an array shape, which PHP# can't write, and whose `Spec`
+     * members it refines to `Special`, which fits, and to `Other`, which doesn't, as it refines the `Spec?` parameter
+     * of the lambda the class declares.
      */
-    private static function notice(CodebaseScanFile $file, Span $span): ClassLikeRefinement
-    {
+    private static function notice(
+        CodebaseScanContext $context,
+        CodebaseScanFile $file,
+        Span $span,
+    ): ClassLikeRefinement {
+        foreach ($file->functionLikes as $lambda) {
+            if ($lambda->kind !== FunctionLikeKind::ArrowFunction) {
+                continue;
+            }
+
+            $context->refine(
+                new FunctionLikeRefinement(
+                    $file->path,
+                    '',
+                    new SignatureRefinement(parameters: [
+                        'spec' => new RefinedType(self::symbol('Proof\Other'), $lambda->location->span),
+                    ]),
+                    declaredAt: $lambda->location->span->start,
+                ),
+            );
+        }
+
         $shape = Type::fromAtomic(
             new KeyedArrayType(
                 [
@@ -179,10 +203,16 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
                 'chosen' => new RefinedType(self::symbol('Proof\Special'), $span),
                 'subject' => new RefinedType(self::symbol('Proof\Other'), $span),
             ],
-            methods: ['merged' => new SignatureRefinement(
-                parameters: ['extra' => new RefinedType($shape, $span)],
-                return: new RefinedType($shape, $span),
-            )],
+            methods: [
+                'merged' => new SignatureRefinement(
+                    parameters: ['extra' => new RefinedType($shape, $span)],
+                    return: new RefinedType($shape, $span),
+                ),
+                'kept' => new SignatureRefinement(parameters: [
+                    'spec' => new RefinedType(self::symbol('Proof\Other'), $span),
+                ]),
+                'first' => new SignatureRefinement(return: new RefinedType(self::symbol('Proof\Other'), $span)),
+            ],
         );
     }
 

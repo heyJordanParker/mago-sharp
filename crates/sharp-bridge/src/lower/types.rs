@@ -1020,16 +1020,13 @@ impl<'analysis> Types<'analysis> {
             let CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. } = target else {
                 return false;
             };
-            let Some(member) = self.codebase.get_method(class.as_bytes(), method.as_bytes()) else {
-                return false;
-            };
+            let member = self.codebase.get_method(class.as_bytes(), method.as_bytes());
             let class = self.scanned(class.as_bytes());
 
             class.flags.is_sharp()
                 && !class.flags.is_final()
                 && member
-                    .method_metadata
-                    .as_ref()
+                    .and_then(|member| member.method_metadata.as_ref())
                     .is_some_and(|method| !method.is_static && !method.visibility.is_private())
         })
     }

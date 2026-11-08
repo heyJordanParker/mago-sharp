@@ -280,12 +280,23 @@ public class Notice
     public Map<string, string> merged(Map<string, string> extra) => extra;
 
     public Special? picked() => this.chosen;
+
+    public void kept(Spec? spec) { }
+
+    public Spec? first() => null;
+
+    public bool holds()
+    {
+        const has = (Spec? spec) => spec != null;
+        return has(null);
+    }
 }
 "#;
 
 /// A host may refine a PHP# member only to a type PHP# can write that fits the member's declared type. A shape on a
 /// `Map` is refused at the member, naming the member, the host and the declared type, and analysis goes on with the
-/// declared type. `Special` fits `Spec`, and `Other` doesn't.
+/// declared type. `Special` fits `Spec`, and `Other` doesn't, on a property, a parameter, a result and a lambda's
+/// parameter.
 #[test]
 fn a_host_refines_a_sharp_member_only_to_a_type_sharp_writes_that_fits_it() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -314,6 +325,11 @@ fn a_host_refines_a_sharp_member_only_to_a_type_sharp_writes_that_fits_it() {
             "{host} `Notice.fields` to `{shape}`, which PHP# can't write, so it keeps its declared type `Map<string, string>?`."
         ),
         format!("{host} `Notice.subject` to `Other?`, which doesn't fit its declared type `Spec?`."),
+        format!(
+            "{host} the parameter `spec` of `Notice.kept` to `Other?`, which doesn't fit its declared type `Spec?`."
+        ),
+        format!("{host} the result of `Notice.first` to `Other?`, which doesn't fit its declared type `Spec?`."),
+        format!("{host} the parameter `spec` of a lambda to `Other?`, which doesn't fit its declared type `Spec?`."),
         format!(
             "{host} the parameter `extra` of `Notice.merged` to `{shape}`, which PHP# can't write, so it keeps its declared type `Map<string, string>`."
         ),
