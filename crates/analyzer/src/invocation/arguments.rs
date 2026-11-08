@@ -15,6 +15,7 @@ use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::string::TString;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
@@ -662,7 +663,18 @@ where
             }
         }
 
-        if types_can_be_identical {
+        if types_can_be_identical && is_sharp && takes_written_string_alone(parameter_type, input_type) {
+            // PHP# writes plain PHP's `literal-string` as `string`, so the two types alone don't say what is refused.
+            let issue = Issue::error(format!(
+                "{argument_subject} of {target_kind_str} `{target_name_str}` takes a `literal-string`, a string literal or a constant, and this string is composed while the code runs."
+            ))
+            .with_annotation(Annotation::primary(input_expression.span()).with_message("Composed while the code runs."))
+            .with_annotation(call_site)
+            .with_note("A `literal-string` keeps the values the code runs on out of the string, as SQL that runs as written.")
+            .with_help("Write the string as a literal or a constant, and pass each value it holds separately, as a query's bindings for its `?` placeholders take them.");
+
+            (IssueCode::PossiblyInvalidArgument, issue)
+        } else if types_can_be_identical {
             let issue = Issue::error(format!(
                 "Possible argument type mismatch for {} of `{}`: expected `{}`, but possibly received `{}`.",
                 argument_label, target_name_str, parameter_type_str, input_type_str
@@ -709,6 +721,22 @@ where
     context.collector.report_with_code(kind, issue);
 
     false
+}
+
+/// Whether `parameter_type` takes no string but one written in the code, as plain PHP's `literal-string` does, and
+/// `input_type` may be a string composed while the code runs.
+fn takes_written_string_alone(parameter_type: &TUnion, input_type: &TUnion) -> bool {
+    fn strings(union: &TUnion) -> impl Iterator<Item = &TString> {
+        union.types.iter().filter_map(|atomic| match atomic {
+            TAtomic::Scalar(TScalar::String(string)) => Some(string),
+            _ => None,
+        })
+    }
+    let mut taken = strings(parameter_type).peekable();
+
+    taken.peek().is_some()
+        && taken.all(|string| string.is_literal_origin())
+        && strings(input_type).any(|string| string.is_general())
 }
 
 /// Whether an argument of `input_type` can hold a value of `parameter_type`. A function value whose type lists an

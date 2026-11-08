@@ -686,8 +686,11 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
         }
     }
 
+    // A class holds each constant it inherits as the parent declares it, so a constant is the class's own when the
+    // class's body holds it, in the class's file: an offset alone falls inside a class of another file too.
     for (name, constant) in &class.constants {
-        if class.span.contains(&constant.span)
+        if constant.span.file_id == class.span.file_id
+            && class.span.contains(&constant.span)
             && constant.visibility.is_public()
             && constant.attributes.is_empty()
             && !constant.flags.is_internal_reach()

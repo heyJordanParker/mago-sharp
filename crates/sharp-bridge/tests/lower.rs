@@ -14045,9 +14045,10 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
 }
 
 /// A collection the project's plain PHP returns is checked element by element where it enters PHP#, since its type is
-/// a docblock nothing checks. A collection PHP's internal functions return, which the standard library alone calls, is
-/// not: the engine guarantees their types. Neither is one whose elements take any value, nor one PHP# can't write, such
-/// as `array<array-key, int>`.
+/// a docblock nothing checks. Plain PHP's `array-key` arrives as `int|string`, spec section 12, so an `array<array-key,
+/// int>` is checked as a `Map<int|string, int>` and a bare `array` as a `Map<int|string, Any?>`. A collection PHP's
+/// internal functions return, which the standard library alone calls, is not: the engine guarantees their types.
+/// Neither is a `List` whose elements take any value.
 #[test]
 fn a_collection_the_project_returns_from_plain_php_is_checked_element_by_element() {
     let body = Lowered(common::checked(
@@ -14061,8 +14062,10 @@ fn a_collection_the_project_returns_from_plain_php_is_checked_element_by_element
     ))
     .body();
 
-    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 1, "{body}");
+    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 3, "{body}");
     assert!(body.contains("ZVAL \"List<int>\"\n      ZVAL \"Lib\\\\Calc::ints()\""), "{body}");
+    assert!(body.contains("ZVAL \"Map<int|string, int>\"\n              ZVAL \"Lib\\\\Calc::keyed()\""), "{body}");
+    assert!(body.contains("ZVAL \"Map<int|string, Any?>\"\n              ZVAL \"Lib\\\\Calc::untyped()\""), "{body}");
 }
 
 /// Every function a call from plain PHP reaches checks a parameter that names a PHP# class with type arguments, as a
@@ -23333,14 +23336,17 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
 }
 
 /// ```php
-/// return \Sharp\Internal\containsKey(\is_array($crossing#1 = \Lib\Calc::prices()) ? \Sharp\Map::from($crossing#1)
-///     : $crossing#1, 5)
-///     && (($nullsafe#1 = \Lib\Calc::maybe()) === null ? null
+/// return \Sharp\Internal\containsKey(
+///     \is_array($crossing#1 = \VERIFY_TYPE_ARGS(\Lib\Calc::prices(), 'Map<int|string, int>', 'Lib\Calc::prices()'))
+///         ? \Sharp\Map::from($crossing#1, 'int|string, int') : $crossing#1, 5)
+///     && (($nullsafe#1 = \VERIFY_TYPE_ARGS(\Lib\Calc::maybe(), 'Map<int|string, int>?', …)) === null ? null
 ///         : \Sharp\Internal\containsKey(\is_array($crossing#2 = $nullsafe#1) ? … : $crossing#2, 5)) == true;
 /// ```
 ///
 /// Spec section 12: a plain PHP array a `Map` member reads becomes the `\Sharp\Map` first, as it does where a typed
-/// local holds it, null-safe or not, so the member runs on the `Map` and a key keeps its type.
+/// local holds it, null-safe or not, so the member runs on the `Map` and a key keeps its type. Plain PHP's
+/// `array-key` arrives as `int|string`, so the project's `array<array-key, int>` is checked as a `Map<int|string, int>`
+/// and its `Map` takes those type arguments.
 #[test]
 fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
     assert_eq!(
@@ -23366,16 +23372,20 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
                             ASSIGN
                               VAR
                                 ZVAL "crossing#1"
-                              STATIC_CALL
-                                ZVAL "Lib\\Calc"
-                                ZVAL "prices"
-                                ARG_LIST
+                              VERIFY_TYPE_ARGS
+                                STATIC_CALL
+                                  ZVAL "Lib\\Calc"
+                                  ZVAL "prices"
+                                  ARG_LIST
+                                ZVAL "Map<int|string, int>"
+                                ZVAL "Lib\\Calc::prices()"
                         STATIC_CALL
                           ZVAL "Sharp\\Map"
                           ZVAL "from"
                           ARG_LIST
                             VAR
                               ZVAL "crossing#1"
+                            ZVAL "int|string, int"
                         VAR
                           ZVAL "crossing#1"
                       ZVAL 5
@@ -23385,10 +23395,13 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
                         ASSIGN
                           VAR
                             ZVAL "nullsafe#1"
-                          STATIC_CALL
-                            ZVAL "Lib\\Calc"
-                            ZVAL "maybe"
-                            ARG_LIST
+                          VERIFY_TYPE_ARGS
+                            STATIC_CALL
+                              ZVAL "Lib\\Calc"
+                              ZVAL "maybe"
+                              ARG_LIST
+                            ZVAL "Map<int|string, int>?"
+                            ZVAL "Lib\\Calc::maybe()"
                         ZVAL null
                       ZVAL null
                       CALL
@@ -23409,6 +23422,7 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
                               ARG_LIST
                                 VAR
                                   ZVAL "crossing#2"
+                                ZVAL "int|string, int"
                             VAR
                               ZVAL "crossing#2"
                           ZVAL 5
@@ -23420,11 +23434,12 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
 /// ```php
 /// foreach (\is_array($crossing#1 = \Lib\Calc::prices()) ? new \Sharp\Map(…(string) $key#2…) : $crossing#1
 ///     as $sku => $count) {}
-/// foreach (\Lib\Calc::counts() as $id => $count) {}
+/// foreach (\VERIFY_TYPE_ARGS(\Lib\Calc::counts(), 'Map<int|string, int>', 'Lib\Calc::counts()') as $id => $count) {}
 /// ```
 ///
 /// Spec section 12: PHP holds an all-digit `string` key as an `int`, so a loop over a plain PHP array keyed by `string`
-/// runs over the `\Sharp\Map` that takes each key back as its `string`. One keyed by `int|string` keeps its keys.
+/// runs over the `\Sharp\Map` that takes each key back as its `string`. One keyed by `array-key`, which arrives as
+/// `int|string`, keeps its keys, and is checked as the project's collection is.
 #[test]
 fn a_loop_over_a_plain_php_array_keyed_by_string_takes_its_keys_back() {
     assert_eq!(
@@ -23510,10 +23525,13 @@ fn a_loop_over_a_plain_php_array_keyed_by_string_takes_its_keys_back() {
                   ZVAL "sku"
                 STMT_LIST
               FOREACH
-                STATIC_CALL
-                  ZVAL "Lib\\Calc"
-                  ZVAL "counts"
-                  ARG_LIST
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "Lib\\Calc"
+                    ZVAL "counts"
+                    ARG_LIST
+                  ZVAL "Map<int|string, int>"
+                  ZVAL "Lib\\Calc::counts()"
                 VAR
                   ZVAL "count"
                 VAR
@@ -23577,6 +23595,91 @@ fn a_lazy_plain_php_source_is_checked_where_an_iterable_holds_it() {
                     ZVAL "count"
                     ARG_LIST
         "#}
+    );
+}
+
+/// ```php
+/// $columns = \is_array($crossing = \VERIFY_TYPE_ARGS(\Lib\Calc::from(new Box()), 'Map<int|string, Any?>', 'Lib\Calc::from()'))
+///     ? \Sharp\Map::from($crossing, 'int|string, Any?') : $crossing;
+/// ```
+///
+/// Spec section 12: plain PHP's `array-key` is PHP#'s `int|string`. A plain PHP generic whose key type no argument
+/// fixes, as an object passed where an `array<TKey, TValue>` or an object is taken leaves it, takes the key type's
+/// default `array-key` as its type argument, which the call carries as `int|string`, and its result enters the `Map`
+/// the local declares.
+#[test]
+fn a_plain_php_array_key_enters_php_sharp_as_int_or_string() {
+    assert_eq!(
+        body_in(
+            "void run()",
+            "        Map<int|string, Any?> columns = Calc.from(new Box());\n",
+            &[
+                (
+                    "src/Lib/Calc.php",
+                    "<?php namespace Lib;\nfinal class Calc {\n/**\n * @template TKey of array-key = array-key\n * @template TValue = mixed\n * @param array<TKey, TValue>|\\WeakMap<object, TValue>|\\Traversable<TKey, TValue>|object $items\n * @return ($items is \\WeakMap ? list<TValue> : array<TKey, TValue>)\n */\npublic static function from($items) { return (array) $items; } }",
+                ),
+                ("src/App/Tenant/Box.sharp", "namespace App.Tenant;\n\nclass Box\n{\n}\n"),
+            ]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "columns"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "crossing#1"
+                        VERIFY_TYPE_ARGS
+                          STATIC_CALL
+                            ZVAL "Lib\\Calc"
+                            ZVAL "from"
+                            ARG_LIST
+                              NEW
+                                ZVAL "App\\Tenant\\Box"
+                                ARG_LIST
+                              SHARP_TYPE_ARGS
+                                null
+                                ZVAL "int|string, Any?"
+                          ZVAL "Map<int|string, Any?>"
+                          ZVAL "Lib\\Calc::from()"
+                  STATIC_CALL
+                    ZVAL "Sharp\\Map"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "crossing#1"
+                      ZVAL "int|string, Any?"
+                  VAR
+                    ZVAL "crossing#1"
+        "#}
+    );
+}
+
+/// A call carries the type arguments of a plain PHP method a project's class declares, which a PHP# override may run,
+/// so one PHP# can't write, as the `scalar` a template's default gives, is refused before lowering, as a PHP# method's
+/// is.
+#[test]
+fn a_plain_php_type_argument_php_sharp_can_t_write_is_refused_before_lowering() {
+    let lowered = Lowered::with(
+        &method_with("void run()", "        List<Any?> values = Calc.from(new Box());\n"),
+        &[
+            (
+                "src/Lib/Calc.php",
+                "<?php namespace Lib;\nfinal class Calc {\n/**\n * @template TValue of scalar = scalar\n * @param list<TValue>|object $items\n * @return list<TValue>\n */\npublic static function from($items) { return []; } }",
+            ),
+            ("src/App/Tenant/Box.sharp", "namespace App.Tenant;\n\nclass Box\n{\n}\n"),
+        ],
+    );
+
+    assert_eq!(
+        lowered.diagnostics(),
+        [
+            "9:29 compile error: The type argument `TValue` of the call to `Calc.from` would be `scalar`, which PHP# can't write."
+        ]
     );
 }
 

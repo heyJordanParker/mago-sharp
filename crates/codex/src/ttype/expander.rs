@@ -707,16 +707,16 @@ fn resolve_special_class_names(object: &mut TObject, codebase: &CodebaseMetadata
         return;
     }
 
-    let needs_static_resolution = matches!(special, SpecialClassName::Static | SpecialClassName::This) || named.is_this;
+    let needs_static_resolution = matches!(special, SpecialClassName::Static | SpecialClassName::This);
 
     if needs_static_resolution && let StaticClassType::Object(TObject::Enum(static_enum)) = &options.static_class_type {
         *object = TObject::Enum(static_enum.clone());
         return;
     }
 
-    // A pre-bound `static` type also rebinds to an enum receiver, but only when
-    // the receiver is compatible: an instance of the named class, or reaching it
-    // through `@mixin` tags.
+    // A pre-bound `static` or `$this` type, one a receiver already bound to its class, also rebinds to an enum
+    // receiver, but only when the receiver is compatible: an instance of the named class, or reaching it through
+    // `@mixin` tags. So a `$this` a call bound to its receiver stays that receiver where an enum's body expands it.
     if matches!(special, SpecialClassName::None)
         && named.is_static
         && let StaticClassType::Object(TObject::Enum(static_enum)) = &options.static_class_type
