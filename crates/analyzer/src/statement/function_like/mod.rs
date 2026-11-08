@@ -20,7 +20,6 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::TemplateTypes;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
-use mago_codex::metadata::ttype::HostRefinement;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
@@ -577,15 +576,11 @@ where
         }
     }
 
-    if let Some(declared) = &function_like_metadata.return_type_metadata
-        && let Some(HostRefinement { host, refused: Some(refused) }) = declared.host_refinement.as_deref()
-    {
-        let member = format!("the result of {}", display_signature(context, block_context, function_like_metadata));
-        report_host_refinement(context, *host, &member, declared, Err(refused));
-    }
+    report_signature_refinements(context, block_context, &mut artifacts, function_like_metadata);
 
     if let Some(effective_return) = &function_like_metadata.return_type_metadata
         && effective_return.from_docblock
+        && !refined_by_host(context, effective_return)
         && let Some(native_return) = &function_like_metadata.return_type_declaration_metadata
     {
         let expanded_docblock =
@@ -603,13 +598,7 @@ where
             &mut ComparisonResult::default(),
         );
 
-        if !is_compatible
-            && context.dialect.is_sharp()
-            && let Some(refinement) = &effective_return.host_refinement
-        {
-            let member = format!("the result of {}", display_signature(context, block_context, function_like_metadata));
-            report_host_refinement(context, refinement.host, &member, native_return, Ok(effective_return));
-        } else if !is_compatible {
+        if !is_compatible {
             let docblock_type_str = effective_return.type_union.get_id();
             let native_type_str = native_return.type_union.get_id();
 
@@ -915,10 +904,6 @@ where
             {
                 report_undefined_type_references(context, native_type);
             }
-            if let Some(HostRefinement { host, refused: Some(refused) }) = parameter_type.host_refinement.as_deref() {
-                let member = display_parameter(context, block_context, function_like_metadata, parameter_metadata);
-                report_host_refinement(context, *host, &member, parameter_type, Err(refused));
-            }
         }
 
         let declared_parameter_type = if let Some(parameter_type) = parameter_metadata.get_type_metadata() {
@@ -926,6 +911,7 @@ where
                 expand_type_metadata(context, block_context, artifacts, function_like_metadata, parameter_type);
 
             if parameter_type.from_docblock
+                && !refined_by_host(context, parameter_type)
                 && let Some(native_type) = parameter_metadata.get_type_declaration_metadata()
             {
                 let expanded_native =
@@ -938,13 +924,7 @@ where
                     &mut ComparisonResult::default(),
                 );
 
-                if !is_compatible
-                    && context.dialect.is_sharp()
-                    && let Some(refinement) = &parameter_type.host_refinement
-                {
-                    let member = display_parameter(context, block_context, function_like_metadata, parameter_metadata);
-                    report_host_refinement(context, refinement.host, &member, native_type, Ok(parameter_type));
-                } else if !is_compatible {
+                if !is_compatible {
                     let docblock_type_str = effective_type.get_id();
                     let native_type_str = native_type.type_union.get_id();
                     let param_name = parameter_metadata.name.0;
@@ -2723,41 +2703,127 @@ where
     }
 }
 
-/// Reports, at `declared`, the type a PHP# member declares, the refinement the extension host `host` gave the member,
-/// which `member` names, as "`Notice.fields`" or "the result of `Notice.merged`": `Err` of a type PHP# can't write,
-/// which the member refused, or `Ok` of one that doesn't fit `declared`.
-pub(crate) fn report_host_refinement<A>(
-    context: &mut Context<'_, '_, A>,
-    host: Word,
-    member: &str,
-    declared: &TypeMetadata,
-    refinement: Result<&TypeMetadata, &TUnion>,
+/// Whether `member_type` is a host's refinement of a PHP# member, which [`report_host_refinement`] reports.
+pub(crate) fn refined_by_host<A>(context: &Context<'_, '_, A>, member_type: &TypeMetadata) -> bool
+where
+    A: Arena,
+{
+    context.dialect.is_sharp() && member_type.host_refinement.is_some()
+}
+
+/// Reports each refinement a host gave the result and the parameters of `function_like`, as
+/// [`report_host_refinement`] does, a method without a body included. Plain PHP may pass each parameter of a lambda,
+/// and of a method that isn't private.
+pub(crate) fn report_signature_refinements<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    function_like: &FunctionLikeMetadata,
 ) where
     A: Arena,
 {
+    if let Some(refined) =
+        function_like.return_type_metadata.as_ref().filter(|refined| refined_by_host(context, refined))
+    {
+        let member = format!("the result of {}", display_signature(context, block_context, function_like));
+        let declared = function_like.return_type_declaration_metadata.as_ref();
+        let expanded = declared.map(|declared| {
+            (
+                expand_type_metadata(context, block_context, artifacts, function_like, refined),
+                expand_type_metadata(context, block_context, artifacts, function_like, declared),
+            )
+        });
+        let expanded = expanded.as_ref().map(|(refined, declared)| (refined, declared));
+        report_host_refinement(context, &member, refined, declared, expanded, false);
+    }
+
+    let plain_passes = function_like.method_metadata.as_ref().is_none_or(|method| !method.visibility.is_private());
+    for parameter in &function_like.parameters {
+        let Some(refined) = parameter.get_type_metadata().filter(|refined| refined_by_host(context, refined)) else {
+            continue;
+        };
+        let member = display_parameter(context, block_context, function_like, parameter);
+        let declared = parameter.get_type_declaration_metadata();
+        let expanded = declared.map(|declared| {
+            (
+                expand_type_metadata(context, block_context, artifacts, function_like, refined),
+                expand_type_metadata(context, block_context, artifacts, function_like, declared),
+            )
+        });
+        let expanded = expanded.as_ref().map(|(refined, declared)| (refined, declared));
+        report_host_refinement(context, &member, refined, declared, expanded, plain_passes);
+    }
+}
+
+/// Reports the refinement an extension host gave a PHP# member, `refined`, where the member declares `declared`, spec
+/// section 1, at the member, which `member` names, as "`Notice.fields`" or "the result of `Notice.merged`". The host
+/// refines it only to a type PHP# writes, as the member's refused type records, and that fits `declared`. A member
+/// whose values plain PHP may give, `plain_gives`, as a parameter of a method plain PHP may call, takes no narrower
+/// type either, since the engine checks each value it takes against `declared` alone. A result may narrow, since the
+/// checker holds the PHP# body to it. Returns whether `refined` is a host's refinement of a PHP# member, which the
+/// caller's own docblock report then leaves alone.
+pub(crate) fn report_host_refinement<A>(
+    context: &mut Context<'_, '_, A>,
+    member: &str,
+    refined: &TypeMetadata,
+    declared: Option<&TypeMetadata>,
+    expanded: Option<(&TUnion, &TUnion)>,
+    plain_gives: bool,
+) -> bool
+where
+    A: Arena,
+{
+    let Some(refinement) = refined.host_refinement.as_deref().filter(|_| context.dialect.is_sharp()) else {
+        return false;
+    };
+    let host = refinement.host;
+    // A refused type leaves the member its declared type, which `refined` then is.
+    let declared = declared.unwrap_or(refined);
     let declared_type = display_sharp_type(context, &declared.type_union);
-    let issue = match refinement {
-        Err(refused) => Issue::error(format!(
+    let refined_type = display_sharp_type(context, &refined.type_union);
+    let fits = |inner: &TUnion, outer: &TUnion| {
+        union_comparator::is_contained_by(
+            context.codebase,
+            inner,
+            outer,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::default(),
+        )
+    };
+    let fault = match (&refinement.refused, expanded) {
+        (Some(refused), _) => format!(
             "The host `{host}` refines {member} to `{}`, which PHP# can't write, so it keeps its declared type `{declared_type}`.",
             refused.get_id()
-        ))
-        .with_annotation(Annotation::primary(declared.span).with_message(format!("`{declared_type}` is declared here."))),
-        Ok(refined) => {
-            let refined_type = display_sharp_type(context, &refined.type_union);
-            Issue::error(format!(
+        ),
+        (None, Some((refined, declared))) if !fits(refined, declared) => {
+            format!(
                 "The host `{host}` refines {member} to `{refined_type}`, which doesn't fit its declared type `{declared_type}`."
-            ))
-            .with_annotation(Annotation::primary(declared.span).with_message(format!("`{declared_type}` is declared here.")))
-            .with_annotation(Annotation::secondary(refined.span).with_message(format!("The host refines it to `{refined_type}` here.")))
+            )
         }
+        (None, Some((refined, declared))) if plain_gives && !fits(declared, refined) => format!(
+            "The host `{host}` refines {member} to `{refined_type}`, which narrows its declared type `{declared_type}`, and plain PHP may give it any `{declared_type}`."
+        ),
+        (None, _) => return true,
     };
+    let mut issue = Issue::error(fault).with_annotation(
+        Annotation::primary(declared.span).with_message(format!("`{declared_type}` is declared here.")),
+    );
+    if refinement.refused.is_none() {
+        issue = issue.with_annotation(
+            Annotation::secondary(refined.span).with_message(format!("The host refines it to `{refined_type}` here.")),
+        );
+    }
 
     context.collector.report_with_code(
         IssueCode::DocblockTypeMismatch,
         issue.with_help(
-            "A host refines a PHP# member only to a type PHP# writes that fits the type the member declares.",
+            "A host refines a PHP# member only to a type PHP# writes that fits the type the member declares, and narrows it only where PHP# alone gives the member its values.",
         ),
     );
+
+    true
 }
 
 /// `function_like` as a message names it: a method through its class, as "`Notice.merged`", and a lambda as "a lambda".

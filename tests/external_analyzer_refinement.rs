@@ -264,16 +264,19 @@ fn a_return_taken_from_the_body_reaches_callers_and_follows_body_edits() {
     assert_eq!(edited, fresh, "incremental analysis after a body edit matches a fresh analysis");
 }
 
-/// A PHP# class the worker refines: its `Map` members to an array shape, `chosen` to `Special` and `subject` to `Other`.
+/// A PHP# class the worker refines: its `Map` members to an array shape, `chosen`, `opened`, the parameter of `passed`
+/// and the result of `latest` to `Special`, and `subject`, the parameter of `kept` and the result of `first` to `Other`.
 /// `picked` reads `chosen` as the `Special` it is refined to.
 const NOTICE: &str = r#"namespace Proof;
 
 [Refined]
-public class Notice
+public abstract class Notice
 {
     public Map<string, string>? fields { get; set; } = null;
 
-    public Spec? chosen { get; set; } = null;
+    public Spec? chosen { get; private set; } = null;
+
+    public Spec? opened { get; set; } = null;
 
     public Spec? subject { get; set; } = null;
 
@@ -281,9 +284,13 @@ public class Notice
 
     public Special? picked() => this.chosen;
 
+    public Spec? latest() => this.chosen;
+
     public void kept(Spec? spec) { }
 
-    public Spec? first() => null;
+    public void passed(Spec? spec) { }
+
+    public abstract Spec? first();
 
     public bool holds()
     {
@@ -295,8 +302,10 @@ public class Notice
 
 /// A host may refine a PHP# member only to a type PHP# can write that fits the member's declared type. A shape on a
 /// `Map` is refused at the member, naming the member, the host and the declared type, and analysis goes on with the
-/// declared type. `Special` fits `Spec`, and `Other` doesn't, on a property, a parameter, a result and a lambda's
-/// parameter.
+/// declared type. `Special` fits `Spec`, and `Other` doesn't, on a property, a parameter, a result, an abstract
+/// method's result and a lambda's parameter. `Special` narrows `Spec`, which a result and a property only PHP# writes
+/// take, and a property and a parameter plain PHP gives values to don't, since the engine checks those against `Spec`
+/// alone.
 #[test]
 fn a_host_refines_a_sharp_member_only_to_a_type_sharp_writes_that_fits_it() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -325,6 +334,12 @@ fn a_host_refines_a_sharp_member_only_to_a_type_sharp_writes_that_fits_it() {
             "{host} `Notice.fields` to `{shape}`, which PHP# can't write, so it keeps its declared type `Map<string, string>?`."
         ),
         format!("{host} `Notice.subject` to `Other?`, which doesn't fit its declared type `Spec?`."),
+        format!(
+            "{host} `Notice.opened` to `Special?`, which narrows its declared type `Spec?`, and plain PHP may give it any `Spec?`."
+        ),
+        format!(
+            "{host} the parameter `spec` of `Notice.passed` to `Special?`, which narrows its declared type `Spec?`, and plain PHP may give it any `Spec?`."
+        ),
         format!(
             "{host} the parameter `spec` of `Notice.kept` to `Other?`, which doesn't fit its declared type `Spec?`."
         ),

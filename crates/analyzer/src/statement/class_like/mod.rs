@@ -16,7 +16,6 @@ use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
-use mago_codex::metadata::ttype::HostRefinement;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::reference::ReferenceOrigin;
@@ -101,6 +100,7 @@ use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::is_union_for_a_class_bound;
+use crate::statement::function_like::refined_by_host;
 use crate::statement::function_like::report_host_refinement;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_bound_types;
@@ -1676,16 +1676,6 @@ where
                     {
                         report_undefined_type_references(context, type_meta);
                         report_invalid_template_arguments(context, type_meta, HintPlace::Declaration);
-                        if let Some(HostRefinement { host, refused: Some(refused) }) =
-                            type_meta.host_refinement.as_deref()
-                        {
-                            let member = format!(
-                                "`{}`",
-                                display_member(context, class_like_metadata.original_name, property_name)
-                            );
-                            report_host_refinement(context, *host, &member, type_meta, Err(refused));
-                        }
-
                         if type_meta.from_docblock
                             && let Some(type_decl_meta) = &prop_meta.type_declaration_metadata
                         {
@@ -1697,6 +1687,13 @@ where
                                 type_meta,
                                 type_decl_meta,
                             );
+                        } else if refined_by_host(context, type_meta) {
+                            // A refused refinement leaves the property its declared type.
+                            let member = format!(
+                                "`{}`",
+                                display_member(context, class_like_metadata.original_name, property_name)
+                            );
+                            report_host_refinement(context, &member, type_meta, None, None, false);
                         }
                     }
                 }
@@ -5078,19 +5075,18 @@ fn report_property_type_mismatch<A>(
     let mut expanded_native = native_type.type_union.clone();
     expand_union(context.codebase, &mut expanded_native, &options);
 
-    if union_comparator::is_contained_by_with_erased_template_arguments(
-        context.codebase,
-        &expanded_docblock,
-        &expanded_native,
-        &mut ComparisonResult::default(),
-    ) {
-        return;
-    }
-    if context.dialect.is_sharp()
-        && let Some(refinement) = &docblock_type.host_refinement
+    // Plain PHP writes a property whose `set` isn't private.
+    let member = format!("`{}`", display_member(context, class_like_metadata.original_name, property.name.0));
+    let plain_writes = !property.write_visibility.is_private();
+    let expanded = Some((&expanded_docblock, &expanded_native));
+    if report_host_refinement(context, &member, docblock_type, Some(native_type), expanded, plain_writes)
+        || union_comparator::is_contained_by_with_erased_template_arguments(
+            context.codebase,
+            &expanded_docblock,
+            &expanded_native,
+            &mut ComparisonResult::default(),
+        )
     {
-        let member = format!("`{}`", display_member(context, class_like_metadata.original_name, property.name.0));
-        report_host_refinement(context, refinement.host, &member, native_type, Ok(docblock_type));
         return;
     }
 

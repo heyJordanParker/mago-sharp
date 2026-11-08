@@ -59,6 +59,7 @@ use crate::statement::function_like::analyze_parameter_default;
 use crate::statement::function_like::check_unused_function_template_parameters;
 use crate::statement::function_like::record_signature_types;
 use crate::statement::function_like::rejected_nullable_parameter;
+use crate::statement::function_like::report_signature_refinements;
 use crate::statement::function_like::report_undefined_bound_types;
 use crate::statement::function_like::unused_parameter;
 use crate::statement::function_like::unused_parameter::utils::is_variable_used_in_expression;
@@ -406,6 +407,7 @@ where
                 )?;
             }
         }
+        report_signature_refinements(context, &defaults_context, artifacts, method_metadata);
     }
 
     let body = match method.body {

@@ -2197,8 +2197,10 @@ pub fn get_sharp_type(atomic: &TAtomic) -> Option<SharpType<'_>> {
 }
 
 /// Whether PHP# can write `union`, each member, each type it intersects and each type inside them, as
-/// [`get_sharp_type`] reads them. `mixed` is `Any?`. A class named before the codebase resolves it, as a declaration's
-/// type is when an extension host refines it, is a class PHP# writes by its name.
+/// [`get_sharp_type`] reads them.
+///
+/// `mixed` is `Any?`. A class named before the codebase resolves it, as a declaration's type is when an extension host
+/// refines it, is a class PHP# writes by its name.
 #[must_use]
 pub fn is_written_in_sharp(union: &TUnion) -> bool {
     union.types.iter().all(|atomic| {

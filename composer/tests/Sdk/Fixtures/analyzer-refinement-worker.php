@@ -158,8 +158,8 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
 
     /**
      * A PHP# class whose `Map` members a host refines to an array shape, which PHP# can't write, and whose `Spec`
-     * members it refines to `Special`, which fits, and to `Other`, which doesn't, as it refines the `Spec?` parameter
-     * of the lambda the class declares.
+     * members it refines to `Special`, which fits and narrows, and to `Other`, which doesn't fit, as it refines the
+     * `Spec?` parameter of the lambda the class declares.
      */
     private static function notice(
         CodebaseScanContext $context,
@@ -201,6 +201,7 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
             properties: [
                 'fields' => new RefinedType($shape, $span),
                 'chosen' => new RefinedType(self::symbol('Proof\Special'), $span),
+                'opened' => new RefinedType(self::symbol('Proof\Special'), $span),
                 'subject' => new RefinedType(self::symbol('Proof\Other'), $span),
             ],
             methods: [
@@ -212,6 +213,10 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
                     'spec' => new RefinedType(self::symbol('Proof\Other'), $span),
                 ]),
                 'first' => new SignatureRefinement(return: new RefinedType(self::symbol('Proof\Other'), $span)),
+                'passed' => new SignatureRefinement(parameters: [
+                    'spec' => new RefinedType(self::symbol('Proof\Special'), $span),
+                ]),
+                'latest' => new SignatureRefinement(return: new RefinedType(self::symbol('Proof\Special'), $span)),
             ],
         );
     }
