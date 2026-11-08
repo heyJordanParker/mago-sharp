@@ -1361,4 +1361,60 @@ mod tests {
         );
         pool.shutdown();
     }
+
+    /// A worker whose group SIGKILL cannot end, as the kernel cannot end a process it holds on a stalled disk, leaves a
+    /// process holding the worker's pipes. The pool still restarts the worker after its request fails, and still drops,
+    /// where each waited for the worker's I/O threads forever. The process that holds the pipes runs in a group of its
+    /// own, which the end of the worker's group misses as it would miss a process the kernel holds.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_pool_restarts_and_drops_a_worker_whose_group_outlives_its_end() {
+        const TIMEOUT: Duration = Duration::from_secs(30);
+
+        let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let folder = std::env::temp_dir().join(format!("mago-outlived-{}-{}", std::process::id(), started.as_nanos()));
+        std::fs::create_dir_all(&folder).expect("the test folder should be made");
+        let script = format!(
+            "cd '{}' || exit 1; if [ -e started ]; then exec cat > /dev/null; fi; : > started; echo $$ > group; \
+             set -m; sleep 2147483647 & echo $! > held; wait",
+            folder.display()
+        );
+        let options = WorkerPoolOptions {
+            host: "acme".to_owned(),
+            request_timeout: Duration::from_millis(200),
+            ..WorkerPoolOptions::default()
+        };
+        let pool =
+            WorkerPool::spawn(WorkerCommand::new("sh").with_arguments(["-c", &script]), NonZeroUsize::MIN, options)
+                .expect("worker pool should start");
+        let read = |name: &str| {
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                if let Ok(id) = std::fs::read_to_string(folder.join(name))
+                    && let Ok(id) = id.trim().parse::<libc::pid_t>()
+                {
+                    return id;
+                }
+                assert!(Instant::now() < deadline, "the worker wrote no {name} within {TIMEOUT:?}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        let group = read("group");
+        let held = read("held");
+        lock(&crate::process_group::UNENDING).push(group);
+
+        let (done, returned) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let failed = pool.request(b"describe".to_vec(), None).is_err();
+            drop(pool);
+            let _result = done.send(failed);
+        });
+        let outcome = returned.recv_timeout(TIMEOUT);
+
+        lock(&crate::process_group::UNENDING).retain(|unending| *unending != group);
+        // SAFETY: `kill` only sends a signal, to the process the worker left holding its pipes.
+        unsafe { libc::kill(held, libc::SIGKILL) };
+        let _result = std::fs::remove_dir_all(&folder);
+        assert_eq!(outcome, Ok(true), "the request should fail, and the pool restart the worker and drop");
+    }
 }
