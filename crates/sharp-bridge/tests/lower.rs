@@ -16452,6 +16452,20 @@ fn an_override_of_a_plain_php_method_keeps_its_result() {
     assert!(count.contains("ZVAL \"crossing#1\""), "{count}");
 }
 
+/// A PHP# method that overrides a method of a plain PHP trait its class uses keeps its own result,
+/// `\Sharp\Map|array`, since PHP checks a class's method against no method of a trait but an abstract one.
+#[test]
+fn an_override_of_a_plain_php_trait_method_keeps_its_own_result() {
+    let lowered = Lowered::with(
+        "final class Form : Listing\n{\n    public override Map<string, List<string>> errors() => [\"name\": [\"required\"]];\n}\n",
+        &[("src/Listing.php", "<?php trait Listing { public function errors(): array { return []; } }")],
+    );
+    let errors = lowered.render(lowered.method_named("errors"));
+
+    assert!(errors.contains("Sharp\\\\Map\""), "{errors}");
+    assert!(!errors.contains("ZVAL \"Sharp\\\\Internal\\\\arrayOf\""), "{errors}");
+}
+
 /// ```php
 /// #[\Override] protected null|string $table = 'orders';   // with the type text "string"
 /// #[\Override] public int|float $level = 3;           // with the type text "int"
