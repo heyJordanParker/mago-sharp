@@ -86,14 +86,12 @@ mod sharp_words;
 #[path = "../../../tests/support/effect_classes.rs"]
 mod effect_classes;
 
-#[path = "../../../tests/support/prelude_population.rs"]
-mod prelude_population;
-
 use effect_classes::EFFECT_CLASSES;
 use effect_classes::LIST_MEMBERS;
 use effect_classes::MAP_MEMBERS;
 use effect_classes::SET_MEMBERS;
-use prelude_population::populate_on_prelude;
+
+use crate::prelude_population::populate_on_prelude;
 
 static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
