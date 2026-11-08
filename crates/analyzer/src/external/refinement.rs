@@ -25,6 +25,7 @@ use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_extension::PayloadReader;
+use mago_names::display_sharp_member;
 use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -368,10 +369,15 @@ fn apply_class_like(
             )));
         };
 
-        let Ok(refined) = member_type(sharp, host, refined, property.type_declaration_metadata.as_ref()) else {
-            unreachable!("the PHP# parser gives every field and property its type");
-        };
-        property.set_type_metadata(Some(refined));
+        // A PHP# property declares its type, unless `Mago\UntypedSince` or `Mago\UntypedUntil` drops it for the
+        // project's PHP version.
+        match member_type(sharp, host, refined, property.type_declaration_metadata.as_ref()) {
+            Ok(refined) => property.set_type_metadata(Some(refined)),
+            Err(refused) => {
+                let part = format!("`{}`", display_sharp_member(&shown, name));
+                class.issues.push(refusal(host, &part, &refused.type_union, refused.span, DOCBLOCK_TYPE_MISMATCH));
+            }
+        }
     }
 
     let method_names = class.methods.clone();
@@ -711,9 +717,10 @@ mod tests {
     use super::*;
     use crate::settings::Settings;
 
-    /// A PHP# file whose class takes a type parameter and a parent's type argument, whose methods take a lambda, a
-    /// type parameter of their own and a value, and which declares a lambda with no types.
-    const NOTICE: &str = "namespace Proof;\n\npublic class Base<T> { }\n\npublic class Notice<T> : Base<string>\n{\n    public void each(Function<void()> run) { }\n\n    public U pick<U>(U item) => item;\n\n    public void run()\n    {\n        const echo = (value) => value;\n    }\n}\n";
+    /// A PHP# file whose class takes a type parameter and a parent's type argument, holds a property `Mago\UntypedSince`
+    /// leaves untyped, whose methods take a lambda, a type parameter of their own and a value, and which declares a
+    /// lambda with no types.
+    const NOTICE: &str = "namespace Proof;\n\npublic class Base<T> { }\n\npublic class Notice<T> : Base<string>\n{\n    [\\Mago\\UntypedSince(80000)]\n    public string? label { get; set; } = null;\n\n    public void each(Function<void()> run) { }\n\n    public U pick<U>(U item) => item;\n\n    public void run()\n    {\n        const echo = (value) => value;\n    }\n}\n";
 
     /// A refinement by the host `typing` of `NOTICE`'s `declaration`.
     fn refinement(file: &File, declaration: Declaration) -> DeclarationRefinement {
@@ -743,7 +750,8 @@ mod tests {
 
     /// Spec section 1: a host refines each part of a PHP# declaration only to a type PHP# can write, where the
     /// refinement enters the codebase: a type parameter's bound, a parent's type argument, the `this` of a lambda a
-    /// parameter takes, and a lambda's own `this`, parameter and result, which declare no type here. Each refused part
+    /// parameter takes, a lambda's own `this`, parameter and result, which declare no type here, and a property
+    /// `Mago\UntypedSince` leaves untyped. Each refused part
     /// keeps no refinement, and its error names the host and the part. A type parameter's bound and a lambda's `this`
     /// PHP# writes apply.
     #[test]
@@ -771,7 +779,7 @@ mod tests {
                 arguments: vec![get_arraykey()],
             }],
             required_extends: Vec::new(),
-            properties: Vec::new(),
+            properties: vec![(word("$label"), unwritable(&file))],
             methods: vec![
                 (
                     word("each"),
@@ -816,6 +824,7 @@ mod tests {
             [
                 "The host `typing` refines the bound of `Notice`'s type parameter `T` to `array-key`, which PHP# can't write.",
                 "The host `typing` refines a type argument `Notice` gives its parent to `array-key`, which PHP# can't write.",
+                "The host `typing` refines `Notice.label` to `array-key`, which PHP# can't write.",
             ]
         );
         assert_eq!(
