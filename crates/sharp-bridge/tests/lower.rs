@@ -8081,6 +8081,22 @@ fn an_extension_read_on_a_union_reads_the_objects_own_member_beside_the_extensio
 /// its own method is told apart by its class before the `Iterable`'s member, since an `Iterable` may be an object too.
 /// An override may replace the object's own method, so it reads its result as its own type declares it.
 #[test]
+fn a_member_of_a_value_that_may_be_a_generic_object_or_an_iterable_reads_the_object_s_result_as_the_call_types_it() {
+    let body = Lowered::with(
+        "namespace App.Tenant;\n\nfinal class Report\n{\n    public int run(bool boxed, Box<int> box, Iterable<string> names) => (boxed ? box : names).toList().count();\n}\n",
+        &[(
+            "src/App/Tenant/Box.sharp",
+            "namespace App.Tenant;\n\npublic class Box<T>\n{\n    public Box() { }\n\n    public List<T> toList() => [];\n}\n",
+        )],
+    )
+    .body_of("run");
+
+    // `List<T>` names the class's type parameter, which the caller's frame doesn't spell, so the call's type is read.
+    assert!(body.contains("ZVAL \"List<int|string>, List<Any?>\"\n"), "{body}");
+    assert!(body.contains("ZVAL \"App.Tenant.Box.toList()\"\n"), "{body}");
+}
+
+#[test]
 fn a_member_of_a_value_that_may_be_a_list_or_an_iterable_runs_the_iterable_s_last() {
     let body = Lowered::new(
         "namespace App.Tenant;\n\nclass Report\n{\n    public List<int> toList() => [];\n\n    public int run(bool listed, List<int> items, Iterable<string> names) => (listed ? items : names).toList().count() + (listed ? this : names).toList().count();\n}\n",
@@ -16570,6 +16586,38 @@ fn a_result_plain_php_takes_is_read_where_the_call_is_written() {
 
     assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"").count(), 1, "{body}");
     assert!(body.contains("ZVAL \"App.Tenant.Taggable.relate()\""), "{body}");
+}
+
+/// Spec section 22: a call that runs one PHP# method alone reads its result as it is: `super.` runs the parent's own
+/// method, and a static method its class names runs that method. Plain PHP's array shape, which PHP# can't write, is
+/// read where a place that declares its type takes it, as the generic method's parameter here. That method's result is
+/// the `Map` the checker writes for the shape, read as an override may give it.
+#[test]
+fn a_call_that_runs_one_php_sharp_method_or_gives_a_shape_reads_its_result_as_it_is() {
+    let base = (
+        "src/App/Tenant/Shelf.sharp",
+        "namespace App.Tenant;\n\npublic class Shelf\n{\n    public Shelf() { }\n\n    public virtual List<int> sizes() => [1];\n\n    public static List<int> shared() => [2];\n\n    public static virtual List<int> made() => [3];\n\n    public T pick<T>(T value) => value;\n}\n",
+    );
+    let calc = (
+        "src/Lib/Calc.php",
+        "<?php namespace Lib; final class Calc { /** @return array{a: int} */ public static function shape(): array { return ['a' => 1]; } }",
+    );
+    let body = Lowered::with(
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\npublic class Pantry : Shelf\n{\n    public Pantry() : super() { }\n\n    public override List<int> sizes() => super.sizes();\n\n    public int run()\n    {\n        const shared = Shelf.shared();\n        const picked = this.pick(Calc.shape());\n        const late = Self.made();\n        const valued = Class.of(this).made();\n        return shared.count();\n    }\n}\n",
+        &[base, calc],
+    )
+    .tree();
+
+    // `Self.` reads the method on `static::class`, and a class value on its class.
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"").count(), 3, "{body}");
+    assert!(body.contains("CLASS_NAME\n                  ZVAL [1] \"static\"\n"), "{body}");
+    assert_eq!(body.matches("ZVAL \"App.Tenant.Shelf.made()\"").count(), 2, "{body}");
+    assert!(
+        body.contains(
+            "ZVAL \"Map<string, int>, Map<Any?, Any?>\"\n                  ZVAL \"App.Tenant.Shelf.pick()\"\n"
+        ),
+        "{body}"
+    );
 }
 
 /// A PHP# method that overrides a method of a plain PHP trait its class uses keeps its own result,

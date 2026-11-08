@@ -962,17 +962,14 @@ impl<'analysis> Types<'analysis> {
             Some((name, metadata)) => {
                 (self.checked_text(r#type, metadata.flags.is_user_defined()).unwrap_or_else(|| "Any?".to_owned()), name)
             }
-            None => self.artifacts.get_callees(call).find_map(|target| match target {
-                CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. } => {
-                    let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
-                    Some((
-                        "Any?".to_owned(),
-                        format!("{}.{}()", class_text(*class, self.codebase), metadata.original_name),
-                    ))
-                }
-                _ => None,
-            })?,
+            None => {
+                let (class, method) = self.artifacts.get_callees(call).find_map(called_method)?;
+                let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
+
+                ("Any?".to_owned(), format!("{}.{}()", class_text(class, self.codebase), metadata.original_name))
+            }
         };
+
         Some((returned_types(crossing, checked), name))
     }
 
@@ -1042,10 +1039,7 @@ impl<'analysis> Types<'analysis> {
         call: &Expression,
         among: Option<&[Word]>,
     ) -> Option<(Word, &'analysis FunctionLikeMetadata)> {
-        self.artifacts.get_callees(call).find_map(|target| {
-            let CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. } = target else {
-                return None;
-            };
+        self.artifacts.get_callees(call).filter_map(called_method).find_map(|(class, method)| {
             let member = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
             let owner = self.scanned(class.as_bytes());
 
@@ -1055,7 +1049,7 @@ impl<'analysis> Types<'analysis> {
                 && among.is_none_or(|among| {
                     among.iter().any(|named| named.as_bytes().eq_ignore_ascii_case(class.as_bytes()))
                 }))
-            .then_some((*class, member))
+            .then_some((class, member))
         })
     }
 
@@ -1148,12 +1142,7 @@ impl<'analysis> Types<'analysis> {
         {
             return None;
         }
-        let (class, method) = self.artifacts.get_callees(call).find_map(|target| match target {
-            CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. } => {
-                Some((*class, *method))
-            }
-            _ => None,
-        })?;
+        let (class, method) = self.artifacts.get_callees(call).find_map(called_method)?;
         let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
         let static_method = metadata.method_metadata.as_ref().is_some_and(|method| method.is_static);
         let binds = names_parameter(&metadata.return_type_metadata.as_ref()?.type_union, static_method);
@@ -1175,7 +1164,7 @@ impl<'analysis> Types<'analysis> {
             unreachable!("the analysis types a method value as its signature, not the value at {:?}", value.span());
         };
         let FunctionLikeIdentifier::Method(class, method) = signature.get_source()? else {
-            return None;
+            unreachable!("a method value's signature comes from its method, not the value at {:?}", value.span());
         };
         let member = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
         if !self.scanned(class.as_bytes()).checks_results_at_call(member) {
@@ -2566,8 +2555,8 @@ pub fn type_text(r#type: &TUnion, codebase: &CodebaseMetadata) -> String {
     text(r#type, codebase, Parameter::Any)
 }
 
-/// `r#type`, a plain PHP result, with each `array-key` in it, at any depth of its collections, as the `int|string` PHP#
-/// writes, as PHP# reads a bare `array` as a `Map<int|string, Any?>`, spec section 12.
+/// `r#type`, a plain PHP result, with each `array-key` in it, at any depth of its `List`s and `Map`s, as the `int|string`
+/// PHP# writes, as PHP# reads a bare `array` as a `Map<int|string, Any?>`, spec section 12. Plain PHP writes no `Set`.
 pub(crate) fn with_written_keys(r#type: &TUnion) -> TUnion {
     let written = |inner: &TUnion| Arc::new(with_written_keys(inner));
 
@@ -2587,7 +2576,6 @@ pub(crate) fn with_written_keys(r#type: &TUnion) -> TUnion {
                 TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none() && list.known_elements.is_none() => {
                     vec![TAtomic::Array(TArray::List(TList::new(written(&list.element_type))))]
                 }
-                TAtomic::Array(TArray::Set(element)) => vec![TAtomic::Array(TArray::Set(written(element)))],
                 atomic => vec![atomic.clone()],
             })
             .collect(),
@@ -2622,6 +2610,16 @@ fn collections_alone(r#type: &TUnion) -> TUnion {
             })
             .collect(),
     )
+}
+
+/// The class and the name of the method `target` runs, when it runs a method.
+fn called_method(target: &CallTarget) -> Option<(Word, Word)> {
+    match target {
+        CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. } => {
+            Some((*class, *method))
+        }
+        _ => None,
+    }
 }
 
 /// The type list `\Sharp\Internal\returned` takes: the type the result crosses into, which the error names, and the

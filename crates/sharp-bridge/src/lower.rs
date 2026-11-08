@@ -5356,9 +5356,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return None;
         }
         let read = read(self);
-        if !is_written_in_sharp(&read) {
-            return None;
-        }
         let null_safe = matches!(expression.unparenthesized(), Expression::Call(Call::NullSafeMethod(_)));
         let check = self.types.returned_check(class, member, &read, null_safe)?;
         // A generic method's PHP# body reads its own type parameters as any type, so its result is checked against the
@@ -5400,9 +5397,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             _ => self.types.expression_type(expression),
         };
         let null_safe = matches!(expression.unparenthesized(), Expression::Call(Call::NullSafeMethod(_)));
-        let Some(check) =
-            self.types.returned_check(class, member, read, null_safe).filter(|_| is_written_in_sharp(read))
-        else {
+        let Some(check) = self.types.returned_check(class, member, read, null_safe) else {
             return call;
         };
         let implementer = self.expression(receiver);
