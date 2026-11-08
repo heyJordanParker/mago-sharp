@@ -1,5 +1,6 @@
 use mago_allocator::Arena;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::comparator::ComparisonResult;
@@ -162,6 +163,18 @@ where
 
     if is_already_subtype {
         return get_true();
+    }
+
+    // In PHP#, a `Map` is a `Sharp\Map` and a `List` is PHP's list, spec section 12, so a value a `Map` type holds is
+    // never a `List`, whatever keys the `Map` takes.
+    let is_map =
+        |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::Keyed(keyed)) if keyed.parameters.is_some());
+    if context.dialect.is_sharp()
+        && target_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
+        && lhs_type.types.iter().all(|atomic| atomic.is_null() || is_map(atomic))
+        && lhs_type.types.iter().any(is_map)
+    {
+        return get_false();
     }
 
     if !union_comparator::can_expression_types_be_identical(context.codebase, lhs_type, &target_type, true, false) {

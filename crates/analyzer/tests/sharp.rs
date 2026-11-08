@@ -3505,6 +3505,27 @@ fn a_plain_php_subclass_of_a_sharp_override_meets_the_type_the_override_writes()
 /// type, before the engine could refuse the class where it links it. A `Map` keyed by `string` returns as the plain
 /// PHP method's `array`.
 #[test]
+fn a_list_test_of_a_value_declared_a_map_is_an_error() {
+    let reader = "namespace Demo;\n\nimport Lib.Box;\n\npublic class Reader\n{\n    public bool listed(Box box) => box.records is List<Map<string, string?>>;\n\n    public bool cast(Box box) => box.records as List<Map<string, string?>> != null;\n\n    public bool held(Map<int, int> counts) => counts is List<int>;\n\n    public bool values(Box box) => box.records?.values() is List<Any?>;\n}\n";
+    let others =
+        [("src/Lib/Box.php", "<?php\n\nnamespace Lib;\n\nclass Box\n{\n    public ?array $records = null;\n}\n")];
+    let errors: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reader.sharp", reader), &others)
+        .iter()
+        .filter(|issue| issue.level == Level::Error)
+        .map(|issue| issue.message.clone())
+        .collect();
+
+    assert_eq!(
+        errors,
+        [
+            "This pattern never matches the value it tests, a `Map<int|string, Any?>?`: a `Map` is never a `List`.",
+            "This pattern never matches the value it tests, a `Map<int|string, Any?>?`: a `Map` is never a `List`.",
+            "This pattern never matches the value it tests, a `Map<int, int>`: a `Map` is never a `List`.",
+        ]
+    );
+}
+
+#[test]
 fn an_override_of_a_plain_php_method_returns_only_a_result_a_php_array_holds() {
     let form = |result: &str| -> &'static str {
         String::leak(format!(

@@ -21954,23 +21954,21 @@ fn a_map_a_class_method_gives_becomes_the_object_where_a_plain_override_may_give
 }
 
 /// ```php
-/// return (($as#1 = \is_array($crossing#2 = $folder->records) ? \Sharp\Map::from($crossing#2) : $crossing#2) instanceof List<…> ? … : null) != null;
+/// return (($as#1 = \is_array($crossing#2 = $folder->records) ? \Sharp\Map::from($crossing#2) : $crossing#2) instanceof Map<…> ? … : null) != null;
 /// ```
 ///
 /// Spec section 12: plain PHP's `?array` arrives as a `Map<int|string, Any?>?`, whatever keys it holds, and one it
 /// declares `list<…>` as a `List`. A pattern's variable holds the value it tests as it arrives, so `as`, `is` and
-/// `match` test the `Map` or the `List` a local holding the value holds, never plain PHP's array.
+/// `match` test the `Map` or the `List` a local holding the value holds, never plain PHP's array. A `List` test of the
+/// `Map` is a compile error, which the analyzer's tests hold.
 #[test]
 fn a_pattern_tests_plain_php_s_array_as_it_arrives() {
     let folder = (
         "src/App/Tenant/Folder.php",
         "<?php namespace App\\Tenant; final class Folder { public ?array $records = null; /** @var list<array<string, ?string>>|null */ public ?array $listed = null; }",
     );
-    let records = body_in(
-        "bool run(Folder folder)",
-        "        return folder.records as List<Map<string, string?>> != null;\n",
-        &[folder],
-    );
+    let records =
+        body_in("bool run(Folder folder)", "        return folder.records as Map<string, Any?> != null;\n", &[folder]);
     let held = body_in(
         "bool run(Folder folder)",
         "        return folder.records is Map<int|string, Any?> records && records.has(0);\n",
