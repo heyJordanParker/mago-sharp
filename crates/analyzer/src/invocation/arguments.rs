@@ -723,8 +723,9 @@ where
     false
 }
 
-/// Whether `parameter_type` takes no string but one written in the code, as plain PHP's `literal-string` does, and
-/// `input_type` may be a string composed while the code runs.
+/// Whether `parameter_type` takes any string written in the code and no other, as plain PHP's `literal-string` does,
+/// and `input_type` may be a string composed while the code runs. A parameter that takes only given values, as
+/// `"a"|"b"`, names them in the generic message already.
 fn takes_written_string_alone(parameter_type: &TUnion, input_type: &TUnion) -> bool {
     fn strings(union: &TUnion) -> impl Iterator<Item = &TString> {
         union.types.iter().filter_map(|atomic| match atomic {
@@ -735,7 +736,7 @@ fn takes_written_string_alone(parameter_type: &TUnion, input_type: &TUnion) -> b
     let mut taken = strings(parameter_type).peekable();
 
     taken.peek().is_some()
-        && taken.all(|string| string.is_literal_origin())
+        && taken.all(TString::is_unspecified_literal)
         && strings(input_type).any(|string| string.is_general())
 }
 

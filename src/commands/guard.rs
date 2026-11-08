@@ -52,6 +52,7 @@ use mago_prelude::Prelude;
 
 use crate::commands::args::baseline_reporting::BaselineReportingArgs;
 use crate::commands::args::substitution::SubstitutionArgs;
+use crate::commands::args::substitution::substitute;
 use crate::commands::outcome::CommandOutcome;
 use crate::commands::stdin_input;
 use crate::config::Configuration;
@@ -198,16 +199,10 @@ impl GuardCommand {
 
         let orchestrator_init_start = trace_enabled.then(Instant::now);
         let substitutions = self.substitution.resolve()?;
-        let substitution_excludes: Vec<String> =
-            substitutions.iter().map(|s| s.original.to_string_lossy().into_owned()).collect();
 
         let mut orchestrator = create_orchestrator(&configuration, color_choice, false, true, false);
         orchestrator.add_exclude_patterns(configuration.guard.excludes.iter());
-        orchestrator.add_exclude_patterns(substitution_excludes.iter());
         skip_sharp_files(&mut orchestrator);
-        for substitution in &substitutions {
-            orchestrator.config.paths.push(substitution.temporary.to_string_lossy().into_owned());
-        }
 
         let stdin_override =
             stdin_input::resolve_stdin_override(self.stdin_input, &self.path, &configuration.source.workspace)?;
@@ -217,6 +212,7 @@ impl GuardCommand {
         let load_database_start = trace_enabled.then(Instant::now);
         let mut database =
             orchestrator.load_database(&configuration.source.workspace, true, Some(database), stdin_override)?;
+        substitute(&substitutions, &mut database, &configuration.source.workspace)?;
         let load_database_duration = load_database_start.map(|s| s.elapsed());
 
         if !database.files().any(|f| f.file_type == FileType::Host) {

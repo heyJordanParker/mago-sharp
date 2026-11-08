@@ -66,4 +66,4 @@ mago guard --substitute /abs/path/to/src/Foo.php=/tmp/mutation-42.php
 - 该标志可以重复使用,以便一次替换多个文件。
 - 与 `--stdin-input` 互斥。
 
-在内部,`TEMP` 会被加入宿主路径,`ORIG` 会被加入本次运行的排除项,因此依赖分析仍然可以看到该变异。报告的问题引用的是 `TEMP` 而非 `ORIG`。
+`TEMP` 会完全按照 `ORIG` 在其路径上的方式接受检查,因此依赖分析会在 `ORIG` 的位置看到该变异。无论 `TEMP` 位于何处,它都会采用 `ORIG` 的排除项。报告的问题引用的是带有 `TEMP` 扩展名的 `ORIG` 路径。

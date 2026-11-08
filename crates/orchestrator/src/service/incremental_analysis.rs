@@ -271,7 +271,7 @@ impl IncrementalAnalysisService {
 
     /// Builds the codebase and runs the before-analysis hooks, then analyzes no file.
     ///
-    /// Each analysis then reports only the issues those hooks raise.
+    /// Each analysis then reports only the issues those hooks raise and each host file's parse errors.
     #[must_use]
     pub fn scan_only(mut self) -> Self {
         self.scan_only = true;
@@ -1780,9 +1780,7 @@ impl IncrementalAnalysisService {
         let host_files: Vec<_> = self
             .database
             .files()
-            .filter(|file| {
-                !self.scan_only && file.file_type == FileType::Host && !effective_skip_files.contains(&file.id)
-            })
+            .filter(|file| file.file_type == FileType::Host && !effective_skip_files.contains(&file.id))
             .map(|file| self.database.get(&file.id))
             .collect::<Result<Vec<_>, _>>()?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -1804,7 +1802,7 @@ impl IncrementalAnalysisService {
         let parser_settings = self.parser_settings;
         let namespace_classes = &self.namespace_classes;
         let changing_members = &self.changing_members;
-        let analyzing_bar = (self.use_progress_bars && !host_files.is_empty())
+        let analyzing_bar = (self.use_progress_bars && !self.scan_only && !host_files.is_empty())
             .then(|| create_progress_bar(host_files.len(), "🔬 Analyzing", ProgressBarTheme::Green));
         #[cfg(not(target_arch = "wasm32"))]
         let hang_watcher = trace_enabled.then(|| HangWatcher::spawn(rayon::current_num_threads()));
@@ -1822,6 +1820,13 @@ impl IncrementalAnalysisService {
                 let mut analysis_result = AnalysisResult::new(SymbolReferences::new());
 
                 let program = parse_file_with_settings(arena, &source_file, parser_settings);
+                // A parse error is an error in every mode, so a scan, which analyzes no file, still reports it.
+                if self.scan_only {
+                    analysis_result.issues.extend(program.errors.iter().map(Issue::from));
+                    arena.reset();
+
+                    return Ok((file_id, analysis_result, None, Vec::new(), HashSet::default()));
+                }
                 let resolved_names = NameResolver::new(arena).resolve_in(program, namespace_classes, changing_members);
 
                 let semantics_checker = SemanticsChecker::new(settings.version);

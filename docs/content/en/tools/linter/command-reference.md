@@ -61,4 +61,4 @@ Rules:
 - The flag can be repeated to substitute several files at once.
 - Conflicts with `--stdin-input` and `--staged`.
 
-Under the hood, `TEMP` is added to the host paths and `ORIG` is added to the excludes for this run, so cross-file rules continue to see the mutation. Reported issues and baseline entries reference `TEMP` rather than `ORIG`. Mutation-testing tools usually compare issue counts between a clean run and the substituted run, so this does not change the workflow.
+`TEMP` is checked exactly as `ORIG` would be at `ORIG`'s path, so cross-file rules see the mutation in its place. It takes `ORIG`'s exclusions, wherever `TEMP` itself lies. Reported issues and baseline entries reference `ORIG`'s path with `TEMP`'s extension. Mutation-testing tools usually compare issue counts between a clean run and the substituted run, so this does not change the workflow.

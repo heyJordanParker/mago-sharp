@@ -32,7 +32,7 @@ Global flags must come before `analyze`. See the [CLI overview](/fundamentals/co
 | `--substitute <ORIG=TEMP>` | Replace one host file with another for this invocation. Intended for mutation testing. Repeatable. |
 | `--watch` | Run continuously, re-analysing on file changes. See [watch mode](#watch-mode). |
 | `--list-codes` | List every analyzer issue code as JSON. |
-| `--scan-only` | Build the codebase and run the extensions' before-analysis hooks, then analyze no file. Reports only the issues those hooks raise, without the baseline. |
+| `--scan-only` | Build the codebase and run the extensions' before-analysis hooks, then analyze no file. Reports only the issues those hooks raise and each file's parse errors, without the baseline. |
 | `-h`, `--help` | Print help and exit. |
 
 The shared flags for reporting, fixing, and baselines are documented on the [reporting and fixing options](/fundamentals/shared-reporting-options/) page.
@@ -62,7 +62,7 @@ Rules:
 - The flag can be repeated to substitute several files at once.
 - Conflicts with `--stdin-input` and `--staged`.
 
-Under the hood, `TEMP` is added to host paths and `ORIG` is added to excludes for this run, so cross-file type inference continues to see the mutation. Reported issues and baseline entries reference `TEMP` rather than `ORIG`.
+`TEMP` is checked exactly as `ORIG` would be at `ORIG`'s path, so cross-file type inference sees the mutation in its place. It takes `ORIG`'s package, folder namespace and exclusions, wherever `TEMP` itself lies, and keeps its own extension, so `Foo.php=Foo.sharp` checks PHP#. Reported issues and baseline entries reference `ORIG`'s path with `TEMP`'s extension.
 
 ## Watch mode
 

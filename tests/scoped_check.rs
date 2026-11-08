@@ -215,17 +215,102 @@ fn a_substituted_file_is_checked_in_place_of_the_file_it_replaces() {
     let issues = issues(&analyze(directory.path(), &["--substitute", &substitution, "src/Second.php"]));
 
     assert!(
-        reports_the_duplicate_route_in(&issues, "tmp/Second.php"),
+        reports_the_duplicate_route_in(&issues, "src/Second.php"),
         "the mutated file is checked against the rest of the project: {issues:#?}"
     );
     assert!(
         issues
             .iter()
-            .any(|issue| issue["code"] == "invalid-return-statement" && primary_file(issue) == Some("tmp/Second.php")),
-        "the mutated file's own issue is reported: {issues:#?}"
+            .any(|issue| issue["code"] == "invalid-return-statement" && primary_file(issue) == Some("src/Second.php")),
+        "the mutated file's own issue is reported at the original's path: {issues:#?}"
     );
     assert!(
-        issues.iter().all(|issue| primary_file(issue) == Some("tmp/Second.php")),
+        issues.iter().all(|issue| primary_file(issue) == Some("src/Second.php")),
         "only the mutated file is reported: {issues:#?}"
     );
+}
+
+/// The plain PHP class `App\Box` of a project whose `composer.json` maps `App` to `src/`, and `drafts/`, which the
+/// project's `mago.toml` excludes.
+fn namespaced_project() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("temporary project");
+    std::fs::create_dir_all(directory.path().join("src")).expect("src directory");
+    std::fs::create_dir_all(directory.path().join("drafts")).expect("drafts directory");
+    std::fs::write(
+        directory.path().join("composer.json"),
+        "{\n    \"name\": \"acme/shop\",\n    \"type\": \"project\",\n    \"autoload\": {\n        \"psr-4\": {\n            \"App\\\\\": \"src/\"\n        }\n    }\n}\n",
+    )
+    .expect("composer.json");
+    std::fs::write(
+        directory.path().join("mago.toml"),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"src\", \"drafts\"]\nexcludes = [\"drafts\"]\n",
+    )
+    .expect("mago.toml");
+    std::fs::write(directory.path().join("src/Box.php"), "<?php\n\nnamespace App;\n\nfinal class Box\n{\n}\n")
+        .expect("Box.php");
+
+    directory
+}
+
+/// A PHP# draft of `Box` that declares a namespace its folder doesn't hold.
+const MISPLACED_BOX: &str = "namespace Other;\n\npublic final class Box\n{\n}\n";
+
+/// Each issue of `issues` as `file code: message`.
+fn located(issues: &[Value]) -> Vec<String> {
+    let mut located: Vec<String> = issues
+        .iter()
+        .map(|issue| {
+            format!(
+                "{} {}: {}",
+                primary_file(issue).unwrap_or_default(),
+                issue["code"].as_str().unwrap_or_default(),
+                issue["message"].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    located.sort();
+
+    located
+}
+
+/// The issues the draft `MISPLACED_BOX` gets where it stands in place of `src/Box.php`, as `src/Box.sharp`.
+fn in_place_issues() -> Vec<String> {
+    let project = namespaced_project();
+    std::fs::remove_file(project.path().join("src/Box.php")).expect("the original moves aside");
+    std::fs::write(project.path().join("src/Box.sharp"), MISPLACED_BOX).expect("the draft in place");
+
+    located(&issues(&analyze(project.path(), &[])))
+}
+
+/// A draft is checked as the file it replaces would be at the original's path, whatever folder holds it: a draft
+/// outside the project takes the original's package and folder namespace, so it gets the folder-namespace error it
+/// gets in place, named at the original's path with the draft's own extension.
+#[test]
+fn a_draft_outside_the_project_is_checked_in_place_of_the_file_it_replaces() {
+    let in_place = in_place_issues();
+    assert!(
+        in_place.contains(&"src/Box.sharp semantics: This file's folder holds the namespace `App`, so the file declares `namespace App;`.".to_owned()),
+        "{in_place:#?}"
+    );
+
+    let project = namespaced_project();
+    let outside = tempfile::tempdir().expect("a folder outside the project");
+    let draft = outside.path().join("Box.sharp");
+    std::fs::write(&draft, MISPLACED_BOX).expect("the draft");
+    let substitution = format!("{}={}", project.path().join("src/Box.php").display(), draft.display());
+
+    assert_eq!(located(&issues(&analyze(project.path(), &["--substitute", &substitution]))), in_place);
+}
+
+/// A draft's own folder never excludes it: one in a folder the project excludes is checked as the original would be.
+#[test]
+fn a_draft_in_an_excluded_folder_is_checked_in_place_of_the_file_it_replaces() {
+    let in_place = in_place_issues();
+
+    let project = namespaced_project();
+    let draft = project.path().join("drafts/Box.sharp");
+    std::fs::write(&draft, MISPLACED_BOX).expect("the draft");
+    let substitution = format!("{}={}", project.path().join("src/Box.php").display(), draft.display());
+
+    assert_eq!(located(&issues(&analyze(project.path(), &["--substitute", &substitution]))), in_place);
 }
