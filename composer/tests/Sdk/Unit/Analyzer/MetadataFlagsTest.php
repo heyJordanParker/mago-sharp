@@ -26,7 +26,7 @@ final class MetadataFlagsTest extends TestCase
             $codex[$name] = 1 << (int) $matches[2][$index];
         }
 
-        self::assertCount(59, $codex);
+        self::assertCount(60, $codex);
         self::assertSame($codex, (new ReflectionClass(MetadataFlags::class))->getConstants());
     }
 }
