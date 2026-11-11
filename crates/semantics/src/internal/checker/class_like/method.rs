@@ -1,6 +1,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use mago_bytes::BytesDisplay;
+use mago_names::EXPORT;
+use mago_names::IMPORT;
 use mago_names::binding::php_method_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -16,6 +18,53 @@ use crate::internal::checker::function_like::check_for_promoted_properties_outsi
 use crate::internal::checker::function_like::check_parameter_list_trailing_comma;
 use crate::internal::checker::returns_generator;
 use crate::internal::context::Context;
+
+/// Checks the interop attributes of a PHP# method, spec section 23: `[Import("levenshtein")]` marks a static method
+/// without a body, which runs the PHP function, and `[Export("auth_redirect")]` a static method, which PHP's global
+/// function of that name calls. Whether the method is an `[Import]` one.
+fn check_interop(
+    method: &Method<'_>,
+    method_display: &impl std::fmt::Display,
+    last_static: Option<Span>,
+    context: &mut Context<'_, '_, '_>,
+) -> bool {
+    if !context.program.dialect.is_sharp() {
+        return false;
+    }
+    let mut is_import = false;
+    for attribute in method.attribute_lists.iter().flat_map(|list| list.attributes.iter()) {
+        let name = context.names.get(&attribute.name);
+        let label = if name.eq_ignore_ascii_case(IMPORT.as_bytes()) {
+            is_import = true;
+            "Import"
+        } else if name.eq_ignore_ascii_case(EXPORT.as_bytes()) {
+            "Export"
+        } else {
+            continue;
+        };
+        if last_static.is_none() {
+            context.report(
+                Issue::error(format!(
+                    "`[{label}]` marks a static method, and `{method_display}` is an instance method."
+                ))
+                .with_annotation(Annotation::primary(attribute.span()).with_message(format!("`[{label}]` is here.")))
+                .with_annotation(Annotation::secondary(method.name.span()).with_message("It is no `static` method."))
+                .with_help("Make the method `static`."),
+            );
+        }
+        if label == "Import" && !matches!(method.body, MethodBody::Abstract(_)) {
+            context.report(
+                Issue::error(format!(
+                    "`[Import]` makes `{method_display}` the call of the PHP function it names, and the method has a body."
+                ))
+                .with_annotation(Annotation::primary(method.body.span()).with_message("The body is here."))
+                .with_help("End the declaration with `;` instead of a body."),
+            );
+        }
+    }
+
+    is_import
+}
 
 #[inline]
 pub fn check_method<'ast, 'arena>(
@@ -322,11 +371,14 @@ pub fn check_method<'ast, 'arena>(
         }
     }
 
+    let is_import = check_interop(method, &method_display, last_static, context);
+
     let mut is_abstract = false;
     match &method.body {
-        // An `extern` method's body is native, so it has none here.
+        // An `extern` method's body is native, and an `[Import]` method's is the PHP function it names, so neither has
+        // one here.
         MethodBody::Abstract(method_abstract_body) => {
-            if !class_like_is_interface && last_abstract.is_none() && !is_extern {
+            if !class_like_is_interface && last_abstract.is_none() && !is_extern && !is_import {
                 context.report(
                     Issue::error(format!("Non-Abstract method `{method_display}` must have a concrete body.",))
                         .with_annotation(Annotation::primary(method_abstract_body.span()))

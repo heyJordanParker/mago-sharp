@@ -1768,6 +1768,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                     self.method(method, modifier_flags_or_private(&method.modifiers), &[body])
                 }
+                // Spec section 23: an `[Import]` method's body is the call of the PHP function it names.
+                ClassLikeMember::Method(method)
+                    if let Some(import) = self.types.import(self.class, method.name.value) =>
+                {
+                    let body = self.imported_call(method, import);
+
+                    self.method(method, modifier_flags_or_private(&method.modifiers), &[body])
+                }
                 ClassLikeMember::Method(method) => {
                     self.method(method, modifier_flags_or_private(&method.modifiers), &[])
                 }
@@ -3369,6 +3377,44 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
 
         self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+    }
+
+    /// The body of the `[Import]` method `method`, spec section 23: `return \levenshtein($a, $b);`, the call of the PHP
+    /// function `import` names, with each argument and the result crossing as any plain PHP value does. A `Map` or a
+    /// `Set` argument passes as the PHP array plain PHP receives, and the result is read as the method's result type,
+    /// checked by `\Sharp\Internal\returned`, whose error names the function. A function PHP doesn't declare throws
+    /// PHP's error that names it, at the first call.
+    fn imported_call(&mut self, method: &Method, import: (Word, Option<(String, String)>)) -> u32 {
+        let (function, check) = import;
+        let line = self.line(method.name.span);
+        let name = self.string(ZEND_NAME_FQ, line, function.as_bytes());
+        let mut arguments = Vec::new();
+        for parameter in &method.parameter_list.parameters {
+            let mut value = self.variable(parameter.variable.span, parameter.variable.name);
+            if self.crossing_type(parameter).is_some() {
+                value = self.array_of(line, value, None);
+            }
+            arguments.push(if parameter.is_variadic() {
+                self.node(SHARP_AST_UNPACK, 0, line, &[value])
+            } else {
+                value
+            });
+        }
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+        let call = self.node(SHARP_AST_CALL, 0, line, &[name, arguments]);
+        if !method.returns_value() {
+            return call;
+        }
+        let result = match check {
+            Some(check) => {
+                let implementer = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+                self.returned_result(line, call, implementer, b"", check)
+            }
+            None => call,
+        };
+
+        self.node(SHARP_AST_RETURN, 0, line, &[result])
     }
 
     /// A variadic parameter carries `ZEND_PARAM_VARIADIC`, as php-src's grammar builds `int ...$values`, and a widened

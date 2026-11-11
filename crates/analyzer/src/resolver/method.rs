@@ -27,11 +27,11 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
-use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_iterable_parameters;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
@@ -55,12 +55,12 @@ use mago_word::word;
 
 use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
-use crate::expression::binary::utils::display_operand;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects::Body;
 use crate::effects::ReadonlyCall;
 use crate::error::AnalysisError;
+use crate::expression::binary::utils::display_operand;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
 use crate::expression::is_refused_type;
@@ -1089,8 +1089,8 @@ pub(crate) fn plain_text_method(codebase: &CodebaseMetadata, class: &ClassLikeMe
     if class.flags.is_sharp() || codebase.get_declaring_method(class.original_name.as_bytes(), b"toString").is_some() {
         return None;
     }
-    let text_method = codebase
-        .get_declaring_method_identifier(&MethodIdentifier::new(class.original_name, word(b"__toString")));
+    let text_method =
+        codebase.get_declaring_method_identifier(&MethodIdentifier::new(class.original_name, word(b"__toString")));
 
     codebase.get_method_by_id(&text_method).is_some().then_some(text_method)
 }

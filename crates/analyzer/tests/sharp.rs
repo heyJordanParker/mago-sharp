@@ -29238,7 +29238,10 @@ fn a_plain_php_to_string_is_the_classes_to_string() {
         "src/Lib/Mail.php",
         "<?php\n\nnamespace Lib;\n\nclass Email\n{\n    public function __toString(): string\n    {\n        return 'a@b.c';\n    }\n}\n\nfinal class WorkEmail extends Email\n{\n}\n\nfinal class Row\n{\n}\n",
     );
-    let status = ("src/Demo/Status.sharp", "namespace Demo;\n\npublic enum Status\n{\n    case Open;\n    case Closed;\n\n    public string toString() => \"open\";\n}\n");
+    let status = (
+        "src/Demo/Status.sharp",
+        "namespace Demo;\n\npublic enum Status\n{\n    case Open;\n    case Closed;\n\n    public string toString() => \"open\";\n}\n",
+    );
     let sharp = "namespace Demo;\n\nimport Lib.Email;\nimport Lib.Row;\nimport Lib.WorkEmail;\n\npublic class Report\n{\n    public string run(Email email, WorkEmail work, Row row, Email|Status either)\n    {\n        const shown = `${email} ${work} ${email.toString()} ${work.toString()}`;\n        const plain = `${row}`;\n        const mixed = `${either}`;\n        return either.toString();\n    }\n}\n";
 
     assert_eq!(
@@ -29248,6 +29251,48 @@ fn a_plain_php_to_string_is_the_classes_to_string() {
             "13:24 invalid-operand `Status|Email` holds an enum and a plain PHP class whose `toString()` is its `__toString()`, and no one call shows both. Test which it is with `is` first, and show each part on its own.",
             "14:16 invalid-operand `Status|Email` holds an enum and a plain PHP class whose `toString()` is its `__toString()`, and no one call shows both. Test which it is with `is` first, and show each part on its own.",
         ]
+    );
+}
+
+/// `[Import]` marks a static method without a body and `[Export]` a static method, spec section 23, each with a string
+/// literal. One function name is imported once and exported once in the project, as PHP ignores its case, and the
+/// refusal names both methods.
+#[test]
+fn interop_attributes_mark_static_methods_of_one_name_each() {
+    let interop = [
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Interop/Import.sharp",
+            include_str!("../../../../composer/library/Sharp/Interop/Import.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Interop/Export.sharp",
+            include_str!("../../../../composer/library/Sharp/Interop/Export.sharp"),
+        ),
+        (
+            "src/Demo/Other.sharp",
+            "namespace Demo;\n\nimport Sharp.Interop.Export;\nimport Sharp.Interop.Import;\n\npublic static class Other\n{\n    [Import(\"Levenshtein\")]\n    public static int distance(string a, string b);\n\n    [Export(\"auth_redirect\")]\n    public static void redirect() { }\n}\n",
+        ),
+    ];
+    let sharp = "namespace Demo;\n\nimport Sharp.Interop.Export;\nimport Sharp.Interop.Import;\n\npublic class Words\n{\n    [Import(\"levenshtein\")]\n    public static int between(string a, string b);\n\n    [Import(\"strlen\")]\n    public int length(string text);\n\n    [Import(\"strrev\")]\n    public static string reversed(string text) => text;\n\n    [Export(\"AUTH_REDIRECT\")]\n    public static void redirect() { }\n\n    [Export(\"auth_check\")]\n    public bool check() => true;\n\n    public static int plain(string text);\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Words.sharp", sharp), &interop),
+        [
+            "11:6 semantics",
+            "15:48 semantics",
+            "20:6 semantics",
+            "23:41 semantics",
+            "6:14 unimplemented-abstract-method",
+            "8:6 duplicate-definition",
+            "17:6 duplicate-definition",
+        ]
+    );
+    let words = explained(("src/Demo/Words.sharp", sharp), &interop);
+    assert!(
+        words.contains(&"8:6 duplicate-definition `[Import(\"levenshtein\")]` is on `Words.between` and on `Other.distance`, and PHP has one function of a name. Keep one `[Import(\"levenshtein\")]` in the project.".to_owned())
+            && words.contains(&"11:6 semantics `[Import]` marks a static method, and `Words.length` is an instance method. Make the method `static`.".to_owned())
+            && words.contains(&"15:48 semantics `[Import]` makes `Words.reversed` the call of the PHP function it names, and the method has a body. End the declaration with `;` instead of a body.".to_owned()),
+        "{words:#?}"
     );
 }
 
