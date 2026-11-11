@@ -29229,6 +29229,28 @@ fn a_composed_string_for_a_plain_php_literal_string_is_refused_by_name() {
     );
 }
 
+/// A plain PHP class's `__toString()`, its own or inherited, is its `toString()`, spec section 18: a template shows it
+/// and a call runs it. A plain PHP class with neither stays a template's error, and a value that holds an enum beside
+/// such a class has no one call that shows both.
+#[test]
+fn a_plain_php_to_string_is_the_classes_to_string() {
+    let mail = (
+        "src/Lib/Mail.php",
+        "<?php\n\nnamespace Lib;\n\nclass Email\n{\n    public function __toString(): string\n    {\n        return 'a@b.c';\n    }\n}\n\nfinal class WorkEmail extends Email\n{\n}\n\nfinal class Row\n{\n}\n",
+    );
+    let status = ("src/Demo/Status.sharp", "namespace Demo;\n\npublic enum Status\n{\n    case Open;\n    case Closed;\n\n    public string toString() => \"open\";\n}\n");
+    let sharp = "namespace Demo;\n\nimport Lib.Email;\nimport Lib.Row;\nimport Lib.WorkEmail;\n\npublic class Report\n{\n    public string run(Email email, WorkEmail work, Row row, Email|Status either)\n    {\n        const shown = `${email} ${work} ${email.toString()} ${work.toString()}`;\n        const plain = `${row}`;\n        const mixed = `${either}`;\n        return either.toString();\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[mail, status]),
+        [
+            "12:24 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `Row` is none of them. Show a value taken from it instead, such as a property or the result of a method.",
+            "13:24 invalid-operand `Status|Email` holds an enum and a plain PHP class whose `toString()` is its `__toString()`, and no one call shows both. Test which it is with `is` first, and show each part on its own.",
+            "14:16 invalid-operand `Status|Email` holds an enum and a plain PHP class whose `toString()` is its `__toString()`, and no one call shows both. Test which it is with `is` first, and show each part on its own.",
+        ]
+    );
+}
+
 /// `Sql.identifier(name, allowed)` gives a `literal-string`, spec section 24, so a column chosen while the code runs
 /// passes to a plain PHP `literal-string` parameter through it, and the same column passed bare is still refused.
 #[test]

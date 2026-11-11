@@ -8090,12 +8090,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// conversion gives `1` or nothing, so a `bool` is `["false", "true"][value]`: PHP indexes by `false` as 0 and
     /// `true` as 1, and the optimizer keeps the read as one `FETCH_DIM_R` of a constant array, where a conditional takes
     /// four instructions. An object shows what its `toString()` returns, `$value->toString()`, which an enum case
-    /// needs, since PHP gives an enum no string conversion. Any other value is itself.
+    /// needs, since PHP gives an enum no string conversion, and a plain PHP class without `toString()` shows its
+    /// `__toString()`, `(string) $value`. Any other value is itself.
     fn template_value(&mut self, expression: &Expression) -> u32 {
         let value = self.expression(expression);
         let r#type = self.types.expression_type(expression);
         let line = self.line(expression);
         if !r#type.types.is_empty() && r#type.types.iter().all(TAtomic::is_object_type) {
+            if self.types.shows_plain_text(r#type) {
+                return self.node(SHARP_AST_CAST, IS_STRING, line, &[value]);
+            }
             let method = self.string(0, line, b"toString");
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
 
@@ -8259,6 +8263,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         if let Some(kinds) = self.types.members_by_kind(expression) {
             return self.call_by_kind(expression, &kinds, (call.object, &call.method, &call.argument_list), false);
+        }
+        // Spec section 18: `email.toString()` of a plain PHP class without `toString()` runs its `__toString()`.
+        if let ClassLikeMemberSelector::Identifier(method) = &call.method
+            && method.value == b"toString"
+            && self.names.static_call_class(call).is_none()
+            && self.types.shows_plain_text(self.types.expression_type(call.object))
+        {
+            let value = self.expression(call.object);
+
+            return self.node(SHARP_AST_CAST, IS_STRING, self.line(call), &[value]);
         }
         if let Some(inlined) = self.inlined_call(expression, call) {
             return inlined;

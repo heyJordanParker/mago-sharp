@@ -233,6 +233,18 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
+    /// Whether a class `value_type` holds declares and inherits no `toString()`, so PHP# shows it by its plain PHP
+    /// `__toString()`, spec section 18, which PHP's string conversion runs. A PHP# class's `__toString()` returns its
+    /// `toString()`, so the conversion shows each class of the value, and the checker refuses a value that also holds
+    /// an enum, which PHP converts to no string.
+    #[must_use]
+    pub fn shows_plain_text(&self, value_type: &TUnion) -> bool {
+        value_type.types.iter().any(|atomic| {
+            matches!(atomic, TAtomic::Object(TObject::Named(object))
+                if self.codebase.get_declaring_method(object.name.as_bytes(), b"toString").is_none())
+        })
+    }
+
     /// Whether `value`, a call of plain PHP or a read of a property plain PHP declares, may be an `int`-keyed array
     /// whose keys have gaps, which the analysis reads as a `List`, as `get_sharp_received_type` says: plain PHP declares
     /// a keyed array, and the analysis types the value as a `List` and as no other array, as
