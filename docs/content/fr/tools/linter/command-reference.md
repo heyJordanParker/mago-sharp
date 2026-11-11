@@ -61,4 +61,4 @@ Règles :
 - L'indicateur peut être répété pour substituer plusieurs fichiers à la fois.
 - En conflit avec `--stdin-input` et `--staged`.
 
-En interne, `TEMP` est ajouté aux chemins hôtes et `ORIG` est ajouté aux exclusions pour cette exécution, de sorte que les règles inter-fichiers continuent de voir la mutation. Les problèmes signalés et les entrées de baseline référencent `TEMP` plutôt que `ORIG`. Les outils de test de mutation comparent généralement le nombre de problèmes entre une exécution propre et l'exécution substituée, ce qui ne change donc pas le flux de travail.
+`TEMP` est vérifié exactement comme `ORIG` le serait au chemin de `ORIG`, de sorte que les règles inter-fichiers voient la mutation à sa place. Il prend les exclusions de `ORIG`, où que se trouve `TEMP`. Les problèmes signalés et les entrées de baseline référencent le chemin de `ORIG` avec l'extension de `TEMP`. Les outils de test de mutation comparent généralement le nombre de problèmes entre une exécution propre et l'exécution substituée, ce qui ne change donc pas le flux de travail.

@@ -868,13 +868,14 @@ impl DeclaredProperty<'_> {
 
     /// The type code of `dialect` reads from the property, as [`Self::declared_type`] declares it, spec section 12:
     /// plain PHP reads a PHP# property's `Map` or `Set` as the PHP array the engine gives it, and PHP# reads a plain PHP
-    /// property's array keyed by `int` alone as a `List`, as [`get_sharp_received_type`] says.
+    /// property as [`get_sharp_received_property_type`] says. A magic property is what its `__get` returns.
     pub(crate) fn read_type(&self, codebase: &CodebaseMetadata, dialect: Dialect) -> TUnion {
         let declared = self.declared_type(codebase);
 
         match (dialect.is_sharp(), self.declaring_class.flags.is_sharp()) {
             (false, true) => get_php_received_type(&declared, codebase),
-            (true, false) => get_sharp_received_type(&declared),
+            (true, false) if self.is_magic() => get_sharp_received_type(&declared),
+            (true, false) => get_sharp_received_property_type(self.property, &declared),
             _ => declared,
         }
     }
@@ -920,6 +921,20 @@ impl DeclaredProperty<'_> {
 
         if self.declaring_class.flags.is_sharp() { known_type_or_error(declared) } else { declared }
     }
+}
+
+/// The type PHP# reads from the plain PHP property `property`, which declares `declared`, as
+/// [`get_sharp_received_type`] reads a value from plain PHP. PHP starts an untyped property at `null`, so one without a
+/// default may still hold it, whatever its `@var` says, and arrives nullable. A typed property throws on a read before
+/// its first write, a promoted one is set by its constructor, and a virtual one holds no value of its own.
+pub(crate) fn get_sharp_received_property_type(property: &PropertyMetadata, declared: &TUnion) -> TUnion {
+    let received = get_sharp_received_type(declared);
+    let starts_null = property.type_declaration_metadata.is_none()
+        && !property.flags.has_default()
+        && !property.flags.is_promoted_property()
+        && !property.flags.is_virtual_property();
+
+    if starts_null { received.as_nullable() } else { received }
 }
 
 /// Resolves which declaration governs an access to `$obj->prop` (or `Class::$prop` with

@@ -60,7 +60,8 @@ impl Server {
     }
 
     /// Build the codebase and run the before-analysis hooks, then analyze no
-    /// file: every analysis reports only the issues those hooks raise.
+    /// file: every analysis reports only the issues those hooks raise and each
+    /// file's parse errors.
     #[must_use]
     pub fn scan_only(mut self) -> Self {
         self.service = self.service.scan_only();

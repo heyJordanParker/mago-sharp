@@ -1014,10 +1014,12 @@ where
 
         // TODO(azjezz): consider comparing declared and inferred types instead
         // and choosing the more specific one, this current solution is a bit naive.
+        // Spec section 14.1: a PHP# parameter's declared type is what the body sees, `Any?` too. The type a lambda is
+        // written for only checks that the lambda takes every parameter it passes.
         let declared_type_is_specific = parameter_metadata.get_type_metadata().is_some_and(|tm| {
             let union = &tm.type_union;
 
-            !union.is_vanilla_array() && !union.is_vanilla_mixed()
+            function_like_metadata.flags.is_sharp() || (!union.is_vanilla_array() && !union.is_vanilla_mixed())
         });
 
         let mut final_parameter_type = if declared_type_is_specific {

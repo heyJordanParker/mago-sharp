@@ -164,6 +164,37 @@ fn analyze_reports_only_the_parse_error_on_its_line() {
     );
 }
 
+/// A parse error is an error in every mode: a scan that analyzes no file reports each file's parse error in its
+/// structured output and fails, as a whole analysis does, so a tool that reads the codebase from a scan sees that the
+/// file is broken.
+#[test]
+fn analyze_scan_only_reports_a_parse_error_and_fails() {
+    let directory = workspace(&valid_report());
+    write(
+        directory.path(),
+        "src/Lib/Broken.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Broken\n{\n    public function size(): int\n    {\n        return 1\n    }\n}\n",
+    );
+
+    let output = run(directory.path(), "analyze", &["--scan-only", "--reporting-format", "json"]);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!("{error}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
+    });
+    let parse_errors: Vec<(&str, &str)> = report["issues"]
+        .as_array()
+        .expect("an issue list")
+        .iter()
+        .filter(|issue| issue["code"] == "parse")
+        .map(|issue| {
+            let file = issue["annotations"][0]["span"]["file_id"]["name"].as_str().expect("a file");
+            (issue["level"].as_str().expect("a level"), file)
+        })
+        .collect();
+
+    assert_eq!(parse_errors, [("Error", "src/Lib/Broken.php")], "{report:#}");
+    assert!(!output.status.success(), "{report:#}");
+}
+
 /// The issues `mago analyze --reporting-format emacs` printed for `file`, as `line:column code`.
 fn issues_in(stdout: &str, file: &str) -> Vec<String> {
     stdout

@@ -1428,9 +1428,21 @@ where
         }
 
         artifacts.record_type_arguments(invocation.span, type_arguments.into_iter(), context.codebase);
-        // A collection's member runs as the engine function its form calls, which takes no type arguments, as a
-        // built-in method's call takes none, so a type argument only a PHP docblock writes stays its own.
-        if sharp_metadata.is_some()
+        // The engine carries the type arguments of a PHP# call into a PHP# method, and into a method a project's plain
+        // PHP class declares, which a PHP# method that overrides or implements it may run. A collection's member runs
+        // as the engine function its form calls, which takes no type arguments, as a built-in method's call takes none,
+        // so a type argument only a PHP docblock writes stays its own.
+        let carries_type_arguments = sharp_metadata.is_some()
+            || context.dialect.is_sharp()
+                && matches!(
+                    invocation.target.get_function_like_identifier(),
+                    Some(FunctionLikeIdentifier::Method(class, method)) if context
+                        .codebase
+                        .get_declaring_method_class(class.as_bytes(), method.as_bytes())
+                        .and_then(|declaring| context.codebase.get_class_like(declaring.as_bytes()))
+                        .is_some_and(|declaring| !declaring.flags.is_built_in())
+                );
+        if carries_type_arguments
             && !empty_receiver
             && !calls_collection_member(invocation)
             && let Some(recorded) =

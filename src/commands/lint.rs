@@ -45,6 +45,7 @@ use mago_reporting::Level;
 
 use crate::commands::args::baseline_reporting::BaselineReportingArgs;
 use crate::commands::args::substitution::SubstitutionArgs;
+use crate::commands::args::substitution::substitute;
 use crate::commands::compile::compile_for_hosts;
 use crate::commands::outcome::CommandOutcome;
 use crate::commands::stdin_input;
@@ -234,16 +235,10 @@ impl LintCommand {
 
         let orchestrator_init_start = trace_enabled.then(Instant::now);
         let substitutions = self.substitution.resolve()?;
-        let substitution_excludes: Vec<String> =
-            substitutions.iter().map(|s| s.original.to_string_lossy().into_owned()).collect();
 
         let mut orchestrator = create_orchestrator(&configuration, color_choice, self.pedantic, true, false);
         orchestrator.add_exclude_patterns(configuration.linter.excludes.iter());
-        orchestrator.add_exclude_patterns(substitution_excludes.iter());
         skip_sharp_files(&mut orchestrator);
-        for substitution in &substitutions {
-            orchestrator.config.paths.push(substitution.temporary.to_string_lossy().into_owned());
-        }
 
         let stdin_override =
             stdin_input::resolve_stdin_override(self.stdin_input, &self.path, &configuration.source.workspace)?;
@@ -294,6 +289,7 @@ impl LintCommand {
 
             Ok((database?, external_linter))
         })?;
+        substitute(&substitutions, &mut database, &configuration.source.workspace)?;
         let load_database_duration = load_database_start.map(|s| s.elapsed());
 
         let mut service = orchestrator.get_lint_service(database.read_only());

@@ -1975,15 +1975,20 @@ fn get_php_signature_form(atomic: &TAtomic, codebase: &CodebaseMetadata, crossin
 /// section 12: plain PHP's `array<int, T>` holds a list whose keys may have gaps, such as what `array_filter` returns,
 /// and PHP# renumbers it where it arrives, as a field of a shape and an element of a collection too. A shape whose keys
 /// are a list's, `array{0: int, 1: string}`, is that list's shape, and any other shape keyed by `int` alone is a `List`
-/// of its fields. An array keyed by `string` or by `int|string` stays a `Map`.
+/// of its fields. An array keyed by `string` or by `int|string` stays a `Map`. Each `array-key`, a key's or a value's,
+/// is the `int|string` PHP# writes for it.
 #[must_use]
 pub fn get_sharp_received_type(r#type: &TUnion) -> TUnion {
-    let types = r#type.types.iter().map(|atomic| match atomic {
-        TAtomic::Array(array) => TAtomic::Array(get_sharp_received_array(array)),
-        atomic => atomic.clone(),
-    });
+    let mut types = Vec::with_capacity(r#type.types.len());
+    for atomic in r#type.types.iter() {
+        match atomic {
+            TAtomic::Scalar(TScalar::ArrayKey) => types.extend_from_slice(INT_STRING_ATOMIC_SLICE),
+            TAtomic::Array(array) => types.push(TAtomic::Array(get_sharp_received_array(array))),
+            atomic => types.push(atomic.clone()),
+        }
+    }
 
-    r#type.clone_with_types(types.collect())
+    r#type.clone_with_types(types)
 }
 
 /// `array` as [`get_sharp_received_type`] reads it.
@@ -2003,7 +2008,8 @@ fn get_sharp_received_array(array: &TArray) -> TArray {
             for (_, value) in keyed.known_items.iter_mut().flat_map(BTreeMap::values_mut) {
                 *value = get_sharp_received_type(value);
             }
-            if let Some((_, value)) = keyed.parameters.as_mut() {
+            if let Some((key, value)) = keyed.parameters.as_mut() {
+                *key = Arc::new(get_sharp_received_type(key));
                 *value = Arc::new(get_sharp_received_type(value));
             }
             let int_keyed = keyed.known_items.as_ref().is_none_or(|items| items.keys().all(ArrayKey::is_integer))

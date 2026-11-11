@@ -178,7 +178,7 @@ A scan configuration can't narrow what Mago scans. Arrays concatenate through `e
 
 ### What the scan runs
 
-`--scan-only` builds the codebase and analyzes no file. It runs the hooks of every enabled host in this order:
+`--scan-only` builds the codebase and analyzes no file. A file that doesn't parse still fails the scan: its parse error is an error in the report, `--reporting-format json` included, and the scan exits non-zero. It runs the hooks of every enabled host in this order:
 
 1. initialization hooks, where `addStub()` declares synthetic classes
 2. codebase-scan hooks

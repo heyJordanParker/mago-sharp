@@ -66,4 +66,4 @@ Rules:
 - The flag can be repeated to substitute several files at once.
 - Conflicts with `--stdin-input`.
 
-Under the hood, `TEMP` is added to host paths and `ORIG` is added to excludes for this run, so dependency analysis continues to see the mutation. Reported issues reference `TEMP` rather than `ORIG`.
+`TEMP` is checked exactly as `ORIG` would be at `ORIG`'s path, so dependency analysis sees the mutation in its place. It takes `ORIG`'s exclusions, wherever `TEMP` itself lies. Reported issues reference `ORIG`'s path with `TEMP`'s extension.

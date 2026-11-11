@@ -66,6 +66,7 @@ use mago_server::Settings as ServerSettings;
 use crate::commands::args::baseline_reporting::BaselineReportingArgs;
 use crate::commands::args::substitution::Substitution;
 use crate::commands::args::substitution::SubstitutionArgs;
+use crate::commands::args::substitution::substitute;
 use crate::commands::compile::compile_for_hosts;
 use crate::commands::outcome::CommandOutcome;
 use crate::commands::stdin_input;
@@ -180,7 +181,7 @@ pub struct AnalyzeCommand {
 
     /// Build the codebase and run the extensions' before-analysis hooks, then analyze no file.
     ///
-    /// Reports only the issues those hooks raise, without the baseline. Useful for extensions
+    /// Reports only the issues those hooks raise and each file's parse errors, without the baseline. Useful for extensions
     /// that write what they read from the codebase, such as a discovery manifest.
     #[arg(long, conflicts_with_all = ["list_codes", "watch", "staged", "stdin_input"])]
     pub scan_only: bool,
@@ -266,16 +267,10 @@ impl AnalyzeCommand {
 
         let orchestrator_init_start = trace_enabled.then(Instant::now);
         let substitutions = self.substitution.resolve()?;
-        let substitution_excludes: Vec<String> =
-            substitutions.iter().map(|s| s.original.to_string_lossy().into_owned()).collect();
 
         let mut orchestrator = create_orchestrator(&configuration, color_choice, false, true, false);
         analyze_the_whole_workspace_without_paths(&mut orchestrator);
         orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
-        orchestrator.add_exclude_patterns(substitution_excludes.iter());
-        for substitution in &substitutions {
-            orchestrator.config.paths.push(substitution.temporary.to_string_lossy().into_owned());
-        }
 
         let stdin_override =
             stdin_input::resolve_stdin_override(self.stdin_input, &self.path, &configuration.source.workspace)?;
@@ -330,6 +325,7 @@ impl AnalyzeCommand {
         );
 
         let mut database = database?;
+        substitute(&substitutions, &mut database, workspace)?;
         database.merge_base(prelude_database);
         let load_inputs_duration = load_inputs_start.map(|s| s.elapsed());
 
@@ -590,7 +586,8 @@ pub(crate) fn analyze_the_whole_workspace_without_paths(orchestrator: &mut Orche
 /// Adds the `named` files to the host paths and returns the scope that reports only their issues.
 ///
 /// The rest of the workspace stays loaded, so rules that judge files against each other still see
-/// it. A named file that `--substitute` replaces is scoped by its replacement.
+/// it. A named file that `--substitute` replaces is loaded, for its replacement to take its place,
+/// and scoped by its replacement's disk path, which the replacement keeps.
 fn scope_to(
     orchestrator: &mut Orchestrator<'_>,
     workspace: &Path,
@@ -624,7 +621,7 @@ fn scope_to(
             .collect(),
         glob: orchestrator.config.glob,
     })?;
-    orchestrator.config.paths.extend(paths);
+    orchestrator.config.paths.extend(named.iter().map(|path| path.to_string_lossy().into_owned()));
 
     Ok(scope)
 }

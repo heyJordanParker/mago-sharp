@@ -421,6 +421,27 @@ fn a_plain_php_use_outside_the_namespace_keeps_a_public_member() {
     );
 }
 
+/// Spec section 5: a member is too wide only on the class that declares it. A PHP# class that inherits a constant from
+/// a plain PHP parent declares no such member, whatever file the constant is in, and a plain PHP class's member is no
+/// PHP# report at all. The PHP# class's own constant still warns.
+#[test]
+fn a_member_inherited_from_a_plain_php_parent_is_not_too_wide() {
+    let store = "<?php\n\nnamespace Lib;\n\nclass Store\n{\n    public const string A = 'a';\n\n    public const string B = 'b';\n}\n";
+    let cache = "namespace App.Shop;\n\nimport Lib.Store;\n\npublic class Cache : Store\n{\n    public const string C = \"c\";\n\n    public static string name() => Cache.A;\n}\n";
+    let page = "namespace App.Web;\n\nimport App.Shop.Cache;\n\npublic class Page\n{\n    internal string show() => Cache.name();\n}\n";
+    let boot = "<?php\n\necho \\Lib\\Store::A;\n";
+
+    assert_eq!(
+        too_wide(&[
+            ("src/Lib/Store.php", store),
+            ("src/App/Shop/Cache.sharp", cache),
+            ("src/App/Web/Page.sharp", page),
+            ("src/boot.php", boot),
+        ]),
+        ["src/App/Shop/Cache.sharp 7:25 `App.Shop.Cache.C` is public, and nothing outside `App.Shop` uses it."]
+    );
+}
+
 /// Spec section 5: a member with an attribute is reached by the code that reads the attribute, through reflection,
 /// which no checker sees, so it never warns, as a `[Listen]` method or a `[Field]` property. The same members
 /// without an attribute still warn.
@@ -6901,6 +6922,20 @@ fn a_lambda_fits_a_function_type_only_with_its_parameters_and_its_void() {
             "43:26 invalid-return-statement: This lambda gives a value, and `Function<void(int)>` returns nothing: remove the value, or give the function type a return type.",
         ],
     );
+}
+
+/// Spec section 14.1: a lambda fits a function type when it takes every parameter the type passes, so a parameter may
+/// take more than the type passes, and its declared type is what the body sees: `(Any? item, int i)` fits a
+/// `Function<void(Order, int)>`, and its body reads `item` as `Any?`, where the function type only checks the fit.
+#[test]
+fn a_lambda_parameter_keeps_its_declared_type_where_the_function_type_passes_a_narrower_one() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void each(Function<void(Order, int)> visit) { }\n\n    public static Function<int(Order)> counter() => (Any? item) => item is Order ? 1 : 0;\n\n    public void run()\n    {\n        Report.each((Any? item, int i) => { const order = item as Order ?? throw new Missing(); });\n        Function<void(Order, int)> visit = (Any? item, int i) => { const order = item as Order ?? throw new Missing(); };\n    }\n}\n";
+    let declared = [
+        ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order\n{\n}\n"),
+        ("src/Demo/Missing.sharp", "namespace Demo;\n\npublic class Missing : Exception\n{\n}\n"),
+    ];
+
+    assert_eq!(explained(("src/Demo/Report.sharp", sharp), &declared), Vec::<String>::new());
 }
 
 /// Spec section 14.1: a call that returns `void` gives no value through `?.` as through `.`, though `?.` types it
@@ -20250,6 +20285,49 @@ fn a_call_template_no_argument_binds_records_mixed() {
     );
 }
 
+/// `Lib\Sources::from`, which takes an array or any object and returns its entries keyed by a template no argument
+/// fixes when it takes an object, whose default is `array-key`.
+const SOURCES: (&str, &str) = (
+    "src/Lib/Sources.php",
+    "<?php\n\nnamespace Lib;\n\nfinal class Sources\n{\n    /**\n     * @template TKey of array-key = array-key\n     * @template TValue = mixed\n     *\n     * @param array<TKey, TValue>|\\Traversable<TKey, TValue>|object $items\n     *\n     * @return ($items is \\WeakMap ? list<TValue> : array<TKey, TValue>)\n     */\n    public static function from($items)\n    {\n        return (array) $items;\n    }\n}\n",
+);
+
+/// Spec section 12: plain PHP's `array-key` is PHP#'s `int|string`, so a type argument a plain PHP template's default
+/// fixes as `array-key` is recorded as `int|string`, which the engine reads.
+#[test]
+fn a_plain_php_array_key_type_argument_is_recorded_as_int_or_string() {
+    let sharp = "namespace Demo;\n\nimport Lib.Sources;\n\nclass Report\n{\n    public int run(Box source)\n    {\n        Map<int|string, Any?> columns = Sources.from(source);\n        return columns.count();\n    }\n}\n";
+    let source = ("src/Demo/Box.sharp", "namespace Demo;\n\npublic class Box\n{\n}\n");
+
+    assert_eq!(
+        recorded_type_arguments(("src/Demo/Report.sharp", sharp), &[SOURCES, source], "Sources.from(source)"),
+        ["int|string", "mixed"]
+    );
+}
+
+/// Spec section 12: a plain PHP result whose type holds `array-key` arrives as `int|string`, so its keys fix a PHP#
+/// generic call's type argument as `int|string`, which PHP# writes.
+#[test]
+fn a_plain_php_result_keyed_by_array_key_arrives_keyed_by_int_or_string() {
+    let sharp = "namespace Demo;\n\nimport Lib.Sources;\n\nclass Report\n{\n    public int run(Box source)\n    {\n        const columns = Sources.from(source);\n        return Report.counted(columns.keys());\n    }\n\n    private static int counted<T>(List<T> items) => items.count();\n}\n";
+    let source = ("src/Demo/Box.sharp", "namespace Demo;\n\npublic class Box\n{\n}\n");
+    let call = "Sources.from(source)";
+    let start = sharp.find(call).unwrap() as u32;
+
+    let (issues, artifacts) =
+        analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[SOURCES, source]);
+
+    assert_eq!(issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(), Vec::<String>::new());
+    assert_eq!(
+        artifacts.expression_types.get(&(start, start + call.len() as u32)).map(|r#type| r#type.get_id().to_string()),
+        Some("array<int|string, mixed>".to_owned())
+    );
+    assert_eq!(
+        recorded_type_arguments(("src/Demo/Report.sharp", sharp), &[SOURCES, source], "Report.counted(columns.keys())"),
+        ["int|string"]
+    );
+}
+
 /// A templated class without a constructor takes the type arguments PHP#'s `new` writes, and binds no template when
 /// plain PHP creates it, so each type argument is `mixed`, `SplObjectStorage`'s too, though the analyzer types its
 /// object with `never` arguments.
@@ -22502,6 +22580,21 @@ fn a_mixin_method_called_from_sharp_has_the_type_upstream_gives_it() {
     );
 }
 
+/// A plain PHP method that returns `$this` or `static` returns its receiver's type wherever PHP# calls it: in a backed
+/// enum's method too, as in a class's, `query.from(source, "s")` is the `Query` it runs on, never the enum.
+#[test]
+fn a_plain_php_method_returning_this_returns_its_receiver_in_an_enum() {
+    let query = (
+        "src/Lib/Query.php",
+        "<?php\n\nnamespace Lib;\n\nclass Query\n{\n    public static function table(string $name): Query\n    {\n        return new Query();\n    }\n\n    /**\n     * @param Query|string $source\n     * @param string $alias\n     * @return $this\n     */\n    public function from($source, $alias)\n    {\n        return $this;\n    }\n\n    /** @return static */\n    public function limit(int $count)\n    {\n        return $this;\n    }\n}\n",
+    );
+    let status = "namespace Demo;\n\nimport Lib.Query;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n\n    public Query sourced() => Query.table(\"t\").from(Query.table(\"u\"), \"s\");\n\n    public Query limited() => Query.table(\"t\").limit(5);\n}\n";
+    let report = "namespace Demo;\n\nimport Lib.Query;\n\npublic class Report\n{\n    public Query sourced() => Query.table(\"t\").from(Query.table(\"u\"), \"s\");\n\n    public Query limited() => Query.table(\"t\").limit(5);\n}\n";
+
+    assert_eq!(explained(("src/Demo/Status.sharp", status), &[query]), Vec::<String>::new());
+    assert_eq!(explained(("src/Demo/Report.sharp", report), &[query]), Vec::<String>::new());
+}
+
 /// A PHP conditional return type is resolved before PHP# specializes the call for its receiver, once, so a receiver
 /// whose type argument names the class's own type parameter replaces it once: `pair.get(true)` on a `Pair<List<TKey>>`
 /// inside `Pair<TKey> : Box<TKey>` is a `List<TKey>`, not a `List<List<TKey>>`. The PHP twin keeps Mago's issues.
@@ -22724,10 +22817,11 @@ fn a_named_constructor_of_a_generic_class_takes_the_type_arguments_of_its_new() 
 }
 
 /// A type argument a plain PHP value fixes is refused when PHP# can't write it, since the engine carries a type
-/// argument as its PHP# text: `array-key`, `scalar`, `numeric` and `resource`, on a static call and an instance call
-/// alike. A refinement PHP# writes as a wider type is that type: `list<int>` is `List<int>`, an `array{a: int}` shape is
-/// `Map<string, int>`, as the literal `["k": [1]]` is `Map<string, List<int>>`, `non-empty-string` is `string`,
-/// `positive-int` is `int` and `class-string` is `Class<Object>`. A written type argument the value fits compiles. A
+/// argument as its PHP# text: `scalar`, `numeric` and `resource`, on a static call and an instance call alike. A type
+/// PHP# writes in its own words is that type: `array-key` is `int|string`, spec section 12. A refinement PHP# writes as
+/// a wider type is that type: `list<int>` is `List<int>`, an `array{a: int}` shape is `Map<string, int>`, as the
+/// literal `["k": [1]]` is `Map<string, List<int>>`, `non-empty-string` is `string`, `positive-int` is `int` and
+/// `class-string` is `Class<Object>`. A written type argument the value fits compiles. A
 /// `new` infers none, so it needs its type argument written. An argument the checker refuses, as it does
 /// `Pager.class() as Class<Object>|null`, shows its refusal alone on its line.
 #[test]
@@ -22748,7 +22842,6 @@ fn a_type_argument_php_sharp_cant_write_is_refused_and_a_refused_argument_shows_
         worded(("src/Demo/Registry.sharp", sharp), &[("src/Lib/Pager.php", php), crate_]),
         [
             "28:40 semantics `as` converts to a type that is not nullable or `void`. | Written here. | `as Class<Object>` already gives null for a value of another type. | Write `as Class<Object>`.".to_owned(),
-            refused(14, 9, "Registry.keep", "array-key"),
             refused(15, 9, "Registry.keep", "scalar"),
             refused(16, 9, "Registry.keep", "numeric"),
             refused(17, 9, "Registry.hold", "resource"),
@@ -29010,6 +29103,42 @@ fn a_plain_php_property_typed_by_a_template_keeps_an_unchecked_default() {
     let php = "<?php\n\nnamespace Demo;\n\n/** @template T of int */\nclass Box\n{\n    /** @var T */\n    public mixed $item = 'x';\n\n    /** @var list<T> */\n    public array $items = ['x'];\n}\n";
 
     assert_eq!(issues(("src/Demo/Box.php", php), &[]), Vec::<String>::new());
+}
+
+/// PHP starts an untyped property at `null`, so an untyped plain PHP property without a default, whatever its `@var`
+/// says, may still be `null` and arrives in PHP# as `Source?`: `this.source == null` checks it, and so does
+/// `Store.shared == null` of a static one. A typed property without a default is a `Source`, since PHP throws on a read
+/// before its first write.
+#[test]
+fn an_untyped_plain_php_property_without_a_default_arrives_nullable() {
+    let php = "<?php\n\nnamespace Lib;\n\nclass Source\n{\n}\n\nclass Store\n{\n    /** @var Source */\n    protected $source;\n\n    /** @var Source */\n    public static $shared;\n\n    protected Source $typed;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Source;\nimport Lib.Store;\n\npublic class Cache : Store\n{\n    public Source loaded()\n    {\n        if (this.source == null) {\n            this.source = new Source();\n        }\n        return this.source;\n    }\n\n    public bool unset() => this.typed == null;\n\n    public bool unshared() => Store.shared == null;\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Cache.sharp", sharp), &[("src/Lib/Store.php", php)]),
+        [
+            "16:28 redundant-comparison Redundant `==` comparison: left-hand side is never equal to right-hand side. Consider simplifying or removing this comparison as it always evaluates to `false`."
+        ]
+    );
+}
+
+/// A plain PHP `literal-string` parameter takes a string written in the code, a string literal or a constant, as PHP's
+/// static analyzers read it, so a string PHP# composes while the code runs is refused with a message that names
+/// `literal-string` and points at a query's bindings for the values it holds.
+#[test]
+fn a_composed_string_for_a_plain_php_literal_string_is_refused_by_name() {
+    let query = (
+        "src/Lib/Query.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Query\n{\n    /**\n     * @param literal-string $sql\n     * @param list<mixed> $bindings\n     */\n    public function selectRaw(string $sql, array $bindings = []): self\n    {\n        return $this;\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.Query;\n\npublic class Report\n{\n    private const string TOTAL = \"sum(price) as total\";\n\n    public Query run(Query query, string column, int floor)\n    {\n        const counted = \"count(*) as count\";\n        query.selectRaw(\"max(price) as most\");\n        query.selectRaw(Report.TOTAL);\n        query.selectRaw(counted);\n        query.selectRaw(\"price > ?\", [floor]);\n        return query.selectRaw(`max(${column})`);\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[query]),
+        [
+            "16:32 possibly-invalid-argument Argument #1 of method `Query.selectRaw` takes a `literal-string`, a string literal or a constant, and this string is composed while the code runs. Write the string as a literal or a constant, and pass each value it holds separately, as a query's bindings for its `?` placeholders take them."
+        ]
+    );
 }
 
 /// A plain PHP `class-string<Box<int, string>>` checks the template arguments of the class it names, as upstream Mago

@@ -32,7 +32,7 @@ Les indicateurs globaux doivent venir avant `analyze`. Voir l'[aperçu de la CLI
 | `--substitute <ORIG=TEMP>` | Remplace un fichier hôte par un autre pour cette invocation. Destiné aux tests de mutation. Répétable. |
 | `--watch` | Exécute en continu, ré-analysant aux changements de fichiers. Voir [mode watch](#watch-mode). |
 | `--list-codes` | Liste tous les codes de problèmes de l'analyseur en JSON. |
-| `--scan-only` | Construit la base de code et exécute les hooks avant-analyse des extensions, sans analyser aucun fichier. Signale uniquement les problèmes levés par ces hooks, sans la baseline. |
+| `--scan-only` | Construit la base de code et exécute les hooks avant-analyse des extensions, sans analyser aucun fichier. Signale uniquement les problèmes levés par ces hooks et les erreurs d'analyse syntaxique de chaque fichier, sans la baseline. |
 | `-h`, `--help` | Affiche l'aide et quitte. |
 
 Les indicateurs partagés pour le rapport, la correction et les baselines sont documentés sur la page [options de rapport et de correction](/fundamentals/shared-reporting-options/).
@@ -62,7 +62,7 @@ Règles :
 - L'indicateur peut être répété pour substituer plusieurs fichiers à la fois.
 - En conflit avec `--stdin-input` et `--staged`.
 
-En interne, `TEMP` est ajouté aux chemins hôtes et `ORIG` est ajouté aux exclusions pour cette exécution, de sorte que l'inférence de types inter-fichiers continue de voir la mutation. Les problèmes signalés et les entrées de baseline référencent `TEMP` plutôt que `ORIG`.
+`TEMP` est vérifié exactement comme `ORIG` le serait au chemin de `ORIG`, de sorte que l'inférence de types inter-fichiers voit la mutation à sa place. Il prend le paquet, l'espace de noms du dossier et les exclusions de `ORIG`, où que se trouve `TEMP`, et garde sa propre extension, donc `Foo.php=Foo.sharp` vérifie du PHP#. Les problèmes signalés et les entrées de baseline référencent le chemin de `ORIG` avec l'extension de `TEMP`.
 
 ## Mode watch
 
