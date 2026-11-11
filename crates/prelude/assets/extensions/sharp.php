@@ -433,6 +433,23 @@ final class Sequence implements \IteratorAggregate
 function listen(string $event, \Closure $listener): \Sharp\Listening {}
 
 /**
+ * The instance properties and fields of the class the class value `$type` names, its own first and then those it
+ * inherits, in the order they are declared. The standard library's `Class<T>.properties()` makes a `Property` of each.
+ *
+ * @return list<list<string>> the class that declares each, its name, the class value of its type without `?`, and the
+ * `?` the type ends with, or "" for a type that is not nullable.
+ */
+function properties(string $type): array {}
+
+/**
+ * The class values of the type arguments of the type the class value `$type` holds, in order. The standard library's
+ * `Class<T>.typeArguments()` returns them.
+ *
+ * @return list<string>
+ */
+function typeArguments(string $type): array {}
+
+/**
  * The listeners of `$event`, one function per listener that takes the event, as `emit` gives them to the dispatcher.
  * The standard library's `Sharp\Psr\ListenerProvider` returns them to a PSR-14 dispatcher.
  *
