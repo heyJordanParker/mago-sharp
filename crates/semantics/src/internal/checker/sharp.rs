@@ -264,6 +264,8 @@ const ANY: &[u8] = b"Any";
 ///   writes `value`, and `didSet` returns no value.
 /// - Behaviors, spec section 6.4: `via` and class names after the accessors of an instance auto-property with
 ///   `get; set;`, and the analyzer checks each is a `Behavior` for the property's type.
+/// - `late`, spec section 6: on an instance field or an instance property with storage and no initial value, which the
+///   constructor may leave unset and whose read before its first write throws.
 /// - A computed property: `public`, `protected` or `private`, an optional `static` or `lazy`, a type, one name and an
 ///   expression body, as in `public string slug => Str.slug(name);`. Its expression is a method body's expression and
 ///   runs on each read, or once when `lazy`. A `static` one runs as a hidden static method of its class, because PHP
@@ -831,6 +833,18 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
+        // `is_slice_property` keeps `late` to instance storage without an initial value.
+        (Node::Modifier(Modifier::Late(_)), FieldOrProperty) => Some(FieldOrProperty),
+        (Node::Modifier(Modifier::Late(late)), _) => {
+            context.report(
+                Issue::error(
+                    "Only a field or a property with storage is `late`, written as in `public late string number { get; set; }`.",
+                )
+                .with_annotation(Annotation::primary(late.span).with_message("Written here.")),
+            );
+
+            None
+        }
         // `check_class` reports `protected` and `private` on a class, and PHP's own check `abstract` with `final`.
         // `check_static_class` reports `abstract`, `final` and `foreign` on a static class.
         (
@@ -1287,6 +1301,18 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 check_accessors(&property.modifiers, &property.hook_list, variable, context);
             }
             check_accessor_bodies(&property.hook_list, variable.name, context);
+            // Spec section 6: a `late` member leaves its storage unset, so it has storage.
+            if let Some(late) = property.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Late(_)))
+                && !context.names.has_storage(&property.hook_list)
+            {
+                context.report(
+                    Issue::error(format!(
+                        "`{}` computes every read and write, so it has no storage to leave unset: drop `late`, or give it an auto accessor such as `get;`.",
+                        BytesDisplay(variable.name.strip_prefix(b"$").unwrap_or(variable.name))
+                    ))
+                    .with_annotation(Annotation::primary(late.span()).with_message("Written here.")),
+                );
+            }
             if let Some(initial_value) = &property.initial_value
                 && !context.names.has_storage(&property.hook_list)
             {
@@ -3582,6 +3608,24 @@ fn is_slice_property(property: &Property) -> Result<(), Box<Issue>> {
             .with_annotation(Annotation::primary(lazy.span()).with_message("Written here."))
             .with_note("It takes no accessors and no initial value."),
         ));
+    }
+
+    // Spec section 6: a `late` member is instance storage that the constructor may leave unset until its first write.
+    if let Some(late) = modifier(|modifier| matches!(modifier, Modifier::Late(_))) {
+        let refusal = if property.modifiers().contains_static() {
+            Some("A static is never `late`: it holds its initial value before any code reads it.")
+        } else if matches!(property, Property::Computed(_)) {
+            Some("A computed property is never `late`: it has no storage to leave unset.")
+        } else if property.initial_value().is_some() {
+            Some("A `late` member takes no initial value: the code that fills it after the constructor sets it.")
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            return Err(Box::new(
+                Issue::error(refusal).with_annotation(Annotation::primary(late.span()).with_message("Written here.")),
+            ));
+        }
     }
 
     if let Property::Plain(_) = property {

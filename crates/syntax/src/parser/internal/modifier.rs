@@ -112,6 +112,7 @@ where
                     Some(b"required") => Modifier::Required(self.expect_any_keyword()?),
                     Some(b"extern") => Modifier::Extern(self.expect_any_keyword()?),
                     Some(b"lazy") => Modifier::Lazy(self.expect_any_keyword()?),
+                    Some(b"late") => Modifier::Late(self.expect_any_keyword()?),
                     Some(b"internal") => Modifier::Internal(self.expect_any_keyword()?),
                     Some(b"foreign") => Modifier::Foreign(self.expect_any_keyword()?),
                     Some(b"ref") => Modifier::Ref(self.expect_any_keyword()?),

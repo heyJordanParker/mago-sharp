@@ -1771,6 +1771,7 @@ where
                 Modifier::Required(keyword) => keyword.format(f),
                 Modifier::Extern(keyword) => keyword.format(f),
                 Modifier::Lazy(keyword) => keyword.format(f),
+                Modifier::Late(keyword) => keyword.format(f),
                 Modifier::Internal(keyword) => keyword.format(f),
                 Modifier::Foreign(keyword) => keyword.format(f),
                 Modifier::Ref(keyword) => keyword.format(f),

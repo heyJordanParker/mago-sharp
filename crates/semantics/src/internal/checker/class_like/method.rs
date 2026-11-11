@@ -204,6 +204,7 @@ pub fn check_method<'ast, 'arena>(
             | Modifier::Override(_)
             | Modifier::Required(_)
             | Modifier::Lazy(_)
+            | Modifier::Late(_)
             | Modifier::Internal(_)
             | Modifier::Foreign(_)
             | Modifier::Ref(_) => {}

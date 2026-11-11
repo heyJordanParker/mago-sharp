@@ -9796,12 +9796,14 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             // PHP methods are open to overriding, and `method` lowers `override` to `#[\Override]`. PHP has no
             // `required` constructor, and the checker proves every subclass keeps one `new Self(…)` can call. `method`
             // gives an `extern` method the body that calls its native function. `property` gives a `lazy` property
-            // the `get` hook that keeps its value.
+            // the `get` hook that keeps its value. A `late` member has no initial value, so PHP leaves its typed
+            // property uninitialized until its first write.
             Modifier::Virtual(_)
             | Modifier::Override(_)
             | Modifier::Required(_)
             | Modifier::Extern(_)
-            | Modifier::Lazy(_) => 0,
+            | Modifier::Lazy(_)
+            | Modifier::Late(_) => 0,
             Modifier::Readonly(_)
             | Modifier::PublicSet(_)
             | Modifier::ProtectedSet(_)
@@ -9862,6 +9864,7 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::Required(_)
             | Modifier::Extern(_)
             | Modifier::Lazy(_)
+            | Modifier::Late(_)
             | Modifier::Ref(_) => unreachable!("check_slice refuses the class modifier `{modifier}`"),
         };
     }

@@ -2641,6 +2641,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Modifier::Required(node) => Node::Keyword(node),
                 Modifier::Extern(node) => Node::Keyword(node),
                 Modifier::Lazy(node) => Node::Keyword(node),
+                Modifier::Late(node) => Node::Keyword(node),
                 Modifier::Internal(node) => Node::Keyword(node),
                 Modifier::Foreign(node) => Node::Keyword(node),
                 Modifier::Ref(node) => Node::Keyword(node),

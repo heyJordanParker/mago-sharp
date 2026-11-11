@@ -24772,6 +24772,27 @@ fn a_class_whose_header_names_iterable_is_one_and_declares_its_elements() {
     );
 }
 
+/// Spec section 6: a `late` member is instance storage with no initial value that the constructor may leave unset. A
+/// static, a member with an initial value, a computed property and a property without storage are never `late`, and
+/// neither is a method or a parameter.
+#[test]
+fn a_late_member_may_stay_unset_after_the_constructor() {
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n    public late int id { get; private set; }\n    public late string number { get; set; }\n    public late string? note { get; set; }\n    private late List<string> lines;\n    public int attempts { get; set; } = 0;\n\n    public late string status { get; set; } = \"open\";\n    public static late int count { get; set; } = 0;\n    public late string label => this.number;\n    public late string code { get => \"A\"; }\n    public late void ship() { }\n\n    public string title() => `Order ${this.number} ${this.lines.count()}`;\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Order.sharp", sharp), &[]);
+
+    assert_eq!(
+        written_errors(sharp, &issues),
+        [
+            "late semantics A `late` member takes no initial value: the code that fills it after the constructor sets it.",
+            "late semantics A static is never `late`: it holds its initial value before any code reads it.",
+            "late semantics A computed property is never `late`: it has no storage to leave unset.",
+            "late semantics `code` computes every read and write, so it has no storage to leave unset: drop `late`, or give it an auto accessor such as `get;`.",
+            "late semantics Only a field or a property with storage is `late`, written as in `public late string number { get; set; }`.",
+        ]
+    );
+}
+
 const MONEY_OPERATORS: (&str, &str) = (
     "src/App/Money.sharp",
     "namespace App;\n\npublic class Money\n{\n    public int cents { get; }\n\n    public Money(int cents)\n    {\n        this.cents = cents;\n    }\n\n    public int hash() => this.cents;\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public static Money operator +(Money a, Money b) => new Money(a.cents + b.cents);\n\n    public static Money operator -(Money a)\n    {\n        return new Money(-a.cents);\n    }\n\n    public static int operator <=>(Money a, Money b) => a.cents <=> b.cents;\n}\n",
