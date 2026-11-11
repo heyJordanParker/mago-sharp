@@ -4213,7 +4213,11 @@ fn nameof_names_a_class_and_a_property() {
     assert_eq!(source(CODE, name_of), "nameof(Order.total)");
 
     // Spec section 25: a class alone is its own name.
-    let class = parse(&arena, "src/Report.sharp", "class Report\n{\n    void run()\n    {\n        log(nameof(Counted));\n    }\n}\n");
+    let class = parse(
+        &arena,
+        "src/Report.sharp",
+        "class Report\n{\n    void run()\n    {\n        log(nameof(Counted));\n    }\n}\n",
+    );
     assert!(class.errors.is_empty(), "{:#?}", class.errors);
 
     let php = parse(&arena, "src/Report.php", "<?php nameof(Order);");
