@@ -78,6 +78,9 @@ pub struct InlineForm {
     /// The node each value replaces: the receiver first for an instance method, then each parameter in declaration
     /// order.
     slots: Vec<u32>,
+    /// For each slot, the node of the parameter's default when it is a literal, which a call that leaves the argument
+    /// out passes, as `trim()` passes `trim(string? characters = null)` its `null`.
+    defaults: Vec<Option<u32>>,
     /// How many slots the form reads in declaration order, the receiver first, before its first call. Their values run
     /// in the order the call runs them, so a value in a later slot must run nothing when read.
     in_order: usize,
@@ -377,6 +380,17 @@ impl Lowering<'_, '_> {
             Body::Expression(expression) => self.php_call(expression, &names),
             Body::Native(_) => None,
         };
+        // A literal runs nothing, so a call that leaves its argument out runs the form with it in any slot.
+        let defaults: Vec<Option<u32>> = receiver
+            .then_some(None)
+            .into_iter()
+            .chain(parameters.iter().map(
+                |parameter| match parameter.default_value.as_ref().map(|default| default.value) {
+                    Some(value @ Expression::Literal(_)) => Some(self.expression(value)),
+                    _ => None,
+                },
+            ))
+            .collect();
         let mut slots = vec![NULL; names.len()];
         let (mut result_type, mut key_order) = (None, None);
         for (index, node) in self.nodes.iter().enumerate() {
@@ -405,6 +419,7 @@ impl Lowering<'_, '_> {
             texts: self.texts,
             root,
             slots,
+            defaults,
             in_order,
             result_type,
             key_order,
@@ -528,7 +543,7 @@ impl Lowering<'_, '_> {
     }
 
     /// The call `call` as its standard library method's inline form, when the method has one and the call passes
-    /// each parameter one positional argument. A slot the form reads out of order, or after a call, takes only a value
+    /// each parameter one positional argument or leaves out one whose default is a literal. A slot the form reads out of order, or after a call, takes only a value
     /// that does nothing when read, since inlined it runs in the form's order instead of the call's.
     pub(super) fn inlined_call(&mut self, expression: &Expression, call: &MethodCall) -> Option<u32> {
         // A type parameter's class is a subclass of its bound when the code runs, which may declare its own method.
@@ -577,6 +592,12 @@ impl Lowering<'_, '_> {
             }
 
             values.push(InlineReceiver::Expression(argument.value));
+        }
+        // An argument the call leaves out is the parameter's default, which the form holds when it is a literal.
+        let defaults: Vec<u32> =
+            form.defaults.get(values.len()..).unwrap_or_default().iter().copied().collect::<Option<_>>()?;
+        for default in defaults {
+            values.push(InlineReceiver::Place(self.copy(form, default, &[], line)));
         }
         // A place is lowered already, and reading it runs nothing.
         let runs_code =

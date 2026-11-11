@@ -9757,7 +9757,7 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
             ]
         ),
         [
-            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
+            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `byteLength`, `byteSubstring`, `bytes`, `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
             "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `clamp`, `floorDiv`, `format`, `mod`, `toByteString`, `toHex`.",
             "7:40 non-existent-method Method `missing` does not exist on `float`. | A `float` has the methods `abs`, `ceil`, `clamp`, `floor`, `format`, `isFinite`, `round`.",
             "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
@@ -29229,6 +29229,24 @@ fn a_composed_string_for_a_plain_php_literal_string_is_refused_by_name() {
     );
 }
 
+/// `Sql.identifier(name, allowed)` gives a `literal-string`, spec section 24, so a column chosen while the code runs
+/// passes to a plain PHP `literal-string` parameter through it, and the same column passed bare is still refused.
+#[test]
+fn an_identifier_from_an_allow_list_passes_to_a_plain_php_literal_string() {
+    let query = (
+        "src/Lib/Query.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Query\n{\n    /**\n     * @param literal-string $sql\n     */\n    public function orderByRaw(string $sql): self\n    {\n        return $this;\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.Query;\nimport Sharp.Data.Sql;\n\npublic class Report\n{\n    public Query run(Query query, string column)\n    {\n        query.orderByRaw(Sql.identifier(column, [\"name\", \"created_at\"]));\n        return query.orderByRaw(column);\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[query]),
+        [
+            "11:33 possibly-invalid-argument Argument #1 of method `Query.orderByRaw` takes a `literal-string`, a string literal or a constant, and this string is composed while the code runs. Write the string as a literal or a constant, and pass each value it holds separately, as a query's bindings for its `?` placeholders take them."
+        ]
+    );
+}
+
 /// A plain PHP `class-string<Box<int, string>>` checks the template arguments of the class it names, as upstream Mago
 /// does. PHP# skips a class value's: `Class<PaginatedList>` names the class itself (spec section 11).
 #[test]
@@ -29961,6 +29979,12 @@ const JSON: (&str, &str) = (
     include_str!("../../../../composer/library/Sharp/Encoding/Json.sharp"),
 );
 
+/// The standard library's `JsonValue`, which `Json.parse` returns, as `sharp/composer/` ships it.
+const JSON_VALUE: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/JsonValue.sharp",
+    include_str!("../../../../composer/library/Sharp/Encoding/JsonValue.sharp"),
+);
+
 /// Spec sections 10 and 24: `Json.encode` takes any value, and a JSON object's key is text, so a `Map` keyed by an
 /// object without `toString()`, wherever the value holds it, is an error. A struct with `toString()`, a backed enum,
 /// an `int` and a `string` key a JSON object.
@@ -29968,6 +29992,7 @@ const JSON: (&str, &str) = (
 fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
     let shapes = [
         JSON,
+        JSON_VALUE,
         (
             "app/Shop/Point.sharp",
             "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n",
@@ -29989,7 +30014,7 @@ fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
     );
     let point = "invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.";
 
-    assert_eq!(worded(JSON, &[]), Vec::<String>::new());
+    assert_eq!(worded(JSON, &[JSON_VALUE]), Vec::<String>::new());
     assert_eq!(
         refusals(report, &shapes),
         [
@@ -30017,9 +30042,9 @@ fn a_parameter_marked_encoded_as_json_refuses_a_map_key_with_no_json_text() {
         "namespace App.Shop;\n\nimport Sharp.Encoding.Feed;\n\npublic class Report\n{\n    public static string run(Map<float, int> floats) => Feed.write(2, floats);\n}\n",
     );
 
-    assert_eq!(worded(feed, &[JSON]), Vec::<String>::new());
+    assert_eq!(worded(feed, &[JSON, JSON_VALUE]), Vec::<String>::new());
     assert_eq!(
-        refusals(report, &[feed, JSON]),
+        refusals(report, &[feed, JSON, JSON_VALUE]),
         [
             "7:71 invalid-json-key `Feed.write` writes each `Map` key as JSON text, and a `float` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`."
         ]

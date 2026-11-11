@@ -29904,6 +29904,32 @@ fn a_form_that_calls_before_its_last_slot_read_inlines_with_pure_arguments() {
 }
 
 /// ```php
+/// return \str_pad(\trim($name), 8);
+/// ```
+///
+/// A call that leaves out an argument whose default is a literal inlines with that literal in its slot, as the method
+/// would run it, so `"  sku ".trim()` runs `mb_trim($text, null)` where `trim(string? characters = null)` declares one.
+#[test]
+fn a_call_that_leaves_out_a_literal_default_inlines_with_the_default() {
+    assert_eq!(
+        inlined_body("string run(string name)", "        return Text.padded(name);\n"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  ZVAL "str_pad"
+                  ARG_LIST
+                    CALL
+                      ZVAL "trim"
+                      ARG_LIST
+                        VAR
+                          ZVAL "name"
+                    ZVAL 8
+        "#}
+    );
+}
+
+/// ```php
 /// return \Sharp\Text::padded($name, \count($widths));
 /// ```
 ///
@@ -30001,7 +30027,7 @@ fn a_form_that_reads_its_slots_out_of_order_keeps_the_call_with_an_impure_receiv
     );
 }
 
-/// A named argument, an omitted default, a method without a form and a method of a project file each keep the call:
+/// A named argument, a method without a form and a method of a project file each keep the call:
 /// a body that calls a private or a protected method, calls `Self`, or can be overridden has no form.
 #[test]
 fn a_call_the_inlining_rule_does_not_take_keeps_its_call() {
@@ -30019,7 +30045,6 @@ fn a_call_the_inlining_rule_does_not_take_keeps_its_call() {
     let named = "        NAMED_ARG\n          ZVAL \"text\"\n          VAR\n            ZVAL \"name\"\n";
     let cases = [
         ("Text.capitalized(text: name)", static_call("Sharp\\\\Text", "capitalized", named)),
-        ("Text.padded(name)", static_call("Sharp\\\\Text", "padded", name)),
         ("Text.twice(name)", static_call("Sharp\\\\Text", "twice", name)),
         ("Text.trimmed(name)", static_call("Sharp\\\\Text", "trimmed", name)),
         ("Loud.capitalized(name)", static_call("Lib\\\\Loud", "capitalized", name)),
