@@ -12,6 +12,7 @@ use mago_names::binding::Local;
 use mago_names::binding::LocalKind;
 use mago_names::binding::php_variable_name;
 use mago_names::resolver::ChangingMembers;
+use mago_names::resolver::ExternNamespaces;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_span::Position;
@@ -845,7 +846,12 @@ fn a_class_like_of_the_files_namespace_wins_over_a_default_one() {
     let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
     let arena = LocalArena::new();
     let program = parse_file(&arena, &file);
-    let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes, &ChangingMembers::default());
+    let names = NameResolver::new(&arena).resolve_in(
+        program,
+        &namespace_classes,
+        &ChangingMembers::default(),
+        &ExternNamespaces::default(),
+    );
 
     for (needle, nth, class) in [
         ("Random?", 0, "App\\Random"),
@@ -862,6 +868,32 @@ fn a_class_like_of_the_files_namespace_wins_over_a_default_one() {
 
     let alone = NameResolver::new(&arena).resolve(program);
     assert_eq!(resolved(&alone, CODE, "Random?", 0), b"Sharp\\Random");
+}
+
+/// Spec section 23: a class of a namespace the project gives a library, as `WordPress` by `extern namespace WordPress
+/// for WP_Post;`, is the library's class of PHP's root namespace, imported or written in full, ignoring case as PHP
+/// does. A class of any other namespace keeps its namespace, and a plain PHP file's names are PHP's own.
+#[test]
+fn a_class_of_an_extern_namespace_is_php_s_root_class() {
+    const CODE: &str = "namespace App.Blog;\n\nimport WordPress;\nimport WordPress.WP_Post;\nimport Vendor.Pdf.Renderer;\n\nclass Feed\n{\n    public bool run(WP_Post post, wordpress.WP_Query query, Renderer renderer) => true;\n}\n";
+    let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
+    let arena = LocalArena::new();
+    let program = parse_file(&arena, &file);
+    let names = NameResolver::new(&arena).resolve_in(
+        program,
+        &NamespaceClasses::default(),
+        &ChangingMembers::default(),
+        &ExternNamespaces::new(["WordPress"]),
+    );
+
+    for (needle, class) in [
+        ("WordPress.WP_Post;", "WP_Post"),
+        ("WP_Post post", "WP_Post"),
+        ("wordpress.WP_Query", "WP_Query"),
+        ("Renderer renderer", "Vendor\\Pdf\\Renderer"),
+    ] {
+        assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, 0)), class, "`{needle}`");
+    }
 }
 
 /// Spec section 23 imports all of `Sharp` by default, so a bare name of a class-like the standard library or the
@@ -931,6 +963,7 @@ fn error_always_names_the_standard_interface_and_result_is_a_default_class() {
             parse_file(&arena, &file),
             &namespace_classes,
             &ChangingMembers::default(),
+            &ExternNamespaces::default(),
         );
 
         assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Error e", 0)), error, "{code}");
@@ -1065,8 +1098,12 @@ fn a_local_written_after_its_declaration_is_recorded_as_written() {
     let arena = LocalArena::new();
     let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
     let program = parse_file(&arena, &file);
-    let names =
-        NameResolver::new(&arena).resolve_in(program, &NamespaceClasses::default(), &ChangingMembers::new(["add"]));
+    let names = NameResolver::new(&arena).resolve_in(
+        program,
+        &NamespaceClasses::default(),
+        &ChangingMembers::new(["add"]),
+        &ExternNamespaces::default(),
+    );
 
     assert!(names.is_written(&declared(CODE, "lines", 0, LocalKind::Let)));
     assert!(!names.is_written(&declared(CODE, "read", 0, LocalKind::Let)));

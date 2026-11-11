@@ -149,6 +149,7 @@ pub use crate::cst::cst::expression::Leave;
 pub use crate::cst::cst::expression::Parenthesized;
 pub use crate::cst::cst::expression::Propagate;
 pub use crate::cst::cst::r#extern::Extern;
+pub use crate::cst::cst::r#extern::ExternNamespaced;
 pub use crate::cst::cst::function_like::arrow_function::ArrowFunction;
 pub use crate::cst::cst::function_like::closure::Closure;
 pub use crate::cst::cst::function_like::closure::ClosureUseClause;

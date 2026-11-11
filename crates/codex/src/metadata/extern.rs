@@ -45,3 +45,21 @@ impl PartialOrd for ExternMetadata {
         Some(self.cmp(other))
     }
 }
+
+/// A PHP# `extern namespace WordPress for WP_Post;`, which gives the folder of a library's class of PHP's root namespace
+/// a PHP# namespace, spec section 23.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct ExternNamespaceMetadata {
+    /// The name of the file that declares it.
+    pub file: Word,
+    /// The declaration, from `extern` to its semicolon.
+    pub span: Span,
+    /// The namespace, as PHP writes it: `WordPress`.
+    pub namespace: Word,
+    /// The class whose folder takes the namespace, as written: `WP_Post`.
+    pub class: Word,
+    /// Where the declaration names the class.
+    pub class_span: Span,
+}

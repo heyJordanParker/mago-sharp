@@ -72,6 +72,7 @@ use crate::identifier::method::MethodIdentifier;
 use crate::metadata::CodebaseMetadata;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::r#extern::ExternMetadata;
+use crate::metadata::r#extern::ExternNamespaceMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
 use crate::metadata::function_like::FunctionLikeMetadata;
@@ -599,6 +600,18 @@ where
     #[inline]
     fn walk_in_extern(&mut self, r#extern: &'arena Extern<'arena>, context: &mut Context<'ctx, 'arena, A>) {
         let target = &r#extern.target;
+        // `extern namespace WordPress for WP_Post;` gives a folder a namespace, spec section 23.
+        if let Some(namespaced) = &r#extern.namespaced {
+            self.codebase.extern_namespaces.push(ExternNamespaceMetadata {
+                file: word(&context.file.name),
+                span: r#extern.span(),
+                namespace: word(context.resolved_names.get(target)),
+                class: word(context.resolved_names.get(&namespaced.class)),
+                class_span: namespaced.class.span(),
+            });
+
+            return;
+        }
         let name = ascii_lowercase_word(context.resolved_names.get(target));
         let root_function = if context.file.is_standard_library && r#extern.event.is_none() {
             target.value().strip_prefix(b"global.")

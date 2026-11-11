@@ -115,6 +115,7 @@ use crate::internal::context::NameResolutionContext;
 use crate::internal::locals::LocalScopes;
 use crate::kind::NameKind;
 use crate::resolver::ChangingMembers;
+use crate::resolver::ExternNamespaces;
 use crate::resolver::NamespaceClasses;
 use crate::scope::concat_with_sep;
 use crate::scope::php_name;
@@ -156,6 +157,8 @@ pub struct NameWalker<'arena, 'classes> {
     namespace_classes: &'classes NamespaceClasses,
     /// The members of the project that change the value they are called on.
     changing_members: &'classes ChangingMembers,
+    /// The namespaces the project gives libraries whose classes have none.
+    extern_namespaces: &'classes ExternNamespaces,
     /// The extension block being walked in PHP#, whose receiver each of its members declares as a parameter.
     extension: Option<ExtensionReceiver<'arena>>,
 }
@@ -204,6 +207,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         program: &Program<'arena>,
         namespace_classes: &'classes NamespaceClasses,
         changing_members: &'classes ChangingMembers,
+        extern_namespaces: &'classes ExternNamespaces,
     ) -> Self {
         let sharp = program.dialect.is_sharp();
         let declared_classes = if sharp { declared_class_names(program) } else { foldhash::HashSet::default() };
@@ -222,6 +226,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
             declared_classes,
             namespace_classes,
             changing_members,
+            extern_namespaces,
             extension: None,
         }
     }
@@ -470,6 +475,13 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         }
 
         let (fqn, imported) = context.resolve(NameKind::Default, name);
+        // Spec section 23: a class of a namespace a project gives a library, as `WordPress\WP_Post`, is PHP's root
+        // class `WP_Post`.
+        if self.sharp
+            && let Some(class) = self.extern_namespaces.root_class(fqn)
+        {
+            return ((class, imported), None);
+        }
         // Spec section 14.1: one name covers every function type, so PHP's `Closure` is no class a PHP# file names. Where
         // the name would mean it, it means `\Closure`, a form no resolved name takes, so it names no class in any
         // position, and each message, which shows a class name without its leading `\`, shows it as written.
@@ -691,6 +703,8 @@ where
             UseItems::Sequence(seq) => {
                 for item in &seq.items {
                     let fqn = trim_start_byte(arena_name(context, &item.name), b'\\');
+                    // Spec section 23: `import WordPress.WP_Post;` imports PHP's root class `WP_Post`.
+                    let fqn = if self.sharp { self.extern_namespaces.root_class(fqn).unwrap_or(fqn) } else { fqn };
                     self.resolved_names.insert_at(item.name.span(), fqn, true);
                 }
             }
@@ -725,6 +739,15 @@ where
     /// names a namespace.
     fn walk_in_extern(&mut self, r#extern: &'ast Extern<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         let target = &r#extern.target;
+        // Spec section 23: `extern namespace WordPress for WP_Post;` names a namespace as written, and a class of PHP's
+        // root namespace, which no import reaches.
+        if let Some(namespaced) = &r#extern.namespaced {
+            self.resolved_names.insert_at(target.span(), arena_name(context, target), false);
+            self.resolved_names.insert_at(namespaced.class.span(), arena_name(context, &namespaced.class), false);
+            self.resolved_names.bind(namespaced.class.span(), Binding::Class);
+
+            return;
+        }
         let written = target.value();
         let class = written.split(|byte| *byte == b'.').next().unwrap_or(written);
         let (fqn, imported) = self.resolve_class(context, class);

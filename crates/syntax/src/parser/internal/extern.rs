@@ -2,6 +2,7 @@ use mago_allocator::prelude::*;
 
 use crate::T;
 use crate::cst::cst::Extern;
+use crate::cst::cst::ExternNamespaced;
 use crate::cst::cst::Uses;
 use crate::cst::sequence::TokenSeparatedSequence;
 use crate::error::ParseError;
@@ -12,7 +13,8 @@ where
     A: Arena,
 {
     /// Parses a PHP# `extern` declaration: `extern`, `event` when the class is an event, its target, a bare name or
-    /// `Class.member`, then an optional `uses` clause.
+    /// `Class.member`, then an optional `uses` clause. `extern namespace WordPress for WP_Post;` gives the folder of a
+    /// library's class a namespace instead, spec section 23.
     pub(crate) fn parse_extern(&mut self) -> Result<Extern<'arena>, ParseError<'arena>> {
         let r#extern = self.expect_any_keyword()?;
         let event = if self.stream.lookahead(0)?.is_some_and(|token| token.value == b"event")
@@ -22,16 +24,23 @@ where
         } else {
             None
         };
+        let namespace = if event.is_none() && self.stream.peek_kind(0)? == Some(T!["namespace"]) {
+            Some(self.expect_any_keyword()?)
+        } else {
+            None
+        };
+        // The target is a bare name or `Class.member`. A longer one is a full name, which the analyzer refuses with the
+        // import to add, spec section 23. A namespace is the name its folder takes, dotted as any namespace.
+        let target = self.parse_dotted_identifier()?;
+        let (namespaced, uses) = if namespace.is_some() {
+            let r#for = self.expect_keyword(T!["for"])?;
 
-        Ok(Extern {
-            r#extern,
-            event,
-            // The target is a bare name or `Class.member`. A longer one is a full name, which the analyzer refuses with
-            // the import to add, spec section 23.
-            target: self.parse_dotted_identifier()?,
-            uses: self.parse_optional_uses()?,
-            terminator: self.parse_terminator()?,
-        })
+            (Some(ExternNamespaced { r#for, class: self.parse_dotted_identifier()? }), None)
+        } else {
+            (None, self.parse_optional_uses()?)
+        };
+
+        Ok(Extern { r#extern, event, namespace, target, namespaced, uses, terminator: self.parse_terminator()? })
     }
 
     /// Parses a `uses` clause when one starts here: `uses`, which stays a name everywhere else, and its effects.

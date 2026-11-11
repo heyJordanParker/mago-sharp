@@ -33,6 +33,7 @@ use crate::metadata::class_like_constant::ClassLikeConstantMetadata;
 use crate::metadata::constant::ConstantMetadata;
 use crate::metadata::enum_case::EnumCaseMetadata;
 use crate::metadata::r#extern::ExternMetadata;
+use crate::metadata::r#extern::ExternNamespaceMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::module::ModuleMetadata;
@@ -120,6 +121,9 @@ pub struct CodebaseMetadata {
     /// Every PHP# module, spec section 32, in the order [`ModuleMetadata`] sorts them.
     #[cfg_attr(feature = "serde", serde(default))]
     pub modules: Vec<ModuleMetadata>,
+    /// Every PHP# `extern namespace`, spec section 23, sorted.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extern_namespaces: Vec<ExternNamespaceMetadata>,
     /// Map from the lowercase name of a PHP# extension member, spec section 26, to every extension member of that name:
     /// its span and the static method it runs as, in span order.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -728,11 +732,32 @@ impl CodebaseMetadata {
         Some((self.folder(class_like.span.file_id)?, word(&name[..separator])))
     }
 
-    /// Gathers the namespaces of the class-likes in each folder [`Self::folder_namespaces`] answers for. Population
-    /// gathers them, and so does a reader of the merged scan before it, as a PHP# member read's resolution does.
+    /// The class of PHP's root namespace that `declaration` names, when a plain PHP library declares it, whose folder
+    /// the declaration gives its namespace, spec section 23. None for a class PHP# declares, one in a namespace, one
+    /// of PHP's built-ins, which has no folder, and a name no class has.
+    #[must_use]
+    pub fn extern_namespace_class(&self, declaration: &ExternNamespaceMetadata) -> Option<&ClassLikeMetadata> {
+        self.get_class_like(declaration.class.as_bytes()).filter(|class_like| {
+            !class_like.flags.is_sharp()
+                && !class_like.flags.is_module()
+                && !class_like.original_name.as_bytes().contains(&b'\\')
+                && self.folder(class_like.span.file_id).is_some()
+        })
+    }
+
+    /// Gathers the namespaces of the class-likes in each folder [`Self::folder_namespaces`] answers for, and the one
+    /// an `extern namespace` gives the folder of the plain PHP class it names. Population gathers them, and so does a
+    /// reader of the merged scan before it, as a PHP# member read's resolution does.
     pub fn populate_folder_namespaces(&mut self) {
         let mut folder_namespaces: HashMap<Word, Vec<Word>> = HashMap::default();
-        for (folder, namespace) in self.class_likes.values().filter_map(|class_like| self.folder_namespace(class_like))
+        let extern_namespaces = self.extern_namespaces.iter().filter_map(|declaration| {
+            Some((self.folder(self.extern_namespace_class(declaration)?.span.file_id)?, declaration.namespace))
+        });
+        for (folder, namespace) in self
+            .class_likes
+            .values()
+            .filter_map(|class_like| self.folder_namespace(class_like))
+            .chain(extern_namespaces)
         {
             folder_namespaces.entry(folder).or_default().push(namespace);
         }
@@ -1507,6 +1532,7 @@ impl CodebaseMetadata {
         self.symbols.extend(other.symbols);
         self.merge_externs(other.externs);
         self.merge_modules(other.modules);
+        self.merge_extern_namespaces(other.extern_namespaces);
         self.merge_extensions(other.extensions);
 
         for (k, v) in other.all_class_like_descendants {
@@ -1609,6 +1635,7 @@ impl CodebaseMetadata {
         self.symbols.extend_ref(&other.symbols);
         self.merge_externs(other.externs.iter().map(|(target, declarations)| (*target, declarations.clone())));
         self.merge_modules(other.modules.iter().cloned());
+        self.merge_extern_namespaces(other.extern_namespaces.iter().copied());
         self.merge_extensions(other.extensions.iter().map(|(name, members)| (*name, members.clone())));
 
         for (k, v) in &other.all_class_like_descendants {
@@ -1657,6 +1684,13 @@ impl CodebaseMetadata {
         self.modules.extend(incoming);
         self.modules.sort_by_key(|module| (module.file, module.span.start.offset));
         self.modules.dedup();
+    }
+
+    /// Adds another codebase's `extern namespace` declarations, keeping them sorted, whatever order the files merge in.
+    fn merge_extern_namespaces(&mut self, incoming: impl IntoIterator<Item = ExternNamespaceMetadata>) {
+        self.extern_namespaces.extend(incoming);
+        self.extern_namespaces.sort_unstable();
+        self.extern_namespaces.dedup();
     }
 
     /// Adds another codebase's extension members, keeping each name's members in span order, whatever order the files
@@ -1946,6 +1980,7 @@ impl CodebaseMetadata {
         }
         self.externs.retain(|_, declarations| !declarations.is_empty());
         self.modules.retain(|module| !removed_files.contains(&module.span.file_id));
+        self.extern_namespaces.retain(|declaration| !removed_files.contains(&declaration.span.file_id));
         for members in self.extensions.values_mut() {
             members.retain(|(span, _)| !removed_files.contains(&span.file_id));
         }

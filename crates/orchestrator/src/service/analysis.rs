@@ -22,6 +22,7 @@ use mago_database::ReadDatabase;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_names::resolver::ChangingMembers;
+use mago_names::resolver::ExternNamespaces;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_reporting::Issue;
@@ -147,8 +148,14 @@ impl AnalysisService {
 
         // The binder counts a call of a member that changes its receiver as a write, which the populated codebase names.
         let changing_members = ChangingMembers::new(receiver_changing_members(&self.codebase));
-        let resolved_names =
-            NameResolver::new(&arena).resolve_in(program, &NamespaceClasses::default(), &changing_members);
+        let extern_namespaces =
+            ExternNamespaces::new(self.codebase.extern_namespaces.iter().map(|declaration| declaration.namespace));
+        let resolved_names = NameResolver::new(&arena).resolve_in(
+            program,
+            &NamespaceClasses::default(),
+            &changing_members,
+            &extern_namespaces,
+        );
         let host_files = self.database.files().filter(|file| file.file_type == FileType::Host).collect::<Vec<_>>();
         resolve_body_returns(
             &mut self.codebase,
@@ -158,6 +165,7 @@ impl AnalysisService {
             self.parser_settings,
             &NamespaceClasses::default(),
             &changing_members,
+            &extern_namespaces,
             external_session.as_ref(),
         )?;
 

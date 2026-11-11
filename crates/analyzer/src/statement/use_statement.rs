@@ -99,7 +99,10 @@ where
     A: Arena,
 {
     let fqn = php_name(name);
-    if (context.codebase.class_like_exists(&fqn) && !is_php_closure(&fqn) && !is_hidden_php_class(context, &fqn))
+    // The class the import names, which a namespace the project gives a library maps to PHP's root class, as
+    // `WordPress.WP_Post` to `WP_Post`.
+    let class = context.resolved_names.get(name);
+    if (context.codebase.class_like_exists(class) && !is_php_closure(class) && !is_hidden_php_class(context, class))
         || holds_function_or_constant(context.codebase, &fqn)
     {
         return false;

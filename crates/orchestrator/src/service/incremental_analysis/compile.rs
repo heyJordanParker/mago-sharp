@@ -798,8 +798,12 @@ impl IncrementalAnalysisService {
                     errors.get(&file.id).map(|issues| issues.iter().cloned().collect()).unwrap_or_default();
                 let arena = LocalArena::new();
                 let program = parse_file_with_settings(&arena, file, self.parser_settings);
-                let names =
-                    NameResolver::new(&arena).resolve_in(program, &self.namespace_classes, &self.changing_members);
+                let names = NameResolver::new(&arena).resolve_in(
+                    program,
+                    &self.namespace_classes,
+                    &self.changing_members,
+                    &self.extern_namespaces,
+                );
                 let namespace_classes = names.namespace_classes().map(mago_word::word).collect();
                 let mut result = AnalysisResult::new(SymbolReferences::new());
                 let artifacts =

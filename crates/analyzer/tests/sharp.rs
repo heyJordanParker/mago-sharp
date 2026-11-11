@@ -55,6 +55,7 @@ use mago_database::file::FileType;
 use mago_names::ResolvedNames;
 use mago_names::STANDARD_ROOT_CLASSES;
 use mago_names::resolver::ChangingMembers;
+use mago_names::resolver::ExternNamespaces;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_prelude::Prelude;
@@ -254,9 +255,13 @@ fn analyze_with_references(
             })
             .map(|member| member.original_name)
     }));
+    let extern_namespaces = ExternNamespaces::new(
+        scanned.iter().flat_map(|scan| scan.extern_namespaces.iter().map(|declaration| declaration.namespace)),
+    );
     let mut programs = Vec::new();
     for (file, program) in parsed {
-        let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes, &changing_members);
+        let names =
+            NameResolver::new(&arena).resolve_in(program, &namespace_classes, &changing_members, &extern_namespaces);
         metadata.extend(scan_program(&arena, file, program, &names, settings.version));
         programs.push((file, program, names));
     }
@@ -3886,6 +3891,75 @@ fn a_function_a_library_declares_outside_any_namespace_belongs_to_the_namespace_
         refusals(folder, &ROOT_HELPERS),
         [
             "5:29 non-existent-class-like `Collections` names no class, and no namespace this file imports. | Check the spelling of `Collections`, or import the class or the namespace whose member this names."
+        ]
+    );
+}
+
+/// A library whose classes and functions have no namespace, as WordPress, beside one with a namespace.
+const ROOT_LIBRARIES: [(&str, &str); 4] = [
+    (
+        "vendor/wordpress/wp-includes/class-wp-post.php",
+        "<?php\n\nclass WP_Post\n{\n    public string $post_title = '';\n}\n",
+    ),
+    (
+        "vendor/wordpress/wp-includes/plugin.php",
+        "<?php\n\nfunction add_action(string $hook, Closure $callback): bool\n{\n    return true;\n}\n\nfunction get_post(int $id): ?WP_Post\n{\n    return null;\n}\n",
+    ),
+    ("vendor/legacy/class-widget.php", "<?php\n\nclass Legacy_Widget\n{\n}\n"),
+    ("vendor/acme/src/Client.php", "<?php\n\nnamespace Acme;\n\nclass Client\n{\n}\n"),
+];
+
+/// Spec section 23: `extern namespace WordPress for WP_Post;` gives the folder of a plain PHP class of PHP's root
+/// namespace the namespace `WordPress`, so its functions are `WordPress.add_action`, its classes `import
+/// WordPress.WP_Post;`, and `extern WordPress.get_post` declares a function's effect. The class must be a library's, of
+/// PHP's root namespace, and a folder takes one namespace no class has, which no other folder takes.
+#[test]
+fn an_extern_namespace_names_a_namespace_less_library() {
+    let stubs = (
+        "app/Stubs/WordPress.sharp",
+        "namespace App.Stubs;\n\nimport WordPress;\n\nextern namespace WordPress for WP_Post;\nextern WordPress.get_post uses Database;\n",
+    );
+    let feed = (
+        "app/Blog/Feed.sharp",
+        "namespace App.Blog;\n\nimport WordPress;\nimport WordPress.WP_Post;\n\npublic class Feed\n{\n    public bool hook() => WordPress.add_action(\"init\", () => { });\n    public string title(WP_Post post) => post.post_title;\n    public WP_Post? first() => WordPress.get_post(1);\n    public bool bare() => add_action(\"init\", () => { });\n}\n",
+    );
+    let wrong = (
+        "app/Stubs/Wrong.sharp",
+        "namespace App.Stubs;\n\nextern namespace Missing for No_Such_Class;\nextern namespace Clients for Acme.Client;\nextern namespace Press for WP_Post;\nextern namespace WordPress for Legacy_Widget;\nextern namespace Acme for Legacy_Widget;\nextern namespace Pages for Page;\n",
+    );
+    let page = (
+        "app/Stubs/Page.sharp",
+        "namespace App.Stubs;\n\nimport WordPress;\n\npublic class Page\n{\n    public bool found => WordPress.get_post(1) != null;\n\n    law located(Page page) => page.found;\n}\n",
+    );
+    let others = |extra: (&'static str, &'static str)| ROOT_LIBRARIES.into_iter().chain([extra]).collect::<Vec<_>>();
+
+    assert_eq!(refusals(stubs, &others(feed)), Vec::<String>::new());
+    assert_eq!(
+        refusals(feed, &others(stubs)),
+        [
+            "11:27 non-existent-function Function `WordPress.add_action` does not exist. | Check the spelling of `WordPress.add_action`."
+        ]
+    );
+    let missing = |at: &str, class: &str| {
+        format!(
+            "{at} non-existent-class-like Cannot find the plain PHP class `{class}` outside any namespace. | `extern namespace` names a class of a library whose classes have no namespace, as `extern namespace WordPress for WP_Post;`."
+        )
+    };
+    assert_eq!(
+        effect_issues(&ROOT_LIBRARIES.into_iter().chain([stubs, page]).collect::<Vec<_>>()),
+        [
+            "app/Stubs/Page.sharp:9:31 impure-law: Law `located` reaches `Page.found`, which calls `WordPress.get_post` with the effect `Database`. Laws hold only over pure code."
+        ]
+    );
+    assert_eq!(
+        refusals(wrong, &[ROOT_LIBRARIES.as_slice(), &[stubs, page]].concat()),
+        [
+            missing("3:30", "No_Such_Class"),
+            missing("4:30", "Acme.Client"),
+            "5:1 duplicate-extern The folder of `WP_Post` already takes the namespace `WordPress`. | Delete this line: a folder takes one namespace.".to_owned(),
+            "6:1 duplicate-extern `WordPress` is already the namespace of the folder of `WP_Post`. | Give this library another namespace.".to_owned(),
+            "7:18 duplicate-extern `Acme` is already the namespace of `Client`, so no library's folder takes it. | Give the library a namespace no class has.".to_owned(),
+            missing("8:28", "Page"),
         ]
     );
 }
