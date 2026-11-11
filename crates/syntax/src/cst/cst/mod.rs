@@ -212,6 +212,7 @@ pub use crate::cst::cst::module::Module;
 pub use crate::cst::cst::module::ModuleMember;
 pub use crate::cst::cst::module::ModuleParent;
 pub use crate::cst::cst::name_of::NameOf;
+pub use crate::cst::cst::name_of::NameOfMember;
 pub use crate::cst::cst::namespace::Namespace;
 pub use crate::cst::cst::namespace::NamespaceBody;
 pub use crate::cst::cst::namespace::NamespaceImplicitBody;

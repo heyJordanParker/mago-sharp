@@ -3089,7 +3089,9 @@ generate_ast_walker! {
     'arena NameOf as name_of => {
         walker.walk_keyword(&name_of.nameof, context);
         walker.walk_identifier(&name_of.class, context);
-        walker.walk_local_identifier(&name_of.property, context);
+        if let Some(member) = &name_of.member {
+            walker.walk_local_identifier(&member.name, context);
+        }
     }
 
     'arena With as with => {

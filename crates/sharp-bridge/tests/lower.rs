@@ -17517,22 +17517,19 @@ fn typeof_is_the_class_name_of_the_imported_class() {
 /// return 'total';
 /// ```
 ///
-/// `nameof(X.y)` is the string `'y'`: the checker proved `X` has the property, so the running program needs its name
-/// alone.
+/// `nameof(X.y)` is the string `'y'`: the checker proved `X` has the property or the method, so the running program
+/// needs its name alone. `nameof(X)` is the class's own name, spec section 25.
 #[test]
-fn nameof_is_the_name_of_the_property() {
-    assert_eq!(
-        body_in(
-            "string run(int extra)",
-            "        return nameof(Calc.total);\n",
-            &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc { public int $total = 0; }")]
-        ),
-        indoc! {r#"
-            STMT_LIST
-              RETURN
-                ZVAL "total"
-        "#}
-    );
+fn nameof_is_the_name_of_the_member_or_the_class() {
+    let calc = [(
+        "src/Lib/Calc.php",
+        "<?php namespace Lib; final class Calc { public int $total = 0; public function run(): void {} }",
+    )];
+    let returns = |name: &str| format!("STMT_LIST\n  RETURN\n    ZVAL {name:?}\n");
+
+    assert_eq!(body_in("string run(int extra)", "        return nameof(Calc.total);\n", &calc), returns("total"));
+    assert_eq!(body_in("string run(int extra)", "        return nameof(Calc.run);\n", &calc), returns("run"));
+    assert_eq!(body_in("string run(int extra)", "        return nameof(Calc);\n", &calc), returns("Calc"));
 }
 
 /// ```php

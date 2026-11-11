@@ -406,7 +406,7 @@ impl<'body, 'program> Body<'body, 'program> {
             Expression::Parenthesized(parenthesized) => self.value(parenthesized.expression),
             Expression::Literal(literal) => self.literal(literal),
             // `nameof(X.y)` is the string `'y'`, which the checker proved names a property of `X`.
-            Expression::NameOf(name_of) => names::string(name_of.property.value),
+            Expression::NameOf(name_of) => names::string(name_of.named()),
             Expression::ConstantAccess(name) => self.name(expression, name),
             Expression::Binary(binary) => self.binary(binary),
             Expression::UnaryPrefix(unary) => self.prefix(unary),

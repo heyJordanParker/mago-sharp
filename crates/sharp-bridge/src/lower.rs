@@ -6090,7 +6090,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(SHARP_AST_CLASS_NAME, 0, line, &[class])
             }
             // The checker proved the class has the property, so the running program needs only its name.
-            Expression::NameOf(name_of) => self.string(0, line, name_of.property.value),
+            Expression::NameOf(name_of) => self.string(0, line, name_of.named()),
             Expression::Throw(throw) => {
                 let exception = self.expression(throw.exception);
 

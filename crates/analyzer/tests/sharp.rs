@@ -3255,28 +3255,28 @@ fn an_override_of_a_plain_php_property_keeps_its_set_and_its_level() {
 }
 
 /// `nameof(X.y)` is the string `'y'`, spec section 6.3, and the checker proves `X` declares or inherits `y`, a
-/// property or a field, instance or static, readable where `nameof` is written, as C#'s `nameof` does. A method is not
-/// a property, and a misspelled name is an error wherever it is written.
+/// property, a field or a method, instance or static, readable where `nameof` is written, as C#'s `nameof` does. A
+/// misspelled name is an error wherever it is written. `nameof(X)` is the class's own name, spec section 25.
 #[test]
-fn nameof_names_a_property_the_class_has_and_is_a_string() {
+fn nameof_names_a_member_the_class_has_and_is_a_string() {
     let entity = (
         "src/Demo/Entity.sharp",
-        "namespace Demo;\n\npublic class Entity\n{\n    public int id { get; set; } = 0;\n}\n",
+        "namespace Demo;\n\npublic class Entity\n{\n    public int id { get; set; } = 0;\n    public bool save() => true;\n}\n",
     );
     let order = (
         "src/Demo/Order.sharp",
-        "namespace Demo;\n\npublic class Order : Entity\n{\n    public int total { get; set; } = 0;\n    public static int count { get; private set; } = 0;\n    private int secret = 0;\n    public int sum() => 1;\n\n    public string own() => nameof(Order.secret);\n}\n",
+        "namespace Demo;\n\npublic class Order : Entity\n{\n    public int total { get; set; } = 0;\n    public static int count { get; private set; } = 0;\n    private int secret = 0;\n    public int sum() => 1;\n    private int audit() => 2;\n\n    public string own() => nameof(Order.secret) + nameof(Order.audit);\n}\n",
     );
     let declared = [entity, order];
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public string column() => nameof(Order.total);\n    public string parent() => nameof(Order.id);\n    public string shared() => nameof(Order.count);\n    public string misspelled() => nameof(Order.totl);\n    public string hidden() => nameof(Order.secret);\n    public string method() => nameof(Order.sum);\n    public string missing() => nameof(Missing.total);\n    public int number() => nameof(Order.total);\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public string column() => nameof(Order.total);\n    public string parent() => nameof(Order.id);\n    public string shared() => nameof(Order.count);\n    public string misspelled() => nameof(Order.totl);\n    public string hidden() => nameof(Order.secret);\n    public string method() => nameof(Order.sum);\n    public string inherited() => nameof(Order.save);\n    public string audited() => nameof(Order.audit);\n    public string class() => nameof(Order);\n    public string missing() => nameof(Missing.total);\n    public int number() => nameof(Order.total);\n}\n";
 
     assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 2]);
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &declared),
         [
-            "Property `Order.totl` does not exist.",
+            "`Order.totl` is no property, field or method.",
             "`Order.secret` is `private`, so `nameof` can't name it here.",
-            "Property `Order.sum` does not exist.",
+            "`Order.audit` is `private`, so `nameof` can't name it here.",
             "Cannot find type `Demo.Missing`.",
             "Invalid return type for method `Report.number`: expected `int`, but found `string`.",
         ]

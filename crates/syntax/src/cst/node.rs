@@ -3293,7 +3293,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::NameOf(name_of) => {
                 f(Node::Keyword(&name_of.nameof));
                 f(Node::Identifier(&name_of.class));
-                f(Node::LocalIdentifier(&name_of.property));
+                if let Some(member) = &name_of.member {
+                    f(Node::LocalIdentifier(&member.name));
+                }
             }
             Node::With(with) => {
                 f(Node::Expression(with.object));
