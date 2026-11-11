@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use foldhash::HashSet;
 use mago_allocator::Arena;
 
@@ -13,6 +15,7 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
+use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::mixed::TMixed;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -23,6 +26,7 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_iterable_parameters;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
@@ -375,6 +379,19 @@ where
                     result.has_invalid_target |= report_method_access_on_null(context, object, object_type);
                 }
 
+                continue;
+            }
+
+            // A PHP# class whose header names `Iterable<T>` is an `Iterable<T>`, so a member it doesn't declare is one of
+            // `Iterable<T>`'s lazy operations, spec section 12.
+            if context.dialect.is_sharp()
+                && let TAtomic::Object(TObject::Named(named)) = object_atomic
+                && context.codebase.is_sharp_iterable(named.name.as_bytes())
+                && let ClassLikeMemberSelector::Identifier(name) = selector
+                && lacks_member(context.codebase, object_atomic, name.value)
+                && let Some((_, element)) = get_iterable_parameters(object_atomic, context.codebase)
+            {
+                collection_parts.push(TAtomic::Iterable(TIterable::sharp_of(Arc::new(element))));
                 continue;
             }
 

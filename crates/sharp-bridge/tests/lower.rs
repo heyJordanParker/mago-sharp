@@ -22076,6 +22076,41 @@ fn a_camel_case_method_s_result_is_read_by_its_lowercase_name() {
 }
 
 /// ```php
+/// class Bag implements \IteratorAggregate { public function getIterator(): \Traversable { return \Sharp\Internal\elements($this, false); } }
+/// class Tally implements \IteratorAggregate { public function getIterator(): \Traversable { return \Sharp\Internal\elements($this, true); } }
+/// ```
+///
+/// Spec section 12: a class whose header names `Iterable<T>` is PHP's `\IteratorAggregate`, whose `getIterator()` reads
+/// its `elements()` through the engine, and `true` gives plain PHP each `[key, value]` tuple as its key and value.
+#[test]
+fn a_class_whose_header_names_iterable_is_an_iterator_aggregate_of_its_elements() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Bag.sharp",
+                "namespace App;\n\npublic class Bag : Iterable<string>\n{\n    public Iterable<string> elements() => [\"tea\"];\n}\n",
+            ),
+            (
+                "src/App/Tally.sharp",
+                "namespace App;\n\npublic class Tally : Iterable<[string, int]>\n{\n    public Iterable<[string, int]> elements() => [\"tea\": 3];\n}\n",
+            ),
+        ],
+        &[],
+    );
+
+    for (name, pairs) in [("Bag", "false"), ("Tally", "true")] {
+        let (lowered, class) = class_in(&files, name);
+        let interfaces = lowered.render(lowered.child(class, 1));
+        let iterator = lowered.render(lowered.method_named("getIterator"));
+
+        assert_eq!(interfaces, "NAME_LIST\n  ZVAL \"IteratorAggregate\"\n");
+        assert!(iterator.contains("ZVAL \"Sharp\\\\Internal\\\\elements\""), "{iterator}");
+        assert!(iterator.contains(&format!("ZVAL {pairs}")), "{iterator}");
+        assert!(iterator.contains("ZVAL \"Traversable\""), "{iterator}");
+    }
+}
+
+/// ```php
 /// return (($as#1 = \is_array($crossing#2 = $folder->records) ? \Sharp\Map::from($crossing#2) : $crossing#2) instanceof Map<…> ? … : null) != null;
 /// ```
 ///

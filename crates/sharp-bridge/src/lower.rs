@@ -898,6 +898,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.class_members(&class.members, parent_name, class.class.span, class.left_brace, class.right_brace);
         members.extend(self.parse_methods(&class.members, class.name.span));
         members.extend(self.string_conversion(class.members.as_slice(), class.left_brace, class.right_brace));
+        members
+            .extend(class.inheritance.as_ref().and_then(|inheritance| self.iteration(inheritance, class.right_brace)));
         if self.tested {
             members.extend(self.test_hooks(class));
         }
@@ -949,6 +951,38 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             start,
             end,
             b"__toString",
+            &[parameters, NULL, body, return_type, NULL],
+        ))
+    }
+
+    /// Spec section 12: plain PHP receives an object of a class whose header names `Iterable<T>` as a `Traversable`
+    /// whose `foreach` reads `elements()`, so the class gets `\IteratorAggregate`'s `getIterator()`:
+    /// `public function getIterator(): \Traversable { return \Sharp\Internal\elements($this, false); }`. The engine
+    /// gives PHP# code each element, and plain PHP each element under the keys 0, 1, 2 and on, or, where `T` is a
+    /// `[key, value]` tuple, `true` here, its key and value. None for a header without `Iterable<T>`.
+    fn iteration(&mut self, inheritance: &Inheritance, end: Span) -> Option<u32> {
+        let iterable = inheritance.iterable()?;
+        let line = self.line(iterable.name);
+        let pairs = iterable
+            .type_arguments
+            .arguments
+            .iter()
+            .next()
+            .is_some_and(|element| matches!(element, Hint::Tuple(tuple) if tuple.elements.len() == 2));
+        let this = self.variable(iterable.name.span, b"this");
+        let pairs = self.zval(line, if pairs { sharp_value::SHARP_TRUE } else { sharp_value::SHARP_FALSE }, |_| {});
+        let elements = self.global_call(line, b"Sharp\\Internal\\elements", &[this, pairs]);
+        let result = self.node(SHARP_AST_RETURN, 0, line, &[elements]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[result]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let return_type = self.string(ZEND_NAME_FQ, line, b"Traversable");
+
+        Some(self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            iterable.name.span,
+            end,
+            b"getIterator",
             &[parameters, NULL, body, return_type, NULL],
         ))
     }
@@ -2088,9 +2122,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A header's interfaces, which PHP compiles as the interface list, or null when it names none. A class's base
-    /// class is its parent, and a trait is in its `use`.
+    /// class is its parent, and a trait is in its `use`. A header's `Iterable<T>` is PHP's `\IteratorAggregate`, whose
+    /// `getIterator()` [`Self::iteration`] writes, spec section 12.
     fn name_list(&mut self, inheritance: &Inheritance) -> u32 {
         let mut names = Vec::new();
+        if let Some(iterable) = inheritance.iterable() {
+            names.push(self.string(ZEND_NAME_FQ, self.line(iterable.name), b"IteratorAggregate"));
+        }
         for name in inheritance.names() {
             let full_name = self.names.get(&name);
             match self.types.class_declaration(full_name).kind {

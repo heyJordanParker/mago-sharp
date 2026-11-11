@@ -1791,7 +1791,12 @@ where
                         always_enters_loop = false;
 
                         if let Some((k, v)) = get_iterable_parameters(iterator_atomic, context.codebase) {
-                            (k, v)
+                            // A PHP# loop reads each element, as plain PHP's `[a, b]` unpacks it too.
+                            if context.dialect.is_sharp() {
+                                sharp_loop_parts(false, foreach.target.key().is_some(), k, v)
+                            } else {
+                                (k, v)
+                            }
                         } else {
                             let class_name = atomic_object.name;
                             let iterator_atomic_str = display_atomic(context, iterator_atomic);

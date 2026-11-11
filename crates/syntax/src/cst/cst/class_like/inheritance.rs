@@ -3,6 +3,7 @@ use mago_span::Span;
 
 use crate::cst::cst::identifier::Identifier;
 use crate::cst::cst::keyword::Keyword;
+use crate::cst::cst::type_hint::GenericHint;
 use crate::cst::cst::type_hint::Hint;
 use crate::cst::sequence::TokenSeparatedSequence;
 use crate::cst::sequence::TokenSeparatedSequenceExt;
@@ -64,11 +65,22 @@ pub struct Inheritance<'arena> {
 
 impl<'arena> Inheritance<'arena> {
     /// The name each entry is written with, in written order: a name as written, and a generic type by its name before
-    /// its type arguments. Any other type, which the checker refuses in a header, names nothing.
+    /// its type arguments. `Iterable<T>`, which names no class, and any other type, which the checker refuses in a
+    /// header, name nothing.
     pub fn names(&self) -> impl Iterator<Item = Identifier<'arena>> {
         self.types.iter().filter_map(|hint| match hint {
             Hint::Identifier(identifier) => Some(*identifier),
-            Hint::Generic(generic) => Some(Identifier::Local(generic.name)),
+            Hint::Generic(generic) if !generic.is_iterable() => Some(Identifier::Local(generic.name)),
+            _ => None,
+        })
+    }
+
+    /// The `Iterable<T>` the header names, spec section 12, which makes the class an `Iterable<T>` of its
+    /// `elements()`.
+    #[must_use]
+    pub fn iterable(&self) -> Option<&GenericHint<'arena>> {
+        self.types.iter().find_map(|hint| match hint {
+            Hint::Generic(generic) if generic.is_iterable() => Some(generic),
             _ => None,
         })
     }

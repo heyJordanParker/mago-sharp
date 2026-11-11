@@ -1082,6 +1082,15 @@ impl CodebaseMetadata {
         all_descendants
     }
 
+    /// Whether `class` is a PHP# class that is an `Iterable<T>` of its `elements()`, spec section 12: its header, or a
+    /// base class's, names `Iterable<T>`, which the scanner links as `IteratorAggregate<int, T>`.
+    #[must_use]
+    pub fn is_sharp_iterable(&self, class: &[u8]) -> bool {
+        self.get_class_like(class).is_some_and(|metadata| {
+            metadata.flags.is_sharp() && metadata.all_parent_interfaces.contains(&word("iteratoraggregate"))
+        })
+    }
+
     /// The classes that declare a real member a PHP# extension member called `name` would hide on a value of type
     /// `receiver`, spec section 26, sorted: the member of that name that a class the value can be declares or
     /// inherits, a method or property, or one a docblock declares with `@method` or `@property`. `__call` and `__get`

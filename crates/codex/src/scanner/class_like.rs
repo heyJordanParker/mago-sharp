@@ -100,6 +100,7 @@ use crate::ttype::atomic::scalar::TScalar;
 use crate::ttype::builder;
 use crate::ttype::builder::get_template_atomic;
 use crate::ttype::get_bool;
+use crate::ttype::get_int;
 use crate::ttype::get_keyed_array;
 use crate::ttype::get_list;
 use crate::ttype::get_mixed;
@@ -1613,6 +1614,35 @@ where
         Hint::Generic(generic) => Some(generic),
         _ => None,
     }) {
+        // Spec section 12: a class whose header names `Iterable<T>` is a `Traversable` of its `elements()`, which PHP
+        // links as `IteratorAggregate`, so every place that takes an `Iterable<T>` takes its objects. PHP# reads no
+        // key of it. The bridge writes its `getIterator()`, which the class declares here at the header.
+        if generic.is_iterable() && class_like_metadata.kind.is_class() {
+            let iterated = word("iteratoraggregate");
+            let element = generic.type_arguments.arguments.iter().map(|element| {
+                get_type_metadata_from_hint(element, Some(original_name), &type_context, context).type_union
+            });
+
+            class_like_metadata.add_direct_parent_interface(iterated);
+            class_like_metadata.template_type_implements_count.insert(iterated, 2);
+            class_like_metadata
+                .add_template_extended_offset(iterated, std::iter::once(get_int()).chain(element).collect());
+
+            let mut iterator = create_static_method(
+                "getIterator",
+                generic.span(),
+                vec![],
+                get_named_object(word("Traversable"), None),
+                vec![],
+            );
+            if let Some(method) = iterator.method_metadata.as_mut() {
+                method.is_final = false;
+                method.is_static = false;
+            }
+            add_method(codebase, b"getIterator", &mut class_like_metadata, iterator);
+
+            continue;
+        }
         let Some(parent_name) = context.resolved_names.resolve(&generic.name) else {
             continue;
         };

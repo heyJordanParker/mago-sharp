@@ -745,6 +745,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                     check_named_constructor(constructor, &class.name, class.modifiers.contains_abstract(), context);
                 }
             }
+            check_iterable_class(class, context);
 
             Some(Class)
         }
@@ -853,6 +854,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // A header names each class and interface by its short name, and a generic one with type arguments, which are
         // a parameter's types.
         (Node::Hint(Hint::Identifier(name)), Header) if !context.names.is_type_parameter(name) => Some(Header),
+        // Spec section 12: a class's header names `Iterable<T>`, whose type argument is a parameter's type, and
+        // `check_header` keeps it to a class.
+        (Node::Hint(Hint::Generic(generic)), Header) if generic.is_iterable() => Some(Parameter),
         (Node::Hint(hint @ Hint::Generic(generic)), Header)
             if is_slice_type(hint) && built_in_generic_arity(generic.name.value).is_none() =>
         {
@@ -3442,7 +3446,39 @@ fn report_interface_member_access(modifier: &Modifier, context: &mut Context<'_,
 /// enum, `UnitEnum` or `BackedEnum`, which the engine adds to every enum or every backed one. Names compare as PHP's
 /// do, resolved and ignoring case. A generic type counts by its name, and `enter` refuses any type in a header that
 /// is not a class or a generic class type, `List`, `Map` and `Class` included, which have no resolved name.
+/// Spec section 12: plain PHP reads a class whose header names `Iterable<T>` through the `getIterator()` the bridge
+/// writes, which reads `elements()`, so the class declares no member of that name.
+fn check_iterable_class(class: &Class, context: &mut Context<'_, '_, '_>) {
+    let Some(iterable) = class.inheritance.as_ref().and_then(|inheritance| inheritance.iterable()) else {
+        return;
+    };
+    for member in &class.members {
+        let ClassLikeMember::Method(method) = member else {
+            continue;
+        };
+        if method.name.value.eq_ignore_ascii_case(b"getIterator") {
+            context.report(
+                Issue::error(format!(
+                    "`{}` names `Iterable<T>`, so plain PHP reads its `elements()` through the `getIterator()` PHP# writes: rename this method.",
+                    BytesDisplay(class.name.value)
+                ))
+                .with_annotation(Annotation::primary(method.name.span()).with_message("Declared here."))
+                .with_annotation(Annotation::secondary(iterable.span()).with_message("Named here.")),
+            );
+        }
+    }
+}
+
 fn check_header(inheritance: &Inheritance, place: Place, context: &mut Context<'_, '_, '_>) {
+    // Spec section 12: a class is an `Iterable<T>` of its `elements()`, and no other type declares one.
+    if place != Place::Class
+        && let Some(iterable) = inheritance.iterable()
+    {
+        context.report(
+            Issue::error("Only a class names `Iterable<T>` in its header, and declares the `elements()` a loop reads.")
+                .with_annotation(Annotation::primary(iterable.span()).with_message("Remove this name.")),
+        );
+    }
     let mut named: Vec<&[u8]> = Vec::new();
     for name in inheritance.names() {
         let Some(resolved) = context.names.resolve(&name) else {

@@ -24722,6 +24722,56 @@ fn a_loop_over_an_object_that_is_no_iterable_is_refused() {
     );
 }
 
+/// Spec section 12: a class whose header names `Iterable<T>` is an `Iterable<T>` wherever one is taken, a loop gives
+/// each `T`, and `toList()` and the lazy operations read it. The class declares or inherits the `elements()` the loop
+/// reads, which returns an `Iterable<T>`, and no `getIterator()`, which PHP# writes for plain PHP.
+#[test]
+fn a_class_whose_header_names_iterable_is_one_and_declares_its_elements() {
+    const ORDER: (&str, &str) = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;\n\npublic class Order\n{\n    public bool paid { get; } = false;\n}\n",
+    );
+    const BAG: (&str, &str) = (
+        "src/Demo/Bag.sharp",
+        "namespace Demo;\n\npublic class Bag<TItem> : Iterable<TItem>\n{\n    private List<TItem> items = [];\n\n    public Iterable<TItem> elements() => this.items;\n}\n",
+    );
+    const ORDERS: (&str, &str) =
+        ("src/Demo/Orders.sharp", "namespace Demo;\n\npublic class Orders : Bag<Order>\n{\n}\n");
+    let report = "namespace Demo;\n\npublic class Report\n{\n    public int tally(Iterable<Order> orders) => orders.toList().count();\n\n    public int paid(Bag<Order> bag, Orders orders)\n    {\n        let n = 0;\n        for (const order of bag) {\n            if (order.paid) {\n                n += 1;\n            }\n        }\n        for (const order of orders) {\n            n += order.paid ? 1 : 0;\n        }\n        return n + this.tally(bag) + this.tally(orders) + bag.filter(o => o.paid).toList().count();\n    }\n}\n";
+    let crate_ = "namespace Demo;\n\npublic class Crate : Iterable<int>\n{\n}\n";
+    let other_box = "namespace Demo;\n\npublic class Box : Iterable<int>\n{\n    public Iterable<string> elements() => [\"one\"];\n}\n";
+    let shelf = "namespace Demo;\n\npublic class Shelf : Iterable<int>\n{\n    public Iterable<int> elements() => [1];\n\n    public Iterable<int> getIterator() => [1];\n}\n";
+    let label = "namespace Demo;\n\npublic interface Label : Iterable<int>\n{\n}\n";
+
+    let issues = |path, code| analyze(&PLUGIN_REGISTRY, settings(), (path, code), &[ORDER, BAG, ORDERS]);
+
+    assert_eq!(written_errors(report, &issues("src/Demo/Report.sharp", report)), Vec::<String>::new());
+    assert_eq!(
+        written_errors(crate_, &issues("src/Demo/Crate.sharp", crate_)),
+        [
+            "Crate unimplemented-abstract-method `Crate` is an `Iterable<int>` and declares or inherits no `elements()`, the member a loop reads."
+        ]
+    );
+    assert_eq!(
+        written_errors(other_box, &issues("src/Demo/Box.sharp", other_box)),
+        [
+            "elements incompatible-return-type `Box.elements()` returns `Iterable<string>`, and `Box` is an `Iterable<int>`, so it returns an `Iterable<int>`."
+        ]
+    );
+    assert_eq!(
+        written_errors(shelf, &issues("src/Demo/Shelf.sharp", shelf)),
+        [
+            "getIterator semantics `Shelf` names `Iterable<T>`, so plain PHP reads its `elements()` through the `getIterator()` PHP# writes: rename this method."
+        ]
+    );
+    assert_eq!(
+        written_errors(label, &issues("src/Demo/Label.sharp", label)),
+        [
+            "Iterable<int> semantics Only a class names `Iterable<T>` in its header, and declares the `elements()` a loop reads."
+        ]
+    );
+}
+
 const MONEY_OPERATORS: (&str, &str) = (
     "src/App/Money.sharp",
     "namespace App;\n\npublic class Money\n{\n    public int cents { get; }\n\n    public Money(int cents)\n    {\n        this.cents = cents;\n    }\n\n    public int hash() => this.cents;\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public static Money operator +(Money a, Money b) => new Money(a.cents + b.cents);\n\n    public static Money operator -(Money a)\n    {\n        return new Money(-a.cents);\n    }\n\n    public static int operator <=>(Money a, Money b) => a.cents <=> b.cents;\n}\n",
