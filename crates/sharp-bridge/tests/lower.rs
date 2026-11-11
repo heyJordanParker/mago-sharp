@@ -22057,6 +22057,25 @@ fn a_map_a_class_method_gives_becomes_the_object_where_a_plain_override_may_give
 }
 
 /// ```php
+/// return \Sharp\Internal\returned($source->heldStatus(), $source, 'heldstatus', 'Map<string, string>', …);
+/// ```
+///
+/// Spec section 22: `\Sharp\Internal\returned` looks the method up in the class's `function_table`, which PHP keys in
+/// lowercase, so the call names a camelCase method in lowercase, and the engine gives the PHP# method's result as it is.
+#[test]
+fn a_camel_case_method_s_result_is_read_by_its_lowercase_name() {
+    let source = (
+        "src/App/Tenant/Source.sharp",
+        "namespace App.Tenant;\n\npublic class Source\n{\n    public virtual Map<string, string> heldStatus() => [\"status\": \"active\"];\n}\n",
+    );
+    let body = body_in("Map<string, string> run(Source source)", "        return source.heldStatus();\n", &[source]);
+
+    assert!(body.contains("ZVAL \"Sharp\\\\Internal\\\\returned\""), "{body}");
+    assert!(body.contains("ZVAL \"heldstatus\""), "{body}");
+    assert!(body.contains("ZVAL \"App.Tenant.Source.heldStatus()\""), "{body}");
+}
+
+/// ```php
 /// return (($as#1 = \is_array($crossing#2 = $folder->records) ? \Sharp\Map::from($crossing#2) : $crossing#2) instanceof Map<…> ? … : null) != null;
 /// ```
 ///

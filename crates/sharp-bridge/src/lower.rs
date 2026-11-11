@@ -5406,7 +5406,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `\Sharp\Internal\returned($lowered, $implementer, $method, $types, $target)`, with the type list and the name of
-    /// `check`, as [`Self::returned_call`] says.
+    /// `check`, as [`Self::returned_call`] says. `method` is the method's `FunctionLikeMetadata::name`, which is
+    /// lowercase, as PHP keys a class's `function_table`, so the engine finds `getStatus` as `getstatus`.
     fn returned_result(
         &mut self,
         line: u32,
