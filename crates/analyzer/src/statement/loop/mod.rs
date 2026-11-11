@@ -80,7 +80,6 @@ use crate::statement::r#loop::cleaner::clean_nodes;
 use crate::statement::refuse_condition_that_never_finishes;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_bool;
-use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_type;
@@ -1765,32 +1764,25 @@ where
                 key_type = Some(add_optional_union_type(k, key_type.as_ref(), context.codebase));
                 value_type = Some(add_optional_union_type(v, value_type.as_ref(), context.codebase));
             }
+            // Spec section 17: PHP# loops over an `Iterable<T>` alone, so an object that is none is the error any other
+            // value that isn't iterable is, where PHP would loop over its public properties.
+            TAtomic::Object(object)
+                if context.dialect.is_sharp()
+                    && !matches!(object, TObject::Named(_) if get_iterable_parameters(iterator_atomic, context.codebase).is_some()) =>
+            {
+                invalid_atomic_ids.push(display_atomic(context, iterator_atomic));
+            }
             TAtomic::Object(object) => {
                 let (obj_key_type, obj_value_type) = match object {
                     TObject::Any | TObject::WithProperties(_) | TObject::HasMethod(_) | TObject::HasProperty(_) => {
                         always_enters_loop = false;
 
-                        let (title, annotation, note, help) = if context.dialect.is_sharp() {
-                            (
-                                "Iterating over an `Object`. This will iterate its public properties.",
-                                "Iterating an `Object` type",
-                                "When a loop reads an `Object` whose class is unknown, PHP iterates its public properties. The keys are the property names, and the values are `Any?`.",
-                                "For predictable and type-safe iteration, give the value an `Iterable<T>` type.",
-                            )
-                        } else {
-                            (
-                                "Iterating over a generic `object`. This will iterate its public properties.",
-                                "Iterating a generic `object` type",
-                                "When `foreach` is used on a generic `object` whose specific class is unknown, PHP will attempt to iterate over its public properties. The keys will be property names (strings) and values their types (typically `mixed` from a static analysis perspective).",
-                                "For predictable and type-safe iteration, ensure the object is an instance of a class implementing `Iterator` or `IteratorAggregate`.",
-                            )
-                        };
                         context.collector.report_with_code(
                             IssueCode::GenericObjectIteration,
-                            Issue::warning(title)
-                                .with_annotation(Annotation::primary(iterator.span()).with_message(annotation))
-                                .with_note(note)
-                                .with_help(help),
+                            Issue::warning("Iterating over a generic `object`. This will iterate its public properties.")
+                                .with_annotation(Annotation::primary(iterator.span()).with_message("Iterating a generic `object` type"))
+                                .with_note("When `foreach` is used on a generic `object` whose specific class is unknown, PHP will attempt to iterate over its public properties. The keys will be property names (strings) and values their types (typically `mixed` from a static analysis perspective).")
+                                .with_help("For predictable and type-safe iteration, ensure the object is an instance of a class implementing `Iterator` or `IteratorAggregate`."),
                         );
 
                         (get_string(), get_mixed())
@@ -1801,11 +1793,7 @@ where
                         if let Some((k, v)) = get_iterable_parameters(iterator_atomic, context.codebase) {
                             (k, v)
                         } else {
-                            let class_name = if context.dialect.is_sharp() {
-                                display_class_like_name(context, atomic_object.name)
-                            } else {
-                                atomic_object.name
-                            };
+                            let class_name = atomic_object.name;
                             let iterator_atomic_str = display_atomic(context, iterator_atomic);
 
                             context.collector.report_with_code(
@@ -1826,22 +1814,13 @@ where
                         }
                     }
                     TObject::Enum(enum_instance) => {
-                        let enum_name = if context.dialect.is_sharp() {
-                            display_class_like_name(context, enum_instance.get_name())
-                        } else {
-                            enum_instance.get_name()
-                        };
+                        let enum_name = enum_instance.get_name();
                         let enum_backing_type = context
                             .codebase
                             .get_enum(enum_instance.get_name().as_bytes())
                             .and_then(|class_like| class_like.enum_type.as_ref());
                         let cases = display_code_member(context, enum_instance.get_name(), "cases()");
-                        // PHP# reads a property as `instance.name` and loops with `for (const case of …)`.
-                        let (instance, case_loop) = if context.dialect.is_sharp() {
-                            ("instance.", format!("for (const case of {cases})"))
-                        } else {
-                            ("$instance->", format!("foreach ({cases} as $case)"))
-                        };
+                        let (instance, case_loop) = ("$instance->", format!("foreach ({cases} as $case)"));
                         let imports = display_missing_imports(context, [enum_instance.get_name()])
                             .map(|imports| format!(" {imports}"))
                             .unwrap_or_default();
@@ -1893,14 +1872,16 @@ where
 
     if !has_valid_iterable_type {
         let iterator_type_id_str = display_type(context, &iterator_type);
-        let (requirement, help) = if context.dialect.is_sharp() {
+        let (requirement, consequence, help) = if context.dialect.is_sharp() {
             (
                 "A loop requires an `Iterable<T>`.",
+                "PHP would loop over an object's public properties and fail on any other value, so PHP# refuses the loop.",
                 "Ensure the expression always evaluates to an `Iterable<T>`. Check variable types and function return values.",
             )
         } else {
             (
                 "A `foreach` loop requires an array or an object implementing the `Traversable` interface.",
+                "Attempting to iterate other types will result in a runtime error or the loop not executing.",
                 "Ensure the expression always evaluates to an array or a traversable object. Check variable types and function return values.",
             )
         };
@@ -1923,9 +1904,7 @@ where
                     Annotation::primary(iterator.span()).with_message("This expression cannot be iterated"),
                 )
                 .with_note(requirement)
-                .with_note(
-                    "Attempting to iterate other types will result in a runtime error or the loop not executing.",
-                )
+                .with_note(consequence)
                 .with_help(help),
         );
 

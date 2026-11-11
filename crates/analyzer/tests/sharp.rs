@@ -24676,10 +24676,11 @@ fn an_empty_match_over_an_enum_whose_short_name_the_file_imports_shows_its_refus
     assert_eq!(written_errors(sharp, &issues), ["match semantics A `match` needs a `default` arm."]);
 }
 
-/// Iterating an enum value names the loop over its cases as the file writes it: the enum's bound short name, and the
-/// import when the file doesn't bind it. The PHP twin keeps upstream's text.
+/// Spec section 17: a PHP# loop reads an `Iterable<T>` alone, so a loop over an enum value is the error any value that
+/// is no `Iterable` gets, which names its type. The PHP twin keeps upstream's warning, which names the loop over its
+/// cases.
 #[test]
-fn an_enum_iteration_help_writes_the_name_the_file_binds_and_its_import() {
+fn a_loop_over_an_enum_value_is_refused_where_php_iterates_its_properties() {
     let billing_status =
         ("src/Billing/Status.php", "<?php\n\nnamespace Billing;\n\nenum Status\n{\n    case Due;\n}\n");
     let sharp = "namespace Demo;\n\nimport Lib.Ticket;\n\nclass Report\n{\n    public static void fields(Ticket ticket)\n    {\n        for (const field of ticket.status()) {\n        }\n    }\n}\n";
@@ -24687,7 +24688,7 @@ fn an_enum_iteration_help_writes_the_name_the_file_binds_and_its_import() {
     let iterated = |analyzed| -> Vec<String> {
         worded(analyzed, &[("src/Lib/Status.php", TICKETS), billing_status])
             .into_iter()
-            .filter(|line| line.contains(" enum-iteration "))
+            .filter(|line| line.contains(" enum-iteration ") || line.contains(" invalid-iterator "))
             .collect()
     };
 
@@ -24700,7 +24701,23 @@ fn an_enum_iteration_help_writes_the_name_the_file_binds_and_its_import() {
     assert_eq!(
         iterated(("src/Demo/Report.sharp", sharp)),
         [
-            "9:29 enum-iteration Iterating directly over the enum enum `Lib.Status`. This will yield its public properties. | This enum instance is being iterated directly | PHP allows iterating an enum case instance like an object, which exposes its public properties: `name` (string). | This is different from iterating through all defined cases of the `Lib.Status` enum using `Status.cases()`, where each item would be an enum case instance itself. | If you only need the properties of this specific instance, consider accessing them directly (e.g., `instance.name`) for better clarity, unless iterating its few properties is explicitly intended. | If your goal is to loop through all defined cases of the `Lib.Status` enum, use `Status.cases()` instead (e.g., `for (const case of Status.cases())`). Add `import Lib.Status;` to the file."
+            "9:29 invalid-iterator The expression provided to a loop is not iterable. It resolved to type `Lib.Status`, which is not iterable. | This expression cannot be iterated | A loop requires an `Iterable<T>`. | PHP would loop over an object's public properties and fail on any other value, so PHP# refuses the loop. | Ensure the expression always evaluates to an `Iterable<T>`. Check variable types and function return values."
+        ]
+    );
+}
+
+/// Spec section 17: a loop over an object whose class is no `Iterable` is the error any value that is no `Iterable`
+/// gets, which names its type, where PHP would loop over the object's public properties.
+#[test]
+fn a_loop_over_an_object_that_is_no_iterable_is_refused() {
+    let sharp = "namespace Demo;\n\npublic class Basket\n{\n    public int count()\n    {\n        let n = 0;\n        for (const item of this) {\n            n += 1;\n        }\n        return n;\n    }\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Basket.sharp", sharp), &[]);
+
+    assert_eq!(
+        written_errors(sharp, &issues),
+        [
+            "this invalid-iterator The expression provided to a loop is not iterable. It resolved to type `Basket`, which is not iterable."
         ]
     );
 }
