@@ -7197,8 +7197,9 @@ fn a_read_of_an_extension_the_file_does_not_import_is_annotated_as_a_read() {
 }
 
 /// Spec section 14.3: `this.discount(…)` always has one meaning, so a class may not declare a field, a property or a
-/// method named like a method, field or property it inherits and can see, from a PHP# class or a plain PHP one, at any
-/// depth. A private member of an ancestor is no member the class sees.
+/// method named like a method, field or property it inherits and can see from a PHP# class, at any depth. A private
+/// member of an ancestor is no member the class sees. A plain PHP ancestor's member is PHP's to resolve, a call as the
+/// method and a read as the field, so `Banner`'s are no error.
 #[test]
 fn a_member_named_as_an_inherited_member_is_an_error() {
     let base = "<?php\n\nnamespace Lib;\n\nclass Base\n{\n    public string $label = \"\";\n    private string $secret = \"\";\n\n    public function shout(): string\n    {\n        return \"\";\n    }\n\n    private function hidden(): string\n    {\n        return \"\";\n    }\n}\n";
@@ -7225,12 +7226,7 @@ fn a_member_named_as_an_inherited_member_is_an_error() {
 
     assert_eq!(
         each_file(issues, &sharp, &others),
-        [
-            vec![],
-            vec![format!("5:34 {in_use}"), format!("6:16 {in_use}")],
-            vec![format!("5:16 {in_use}")],
-            vec![format!("7:19 {in_use}"), format!("8:34 {in_use}")],
-        ]
+        [vec![], vec![format!("5:34 {in_use}"), format!("6:16 {in_use}")], vec![format!("5:16 {in_use}")], vec![]]
     );
     let messages = each_file(messages, &sharp, &others);
     assert_eq!(
@@ -7241,6 +7237,27 @@ fn a_member_named_as_an_inherited_member_is_an_error() {
         messages[2][0],
         "`Clearance` declares the property `rebate` and inherits the method `rebate` from `Pricing`, so `x.rebate(…)` could run either. Rename one of them."
     );
+}
+
+/// Spec section 14.3: a plain PHP ancestor may declare a field and a method of one name, as Eloquent's `HasAttributes`
+/// declares `$casts` and `casts()`, and PHP runs a call as the method and a read as the field. So a PHP# class
+/// overrides either one, and its code calls the method and reads the field or the property.
+#[test]
+fn a_class_overrides_the_field_or_the_method_a_plain_ancestor_names_alike() {
+    let parent = "<?php\n\nnamespace Lib;\n\nclass P\n{\n    protected $x = [];\n\n    protected function x()\n    {\n        return [];\n    }\n}\n";
+    let sharp = [
+        (
+            "src/Demo/C.sharp",
+            "namespace Demo;\n\nimport Lib.P;\n\npublic class C : P\n{\n    protected override Map<string, string> x() => [:];\n\n    public Map<string, string> called() => this.x();\n\n    public Any? read() => this.x;\n}\n",
+        ),
+        (
+            "src/Demo/D.sharp",
+            "namespace Demo;\n\nimport Lib.P;\n\npublic class D : P\n{\n    protected override Map<string, string> x { get; set; } = [:];\n\n    public Any? called() => this.x();\n\n    public Map<string, string> read() => this.x;\n}\n",
+        ),
+    ];
+    let others = [("src/Lib/P.php", parent)];
+
+    assert_eq!(each_file(issues, &sharp, &others), [Vec::<String>::new(), Vec::new()]);
 }
 
 #[test]

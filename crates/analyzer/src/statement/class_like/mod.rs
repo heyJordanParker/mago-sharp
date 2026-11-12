@@ -1914,11 +1914,12 @@ where
     }
 }
 
-/// Reports each member of the PHP# class `class` named like a member of the other kind that it inherits and can see,
-/// spec section 14.3: `x.discount(…)` runs a method `discount` or the function a field or property `discount` holds, so
-/// a class has one or the other, from a PHP# ancestor or a plain PHP one. An ancestor's private member is not among
-/// the members the class inherits, and two members of one body are the semantics check's. Names compare ignoring case, as PHP calls a
-/// method.
+/// Reports each member of the PHP# class `class` named like a member of the other kind that it inherits from a PHP#
+/// ancestor and can see, spec section 14.3: `x.discount(…)` runs a method `discount` or the function a field or property
+/// `discount` holds, so PHP# code declares one or the other. A plain PHP ancestor's member is PHP's to resolve, a call
+/// as the method and a read as the field, as Eloquent's `$casts` and `casts()` are, so the class overrides either one.
+/// An ancestor's private member is not among the members the class inherits, and two members of one body are the
+/// semantics check's. A method's name is the class's key of it, spec section 24.
 fn report_members_named_like_inherited_members<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
 where
     A: Arena,
@@ -1935,6 +1936,11 @@ where
         if is_own(method_class) == is_own(property_class) {
             continue;
         }
+        let inherited_from = if is_own(method_class) { property_class } else { method_class };
+        if !context.codebase.get_class_like(inherited_from.as_bytes()).is_some_and(|ancestor| ancestor.flags.is_sharp())
+        {
+            continue;
+        }
         let Some(declaring) = context.codebase.get_class_like(property_class.as_bytes()) else {
             unreachable!("the class that declares a property the class inherits is in the codebase");
         };
@@ -1944,9 +1950,7 @@ where
             unreachable!("the class that declares a member has it");
         };
 
-        // A plain PHP property without hooks is storage, as a PHP# field is.
-        let is_field = property.flags.is_field() || (!declaring.flags.is_sharp() && property.hooks.is_empty());
-        let property_kind = if is_field { "field" } else { "property" };
+        let property_kind = if property.flags.is_field() { "field" } else { "property" };
         let (span, declared, inherited, ancestor) = if is_own(method_class) {
             (method.name_span, "method", property_kind, property_class)
         } else {
