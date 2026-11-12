@@ -6,7 +6,8 @@ The steps of the proof Mago writes for a PHP# law, from its body or, for a law w
 
 A law without a body is proven by `sharp_prove`, which unfolds every definition its claim reaches. Each case of a body
 ends in `sharp_close`, which closes the case with Lean's automatic steps and the facts in scope, on the claim as it
-stands, with each definition the claim calls unfolded once, or with those definitions as `simp` rewrites. The facts
+stands, with each definition the claim calls unfolded once, or with those definitions as `simp` rewrites, and then with
+every definition they reach that does not recurse as one too. The facts
 are the law calls of the body before it, each `sharp_call%` of the theorem of the law it calls, which proves the called
 law's `when` condition first. A step that cannot close its goal reports the goal, as the law reads it, in an error that starts with `sharp-case` or `sharp-condition` and its index, then admits the goal, so
 every theorem is declared and each failure is reported once. The runner reads those errors, and Mago prints each goal
@@ -233,19 +234,24 @@ elab_rules : tactic
     unless ← closes once <||> (pure !recursive.isEmpty <&&> closes ended) do report index conditions.getElems
 
 /-- Closes the case `index` of a body with the automatic steps and the laws of the facts in scope: on the claim as the
-facts state it, else with each definition the claim calls unfolded once, else with those definitions as `simp` rewrites.
-A rewrite of a recursive definition reads a call on a value its equation matches, as `total (first :: rest)`, and keeps
-a call on any other value, as `total b`, as the facts state it. -/
+facts state it, else with each definition the claim calls unfolded once, else with those definitions as `simp` rewrites,
+else with every definition they reach that does not recurse as a `simp` rewrite too, as a law without a body reads
+them, so a case that knows `role = Owner` reads what `role.level()` computes through the methods it calls. A rewrite of
+a recursive definition reads a call on a value its equation matches, as `total (first :: rest)`, and keeps a call on any
+other value, as `total b`, as the facts state it. -/
 syntax "sharp_close " num " [" ident,* "]" : tactic
 
 elab_rules : tactic
   | `(tactic| sharp_close $index [$conditions,*]) => do
     let definitions ← definitionsIn (← getMainTarget)
+    let reaching ← (← reached (← getMainTarget)).filterM fun definition => do
+      return !definitions.contains definition && !(← isRecursiveDefinition definition)
     let laws ← lawsInScope
     let unfolded : TacticM Unit := do
       for definition in definitions do unfoldOnce definition
       auto laws
-    unless ← closes (auto laws) <||> closes unfolded <||> closes (auto (definitions ++ laws)) do
+    unless ← closes (auto laws) <||> closes unfolded <||> closes (auto (definitions ++ laws)) <||>
+        (pure !reaching.isEmpty <&&> closes (auto (definitions ++ reaching ++ laws))) do
       report index conditions.getElems
 
 /-- Proves the condition of the law the call `index` calls with the automatic steps. Each part of a condition joined by
