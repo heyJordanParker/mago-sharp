@@ -4189,19 +4189,20 @@ fn compile_proves_a_law_over_map_filter_and_count() {
     );
 }
 
-/// `App.Shared.Events.Retry`, whose `backoff()` gives a growing list of delays, with `law`.
+/// The real app's `App.Shared.Events.Retry`, an enum whose `backoff()` gives each case's growing list of delays, of 0
+/// to 9 entries, with `law`.
 fn retry(law: &str) -> String {
     format!(
-        "namespace App.Shared.Events;\n\npublic class Retry\n{{\n    public Retry(public int attempts {{ get; }}) {{ }}\n    public List<int> backoff() => [1, 2, 4, 8];\n\n    {law}\n}}\n"
+        "namespace App.Shared.Events;\n\npublic enum Retry : string\n{{\n    case None = \"none\";\n    case Fixed = \"fixed\";\n    case Linear = \"linear\";\n    case Patient = \"patient\";\n    case Exponential = \"exponential\";\n    case ExponentialRamp = \"exponential-ramp\";\n\n    public List<int> backoff() => match (this) {{\n        Retry.None => [],\n        Retry.Fixed => [5, 5, 5],\n        Retry.Linear => [10, 20, 30],\n        Retry.Patient => [1, 2, 3, 5, 8, 13, 21, 34, 55],\n        Retry.Exponential => [1, 2, 4, 8, 16, 32, 64],\n        Retry.ExponentialRamp => [30, 60, 300, 900, 1800, 3600, 7200],\n    }};\n\n    {law}\n}}\n"
     )
 }
 
 /// A `List` read `x[i]` is the element at `i`, and throws `OutOfRangeException` at an index outside the list, as the
 /// engine does, and a throw does not break a law. So a law proves through its own guards, and a law without them proves
-/// where the read is in range.
+/// where the read is in range, at an index the law leaves open, over every list an enum's method returns.
 #[test]
 fn compile_proves_a_law_over_a_list_index_read() {
-    let laws = "law backoffNeverShrinks(Retry r, int i) => i < 0 || i + 1 >= r.backoff().count() || r.backoff()[i] <= r.backoff()[i + 1];\n    law backoffWaits(Retry r, int i) => r.backoff()[i] >= 1;";
+    let laws = "law backoffNeverShrinks(Retry retry, int index) => index < 0 || index + 1 >= retry.backoff().count() || retry.backoff()[index] <= retry.backoff()[index + 1];\n    law rampNeverShrinks(int index) => index < 0 || index + 1 >= Retry.ExponentialRamp.backoff().count() || Retry.ExponentialRamp.backoff()[index] <= Retry.ExponentialRamp.backoff()[index + 1];\n    law rampStartsAtThirty(int unused) => Retry.ExponentialRamp.backoff()[0] == 30;\n    law backoffWaits(Retry retry, int index) => retry.backoff()[index] >= 1;";
     let directory = library_project(&[("app/Shared/Events/Retry.sharp", &retry(laws))]);
     let root = directory.path();
 
@@ -4211,21 +4212,22 @@ fn compile_proves_a_law_over_a_list_index_read() {
     assert!(compiled(root, "app/Shared/Events/Retry.sharp").exists());
 }
 
-/// A law an index read breaks is not proven, and the goal still to show names the elements it reads, and a `Map` read by
-/// its key is still refused.
+/// A law an index read breaks, as a ramp of delays that shrinks from 30 to 20, is not proven, and the goal still to show
+/// names the reads, and a `Map` read by its key is still refused.
 #[test]
 fn a_false_law_over_a_list_index_read_is_not_proven_and_a_map_key_read_is_refused() {
-    let directory = library_project(&[(
-        "app/Shared/Events/Retry.sharp",
-        &retry("law backoffShrinks(Retry r) => r.backoff()[0] >= r.backoff()[1];"),
-    )]);
+    let shrinking = retry(
+        "law rampNeverShrinks(int index) => index < 0 || index + 1 >= Retry.ExponentialRamp.backoff().count() || Retry.ExponentialRamp.backoff()[index] <= Retry.ExponentialRamp.backoff()[index + 1];",
+    )
+    .replace("[30, 60, 300", "[30, 20, 300");
+    let directory = library_project(&[("app/Shared/Events/Retry.sharp", &shrinking)]);
 
     let output = compile(directory.path());
 
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(
         printed(&output).contains(
-            "error[law-unproven]: law backoffShrinks is not proven\n = still to show: [1, 2, 4, 8][0] >= [1, 2, 4, 8][1]\n"
+            "error[law-unproven]: law rampNeverShrinks is not proven\n = still to show: index < 0 || index + 1 >= Retry.ExponentialRamp.backoff().count() || Retry.ExponentialRamp.backoff()[index] <= Retry.ExponentialRamp.backoff()[index + 1]\n"
         ),
         "{}",
         printed(&output)
@@ -4235,6 +4237,45 @@ fn a_false_law_over_a_list_index_read_is_not_proven_and_a_map_key_read_is_refuse
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static int limit(Map<string, int> limits) => limits[\"orders\"] ?? 0;\n\n    law limited(int unused) => Shape.limit([\"orders\": 3]) == 3;\n}\n",
         "Law limited reaches a collection in Shape.limit.",
     );
+}
+
+/// A law body's `match` whose `default` arm covers the cases the arms before it leave splits the law's proof on those
+/// arms, and the `default` arm proves for every case left.
+#[test]
+fn compile_proves_a_law_whose_body_matches_an_enum_with_a_default_arm() {
+    assert_backoff_split_on(
+        "default",
+        "retry is not Retry.None && retry is not Retry.Fixed && retry is not Retry.Linear && retry is not Retry.Patient && retry is not Retry.Exponential",
+    );
+}
+
+/// Checks that the real app's `backoffNeverShrinks`, with a body that matches `retry` on each case and then `last`,
+/// proves, and that over a ramp of delays that shrinks from 30 to 20 it is refused in the arm `when` names.
+fn assert_backoff_split_on(last: &str, when: &str) {
+    let claim =
+        "index < 0 || index + 1 >= retry.backoff().count() || retry.backoff()[index] <= retry.backoff()[index + 1]";
+    let law = format!(
+        "law backoffNeverShrinks(Retry retry, int index) => {claim}\n    {{\n        match (retry) {{\n            Retry.None => {{ return; }},\n            Retry.Fixed => {{ return; }},\n            Retry.Linear => {{ return; }},\n            Retry.Patient => {{ return; }},\n            Retry.Exponential => {{ return; }},\n            {last} => {{ return; }},\n        }}\n    }}"
+    );
+    for (ramp, proven) in [("[30, 60, 300", true), ("[30, 20, 300", false)] {
+        let source = retry(&law).replace("[30, 60, 300", ramp);
+        let directory = library_project(&[("app/Shared/Events/Retry.sharp", &source)]);
+        let root = directory.path();
+
+        let output = compile(root);
+
+        assert_eq!(output.status.success(), proven, "{ramp}: {}", printed(&output));
+        assert_eq!(compiled(root, "app/Shared/Events/Retry.sharp").exists(), proven);
+        if !proven {
+            assert!(
+                printed(&output).contains(&format!(
+                    "error[law-unproven]: law backoffNeverShrinks is not proven\n = when {when}, still to show: {claim}\n"
+                )),
+                "{}",
+                printed(&output)
+            );
+        }
+    }
 }
 
 /// Compiles `source` as `app/Shared/<class>.sharp`, in a project that installs the standard library and so the members

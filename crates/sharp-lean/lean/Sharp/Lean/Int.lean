@@ -73,10 +73,14 @@ grind_pattern toInt_bounds => x.toInt
 /-! A law's automatic steps read an `int` result as the exact `Int` it holds, so `simp` and `omega` reason about it, and
 two `int`s as equal when their `Int`s are. -/
 
-private theorem pure_ne_throw (x : int) (e : Throwable) : (pure x : M int) ≠ throw e := by
+private theorem pure_ne_throw {α : Type} (x : α) (e : Throwable) : (pure x : M α) ≠ throw e := by
   intro h
   have := congrArg ExceptT.run h
   simp [ExceptT.run_pure, ExceptT.run_throw] at this
+
+private theorem pure_injective {α : Type} {x y : α} (h : (pure y : M α) = pure x) : y = x := by
+  have := congrArg ExceptT.run h
+  simpa [ExceptT.run_pure] using this
 
 @[simp] theorem ofInt_eq_pure {i : Int} {x : int} :
     ofInt i = pure x ↔ (-9223372036854775808 ≤ i ∧ i ≤ 9223372036854775807) ∧ x.toInt = i := by
@@ -152,15 +156,45 @@ under a condition that bounds it. -/
 attribute [simp] Int.le_min Int.min_eq_left
 
 /-- A List's read `x[i]`: the element at `i`, or `OutOfRangeException` at an index outside the list, a negative one
-included, as the engine throws. A law's automatic steps read it on a list the law writes out one element at a time,
-and keep it whole on any other list. -/
+included, as the engine throws. -/
 def read {α : Type} (l : List α) (i : int) : M α := go l i.toInt
 where
   go : List α → Int → M α
     | [], _ => throw .OutOfRangeException
     | x :: rest, k => if k = 0 then pure x else go rest (k - 1)
 
-attribute [simp] read read.go
+attribute [simp] read
+
+private theorem read.go_nonneg {α : Type} {l : List α} {k : Int} {x : α} (h : read.go l k = pure x) : 0 ≤ k := by
+  induction l generalizing k with
+  | nil => exact absurd h.symm (pure_ne_throw _ _)
+  | cons y rest ih =>
+    unfold read.go at h
+    split at h
+    · omega
+    · have := ih h
+      omega
+
+/-! A law's automatic steps read a read on a list the law writes out as one fact per element: the index is that
+element's, and the value is that element. They keep a read of any other list whole. `read.go` unfolded as it is
+defined would give each element's `if` the negation of every test before it, which `simp` works through in time that
+grows fast with the list's length, past its limits at 7 elements. A value read at `k - 1` shows `k` is not `0`, so
+each fact leaves that negation out. -/
+
+@[simp] theorem read.go_nil_eq_pure {α : Type} (k : Int) (x : α) : read.go [] k = pure x ↔ False :=
+  ⟨fun h => pure_ne_throw _ _ h.symm, False.elim⟩
+
+@[simp] theorem read.go_cons_eq_pure {α : Type} (y : α) (rest : List α) (k : Int) (x : α) :
+    read.go (y :: rest) k = pure x ↔ (k = 0 ∧ y = x) ∨ read.go rest (k - 1) = pure x := by
+  rw [read.go.eq_2]
+  by_cases h : k = 0
+  · subst h
+    refine ⟨fun e => .inl ⟨rfl, pure_injective e⟩, ?_⟩
+    rintro (⟨_, rfl⟩ | e)
+    · rfl
+    · have := read.go_nonneg e
+      omega
+  · simp only [h, ite_false, false_and, false_or]
 
 /-! The standard library's `Math.max` and `Math.min` are Lean's `max` and `min` on `int`, which never leave the `int`
 range. A law's automatic steps read each as `max` and `min` of the `Int`s, which `omega` reasons about. -/

@@ -216,10 +216,21 @@ private def report (index : TSyntax `num) (conditions : Array Ident) : TacticM U
   logError m!"sharp-case {index.getNat} {goal.compress}"
   admitGoal (← getMainGoal)
 
+/-- The name of each value of the main goal whose type is an enum, as a PHP# enum or `bool` translates. -/
+private def enumsInScope : TacticM (Array Name) := do
+  (← getMainGoal).withContext do
+    let mut found := #[]
+    for declaration in ← getLCtx do
+      let .const type _ := declaration.type.getAppFn | continue
+      if !declaration.isImplementationDetail && (← isEnumType type) then found := found.push declaration.userName
+    return found
+
 /-- Proves a law without a body, whose case `index` is its whole claim: unfolds a recursive definition the claim reaches
 once, and every other one as `simp` rewrites, then runs the automatic steps. A claim over values the law writes out,
 as `Money.total([new Money(1, "EUR")])`, needs each recursion unfolded until it ends, so the steps then run with the
-recursive definitions as `simp` rewrites too. -/
+recursive definitions as `simp` rewrites too. A claim over an enum the law takes, as `retry.backoff()[index]` over
+a `Retry`, reads what each case computes, so the steps then run on each case of each enum, as a body's `match` on each
+case would. -/
 syntax "sharp_prove " num " [" ident,* "]" : tactic
 
 elab_rules : tactic
@@ -227,11 +238,18 @@ elab_rules : tactic
     let definitions ← reached (← getMainTarget)
     let recursive ← definitions.filterM fun definition => isRecursiveDefinition definition
     let laws ← lawsInScope
+    let enums ← enumsInScope
     let once : TacticM Unit := do
       for definition in recursive do unfoldOnce definition
       auto ((definitions.filter (!recursive.contains ·)) ++ laws)
     let ended : TacticM Unit := auto (definitions ++ laws)
-    unless ← closes once <||> (pure !recursive.isEmpty <&&> closes ended) do report index conditions.getElems
+    let proven : TacticM Bool := closes once <||> (pure !recursive.isEmpty <&&> closes ended)
+    let split : TacticM Unit := do
+      for enum in enums do evalTactic (← `(tactic| all_goals cases $(mkIdent enum):ident))
+      for case in ← getGoals do
+        setGoals [case]
+        unless ← proven do throwError "a case of the law is not proven"
+    unless ← proven <||> (pure !enums.isEmpty <&&> closes split) do report index conditions.getElems
 
 /-- Closes the case `index` of a body with the automatic steps and the laws of the facts in scope: on the claim as the
 facts state it, else with each definition the claim calls unfolded once, else with those definitions as `simp` rewrites,
