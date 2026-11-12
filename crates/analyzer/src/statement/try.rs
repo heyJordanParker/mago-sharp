@@ -556,6 +556,11 @@ where
                 if context.dialect.is_sharp() && built_in_generic_arity(generic.name.value).is_none() =>
             {
                 let class = word(context.resolved_names.get(&generic.name));
+                crate::utils::casing::report_sharp_class_like_in_another_case(
+                    context,
+                    class.as_bytes(),
+                    generic.name.span(),
+                );
                 let caught_type = get_type_from_hint(context, block_context, artifacts, hint);
 
                 caught.entry(class).or_insert(hint.span());
@@ -564,6 +569,7 @@ where
             }
             Hint::Identifier(identifier) => {
                 let name_bytes = context.resolved_names.get(identifier);
+                crate::utils::casing::report_sharp_class_like_in_another_case(context, name_bytes, identifier.span());
                 let name = mago_bytes::BytesDisplay(name_bytes);
                 let id = word(name_bytes);
 

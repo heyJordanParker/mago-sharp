@@ -101,6 +101,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Binary<'arena> {
                     && artifacts.get_tested_type(self.rhs).is_none()
                 {
                     let class_name = context.resolved_names.get(identifier);
+                    crate::utils::casing::report_sharp_class_like_in_another_case(
+                        context,
+                        class_name,
+                        identifier.span(),
+                    );
                     if !context.codebase.class_like_exists(class_name) {
                         report_non_existent_class_like(context, identifier.span(), word(class_name));
 

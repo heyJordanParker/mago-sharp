@@ -109,6 +109,7 @@ use crate::statement::function_like::report_undefined_bound_types;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::function_like::report_union_for_a_class_bound;
 use crate::statement::function_like::written_type;
+use crate::utils::casing::report_sharp_class_like_in_another_case;
 use crate::utils::missing_type_hints;
 use crate::utils::names::and_list;
 use crate::utils::names::article;
@@ -2231,6 +2232,9 @@ fn check_class_like_extends<'ctx, 'arena, A>(
             );
             continue;
         };
+        if report_sharp_class_like_in_another_case(context, extended_type_str, extended_type.span()) {
+            continue;
+        }
 
         let extended_name = display_class_like_name(context, extended_class_metadata.original_name);
         let extended_kind_str = extended_class_metadata.kind.as_str();
@@ -2483,6 +2487,11 @@ fn check_class_like_implements<'ctx, 'arena, A>(
     for &implemented_type in implemented_types {
         let implemented_type_str = context.resolved_names.get(&implemented_type);
         let implemented_interface_metadata = context.codebase.get_class_like(implemented_type_str);
+        if implemented_interface_metadata.is_some()
+            && report_sharp_class_like_in_another_case(context, implemented_type_str, implemented_type.span())
+        {
+            continue;
+        }
 
         if let Some(implemented_metadata) = implemented_interface_metadata {
             let implemented_name = display_class_like_name(context, implemented_metadata.original_name);
@@ -2660,6 +2669,9 @@ fn check_class_like_use<'ctx, 'arena, A>(
 
             continue;
         };
+        if report_sharp_class_like_in_another_case(context, used_type_str, used_type.span()) {
+            continue;
+        }
 
         let used_name = display_class_like_name(context, used_trait_metadata.original_name);
         let used_kind_str = used_trait_metadata.kind.as_str();

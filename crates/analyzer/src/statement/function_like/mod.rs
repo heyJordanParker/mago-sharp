@@ -107,6 +107,7 @@ use crate::statement::class_like::property::analyze_property_hook;
 use crate::statement::class_like::r#struct::report_class_held_by_key;
 use crate::statement::r#return::handle_return_value;
 use crate::statement::r#static::infer_static_local_types;
+use crate::utils::casing::report_sharp_class_like_in_another_case;
 use crate::utils::expression::get_variable_id;
 use crate::utils::int_refused_for_float;
 use crate::utils::names::display_atomic;
@@ -2252,14 +2253,24 @@ where
     }
 }
 
-/// Reports each type `type_union`, written at `span`, names that no analyzed file or stub declares.
+/// Reports each type `type_union`, written at `span`, names that no analyzed file or stub declares, and each PHP# type it
+/// names in another case than the type declares, which names nothing, spec section 24.
 pub(crate) fn report_undefined_types<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
 {
     for type_ref in type_union.get_all_child_nodes() {
-        if let TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) = type_ref {
-            report_undefined_type(context, *name, span);
+        match type_ref {
+            TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) => {
+                report_undefined_type(context, *name, span);
+            }
+            TypeRef::Atomic(TAtomic::Object(TObject::Named(named))) => {
+                report_sharp_class_like_in_another_case(context, named.get_name().as_bytes(), span);
+            }
+            TypeRef::Atomic(TAtomic::Object(TObject::Enum(enum_object))) => {
+                report_sharp_class_like_in_another_case(context, enum_object.get_name().as_bytes(), span);
+            }
+            _ => {}
         }
     }
 }

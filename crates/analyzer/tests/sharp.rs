@@ -32001,3 +32001,129 @@ function run(Order $order): int
         Some("`Demo\\Order` has no member `TOTAL`; did you mean `Total`?")
     );
 }
+
+/// Spec section 24: PHP# names are case-sensitive, so the engine finds a PHP# type only by its exact name, from any
+/// code, and a type, a `new`, a static call, a header and an import that write it in another case name nothing.
+#[test]
+fn a_type_is_reached_only_by_its_exact_name() {
+    let order = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;
+
+public class Order
+{
+    public static Order make() => new Order();
+}
+",
+    );
+    let base = (
+        "src/Demo/Base.sharp",
+        "namespace Demo;
+
+public abstract class Base
+{
+}
+",
+    );
+    let priced = (
+        "src/Demo/Priced.sharp",
+        "namespace Demo;
+
+public interface Priced
+{
+}
+",
+    );
+    let caller = (
+        "src/Demo/Caller.sharp",
+        "namespace Demo;
+
+public class Caller
+{
+    public ORDER kept(ORDER order) => order;
+
+    public Order made() => ORDER.make();
+
+    public Order built() => new ORDER();
+
+    public bool tested(Any? value) => value is ORDER;
+
+    public Class<Order> named() => typeof(ORDER);
+
+    public void caught()
+    {
+        try {
+            Order.make();
+        } catch (FAILED failure) {
+        }
+    }
+}
+",
+    );
+    let failed = (
+        "src/Demo/Failed.sharp",
+        "namespace Demo;
+
+public class Failed : Exception
+{
+}
+",
+    );
+    let rush = (
+        "src/Demo/Rush.sharp",
+        "namespace Demo;
+
+public class Rush : BASE, PRICED
+{
+}
+",
+    );
+    let shop = (
+        "src/Shop/Cart.sharp",
+        "namespace Shop;
+
+import Demo.ORDER;
+
+public class Cart
+{
+}
+",
+    );
+    let plain = (
+        "src/Demo/caller.php",
+        "<?php
+
+namespace Demo;
+
+function run(): ORDER
+{
+    return new ORDER();
+}
+",
+    );
+
+    assert_eq!(
+        messages(caller, &[order, failed]),
+        [
+            "Cannot find type `ORDER`; did you mean `Order`?",
+            "Cannot find type `ORDER`; did you mean `Order`?",
+            "Cannot find type `ORDER`; did you mean `Order`?",
+            "Cannot find type `ORDER`; did you mean `Order`?",
+            "Cannot find type `ORDER`; did you mean `Order`?",
+            "Cannot find type `ORDER`; did you mean `Order`?",
+            "Cannot find type `FAILED`; did you mean `Failed`?",
+        ]
+    );
+    assert_eq!(
+        messages(rush, &[base, priced]),
+        ["Cannot find type `BASE`; did you mean `Base`?", "Cannot find type `PRICED`; did you mean `Priced`?"]
+    );
+    assert_eq!(messages(shop, &[order]), ["Cannot find type `Demo.ORDER`; did you mean `Demo.Order`?"]);
+    assert_eq!(
+        messages(plain, &[order]),
+        [
+            "Cannot find type `Demo\\ORDER`; did you mean `Demo\\Order`?",
+            "Cannot find type `Demo\\ORDER`; did you mean `Demo\\Order`?",
+        ]
+    );
+}

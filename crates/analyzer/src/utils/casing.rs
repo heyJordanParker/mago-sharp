@@ -1,6 +1,7 @@
 use mago_allocator::Arena;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_names::scope::php_name;
+use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -14,13 +15,69 @@ use mago_word::word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::utils::names::display_class_like_name;
+
+/// Reports `used_name`, a class-like name the code writes at `span`, when it names a PHP# class-like in another case, and
+/// returns whether it reported. PHP# names are case-sensitive, spec section 24, so the engine finds a PHP# class-like
+/// only by its exact name, from any code, plain PHP included, and another case names nothing.
+pub fn report_sharp_class_like_in_another_case<A>(
+    context: &mut Context<'_, '_, A>,
+    used_name: &[u8],
+    span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    report_in_another_case(context, used_name, span, false)
+}
+
+/// Reports `used_name`, the full name a PHP# `import` line writes at `span`, as
+/// [`report_sharp_class_like_in_another_case`] reports a name code writes, by the full names, as the line writes them.
+pub fn report_sharp_import_in_another_case<A>(context: &mut Context<'_, '_, A>, used_name: &[u8], span: Span) -> bool
+where
+    A: Arena,
+{
+    report_in_another_case(context, used_name, span, true)
+}
+
+fn report_in_another_case<A>(context: &mut Context<'_, '_, A>, used_name: &[u8], span: Span, full: bool) -> bool
+where
+    A: Arena,
+{
+    let used_name = mago_bytes::trim_start_byte(used_name, b'\\');
+    let Some(metadata) = context.codebase.get_class_like(used_name) else {
+        return false;
+    };
+    if !metadata.flags.is_sharp() || metadata.original_name.as_bytes() == used_name {
+        return false;
+    }
+
+    let (written, declared) = if !context.dialect.is_sharp() {
+        (String::from_utf8_lossy(used_name).into_owned(), metadata.original_name.to_string())
+    } else if full {
+        (String::from_utf8_lossy(used_name).replace('\\', "."), metadata.original_name.to_string().replace('\\', "."))
+    } else {
+        (short_name(used_name), display_class_like_name(context, metadata.original_name).to_string())
+    };
+    context.collector.report_with_code(
+        IssueCode::NonExistentClassLike,
+        Issue::error(format!("Cannot find type `{written}`; did you mean `{declared}`?"))
+            .with_annotation(Annotation::primary(span).with_message(format!("Declared as `{declared}`.")))
+            .with_note("PHP# names are case-sensitive: code reaches a PHP# type only by the name it declares.")
+            .with_help(format!("Write `{declared}`.")),
+    );
+
+    true
+}
 
 /// Checks if the used class-like name matches the canonical casing and reports if not.
 pub fn check_class_like_casing<A>(context: &mut Context<'_, '_, A>, used_name: Word, span: Span)
 where
     A: Arena,
 {
-    if !context.settings.check_name_casing {
+    if report_sharp_class_like_in_another_case(context, used_name.as_bytes(), span)
+        || !context.settings.check_name_casing
+    {
         return;
     }
 

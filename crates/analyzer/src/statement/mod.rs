@@ -212,7 +212,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                         // writes no qualified name, so the import is where code outside an `internal` class's reach
                         // names it.
                         for item in &sequence.items {
-                            if let Some(class) = context.codebase.get_class_like(&php_name(&item.name)) {
+                            let name = php_name(&item.name);
+                            if crate::utils::casing::report_sharp_import_in_another_case(
+                                context,
+                                &name,
+                                item.name.span(),
+                            ) {
+                                continue;
+                            }
+                            if let Some(class) = context.codebase.get_class_like(&name) {
                                 check_internal_reach(context, class, None, |_| String::new(), item.name.span());
                             }
                         }
