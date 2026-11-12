@@ -88,6 +88,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::assertion::CodebasePatternNames;
 use crate::context::block::BlockContext;
+use crate::context::scope::control_action::ControlAction;
 use crate::context::scope::var_has_root;
 use crate::error::AnalysisError;
 use crate::expression::instantiation::analyze_anonymous_class_constructor;
@@ -775,7 +776,16 @@ where
             .map(|test| handled_test(test, context.arena, artifacts))
             .collect();
 
-        report_unhandled(pattern_match, first_hidden, &handled, context, block_context, artifacts);
+        // Its PHP is an `if` per arm with no `else`, which the analysis reads as running no arm for some value. A
+        // `match` statement that handles every value runs one of its arms, so it ends the block when each arm does.
+        if report_unhandled(pattern_match, first_hidden, &handled, context, block_context, artifacts)
+            && let Node::Statement(statement) = node
+        {
+            let actions = ControlAction::from_statements(vec![statement], vec![], Some(artifacts), true);
+            if actions.len() == 1 && actions.contains(ControlAction::End) {
+                block_context.flags.set_has_returned(true);
+            }
+        }
     }
 
     // Reading (g) of spec section 21: a pattern that can never match is an error, as C#'s CS8121 is. Its test is then
@@ -832,7 +842,8 @@ where
 /// Reports what a PHP# `match` without `default` leaves unhandled. Spec section 21 gives `default` to every `match` on
 /// a value that is not an enum, a sealed interface or a `List`, and makes a `match` on one handle each of its cases or
 /// lists. The value left is the value once every `handled` test is false, which Mago's reconciler narrows as it
-/// narrows the arms of PHP's `match`. `first_hidden` is the hidden variable the `match`'s PHP assigns first.
+/// narrows the arms of PHP's `match`. `first_hidden` is the hidden variable the `match`'s PHP assigns first. Returns
+/// whether the arms handle every value, when nothing is reported.
 fn report_unhandled<'ctx, 'arena, A>(
     pattern_match: &PatternMatch<'arena>,
     first_hidden: Option<Word>,
@@ -840,7 +851,8 @@ fn report_unhandled<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
-) where
+) -> bool
+where
     A: Arena,
 {
     // Each arm reads a local in its own test, never where `match` writes it, so a local's type is the variable's, and
@@ -867,7 +879,7 @@ fn report_unhandled<'ctx, 'arena, A>(
     };
     let message = match missing.as_slice() {
         _ if !is_closed => "A `match` needs a `default` arm.".to_owned(),
-        [] => return,
+        [] => return true,
         [only] => format!("This `match` misses {only}."),
         [rest @ .., last] => format!("This `match` misses {} and {last}.", rest.join(", ")),
     };
@@ -885,6 +897,8 @@ fn report_unhandled<'ctx, 'arena, A>(
             .with_note("A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, or every value of a `List`.")
             .with_help("Add an arm for each value it misses, or add `default => …` as the last arm."),
     );
+
+    false
 }
 
 /// The PHP variable the PHP of `pattern_match` tests, as `php_shape` writes it: the local the `match` names, or

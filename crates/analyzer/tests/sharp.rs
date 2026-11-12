@@ -8442,6 +8442,24 @@ fn a_match_statement_whose_arms_return_handles_the_cases_it_names() {
     );
 }
 
+/// A method that ends in a `match` statement with an arm for every case of an enum, each returning, returns on every
+/// path, and one whose `match` misses a case still needs a `return` after it.
+#[test]
+fn a_method_that_ends_in_a_match_whose_every_arm_returns_returns() {
+    let retry = (
+        "src/Demo/Retry.sharp",
+        "namespace Demo;\n\npublic enum Retry\n{\n    case None;\n    case Fixed;\n    case Linear;\n\n    public static int attempts(Retry retry)\n    {\n        match (retry) {\n            Retry.None => { return 0; },\n            Retry.Fixed => { return 3; },\n            Retry.Linear => { return 5; },\n        }\n    }\n\n    public static int missing(Retry retry)\n    {\n        match (retry) {\n            Retry.None => { return 0; },\n            Retry.Fixed => { return 3; },\n        }\n    }\n}\n",
+    );
+
+    assert_eq!(
+        written_errors(retry.1, &analyze(&PLUGIN_REGISTRY, settings(), retry, &[])),
+        [
+            "match match-not-exhaustive This `match` misses `Retry.Linear`.",
+            "missing missing-return-statement Missing return statement in method `Retry.missing`",
+        ]
+    );
+}
+
 /// Only the last arm of a `match` takes what the arms before it leave, as `default` does. An arm before it that is
 /// always true leaves nothing for the arms after it.
 #[test]
