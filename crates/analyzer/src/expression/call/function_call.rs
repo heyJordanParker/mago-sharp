@@ -498,7 +498,7 @@ where
     A: Arena,
 {
     let class = block_context.scope.get_class_like()?;
-    if let Some(law) = class.laws.get(&ascii_lowercase_word(name)) {
+    if let Some(law) = class.laws.get(&class.method_key(name)) {
         return Some(if block_context.flags.inside_law_body() {
             format!(
                 "Write `{}()`: a static method reaches the members of its class through the class name.",
@@ -508,7 +508,11 @@ where
             uncallable_law(context, class, law, law.span).message
         });
     }
-    let method = context.codebase.get_method(class.name.as_bytes(), name)?;
+    // A name in another case names the method too, since the message writes the call as declared.
+    let method = context
+        .codebase
+        .get_method(class.name.as_bytes(), name)
+        .or_else(|| context.codebase.get_method_in_another_case(class.name.as_bytes(), name))?;
 
     Some(if block_context.scope.is_static() {
         format!(

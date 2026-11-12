@@ -1,7 +1,6 @@
 use mago_allocator::Arena;
 use mago_codex::context::ScopeContext;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 use mago_word::concat_word;
 use mago_word::word;
 
@@ -114,7 +113,7 @@ fn check_to_string<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadat
 where
     A: Arena,
 {
-    let Some(method) = context.codebase.get_method(class.name.as_bytes(), b"tostring") else {
+    let Some(method) = context.codebase.get_method(class.name.as_bytes(), b"toString") else {
         unreachable!("the codex scans each method the analyzer analyzes");
     };
     let Some(fault) = text_method_fault(method) else {
@@ -267,7 +266,7 @@ fn check_hidden_member<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMet
 where
     A: Arena,
 {
-    let extension = MethodIdentifier::new(class.name, ascii_lowercase_word(member.name));
+    let extension = MethodIdentifier::new(class.name, class.method_key(member.name));
     let Some(receiver) = context
         .codebase
         .get_method_by_id(&extension)
@@ -348,15 +347,15 @@ where
     };
 
     let method_name = word(name);
-    let lowercase_method_name = ascii_lowercase_word(name);
+    let method_name_key = class_like_metadata.method_key(name);
     if context.settings.diff
-        && context.codebase.safe_symbol_members.contains(&(class_like_metadata.name, lowercase_method_name))
+        && context.codebase.safe_symbol_members.contains(&(class_like_metadata.name, method_name_key))
     {
         return Ok(None);
     }
 
     let Some(method_metadata) =
-        context.codebase.get_method_by_id(&MethodIdentifier::new(class_like_metadata.name, lowercase_method_name))
+        context.codebase.get_method_by_id(&MethodIdentifier::new(class_like_metadata.name, method_name_key))
     else {
         tracing::error!(
             "Failed to find method metadata for `{}` in class `{}`.",
@@ -449,13 +448,13 @@ where
             None,
         )?;
 
-        let method_key = (class_like_metadata.name, lowercase_method_name);
+        let method_key = (class_like_metadata.name, method_name_key);
 
         if context.dialect.is_sharp() {
             effects::summary::record(
                 context,
                 artifacts,
-                Body::Method(class_like_metadata.name, lowercase_method_name),
+                Body::Method(class_like_metadata.name, method_name_key),
                 member,
                 method.parameter_list.parameters.iter().map(|parameter| parameter.variable.span).collect(),
                 initializer,

@@ -19,7 +19,6 @@ use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Property;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
@@ -101,8 +100,8 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             continue;
         }
 
-        let lowercase_name = ascii_lowercase_word(php_method_name(method));
-        let Some(parent_class_names) = metadata.overridden_method_ids.get(&lowercase_name) else {
+        let method_key = metadata.method_key(php_method_name(method));
+        let Some(parent_class_names) = metadata.overridden_method_ids.get(&method_key) else {
             if metadata.has_incomplete_hierarchy() {
                 continue;
             }

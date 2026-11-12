@@ -1781,13 +1781,13 @@ where
                         match adaptation {
                             TraitUseAdaptation::Precedence(_) => {}
                             TraitUseAdaptation::Alias(adaptation) => {
-                                let method_name = ascii_lowercase_word(match &adaptation.method_reference {
+                                let method_name = class_like_metadata.method_key(match &adaptation.method_reference {
                                     TraitUseMethodReference::Identifier(local_identifier) => local_identifier.value,
                                     TraitUseMethodReference::Absolute(reference) => reference.method_name.value,
                                 });
 
                                 let method_alias =
-                                    adaptation.alias.as_ref().map(|alias| ascii_lowercase_word(alias.value));
+                                    adaptation.alias.as_ref().map(|alias| class_like_metadata.method_key(alias.value));
 
                                 if let Some(alias) = method_alias {
                                     class_like_metadata.add_trait_alias(method_name, alias);
@@ -2002,9 +2002,10 @@ fn add_method(
     codebase: &mut CodebaseMetadata,
     name: &[u8],
     class_like_metadata: &mut ClassLikeMetadata,
-    function_like_metadata: FunctionLikeMetadata,
+    mut function_like_metadata: FunctionLikeMetadata,
 ) {
-    let name = ascii_lowercase_word(name);
+    let name = class_like_metadata.method_key(name);
+    function_like_metadata.name = name;
     let method_id = (class_like_metadata.name, name);
 
     let method_identifier = MethodIdentifier::new(class_like_metadata.name, name);

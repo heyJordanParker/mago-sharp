@@ -809,7 +809,7 @@ impl<'analysis> Types<'analysis> {
         }
         let mut effects: Vec<String> = self
             .effects
-            .function_effects(function)?
+            .function_effects(self.codebase, function)?
             .into_iter()
             .map(|effect| class_text(effect, self.codebase))
             .collect();

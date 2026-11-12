@@ -73,6 +73,13 @@ pub struct ClassLikeMetadata {
     /// `fromJson` of `new TItem.fromJson(json)`: each with the entity that declares the type parameter and its name.
     #[cfg_attr(feature = "serde", serde(default))]
     pub type_parameter_named_constructors: Vec<(GenericParent, Word, Word)>,
+    /// Whether the class-like or an ancestor of it is PHP#'s, so it keys its methods by their exact names, as the
+    /// engine's `SHARP_CLASS_EXACT_NAMES` does, spec section 24: `total` and `Total` are two methods, and each is found
+    /// only as declared. Every other class-like keys a method by its lowercase name, as PHP does. The scanner sets it
+    /// for a PHP# class-like, and the populator for one that inherits it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub exact_names: bool,
+    /// The key of each method the class-like declares, as `exact_names` says.
     pub methods: WordSet,
     pub pseudo_methods: WordSet,
     pub static_pseudo_methods: WordSet,
@@ -231,6 +238,7 @@ impl ClassLikeMetadata {
             invalid_dependencies: WordSet::default(),
             span,
             name_span,
+            exact_names: flags.is_sharp(),
             methods: WordSet::default(),
             pseudo_methods: WordSet::default(),
             static_pseudo_methods: WordSet::default(),
@@ -432,6 +440,14 @@ impl ClassLikeMetadata {
         if !paths.contains(&parameters) {
             paths.push(parameters);
         }
+    }
+
+    /// The key the class-like's method maps hold the method `name` under: `name` as written when it has
+    /// `exact_names`, and its lowercase otherwise, as PHP folds a method name's case.
+    #[inline]
+    #[must_use]
+    pub fn method_key(&self, name: &[u8]) -> Word {
+        if self.exact_names { mago_word::word(name) } else { mago_word::ascii_lowercase_word(name) }
     }
 
     /// Adds or updates the declaring method identifier for a method name.

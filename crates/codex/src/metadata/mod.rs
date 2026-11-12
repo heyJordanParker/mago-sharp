@@ -302,6 +302,15 @@ impl CodebaseMetadata {
         self.function_likes.get(&(*actual, method)).map(|metadata| &**metadata)
     }
 
+    /// The key the class-like `class`, by its lowercase name, holds the method `method` under, as
+    /// [`ClassLikeMetadata::method_key`] says: the exact name for one with `exact_names`, and the lowercase name
+    /// otherwise, an unknown class-like's included.
+    #[inline]
+    #[must_use]
+    pub fn method_key(&self, class: Word, method: &[u8]) -> Word {
+        self.get_class_like_by_word(class).map_or_else(|| ascii_lowercase_word(method), |meta| meta.method_key(method))
+    }
+
     /// Checks if a class exists in the codebase (case-insensitive).
     ///
     /// # Examples
@@ -378,8 +387,8 @@ impl CodebaseMetadata {
     #[must_use]
     pub fn method_identifier_exists(&self, method_id: &MethodIdentifier) -> bool {
         let lowercase_class = ascii_lowercase_word(method_id.get_class_name().as_bytes());
-        let lowercase_method = ascii_lowercase_word(method_id.get_method_name().as_bytes());
-        self.get_method_by_words(lowercase_class, lowercase_method).is_some()
+        let method_key = self.method_key(lowercase_class, method_id.get_method_name().as_bytes());
+        self.get_method_by_words(lowercase_class, method_key).is_some()
     }
 
     /// Checks if a global function exists in the codebase (case-insensitive).
@@ -400,14 +409,14 @@ impl CodebaseMetadata {
         self.constants.contains_key(&lowercase_name)
     }
 
-    /// Checks if a method exists on a class-like, including inherited methods (case-insensitive).
+    /// Checks if a method exists on a class-like, including inherited methods (case-insensitive, and exact for a
+    /// class-like with `exact_names`).
     #[inline]
     #[must_use]
     pub fn method_exists(&self, class: &[u8], method: &[u8]) -> bool {
         let lowercase_class = ascii_lowercase_word(class);
-        let lowercase_method = ascii_lowercase_word(method);
         self.get_class_like_by_word(lowercase_class)
-            .is_some_and(|meta| meta.appearing_method_ids.contains_key(&lowercase_method))
+            .is_some_and(|meta| meta.appearing_method_ids.contains_key(&meta.method_key(method)))
     }
 
     /// Checks if a property exists on a class-like, including inherited properties.
@@ -496,13 +505,13 @@ impl CodebaseMetadata {
         self.function_likes.get(&identifier).map(|metadata| &**metadata)
     }
 
-    /// Retrieves metadata for a method (case-insensitive for both class and method names).
+    /// Retrieves metadata for a method (case-insensitive for both class and method names, and exact for the method of
+    /// a class-like with `exact_names`).
     #[inline]
     #[must_use]
     pub fn get_method(&self, class: &[u8], method: &[u8]) -> Option<&FunctionLikeMetadata> {
         let lowercase_class = ascii_lowercase_word(class);
-        let lowercase_method = ascii_lowercase_word(method);
-        self.get_method_by_words(lowercase_class, lowercase_method)
+        self.get_method_by_words(lowercase_class, self.method_key(lowercase_class, method))
     }
 
     /// Retrieves metadata for a closure or arrow function by its synthetic
@@ -523,13 +532,26 @@ impl CodebaseMetadata {
         self.get_closure(&name)
     }
 
+    /// The method `class` declares or inherits whose name differs from `method` only in case, for the error a call of
+    /// `method` gets on a class-like with `exact_names`, which finds a method only as declared, spec section 24. Of
+    /// twins, as `total` and `Total`, the one whose key sorts first.
+    #[must_use]
+    pub fn get_method_in_another_case(&self, class: &[u8], method: &[u8]) -> Option<&FunctionLikeMetadata> {
+        let class_meta = self.get_class_like(class).filter(|class_meta| class_meta.exact_names)?;
+        let (_, id) = class_meta
+            .appearing_method_ids
+            .iter()
+            .filter(|(key, _)| key.as_bytes() != method && key.as_bytes().eq_ignore_ascii_case(method))
+            .min_by_key(|(key, _)| key.as_bytes())?;
+
+        self.get_method_by_id(id)
+    }
+
     /// Retrieves method metadata by `MethodIdentifier`.
     #[inline]
     #[must_use]
     pub fn get_method_by_id(&self, method_id: &MethodIdentifier) -> Option<&FunctionLikeMetadata> {
-        let lowercase_class = ascii_lowercase_word(method_id.get_class_name().as_bytes());
-        let lowercase_method = ascii_lowercase_word(method_id.get_method_name().as_bytes());
-        self.get_method_by_words(lowercase_class, lowercase_method)
+        self.get_method(method_id.get_class_name().as_bytes(), method_id.get_method_name().as_bytes())
     }
 
     /// Retrieves the declaring method metadata, following the inheritance chain.
@@ -562,7 +584,7 @@ impl CodebaseMetadata {
     /// against no other method of a trait it uses.
     #[must_use]
     pub fn get_overridden_php_result(&self, class_like: &ClassLikeMetadata, method: &[u8]) -> Option<&TypeMetadata> {
-        class_like.overridden_method_ids.get(&ascii_lowercase_word(method)).and_then(|overridden| {
+        class_like.overridden_method_ids.get(&class_like.method_key(method)).and_then(|overridden| {
             overridden
                 .values()
                 .filter_map(|parent| {
@@ -1144,7 +1166,6 @@ impl CodebaseMetadata {
             }
         }
 
-        let method_name = ascii_lowercase_word(name);
         let property_name = concat_word!(b"$", name);
 
         let mut classes: Vec<Word> = receiver
@@ -1157,6 +1178,7 @@ impl CodebaseMetadata {
             })
             .filter_map(|name| self.get_class_like(name.as_bytes()))
             .filter_map(|class| {
+                let method_name = class.method_key(name);
                 class
                     .declaring_method_ids
                     .get(&method_name)
@@ -1193,24 +1215,20 @@ impl CodebaseMetadata {
     #[inline]
     #[must_use]
     pub fn get_declaring_method_class(&self, class: &[u8], method: &[u8]) -> Option<Word> {
-        let lowercase_class = ascii_lowercase_word(class);
-        let lowercase_method = ascii_lowercase_word(method);
+        let class_meta = self.get_class_like_by_word(ascii_lowercase_word(class))?;
 
-        self.get_class_like_by_word(lowercase_class)?
-            .declaring_method_ids
-            .get(&lowercase_method)
-            .map(|method_id| method_id.get_class_name())
+        class_meta.declaring_method_ids.get(&class_meta.method_key(method)).map(|method_id| method_id.get_class_name())
     }
 
     /// Gets the declaring method identifier for a method.
     #[must_use]
     pub fn get_declaring_method_identifier(&self, method_id: &MethodIdentifier) -> MethodIdentifier {
         let lowercase_class = ascii_lowercase_word(method_id.get_class_name().as_bytes());
-        let lowercase_method = ascii_lowercase_word(method_id.get_method_name().as_bytes());
 
         let Some(class_meta) = self.get_class_like_by_word(lowercase_class) else {
             return *method_id;
         };
+        let lowercase_method = class_meta.method_key(method_id.get_method_name().as_bytes());
 
         if let Some(declaring_method_id) = class_meta.declaring_method_ids.get(&lowercase_method) {
             return *declaring_method_id;
@@ -1246,19 +1264,15 @@ impl CodebaseMetadata {
     #[inline]
     #[must_use]
     pub fn method_is_overriding(&self, class: &[u8], method: &[u8]) -> bool {
-        let lowercase_class = ascii_lowercase_word(class);
-        let lowercase_method = ascii_lowercase_word(method);
-        self.get_class_like_by_word(lowercase_class)
-            .is_some_and(|meta| meta.overridden_method_ids.contains_key(&lowercase_method))
+        self.get_class_like_by_word(ascii_lowercase_word(class))
+            .is_some_and(|meta| meta.overridden_method_ids.contains_key(&meta.method_key(method)))
     }
 
     /// Checks if a method is abstract.
     #[inline]
     #[must_use]
     pub fn method_is_abstract(&self, class: &[u8], method: &[u8]) -> bool {
-        let lowercase_class = ascii_lowercase_word(class);
-        let lowercase_method = ascii_lowercase_word(method);
-        self.get_method_by_words(lowercase_class, lowercase_method)
+        self.get_method(class, method)
             .and_then(|meta| meta.method_metadata.as_ref())
             .is_some_and(|method_meta| method_meta.is_abstract)
     }
@@ -1267,9 +1281,7 @@ impl CodebaseMetadata {
     #[inline]
     #[must_use]
     pub fn method_is_final(&self, class: &[u8], method: &[u8]) -> bool {
-        let lowercase_class = ascii_lowercase_word(class);
-        let lowercase_method = ascii_lowercase_word(method);
-        self.get_method_by_words(lowercase_class, lowercase_method)
+        self.get_method(class, method)
             .and_then(|meta| meta.method_metadata.as_ref())
             .is_some_and(|method_meta| method_meta.is_final)
     }
@@ -1282,22 +1294,19 @@ impl CodebaseMetadata {
     #[inline]
     #[must_use]
     pub fn get_method_visibility(&self, class: &[u8], method: &[u8]) -> Option<Visibility> {
-        let lowercase_class = ascii_lowercase_word(class);
-        let lowercase_method = ascii_lowercase_word(method);
+        let class_meta = self.get_class_like_by_word(ascii_lowercase_word(class))?;
+        let method_key = class_meta.method_key(method);
 
         // First check if there's a trait visibility override for this method
-        if let Some(class_meta) = self.get_class_like_by_word(lowercase_class)
-            && let Some(overridden_visibility) = class_meta.trait_visibility_map.get(&lowercase_method)
-        {
+        if let Some(overridden_visibility) = class_meta.trait_visibility_map.get(&method_key) {
             return Some(*overridden_visibility);
         }
 
-        // Fall back to the method's declared visibility
-        let declaring_class = self.get_declaring_method_class(class, method)?;
-        let identifier = (declaring_class, lowercase_method);
+        // Fall back to the method's declared visibility, by the key its declaring class gives it
+        let declaring = class_meta.declaring_method_ids.get(&method_key)?;
 
         self.function_likes
-            .get(&identifier)
+            .get(&declaring.get_key())
             .and_then(|meta| meta.method_metadata.as_ref())
             .map(|method_meta| method_meta.visibility)
     }

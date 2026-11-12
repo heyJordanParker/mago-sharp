@@ -260,7 +260,7 @@ fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: &[u8]) ->
     } else if declaring.flags.is_sharp() && metadata.method_metadata.as_ref().is_some_and(|m| m.is_abstract) {
         Runs::Foreign { callee, effects: metadata.uses.iter().map(|effect| Effect::Foreign(*effect)).collect() }
     } else if declaring.flags.is_sharp() {
-        Runs::Body(Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), lowercase_method))
+        Runs::Body(Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), declaring.method_key(method)))
     } else if is_prelude_stub(declaring_class) {
         Runs::Foreign { callee, effects: Vec::new() }
     } else {
@@ -926,7 +926,8 @@ where
                 continue;
             };
 
-            let callee = Body::Method(ascii_lowercase_word(class.as_bytes()), ascii_lowercase_word(method.as_bytes()));
+            let class = ascii_lowercase_word(class.as_bytes());
+            let callee = Body::Method(class, self.codebase().method_key(class, method.as_bytes()));
             let arguments = operands.iter().map(|operand| self.roots(operand)).collect();
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
         }
@@ -981,10 +982,8 @@ where
                 return;
             }
 
-            let callee = Body::Method(
-                ascii_lowercase_word(declaring_class.as_bytes()),
-                ascii_lowercase_word(method_name.as_bytes()),
-            );
+            let declaring_class = ascii_lowercase_word(declaring_class.as_bytes());
+            let callee = Body::Method(declaring_class, codebase.method_key(declaring_class, method_name.as_bytes()));
             self.summary.calls.push(Call { callee, span, receiver: receiver_roots, arguments: roots });
 
             return;
@@ -1074,7 +1073,7 @@ where
 
         let span = instantiation.span();
         let (declaring, constructor) = match &instantiation.constructor {
-            Some(constructor) => (class, ascii_lowercase_word(constructor.name.value)),
+            Some(constructor) => (class, class.method_key(constructor.name.value)),
             None => {
                 let constructor = word(b"__construct");
                 let declaring = codebase

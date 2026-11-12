@@ -329,7 +329,7 @@ impl Scanner {
         let mut class_like_metadata =
             self.codebase.class_likes.remove(&current_class).expect("Expected class-like metadata to be present");
 
-        let name = ascii_lowercase_word(method.name);
+        let name = class_like_metadata.method_key(method.name);
 
         if class_like_metadata.methods.contains(&name) {
             if class_like_metadata.pseudo_methods.contains(&name)
@@ -506,7 +506,8 @@ impl Scanner {
                 continue;
             }
 
-            let method_name = ascii_lowercase_word(method.name.value);
+            // The interface and its trait are PHP#'s, so each keys the method by its exact name.
+            let method_name = defaults.method_key(method.name.value);
             let Some(signature) = self.codebase.function_likes.get(&(interface_name, method_name)) else {
                 continue;
             };
@@ -556,8 +557,8 @@ impl Scanner {
         };
         self.register_method(&parts, context);
 
-        let name = ascii_lowercase_word(parts.name);
         if let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
+            && let name = class.method_key(parts.name)
             && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, name))
             && method.span == parts.span
         {
@@ -1122,7 +1123,7 @@ where
         self.register_method(&parts, context);
 
         if let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
-            && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, ascii_lowercase_word(parts.name)))
+            && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, class.method_key(parts.name)))
         {
             method.flags |= MetadataFlags::OPERATOR;
             // `operator ==` runs as `op_Equality(?Money $a, ?Money $b)`, which lifts `null` itself, so the PHP method
@@ -1156,7 +1157,7 @@ where
         self.register_method(&parts, context);
 
         if let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
-            && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, ascii_lowercase_word(parts.name)))
+            && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, class.method_key(parts.name)))
             && let Some(method_metadata) = &mut method.method_metadata
         {
             method_metadata.is_static = true;

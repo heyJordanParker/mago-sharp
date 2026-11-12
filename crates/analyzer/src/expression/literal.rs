@@ -21,7 +21,7 @@ use crate::error::AnalysisError;
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Literal<'arena> {
     fn analyze<'ctx, A>(
         &'ast self,
-        _context: &mut Context<'ctx, 'arena, A>,
+        context: &mut Context<'ctx, 'arena, A>,
         block_context: &mut BlockContext<'ctx>,
         artifacts: &mut AnalysisArtifacts,
     ) -> Result<(), AnalysisError>
@@ -35,9 +35,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Literal<'arena> {
             let class_part = &value[..separator_idx];
             let method_part = &value[separator_idx + 2..];
             if !class_part.is_empty() && !method_part.is_empty() && memchr::memmem::find(method_part, b"::").is_none() {
+                let class_part = ascii_lowercase_word(class_part);
                 artifacts.symbol_references.add_reference_to_class_member(
                     &block_context.scope,
-                    (ascii_lowercase_word(class_part), ascii_lowercase_word(method_part)),
+                    (class_part, context.codebase.method_key(class_part, method_part)),
                     false,
                 );
             }

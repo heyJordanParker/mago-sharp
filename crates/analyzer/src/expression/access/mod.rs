@@ -27,7 +27,6 @@ use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 use mago_word::concat_word;
 use mago_word::word;
 
@@ -584,7 +583,7 @@ fn record_class_type_arguments<A>(
     let Some(type_arguments) = statics_type_arguments(context, block_context, artifacts, class_expression) else {
         return;
     };
-    let method = MethodIdentifier::new(class, ascii_lowercase_word(name.value));
+    let method = MethodIdentifier::new(class, word(name.value));
     let declaring_class = context.codebase.get_declaring_method_identifier(&method).get_class_name();
     let Some(class_type_arguments) =
         static_member_type_arguments(context, class, declaring_class, Some(&type_arguments))

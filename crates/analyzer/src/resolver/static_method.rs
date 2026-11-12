@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use mago_codex::defaults_trait_name;
@@ -463,12 +462,14 @@ where
         && defining_class_metadata.kind.is_interface()
         && let Some(defaults) =
             context.codebase.get_trait(defaults_trait_name(defining_class_metadata.original_name.as_bytes()).as_bytes())
-        && defaults.declaring_method_ids.contains_key(&ascii_lowercase_word(method_name.as_bytes()))
+        && defaults.declaring_method_ids.contains_key(&defaults.method_key(method_name.as_bytes()))
     {
         defaults
     } else {
         defining_class_metadata
     };
+    // As the class keys it, see `get_method_candidates_from_object`.
+    let method_name = defining_class_metadata.method_key(method_name.as_bytes());
     let method_id = MethodIdentifier::new(defining_class_metadata.original_name, method_name);
     let declaring_method_id = context.codebase.get_declaring_method_identifier(&method_id);
     let (declaring_method_id, function_like) = match context.codebase.get_method_by_id(&declaring_method_id) {
@@ -727,14 +728,14 @@ fn has_real_ancestor_method<'ctx, A>(
 where
     A: Arena,
 {
-    let method_name_lc = ascii_lowercase_word(method_name.as_bytes());
-
     class_metadata.all_parent_classes.iter().chain(class_metadata.used_traits.iter()).any(|ancestor_name| {
         context.codebase.get_class_like(ancestor_name.as_bytes()).is_some_and(|ancestor| {
-            ancestor.declaring_method_ids.get(&method_name_lc).is_some_and(|declaring_id| {
-                context.codebase.get_method_by_id(declaring_id).is_some_and(|m| !m.flags.is_magic_method())
-                    && is_method_visible(context, block_context, ancestor_name.as_bytes(), method_name_lc.as_bytes())
-            })
+            ancestor.declaring_method_ids.get(&ancestor.method_key(method_name.as_bytes())).is_some_and(
+                |declaring_id| {
+                    context.codebase.get_method_by_id(declaring_id).is_some_and(|m| !m.flags.is_magic_method())
+                        && is_method_visible(context, block_context, ancestor_name.as_bytes(), method_name.as_bytes())
+                },
+            )
         })
     })
 }

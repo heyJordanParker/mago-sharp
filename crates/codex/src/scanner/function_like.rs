@@ -112,7 +112,7 @@ where
     let verdict = evaluate_version_attributes(method.attribute_lists, context, context.php_version);
 
     let method_name_str = method.name;
-    let lookup_name = ascii_lowercase_word(method_name_str);
+    let lookup_name = class_like_metadata.method_key(method_name_str);
     let display_name = word(method_name_str);
 
     let mut metadata = FunctionLikeMetadata::new(FunctionLikeKind::Method, lookup_name, display_name, span, flags);
@@ -292,7 +292,7 @@ where
 {
     let mut metadata = FunctionLikeMetadata::new(
         FunctionLikeKind::Method,
-        ascii_lowercase_word(law.name.value),
+        class_like_metadata.method_key(law.name.value),
         word(law.name.value),
         law.span(),
         MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP,

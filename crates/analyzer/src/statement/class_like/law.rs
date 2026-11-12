@@ -28,7 +28,6 @@ use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::Statement;
 use mago_word::WordMap;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
@@ -75,8 +74,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
             unreachable!("a class-like or a module analyzes its laws in its own scope");
         };
 
-        let lowercase_law_name = ascii_lowercase_word(self.name.value);
-        let Some(law_metadata) = class_like_metadata.laws.get(&lowercase_law_name) else {
+        let law_key = class_like_metadata.method_key(self.name.value);
+        let Some(law_metadata) = class_like_metadata.laws.get(&law_key) else {
             unreachable!("the codex scans each law the analyzer analyzes");
         };
 
@@ -85,7 +84,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
             return Ok(());
         }
 
-        let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, lowercase_law_name)));
+        let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, law_key)));
         scope.set_class_like(Some(class_like_metadata));
         scope.set_function_like(Some(law_metadata));
         scope.set_static(true);
@@ -122,7 +121,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
         effects::summary::record(
             context,
             artifacts,
-            Body::Method(class_like_metadata.name, lowercase_law_name),
+            Body::Method(class_like_metadata.name, law_key),
             word(self.name.value),
             self.parameter_list.parameters.iter().map(|parameter| parameter.variable.span).collect(),
             None,
@@ -167,7 +166,7 @@ where
     let class = context.resolved_names.static_call_class(call)?;
     let class = context.codebase.get_class_like(context.resolved_names.get(&class.name))?;
 
-    Some((class, class.laws.get(&ascii_lowercase_word(name.value))?))
+    Some((class, class.laws.get(&class.method_key(name.value))?))
 }
 
 /// Whether `call` is a bare call of a law of `class`, which a law's body writes through the class name, as it writes a
@@ -181,7 +180,7 @@ where
     };
 
     !matches!(context.resolved_names.binding(name), Some(Binding::Local(_) | Binding::This))
-        && class.laws.contains_key(&ascii_lowercase_word(name.value()))
+        && class.laws.contains_key(&class.method_key(name.value()))
 }
 
 /// The call a statement of a law's body is, when it calls a law.

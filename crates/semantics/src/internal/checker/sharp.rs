@@ -2720,7 +2720,7 @@ fn is_slice_method(method: &Method, program: &Program) -> Result<(), Box<Issue>>
             "A method is written `public int total()`, and the constructor `public Report()`.".to_owned(),
         )
     } else if method.return_type_hint.is_some()
-        && let Some(class_name) = class_name.filter(|class_name| class_name.eq_ignore_ascii_case(method.name.value))
+        && let Some(class_name) = class_name.filter(|class_name| *class_name == method.name.value)
     {
         let class_name = BytesDisplay(class_name);
         refusal(

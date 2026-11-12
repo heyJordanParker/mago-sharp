@@ -357,7 +357,8 @@ where
         }
 
         if let Some(name) = resolved_selector.name() {
-            method_names.push(ascii_lowercase_word(name.as_bytes()));
+            // As written: each receiver's class keys it, see `get_method_candidates_from_object`.
+            method_names.push(word(name.as_bytes()));
         } else {
             result.has_invalid_target = true;
         }
@@ -1168,6 +1169,9 @@ where
         return candidates;
     };
 
+    // The call's name as the class keys it: as written for a class with `exact_names`, so another case of it reaches
+    // nothing, spec section 24, and in lowercase for any other.
+    let method_name = class_metadata.method_key(method_name.as_bytes());
     let mut method_id = MethodIdentifier::new(class_metadata.original_name, method_name);
     if !context.codebase.method_identifier_exists(&method_id) {
         method_id = context.codebase.get_declaring_method_identifier(&method_id);
@@ -1204,13 +1208,11 @@ where
         }
 
         if function_like_metadata.flags.is_magic_method() {
-            let lowercase_method = ascii_lowercase_word(method_name.as_bytes());
-            let is_pseudo = class_metadata.pseudo_methods.contains(&lowercase_method)
+            let is_pseudo = class_metadata.pseudo_methods.contains(&method_name)
                 || class_metadata.all_parent_classes.iter().any(|parent_name| {
-                    context
-                        .codebase
-                        .get_class_like(parent_name.as_bytes())
-                        .is_some_and(|parent| parent.pseudo_methods.contains(&lowercase_method))
+                    context.codebase.get_class_like(parent_name.as_bytes()).is_some_and(|parent| {
+                        parent.pseudo_methods.contains(&parent.method_key(method_name.as_bytes()))
+                    })
                 });
 
             let mut is_inherited = false;
@@ -1218,8 +1220,9 @@ where
             if is_pseudo {
                 for parent_class_name in &class_metadata.all_parent_classes {
                     if let Some(parent_metadata) = context.codebase.get_class_like(parent_class_name.as_bytes())
-                        && parent_metadata.methods.contains(&lowercase_method)
-                        && !parent_metadata.pseudo_methods.contains(&lowercase_method)
+                        && let parent_key = parent_metadata.method_key(method_name.as_bytes())
+                        && parent_metadata.methods.contains(&parent_key)
+                        && !parent_metadata.pseudo_methods.contains(&parent_key)
                     {
                         is_inherited = true;
                         break;
@@ -1427,11 +1430,13 @@ pub(crate) fn untyped_implementations(
     if method.flags.is_sharp() || method.return_type_declaration_metadata.is_some() {
         return Vec::new();
     }
-    let name = ascii_lowercase_word(method.name.as_bytes());
     let mut members: Vec<MethodIdentifier> = class
         .all_parent_interfaces
         .iter()
-        .filter_map(|interface| codebase.get_class_like(interface.as_bytes())?.declaring_method_ids.get(&name).copied())
+        .filter_map(|interface| {
+            let interface = codebase.get_class_like(interface.as_bytes())?;
+            interface.declaring_method_ids.get(&interface.method_key(method.original_name.as_bytes())).copied()
+        })
         .filter(|member| {
             codebase.get_class_like(member.get_class_name().as_bytes()).is_some_and(|interface| {
                 codebase.get_method_by_id(member).is_some_and(|member| interface.checks_results_at_call(member))
@@ -1799,7 +1804,7 @@ fn report_non_existent_collection_member<A>(
     let collection = display_type(context, parts);
     // A member of the kind's collections of narrower elements, as a `List<int>`'s `max()`, names the elements it needs.
     let codebase = context.codebase;
-    let needed = codebase.extensions.get(&ascii_lowercase_word(method_name.as_bytes())).and_then(|members| {
+    let needed = codebase.extensions.get(&method_name).and_then(|members| {
         members.iter().find_map(|(_, member)| {
             let metadata = codebase.get_method_by_id(member)?;
             let array = metadata.parameters.first()?.get_type_metadata()?.type_union.get_single_array()?;
@@ -1982,7 +1987,7 @@ pub(crate) fn report_non_existent_method<A>(
     // Spec section 28: a law is checked and never runs, so the class keeps it apart from its methods, and only a law's
     // call statement in a law's body calls it.
     if let Some(class) = context.codebase.get_class_like(classname.as_bytes())
-        && let Some(law) = class.laws.get(&ascii_lowercase_word(method_name.as_bytes()))
+        && let Some(law) = class.laws.get(&class.method_key(method_name.as_bytes()))
     {
         context
             .collector
@@ -1995,6 +2000,25 @@ pub(crate) fn report_non_existent_method<A>(
     if !context.codebase.class_like_exists(classname.as_bytes())
         && report_unknown_sharp_class(context, classname.as_bytes(), obj_span)
     {
+        return;
+    }
+
+    // Spec section 24: a class with exact names finds a method only as declared, so a call in another case names the
+    // method it meant, as the engine's `Error` does.
+    if let Some(declared) = context
+        .codebase
+        .get_method_in_another_case(classname.as_bytes(), method_name.as_bytes())
+        .map(|method| method.original_name)
+    {
+        let class = display_class_like_name(context, classname);
+        context.collector.report_with_code(
+            IssueCode::NonExistentMethod,
+            Issue::error(format!("`{class}` has no member `{method_name}`; did you mean `{declared}`?"))
+                .with_annotation(Annotation::primary(selector_span).with_message(format!("Declared as `{declared}`.")))
+                .with_note("PHP# names are case-sensitive: code reaches a method only by the name it declares.")
+                .with_help(format!("Write `{declared}`.")),
+        );
+
         return;
     }
 

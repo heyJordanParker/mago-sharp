@@ -117,13 +117,13 @@ where
         if method_ident.value.eq_ignore_ascii_case(b"__construct") {
             block_context.flags.set_calls_parent_constructor(true);
         } else {
-            let method_name = mago_word::ascii_lowercase_word(method_ident.value);
             let parent_meta = block_context
                 .scope
                 .get_class_like()
                 .and_then(|m| m.direct_parent_class)
                 .and_then(|p| context.codebase.get_class_like(p.as_bytes()));
             if let Some(parent_meta) = parent_meta
+                && let method_name = parent_meta.method_key(method_ident.value)
                 && context.is_class_initializer_for(parent_meta, method_name)
             {
                 block_context.calls_parent_initializer = Some(method_name);
@@ -479,8 +479,8 @@ where
                 SharpType::Enum(name) | SharpType::Class(name, _) => {
                     let class = codebase.get_class_like(name.as_bytes())?;
                     let has_text = class.enum_type.is_some()
-                        || codebase.get_method(name.as_bytes(), b"tostring").is_some()
-                        || codebase.get_method(name.as_bytes(), b"__tostring").is_some();
+                        || codebase.get_method(name.as_bytes(), b"toString").is_some()
+                        || codebase.get_method(name.as_bytes(), b"__toString").is_some();
 
                     (!has_text).then_some(InvalidJsonKey::Class(class.name))
                 }

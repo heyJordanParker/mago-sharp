@@ -83,7 +83,8 @@ pub struct FunctionLikeMetadata {
 
     /// The lookup name of the function or method. For named functions and
     /// methods this is the lowercased identifier (PHP-style case-insensitive
-    /// lookup); for closures and arrow functions it is the synthetic
+    /// lookup), and for a method of a class-like with `exact_names` the
+    /// identifier as declared, `ClassLikeMetadata::method_key`; for closures and arrow functions it is the synthetic
     /// `{closure:path:line:col}` word produced by
     /// [`crate::build_synthetic_name`]. Always set.
     /// Example: `processrequest`, `__construct`, `my_global_func`,

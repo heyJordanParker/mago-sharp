@@ -5451,13 +5451,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let late = self.node(SHARP_AST_CLASS_NAME, 0, line, &[late]);
                 let lowered = self.unchecked_expression(line, expression);
 
-                self.returned_result(line, lowered, late, member.name.as_bytes(), check)
+                self.returned_result(line, lowered, late, member.original_name.as_bytes(), check)
             }
             object => self.with_held_receiver(line, object, |this| {
                 let lowered = this.unchecked_expression(line, expression);
                 let implementer = this.expression(object);
 
-                this.returned_result(line, lowered, implementer, member.name.as_bytes(), check)
+                this.returned_result(line, lowered, implementer, member.original_name.as_bytes(), check)
             }),
         };
 
@@ -5486,12 +5486,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let implementer = self.expression(receiver);
 
-        self.returned_result(line, call, implementer, member.name.as_bytes(), check)
+        self.returned_result(line, call, implementer, member.original_name.as_bytes(), check)
     }
 
     /// `\Sharp\Internal\returned($lowered, $implementer, $method, $types, $target)`, with the type list and the name of
-    /// `check`, as [`Self::returned_call`] says. `method` is the method's `FunctionLikeMetadata::name`, which is
-    /// lowercase, as PHP keys a class's `function_table`, so the engine finds `getStatus` as `getstatus`.
+    /// `check`, as [`Self::returned_call`] says. `method` is the method's declared name,
+    /// `FunctionLikeMetadata::original_name`, which a PHP# class finds only as declared.
     fn returned_result(
         &mut self,
         line: u32,

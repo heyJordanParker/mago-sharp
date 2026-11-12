@@ -24,6 +24,7 @@ use mago_span::HasSpan;
 use mago_syntax::cst::LocalIdentifier;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
+use mago_word::word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
@@ -149,7 +150,7 @@ where
     }
 
     let codebase = context.codebase;
-    let extensions = codebase.extensions.get(&ascii_lowercase_word(name.value))?;
+    let extensions = codebase.extensions.get(&word(name.value))?;
     // A real member of the type the code shows wins over an extension, spec section 26. The access is analyzed again
     // when a class of the type gains or loses one, because its type traces to a signature that names the class.
     if !codebase.get_classes_hidden_by_extension(receiver, name.value).is_empty() {
@@ -324,7 +325,7 @@ where
 {
     let codebase = context.codebase;
 
-    codebase.extensions.get(&ascii_lowercase_word(name)).is_some_and(|members| {
+    codebase.extensions.get(&word(name)).is_some_and(|members| {
         members.iter().any(|(_, method)| {
             codebase.get_method_by_id(method).is_some_and(|metadata| {
                 let class = method.get_class_name();
@@ -713,7 +714,7 @@ pub fn collection_member<'codebase>(
     name: &[u8],
     kind: CollectionKind,
 ) -> Option<&'codebase MethodIdentifier> {
-    codebase.extensions.get(&ascii_lowercase_word(name))?.iter().map(|(_, method)| method).find(|method| {
+    codebase.extensions.get(&word(name))?.iter().map(|(_, method)| method).find(|method| {
         codebase
             .get_method_by_id(method)
             .is_some_and(|metadata| collection_member_kind(method.get_class_name(), metadata) == Some(kind))
@@ -738,7 +739,7 @@ where
 {
     let codebase = context.codebase;
 
-    codebase.extensions.get(&ascii_lowercase_word(name))?.iter().find_map(|(_, method)| {
+    codebase.extensions.get(&word(name))?.iter().find_map(|(_, method)| {
         let metadata = codebase.get_method_by_id(method)?;
 
         (is_collection_member(method.get_class_name(), metadata)
@@ -778,7 +779,7 @@ pub(crate) fn class_member<'codebase>(
 ) -> Option<&'codebase FunctionLikeMetadata> {
     codebase
         .extensions
-        .get(&ascii_lowercase_word(name))?
+        .get(&word(name))?
         .iter()
         .filter_map(|(_, method)| codebase.get_method_by_id(method))
         .find(|metadata| is_class_member(metadata))

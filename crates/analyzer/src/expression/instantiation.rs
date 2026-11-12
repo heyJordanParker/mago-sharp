@@ -43,7 +43,6 @@ use mago_syntax::cst::PartialArgumentList;
 use mago_syntax::cst::TypeArgumentList;
 use mago_word::Word;
 use mago_word::WordMap;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
@@ -681,7 +680,7 @@ where
         // A `required` one passes down, spec section 11, so a class below the one that requires it has its own, which
         // `new TItem.fromJson(…)` and `new Self.fromJson(…)` call, whether or not the class they name declares one.
         Some(constructor) => {
-            let constructor_name = ascii_lowercase_word(constructor.name.value);
+            let constructor_name = metadata.method_key(constructor.name.value);
             let declared = context
                 .codebase
                 .get_method_by_id(&MethodIdentifier::new(metadata.name, constructor_name))

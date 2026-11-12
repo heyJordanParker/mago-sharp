@@ -61,10 +61,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NameOf<'arena> {
             if let Some(method) = context.codebase.get_declaring_method(class.name.as_bytes(), member.name.value)
                 && let Some(metadata) = method.method_metadata.as_ref()
             {
-                let declaring = context.codebase.get_declaring_method_identifier(&MethodIdentifier::new(
-                    class.name,
-                    ascii_lowercase_word(member.name.value),
-                ));
+                let declaring = context
+                    .codebase
+                    .get_declaring_method_identifier(&MethodIdentifier::new(class.name, word(member.name.value)));
                 let declaring_class = declaring.get_class_name();
                 if !is_visible_from_scope(context.codebase, metadata.visibility, declaring_class.as_bytes(), scope) {
                     let method_name = display_sharp_member(class_name, word(member.name.value));
@@ -80,7 +79,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NameOf<'arena> {
                 }
                 artifacts.symbol_references.add_reference_to_class_member(
                     &block_context.scope,
-                    (ascii_lowercase_word(declaring_class.as_bytes()), ascii_lowercase_word(member.name.value)),
+                    (ascii_lowercase_word(declaring_class.as_bytes()), declaring.get_method_name()),
                     false,
                 );
 

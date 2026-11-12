@@ -1406,7 +1406,8 @@ pub fn check_members<'ast, 'arena>(
             _ => Vec::new(),
         };
         for (name, name_span) in callable_names {
-            let lowercase_name = name.to_ascii_lowercase();
+            // Spec section 2: PHP# names are case-sensitive, so `name` and `Name` are two methods. PHP's are not.
+            let key = if context.program.dialect.is_sharp() { name.to_vec() } else { name.to_ascii_lowercase() };
             let is_sharp_constructor = matches!(member, ClassLikeMember::Method(method)
                 if context.program.dialect.is_sharp()
                     && method.return_type_hint.is_none()
@@ -1438,7 +1439,7 @@ pub fn check_members<'ast, 'arena>(
                 // The constructor is PHP's `__construct`, so it shares no name with a method, and a method named after
                 // its class has only its own error.
                 main_constructor = Some(name_span);
-            } else if let Some(&(previous, previous_member)) = method_names.get(&lowercase_name) {
+            } else if let Some(&(previous, previous_member)) = method_names.get(&key) {
                 let method_display = context.display_member(class_like_name, BytesDisplay(name));
                 // Spec section 9.1: a named constructor and a method of one name clash, as they do across a class and
                 // its parent, which the analyzer reports in the same words.
@@ -1488,7 +1489,7 @@ pub fn check_members<'ast, 'arena>(
                     );
                 }
             } else {
-                method_names.insert(lowercase_name, (name_span, member));
+                method_names.insert(key, (name_span, member));
             }
         }
 

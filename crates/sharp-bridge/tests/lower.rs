@@ -8179,7 +8179,7 @@ fn a_member_of_a_value_that_may_be_a_list_or_an_iterable_runs_the_iterable_s_las
                                     ARG_LIST
                                   VAR
                                     ZVAL "receiver#1"
-                                  ZVAL "tolist"
+                                  ZVAL "toList"
                                   ZVAL "List<int>, List<Any?>"
                                   ZVAL "App.Tenant.Report.toList()"
                               METHOD_CALL
@@ -13870,7 +13870,7 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
                           ZVAL "#0"
                     VAR
                       ZVAL "this"
-                    ZVAL "pairwith"
+                    ZVAL "pairWith"
                     ZVAL "App.Pair<$0, #0>"
                     ZVAL "App.PaginatedList.pairWith()"
         "##}
@@ -22054,13 +22054,14 @@ fn a_map_a_class_method_gives_becomes_the_object_where_a_plain_override_may_give
 }
 
 /// ```php
-/// return \Sharp\Internal\returned($source->heldStatus(), $source, 'heldstatus', 'Map<string, string>', …);
+/// return \Sharp\Internal\returned($source->heldStatus(), $source, 'heldStatus', 'Map<string, string>', …);
 /// ```
 ///
-/// Spec section 22: `\Sharp\Internal\returned` looks the method up in the class's `function_table`, which PHP keys in
-/// lowercase, so the call names a camelCase method in lowercase, and the engine gives the PHP# method's result as it is.
+/// Spec section 22: `\Sharp\Internal\returned` looks the method up in the class's `function_table`, which keys a PHP#
+/// class's method by its exact name, spec section 24, so the call names a camelCase method as declared, and the engine
+/// gives the PHP# method's result as it is.
 #[test]
-fn a_camel_case_method_s_result_is_read_by_its_lowercase_name() {
+fn a_camel_case_method_s_result_is_read_by_its_declared_name() {
     let source = (
         "src/App/Tenant/Source.sharp",
         "namespace App.Tenant;\n\npublic class Source\n{\n    public virtual Map<string, string> heldStatus() => [\"status\": \"active\"];\n}\n",
@@ -22068,7 +22069,7 @@ fn a_camel_case_method_s_result_is_read_by_its_lowercase_name() {
     let body = body_in("Map<string, string> run(Source source)", "        return source.heldStatus();\n", &[source]);
 
     assert!(body.contains("ZVAL \"Sharp\\\\Internal\\\\returned\""), "{body}");
-    assert!(body.contains("ZVAL \"heldstatus\""), "{body}");
+    assert!(body.contains("ZVAL \"heldStatus\""), "{body}");
     assert!(body.contains("ZVAL \"App.Tenant.Source.heldStatus()\""), "{body}");
 }
 

@@ -10427,7 +10427,7 @@ fn a_plugin_reads_an_extension_members_receiver_as_its_first_argument() {
         .iter()
         .map(|(method, [receiver, argument])| format!("{method} {} {}", text(*receiver), text(*argument)))
         .collect();
-    assert_eq!(seen, ["slug title \"-\"", "isblank title none"]);
+    assert_eq!(seen, ["slug title \"-\"", "isBlank title none"]);
 }
 
 /// Records the type a throw type provider reads for the first argument of each call of `Lib\seal` and of a method of
@@ -14211,7 +14211,7 @@ fn a_collection_member_on_a_value_that_may_be_an_object_runs_the_objects_method_
     assert_eq!(
         refusals(("src/Demo/Shelf.sharp", sharp), &[boxed]),
         [
-            "10:38 non-existent-method Method `Box.isempty` does not exist. | Ensure the method `Box.isempty` is defined."
+            "10:38 non-existent-method Method `Box.isEmpty` does not exist. | Ensure the method `Box.isEmpty` is defined."
         ]
     );
 }
@@ -21906,9 +21906,9 @@ fn equatable_is_no_return_type_and_joins_no_object() {
 
 /// A PHP# class can't declare a static named like a member of `Class`, spec section 25, as TypeScript's error 2699
 /// refuses one named like a member of `Function`: `type.attributes` on a class value reaches `Class`'s, so a static
-/// method, a static property, a constant and an enum case of that name never run through it. A method name is
-/// compared ignoring case, as PHP calls one, and the message quotes the static's name and `Class`'s member each as
-/// written. An instance member and a static of another name are not reached through a class value, so they stay.
+/// method, a static property, a constant and an enum case of that name never run through it. PHP# names are
+/// case-sensitive, spec section 24, so a static `Attributes` is reached as written, and only its case is warned on.
+/// An instance member and a static of another name are not reached through a class value, so they stay.
 #[test]
 fn a_static_named_like_a_member_of_class_is_an_error() {
     let refusal =
@@ -21918,14 +21918,8 @@ fn a_static_named_like_a_member_of_class_is_an_error() {
         "namespace Demo;\n\npublic class Report\n{\n    public static string Attributes() => \"\";\n}\n",
     );
 
-    assert_eq!(issues(capitalized, &[CLASS_MEMBERS]), ["5:26 method-name-case", "5:26 name-already-in-use"]);
-    assert_eq!(
-        messages(capitalized, &[CLASS_MEMBERS]),
-        [
-            "Method name `Attributes` should be in camel case.",
-            "`type.Attributes` on a class value reaches `Class`'s member `attributes`, never this static. Rename it."
-        ]
-    );
+    assert_eq!(issues(capitalized, &[CLASS_MEMBERS]), ["5:26 method-name-case"]);
+    assert_eq!(messages(capitalized, &[CLASS_MEMBERS]), ["Method name `Attributes` should be in camel case."]);
     // A constant is compared by its exact name, so one named `attributes` also breaks the upper snake case of spec
     // section 24.
     for (member, column, warning) in [
@@ -28445,12 +28439,10 @@ fn a_foreign_object_is_an_ordinary_parameter_and_return_type() {
     assert_eq!(issues(stamp, &[instant]), Vec::<String>::new());
     let (codebase, summaries) = summarized(&[stamp, instant, BUILTINS]);
     let effects = Effects::solve(&codebase, &summaries);
-    let method = |name: &[u8]| {
-        FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Stamp"), ascii_lowercase_word(name))
-    };
+    let method = |name: &[u8]| FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Stamp"), word(name));
     let clock = Some(vec![word("Sharp\\Time\\Clock")]);
-    assert_eq!(effects.function_effects(&method(b"stampedWith")), clock, "a parameter");
-    assert_eq!(effects.function_effects(&method(b"later")), clock, "a returned one");
+    assert_eq!(effects.function_effects(&codebase, &method(b"stampedWith")), clock, "a parameter");
+    assert_eq!(effects.function_effects(&codebase, &method(b"later")), clock, "a returned one");
 
     let stamps = (
         "app/Shop/Stamps.sharp",
@@ -28635,9 +28627,7 @@ fn the_files_a_call_reaches_are_its_methods_its_overrides_and_its_accessors() {
     let (codebase, summaries) = summarized(&[base, sale, stock, opened, till, CLOCK_STUB, NOW]);
     let effects = Effects::solve(&codebase, &summaries);
     let file = |class: &[u8]| codebase.get_class_like(class).expect("the class is declared").span.file_id;
-    let method = |name: &[u8]| {
-        FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Till"), ascii_lowercase_word(name))
-    };
+    let method = |name: &[u8]| FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Till"), word(name));
 
     let callee_files = effects.callee_files(&codebase);
     assert_eq!(
@@ -28654,8 +28644,8 @@ fn the_files_a_call_reaches_are_its_methods_its_overrides_and_its_accessors() {
         )
     );
     assert_eq!(callee_files.get(&file(b"App\\Shop\\Sale")), None);
-    assert_eq!(effects.function_effects(&method(b"add")), Some(Vec::new()));
-    assert_eq!(effects.function_effects(&method(b"ring")), Some(vec![word("Sharp\\Time\\Clock")]));
+    assert_eq!(effects.function_effects(&codebase, &method(b"add")), Some(Vec::new()));
+    assert_eq!(effects.function_effects(&codebase, &method(b"ring")), Some(vec![word("Sharp\\Time\\Clock")]));
 }
 
 /// An operator on an instance runs the operator its class declares (spec section 19), so a getter that applies one
@@ -30113,7 +30103,10 @@ fn emit_has_the_effect_events() {
         ascii_lowercase_word(b"App\\Shop\\Checkout"),
         ascii_lowercase_word(b"broadcast"),
     );
-    assert_eq!(Effects::solve(&codebase, &summaries).function_effects(&broadcast), Some(vec![word("Sharp\\Events")]));
+    assert_eq!(
+        Effects::solve(&codebase, &summaries).function_effects(&codebase, &broadcast),
+        Some(vec![word("Sharp\\Events")])
+    );
     assert_eq!(
         effect_issues(&[checkout, order_event, order_paid]),
         [
@@ -31924,5 +31917,87 @@ fn a_keyword_in_another_case_that_names_nothing_suggests_the_keyword() {
             &[base, ("src/Demo/This.sharp", this)]
         ),
         Vec::<String>::new()
+    );
+}
+
+/// Spec section 24: PHP# names are case-sensitive, as in C#, Java and Kotlin. `total()` and `Total()` are two methods
+/// of one class, each reached only by its exact name, from PHP# and from plain PHP alike, and a call in another case is
+/// refused with the method it meant. A method that differs from a plain PHP parent's only in case is a second method,
+/// and an override names the parent's method exactly.
+#[test]
+fn a_method_is_reached_only_by_its_exact_name() {
+    let order = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;
+
+public class Order
+{
+    public int total() => 1;
+
+    public int Total() => 2;
+
+    public int sum() => this.total() + this.Total();
+}
+",
+    );
+    let base = (
+        "src/Lib/Base.php",
+        "<?php
+
+namespace Lib;
+
+class Base
+{
+    public function doThing(): int { return 1; }
+}
+",
+    );
+    let child = (
+        "src/Demo/Child.sharp",
+        "namespace Demo;
+
+import Lib.Base;
+
+public class Child : Base
+{
+    public override int doThing() => 2;
+
+    public int dothing() => 3;
+}
+",
+    );
+
+    // `Total` breaks only the camel case of spec section 24, which is a warning.
+    assert_eq!(issues(order, &[]), ["7:16 method-name-case"]);
+    assert_eq!(issues(child, &[base]), Vec::<String>::new());
+
+    let caller = (
+        "src/Demo/Caller.sharp",
+        "namespace Demo;
+
+public class Caller
+{
+    public int run(Order order) => order.TOTAL() + order.Total();
+}
+",
+    );
+    assert_eq!(messages(caller, &[order]), ["`Order` has no member `TOTAL`; did you mean `Total`?"]);
+
+    let plain = (
+        "src/Demo/caller.php",
+        "<?php
+
+namespace Demo;
+
+function run(Order $order): int
+{
+    return $order->TOTAL() + $order->total();
+}
+",
+    );
+    // Plain PHP goes on with the call's `mixed` result, which its own checks report after.
+    assert_eq!(
+        messages(plain, &[order]).first().map(String::as_str),
+        Some("`Demo\\Order` has no member `TOTAL`; did you mean `Total`?")
     );
 }

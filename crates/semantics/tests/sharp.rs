@@ -1749,7 +1749,7 @@ fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_a
 #[test]
 fn a_named_constructor_shares_no_name_with_a_method() {
     let after = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Order.copy() : this(1) { }\n    public int copy() => 1;\n}\n";
-    let before = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public int Copy() => 1;\n    public Order.copy() : this(1) { }\n}\n";
+    let before = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public int copy() => 1;\n    public Order.copy() : this(1) { }\n}\n";
     let static_method = "namespace App.Tenant;\n\npublic class Clash\n{\n    public Clash() { }\n\n    public Clash.of() : this() { }\n    public static Clash of() => new Clash();\n}\n";
     let law = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    law copy(int a) => a == a;\n    public Order.copy() : this(1) { }\n}\n";
     let coded = |code: &'static str| -> Vec<(String, Option<String>)> {
@@ -1760,13 +1760,13 @@ fn a_named_constructor_shares_no_name_with_a_method() {
     assert_eq!(coded(after), clash("`Order.copy` cannot share its name with `Order`'s named constructor `copy`."));
     assert_eq!(
         coded(before)[..1],
-        clash("The named constructor `Order.copy` cannot share its name with the method `Order.Copy`.")
+        clash("The named constructor `Order.copy` cannot share its name with the method `Order.copy`.")
     );
     assert_eq!(coded(static_method), clash("`Clash.of` cannot share its name with `Clash`'s named constructor `of`."));
     assert_eq!(issues(after), ["8:16 `Order.copy` cannot share its name with `Order`'s named constructor `copy`."]);
     assert_eq!(
         issues(before),
-        ["8:18 The named constructor `Order.copy` cannot share its name with the method `Order.Copy`."]
+        ["8:18 The named constructor `Order.copy` cannot share its name with the method `Order.copy`."]
     );
     assert_eq!(
         issues(law),
@@ -2541,7 +2541,8 @@ fn int_float_and_bool_outside_the_sharp_namespace_are_reserved() {
 }
 
 /// Spec section 22: a class has one method per name, so PHP# has no overloading by argument types. A second method of
-/// one name, whatever it takes or however its name is cased, is an error that says to name each by what it takes.
+/// one name, whatever it takes, is an error that says to name each by what it takes. Names are case-sensitive, spec
+/// section 24, so `Grant` is a third method.
 #[test]
 fn a_class_has_one_method_per_name_and_no_overloading() {
     let code = "namespace App.Tenant;\n\nclass Access\n{\n    public void grant(User user) { }\n\n    public void grant(Tenant tenant) { }\n\n    public void Grant() { }\n}\n";
@@ -2551,7 +2552,6 @@ fn a_class_has_one_method_per_name_and_no_overloading() {
         issues(code),
         [
             "7:17 `Access.grant` is declared twice: a class has one method per name, with no overloading by argument types.",
-            "9:17 `Access.Grant` is declared twice: a class has one method per name, with no overloading by argument types.",
         ]
     );
     assert_eq!(
@@ -2561,17 +2561,13 @@ fn a_class_has_one_method_per_name_and_no_overloading() {
     assert_eq!(issues(fixed), Vec::<String>::new());
 }
 
+/// Spec section 24: PHP# names are case-sensitive, so `run` and `Run` are two methods, as in C#, Java and Kotlin, and
+/// PHP's own rule still refuses the pair in a `.php` file.
 #[test]
-fn methods_whose_names_differ_only_in_case_are_an_error() {
+fn methods_whose_names_differ_only_in_case_are_two_methods() {
     let code = "class Report\n{\n    public int run() { return 1; }\n\n    public int Run() { return 2; }\n}\n";
 
-    // The PHP checks already reject this, so PHP# adds no second error.
-    assert_eq!(
-        issues(code),
-        [
-            "5:16 `Report.Run` is declared twice: a class has one method per name, with no overloading by argument types.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 
     let php = "<?php\n\nclass Report\n{\n    public function run(): int { return 1; }\n\n    public function Run(): int { return 2; }\n}\n";
     assert_eq!(issues_in("src/Report.php", php), ["7:21 class method `Report::Run` has already been defined"]);
@@ -3064,12 +3060,12 @@ fn a_double_underscore_class_with_a_constructor_reports_its_name_once() {
 /// body checked.
 #[test]
 fn a_method_refused_at_its_name_has_its_body_checked() {
-    let code = "namespace App.Tenant;\n\nclass Forms\n{\n    public void forms()\n    {\n        const host = _SERVER[\"x\"];\n        echo \"a\";\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Forms\n{\n    public void Forms()\n    {\n        const host = _SERVER[\"x\"];\n        echo \"a\";\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "5:17 Only the constructor is named after its class: rename `forms`.",
+            "5:17 Only the constructor is named after its class: rename `Forms`.",
             "7:22 Unexpected `_SERVER`",
             "8:9 Unexpected `echo`",
         ]
@@ -3468,13 +3464,14 @@ fn an_abstract_method_states_public_or_protected() {
     assert_eq!(issues(code), [format!("5:18 {message}"), format!("6:26 {message}")]);
 }
 
+/// Spec section 24: names are case-sensitive, so only a method named exactly like its class is named after it.
 #[test]
 fn a_method_named_after_its_class_is_an_error() {
-    let report = "namespace App.Tenant;\n\nclass Report\n{\n    public int report() { return 1; }\n}\n";
-    let calc = "namespace App.Tenant;\n\nclass Calc\n{\n    public int CALC() { return 1; }\n}\n";
+    let report = "namespace App.Tenant;\n\nclass Report\n{\n    public int Report() { return 1; }\n}\n";
+    let calc = "namespace App.Tenant;\n\nclass Calc\n{\n    public int calc() { return 1; }\n\n    public int CALC() { return 1; }\n}\n";
 
-    assert_eq!(issues(report), ["5:16 Only the constructor is named after its class: rename `report`."]);
-    assert_eq!(issues(calc), ["5:16 Only the constructor is named after its class: rename `CALC`."]);
+    assert_eq!(issues(report), ["5:16 Only the constructor is named after its class: rename `Report`."]);
+    assert_eq!(issues(calc), Vec::<String>::new());
 }
 
 #[test]

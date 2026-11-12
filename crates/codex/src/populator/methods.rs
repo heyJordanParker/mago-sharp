@@ -28,7 +28,19 @@ pub fn inherit_methods_from_parent(
         None
     };
 
+    // A class-like with `exact_names` keys the method a plain PHP parent keys `dothing` by its declared name, `doThing`,
+    // as the engine does, so only a method of that exact name overrides it.
+    let translates = metadata.exact_names && !parent_metadata.exact_names;
+    let child_key = |parent_key: Word, id: &MethodIdentifier| {
+        if translates {
+            codebase.function_likes.get(&id.get_key()).map_or(parent_key, |method| method.original_name)
+        } else {
+            parent_key
+        }
+    };
+
     for (method_name_lc, appearing_method_id) in &parent_metadata.appearing_method_ids {
+        let key = child_key(*method_name_lc, appearing_method_id);
         let mut process_name = |aliased_method_name: Word| {
             if metadata.has_appearing_method(aliased_method_name) {
                 return;
@@ -39,7 +51,7 @@ pub fn inherit_methods_from_parent(
             metadata.appearing_method_ids.insert(aliased_method_name, final_appearing_id);
         };
 
-        process_name(*method_name_lc);
+        process_name(key);
 
         if let Some(reverse_map) = reverse_alias_map.as_ref()
             && let Some(aliases) = reverse_map.get(method_name_lc)
@@ -51,25 +63,24 @@ pub fn inherit_methods_from_parent(
     }
 
     for (method_name_lc, declaring_method_id) in &parent_metadata.inheritable_method_ids {
+        let key = child_key(*method_name_lc, declaring_method_id);
         if !method_name_lc.eq(&word("__construct")) || parent_metadata.flags.has_consistent_constructor() {
             if parent_is_trait {
-                let declaring_class = declaring_method_id.get_class_name();
-
                 // A PHP# class's own method replaces a trait's body, spec section 22, so it overrides it.
-                if (metadata.flags.is_sharp() && metadata.methods.contains(method_name_lc))
+                if (metadata.flags.is_sharp() && metadata.methods.contains(&key))
                     || codebase
                         .function_likes
-                        .get(&(declaring_class, *method_name_lc))
+                        .get(&declaring_method_id.get_key())
                         .and_then(|meta| meta.method_metadata.as_ref())
                         .is_some_and(|method| method.is_abstract)
                 {
-                    metadata.add_overridden_method_parent(*method_name_lc, *declaring_method_id);
+                    metadata.add_overridden_method_parent(key, *declaring_method_id);
                 }
             } else {
-                metadata.add_overridden_method_parent(*method_name_lc, *declaring_method_id);
+                metadata.add_overridden_method_parent(key, *declaring_method_id);
             }
 
-            if let Some(existing_overridden) = metadata.overridden_method_ids.get_mut(method_name_lc)
+            if let Some(existing_overridden) = metadata.overridden_method_ids.get_mut(&key)
                 && let Some(parent_overridden_map) = parent_metadata.overridden_method_ids.get(method_name_lc)
             {
                 existing_overridden.extend(parent_overridden_map.iter().map(|(k, v)| (*k, *v)));
@@ -117,7 +128,7 @@ pub fn inherit_methods_from_parent(
             }
         };
 
-        process_name(*method_name_lc, metadata);
+        process_name(key, metadata);
 
         if let Some(reverse_map) = reverse_alias_map.as_ref()
             && let Some(aliases) = reverse_map.get(method_name_lc)

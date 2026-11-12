@@ -1870,8 +1870,9 @@ where
 
 /// Reports each static of a PHP# class-like named like a member of `Class`, spec section 25, as TypeScript's error 2699
 /// refuses a static named like a member of `Function`: `type.y` through a class value reaches a static method, a
-/// static property, a constant and an enum case alike, and `Class`'s own member wins, so the static would never run. A
-/// member name is compared ignoring case, as PHP calls a method, and the message quotes each name as written.
+/// static property, a constant and an enum case alike, and `Class`'s own member wins, so the static would never run.
+/// PHP# names are case-sensitive, spec section 24, so a static `Attributes` beside `Class`'s `attributes()` is reached
+/// as written.
 fn report_statics_named_like_class_members<A>(context: &mut Context<'_, '_, A>, members: &[ClassLikeMember<'_>])
 where
     A: Arena,
@@ -1898,14 +1899,14 @@ where
     }
 
     for (name, span) in statics {
-        let Some(member) = class_member(context.codebase, name) else {
+        if class_member(context.codebase, name).is_none() {
             continue;
-        };
-        let (name, member) = (BytesDisplay(name), member.original_name);
+        }
+        let name = BytesDisplay(name);
         context.collector.report_with_code(
             IssueCode::NameAlreadyInUse,
             Issue::error(format!(
-                "`type.{name}` on a class value reaches `Class`'s member `{member}`, never this static. Rename it."
+                "`type.{name}` on a class value reaches `Class`'s member `{name}`, never this static. Rename it."
             ))
             .with_annotation(Annotation::primary(span).with_message("Declared here.")),
         );
@@ -1926,7 +1927,7 @@ where
     let mut clashes = vec![];
     for (property_name, &property_class) in &class.declaring_property_ids {
         let name = property_name.as_bytes().strip_prefix(b"$").unwrap_or(property_name.as_bytes());
-        let Some(method_id) = class.declaring_method_ids.get(&ascii_lowercase_word(name)) else {
+        let Some(method_id) = class.declaring_method_ids.get(&class.method_key(name)) else {
             continue;
         };
         let method_class = method_id.get_class_name();
@@ -3523,7 +3524,7 @@ fn check_inherited_operators<'ctx, 'arena, A>(
         let Some(method) = MethodParts::of_operator(operator) else {
             continue;
         };
-        let name = ascii_lowercase_word(method.name);
+        let name = parent.method_key(method.name);
         let Some(declaring_method_id) = parent.declaring_method_ids.get(&name) else {
             continue;
         };

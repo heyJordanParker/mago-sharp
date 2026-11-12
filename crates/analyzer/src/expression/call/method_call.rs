@@ -335,7 +335,10 @@ where
         && let ClassLikeMemberSelector::Identifier(method_ident) = selector
         && is_this_or_self_returning_chain(object, context, block_context)
     {
-        let method_name = mago_word::ascii_lowercase_word(method_ident.value);
+        let method_name = block_context.scope.get_class_like().map_or_else(
+            || mago_word::ascii_lowercase_word(method_ident.value),
+            |class_like| class_like.method_key(method_ident.value),
+        );
         block_context.definitely_called_methods.insert(method_name);
         block_context.called_methods.insert(method_name);
     }
@@ -1190,8 +1193,7 @@ where
                 return false;
             };
 
-            let method_name = mago_word::ascii_lowercase_word(method_ident.value);
-            method_returns_self_or_static(context, class_like.name, method_name)
+            method_returns_self_or_static(context, class_like.name, class_like.method_key(method_ident.value))
         }
         Expression::Call(Call::NullSafeMethod(method_call)) => {
             if !is_this_or_self_returning_chain(method_call.object, context, block_context) {
@@ -1206,8 +1208,7 @@ where
                 return false;
             };
 
-            let method_name = mago_word::ascii_lowercase_word(method_ident.value);
-            method_returns_self_or_static(context, class_like.name, method_name)
+            method_returns_self_or_static(context, class_like.name, class_like.method_key(method_ident.value))
         }
         Expression::Parenthesized(paren) => is_this_or_self_returning_chain(paren.expression, context, block_context),
         _ => false,

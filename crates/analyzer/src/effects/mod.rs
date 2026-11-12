@@ -459,7 +459,8 @@ impl Effects {
             return None;
         };
 
-        let body = Body::Method(ascii_lowercase_word(class.as_bytes()), ascii_lowercase_word(method.as_bytes()));
+        let class = ascii_lowercase_word(class.as_bytes());
+        let body = Body::Method(class, codebase.method_key(class, method.as_bytes()));
         let imports = &self.imports[*self.index.get(&body)?];
         let short_name_counts = OnceCell::new();
 
@@ -475,10 +476,15 @@ impl Effects {
     /// A change of state is no effect. `None` when it calls plain PHP no `extern` declares, which no function type lists,
     /// and for a function no summary records, such as a plain PHP one or a method without a body.
     #[must_use]
-    pub fn function_effects(&self, function: &FunctionLikeIdentifier) -> Option<Vec<Word>> {
+    pub fn function_effects(
+        &self,
+        codebase: &CodebaseMetadata,
+        function: &FunctionLikeIdentifier,
+    ) -> Option<Vec<Word>> {
         let body = match function {
             FunctionLikeIdentifier::Method(class, method) => {
-                Body::Method(ascii_lowercase_word(class.as_bytes()), ascii_lowercase_word(method.as_bytes()))
+                let class = ascii_lowercase_word(class.as_bytes());
+                Body::Method(class, codebase.method_key(class, method.as_bytes()))
             }
             FunctionLikeIdentifier::Closure(name) => Body::Lambda(*name),
             FunctionLikeIdentifier::Function(_) => unreachable!("PHP# declares no function outside a class"),
