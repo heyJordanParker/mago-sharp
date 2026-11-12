@@ -24794,6 +24794,16 @@ fn a_loop_over_an_object_that_is_no_iterable_is_refused() {
             "this invalid-iterator The expression provided to a loop is not iterable. It resolved to type `Basket`, which is not iterable."
         ]
     );
+
+    // Plain PHP still loops over an `object`'s public properties, with the warning that says so.
+    let php = "<?php\n\nnamespace Demo;\n\nfunction count_values(object $value): int\n{\n    $n = 0;\n    foreach ($value as $item) {\n        $n++;\n    }\n\n    return $n;\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/count.php", php), &[]),
+        [
+            "8:14 generic-object-iteration Iterating over a generic `object`. This will iterate its public properties. | For predictable and type-safe iteration, ensure the object is an instance of a class implementing `Iterator` or `IteratorAggregate`.",
+            "8:24 mixed-assignment Assigning `mixed` type to a variable may lead to unexpected behavior. | Consider using a more specific type to avoid potential issues.",
+        ]
+    );
 }
 
 /// Spec section 12: a class whose header names `Iterable<T>` is an `Iterable<T>` wherever one is taken, a loop gives
@@ -24807,14 +24817,14 @@ fn a_class_whose_header_names_iterable_is_one_and_declares_its_elements() {
     );
     const BAG: (&str, &str) = (
         "src/Demo/Bag.sharp",
-        "namespace Demo;\n\npublic class Bag<TItem> : Iterable<TItem>\n{\n    private List<TItem> items = [];\n\n    public Iterable<TItem> elements() => this.items;\n}\n",
+        "namespace Demo;\n\npublic class Bag<TItem> : Iterable<TItem>\n{\n    private List<TItem> items = [];\n\n    public virtual Iterable<TItem> elements() => this.items;\n}\n",
     );
     const ORDERS: (&str, &str) =
         ("src/Demo/Orders.sharp", "namespace Demo;\n\npublic class Orders : Bag<Order>\n{\n}\n");
     let report = "namespace Demo;\n\npublic class Report\n{\n    public int tally(Iterable<Order> orders) => orders.toList().count();\n\n    public int paid(Bag<Order> bag, Orders orders)\n    {\n        let n = 0;\n        for (const order of bag) {\n            if (order.paid) {\n                n += 1;\n            }\n        }\n        for (const order of orders) {\n            n += order.paid ? 1 : 0;\n        }\n        return n + this.tally(bag) + this.tally(orders) + bag.filter(o => o.paid).toList().count();\n    }\n}\n";
     let crate_ = "namespace Demo;\n\npublic class Crate : Iterable<int>\n{\n}\n";
     let other_box = "namespace Demo;\n\npublic class Box : Iterable<int>\n{\n    public Iterable<string> elements() => [\"one\"];\n}\n";
-    let shelf = "namespace Demo;\n\npublic class Shelf : Iterable<int>\n{\n    public Iterable<int> elements() => [1];\n\n    public Iterable<int> getIterator() => [1];\n}\n";
+    let shelf = "namespace Demo;\n\npublic class Shelf : Iterable<int>\n{\n    private int size = 1;\n\n    public Iterable<int> elements() => [this.size];\n\n    public Iterable<int> getIterator() => [1];\n}\n";
     let label = "namespace Demo;\n\npublic interface Label : Iterable<int>\n{\n}\n";
 
     let issues = |path, code| analyze(&PLUGIN_REGISTRY, settings(), (path, code), &[ORDER, BAG, ORDERS]);
@@ -24842,6 +24852,66 @@ fn a_class_whose_header_names_iterable_is_one_and_declares_its_elements() {
         written_errors(label, &issues("src/Demo/Label.sharp", label)),
         [
             "Iterable<int> semantics Only a class names `Iterable<T>` in its header, and declares the `elements()` a loop reads."
+        ]
+    );
+
+    // A subclass inherits `elements()` or declares its own of the type, an abstract class leaves it to its subclasses,
+    // and a user's extension of an `Iterable` reaches the class.
+    let picks = "namespace Demo;\n\npublic class Picks : Bag<Order>\n{\n    public override Iterable<Order> elements() => [new Order()];\n}\n";
+    let pile = "namespace Demo;\n\npublic abstract class Pile : Iterable<int>\n{\n}\n";
+    let rows = (
+        "src/Demo/Rows.sharp",
+        "namespace Demo;\n\npublic static class Rows\n{\n    extension<T>(Iterable<T> items)\n    {\n        public int size() => items.toList().count();\n    }\n}\n",
+    );
+    let sized = "namespace Demo;\n\npublic class Sized\n{\n    public int of(Bag<Order> bag) => bag.size();\n}\n";
+    for (path, code) in
+        [("src/Demo/Orders.sharp", ORDERS.1), ("src/Demo/Picks.sharp", picks), ("src/Demo/Pile.sharp", pile)]
+    {
+        assert_eq!(written_errors(code, &issues(path, code)), Vec::<String>::new(), "{path}");
+    }
+    assert_eq!(
+        written_errors(
+            sized,
+            &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sized.sharp", sized), &[ORDER, BAG, rows])
+        ),
+        Vec::<String>::new()
+    );
+
+    // A plain PHP parent's `elements()` without a return type gives `Any?`, which is no `Iterable<int>`, and a plain PHP
+    // parent that is PHP's `IteratorAggregate` asks a PHP# subclass for no `elements()`.
+    let library = [
+        (
+            "src/Lib/Legacy.php",
+            "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    public function elements()\n    {\n        return [];\n    }\n}\n",
+        ),
+        (
+            "src/Lib/Heap.php",
+            "<?php\n\nnamespace Lib;\n\nclass Heap implements \\IteratorAggregate\n{\n    public function getIterator(): \\Iterator\n    {\n        return new \\ArrayIterator([]);\n    }\n}\n",
+        ),
+    ];
+    let stack = "namespace Demo;\n\nimport Lib.Legacy;\n\npublic class Stack : Legacy, Iterable<int>\n{\n}\n";
+    let mound = "namespace Demo;\n\nimport Lib.Heap;\n\npublic class Mound : Heap\n{\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Stack.sharp", stack), &library),
+        [
+            "5:14 incompatible-return-type `Stack.elements()` returns `Any?`, and `Stack` is an `Iterable<int>`, so it returns an `Iterable<int>`. | "
+        ]
+    );
+    assert_eq!(refusals(("src/Demo/Mound.sharp", mound), &library), Vec::<String>::new());
+
+    // A header that names `Iterable` without its element type gets the error any generic type written bare gets.
+    let bare = "namespace Demo;\n\npublic class Loose : Iterable\n{\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Loose.sharp", bare), &[]),
+        [
+            "3:22 semantics A header names classes and interfaces, and `Iterable` is neither: list a class or an interface, as in `: DatabaseEntity, Linkable`. | "
+        ]
+    );
+    let raw = "namespace Demo;\n\npublic class Raw : Bag\n{\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Raw.sharp", raw), &[ORDER, BAG]),
+        [
+            "3:20 missing-template-parameter Too few type arguments for `Bag`: expected at least 1, but found 0. | Write a type for `TItem` in the header, as in `: Bag<…>`."
         ]
     );
 }
@@ -29347,7 +29417,7 @@ fn interop_attributes_mark_static_methods_of_one_name_each() {
             "namespace Demo;\n\nimport Sharp.Interop.Export;\nimport Sharp.Interop.Import;\n\npublic static class Other\n{\n    [Import(\"Levenshtein\")]\n    public static int distance(string a, string b);\n\n    [Export(\"auth_redirect\")]\n    public static void redirect() { }\n}\n",
         ),
     ];
-    let sharp = "namespace Demo;\n\nimport Sharp.Interop.Export;\nimport Sharp.Interop.Import;\n\npublic class Words\n{\n    [Import(\"levenshtein\")]\n    public static int between(string a, string b);\n\n    [Import(\"strlen\")]\n    public int length(string text);\n\n    [Import(\"strrev\")]\n    public static string reversed(string text) => text;\n\n    [Export(\"AUTH_REDIRECT\")]\n    public static void redirect() { }\n\n    [Export(\"auth_check\")]\n    public bool check() => true;\n\n    public static int plain(string text);\n}\n";
+    let sharp = "namespace Demo;\n\nimport Sharp.Interop.Export;\nimport Sharp.Interop.Import;\n\npublic class Words\n{\n    [Import(\"levenshtein\")]\n    public static int between(string a, string b);\n\n    [Import(\"strlen\")]\n    public int length(string text);\n\n    [Import(\"strrev\")]\n    public static string reversed(string text) => text;\n\n    [Export(\"AUTH_REDIRECT\")]\n    public static void redirect() { }\n\n    [Export(\"auth_check\")]\n    public bool check() => true;\n\n    public static int plain(string text);\n\n    public const string NAME = \"words_named\";\n\n    [Export(Words.NAME)]\n    public static void named() { }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Words.sharp", sharp), &interop),
@@ -29359,13 +29429,15 @@ fn interop_attributes_mark_static_methods_of_one_name_each() {
             "6:14 unimplemented-abstract-method",
             "8:6 duplicate-definition",
             "17:6 duplicate-definition",
+            "27:6 invalid-attribute-target",
         ]
     );
     let words = explained(("src/Demo/Words.sharp", sharp), &interop);
     assert!(
         words.contains(&"8:6 duplicate-definition `[Import(\"levenshtein\")]` is on `Words.between` and on `Other.distance`, and PHP has one function of a name. Keep one `[Import(\"levenshtein\")]` in the project.".to_owned())
             && words.contains(&"11:6 semantics `[Import]` marks a static method, and `Words.length` is an instance method. Make the method `static`.".to_owned())
-            && words.contains(&"15:48 semantics `[Import]` makes `Words.reversed` the call of the PHP function it names, and the method has a body. End the declaration with `;` instead of a body.".to_owned()),
+            && words.contains(&"15:48 semantics `[Import]` makes `Words.reversed` the call of the PHP function it names, and the method has a body. End the declaration with `;` instead of a body.".to_owned())
+            && words.contains(&"27:6 invalid-attribute-target `[Export]` takes the name of a PHP function as a string literal. Write the name in quotes, as `[Export(\"levenshtein\")]`.".to_owned()),
         "{words:#?}"
     );
 }

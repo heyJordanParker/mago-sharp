@@ -25020,6 +25020,129 @@ fn an_object_in_a_template_shows_what_its_to_string_returns() {
     );
 }
 
+/// Spec section 18: a plain PHP class without `toString()` shows its `__toString()`, which PHP's string conversion runs,
+/// in a template and in a call of `toString()`.
+#[test]
+fn a_plain_php_object_shows_its_to_string_through_a_string_conversion() {
+    let email = (
+        "src/Lib/Email.php",
+        "<?php\n\nnamespace Lib;\n\nclass Email\n{\n    public function __toString(): string\n    {\n        return 'a@b.c';\n    }\n}\n",
+    );
+    let report = Lowered::with(
+        "namespace App.Tenant;\n\nimport Lib.Email;\n\nclass Report\n{\n    public string run(Email email) => `To: ${email}`;\n\n    public string text(Email email) => email.toString();\n}\n",
+        &[email],
+    );
+
+    assert_eq!(
+        report.body_of("run"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                ENCAPS_LIST
+                  ZVAL "To: "
+                  CAST [6]
+                    VAR
+                      ZVAL "email"
+        "#}
+    );
+    assert_eq!(
+        report.body_of("text"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CAST [6]
+                  VAR
+                    ZVAL "email"
+        "#}
+    );
+}
+
+/// `Sharp\Interop\Import` at the standard library's path, which an `[Import]` method names.
+const IMPORT_LIBRARY: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Interop/Import.sharp",
+    include_str!("../../../../composer/library/Sharp/Interop/Import.sharp"),
+);
+
+/// Spec section 23: an `[Import]` method's body is the call of the PHP function it names. A `Map` argument passes as
+/// the PHP array plain PHP receives, a variadic one spreads, the result is checked as a plain PHP value crossing into
+/// the declared type, and a `void` or `Any?` result needs no check.
+#[test]
+fn an_imported_method_s_body_calls_the_php_function_it_names() {
+    let words = Lowered::with(
+        "namespace App.Tenant;\n\nimport Sharp.Interop.Import;\n\npublic static class Words\n{\n    [Import(\"array_keys\")]\n    public static List<string> keys(Map<string, int> counts);\n\n    [Import(\"max\")]\n    public static int largest(int ...values);\n\n    [Import(\"json_decode\")]\n    public static Any? decoded(string json);\n\n    [Import(\"usleep\")]\n    public static void pause(int microseconds);\n}\n",
+        &[IMPORT_LIBRARY],
+    );
+
+    // The last statement of each body, after the checks of the arguments plain PHP may pass.
+    let call = |name: &str| {
+        let body = words.child(words.method_named(name), 2);
+
+        words.render(words.child(body, words.nodes()[body as usize].child_count - 1))
+    };
+
+    assert_eq!(
+        call("keys"),
+        indoc! {r#"
+            RETURN
+              CALL
+                ZVAL "Sharp\\Internal\\returned"
+                ARG_LIST
+                  CALL
+                    ZVAL "array_keys"
+                    ARG_LIST
+                      CALL
+                        ZVAL "Sharp\\Internal\\arrayOf"
+                        ARG_LIST
+                          VAR
+                            ZVAL "counts"
+                  ZVAL null
+                  ZVAL ""
+                  ZVAL "List<string>, List<Any?>"
+                  ZVAL "array_keys()"
+        "#}
+    );
+    assert_eq!(
+        call("largest"),
+        indoc! {r#"
+            RETURN
+              CALL
+                ZVAL "Sharp\\Internal\\returned"
+                ARG_LIST
+                  CALL
+                    ZVAL "max"
+                    ARG_LIST
+                      UNPACK
+                        VAR
+                          ZVAL "values"
+                  ZVAL null
+                  ZVAL ""
+                  ZVAL "int"
+                  ZVAL "max()"
+        "#}
+    );
+    assert_eq!(
+        call("decoded"),
+        indoc! {r#"
+            RETURN
+              CALL
+                ZVAL "json_decode"
+                ARG_LIST
+                  VAR
+                    ZVAL "json"
+        "#}
+    );
+    assert_eq!(
+        call("pause"),
+        indoc! {r#"
+            CALL
+              ZVAL "usleep"
+              ARG_LIST
+                VAR
+                  ZVAL "microseconds"
+        "#}
+    );
+}
+
 /// ```php
 /// public function __toString(): string { return $this->toString(); }
 /// ```

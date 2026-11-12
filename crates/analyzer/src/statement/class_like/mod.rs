@@ -1792,8 +1792,8 @@ where
     let element = element.1;
     // A subclass is checked for the member it inherits, and its type where the class names `Iterable<T>` or declares
     // `elements()` itself.
-    let own = class_like_metadata.template_extended_offsets.contains_key(&iterated)
-        || class_like_metadata.methods.contains(&word("elements"));
+    let declared_here = class_like_metadata.methods.contains(&word("elements"));
+    let own = declared_here || class_like_metadata.template_extended_offsets.contains_key(&iterated);
     let class_name = display_class_like_name(context, class_like_metadata.original_name);
     let iterable = TUnion::from_atomic(TAtomic::Iterable(TIterable::sharp_of(Arc::new(element.clone()))));
     let iterable_name = display_type(context, &iterable);
@@ -1814,13 +1814,13 @@ where
 
         return;
     };
-    let Some(returned) = elements.return_type_metadata.as_ref().map(|returned| &returned.type_union) else {
-        return;
-    };
+    // A plain PHP parent's `elements()` without a return type returns `Any?`, as any untyped plain PHP method does.
+    let returned =
+        elements.return_type_metadata.as_ref().map_or_else(get_mixed, |returned| returned.type_union.clone());
     if own
         && !union_comparator::is_contained_by(
             context.codebase,
-            returned,
+            &returned,
             &iterable,
             false,
             false,
@@ -1828,15 +1828,24 @@ where
             &mut ComparisonResult::new(),
         )
     {
-        let returned_name = display_type(context, returned);
-        context.collector.report_with_code(
-            IssueCode::IncompatibleReturnType,
-            Issue::error(format!(
-                "`{class_name}.elements()` returns `{returned_name}`, and `{class_name}` is an `{iterable_name}`, so it returns an `{iterable_name}`."
-            ))
-            .with_annotation(Annotation::primary(elements.name_span.unwrap_or(elements.span)).with_message("Declared here."))
-            .with_annotation(Annotation::secondary(span).with_message(format!("Named `{iterable_name}` here."))),
-        );
+        let returned_name = display_type(context, &returned);
+        let issue = Issue::error(format!(
+            "`{class_name}.elements()` returns `{returned_name}`, and `{class_name}` is an `{iterable_name}`, so it returns an `{iterable_name}`."
+        ));
+        // An inherited `elements()` is declared in another class, so the refusal stands where this one names the type.
+        let issue = if declared_here {
+            issue
+                .with_annotation(
+                    Annotation::primary(elements.name_span.unwrap_or(elements.span)).with_message("Declared here."),
+                )
+                .with_annotation(Annotation::secondary(span).with_message(format!("Named `{iterable_name}` here.")))
+        } else {
+            issue.with_annotation(
+                Annotation::primary(span)
+                    .with_message(format!("Named `{iterable_name}` here, and `elements()` is inherited.")),
+            )
+        };
+        context.collector.report_with_code(IssueCode::IncompatibleReturnType, issue);
     }
 }
 

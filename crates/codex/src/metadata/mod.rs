@@ -1108,11 +1108,22 @@ impl CodebaseMetadata {
     }
 
     /// Whether `class` is a PHP# class that is an `Iterable<T>` of its `elements()`, spec section 12: its header, or a
-    /// base class's, names `Iterable<T>`, which the scanner links as `IteratorAggregate<int, T>`.
+    /// PHP# base class's, names `Iterable<T>`, which the scanner links as `IteratorAggregate<int, T>`. A PHP# class
+    /// whose plain PHP base implements PHP's `IteratorAggregate` is a `Traversable` of that base's `getIterator()`.
     #[must_use]
     pub fn is_sharp_iterable(&self, class: &[u8]) -> bool {
+        let iterated = word("iteratoraggregate");
+        let names_iterable = |metadata: &ClassLikeMetadata| {
+            metadata.flags.is_sharp() && metadata.direct_parent_interfaces.contains(&iterated)
+        };
         self.get_class_like(class).is_some_and(|metadata| {
-            metadata.flags.is_sharp() && metadata.all_parent_interfaces.contains(&word("iteratoraggregate"))
+            metadata.flags.is_sharp()
+                && (names_iterable(metadata)
+                    || metadata
+                        .all_parent_classes
+                        .iter()
+                        .filter_map(|parent| self.get_class_like(parent.as_bytes()))
+                        .any(names_iterable))
         })
     }
 
