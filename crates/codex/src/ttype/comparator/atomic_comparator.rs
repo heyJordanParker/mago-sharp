@@ -640,7 +640,9 @@ pub(crate) fn can_be_identical(
         (first_part, second_part)
     {
         return match (class_string, string.get_known_literal_value()) {
-            (TClassLikeString::Literal { value }, Some(str_value)) => value.as_bytes().eq_ignore_ascii_case(str_value),
+            (TClassLikeString::Literal { value }, Some(str_value)) => {
+                codebase.class_key(value.as_bytes()) == codebase.class_key(str_value)
+            }
             _ => true,
         };
     }
@@ -655,7 +657,7 @@ pub(crate) fn can_be_identical(
     if let (TAtomic::Object(TObject::Enum(first_enum)), TAtomic::Object(TObject::Enum(second_enum))) =
         (first_part, second_part)
     {
-        if !first_enum.name.as_bytes().eq_ignore_ascii_case(second_enum.name.as_bytes()) {
+        if codebase.class_key(first_enum.name.as_bytes()) != codebase.class_key(second_enum.name.as_bytes()) {
             return false;
         }
 

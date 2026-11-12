@@ -5067,6 +5067,15 @@ fn a_law_reaching_a_loop_that_reads_a_local_it_adds_to_is_refused() {
     );
 }
 
+/// PHP finds a property by its exact name, so a law knows a stored `raw` and an accessor `Raw` apart.
+#[test]
+fn a_law_knows_a_stored_field_from_an_accessor_whose_name_differs_only_in_case() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int raw { get; }) { }\n    public int Raw => this.raw * 2;\n\n    law doubledHolds(Shape s) => s.Raw == s.Raw;\n}\n",
+        "Law doubledHolds reaches the accessor of Shape.Raw in Shape.doubledHolds. Compute the value in a method, and give the property no accessor body.",
+    );
+}
+
 #[test]
 fn a_law_reaching_a_pattern_that_names_a_value_outside_an_if_or_a_conditional_is_refused() {
     assert_unmodeled(

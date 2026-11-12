@@ -1,6 +1,5 @@
 use mago_allocator::Arena;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like_constant::ClassLikeConstantMetadata;
@@ -232,7 +231,7 @@ where
 
             artifacts.symbol_references.add_reference_to_symbol(
                 &block_context.scope,
-                ascii_lowercase_word(fq_class_id.as_bytes()),
+                context.codebase.class_key(fq_class_id.as_bytes()),
                 false,
             );
 

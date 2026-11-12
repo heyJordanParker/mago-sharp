@@ -24,6 +24,7 @@ use crate::metadata::ttype::TypeMetadata;
 use crate::metadata::version_constraint::VersionConstraint;
 use crate::misc::GenericParent;
 use crate::symbol::SymbolKind;
+use crate::symbol::Symbols;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::template::GenericTemplate;
 use crate::ttype::template::variance::Variance;
@@ -147,6 +148,18 @@ pub struct ParsedField<'codebase> {
     pub is_parameter: bool,
     /// The span of the field's name, where the codex has one.
     pub span: Option<Span>,
+}
+
+/// The key the class-like a file declares as `name` has in the codebase's maps, spec section 24.
+///
+/// It is its exact name when a `.sharp` file declares it, `sharp`, as the engine's class table keys it, and its
+/// lowercase name otherwise, as PHP folds a class name's case.
+/// [`CodebaseMetadata::class_key`](super::CodebaseMetadata::class_key) gives the key a name that refers to a class-like
+/// names.
+#[inline]
+#[must_use]
+pub fn class_like_key(name: &[u8], sharp: bool) -> Word {
+    if sharp { mago_word::word(name) } else { mago_word::ascii_lowercase_word(name) }
 }
 
 impl ClassLikeMetadata {
@@ -442,6 +455,45 @@ impl ClassLikeMetadata {
         }
     }
 
+    /// Keys each class-like the scanner recorded as written, its parent class, interfaces, traits and the class-likes
+    /// its docblock names, by [`Symbols::class_key`], once every file is scanned, spec section 24: a file names a PHP#
+    /// class-like exactly and a plain PHP one in any case, and only the whole codebase tells which one a name is.
+    pub fn key_header_names(&mut self, symbols: &Symbols) {
+        let key = |name: Word| symbols.class_key(name.as_bytes());
+        let key_set = |set: &mut WordSet| {
+            if set.iter().any(|name| key(*name) != *name) {
+                *set = set.iter().map(|name| key(*name)).collect();
+            }
+        };
+        fn key_map<V>(map: &mut WordMap<V>, key: impl Fn(Word) -> Word) {
+            if map.keys().any(|name| key(*name) != *name) {
+                *map = std::mem::take(map).into_iter().map(|(name, value)| (key(name), value)).collect();
+            }
+        }
+
+        self.direct_parent_class = self.direct_parent_class.map(key);
+        for set in [
+            &mut self.direct_parent_interfaces,
+            &mut self.all_parent_interfaces,
+            &mut self.require_extends,
+            &mut self.require_implements,
+            &mut self.all_parent_classes,
+            &mut self.used_traits,
+        ] {
+            key_set(set);
+        }
+        if let Some(inheritors) = self.permitted_inheritors.as_mut() {
+            key_set(inheritors);
+        }
+        key_map(&mut self.template_extended_offsets, key);
+        key_map(&mut self.template_type_extends_count, key);
+        key_map(&mut self.template_type_implements_count, key);
+        key_map(&mut self.template_type_uses_count, key);
+        for (source, _, _) in self.imported_type_aliases.values_mut() {
+            *source = key(*source);
+        }
+    }
+
     /// The key the class-like's method maps hold the method `name` under: `name` as written when it has
     /// `exact_names`, and its lowercase otherwise, as PHP folds a method name's case.
     #[inline]
@@ -651,12 +703,20 @@ impl ClassLikeMetadata {
     /// the patch is describing a different class. Returns `true` when they differ, in which
     /// case the patch must be rejected wholesale.
     fn report_hierarchy_mismatch(&self, patch: &mut ClassLikeMetadata) -> bool {
-        let hierarchy_mismatch = (patch.direct_parent_class.is_some()
-            && patch.direct_parent_class != self.direct_parent_class)
-            || (!patch.direct_parent_interfaces.is_empty()
-                && patch.direct_parent_interfaces != self.direct_parent_interfaces)
-            || (!patch.require_extends.is_empty() && patch.require_extends != self.require_extends)
-            || (!patch.require_implements.is_empty() && patch.require_implements != self.require_implements);
+        // A patch runs before the populator keys the names a header gives, and a patch and the class it patches are
+        // plain PHP, whose names match in any case.
+        let same = |left: &Word, right: &Word| left.as_bytes().eq_ignore_ascii_case(right.as_bytes());
+        let differ = |patched: &WordSet, original: &WordSet| {
+            !patched.is_empty()
+                && (patched.len() != original.len()
+                    || patched.iter().any(|name| !original.iter().any(|other| same(name, other))))
+        };
+        let hierarchy_mismatch = patch
+            .direct_parent_class
+            .is_some_and(|parent| !self.direct_parent_class.is_some_and(|original| same(&parent, &original)))
+            || differ(&patch.direct_parent_interfaces, &self.direct_parent_interfaces)
+            || differ(&patch.require_extends, &self.require_extends)
+            || differ(&patch.require_implements, &self.require_implements);
 
         if !hierarchy_mismatch {
             return false;
@@ -1006,44 +1066,39 @@ impl ClassLikeMetadata {
 
 /// Collects all method names reachable through the ancestors of `class_meta`.
 ///
-/// Does not include methods defined directly on `class_meta` itself.
+/// Each ancestor is found by its key in `symbols`, spec section 24, since the populator has not yet keyed the names a
+/// header gives. Does not include methods defined directly on `class_meta` itself.
 #[must_use]
 pub fn collect_ancestor_methods(
     class_meta: &ClassLikeMetadata,
     class_likes: &WordMap<Shared<ClassLikeMetadata>>,
+    symbols: &Symbols,
 ) -> WordSet {
     let mut visited = WordSet::default();
     let mut methods = WordSet::default();
-    collect_ancestor_methods_inner(class_meta, class_likes, &mut visited, &mut methods);
+    collect_ancestor_methods_inner(class_meta, class_likes, symbols, &mut visited, &mut methods);
     methods
 }
 
 fn collect_ancestor_methods_inner(
     class_meta: &ClassLikeMetadata,
     class_likes: &WordMap<Shared<ClassLikeMetadata>>,
+    symbols: &Symbols,
     visited: &mut WordSet,
     methods: &mut WordSet,
 ) {
     if !visited.insert(class_meta.name) {
         return;
     }
-    if let Some(parent_name) = class_meta.direct_parent_class
-        && let Some(parent_meta) = class_likes.get(&parent_name)
-    {
-        methods.extend(parent_meta.methods.iter().copied());
-        collect_ancestor_methods_inner(parent_meta, class_likes, visited, methods);
-    }
-    for interface_name in &class_meta.direct_parent_interfaces {
-        if let Some(interface_meta) = class_likes.get(interface_name) {
-            methods.extend(interface_meta.methods.iter().copied());
-            collect_ancestor_methods_inner(interface_meta, class_likes, visited, methods);
-        }
-    }
-    for trait_name in &class_meta.used_traits {
-        if let Some(trait_meta) = class_likes.get(trait_name) {
-            methods.extend(trait_meta.methods.iter().copied());
-            collect_ancestor_methods_inner(trait_meta, class_likes, visited, methods);
-        }
+    let ancestors = class_meta
+        .direct_parent_class
+        .iter()
+        .chain(&class_meta.direct_parent_interfaces)
+        .chain(&class_meta.used_traits)
+        .filter_map(|name| class_likes.get(&symbols.class_key(name.as_bytes())));
+    for ancestor in ancestors {
+        methods.extend(ancestor.methods.iter().copied());
+        collect_ancestor_methods_inner(ancestor, class_likes, symbols, visited, methods);
     }
 }
 

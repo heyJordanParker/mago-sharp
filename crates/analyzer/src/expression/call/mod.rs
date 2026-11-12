@@ -401,6 +401,7 @@ where
                 }
                 FunctionLikeIdentifier::Method(class_name, method_name) => {
                     artifacts.symbol_references.add_reference_for_method_call(
+                        context.codebase,
                         &block_context.scope,
                         &MethodIdentifier::new(*class_name, *method_name),
                     );

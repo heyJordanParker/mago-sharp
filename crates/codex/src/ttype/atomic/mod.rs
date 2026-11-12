@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 use mago_word::concat_word;
 use mago_word::word;
 
@@ -829,10 +828,15 @@ pub(crate) fn append_intersection_ids(mut base: Word, intersection_types: &[TAto
     base
 }
 
-/// Records a reference to the class-like `name` names, by the lowercase name its declaration has, so a change to
-/// the declaration reaches the reference however the code wrote the name.
-fn add_symbol_reference(reference_source: &ReferenceSource, symbol_references: &mut SymbolReferences, name: Word) {
-    let name = ascii_lowercase_word(name.as_bytes());
+/// Records a reference to the class-like `name` names, by its key, spec section 24, so a change to the declaration
+/// reaches the reference however the code wrote the name.
+fn add_symbol_reference(
+    symbols: &Symbols,
+    reference_source: &ReferenceSource,
+    symbol_references: &mut SymbolReferences,
+    name: Word,
+) {
+    let name = symbols.class_key(name.as_bytes());
     match reference_source {
         ReferenceSource::Symbol(in_signature, a) => {
             symbol_references.add_symbol_reference_to_symbol(*a, name, *in_signature);
@@ -909,7 +913,7 @@ pub fn populate_atomic_type(
 
             if !named_object.is_intersection()
                 && !named_object.has_type_parameters()
-                && codebase_symbols.contains_enum(name)
+                && codebase_symbols.contains_enum(codebase_symbols.class_key(name.as_bytes()))
             {
                 *unpopulated_atomic = TAtomic::Object(TObject::new_enum(name));
             } else {
@@ -927,7 +931,7 @@ pub fn populate_atomic_type(
             }
 
             if let Some(reference_source) = reference_source {
-                add_symbol_reference(reference_source, symbol_references, name);
+                add_symbol_reference(codebase_symbols, reference_source, symbol_references, name);
             }
         }
         TAtomic::Object(TObject::WithProperties(keyed_array)) => {
@@ -955,10 +959,10 @@ pub fn populate_atomic_type(
                 }
 
                 if let Some(reference_source) = reference_source {
-                    add_symbol_reference(reference_source, symbol_references, *name);
+                    add_symbol_reference(codebase_symbols, reference_source, symbol_references, *name);
                 }
 
-                if let Some(symbol_kind) = codebase_symbols.get_kind(ascii_lowercase_word(name.as_bytes())) {
+                if let Some(symbol_kind) = codebase_symbols.get_kind(codebase_symbols.class_key(name.as_bytes())) {
                     if symbol_kind == SymbolKind::Enum {
                         *unpopulated_atomic = TAtomic::Object(TObject::new_enum(*name));
                     } else {
@@ -997,7 +1001,7 @@ pub fn populate_atomic_type(
                 if let TReferenceMemberSelector::Identifier(member_name) = member_selector
                     && let Some(reference_source) = reference_source
                 {
-                    let member = (ascii_lowercase_word(class_like_name.as_bytes()), *member_name);
+                    let member = (codebase_symbols.class_key(class_like_name.as_bytes()), *member_name);
                     match reference_source {
                         ReferenceSource::Symbol(in_signature, a) => {
                             symbol_references.add_symbol_reference_to_class_member(*a, member, *in_signature);

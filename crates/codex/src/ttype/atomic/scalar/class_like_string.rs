@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 use mago_word::concat_word;
 use mago_word::word;
 
@@ -211,7 +210,7 @@ impl TClassLikeString {
                 ))
             }
             TClassLikeString::Literal { value } => {
-                if codebase.symbols.contains_enum(ascii_lowercase_word(value.as_bytes())) {
+                if codebase.symbols.contains_enum(codebase.class_key(value.as_bytes())) {
                     TAtomic::Object(TObject::Enum(TEnum::new(*value)))
                 } else {
                     TAtomic::Object(TObject::Named(TNamedObject::new(*value)))

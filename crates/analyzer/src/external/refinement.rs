@@ -137,22 +137,24 @@ pub(super) fn decode(
         })?;
 
         let declaration = match reader.read_u8("refinement declaration kind")? {
+            // The class-likes a refinement names stay as written, and `apply` keys each in the codebase, spec section
+            // 24, and each method by its class.
             CLASS_LIKE => {
                 let class = if reader.read_bool("anonymous class refinement")? {
-                    ascii_lowercase_word(get_anonymous_class_name(file, read_offset(reader, file)?).as_bytes())
+                    get_anonymous_class_name(file, read_offset(reader, file)?)
                 } else {
                     let class = reader.read_bytes("refinement class")?;
                     if class.is_empty() {
                         return Err(protocol("a declaration refinement names an empty class"));
                     }
-                    ascii_lowercase_word(class)
+                    word(class)
                 };
 
                 let templates = read_templates(reader, file)?;
                 let inherited_count = reader.read_count("inherited applications", MAXIMUM_MEMBERS)?;
                 let mut inherited = Vec::with_capacity(inherited_count);
                 for _ in 0..inherited_count {
-                    let ancestor = ascii_lowercase_word(reader.read_bytes("inherited ancestor")?);
+                    let ancestor = word(reader.read_bytes("inherited ancestor")?);
                     let span = read_span(reader, file)?;
                     let argument_count = reader.read_count("inherited arguments", MAXIMUM_MEMBERS)?;
                     let mut arguments = Vec::with_capacity(argument_count);
@@ -165,14 +167,14 @@ pub(super) fn decode(
                 let required_count = reader.read_count("required parents", MAXIMUM_MEMBERS)?;
                 let mut required_extends = Vec::with_capacity(required_count);
                 for _ in 0..required_count {
-                    required_extends.push(ascii_lowercase_word(reader.read_bytes("required parent")?));
+                    required_extends.push(word(reader.read_bytes("required parent")?));
                 }
 
                 let properties = read_members(reader, file, "refined properties")?;
                 let method_count = reader.read_count("refined methods", MAXIMUM_MEMBERS)?;
                 let mut methods = Vec::with_capacity(method_count);
                 for _ in 0..method_count {
-                    let name = ascii_lowercase_word(reader.read_bytes("refined method")?);
+                    let name = word(reader.read_bytes("refined method")?);
                     methods.push((name, read_signature(reader, file, &plugin)?));
                 }
 
@@ -303,11 +305,16 @@ fn apply_class_like(
     methods: Vec<(Word, SignatureRefinement)>,
     issues: Vec<Issue>,
 ) -> Result<(), ExternalAnalyzerError> {
+    // A refinement runs on its file's codebase before population, so the file keys its own class-like, and the names
+    // of the class-like's header stay as written until the populator keys them, as the ancestors here do.
+    let class_name = codebase.class_key(class_name.as_bytes());
     let Some(class) = codebase.class_likes.get_mut(&class_name) else {
         return Err(protocol(format!(
             "a declaration refinement names class `{class_name}`, which its file does not declare"
         )));
     };
+    let methods: Vec<_> =
+        methods.into_iter().map(|(method, signature)| (class.method_key(method.as_bytes()), signature)).collect();
 
     class.issues.extend(issues);
     let sharp = class.flags.is_sharp();
@@ -576,10 +583,15 @@ fn refusal(host: Word, part: &str, refused: &TUnion, span: Span, code: &str) -> 
         .with_help("A host refines a PHP# declaration only to a type PHP# can write.")
 }
 
+/// Applies `application`'s arguments to the direct parent it names, in any case, as a docblock's `@extends` does: the
+/// header's names stay as written until the populator keys them, spec section 24.
 fn apply_inherited(class: &mut ClassLikeMetadata, application: InheritedApplication) {
-    let ancestor = application.ancestor;
-    let is_parent_interface = class.direct_parent_interfaces.contains(&ancestor);
-    let counts = if class.direct_parent_class == Some(ancestor) || (class.kind.is_interface() && is_parent_interface) {
+    let names = |name: &Word| name.as_bytes().eq_ignore_ascii_case(application.ancestor.as_bytes());
+    let parent_interface = class.direct_parent_interfaces.iter().find(|name| names(name)).copied();
+    let parent_class = class.direct_parent_class.filter(names);
+    let ancestor = parent_class.or(parent_interface).unwrap_or(application.ancestor);
+    let is_parent_interface = parent_interface.is_some();
+    let counts = if parent_class.is_some() || (class.kind.is_interface() && is_parent_interface) {
         &mut class.template_type_extends_count
     } else if is_parent_interface {
         &mut class.template_type_implements_count
@@ -761,7 +773,7 @@ mod tests {
         let program = parse_file(&arena, &file);
         let names = NameResolver::new(&arena).resolve(program);
         let mut codebase = scan_program(&arena, &file, program, &names, Settings::default().version);
-        let notice = word("proof\\notice");
+        let notice = word("Proof\\Notice");
         let lambda_key = *codebase
             .function_likes
             .iter()
@@ -774,7 +786,7 @@ mod tests {
             class: notice,
             templates: vec![template("T")],
             inherited: vec![InheritedApplication {
-                ancestor: word("proof\\base"),
+                ancestor: word("Proof\\Base"),
                 span: unwritable(&file).span,
                 arguments: vec![get_arraykey()],
             }],

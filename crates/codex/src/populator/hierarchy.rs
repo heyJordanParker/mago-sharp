@@ -5,7 +5,6 @@ use mago_reporting::Issue;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::identifier::method::MethodIdentifier;
@@ -156,7 +155,7 @@ pub fn populate_class_like_metadata_iterative(
     for attribute_metadata in &metadata.attributes {
         symbol_references.add_symbol_reference_to_symbol(
             metadata.name,
-            ascii_lowercase_word(attribute_metadata.name.as_bytes()),
+            codebase.class_key(attribute_metadata.name.as_bytes()),
             true,
         );
     }
@@ -626,7 +625,7 @@ pub fn populate_class_like_types(
         for attribute_metadata in &constant.attributes {
             symbol_references.add_class_member_reference_to_symbol(
                 (name, *constant_name),
-                ascii_lowercase_word(attribute_metadata.name.as_bytes()),
+                codebase_symbols.class_key(attribute_metadata.name.as_bytes()),
                 true,
             );
         }
@@ -658,7 +657,7 @@ pub fn populate_class_like_types(
         for attribute_metadata in &enum_case.attributes {
             symbol_references.add_class_member_reference_to_symbol(
                 (name, *enum_case_name),
-                ascii_lowercase_word(attribute_metadata.name.as_bytes()),
+                codebase_symbols.class_key(attribute_metadata.name.as_bytes()),
                 true,
             );
         }

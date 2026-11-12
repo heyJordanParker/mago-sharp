@@ -42,7 +42,7 @@ pub fn build_file_signature<'arena>(
     program: &'arena Program<'arena>,
     resolved_names: &'arena ResolvedNames<'arena>,
 ) -> FileSignature {
-    let mut builder = SignatureBuilder::new(resolved_names, program.trivia.nodes);
+    let mut builder = SignatureBuilder::new(resolved_names, program.trivia.nodes, program.dialect.is_sharp());
     builder.walk_program(program, &mut ());
 
     let hash = program.fingerprint(resolved_names, &builder.fingerprint_options);
@@ -57,14 +57,24 @@ struct SignatureBuilder<'arena> {
     sig_only_options: FingerprintOptions<'arena>,
     class_stack: Vec<DefSignatureNode>,
     ast_nodes: Vec<DefSignatureNode>,
+    /// Whether the file is a `.sharp` one, whose class-likes and methods the codebase keys by their exact names, spec
+    /// section 24.
+    sharp: bool,
 }
 
 impl<'arena> SignatureBuilder<'arena> {
-    fn new(resolved_names: &'arena ResolvedNames<'arena>, trivia: &'arena [Trivia<'arena>]) -> Self {
+    fn new(resolved_names: &'arena ResolvedNames<'arena>, trivia: &'arena [Trivia<'arena>], sharp: bool) -> Self {
         let fingerprint_options = FingerprintOptions::default().with_trivia_context(trivia);
         let sig_only_options = FingerprintOptions { signature_only: true, ..fingerprint_options };
 
-        Self { resolved_names, fingerprint_options, sig_only_options, class_stack: Vec::new(), ast_nodes: Vec::new() }
+        Self {
+            resolved_names,
+            fingerprint_options,
+            sig_only_options,
+            class_stack: Vec::new(),
+            ast_nodes: Vec::new(),
+            sharp,
+        }
     }
 
     fn create_node(
@@ -77,10 +87,12 @@ impl<'arena> SignatureBuilder<'arena> {
         signature_hash: u64,
     ) -> DefSignatureNode {
         // A constant is named as the codebase keys it, with its namespace lowercased, so a reference to it names the
-        // node of the file that declares it. A class constant's name has no namespace, so it keeps its name.
+        // node of the file that declares it. A class constant's name has no namespace, so it keeps its name. A `.sharp`
+        // file's class-likes and methods are keyed by their exact names, and plain PHP's by their lowercase names.
         let atom_name = match (is_constant, is_property) {
             (true, _) => ascii_lowercase_constant_name_word(name),
             (_, true) => word(name),
+            _ if self.sharp => word(name),
             _ => ascii_lowercase_word(name),
         };
 

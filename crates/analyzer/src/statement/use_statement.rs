@@ -168,7 +168,10 @@ where
                 .with_annotation(Annotation::primary(name.span()).with_message("Imports a namespace of classes.")),
         )
     } else {
-        report_non_existent_import(context, name.span(), &fqn, "class, interface, trait, or enum");
+        // A PHP# type in another case names nothing, and the error names the type, spec section 24.
+        if !crate::utils::casing::report_sharp_import_in_another_case(context, &fqn, name.span()) {
+            report_non_existent_import(context, name.span(), &fqn, "class, interface, trait, or enum");
+        }
 
         return true;
     };

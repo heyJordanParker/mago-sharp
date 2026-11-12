@@ -56,7 +56,6 @@ use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::VariadicArrayElement;
 use mago_word::WordSet;
-use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
 use mago_word::word;
 
@@ -673,11 +672,8 @@ where
             })
             .collect();
 
-        let method_names: Vec<_> = second_type
-            .types
-            .iter()
-            .filter_map(|atomic| atomic.get_literal_string_value().map(ascii_lowercase_word))
-            .collect();
+        let method_names: Vec<_> =
+            second_type.types.iter().filter_map(|atomic| atomic.get_literal_string_value()).collect();
 
         for class_name in &class_names {
             for method_name in &method_names {
@@ -685,9 +681,11 @@ where
                     continue;
                 }
 
+                // Each by its key, spec section 24: the class's in the codebase, and the method's in its class.
+                let class = context.codebase.class_key(class_name.as_bytes());
                 artifacts.symbol_references.add_reference_to_class_member(
                     &block_context.scope,
-                    (ascii_lowercase_word(class_name.as_bytes()), *method_name),
+                    (class, context.codebase.method_key(class, method_name)),
                     false,
                 );
             }

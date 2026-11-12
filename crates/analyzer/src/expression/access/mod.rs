@@ -421,7 +421,10 @@ pub(crate) fn report_unknown_member_owner<A>(context: &mut Context<'_, '_, A>, n
 where
     A: Arena,
 {
-    if report_unknown_sharp_class(context, context.resolved_names.get(name), name.span()) {
+    let resolved = context.resolved_names.get(name);
+    if crate::utils::casing::report_sharp_class_like_in_another_case(context, resolved, name.span())
+        || report_unknown_sharp_class(context, resolved, name.span())
+    {
         return;
     }
 

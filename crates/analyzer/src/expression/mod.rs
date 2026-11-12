@@ -1039,7 +1039,7 @@ where
             _ => vec![class],
         };
         for member in members {
-            let is_tested = tested.iter().any(|tested| tested.eq_ignore_ascii_case(member.name.as_bytes()));
+            let is_tested = tested.iter().any(|tested| context.codebase.class_key(tested) == member.name);
             if !is_tested && !left_classes.iter().any(|known| known.name == member.name) {
                 left_classes.push(member);
             }

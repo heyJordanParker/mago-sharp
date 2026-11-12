@@ -301,18 +301,22 @@ pub(crate) fn data_enum(codebase: &CodebaseMetadata, class: &ClassLikeMetadata) 
     (!data_cases(codebase, class).is_empty()).then_some(class.name)
 }
 
-/// The classes the cases of `class` run as, when it is an enum with a case that carries data, spec section 20.
+/// The classes the cases of `class` run as, when it is an enum with a case that carries data, spec section 20, in the
+/// order the enum declares them, which no set of names keeps.
 pub(crate) fn data_cases<'codebase>(
     codebase: &'codebase CodebaseMetadata,
     class: &ClassLikeMetadata,
 ) -> Vec<&'codebase ClassLikeMetadata> {
-    class
+    let mut cases: Vec<&ClassLikeMetadata> = class
         .permitted_inheritors
         .iter()
         .flatten()
         .filter_map(|case| codebase.get_class_like(case.as_bytes()))
         .filter(|case| case.flags.is_enum_case_class() && case.direct_parent_class == Some(class.name))
-        .collect()
+        .collect();
+    cases.sort_by_key(|case| case.span.start.offset);
+
+    cases
 }
 
 /// Reports each struct or enum case in `key_type` that has no `==`, as [`struct_property_refusal`] decides it for `==`,

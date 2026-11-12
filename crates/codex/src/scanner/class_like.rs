@@ -54,6 +54,7 @@ use crate::issue::ScanningIssueKind;
 use crate::metadata::CodebaseMetadata;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::class_like::TemplateTypes;
+use crate::metadata::class_like::class_like_key;
 use crate::metadata::class_like_constant::ClassLikeConstantMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
@@ -340,7 +341,7 @@ fn register_case_classes<'arena, A>(
         };
         let case_name = case.item.name();
         let original_name = word([enum_metadata.original_name.as_bytes(), b"\\", case_name.value].concat());
-        let name = ascii_lowercase_word(original_name.as_bytes());
+        let name = class_like_key(original_name.as_bytes(), true);
         if codebase.class_likes.contains_key(&name) {
             continue;
         }
@@ -351,7 +352,7 @@ fn register_case_classes<'arena, A>(
         case_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::ENUM_CASE_CLASS;
         case_metadata.direct_parent_class = Some(enum_metadata.name);
         case_metadata.all_parent_classes.insert(enum_metadata.name);
-        codebase.symbols.add_symbol_name(name, SymbolKind::Class);
+        codebase.symbols.add_class_like(name, SymbolKind::Class, true);
         enum_metadata.permitted_inheritors.get_or_insert_default().insert(name);
         // Spec section 31: a case of a generic enum is a class with the enum's type parameters, which it passes to the
         // enum, as `Result.Ok<T, TError> : Result<T, TError>`. Its fields read them as its own.
@@ -592,7 +593,7 @@ where
     }
 
     let original_name = word(context.resolved_names.get(&module.module));
-    let name = ascii_lowercase_word(original_name.as_bytes());
+    let name = class_like_key(original_name.as_bytes(), true);
     if codebase.class_likes.contains_key(&name) {
         return None;
     }
@@ -603,7 +604,7 @@ where
         | MetadataFlags::FINAL;
     let mut metadata = ClassLikeMetadata::new(name, original_name, module.span(), Some(module.module.span), flags);
     metadata.kind = SymbolKind::Class;
-    codebase.symbols.add_symbol_name(name, SymbolKind::Class);
+    codebase.symbols.add_class_like(name, SymbolKind::Class, true);
 
     let type_context = TypeResolutionContext::new();
     for member in &module.members {
@@ -707,7 +708,8 @@ where
     A: Arena,
 {
     let original_name = name;
-    let name = ascii_lowercase_word(original_name.as_bytes());
+    let sharp = context.program.dialect.is_sharp();
+    let name = class_like_key(original_name.as_bytes(), sharp);
 
     if codebase.class_likes.contains_key(&name) {
         return None;
@@ -766,11 +768,11 @@ where
                 class_like_metadata.flags |= MetadataFlags::FOREIGN;
             }
 
-            codebase.symbols.add_symbol_name(name, SymbolKind::Class);
+            codebase.symbols.add_class_like(name, SymbolKind::Class, sharp);
 
             if let Some(extended_class) = extends.and_then(|e| e.types.first()) {
-                let parent_name = context.resolved_names.get(extended_class);
-                let parent_name = ascii_lowercase_word(parent_name);
+                // As written: the populator keys each name a class-like's header gives once every file is scanned.
+                let parent_name = word(context.resolved_names.get(extended_class));
 
                 class_like_metadata.direct_parent_class = Some(parent_name);
                 class_like_metadata.all_parent_classes.insert(parent_name);
@@ -795,22 +797,21 @@ where
                 }
             }
 
-            codebase.symbols.add_symbol_name(name, SymbolKind::Enum);
+            codebase.symbols.add_class_like(name, SymbolKind::Enum, sharp);
 
             create_enum_methods(codebase, &mut class_like_metadata, span);
         }
         SymbolKind::Trait => {
-            codebase.symbols.add_symbol_name(name, SymbolKind::Trait);
+            codebase.symbols.add_class_like(name, SymbolKind::Trait, sharp);
         }
         SymbolKind::Interface => {
             class_like_metadata.flags |= MetadataFlags::ABSTRACT;
 
-            codebase.symbols.add_symbol_name(name, SymbolKind::Interface);
+            codebase.symbols.add_class_like(name, SymbolKind::Interface, sharp);
 
             if let Some(extends) = extends {
                 for extended_interface in &extends.types {
-                    let parent_name = context.resolved_names.get(extended_interface);
-                    let parent_name = ascii_lowercase_word(parent_name);
+                    let parent_name = word(context.resolved_names.get(extended_interface));
 
                     class_like_metadata.add_direct_parent_interface(parent_name);
                 }
@@ -822,8 +823,7 @@ where
         && let Some(implemented_interfaces) = implements
     {
         for interface_name in &implemented_interfaces.types {
-            let interface_name = context.resolved_names.get(interface_name);
-            let interface_name = ascii_lowercase_word(interface_name);
+            let interface_name = word(context.resolved_names.get(interface_name));
 
             class_like_metadata.add_direct_parent_interface(interface_name);
         }
@@ -838,7 +838,7 @@ where
             continue;
         };
 
-        class_like_metadata.add_direct_parent_interface(ascii_lowercase_word(name));
+        class_like_metadata.add_direct_parent_interface(word(name));
     }
 
     let mut type_context = TypeResolutionContext::new();
@@ -899,12 +899,11 @@ where
                 continue;
             };
 
-            let fqcn =
-                ascii_lowercase_word(&scope.resolve_str(NameKind::Default, imported_type_alias.imported_from.value).0);
+            let fqcn = word(&scope.resolve_str(NameKind::Default, imported_type_alias.imported_from.value).0);
             let type_name = word(imported_type_alias.imported_alias.value);
             let alias = imported_type_alias.imported_as.as_ref().map_or(type_name, |a| word(a.local.value));
 
-            if fqcn == name {
+            if fqcn.as_bytes().eq_ignore_ascii_case(original_name.as_bytes()) {
                 continue;
             }
 
@@ -989,12 +988,13 @@ where
                 continue;
             };
 
-            let fqcn =
-                ascii_lowercase_word(&scope.resolve_str(NameKind::Default, imported_type_alias.imported_from.value).0);
+            // As written: the populator keys it once every file is scanned. A docblock is plain PHP's, whose names
+            // compare in any case.
+            let fqcn = word(&scope.resolve_str(NameKind::Default, imported_type_alias.imported_from.value).0);
             let type_name = word(imported_type_alias.imported_alias.value);
             let alias = imported_type_alias.imported_as.as_ref().map_or(type_name, |a| word(a.local.value));
 
-            if fqcn == name {
+            if fqcn.as_bytes().eq_ignore_ascii_case(original_name.as_bytes()) {
                 class_like_metadata.issues.push(
                     Issue::help("Type alias is importing from itself, which is unnecessary.")
                         .with_code(ScanningIssueKind::CircularTypeImport)
@@ -1088,13 +1088,17 @@ where
                 continue;
             };
 
-            let lowercase_parent_name = ascii_lowercase_word(parent_name.as_bytes());
-
-            let has_parent = if class_like_metadata.kind.is_interface() {
-                class_like_metadata.all_parent_interfaces.contains(&lowercase_parent_name)
-            } else {
-                class_like_metadata.all_parent_classes.contains(&lowercase_parent_name)
+            // The header's names are as written until the populator keys them, and a docblock's compare in any case.
+            let written_parent = |parents: &WordSet| {
+                parents.iter().find(|parent| parent.as_bytes().eq_ignore_ascii_case(parent_name.as_bytes())).copied()
             };
+            let written = if class_like_metadata.kind.is_interface() {
+                written_parent(&class_like_metadata.all_parent_interfaces)
+            } else {
+                written_parent(&class_like_metadata.all_parent_classes)
+            };
+            let has_parent = written.is_some();
+            let header_name = written.unwrap_or(parent_name);
 
             if !has_parent {
                 class_like_metadata.issues.push(
@@ -1111,10 +1115,8 @@ where
             }
 
             if let Some(extended_parent_parameters) = parent_parameters {
-                class_like_metadata
-                    .template_type_extends_count
-                    .insert(lowercase_parent_name, extended_parent_parameters.len());
-                class_like_metadata.add_template_extended_offset(lowercase_parent_name, extended_parent_parameters);
+                class_like_metadata.template_type_extends_count.insert(header_name, extended_parent_parameters.len());
+                class_like_metadata.add_template_extended_offset(header_name, extended_parent_parameters);
             }
         }
 
@@ -1177,9 +1179,12 @@ where
                 }
             };
 
-            let lowercase_parent_name = ascii_lowercase_word(parent_name.as_bytes());
-
-            if !class_like_metadata.all_parent_interfaces.contains(&lowercase_parent_name) {
+            let Some(header_name) = class_like_metadata
+                .all_parent_interfaces
+                .iter()
+                .find(|parent| parent.as_bytes().eq_ignore_ascii_case(parent_name.as_bytes()))
+                .copied()
+            else {
                 class_like_metadata.issues.push(
                     Issue::error("The `@implements` tag must refer to a direct parent interface.")
                         .with_code(ScanningIssueKind::InvalidImplementsTag)
@@ -1191,13 +1196,11 @@ where
                 );
 
                 continue;
-            }
+            };
 
             if let Some(impl_parent_parameters) = parent_parameters {
-                class_like_metadata
-                    .template_type_implements_count
-                    .insert(lowercase_parent_name, impl_parent_parameters.len());
-                class_like_metadata.add_template_extended_offset(lowercase_parent_name, impl_parent_parameters);
+                class_like_metadata.template_type_implements_count.insert(header_name, impl_parent_parameters.len());
+                class_like_metadata.add_template_extended_offset(header_name, impl_parent_parameters);
             }
         }
 
@@ -1273,7 +1276,7 @@ where
                 continue;
             };
 
-            class_like_metadata.require_extends.insert(ascii_lowercase_word(required_name.as_bytes()));
+            class_like_metadata.require_extends.insert(required_name);
             if let Some(required_params) = required_params {
                 class_like_metadata.add_template_extended_offset(required_name, required_params);
             }
@@ -1355,7 +1358,7 @@ where
                 continue;
             };
 
-            class_like_metadata.require_implements.insert(ascii_lowercase_word(required_name.as_bytes()));
+            class_like_metadata.require_implements.insert(required_name);
             if let Some(required_parameters) = required_parameters {
                 class_like_metadata.add_template_extended_offset(required_name, required_parameters);
             }
@@ -1374,10 +1377,7 @@ where
                     for inheritor in inheritors_union.types.as_ref() {
                         match inheritor {
                             TAtomic::Reference(TReference::Symbol { name, intersection_types: None, .. }) => {
-                                class_like_metadata
-                                    .permitted_inheritors
-                                    .get_or_insert_default()
-                                    .insert(ascii_lowercase_word(name.as_bytes()));
+                                class_like_metadata.permitted_inheritors.get_or_insert_default().insert(*name);
                             }
                             _ => {
                                 class_like_metadata.issues.push(
@@ -1647,7 +1647,7 @@ where
             continue;
         };
 
-        let parent_name = ascii_lowercase_word(parent_name);
+        let parent_name = word(parent_name);
         let arguments: Vec<TUnion> = generic
             .type_arguments
             .arguments
@@ -1771,9 +1771,7 @@ where
         match member {
             ClassLikeMember::TraitUse(trait_use) => {
                 for trait_use in &trait_use.trait_names {
-                    let trait_name = context.resolved_names.get(trait_use);
-
-                    class_like_metadata.add_used_trait(ascii_lowercase_word(trait_name));
+                    class_like_metadata.add_used_trait(word(context.resolved_names.get(trait_use)));
                 }
 
                 if let TraitUseSpecification::Concrete(specification) = &trait_use.specification {
@@ -1899,8 +1897,12 @@ where
                         continue;
                     };
 
-                    let lowercase_trait_name = ascii_lowercase_word(trait_name.as_bytes());
-                    if !class_like_metadata.used_traits.contains(&lowercase_trait_name) {
+                    let Some(header_name) = class_like_metadata
+                        .used_traits
+                        .iter()
+                        .find(|used| used.as_bytes().eq_ignore_ascii_case(trait_name.as_bytes()))
+                        .copied()
+                    else {
                         class_like_metadata.issues.push(
                             Issue::error("The `@use` tag must refer to a trait that is used.")
                                 .with_code(ScanningIssueKind::InvalidUseTag)
@@ -1916,16 +1918,14 @@ where
                         );
 
                         continue;
-                    }
+                    };
 
                     match trait_parameters.filter(|parameters| !parameters.is_empty()) {
                         Some(trait_parameters) => {
                             let parameters_count = trait_parameters.len();
 
-                            class_like_metadata.template_type_uses_count.insert(lowercase_trait_name, parameters_count);
-                            class_like_metadata
-                                .template_extended_offsets
-                                .insert(lowercase_trait_name, trait_parameters);
+                            class_like_metadata.template_type_uses_count.insert(header_name, parameters_count);
+                            class_like_metadata.template_extended_offsets.insert(header_name, trait_parameters);
                         }
                         // The `@use` tag is redundant if no parameters are provided.
                         None => {

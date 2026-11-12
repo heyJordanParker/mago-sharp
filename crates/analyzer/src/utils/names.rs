@@ -135,7 +135,7 @@ fn shares_short_name(
         for (class_like, metadata) in &codebase.class_likes {
             // php-sharp#60: the prelude's `Sharp\` class-likes are built-in, yet a `.sharp` file reaches them with no
             // import.
-            if !metadata.flags.is_built_in() || class_like.as_bytes().starts_with(b"sharp\\") {
+            if !metadata.flags.is_built_in() || is_prelude_stub(*class_like) {
                 *counts.entry(short_name(class_like).to_ascii_lowercase()).or_insert(0) += 1;
             }
         }

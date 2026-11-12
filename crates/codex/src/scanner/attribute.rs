@@ -263,7 +263,6 @@ mod tests {
     use mago_names::resolver::NameResolver;
     use mago_span::Span;
     use mago_syntax::parser::parse_file;
-    use mago_word::ascii_lowercase_word;
     use mago_word::word;
     use ordered_float::OrderedFloat;
 
@@ -281,7 +280,7 @@ mod tests {
         let resolved_names = NameResolver::new(&arena).resolve(program);
         let codebase = scan_program(&arena, &file, program, &resolved_names, mago_php_version::PHPVersion::LATEST);
 
-        codebase.class_likes.get(&ascii_lowercase_word(b"App\\Holder")).expect("Holder is scanned").attributes.clone()
+        codebase.get_class_like(b"App\\Holder").expect("Holder is scanned").attributes.clone()
     }
 
     #[test]

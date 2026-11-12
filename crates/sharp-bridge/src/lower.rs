@@ -5,6 +5,7 @@ use mago_allocator::LocalArena;
 use mago_analyzer::CollectionKind;
 use mago_analyzer::artifacts::MemberCall;
 use mago_codex::defaults_trait_name;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::metadata::module::ModuleKind;
@@ -830,7 +831,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         for (binding, binding_metadata) in written.zip(&metadata.bindings) {
             let line = self.line(binding);
             let namespace = self.string(0, line, metadata.namespace.as_bytes());
-            let service = self.string(0, line, service_id(&binding_metadata.service.type_union).as_bytes());
+            let id = service_id(&binding_metadata.service.type_union, self.types.codebase());
+            let service = self.string(0, line, id.as_bytes());
             let target = match binding_metadata.target {
                 Some(target) => self.string(0, line, target.as_bytes()),
                 None => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
@@ -3425,7 +3427,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             unreachable!("semantics refuses a method parameter without a type");
         };
         let hint_index = self.hint(hint);
-        let service = service.and_then(|service| dropped_service(hint, service));
+        let service = service.and_then(|service| dropped_service(hint, service, self.types.codebase()));
         let node = self.parameter_of_type(parameter, hint_index, service);
         if self.types.is_widened(parameter.variable.span) {
             self.nodes[node as usize].attr |= ZEND_PARAM_WIDENED;
@@ -9936,7 +9938,7 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
 /// drops the service, spec section 32: a collection of objects, as `List<PriceRule>` runs as `array`. The engine reads
 /// any other parameter's class from its PHP type, and a collection of values is no service. Neither is a type that
 /// names a type parameter, as `List<TItem>` does, whose objects are of a type each type argument fixes.
-fn dropped_service(hint: &Hint, service: &FunctionLikeParameterMetadata) -> Option<Word> {
+fn dropped_service(hint: &Hint, service: &FunctionLikeParameterMetadata, codebase: &CodebaseMetadata) -> Option<Word> {
     let r#type = &service.type_metadata.as_ref()?.type_union;
     let collection = matches!(
         without_readonly(hint),
@@ -9946,7 +9948,7 @@ fn dropped_service(hint: &Hint, service: &FunctionLikeParameterMetadata) -> Opti
     let of_objects = nodes.iter().any(|node| matches!(node, TypeRef::Atomic(TAtomic::Object(_))));
     let is_open = nodes.iter().any(|node| matches!(node, TypeRef::Atomic(TAtomic::GenericParameter(_))));
 
-    (collection && of_objects && !is_open).then(|| service_id(r#type))
+    (collection && of_objects && !is_open).then(|| service_id(r#type, codebase))
 }
 
 /// Where plain PHP's array, which the checker reads as a `List`, goes, as [`Lowering::arriving`] lowers it.

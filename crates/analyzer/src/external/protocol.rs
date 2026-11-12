@@ -825,7 +825,8 @@ fn read_class_like_target(
     if !is_valid_symbol_name(&ancestor) {
         return Err(protocol(format!("class-like analysis hook {index} target must be a valid PHP class-like name")));
     }
-    Ok(ascii_lowercase_word(&ancestor))
+    // As written: the codebase keys it where a class-like is matched against it, spec section 24.
+    Ok(word(&ancestor))
 }
 
 fn read_function_target(

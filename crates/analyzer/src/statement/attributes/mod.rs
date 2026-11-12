@@ -372,7 +372,7 @@ where
     let constructor_id = MethodIdentifier::new(metadata.original_name, word("__construct"));
     let declaring_constructor_id = context.codebase.get_declaring_method_identifier(&constructor_id);
 
-    artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &constructor_id);
+    artifacts.symbol_references.add_reference_for_method_call(context.codebase, &block_context.scope, &constructor_id);
 
     let Some(constructor) = context.codebase.get_method_by_id(&declaring_constructor_id) else {
         if let Some(argument_list) = &attribute.argument_list {
@@ -404,7 +404,11 @@ where
         return Ok(());
     };
 
-    artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &declaring_constructor_id);
+    artifacts.symbol_references.add_reference_for_method_call(
+        context.codebase,
+        &block_context.scope,
+        &declaring_constructor_id,
+    );
 
     let mut invocation = Invocation {
         target: InvocationTarget::FunctionLike {

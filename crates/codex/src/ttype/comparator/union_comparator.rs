@@ -99,7 +99,7 @@ pub fn is_contained_by_with_erased_template_arguments(
         return true;
     }
 
-    let Some(relaxed_container) = replace_erased_template_arguments(input_type, container_type) else {
+    let Some(relaxed_container) = replace_erased_template_arguments(codebase, input_type, container_type) else {
         *union_comparison_result = direct_result;
         return false;
     };
@@ -107,7 +107,11 @@ pub fn is_contained_by_with_erased_template_arguments(
     is_contained_by(codebase, input_type, &relaxed_container, false, false, false, union_comparison_result)
 }
 
-fn replace_erased_template_arguments(input_type: &TUnion, container_type: &TUnion) -> Option<TUnion> {
+fn replace_erased_template_arguments(
+    codebase: &CodebaseMetadata,
+    input_type: &TUnion,
+    container_type: &TUnion,
+) -> Option<TUnion> {
     let mut relaxed = container_type.clone();
     let mut replaced = false;
 
@@ -124,10 +128,7 @@ fn replace_erased_template_arguments(input_type: &TUnion, container_type: &TUnio
                 return None;
             };
 
-            input_object
-                .name
-                .as_bytes()
-                .eq_ignore_ascii_case(container_object.name.as_bytes())
+            (codebase.class_key(input_object.name.as_bytes()) == codebase.class_key(container_object.name.as_bytes()))
                 .then_some(input_object.type_parameters.as_deref())
                 .flatten()
         }) else {

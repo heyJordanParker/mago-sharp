@@ -32,13 +32,13 @@ pub fn is_contained_by(
         TClassLikeString::Literal { value } => {
             if let Some(str_value) = input_scalar.get_known_literal_string_value()
                 && is_valid_class_string(str_value)
-                && str_value.eq_ignore_ascii_case(value.as_bytes())
+                && codebase.class_key(str_value) == codebase.class_key(value.as_bytes())
             {
                 return true;
             }
 
             if let Some(literal_class_string) = input_scalar.get_literal_class_string_value()
-                && literal_class_string.as_bytes().eq_ignore_ascii_case(value.as_bytes())
+                && codebase.class_key(literal_class_string.as_bytes()) == codebase.class_key(value.as_bytes())
             {
                 return true;
             }

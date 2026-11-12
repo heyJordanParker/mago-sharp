@@ -49,7 +49,6 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::NullSafePropertyAccess;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 use mago_word::concat_word;
 use mago_word::word;
 
@@ -573,7 +572,7 @@ where
                                     |magic_method| UndocumentedMethod {
                                         classname,
                                         method_name: context.codebase.method_key(
-                                            ascii_lowercase_word(classname.as_bytes()),
+                                            context.codebase.class_key(classname.as_bytes()),
                                             method_name.as_bytes(),
                                         ),
                                         target_span: object.span(),
@@ -689,7 +688,7 @@ where
     }
 
     for method_id in asserted_descendant_method_references {
-        artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &method_id);
+        artifacts.symbol_references.add_reference_for_method_call(context.codebase, &block_context.scope, &method_id);
     }
     artifacts.readonly_calls.append(&mut readonly_calls);
 
@@ -741,7 +740,7 @@ pub(crate) fn check_call_through_readonly<A>(
     }
 
     readonly_calls.push(ReadonlyCall {
-        callee: Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), identifier.get_method_name()),
+        callee: Body::Method(context.codebase.class_key(declaring_class.as_bytes()), identifier.get_method_name()),
         span: selector.span(),
         caller,
         call,
@@ -851,7 +850,8 @@ where
         } else if !magic_call.is_empty() {
             result.undocumented_methods.extend(magic_call.into_iter().map(|magic_method| UndocumentedMethod {
                 classname: name,
-                method_name: context.codebase.method_key(ascii_lowercase_word(name.as_bytes()), method_name.as_bytes()),
+                method_name:
+                    context.codebase.method_key(context.codebase.class_key(name.as_bytes()), method_name.as_bytes()),
                 target_span,
                 selector_span: selector.span(),
                 magic_method,
@@ -2337,10 +2337,10 @@ fn collect_mixin_types_into(
         for mixin_atomic in mixin_type.type_union.types.as_ref() {
             match mixin_atomic {
                 TAtomic::Object(obj @ TObject::Named(named)) => {
-                    direct.push((ascii_lowercase_word(named.name.as_bytes()), obj));
+                    direct.push((codebase.class_key(named.name.as_bytes()), obj));
                 }
                 TAtomic::Object(obj @ TObject::Enum(enum_type)) => {
-                    direct.push((ascii_lowercase_word(enum_type.name.as_bytes()), obj));
+                    direct.push((codebase.class_key(enum_type.name.as_bytes()), obj));
                 }
                 TAtomic::GenericParameter(TGenericParameter {
                     parameter_name, constraint, defining_entity, ..
@@ -2350,18 +2350,19 @@ fn collect_mixin_types_into(
                     if let TObject::Named(named_object) = outer_object
                         && let Some(type_params) = named_object.get_type_parameters()
                         && let GenericParent::ClassLike(defining_class) = defining_entity
-                        && named_object.name.as_bytes().eq_ignore_ascii_case(defining_class.as_bytes())
+                        && codebase.class_key(named_object.name.as_bytes())
+                            == codebase.class_key(defining_class.as_bytes())
                         && let Some(index) = class_metadata.get_template_index_for_name(*parameter_name)
                         && let Some(concrete_type) = type_params.get(index)
                     {
                         for atomic in concrete_type.types.as_ref() {
                             match atomic {
                                 TAtomic::Object(obj @ TObject::Named(named)) => {
-                                    direct.push((ascii_lowercase_word(named.name.as_bytes()), obj));
+                                    direct.push((codebase.class_key(named.name.as_bytes()), obj));
                                     resolved = true;
                                 }
                                 TAtomic::Object(obj @ TObject::Enum(enum_type)) => {
-                                    direct.push((ascii_lowercase_word(enum_type.name.as_bytes()), obj));
+                                    direct.push((codebase.class_key(enum_type.name.as_bytes()), obj));
                                     resolved = true;
                                 }
                                 _ => {}
@@ -2373,10 +2374,10 @@ fn collect_mixin_types_into(
                         for constraint_atomic in constraint.types.as_ref() {
                             match constraint_atomic {
                                 TAtomic::Object(obj @ TObject::Named(named)) => {
-                                    direct.push((ascii_lowercase_word(named.name.as_bytes()), obj));
+                                    direct.push((codebase.class_key(named.name.as_bytes()), obj));
                                 }
                                 TAtomic::Object(obj @ TObject::Enum(enum_type)) => {
-                                    direct.push((ascii_lowercase_word(enum_type.name.as_bytes()), obj));
+                                    direct.push((codebase.class_key(enum_type.name.as_bytes()), obj));
                                 }
                                 _ => {}
                             }

@@ -81,7 +81,6 @@ use mago_syntax::token::is_sharp_keyword;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
@@ -109,7 +108,6 @@ use crate::statement::function_like::report_undefined_bound_types;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::function_like::report_union_for_a_class_bound;
 use crate::statement::function_like::written_type;
-use crate::utils::casing::report_sharp_class_like_in_another_case;
 use crate::utils::missing_type_hints;
 use crate::utils::names::and_list;
 use crate::utils::names::article;
@@ -219,7 +217,8 @@ fn report_class_like_named_as_a_namespace<A>(
 
     let sharp = context.dialect.is_sharp();
     // Spec section 22: PHP# code never names an interface's trait of default bodies, so the rule leaves it out.
-    let defaults = ascii_lowercase_word(defaults_trait_name(name).as_bytes());
+    let defaults =
+        context.codebase.class_key(defaults_trait_name(class_like_metadata.original_name.as_bytes()).as_bytes());
     let Some(inside) = context
         .codebase
         .class_likes
@@ -233,7 +232,9 @@ fn report_class_like_named_as_a_namespace<A>(
             (sharp || other.flags.is_sharp())
                 && other.name != defaults
                 && !is_own_case
-                && other.name.as_bytes().strip_prefix(name).is_some_and(|rest| rest.starts_with(b"\\"))
+                // A namespace is found in any case, as PHP finds it, whatever case each class-like's key keeps.
+                && other.name.as_bytes().get(..name.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+                && other.name.as_bytes().get(name.len()) == Some(&b'\\')
         })
         .min_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()))
     else {
@@ -1272,7 +1273,7 @@ where
         let is_parent = class_like_metadata.kind.is_interface()
             || class_like_metadata
                 .direct_parent_class
-                .is_some_and(|parent| parent.as_bytes().eq_ignore_ascii_case(resolved));
+                .is_some_and(|parent| parent == context.codebase.class_key(resolved));
 
         if is_parent {
             extended_types.push(type_name);
@@ -1305,8 +1306,9 @@ where
 
     // The base that starts a chain back to the class is the cycle's error alone, so no other check reads it.
     if let Some(start) = report_inheritance_cycle(context, class_like_metadata, &extended_types, &implemented_types) {
+        let start = context.codebase.class_key(start.as_bytes());
         let starts_cycle =
-            |name: &Identifier<'arena>| context.resolved_names.get(name).eq_ignore_ascii_case(start.as_bytes());
+            |name: &Identifier<'arena>| context.codebase.class_key(context.resolved_names.get(name)) == start;
         extended_types.retain(|name| !starts_cycle(name));
         implemented_types.retain(|name| !starts_cycle(name));
     }
@@ -1924,7 +1926,7 @@ fn report_members_named_like_inherited_members<A>(context: &mut Context<'_, '_, 
 where
     A: Arena,
 {
-    let is_own = |declaring: Word| declaring.as_bytes().eq_ignore_ascii_case(class.name.as_bytes());
+    let is_own = |declaring: Word| context.codebase.class_key(declaring.as_bytes()) == class.name;
 
     let mut clashes = vec![];
     for (property_name, &property_class) in &class.declaring_property_ids {
@@ -2177,7 +2179,7 @@ where
     let written = extended_types
         .iter()
         .chain(implemented_types)
-        .find(|name| context.resolved_names.get(*name).eq_ignore_ascii_case(start.as_bytes()))?;
+        .find(|name| context.codebase.class_key(context.resolved_names.get(*name)) == start)?;
     let names: Vec<Word> =
         chain.iter().map(|type_like| display_class_like_name(context, type_like.original_name)).collect();
     let (own, base) = (names[0], names[1]);
@@ -2236,9 +2238,6 @@ fn check_class_like_extends<'ctx, 'arena, A>(
             );
             continue;
         };
-        if report_sharp_class_like_in_another_case(context, extended_type_str, extended_type.span()) {
-            continue;
-        }
 
         let extended_name = display_class_like_name(context, extended_class_metadata.original_name);
         let extended_kind_str = extended_class_metadata.kind.as_str();
@@ -2491,12 +2490,6 @@ fn check_class_like_implements<'ctx, 'arena, A>(
     for &implemented_type in implemented_types {
         let implemented_type_str = context.resolved_names.get(&implemented_type);
         let implemented_interface_metadata = context.codebase.get_class_like(implemented_type_str);
-        if implemented_interface_metadata.is_some()
-            && report_sharp_class_like_in_another_case(context, implemented_type_str, implemented_type.span())
-        {
-            continue;
-        }
-
         if let Some(implemented_metadata) = implemented_interface_metadata {
             let implemented_name = display_class_like_name(context, implemented_metadata.original_name);
             let implemented_kind_str = implemented_metadata.kind.as_str();
@@ -2673,9 +2666,6 @@ fn check_class_like_use<'ctx, 'arena, A>(
 
             continue;
         };
-        if report_sharp_class_like_in_another_case(context, used_type_str, used_type.span()) {
-            continue;
-        }
 
         let used_name = display_class_like_name(context, used_trait_metadata.original_name);
         let used_kind_str = used_trait_metadata.kind.as_str();
@@ -3124,11 +3114,11 @@ fn check_template_parameters<'ctx, A>(
     }
 }
 
-/// Checks if this is the same method that was inherited (not overridden).
+/// Checks if this is the same method that was inherited (not overridden), by the classes' keys, spec section 24.
 /// Example: `StringBox` extends Box and inherits `Box::setValue` without overriding it.
 #[inline]
-fn should_skip_same_method(appearing_fqcn: &[u8], overridden_fqcn: &[u8]) -> bool {
-    appearing_fqcn.eq_ignore_ascii_case(overridden_fqcn)
+fn should_skip_same_method(codebase: &CodebaseMetadata, appearing_fqcn: &[u8], overridden_fqcn: &[u8]) -> bool {
+    codebase.class_key(appearing_fqcn) == codebase.class_key(overridden_fqcn)
 }
 
 /// Checks if this is a trait-to-trait abstract method conflict that should be handled
@@ -3157,16 +3147,14 @@ fn should_skip_trait_to_trait_conflict(
         return false;
     }
 
-    let appearing_lowercase = ascii_lowercase_word(appearing_class.name.as_bytes());
-    let overridden_lowercase = ascii_lowercase_word(overridden_class.name.as_bytes());
-
-    if !class_like_metadata.used_traits.contains(&appearing_lowercase)
-        || !class_like_metadata.used_traits.contains(&overridden_lowercase)
+    // Each name is its class-like's key, as the used traits are, spec section 24.
+    if !class_like_metadata.used_traits.contains(&appearing_class.name)
+        || !class_like_metadata.used_traits.contains(&overridden_class.name)
     {
         return false;
     }
 
-    appearing_lowercase != overridden_lowercase
+    appearing_class.name != overridden_class.name
 }
 
 /// Checks if this is an enum implementing BackedEnum/UnitEnum, which is allowed
@@ -3293,7 +3281,7 @@ fn check_sharp_template_variance<A>(
         .flat_map(|inheritance| inheritance.types.iter())
         .filter_map(|hint| match hint {
             Hint::Generic(generic) => {
-                Some((ascii_lowercase_word(context.resolved_names.resolve(&generic.name)?), generic.span()))
+                Some((context.codebase.class_key(context.resolved_names.resolve(&generic.name)?), generic.span()))
             }
             _ => None,
         })
@@ -3604,7 +3592,7 @@ fn check_abstract_method_signatures<'ctx, A>(
             let declaring_class_name = parent_declaring_method_id.get_class_name();
             let declaring_class_name_str = declaring_class_name.as_ref();
 
-            if should_skip_same_method(method_fqcn.as_bytes(), parent_fqcn_str) {
+            if should_skip_same_method(context.codebase, method_fqcn.as_bytes(), parent_fqcn_str) {
                 continue;
             }
 
@@ -4341,7 +4329,7 @@ fn check_interface_method_signatures<'ctx, A>(
             continue;
         };
 
-        if should_skip_same_method(class_fqcn_str, interface_fqcn_str) {
+        if should_skip_same_method(context.codebase, class_fqcn_str, interface_fqcn_str) {
             continue;
         }
 
@@ -4491,7 +4479,7 @@ fn check_required_named_constructors<A>(
     }
 
     for (method_name, declaring_method_id) in &class_like_metadata.declaring_method_ids {
-        if declaring_method_id.get_class_name().as_bytes().eq_ignore_ascii_case(class_like_metadata.name.as_bytes()) {
+        if context.codebase.class_key(declaring_method_id.get_class_name().as_bytes()) == class_like_metadata.name {
             continue;
         }
         let Some(requiring_class) =

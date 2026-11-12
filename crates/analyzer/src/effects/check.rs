@@ -509,7 +509,9 @@ where
         return;
     }
 
-    let Some(class_metadata) = context.codebase.get_class_like(class.as_bytes()) else {
+    // An `extern` is keyed by its class's lowercase name, as plain PHP finds the class, and the code finds the class by
+    // its name as written, which names a PHP# class only exactly, spec section 24.
+    let Some(class_metadata) = context.codebase.get_class_like(context.resolved_names.get(&r#extern.target)) else {
         // `extern Pdf.render` after `import Vendor.Pdf;` declares the function `render` of that namespace, spec
         // section 23, as `extern Foundation.now` declares Laravel's `now()`.
         if namespace_function(context.codebase, class, member.as_bytes()).is_some() {

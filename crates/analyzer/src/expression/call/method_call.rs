@@ -943,6 +943,7 @@ where
     let mut has_invalid_targets = false;
     for property in called_properties {
         artifacts.symbol_references.add_reference_for_property_read(
+            context.codebase,
             &block_context.scope,
             property.declaring_class,
             property.property_name,

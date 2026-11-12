@@ -1,7 +1,8 @@
 use mago_span::Span;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
+use mago_word::word;
 
+use crate::metadata::CodebaseMetadata;
 use crate::metadata::ttype::TypeMetadata;
 use crate::ttype::TType;
 use crate::ttype::union::TUnion;
@@ -82,14 +83,26 @@ pub enum BindingValueMetadata {
     Expression(Word),
 }
 
-/// The id the container knows the service of `type` by: its type in lowercase, as PHP compares class names.
+/// The id the container knows the service of `type` by.
 ///
-/// A binding serves it, the analyzer resolves a parameter by it, and a compiled module's table and a parameter whose
+/// It is the type with each PHP# class's name exact and the rest in lowercase, as `codebase` keys a class, spec
+/// section 24, and the engine's `sharp_container_id` writes it. A binding serves it, the analyzer resolves a parameter by it, and a compiled module's table and a parameter whose
 /// PHP type drops its type arguments carry it to the engine. A `readonly` parameter takes the service of its type,
 /// spec section 13, because the mark promises only what the constructor does with it.
 #[must_use]
-pub fn service_id(r#type: &TUnion) -> Word {
-    ascii_lowercase_word(r#type.clone().without_readonly().get_id().as_bytes())
+pub fn service_id(r#type: &TUnion, codebase: &CodebaseMetadata) -> Word {
+    let id = r#type.clone().without_readonly().get_id();
+    let is_name = |byte: &u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'\\');
+    let mut keyed = Vec::with_capacity(id.len());
+    for part in id.as_bytes().chunk_by(|left, right| is_name(left) == is_name(right)) {
+        if part.iter().all(is_name) {
+            keyed.extend_from_slice(codebase.class_key(part).as_bytes());
+        } else {
+            keyed.extend_from_slice(part);
+        }
+    }
+
+    word(&keyed)
 }
 
 /// The namespaces of the app's top modules that bind `Sharp.Dispatcher`, spec section 15.
@@ -119,7 +132,7 @@ impl BindingMetadata {
     /// Whether it binds `Sharp.Dispatcher`, the service every `emit` hands its event to.
     #[must_use]
     pub fn binds_dispatcher(&self) -> bool {
-        service_id(&self.service.type_union).as_bytes() == b"sharp\\dispatcher"
+        self.service.type_union.clone().without_readonly().get_id().as_bytes() == b"Sharp\\Dispatcher"
     }
 }
 

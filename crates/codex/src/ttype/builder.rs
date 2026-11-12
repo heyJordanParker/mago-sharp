@@ -254,14 +254,8 @@ pub fn get_union_from_type(
             return Err(TypeError::UnsupportedType(ttype.to_string(), ttype.span()));
         }
         Type::MemberReference(member_reference) => {
-            let class_like_name = get_reference_class_name(
-                &member_reference.kind,
-                scope,
-                classname,
-                ttype,
-                member_reference.span(),
-                false,
-            )?;
+            let class_like_name =
+                get_reference_class_name(&member_reference.kind, scope, classname, ttype, member_reference.span())?;
 
             let member_selector = match member_reference.member {
                 MemberReferenceSelector::Wildcard(_) => TReferenceMemberSelector::Wildcard,
@@ -291,14 +285,8 @@ pub fn get_union_from_type(
             wrap_atomic(TAtomic::Reference(TReference::Global { selector }))
         }
         Type::AliasReference(alias_reference) => {
-            let class_like_name = get_reference_class_name(
-                &alias_reference.class,
-                scope,
-                classname,
-                ttype,
-                alias_reference.span(),
-                true,
-            )?;
+            let class_like_name =
+                get_reference_class_name(&alias_reference.class, scope, classname, ttype, alias_reference.span())?;
 
             let alias_name = match alias_reference.alias {
                 AliasName::Identifier(identifier) => word(identifier.value),
@@ -527,7 +515,6 @@ fn get_reference_class_name(
     classname: Option<Word>,
     ttype: &Type<'_>,
     reference_span: Span,
-    lowercase_resolved_identifier: bool,
 ) -> Result<Word, TypeError> {
     let require_classname = || {
         classname.ok_or_else(|| {
@@ -544,9 +531,10 @@ fn get_reference_class_name(
         ReferenceKind::Identifier(identifier) if identifier.value.eq(b"this") => require_classname()?,
         ReferenceKind::Parent(_) => word("parent"),
         ReferenceKind::Identifier(identifier) => {
+            // As written: the codebase finds the class-like by its key, spec section 24.
             let (class_like_name, _) = scope.resolve(NameKind::Default, identifier.value);
 
-            if lowercase_resolved_identifier { ascii_lowercase_word(&class_like_name) } else { word(&class_like_name) }
+            word(&class_like_name)
         }
     })
 }

@@ -566,7 +566,8 @@ fn a_bare_name_of_an_alias_of_the_files_namespace_is_a_reference_to_the_alias() 
 
     assert!(issues.is_empty(), "{issues:#?}");
     let referencing = references.get_references_to_symbol((ascii_lowercase_word(b"Demo\\Pace"), empty_word()));
-    let report = ascii_lowercase_word(b"Demo\\Report");
+    // The PHP# class `Report` is keyed by its exact name, spec section 24.
+    let report = word(b"Demo\\Report");
     assert_eq!(referencing, HashSet::from_iter([&(report, empty_word()), &(report, word(b"percent"))]));
 }
 
@@ -10084,10 +10085,10 @@ fn an_extension_on_a_union_runs_on_the_parts_that_lack_a_member_of_its_name() {
     assert_messages(("src/App/Billing/Labels.sharp", calls), &others, &[]);
     let extension = |member: &str| {
         format!(
-            r#"FunctionLike {{ callee: Method("app\\billing\\unionlabels", "{member}"), class: Some("app\\billing\\unionlabels") }}"#
+            r#"FunctionLike {{ callee: Method("App\\Billing\\UnionLabels", "{member}"), class: Some("App\\Billing\\UnionLabels") }}"#
         )
     };
-    let own = r#"FunctionLike { callee: Method("App\\Billing\\Order", "label"), class: Some("app\\billing\\order") }"#
+    let own = r#"FunctionLike { callee: Method("App\\Billing\\Order", "label"), class: Some("App\\Billing\\Order") }"#
         .to_owned();
     assert_eq!(
         recorded_callees(
@@ -20431,9 +20432,9 @@ fn a_call_of_a_property_holding_a_function_records_the_property() {
             &["this.scale(extra)", "order.handler(extra)", "Report.shared(extra)"]
         ),
         [
-            [r#"Property { class: "demo\\report", property: "$scale" }"#],
+            [r#"Property { class: "Demo\\Report", property: "$scale" }"#],
             [r#"Property { class: "lib\\order", property: "$handler" }"#],
-            [r#"Property { class: "demo\\report", property: "$shared" }"#]
+            [r#"Property { class: "Demo\\Report", property: "$shared" }"#]
         ]
     );
 }
@@ -20557,7 +20558,7 @@ fn new_on_a_generic_class_without_a_constructor_records_the_type_arguments_it_wr
 
     assert_eq!(recorded_type_arguments(report, &[r#box, crate_], "new Box<int>()"), ["int"]);
     assert_eq!(recorded_type_arguments(report, &[r#box, crate_], "new Crate<string>()"), ["string"]);
-    assert_eq!(recorded_type_arguments(tray, &[], "new Self()"), ["('T.demo\\tray extends mixed)"]);
+    assert_eq!(recorded_type_arguments(tray, &[], "new Self()"), ["('T.Demo\\Tray extends mixed)"]);
     assert_eq!(each_file(issues, &[r#box, crate_], &[]), vec![Vec::<String>::new(); 2]);
 }
 
@@ -23145,7 +23146,7 @@ fn the_declared_type_a_call_goes_into_fixes_its_type_arguments() {
     let analyzed = ("src/Demo/Report.sharp", sharp);
 
     assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 3]);
-    assert_eq!(recorded_type_arguments(shelf, &declared, "this.shelved()"), ["('TItem.demo\\shelf extends mixed)"]);
+    assert_eq!(recorded_type_arguments(shelf, &declared, "this.shelved()"), ["('TItem.Demo\\Shelf extends mixed)"]);
     for (call, recorded) in [
         ("cache.get(\"orders\")", "list<Demo\\Order>"),
         ("this.make()", "Demo\\Order"),
@@ -28041,7 +28042,7 @@ fn a_getter_building_and_changing_a_new_object_passes() {
 
     assert_eq!(effect_issues(&[page, builder]), Vec::<String>::new());
     let (codebase, summaries) = summarized(&[page, builder]);
-    let add = FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Builder"), ascii_lowercase_word(b"add"));
+    let add = FunctionLikeIdentifier::Method(word(b"App\\Shop\\Builder"), word(b"add"));
     assert_eq!(
         Effects::solve(&codebase, &summaries).impurity(&codebase, &add).as_deref(),
         Some("changes `this.text`"),
@@ -28456,7 +28457,7 @@ fn a_foreign_object_is_an_ordinary_parameter_and_return_type() {
     assert_eq!(issues(stamp, &[instant]), Vec::<String>::new());
     let (codebase, summaries) = summarized(&[stamp, instant, BUILTINS]);
     let effects = Effects::solve(&codebase, &summaries);
-    let method = |name: &[u8]| FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Stamp"), word(name));
+    let method = |name: &[u8]| FunctionLikeIdentifier::Method(word(b"App\\Shop\\Stamp"), word(name));
     let clock = Some(vec![word("Sharp\\Time\\Clock")]);
     assert_eq!(effects.function_effects(&codebase, &method(b"stampedWith")), clock, "a parameter");
     assert_eq!(effects.function_effects(&codebase, &method(b"later")), clock, "a returned one");
@@ -28609,7 +28610,7 @@ fn a_recursive_pair_of_methods_solves_without_looping() {
     );
     let (codebase, summaries) = summarized(&files);
     let effects = Effects::solve(&codebase, &summaries);
-    let even = FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Tree"), ascii_lowercase_word(b"even"));
+    let even = FunctionLikeIdentifier::Method(word(b"App\\Shop\\Tree"), word(b"even"));
     assert_eq!(
         effects.impurity(&codebase, &even).as_deref(),
         Some("reaches `Tree.odd`, which calls `Chrono.now` with the effect `Clock`")
@@ -28644,7 +28645,7 @@ fn the_files_a_call_reaches_are_its_methods_its_overrides_and_its_accessors() {
     let (codebase, summaries) = summarized(&[base, sale, stock, opened, till, CLOCK_STUB, NOW]);
     let effects = Effects::solve(&codebase, &summaries);
     let file = |class: &[u8]| codebase.get_class_like(class).expect("the class is declared").span.file_id;
-    let method = |name: &[u8]| FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Till"), word(name));
+    let method = |name: &[u8]| FunctionLikeIdentifier::Method(word(b"App\\Shop\\Till"), word(name));
 
     let callee_files = effects.callee_files(&codebase);
     assert_eq!(
@@ -30116,10 +30117,7 @@ fn emit_has_the_effect_events() {
     assert_eq!(issues(checkout, &ORDER_EVENTS), Vec::<String>::new());
     // Its own `emit` and a call of a function whose type lists `Events` give a function type `Events` once.
     let (codebase, summaries) = summarized(&[checkout, order_event, order_paid]);
-    let broadcast = FunctionLikeIdentifier::Method(
-        ascii_lowercase_word(b"App\\Shop\\Checkout"),
-        ascii_lowercase_word(b"broadcast"),
-    );
+    let broadcast = FunctionLikeIdentifier::Method(word(b"App\\Shop\\Checkout"), word(b"broadcast"));
     assert_eq!(
         Effects::solve(&codebase, &summaries).function_effects(&codebase, &broadcast),
         Some(vec![word("Sharp\\Events")])
@@ -32141,6 +32139,64 @@ function run(): ORDER
         [
             "Cannot find type `Demo\\ORDER`; did you mean `Demo\\Order`?",
             "Cannot find type `Demo\\ORDER`; did you mean `Demo\\Order`?",
+        ]
+    );
+}
+
+/// Spec section 24: a PHP# type's identity is its exact name, so `Order` and `ORDER` in one namespace are two types,
+/// neither a duplicate of the other, each reached by its own name with its own members, and a name in a third case
+/// reaches neither.
+#[test]
+fn two_types_whose_names_differ_only_in_case_are_two_types() {
+    let order = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;
+
+public class Order
+{
+    public int total() => 1;
+}
+",
+    );
+    let shouted = (
+        "src/Demo/ORDER.sharp",
+        "namespace Demo;
+
+public class ORDER
+{
+    public string label() => \"line\";
+}
+",
+    );
+    let caller = (
+        "src/Demo/Caller.sharp",
+        "namespace Demo;
+
+public class Caller
+{
+    public int total(Order order) => order.total();
+
+    public string label(ORDER line) => line.label();
+
+    public int built() => new Order().total();
+
+    public string made() => new ORDER().label();
+
+    public int wrong(ORDER line) => line.total();
+
+    public OrDer missing() => new OrDer();
+}
+",
+    );
+
+    assert_eq!(messages(order, &[shouted]), Vec::<String>::new());
+    assert_eq!(messages(shouted, &[order]), Vec::<String>::new());
+    assert_eq!(
+        messages(caller, &[order, shouted]),
+        [
+            "Method `Demo.ORDER.total` does not exist.",
+            "Cannot find type `OrDer`; did you mean `Demo.ORDER`?",
+            "Cannot find type `OrDer`; did you mean `Demo.ORDER`?",
         ]
     );
 }

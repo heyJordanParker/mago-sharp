@@ -6,7 +6,6 @@ use indexmap::IndexMap;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
-use mago_word::ascii_lowercase_word;
 
 use crate::metadata::CodebaseMetadata;
 use crate::metadata::class_like::ClassLikeMetadata;
@@ -80,6 +79,7 @@ fn populate_codebase_inner(
     mut safe_symbol_members: HashSet<SymbolIdentifier>,
     mut dirty_symbols: Option<HashSet<SymbolIdentifier>>,
 ) {
+    codebase.drop_modules_named_like_plain_classes();
     if codebase.populate_class_like_aliases() {
         safe_symbols.clear();
         safe_symbol_members.clear();
@@ -125,6 +125,7 @@ fn populate_codebase_inner(
 
     for class_like_name in &class_likes_to_repopulate {
         if let Some(classlike_info) = codebase.class_likes.get_mut(class_like_name) {
+            classlike_info.key_header_names(&codebase.symbols);
             classlike_info.flags &= !MetadataFlags::POPULATED;
             classlike_info.declaring_property_ids.clear();
             classlike_info.appearing_property_ids.clear();
@@ -427,7 +428,7 @@ fn populate_sealed_interfaces(codebase: &mut CodebaseMetadata) {
 /// runs a full analysis, which scans every bound again.
 fn refuse_missing_bounds(codebase: &mut CodebaseMetadata) {
     let CodebaseMetadata { symbols, class_likes, function_likes, .. } = codebase;
-    let declares = |name: Word| symbols.get_kind(ascii_lowercase_word(name.as_bytes())).is_some();
+    let declares = |name: Word| symbols.get_kind(symbols.class_key(name.as_bytes())).is_some();
 
     let sharp_classes = class_likes.values_mut().filter(|class| class.flags.is_sharp());
     let sharp_functions = function_likes.values_mut().filter(|function| function.flags.is_sharp());
@@ -617,7 +618,7 @@ fn populate_constant(
     for attribute_metadata in &constant.attributes {
         symbol_references.add_symbol_reference_to_symbol(
             name,
-            ascii_lowercase_word(attribute_metadata.name.as_bytes()),
+            symbols.class_key(attribute_metadata.name.as_bytes()),
             true,
         );
     }

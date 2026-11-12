@@ -374,7 +374,7 @@ where
     // Spec section 29 keeps native bodies to the standard library's classes under `Sharp\`. The engine compiles the
     // library from `vendor/` as any other code, so only the analyzer knows the file's package.
     if method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_)))
-        && !(context.source_file.is_standard_library && class_like_metadata.name.as_bytes().starts_with(b"sharp\\"))
+        && !(context.source_file.is_standard_library && class_like_metadata.name.as_bytes().starts_with(b"Sharp\\"))
     {
         context.collector.report_with_code(
             IssueCode::NativeBodyOutsideLibrary,

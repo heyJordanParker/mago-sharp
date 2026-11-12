@@ -156,7 +156,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
 }
 
 /// The constants and enum cases a PHP# constant's or backed case's value reads on its way back to `start`, a class's
-/// lowercase name and the constant's or case's own, as `Loop.B` for ``A = `a${Loop.B}` `` beside
+/// key and the constant's or case's own name, as `Loop.B` for ``A = `a${Loop.B}` `` beside
 /// ``B = `b${Loop.A}` ``, or none when no read leads back. An empty path is a value that reads itself.
 pub(super) fn path_back(codebase: &CodebaseMetadata, start: (Word, Word)) -> Option<Vec<(Word, Word)>> {
     let mut path = Vec::new();
@@ -183,7 +183,8 @@ fn leads_back(
         },
     };
 
-    for &read in reads {
+    for &(class, name) in reads {
+        let read = (codebase.class_key(class.as_bytes()), name);
         if read == start {
             return true;
         }

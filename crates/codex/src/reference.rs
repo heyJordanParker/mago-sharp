@@ -1,6 +1,5 @@
 use foldhash::HashMap;
 use foldhash::HashSet;
-use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
 
 use mago_word::Word;
@@ -492,35 +491,46 @@ impl SymbolReferences {
         self.add_reference(scope.get_reference_origin(), class_member, in_signature);
     }
 
+    /// Records a call of `method`, by its class's key, spec section 24.
     #[inline]
-    pub fn add_reference_for_method_call(&mut self, scope: &ScopeContext<'_>, method: &MethodIdentifier) {
+    pub fn add_reference_for_method_call(
+        &mut self,
+        codebase: &CodebaseMetadata,
+        scope: &ScopeContext<'_>,
+        method: &MethodIdentifier,
+    ) {
         self.add_reference_to_class_member(
             scope,
-            (ascii_lowercase_word(method.get_class_name().as_bytes()), method.get_method_name()),
+            (codebase.class_key(method.get_class_name().as_bytes()), method.get_method_name()),
             false,
         );
     }
 
-    /// Records a read reference to a property (e.g., `$this->prop` used as a value).
+    /// Records a read reference to a property (e.g., `$this->prop` used as a value), by its class's key.
     #[inline]
-    pub fn add_reference_for_property_read(&mut self, scope: &ScopeContext<'_>, class_name: Word, property_name: Word) {
-        let normalized_class_name = ascii_lowercase_word(class_name.as_bytes());
-        let class_member = (normalized_class_name, property_name);
-
-        self.add_property_read_reference(scope.get_reference_origin(), class_member);
-    }
-
-    /// Records a write reference to a property (e.g., `$this->prop = value`).
-    /// This is tracked separately from read references to enable write-only property detection.
-    #[inline]
-    pub fn add_reference_for_property_write(
+    pub fn add_reference_for_property_read(
         &mut self,
+        codebase: &CodebaseMetadata,
         scope: &ScopeContext<'_>,
         class_name: Word,
         property_name: Word,
     ) {
-        let normalized_class_name = ascii_lowercase_word(class_name.as_bytes());
-        let class_member = (normalized_class_name, property_name);
+        let class_member = (codebase.class_key(class_name.as_bytes()), property_name);
+
+        self.add_property_read_reference(scope.get_reference_origin(), class_member);
+    }
+
+    /// Records a write reference to a property (e.g., `$this->prop = value`), by its class's key.
+    /// This is tracked separately from read references to enable write-only property detection.
+    #[inline]
+    pub fn add_reference_for_property_write(
+        &mut self,
+        codebase: &CodebaseMetadata,
+        scope: &ScopeContext<'_>,
+        class_name: Word,
+        property_name: Word,
+    ) {
+        let class_member = (codebase.class_key(class_name.as_bytes()), property_name);
 
         self.add_property_write_reference(scope.get_reference_origin(), class_member);
     }
@@ -849,7 +859,12 @@ impl SymbolReferences {
                 invalid_files.insert(file);
             }
         }
-        let read_invalid = read.iter().any(|symbol| invalid_signatures.contains(symbol));
+        // A read names a class-like as the extension wrote it: exactly, as a PHP# one's key is, or by its key, spec
+        // section 24, which a deleted PHP# class-like no longer has.
+        let read_invalid = read.iter().any(|&(class, member)| {
+            invalid_signatures.contains(&(class, member))
+                || invalid_signatures.contains(&(codebase.class_key(class.as_bytes()), member))
+        });
 
         let mut all_invalid_symbols = invalid_signatures;
         all_invalid_symbols.extend(invalid_bodies);

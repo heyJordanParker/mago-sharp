@@ -260,7 +260,7 @@ fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: &[u8]) ->
     } else if declaring.flags.is_sharp() && metadata.method_metadata.as_ref().is_some_and(|m| m.is_abstract) {
         Runs::Foreign { callee, effects: metadata.uses.iter().map(|effect| Effect::Foreign(*effect)).collect() }
     } else if declaring.flags.is_sharp() {
-        Runs::Body(Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), declaring.method_key(method)))
+        Runs::Body(Body::Method(declaring.name, declaring.method_key(method)))
     } else if is_prelude_stub(declaring_class) {
         Runs::Foreign { callee, effects: Vec::new() }
     } else {
@@ -637,7 +637,7 @@ where
         let property = php_variable_name(property);
         let declaring = *self.codebase().get_class_like(class.as_bytes())?.declaring_property_ids.get(&property)?;
 
-        Some(Body::Accessor(ascii_lowercase_word(declaring.as_bytes()), property, word(accessor)))
+        Some(Body::Accessor(self.codebase().class_key(declaring.as_bytes()), property, word(accessor)))
     }
 
     fn read_property(&mut self, object: &Expression<'arena>, property: &ClassLikeMemberSelector<'arena>, span: Span) {
@@ -926,7 +926,7 @@ where
                 continue;
             };
 
-            let class = ascii_lowercase_word(class.as_bytes());
+            let class = self.codebase().class_key(class.as_bytes());
             let callee = Body::Method(class, self.codebase().method_key(class, method.as_bytes()));
             let arguments = operands.iter().map(|operand| self.roots(operand)).collect();
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
@@ -982,7 +982,7 @@ where
                 return;
             }
 
-            let declaring_class = ascii_lowercase_word(declaring_class.as_bytes());
+            let declaring_class = codebase.class_key(declaring_class.as_bytes());
             let callee = Body::Method(declaring_class, codebase.method_key(declaring_class, method_name.as_bytes()));
             self.summary.calls.push(Call { callee, span, receiver: receiver_roots, arguments: roots });
 
@@ -1094,7 +1094,7 @@ where
                 roots = self.argument_roots(arguments, &metadata.parameters);
                 self.passed_functions(arguments, &metadata.parameters, &Roots::new(), &roots);
             }
-            let callee = Body::Method(ascii_lowercase_word(declaring.name.as_bytes()), constructor);
+            let callee = Body::Method(declaring.name, constructor);
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: roots });
         } else if !is_prelude_stub(class.name) {
             let declaration = extern_of(codebase, class.name, constructor);
@@ -1411,11 +1411,13 @@ pub(crate) fn extern_of(codebase: &CodebaseMetadata, class: Word, member: Word) 
         });
     }
 
-    let mut current = Some(ascii_lowercase_word(class.as_bytes()));
+    // The chain goes by the class-likes' keys, spec section 24, and an `extern` names a plain PHP class in lowercase.
+    let mut current = Some(codebase.class_key(class.as_bytes()));
     let mut remaining =
         codebase.get_class_like(class.as_bytes()).map_or(0, |metadata| metadata.all_parent_classes.len());
     while let Some(class) = current {
-        if let Some(declaration) = declared((class, member)).or_else(|| declared((class, empty_word()))) {
+        let named = ascii_lowercase_word(class.as_bytes());
+        if let Some(declaration) = declared((named, member)).or_else(|| declared((named, empty_word()))) {
             return Some(declaration);
         }
 
@@ -1423,10 +1425,7 @@ pub(crate) fn extern_of(codebase: &CodebaseMetadata, class: Word, member: Word) 
             break;
         }
         remaining -= 1;
-        current = codebase
-            .get_class_like(class.as_bytes())
-            .and_then(|metadata| metadata.direct_parent_class)
-            .map(|parent| ascii_lowercase_word(parent.as_bytes()));
+        current = codebase.get_class_like(class.as_bytes()).and_then(|metadata| metadata.direct_parent_class);
     }
 
     None

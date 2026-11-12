@@ -412,12 +412,13 @@ fn class_like_matches_hook(
     hook: &super::ClassLikeAnalysisHookRegistration,
     codebase: &CodebaseMetadata,
 ) -> bool {
-    let class_like = ascii_lowercase_word(class_like);
-    let Some(metadata) = codebase.get_class_like(class_like.as_bytes()) else {
+    let Some(metadata) = codebase.get_class_like(class_like) else {
         return false;
     };
 
+    // A hook names its ancestor as written, which the codebase keys, spec section 24.
     hook.targets.iter().any(|ancestor| {
+        let ancestor = &codebase.class_key(ancestor.as_bytes());
         if metadata.name != *ancestor
             && (metadata.all_parent_classes.contains(ancestor) || metadata.all_parent_interfaces.contains(ancestor))
         {
@@ -2183,7 +2184,8 @@ mod tests {
             symbols: HashSet::from_iter([(word(name), empty_word())]),
             listings: HashSet::default(),
         };
-        let sorted = ExtensionReads { issues: class(b"issue"), code: class(b"code") };
+        // A class-like read stays as written, for the codebase to key.
+        let sorted = ExtensionReads { issues: class(b"Issue"), code: class(b"Code") };
 
         let before = decoded_reads(BEFORE_ANALYSIS_REQUEST, &response_with_reads(BEFORE_ANALYSIS_RESPONSE, &[None]))
             .expect("before-analysis hooks may read");

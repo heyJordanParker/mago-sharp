@@ -55,6 +55,7 @@ where
     for resolved_property in property_resolution.properties {
         if let Some(declaring_class_id) = resolved_property.declaring_class_id {
             artifacts.symbol_references.add_reference_for_property_write(
+                context.codebase,
                 &block_context.scope,
                 declaring_class_id,
                 resolved_property.property_name,

@@ -41,15 +41,16 @@ pub(crate) struct ReachedMethod {
 /// mention, along the codebase's reference edges.
 #[derive(Debug, Default)]
 pub struct Reach {
-    /// Each reached declaration by its lowercase class and its member as the class keys it, and each reached class with
-    /// an empty member.
+    /// Each reached declaration by its class's key and its member as the class keys it, and each reached class with an
+    /// empty member.
     declarations: HashSet<SymbolIdentifier>,
+    /// Each reached class by its key, as the codebase keys it.
     classes: HashMap<Word, ReachedClass>,
     methods: HashMap<SymbolIdentifier, ReachedMethod>,
-    /// Each property that holds a value, by its lowercase class and lowercase name without `$`: it is not static and
-    /// has no accessor body.
+    /// Each property that holds a value, by its class's key and its exact name without `$`, as PHP finds a property: it
+    /// is not static and has no accessor body.
     stored_fields: HashSet<(Word, Word)>,
-    /// Each property whose declared type takes `null`, by its lowercase class and lowercase name without `$`.
+    /// Each property whose declared type takes `null`, by its class's key and its exact name without `$`.
     nullable_fields: HashSet<(Word, Word)>,
     /// The files each file's laws reach, its own included.
     files: HashMap<FileId, Vec<FileId>>,
@@ -131,7 +132,7 @@ impl Reach {
             let Some(metadata) = codebase.get_declaring_property(class.as_bytes(), member.as_bytes()) else {
                 return;
             };
-            let field = (class, ascii_lowercase_word(property));
+            let field = (class, word(property));
             if !metadata.flags.is_static() && metadata.hooks.values().all(|hook| hook.is_abstract) {
                 self.stored_fields.insert(field);
             }
@@ -163,7 +164,24 @@ impl Reach {
 
     /// What the analysis knows about the reached class `class`.
     pub(crate) fn class(&self, class: &[u8]) -> Option<ReachedClass> {
-        self.classes.get(&ascii_lowercase_word(class)).copied()
+        self.classes.get(&self.class_key(class)).copied()
+    }
+
+    /// Whether the names `left` and `right` name one class, by [`Reach::class_key`].
+    pub(crate) fn same_class(&self, left: &[u8], right: &[u8]) -> bool {
+        self.class_key(left) == self.class_key(right)
+    }
+
+    /// The key of the reached class `class` names, as the codebase keys it, spec section 24: a PHP# class's exact name,
+    /// so another case names none, and a plain PHP class's lowercase name, as an unreached class's is.
+    fn class_key(&self, class: &[u8]) -> Word {
+        let exact = word(class);
+        if self.classes.contains_key(&exact) {
+            return exact;
+        }
+
+        let lowercase = ascii_lowercase_word(class);
+        if self.classes.get(&lowercase).is_some_and(|reached| reached.sharp) { exact } else { lowercase }
     }
 
     /// What the analysis knows about the reached method `method` of `class`.
@@ -174,7 +192,7 @@ impl Reach {
     /// `class`'s member `member` as the reach keys it: a method by its exact name on a class that finds its methods so,
     /// and else lowercase, as `keyed` keys it, and a property, written with `$`, by its name.
     fn member_key(&self, class: &[u8], member: &[u8]) -> SymbolIdentifier {
-        let class = ascii_lowercase_word(class);
+        let class = self.class_key(class);
         let exact = member.starts_with(b"$") || self.classes.get(&class).is_some_and(|reached| reached.exact_names);
 
         (class, if exact { word(member) } else { ascii_lowercase_word(member) })
@@ -182,19 +200,19 @@ impl Reach {
 
     /// Whether `class`'s property `property` holds a value, so its structure has a field for it.
     pub(crate) fn is_stored_field(&self, class: &[u8], property: &[u8]) -> bool {
-        self.stored_fields.contains(&(ascii_lowercase_word(class), ascii_lowercase_word(property)))
+        self.stored_fields.contains(&(self.class_key(class), word(property)))
     }
 
     /// Whether the declared type of `class`'s property `property` takes `null`.
     pub(crate) fn is_nullable_field(&self, class: &[u8], property: &[u8]) -> bool {
-        self.nullable_fields.contains(&(ascii_lowercase_word(class), ascii_lowercase_word(property)))
+        self.nullable_fields.contains(&(self.class_key(class), word(property)))
     }
 }
 
-/// The symbol with its class lowercase, and a method as its class keys it, by its exact name on a PHP# class, spec
-/// section 24, and lowercase on a plain PHP one. A property keeps its name.
+/// The symbol with its class and a method as the codebase keys them, spec section 24: by their exact names on a PHP#
+/// class, and lowercase on a plain PHP one. A property keeps its name.
 fn keyed(codebase: &CodebaseMetadata, (class, member): SymbolIdentifier) -> SymbolIdentifier {
-    let class = ascii_lowercase_word(class.as_bytes());
+    let class = codebase.class_key(class.as_bytes());
     let member =
         if member.as_bytes().starts_with(b"$") { member } else { codebase.method_key(class, member.as_bytes()) };
 

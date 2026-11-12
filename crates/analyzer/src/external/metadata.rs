@@ -31,7 +31,6 @@ use mago_extension::PayloadWriter;
 use mago_span::Span;
 use mago_syntax::dialect::Dialect;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::external::ExternalAnalysisSession;
@@ -236,7 +235,8 @@ struct MethodSearch {
     fields: u32,
 }
 
-/// The classes a method search searches, by their lowercase name.
+/// The classes a method search searches, by their names as the worker wrote them, which the codebase keys, spec section
+/// 24.
 #[derive(Clone, Copy)]
 enum ClassFilter {
     /// Every class.
@@ -291,7 +291,7 @@ fn read_method_search(reader: &mut PayloadReader<'_>) -> Result<MethodSearch, Ex
                 return Err(protocol("method search class cannot be empty"));
             }
 
-            let class = ascii_lowercase_word(class);
+            let class = word(class);
             if filter == METHOD_SEARCH_EXACT_CLASS {
                 ClassFilter::Exact(class)
             } else {
@@ -310,7 +310,8 @@ fn read_method_search(reader: &mut PayloadReader<'_>) -> Result<MethodSearch, Ex
     if pattern.contains(&b'*') {
         return Err(protocol("method search wildcards are only allowed at the end"));
     }
-    let pattern = ascii_lowercase_word(pattern);
+    // As written: each class keys the pattern as it keys its methods, and the codebase keys each attribute.
+    let pattern = word(pattern);
     let declared_only = reader.read_bool("method search declared-only filter")?;
 
     let attribute_count = reader.read_count("method search attribute filters", MAXIMUM_QUERIES)?;
@@ -320,7 +321,7 @@ fn read_method_search(reader: &mut PayloadReader<'_>) -> Result<MethodSearch, Ex
         if attribute.is_empty() {
             return Err(protocol("method search attribute cannot be empty"));
         }
-        attributes.push(ascii_lowercase_word(attribute));
+        attributes.push(word(attribute));
     }
 
     let fields = reader.read_u32("method projection fields")?;
@@ -341,7 +342,8 @@ fn write_methods<'codebase>(
 ) -> Result<(), ExternalAnalyzerError> {
     let started = tracing::enabled!(tracing::Level::TRACE).then(std::time::Instant::now);
     let MethodSearch { class_filter, pattern, prefix, declared_only, fields, .. } = *search;
-    let attributes = &search.attributes;
+    let attributes: Vec<Word> =
+        search.attributes.iter().map(|attribute| codebase.class_key(attribute.as_bytes())).collect();
     writer.write_u32(fields);
 
     let mut scanned_classes = 0usize;
@@ -349,6 +351,7 @@ fn write_methods<'codebase>(
     let mut matches = Vec::new();
     let mut collect = |class_like: &'codebase ClassLikeMetadata| {
         scanned_classes += 1;
+        let pattern = class_like.method_key(pattern.as_bytes());
         for (method_name, declaring) in &class_like.declaring_method_ids {
             scanned_methods += 1;
             let matches_name =
@@ -362,9 +365,7 @@ fn write_methods<'codebase>(
             };
             if !attributes.is_empty()
                 && !metadata.attributes.iter().any(|attribute| {
-                    attributes
-                        .iter()
-                        .any(|requested| attribute.name.as_bytes().eq_ignore_ascii_case(requested.as_bytes()))
+                    attributes.iter().any(|requested| codebase.class_key(attribute.name.as_bytes()) == *requested)
                 })
             {
                 continue;
@@ -381,6 +382,7 @@ fn write_methods<'codebase>(
             }
         }
         ClassFilter::Descendants(class) => {
+            let class = codebase.class_key(class.as_bytes());
             for class_like in codebase.class_likes.values() {
                 if class_like.name != class && codebase.is_instance_of(class_like.name.as_bytes(), class.as_bytes()) {
                     collect(class_like);

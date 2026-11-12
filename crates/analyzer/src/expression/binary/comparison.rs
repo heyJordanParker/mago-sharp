@@ -1851,7 +1851,7 @@ pub(crate) fn struct_property_refusal<'codebase>(
     }
     let properties = value_properties(codebase, class)?;
     let type_arguments = type_of.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Object(TObject::Named(named)) if named.name.as_bytes().eq_ignore_ascii_case(class.name.as_bytes()) => {
+        TAtomic::Object(TObject::Named(named)) if codebase.class_key(named.name.as_bytes()) == class.name => {
             named.type_parameters.as_deref()
         }
         _ => None,

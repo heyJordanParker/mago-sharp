@@ -54,7 +54,6 @@ use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
-use mago_word::ascii_lowercase_word;
 
 use crate::issues;
 use crate::reach::Reach;
@@ -849,8 +848,8 @@ impl<'body, 'program> Body<'body, 'program> {
         };
 
         match atomic {
-            TAtomic::Object(TObject::Named(named)) => named.name.as_bytes().eq_ignore_ascii_case(class),
-            TAtomic::Object(TObject::Enum(r#enum)) => r#enum.name.as_bytes().eq_ignore_ascii_case(class),
+            TAtomic::Object(TObject::Named(named)) => self.reach.same_class(named.name.as_bytes(), class),
+            TAtomic::Object(TObject::Enum(r#enum)) => self.reach.same_class(r#enum.name.as_bytes(), class),
             _ => false,
         }
     }
@@ -868,7 +867,7 @@ impl<'body, 'program> Body<'body, 'program> {
             TAtomic::Object(TObject::Enum(r#enum)) => r#enum.name.as_bytes(),
             _ => return None,
         };
-        if !named.eq_ignore_ascii_case(r#enum) || self.checked.types().enum_case_class(r#enum, case).is_none() {
+        if !self.reach.same_class(named, r#enum) || self.checked.types().enum_case_class(r#enum, case).is_none() {
             return None;
         }
 
@@ -1246,7 +1245,7 @@ impl<'body, 'program> Body<'body, 'program> {
         receiver: Option<String>,
         arguments: Option<&ArgumentList>,
     ) -> String {
-        if ascii_lowercase_word(declaring) != ascii_lowercase_word(class) {
+        if !self.reach.same_class(declaring, class) {
             return self.unmodeled(
                 expression.span(),
                 format!("the inherited method {}.{}", names::short_name(class), String::from_utf8_lossy(method)),
@@ -1265,9 +1264,8 @@ impl<'body, 'program> Body<'body, 'program> {
         let key = names::member(&names::full_name(&class_name), facts.name.as_bytes());
         let mut parts = vec![key.clone()];
         parts.extend(receiver);
-        let smaller = arguments
-            .filter(|_| ascii_lowercase_word(class) == ascii_lowercase_word(self.class))
-            .and_then(|list| self.smaller(list));
+        let smaller =
+            arguments.filter(|_| self.reach.same_class(class, self.class)).and_then(|list| self.smaller(list));
         let stepped = smaller.as_ref().and_then(|(smaller, term)| Some((smaller.argument, term.clone()?)));
         let Some(arguments) =
             arguments.map_or_else(|| Some(Vec::new()), |list| self.arguments(list, facts.parameters, stepped))
@@ -1451,7 +1449,7 @@ impl<'body, 'program> Body<'body, 'program> {
         if !matches!(declaration.kind, DeclarationKind::Property { .. }) {
             return self.unmodeled(expression.span(), format!("the member {place}"), issues::MEMBER);
         }
-        if ascii_lowercase_word(declaration.class.as_bytes()) != ascii_lowercase_word(class) {
+        if !self.reach.same_class(declaration.class.as_bytes(), class) {
             return self.unmodeled(expression.span(), format!("the inherited property {place}"), issues::INHERITANCE);
         }
         if !self.reach.is_stored_field(class, property) {

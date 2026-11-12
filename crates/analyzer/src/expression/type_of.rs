@@ -18,7 +18,6 @@ use mago_codex::ttype::wrap_atomic;
 use mago_span::HasSpan;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::TypeOf;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
@@ -100,12 +99,9 @@ where
     let mut class = word(context.resolved_names.get(name));
     artifacts.symbol_references.add_reference_to_symbol(
         &block_context.scope,
-        ascii_lowercase_word(class.as_bytes()),
+        context.codebase.class_key(class.as_bytes()),
         false,
     );
-    if crate::utils::casing::report_sharp_class_like_in_another_case(context, class.as_bytes(), name.span()) {
-        return TUnion::from_atomic(TAtomic::Error);
-    }
     let metadata = context.codebase.get_class_like(class.as_bytes());
     match metadata {
         Some(metadata) => class = metadata.original_name,

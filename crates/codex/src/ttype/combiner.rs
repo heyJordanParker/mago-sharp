@@ -1089,6 +1089,11 @@ fn scrape_type_properties(
         for (key, existing_type) in &combination.value_types {
             if let TAtomic::Object(TObject::Named(existing_object)) = &existing_type {
                 let existing_name = existing_object.get_name();
+                // A readonly object and a writable one stay apart, so neither covers the other and the union keeps
+                // the readonly one, spec section 13.
+                if existing_object.is_readonly != named_object.is_readonly {
+                    continue;
+                }
 
                 if intersection_types.is_some() || existing_object.has_intersection_types() {
                     if object_comparator::is_shallowly_contained_by(

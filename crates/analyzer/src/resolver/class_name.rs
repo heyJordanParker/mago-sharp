@@ -210,9 +210,7 @@ impl ResolvedClassname {
 
         let mut object_atomic = TAtomic::Object(match self.fqcn {
             Some(fqcn) => {
-                let lowercase_fqcn = ascii_lowercase_word(fqcn.as_bytes());
-
-                if codebase.symbols.contains_enum(lowercase_fqcn) {
+                if codebase.symbols.contains_enum(codebase.class_key(fqcn.as_bytes())) {
                     TObject::Enum(TEnum::new(fqcn))
                 } else if self.can_extend_static() {
                     TObject::Named(TNamedObject::new_static(fqcn))
@@ -316,7 +314,7 @@ where
         }
         (Some(class), _)
             if let Some(user) =
-                defaults_user(context.codebase, class, ascii_lowercase_word(interface_name.as_bytes()))
+                defaults_user(context.codebase, class, context.codebase.class_key(interface_name.as_bytes()))
                 && !user.flags.is_sharp() =>
         {
             let user_display = display_class_like_name(context, user.original_name);
@@ -1007,13 +1005,18 @@ where
 }
 
 /// Reports the class `name`, as the binder resolved what a `.sharp` file's code wrote at `span`, which no analyzed file
-/// or stub declares: what the spec says the code meant, as [`report_unknown_sharp_class`] says, or else the missing
-/// type by its PHP# name, as [`report_missing_sharp_type`] says. Returns whether it reported, which it does in every
-/// `.sharp` file, so a plain PHP file alone keeps the caller's own error.
+/// or stub declares: a PHP# type in another case, from any code, with the type it names as the hint, what the spec says
+/// the code meant, as [`report_unknown_sharp_class`] says, or else the missing type by its PHP# name, as
+/// [`report_missing_sharp_type`] says. Returns whether it reported, which it does in every `.sharp` file, so a plain
+/// PHP file alone keeps the caller's own error for a name that is no PHP# type's.
 pub(crate) fn report_missing_class<A>(context: &mut Context<'_, '_, A>, name: &[u8], span: Span) -> bool
 where
     A: Arena,
 {
+    // A PHP# type written in another case names nothing, from any code, and the error names the type, spec section 24.
+    if crate::utils::casing::report_sharp_class_like_in_another_case(context, name, span) {
+        return true;
+    }
     if !context.dialect.is_sharp() {
         return false;
     }

@@ -16,7 +16,6 @@ use mago_syntax::cst::PropertyAccess;
 use mago_syntax::walker::MutWalker;
 use mago_syntax::walker::walk_expression_mut;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::issue::ScanningIssueKind;
@@ -165,8 +164,8 @@ where
 }
 
 /// The class constants and enum cases a PHP# constant value reads, as `Billing.TRIAL_DAYS` and `Code.A` in
-/// `Code.A.value`, each as its class's lowercase name and its own name. A lambda in the value reads them only when it
-/// is called, so its reads are left out.
+/// `Code.A.value`, each as its class's name as written, which the codebase keys, spec section 24, and its own name. A
+/// lambda in the value reads them only when it is called, so its reads are left out.
 pub(super) fn read_constants<'arena>(names: &ResolvedNames<'arena>, value: &Expression<'arena>) -> Vec<(Word, Word)> {
     let mut reads = ConstantReads { names, reads: Vec::new() };
     walk_expression_mut(&mut reads, value, &mut ());
@@ -185,7 +184,7 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for ConstantReads<'_, 'arena> {
         if let (Some(class), ClassLikeMemberSelector::Identifier(name)) =
             (self.names.static_property_class(access), &access.property)
         {
-            self.reads.push((ascii_lowercase_word(self.names.get(&class.name)), word(name.value)));
+            self.reads.push((word(self.names.get(&class.name)), word(name.value)));
         }
     }
 

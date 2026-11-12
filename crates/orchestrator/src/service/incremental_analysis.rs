@@ -1339,18 +1339,21 @@ impl IncrementalAnalysisService {
             .collect();
         // The analyzer refuses a class-like whose full name is also a namespace (spec section 23), on either side, so a
         // file is analyzed again when a class-like it declares names the namespace of a class-like scanned again, or
-        // lies in the namespace a class-like scanned again names.
+        // lies in the namespace a class-like scanned again names. A namespace matches in any case, whatever case each
+        // class-like's key keeps, spec section 24, so the names compare in lowercase.
         let namespaces_of = |name: &mago_word::Word| {
             let name = name.as_bytes();
             name.iter()
                 .enumerate()
                 .filter(|(_, byte)| **byte == b'\\')
-                .map(|(end, _)| mago_word::word(&name[..end]))
+                .map(|(end, _)| mago_word::ascii_lowercase_word(&name[..end]))
                 .collect::<Vec<_>>()
         };
         let scanned_class_likes: WordSet =
             new_file_scans.iter().flat_map(|(_, metadata)| metadata.class_likes.keys().copied()).collect();
         let scanned_namespaces: WordSet = scanned_class_likes.iter().flat_map(namespaces_of).collect();
+        let scanned_lowercase_class_likes: WordSet =
+            scanned_class_likes.iter().map(|name| mago_word::ascii_lowercase_word(name.as_bytes())).collect();
 
         let mut merged_codebase = std::mem::take(&mut self.codebase);
 
@@ -1443,8 +1446,10 @@ impl IncrementalAnalysisService {
                 extension_read_changed
                     || state.reads.listings.iter().any(|listing| changed_listings.contains(listing))
                     || state.entry_keys.class_like_names.iter().any(|name| {
-                        scanned_namespaces.contains(name)
-                            || namespaces_of(name).iter().any(|namespace| scanned_class_likes.contains(namespace))
+                        scanned_namespaces.contains(&mago_word::ascii_lowercase_word(name.as_bytes()))
+                            || namespaces_of(name)
+                                .iter()
+                                .any(|namespace| scanned_lowercase_class_likes.contains(namespace))
                     })
             }) && let Ok(file) = self.database.get(file_id)
             {
@@ -2228,7 +2233,7 @@ impl IncrementalAnalysisService {
 }
 
 /// Whether a PHP# bound of a populated declaration in `codebase` names a type that population left missing and that
-/// `declared`, the lowercase names of the class-likes a scan just declared, now holds: such a bound was refused, spec
+/// `declared`, the keys of the class-likes a scan just declared, now holds: such a bound was refused, spec
 /// section 11. A declaration the scan just read is unpopulated, and reads its bounds afresh.
 fn names_a_refused_bound_type(codebase: &CodebaseMetadata, declared: &WordSet) -> bool {
     let class_templates = codebase
@@ -2256,7 +2261,7 @@ fn names_a_refused_bound_type(codebase: &CodebaseMetadata, declared: &WordSet) -
                 matches!(
                     node,
                     TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. }))
-                        if declared.contains(&mago_word::ascii_lowercase_word(name.as_bytes()))
+                        if declared.contains(&codebase.class_key(name.as_bytes()))
                 )
             })
         })

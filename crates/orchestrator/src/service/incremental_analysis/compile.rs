@@ -58,7 +58,6 @@ use mago_sharp_lean::translate;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file_with_settings;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
 
 use super::IncrementalAnalysisService;
@@ -523,7 +522,7 @@ impl IncrementalAnalysisService {
 
         let declared = |target: SymbolIdentifier| -> Option<(SymbolIdentifier, FileId, u64)> {
             let find = |class: mago_word::Word| {
-                [(class, target.1), (ascii_lowercase_word(class.as_bytes()), target.1)]
+                [(class, target.1), (self.codebase.class_key(class.as_bytes()), target.1)]
                     .into_iter()
                     .find_map(|member| declarations.get(&member).map(|(file_id, hash)| (member, *file_id, *hash)))
             };
@@ -533,7 +532,7 @@ impl IncrementalAnalysisService {
 
             let mut class = Some(target.0);
             while let Some(name) = class {
-                let metadata = self.codebase.class_likes.get(&ascii_lowercase_word(name.as_bytes()))?;
+                let metadata = self.codebase.get_class_like(name.as_bytes())?;
                 if let Some(found) = find(name).or_else(|| metadata.used_traits.iter().find_map(|t| find(*t))) {
                     return Some(found);
                 }
@@ -667,14 +666,14 @@ impl IncrementalAnalysisService {
     /// `name` and, when it names a class-like, every class, interface and trait it inherits from, since an extension
     /// that read a class-like read its inherited members too.
     fn with_ancestors(&self, name: Word) -> Vec<Word> {
-        let Some(class_like) = self.codebase.class_likes.get(&name) else {
+        let Some(class_like) = self.codebase.get_class_like(name.as_bytes()) else {
             return vec![name];
         };
 
-        let classes = std::iter::once(name).chain(class_like.all_parent_classes.iter().copied());
+        let classes = std::iter::once(class_like.name).chain(class_like.all_parent_classes.iter().copied());
         let traits = classes
             .clone()
-            .filter_map(|class| self.codebase.class_likes.get(&ascii_lowercase_word(class.as_bytes())))
+            .filter_map(|class| self.codebase.get_class_like(class.as_bytes()))
             .flat_map(|class| class.used_traits.iter().copied());
 
         classes.chain(class_like.all_parent_interfaces.iter().copied()).chain(traits).collect()
@@ -1042,8 +1041,13 @@ impl<'service> Dependencies<'service> {
                 self.changes(*member, &mut changes, &mut visited);
             }
         }
-        for read in &self.code_reads.symbols {
-            self.signature_changes(*read, &mut changes, &mut visited);
+        // A read names a class-like as the extension wrote it, which the codebase keys, spec section 24.
+        for &(class, member) in &self.code_reads.symbols {
+            self.signature_changes(
+                (self.service.codebase.class_key(class.as_bytes()), member),
+                &mut changes,
+                &mut visited,
+            );
         }
 
         changes
@@ -1760,7 +1764,7 @@ mod tests {
                 format!("{}::{}", String::from_utf8_lossy(class), String::from_utf8_lossy(member))
             })
             .collect();
-        assert_eq!(members, ["sharp\\text::capitalized"]);
+        assert_eq!(members, ["Sharp\\Text::capitalized"]);
         assert!(matches!(
             compiled["vendor/heyjordanparker/php-sharp-composer/library/Sharp/Words.sharp"],
             Compilation::Refused(_)

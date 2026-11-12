@@ -17,9 +17,10 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::utils::names::display_class_like_name;
 
-/// Reports `used_name`, a class-like name the code writes at `span`, when it names a PHP# class-like in another case, and
-/// returns whether it reported. PHP# names are case-sensitive, spec section 24, so the engine finds a PHP# class-like
-/// only by its exact name, from any code, plain PHP included, and another case names nothing.
+/// Reports `used_name`, a class-like name the code writes at `span`, as the unknown name it is when it names a PHP#
+/// class-like only in another case, with that class-like as the hint, and returns whether it reported. PHP# names are
+/// case-sensitive, spec section 24, so the engine finds a PHP# class-like only by its exact name, from any code, plain
+/// PHP included, and another case names nothing.
 pub fn report_sharp_class_like_in_another_case<A>(
     context: &mut Context<'_, '_, A>,
     used_name: &[u8],
@@ -45,12 +46,14 @@ where
     A: Arena,
 {
     let used_name = mago_bytes::trim_start_byte(used_name, b'\\');
-    let Some(metadata) = context.codebase.get_class_like(used_name) else {
+    let Some(metadata) = context
+        .codebase
+        .symbols
+        .sharp_class_like_in_another_case(used_name)
+        .and_then(|key| context.codebase.get_class_like(key.as_bytes()))
+    else {
         return false;
     };
-    if !metadata.flags.is_sharp() || metadata.original_name.as_bytes() == used_name {
-        return false;
-    }
 
     let (written, declared) = if !context.dialect.is_sharp() {
         (String::from_utf8_lossy(used_name).into_owned(), metadata.original_name.to_string())
@@ -75,9 +78,8 @@ pub fn check_class_like_casing<A>(context: &mut Context<'_, '_, A>, used_name: W
 where
     A: Arena,
 {
-    if report_sharp_class_like_in_another_case(context, used_name.as_bytes(), span)
-        || !context.settings.check_name_casing
-    {
+    // A PHP# type in another case names nothing, which the code that finds no type reports, spec section 24.
+    if !context.settings.check_name_casing {
         return;
     }
 

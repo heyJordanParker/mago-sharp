@@ -602,20 +602,24 @@ where
                     );
                 }
 
-                artifacts
-                    .symbol_references
-                    .add_reference_for_method_call(&block_context.scope, &magic_method_identifier);
+                artifacts.symbol_references.add_reference_for_method_call(
+                    context.codebase,
+                    &block_context.scope,
+                    &magic_method_identifier,
+                );
             }
 
             if let Some(declaring_class_id) = resolved_property.declaring_class_id {
                 if for_assignment {
                     artifacts.symbol_references.add_reference_for_property_write(
+                        context.codebase,
                         &block_context.scope,
                         declaring_class_id,
                         resolved_property.property_name,
                     );
                 } else {
                     artifacts.symbol_references.add_reference_for_property_read(
+                        context.codebase,
                         &block_context.scope,
                         declaring_class_id,
                         resolved_property.property_name,
@@ -1071,7 +1075,7 @@ where
                 && method.return_type_metadata.as_ref().is_some_and(|return_type| {
                     return_type.type_union.types.iter().any(|atomic| {
                         matches!(atomic, TAtomic::Object(TObject::Named(object))
-                            if object.name.as_bytes().eq_ignore_ascii_case(r#struct.name.as_bytes()))
+                            if context.codebase.class_key(object.name.as_bytes()) == r#struct.name)
                     })
                 })
         })
@@ -1604,12 +1608,14 @@ fn record_asserted_descendant_property_references<'ctx, A>(
     for declaring_class in declaring_classes {
         if for_assignment {
             artifacts.symbol_references.add_reference_for_property_write(
+                context.codebase,
                 &block_context.scope,
                 declaring_class,
                 property_name,
             );
         } else {
             artifacts.symbol_references.add_reference_for_property_read(
+                context.codebase,
                 &block_context.scope,
                 declaring_class,
                 property_name,
@@ -2325,7 +2331,7 @@ where
 
     artifacts.symbol_references.add_reference_to_class_member(
         &block_context.scope,
-        (ascii_lowercase_word(class_name.as_bytes()), method.get_method_name()),
+        (context.codebase.class_key(class_name.as_bytes()), method.get_method_name()),
         false,
     );
 
@@ -2881,7 +2887,8 @@ where
                     if let TObject::Named(named_object) = outer_object
                         && let Some(type_params) = named_object.get_type_parameters()
                         && let GenericParent::ClassLike(defining_class) = defining_entity
-                        && named_object.name.as_bytes().eq_ignore_ascii_case(defining_class.as_bytes())
+                        && context.codebase.class_key(named_object.name.as_bytes())
+                            == context.codebase.class_key(defining_class.as_bytes())
                         && let Some(index) = class_metadata.get_template_index_for_name(*parameter_name)
                         && let Some(concrete_type) = type_params.get(index)
                     {

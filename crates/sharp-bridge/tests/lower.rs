@@ -950,21 +950,21 @@ fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_val
         )
     };
 
-    let mailer = r#"ZVAL "app\\mail\\mailer""#;
+    let mailer = r#"ZVAL "App\\Mail\\Mailer""#;
     let smtp = r#"ZVAL "App\\Mail\\SmtpMailer""#;
     for (bindings, expected) in [
-        // ['app\shop', 'app\mail\mailer', null, 'singleton', 'App\Mail\SmtpMailer']
+        // ['app\shop', 'App\Mail\Mailer', null, 'singleton', 'App\Mail\SmtpMailer']
         ("    singleton Mailer = SmtpMailer;", [mailer, "ZVAL null", r#"ZVAL "singleton""#, smtp]),
-        // ['app\shop', 'app\mail\mailer', 'App\Shop\SendReceipt', 'scoped', 'App\Mail\SmtpMailer']
+        // ['app\shop', 'App\Mail\Mailer', 'App\Shop\SendReceipt', 'scoped', 'App\Mail\SmtpMailer']
         (
             "    scoped Mailer for SendReceipt = SmtpMailer;",
             [mailer, r#"ZVAL "App\\Shop\\SendReceipt""#, r#"ZVAL "scoped""#, smtp],
         ),
-        // ['app\shop', 'list<app\pricing\pricerule>', null, 'transient', ['App\Pricing\TaxRule']]
+        // ['app\shop', 'list<App\Pricing\PriceRule>', null, 'transient', ['App\Pricing\TaxRule']]
         (
             "    transient List<PriceRule> = [TaxRule];",
             [
-                r#"ZVAL "list<app\\pricing\\pricerule>""#,
+                r#"ZVAL "list<App\\Pricing\\PriceRule>""#,
                 "ZVAL null",
                 r#"ZVAL "transient""#,
                 indoc! {r#"
@@ -974,7 +974,7 @@ fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_val
                         null"#},
             ],
         ),
-        // ['app\shop', 'app\mail\mailer', null, 'singleton', static fn (\App\Mail\SmtpMailer $smtp) => $smtp]
+        // ['app\shop', 'App\Mail\Mailer', null, 'singleton', static fn (\App\Mail\SmtpMailer $smtp) => $smtp]
         (
             "    singleton Mailer(SmtpMailer smtp) = smtp;\n    transient SmtpMailer = SmtpMailer;",
             [
@@ -998,8 +998,8 @@ fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_val
                       null"#},
             ],
         ),
-        // ['app\shop', 'app\mail\mailer', null, 'singleton',
-        //     static fn (#[\Sharp\Internal\Service('list<app\pricing\pricerule>')] array $rules) => new \App\Mail\SmtpMailer()]
+        // ['app\shop', 'App\Mail\Mailer', null, 'singleton',
+        //     static fn (#[\Sharp\Internal\Service('list<App\Pricing\PriceRule>')] array $rules) => new \App\Mail\SmtpMailer()]
         (
             "    singleton Mailer(List<PriceRule> rules) = new SmtpMailer();\n    transient List<PriceRule> = [TaxRule];",
             [
@@ -1018,7 +1018,7 @@ fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_val
                               ATTRIBUTE
                                 ZVAL "Sharp\\Internal\\Service"
                                 ARG_LIST
-                                  ZVAL "list<app\\pricing\\pricerule>"
+                                  ZVAL "list<App\\Pricing\\PriceRule>"
                           null
                           null
                       null
@@ -1205,8 +1205,8 @@ fn a_constructor_parameter_whose_php_type_drops_its_service_names_the_service() 
     };
 
     for (parameter, constructor) in [
-        ("List<TaxRule> rules", service("list<app\\pricing\\taxrule>")),
-        ("Map<string, TaxRule> rules", service("array<string, app\\pricing\\taxrule>")),
+        ("List<TaxRule> rules", service("list<App\\Pricing\\TaxRule>")),
+        ("Map<string, TaxRule> rules", service("array<string, App\\Pricing\\TaxRule>")),
         ("List<string> names", "null\n".to_owned()),
         ("TaxRule rule", "null\n".to_owned()),
         ("int count", "null\n".to_owned()),
@@ -9668,7 +9668,7 @@ fn a_list_index_write_runs_the_standard_library_s_set_member() {
         .map(|read| String::from_utf8_lossy(&read.name).into_owned())
         .collect();
 
-    assert_eq!(inlined, ["sharp\\listmembers::set"]);
+    assert_eq!(inlined, ["Sharp\\ListMembers::set"]);
 }
 
 /// ```php
@@ -20702,7 +20702,7 @@ fn a_static_call_beside_a_get_is_the_static_method_call_static_serves() {
         .map(|(name, _)| String::from_utf8_lossy(&name).into_owned())
         .collect();
 
-    assert_eq!(forms, ["sharp\\text::found"]);
+    assert_eq!(forms, ["Sharp\\Text::found"]);
     assert_eq!(
         Lowered::with(
             "namespace App.Tenant;\n\nimport Lib.Order;\n\nclass Report\n{\n    public void run(int extra)\n    {\n        Order.where(extra);\n    }\n}\n",
@@ -29782,11 +29782,11 @@ fn an_inline_form_gives_the_plain_php_call_its_body_makes() {
     assert_eq!(
         calls,
         [
-            ("sharp\\calls".to_owned(), "broken".to_owned(), Some(vec![PhpCallArgument::Slot(0), literal("true")]), 1),
-            ("sharp\\calls".to_owned(), "named".to_owned(), None, 1),
-            ("sharp\\calls".to_owned(), "plain".to_owned(), Some(vec![PhpCallArgument::Slot(0), literal("false")]), 1),
+            ("Sharp\\Calls".to_owned(), "broken".to_owned(), Some(vec![PhpCallArgument::Slot(0), literal("true")]), 1),
+            ("Sharp\\Calls".to_owned(), "named".to_owned(), None, 1),
+            ("Sharp\\Calls".to_owned(), "plain".to_owned(), Some(vec![PhpCallArgument::Slot(0), literal("false")]), 1),
             (
-                "sharp\\calls".to_owned(),
+                "Sharp\\Calls".to_owned(),
                 "remainder".to_owned(),
                 Some(vec![PhpCallArgument::Slot(0), literal("1.5")]),
                 1
@@ -29802,7 +29802,7 @@ fn an_inline_form_gives_the_plain_php_call_its_body_makes() {
 /// `again` calls `Self`, which names the caller's class once copied there. `hidden` and `muted` are not public.
 #[test]
 fn a_method_whose_body_is_one_call_reading_each_slot_once_gives_an_inline_form() {
-    assert_eq!(form_names(TEXT), ["sharp\\text::capitalized", "sharp\\text::padded", "sharp\\text::wrapped"]);
+    assert_eq!(form_names(TEXT), ["Sharp\\Text::capitalized", "Sharp\\Text::padded", "Sharp\\Text::wrapped"]);
 }
 
 /// ```php
@@ -29837,7 +29837,7 @@ fn a_void_method_gives_an_inline_form_and_a_constructor_none() {
 
     assert_eq!(
         form_names(("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Counter.sharp", code)),
-        ["sharp\\counter::log"]
+        ["Sharp\\Counter::log"]
     );
 }
 
@@ -29850,7 +29850,7 @@ fn a_method_that_runs_position_current_gives_no_inline_form() {
             "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Here.sharp",
             "namespace Sharp;\n\npublic class Here\n{\n    public static Position now() => Position.current();\n\n    public static string capitalized(string text) => global.ucfirst(text);\n}\n"
         )),
-        ["sharp\\here::capitalized"]
+        ["Sharp\\Here::capitalized"]
     );
 }
 
@@ -30408,7 +30408,7 @@ fn a_call_of_a_variadic_native_body_keeps_its_static_call() {
 fn the_unit_names_each_form_it_inlines_with_its_fingerprint() {
     let forms = common::checked(TEXT.0, TEXT.1, &[], inline_forms).expect("the library file is checked");
     let (_, capitalized) =
-        forms.iter().find(|(name, _)| name == b"sharp\\text::capitalized").expect("capitalized has a form");
+        forms.iter().find(|(name, _)| name == b"Sharp\\Text::capitalized").expect("capitalized has a form");
     let code = "namespace App.Tenant;\n\nimport Sharp.Text;\n\nclass Report\n{\n    public string run(string name) => Text.capitalized(name) + Text.capitalized(name);\n}\n";
     let lowered = Lowered::inlining(code, &[], &[TEXT]);
     let inlined: Vec<(String, u64)> = lowered
@@ -30419,7 +30419,7 @@ fn the_unit_names_each_form_it_inlines_with_its_fingerprint() {
         .map(|read| (String::from_utf8_lossy(&read.name).into_owned(), read.fingerprint))
         .collect();
 
-    assert_eq!(inlined, [("sharp\\text::capitalized".to_owned(), capitalized.fingerprint())]);
+    assert_eq!(inlined, [("Sharp\\Text::capitalized".to_owned(), capitalized.fingerprint())]);
 }
 
 /// The unit names the function type of each method its file declares with the xxh3-64 of the type text `is` tests a
@@ -30477,7 +30477,7 @@ fn a_form_fingerprint_follows_its_body_and_not_its_lines() {
         common::checked(TEXT.0, code, &[], inline_forms)
             .expect("the library file is checked")
             .into_iter()
-            .find(|(name, _)| name == b"sharp\\text::capitalized")
+            .find(|(name, _)| name == b"Sharp\\Text::capitalized")
             .map(|(_, form)| form.fingerprint())
             .expect("capitalized has a form")
     };
@@ -35462,7 +35462,7 @@ fn readonly_lowers_to_the_same_php_as_without_it() {
     let plain = Lowered::with(&shop("", ""), &[order]);
 
     // The container fills `orders` with the service its PHP type, `array`, drops, and builds `ids` as a `Set`.
-    assert!(plain.tree().contains(r#"ZVAL "list<app\\order>""#), "{}", plain.tree());
+    assert!(plain.tree().contains(r#"ZVAL "list<App\\Order>""#), "{}", plain.tree());
     assert_eq!(marked.tree(), plain.tree());
 }
 

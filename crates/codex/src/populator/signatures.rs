@@ -7,7 +7,6 @@ use crate::ttype::TType;
 use crate::ttype::atomic::populate_atomic_type;
 use crate::ttype::union::populate_union_type;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 
 /// Populates metadata for a single function or method.
 ///
@@ -26,11 +25,11 @@ pub fn populate_function_like_metadata(
     }
 
     for attribute_metadata in metadata.get_attributes() {
-        add_class_reference(symbol_references, reference_source, attribute_metadata.name, Some(true));
+        add_class_reference(codebase_symbols, symbol_references, reference_source, attribute_metadata.name, Some(true));
     }
 
     for class in &metadata.uses {
-        add_class_reference(symbol_references, reference_source, *class, Some(true));
+        add_class_reference(codebase_symbols, symbol_references, reference_source, *class, Some(true));
     }
 
     for listened in &mut metadata.listens {
@@ -76,7 +75,7 @@ pub fn populate_function_like_metadata(
         }
 
         for attribute_metadata in &parameter_metadata.attributes {
-            add_class_reference(symbol_references, reference_source, attribute_metadata.name, None);
+            add_class_reference(codebase_symbols, symbol_references, reference_source, attribute_metadata.name, None);
         }
     }
 
@@ -158,14 +157,15 @@ pub fn populate_function_like_metadata(
     metadata.flags |= MetadataFlags::POPULATED;
 }
 
-/// Records that the function-like names the class `name`, as an attribute or in an `on` clause.
+/// Records that the function-like names the class `name`, as an attribute or in an `on` clause, by its key.
 fn add_class_reference(
+    symbols: &Symbols,
     symbol_references: &mut SymbolReferences,
     reference_source: &ReferenceSource,
     name: Word,
     in_signature_override: Option<bool>,
 ) {
-    let name = ascii_lowercase_word(name.as_bytes());
+    let name = symbols.class_key(name.as_bytes());
     match reference_source {
         ReferenceSource::Symbol(in_signature, a) => {
             symbol_references.add_symbol_reference_to_symbol(*a, name, in_signature_override.unwrap_or(*in_signature));

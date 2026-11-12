@@ -274,7 +274,7 @@ pub(crate) struct TemplateUse {
 /// primary and secondary constructors, and so are the generated `parse` and `tryParse`, and a private member that
 /// breaks a marker is reachable only through `this`, which `check_private_method_reach` and
 /// `check_private_property_reach` check where it is reached. A header entry stands at its span in `header_spans`, by
-/// its parent's lowercase name, or at the class's name without one.
+/// its parent's key, or at the class's name without one.
 pub(crate) fn find_template_uses<A>(
     context: &Context<'_, '_, A>,
     class: &ClassLikeMetadata,

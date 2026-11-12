@@ -83,9 +83,10 @@ pub enum Listing {
     ClassLikes(u8),
     Functions,
     Constants,
-    /// The class-likes that extend, implement, or use this lowercase class-like name directly.
+    /// The class-likes that extend, implement, or use this class-like directly, by its name as written, which the
+    /// codebase keys, spec section 24.
     DirectDescendants(Word),
-    /// Every class-like below this lowercase class-like name.
+    /// Every class-like below this class-like, by its name as written.
     Descendants(Word),
     /// Whether this namespace exists.
     Namespace(Word),
@@ -126,7 +127,11 @@ impl FileReads {
     fn record(&mut self, operation: u8, argument: u8, name: &[u8]) -> Result<(), ExternalAnalyzerError> {
         let name = name.strip_prefix(b"\\").unwrap_or(name);
         match (operation, argument) {
-            (metadata::GET_CLASS_LIKES | metadata::GET_FUNCTIONS, 0) if !name.is_empty() => {
+            // A class-like stays as written, which the codebase keys where the read is matched, spec section 24.
+            (metadata::GET_CLASS_LIKES, 0) if !name.is_empty() => {
+                self.symbols.insert((word(name), empty_word()));
+            }
+            (metadata::GET_FUNCTIONS, 0) if !name.is_empty() => {
                 self.symbols.insert((ascii_lowercase_word(name), empty_word()));
             }
             (metadata::GET_CONSTANTS, 0) if !name.is_empty() => {
@@ -142,10 +147,10 @@ impl FileReads {
                 self.listings.insert(Listing::Constants);
             }
             (metadata::GET_CLASS_LIKE_RELATIONS, metadata::DIRECT_DESCENDANTS) if !name.is_empty() => {
-                self.listings.insert(Listing::DirectDescendants(ascii_lowercase_word(name)));
+                self.listings.insert(Listing::DirectDescendants(word(name)));
             }
             (metadata::GET_CLASS_LIKE_RELATIONS, metadata::ALL_DESCENDANTS) if !name.is_empty() => {
-                self.listings.insert(Listing::Descendants(ascii_lowercase_word(name)));
+                self.listings.insert(Listing::Descendants(word(name)));
             }
             (metadata::CHECK_EXISTENCE, metadata::EXISTS_NAMESPACE) if !name.is_empty() => {
                 self.listings.insert(Listing::Namespace(word(name)));
@@ -239,7 +244,8 @@ mod tests {
         let reads = decoded(&[(metadata::GET_CLASS_LIKES, b"\\App\\Order")], &[(metadata::LIST_FUNCTIONS, b"")])
             .expect("two lists of known reads");
 
-        assert_eq!(reads.issues.symbols, HashSet::from_iter([(word(b"app\\order"), empty_word())]));
+        // A class-like read stays as written, without its leading `\`, for the codebase to key.
+        assert_eq!(reads.issues.symbols, HashSet::from_iter([(word(b"App\\Order"), empty_word())]));
         assert!(reads.issues.listings.is_empty());
         assert!(reads.code.symbols.is_empty());
         assert_eq!(reads.code.listings, HashSet::from_iter([Listing::Functions]));

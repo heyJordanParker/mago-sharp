@@ -43,7 +43,6 @@ use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::TokenSeparatedSequence;
 use mago_syntax::dialect::Dialect;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
 use mago_word::word;
 
@@ -92,7 +91,10 @@ where
             continue;
         };
 
-        let key = (service_id(service), binding_metadata.target.map(|target| ascii_lowercase_word(target.as_bytes())));
+        let key = (
+            service_id(service, context.codebase),
+            binding_metadata.target.map(|target| context.codebase.class_key(target.as_bytes())),
+        );
         if let Some((_, first)) = bound.iter().find(|(earlier, _)| *earlier == key) {
             report_duplicate_binding(context, service, binding_metadata, *first);
         } else {
@@ -436,7 +438,7 @@ impl<'ctx> Services<'ctx> {
         service: &TUnion,
         requester: Option<Word>,
     ) -> Option<(&'ctx ModuleMetadata, &'ctx BindingMetadata)> {
-        let key = service_id(service);
+        let key = service_id(service, self.codebase);
         let mut namespace = namespace;
         loop {
             let modules = self
@@ -445,12 +447,11 @@ impl<'ctx> Services<'ctx> {
                 .copied()
                 .chain(self.codebase.modules.iter().filter(|module| module.kind == ModuleKind::Base));
             for module in modules.filter(|module| module.namespace.as_bytes() == namespace) {
-                let serves = |binding: &&BindingMetadata| service_id(&binding.service.type_union) == key;
+                let serves = |binding: &&BindingMetadata| service_id(&binding.service.type_union, self.codebase) == key;
                 let targeted = module.bindings.iter().filter(serves).find(|binding| {
-                    binding
-                        .target
-                        .zip(requester)
-                        .is_some_and(|(target, requester)| target.as_bytes().eq_ignore_ascii_case(requester.as_bytes()))
+                    binding.target.zip(requester).is_some_and(|(target, requester)| {
+                        self.codebase.class_key(target.as_bytes()) == self.codebase.class_key(requester.as_bytes())
+                    })
                 });
                 if let Some(binding) =
                     targeted.or_else(|| module.bindings.iter().filter(serves).find(|binding| binding.target.is_none()))

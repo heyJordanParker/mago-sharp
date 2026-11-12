@@ -1462,7 +1462,7 @@ impl<'analysis> Types<'analysis> {
         let metadata = self.codebase.get_class_like(&[class, b"\\", case].concat())?;
 
         (metadata.flags.is_enum_case_class()
-            && metadata.direct_parent_class.is_some_and(|parent| parent.as_bytes().eq_ignore_ascii_case(class)))
+            && metadata.direct_parent_class.is_some_and(|parent| parent == self.codebase.class_key(class)))
         .then_some(metadata.original_name)
     }
 

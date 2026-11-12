@@ -205,7 +205,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                             Arc::make_mut(&mut context.imported_names).insert(imported, word(imported_name));
                             // Spec section 26: an imported class's extensions apply to the whole file, so the file
                             // reads the class even where it names none of its members.
-                            artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, imported, false);
+                            artifacts.symbol_references.add_reference_to_symbol(
+                                &block_context.scope,
+                                context.codebase.class_key(&php_name(&item.name)),
+                                false,
+                            );
                         }
 
                         // Spec section 5: a class of another namespace is named only through its import, since PHP#
@@ -213,13 +217,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                         // names it.
                         for item in &sequence.items {
                             let name = php_name(&item.name);
-                            if crate::utils::casing::report_sharp_import_in_another_case(
-                                context,
-                                &name,
-                                item.name.span(),
-                            ) {
-                                continue;
-                            }
                             if let Some(class) = context.codebase.get_class_like(&name) {
                                 check_internal_reach(context, class, None, |_| String::new(), item.name.span());
                             }

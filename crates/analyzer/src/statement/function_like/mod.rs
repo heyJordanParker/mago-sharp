@@ -107,7 +107,6 @@ use crate::statement::class_like::property::analyze_property_hook;
 use crate::statement::class_like::r#struct::report_class_held_by_key;
 use crate::statement::r#return::handle_return_value;
 use crate::statement::r#static::infer_static_local_types;
-use crate::utils::casing::report_sharp_class_like_in_another_case;
 use crate::utils::expression::get_variable_id;
 use crate::utils::int_refused_for_float;
 use crate::utils::names::display_atomic;
@@ -1266,6 +1265,7 @@ where
     A: Arena,
 {
     add_symbol_references(
+        context.codebase,
         &type_metadata.type_union,
         block_context.scope.get_function_like_identifier().as_ref(),
         artifacts,
@@ -1525,33 +1525,40 @@ where
     }
 }
 
+/// Records each symbol `parameter_type` names by its key, spec section 24: a class-like's in the codebase, a
+/// function's lowercase, and a method's in its class.
 fn add_symbol_references(
+    codebase: &CodebaseMetadata,
     parameter_type: &TUnion,
     calling_function_like_id: Option<&FunctionLikeIdentifier>,
     artifacts: &mut AnalysisArtifacts,
 ) {
     for type_node in parameter_type.get_all_child_nodes() {
         if let TypeRef::Atomic(atomic) = type_node {
-            match atomic {
-                TAtomic::Reference(TReference::Symbol { name, .. })
-                | TAtomic::Callable(TCallable::Alias(FunctionLikeIdentifier::Function(name))) => {
-                    let name = ascii_lowercase_word(name.as_bytes());
-                    match calling_function_like_id {
-                        Some(FunctionLikeIdentifier::Function(calling_function)) => {
-                            artifacts.symbol_references.add_symbol_reference_to_symbol(*calling_function, name, true);
-                        }
-                        Some(FunctionLikeIdentifier::Method(calling_classlike, calling_function)) => {
-                            artifacts.symbol_references.add_class_member_reference_to_symbol(
-                                (*calling_classlike, *calling_function),
-                                name,
-                                true,
-                            );
-                        }
-                        _ => {}
-                    }
+            let symbol = match atomic {
+                TAtomic::Reference(TReference::Symbol { name, .. }) => Some(codebase.class_key(name.as_bytes())),
+                TAtomic::Callable(TCallable::Alias(FunctionLikeIdentifier::Function(name))) => {
+                    Some(ascii_lowercase_word(name.as_bytes()))
                 }
+                _ => None,
+            };
+            match atomic {
+                _ if let Some(name) = symbol => match calling_function_like_id {
+                    Some(FunctionLikeIdentifier::Function(calling_function)) => {
+                        artifacts.symbol_references.add_symbol_reference_to_symbol(*calling_function, name, true);
+                    }
+                    Some(FunctionLikeIdentifier::Method(calling_classlike, calling_function)) => {
+                        artifacts.symbol_references.add_class_member_reference_to_symbol(
+                            (*calling_classlike, *calling_function),
+                            name,
+                            true,
+                        );
+                    }
+                    _ => {}
+                },
                 TAtomic::Callable(TCallable::Alias(FunctionLikeIdentifier::Method(name, member_name))) => {
-                    let method = (ascii_lowercase_word(name.as_bytes()), ascii_lowercase_word(member_name.as_bytes()));
+                    let class = codebase.class_key(name.as_bytes());
+                    let method = (class, codebase.method_key(class, member_name.as_bytes()));
                     match calling_function_like_id {
                         Some(FunctionLikeIdentifier::Function(calling_function)) => {
                             artifacts.symbol_references.add_symbol_reference_to_class_member(
@@ -2253,24 +2260,15 @@ where
     }
 }
 
-/// Reports each type `type_union`, written at `span`, names that no analyzed file or stub declares, and each PHP# type it
-/// names in another case than the type declares, which names nothing, spec section 24.
+/// Reports each type `type_union`, written at `span`, names that no analyzed file or stub declares, a PHP# type in
+/// another case than the type declares among them, which names nothing, spec section 24.
 pub(crate) fn report_undefined_types<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
 {
     for type_ref in type_union.get_all_child_nodes() {
-        match type_ref {
-            TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) => {
-                report_undefined_type(context, *name, span);
-            }
-            TypeRef::Atomic(TAtomic::Object(TObject::Named(named))) => {
-                report_sharp_class_like_in_another_case(context, named.get_name().as_bytes(), span);
-            }
-            TypeRef::Atomic(TAtomic::Object(TObject::Enum(enum_object))) => {
-                report_sharp_class_like_in_another_case(context, enum_object.get_name().as_bytes(), span);
-            }
-            _ => {}
+        if let TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) = type_ref {
+            report_undefined_type(context, *name, span);
         }
     }
 }

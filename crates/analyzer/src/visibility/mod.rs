@@ -96,7 +96,11 @@ pub(crate) fn list_refusing<'codebase>(
 /// The namespace of the folder's module `module`, as its code writes it, dot separated: the namespace of the
 /// class-like `Module` the scanner registers for it, which keeps its case.
 pub(crate) fn display_namespace(codebase: &CodebaseMetadata, module: &ModuleMetadata) -> String {
-    let class = codebase.get_class_like(&[module.namespace.as_bytes(), b"\\module"].concat());
+    // A module keeps its namespace lowercase, as PHP finds a namespace, and its class is PHP#'s, keyed by its exact name.
+    let name = [module.namespace.as_bytes(), b"\\module"].concat();
+    let class = codebase.get_class_like(&name).or_else(|| {
+        codebase.symbols.sharp_class_like_in_another_case(&name).and_then(|key| codebase.get_class_like(key.as_bytes()))
+    });
 
     dotted(class.map_or(module.namespace.as_bytes(), |class| namespace_of(class.original_name.as_bytes())))
 }
@@ -783,7 +787,7 @@ pub(crate) fn is_visible_from_scope(
         Visibility::Public => true,
         Visibility::Protected => {
             if let Some(current_class_id) = current_class_opt {
-                current_class_id.as_bytes().eq_ignore_ascii_case(declaring_class_id)
+                codebase.class_key(current_class_id.as_bytes()) == codebase.class_key(declaring_class_id)
                     || codebase.is_instance_of(current_class_id.as_bytes(), declaring_class_id)
                     || codebase.is_instance_of(declaring_class_id, current_class_id.as_bytes())
                     || is_visible_via_required_extends(codebase, current_class_id.as_bytes(), declaring_class_id)
@@ -793,7 +797,7 @@ pub(crate) fn is_visible_from_scope(
         }
         Visibility::Private => {
             if let Some(current_class_id) = current_class_opt {
-                current_class_id.as_bytes().eq_ignore_ascii_case(declaring_class_id)
+                codebase.class_key(current_class_id.as_bytes()) == codebase.class_key(declaring_class_id)
                     || codebase.class_uses_trait(current_class_id.as_bytes(), declaring_class_id)
                     || codebase.class_uses_trait(declaring_class_id, current_class_id.as_bytes())
             } else {
@@ -811,9 +815,7 @@ fn is_visible_via_required_extends(
     current_class_id: &[u8],
     declaring_class_id: &[u8],
 ) -> bool {
-    let current_class_id_lc = mago_word::ascii_lowercase_word(current_class_id);
-
-    let Some(current_metadata) = codebase.get_class_like(current_class_id_lc.as_bytes()) else {
+    let Some(current_metadata) = codebase.get_class_like(current_class_id) else {
         return false;
     };
 

@@ -1,4 +1,5 @@
 use mago_word::WordSet;
+use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use mago_word::Word;
@@ -67,11 +68,17 @@ impl SymbolKind {
 
 /// Stores a map of all known class-like symbol names (FQCNs) to their corresponding `SymbolKind`.
 /// Provides basic methods for adding symbols and querying.
+///
+/// Each symbol is held under its key, spec section 24: a PHP# class-like's exact name, and a plain PHP one's lowercase
+/// name, as [`Symbols::class_key`] finds them.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Symbols {
     all: WordMap<SymbolKind>,
     namespaces: WordSet,
+    /// The key of each PHP# class-like, its exact name.
+    #[cfg_attr(feature = "serde", serde(default))]
+    sharp: WordSet,
 }
 
 impl Symbols {
@@ -79,14 +86,56 @@ impl Symbols {
     #[inline]
     #[must_use]
     pub fn new() -> Symbols {
-        Symbols { all: WordMap::default(), namespaces: WordSet::default() }
+        Symbols::default()
     }
 
-    /// Adds or updates a symbol name identified as the given kind.
+    /// Adds or updates a symbol name identified as the given kind. Its namespaces are kept lowercase, since a namespace
+    /// is found in any case, whatever case the key of a class-like in it keeps.
     #[inline]
     pub fn add_symbol_name(&mut self, name: Word, kind: SymbolKind) {
-        self.namespaces.extend(get_symbol_namespaces(name));
+        self.namespaces.extend(get_symbol_namespaces(ascii_lowercase_word(name.as_bytes())));
         self.all.insert(name, kind);
+    }
+
+    /// Adds or updates the class-like a file declares, by its key `name`, identified as the given kind: a PHP# one's
+    /// when `sharp`, whose key is its exact name.
+    #[inline]
+    pub fn add_class_like(&mut self, name: Word, kind: SymbolKind, sharp: bool) {
+        self.add_symbol_name(name, kind);
+        if sharp {
+            self.sharp.insert(name);
+        }
+    }
+
+    /// The key of the class-like `name` names, spec section 24: a PHP# class-like's exact name, so a name in another
+    /// case names no PHP# class-like, and a plain PHP one's lowercase name, so it is found in any case, as PHP finds
+    /// it. A name of no known symbol keys as a plain PHP one would, and a key is its own key.
+    #[must_use]
+    pub fn class_key(&self, name: &[u8]) -> Word {
+        let exact = word(name);
+        if self.all.contains_key(&exact) {
+            return exact;
+        }
+
+        let lowercase = ascii_lowercase_word(name);
+        // A PHP# class-like whose whole name is lowercase, as `order`, is no plain one that `ORDER` finds.
+        if self.sharp.contains(&lowercase) { exact } else { lowercase }
+    }
+
+    /// The key of the PHP# class-like `name` names in another case, as `Demo\ORDER` names `Demo\Order`, when `name`
+    /// names no class-like itself, spec section 24: the first by its bytes when several PHP# class-likes differ from
+    /// `name` only in case. It is for the error that names the class-like the code meant.
+    #[must_use]
+    pub fn sharp_class_like_in_another_case(&self, name: &[u8]) -> Option<Word> {
+        if self.contains(self.class_key(name)) {
+            return None;
+        }
+
+        self.sharp
+            .iter()
+            .filter(|key| key.as_bytes().eq_ignore_ascii_case(name))
+            .min_by_key(|key| key.as_bytes())
+            .copied()
     }
 
     /// Retrieves the `SymbolKind` for a given symbol name, if known.
@@ -152,6 +201,7 @@ impl Symbols {
     #[inline]
     pub fn extend(&mut self, other: Symbols) {
         self.namespaces.extend(other.namespaces);
+        self.sharp.extend(other.sharp);
         for (entry, kind) in other.all {
             self.all.entry(entry).or_insert(kind);
         }
@@ -161,18 +211,20 @@ impl Symbols {
     #[inline]
     pub fn extend_ref(&mut self, other: &Symbols) {
         self.namespaces.extend(other.namespaces.iter().copied());
+        self.sharp.extend(other.sharp.iter().copied());
 
         for (entry, kind) in &other.all {
             self.all.entry(*entry).or_insert(*kind);
         }
     }
 
-    /// Removes a symbol by its FQCN.
+    /// Removes a symbol by its key.
     ///
     /// Note: does not remove namespaces (they may be shared by other symbols).
     #[inline]
     pub fn remove(&mut self, name: Word) {
         self.all.remove(&name);
+        self.sharp.remove(&name);
     }
 }
 

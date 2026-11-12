@@ -306,7 +306,7 @@ impl Effects {
                 && let Some(metadata) = codebase.get_class_like(class.as_bytes())
             {
                 for parent in &metadata.all_parent_classes {
-                    overrides.entry((ascii_lowercase_word(parent.as_bytes()), method)).or_default().push(position);
+                    overrides.entry((codebase.class_key(parent.as_bytes()), method)).or_default().push(position);
                 }
             }
         }
@@ -459,7 +459,7 @@ impl Effects {
             return None;
         };
 
-        let class = ascii_lowercase_word(class.as_bytes());
+        let class = codebase.class_key(class.as_bytes());
         let body = Body::Method(class, codebase.method_key(class, method.as_bytes()));
         let imports = &self.imports[*self.index.get(&body)?];
         let short_name_counts = OnceCell::new();
@@ -483,7 +483,7 @@ impl Effects {
     ) -> Option<Vec<Word>> {
         let body = match function {
             FunctionLikeIdentifier::Method(class, method) => {
-                let class = ascii_lowercase_word(class.as_bytes());
+                let class = codebase.class_key(class.as_bytes());
                 Body::Method(class, codebase.method_key(class, method.as_bytes()))
             }
             FunctionLikeIdentifier::Closure(name) => Body::Lambda(*name),

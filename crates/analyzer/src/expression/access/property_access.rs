@@ -343,6 +343,7 @@ where
     // Add references (after releasing the immutable borrow)
     for declaring_class in declaring_classes {
         artifacts.symbol_references.add_reference_for_property_read(
+            context.codebase,
             &block_context.scope,
             declaring_class,
             property_name,

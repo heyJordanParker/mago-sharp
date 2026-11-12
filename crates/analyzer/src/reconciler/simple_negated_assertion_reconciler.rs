@@ -24,7 +24,6 @@ use mago_codex::ttype::get_undefined_null;
 use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::union::TUnion;
 use mago_span::Span;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::reconciler::Context;
@@ -87,7 +86,8 @@ where
                     })
                     .any(|parent_class| {
                         parent_class.permitted_inheritors.as_ref().is_some_and(|permitted_inheritors| {
-                            permitted_inheritors.contains(&ascii_lowercase_word(subtracting_named.name.as_bytes()))
+                            permitted_inheritors
+                                .contains(&context.codebase.class_key(subtracting_named.name.as_bytes()))
                         })
                     }) =>
             {
@@ -331,24 +331,21 @@ where
             } else if let TAtomic::Object(TObject::Named(existing_named)) = &atomic
                 && let Some(TAtomic::Object(TObject::Named(subtracting_named))) = type_to_subtract
             {
-                let lowercase_subtracting_name = ascii_lowercase_word(subtracting_named.get_name().as_bytes());
+                // Each class by its key, spec section 24.
+                let subtracting_key = context.codebase.class_key(subtracting_named.get_name().as_bytes());
 
-                if existing_named.get_name().as_bytes().eq_ignore_ascii_case(lowercase_subtracting_name.as_bytes()) {
+                if context.codebase.class_key(existing_named.get_name().as_bytes()) == subtracting_key {
                 } else if let Some(existing_metadata) =
                     context.codebase.get_class_like(existing_named.get_name().as_bytes())
                     && let Some(permitted_inheritors) = &existing_metadata.permitted_inheritors
-                    && context
-                        .codebase
-                        .is_instance_of(lowercase_subtracting_name.as_bytes(), existing_named.get_name().as_bytes())
-                    && permitted_inheritors.contains(&lowercase_subtracting_name)
+                    && context.codebase.is_instance_of(subtracting_key.as_bytes(), existing_named.get_name().as_bytes())
+                    && permitted_inheritors.contains(&subtracting_key)
                 {
                     let parent_type_params = existing_named.get_type_parameters();
                     acceptable_types.extend(
                         permitted_inheritors
                             .iter()
-                            .filter(|inheritor| {
-                                !inheritor.as_bytes().eq_ignore_ascii_case(lowercase_subtracting_name.as_bytes())
-                            })
+                            .filter(|inheritor| **inheritor != subtracting_key)
                             .map(|inheritor| {
                                 let child = TNamedObject::new(
                                     context

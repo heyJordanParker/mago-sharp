@@ -16,7 +16,6 @@ use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
 use mago_word::Word;
 use mago_word::WordMap;
-use mago_word::ascii_lowercase_word;
 
 pub(crate) fn collect(
     codebase: &CodebaseMetadata,
@@ -93,7 +92,7 @@ pub(crate) fn collect(
 
         let self_call =
             if let Some(TObject::Named(TNamedObject { name: self_class_name, is_static: true, .. })) = object_type {
-                template_classname == &GenericParent::ClassLike(ascii_lowercase_word(self_class_name.as_bytes()))
+                template_classname == &GenericParent::ClassLike(codebase.class_key(self_class_name.as_bytes()))
             } else {
                 false
             };
