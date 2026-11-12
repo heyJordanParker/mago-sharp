@@ -20,6 +20,8 @@ inductive Throwable where
   | DivisionByZeroError
   /-- A `match` with no arm for its value. -/
   | UnhandledMatchError
+  /-- A `List` read `x[i]` at an index outside the list. -/
+  | OutOfRangeException
   deriving Repr, DecidableEq
 
 /-- The monad translated code runs in. -/
@@ -146,6 +148,17 @@ def count {α : Type} (l : List α) : int := Int64.ofNat (min l.length 922337203
 under a condition that bounds it. -/
 
 attribute [simp] Int.le_min Int.min_eq_left
+
+/-- A List's read `x[i]`: the element at `i`, or `OutOfRangeException` at an index outside the list, a negative one
+included, as the engine throws. A law's automatic steps read it on a list the law writes out one element at a time,
+and keep it whole on any other list. -/
+def read {α : Type} (l : List α) (i : int) : M α := go l i.toInt
+where
+  go : List α → Int → M α
+    | [], _ => throw .OutOfRangeException
+    | x :: rest, k => if k = 0 then pure x else go rest (k - 1)
+
+attribute [simp] read read.go
 
 /-! The standard library's `Math.max` and `Math.min` are Lean's `max` and `min` on `int`, which never leave the `int`
 range. A law's automatic steps read each as `max` and `min` of the `Int`s, which `omega` reasons about. -/

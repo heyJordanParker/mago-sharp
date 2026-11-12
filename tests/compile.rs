@@ -4131,7 +4131,7 @@ fn a_law_reaching_a_member_lean_reserves_is_refused() {
 fn a_law_reaching_a_map_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(Map<string, int> items) => true;\n}\n",
-        "Law sized reaches a collection in Shape.sized. Hold the values in a List, and read it with `count()`, `map`, `filter`, a list pattern or a spread.",
+        "Law sized reaches a collection in Shape.sized. Hold the values in a List, and read it with `count()`, an index, `map`, `filter`, a list pattern or a spread.",
     );
 }
 
@@ -4143,6 +4143,54 @@ fn compile_proves_a_law_over_map_filter_and_count() {
         "Basket",
         "namespace App.Shared;\n\npublic class Basket\n{\n    public static List<bool> flags(List<int> items) => items.map(x => x > 0);\n\n    public static List<int> positives(List<int> items) => items.filter(x => x > 0);\n\n    law flagsKeepCount(List<int> items) => Basket.flags(items).count() == items.count();\n\n    law positivesDropTheRest(int unused) => Basket.positives([1, -2, 3]) == [1, 3];\n}\n",
         "law positivesKeepAll(List<int> items) => Basket.positives(items).count() == items.count();",
+    );
+}
+
+/// `App.Shared.Events.Retry`, whose `backoff()` gives a growing list of delays, with `law`.
+fn retry(law: &str) -> String {
+    format!(
+        "namespace App.Shared.Events;\n\npublic class Retry\n{{\n    public Retry(public int attempts {{ get; }}) {{ }}\n    public List<int> backoff() => [1, 2, 4, 8];\n\n    {law}\n}}\n"
+    )
+}
+
+/// A `List` read `x[i]` is the element at `i`, and throws `OutOfRangeException` at an index outside the list, as the
+/// engine does, and a throw does not break a law. So a law proves through its own guards, and a law without them proves
+/// where the read is in range.
+#[test]
+fn compile_proves_a_law_over_a_list_index_read() {
+    let laws = "law backoffNeverShrinks(Retry r, int i) => i < 0 || i + 1 >= r.backoff().count() || r.backoff()[i] <= r.backoff()[i + 1];\n    law backoffWaits(Retry r, int i) => r.backoff()[i] >= 1;";
+    let directory = library_project(&[("app/Shared/Events/Retry.sharp", &retry(laws))]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Events/Retry.sharp").exists());
+}
+
+/// A law an index read breaks is not proven, and the goal still to show names the elements it reads, and a `Map` read by
+/// its key is still refused.
+#[test]
+fn a_false_law_over_a_list_index_read_is_not_proven_and_a_map_key_read_is_refused() {
+    let directory = library_project(&[(
+        "app/Shared/Events/Retry.sharp",
+        &retry("law backoffShrinks(Retry r) => r.backoff()[0] >= r.backoff()[1];"),
+    )]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: law backoffShrinks is not proven\n = still to show: [1, 2, 4, 8][0] >= [1, 2, 4, 8][1]\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static int limit(Map<string, int> limits) => limits[\"orders\"] ?? 0;\n\n    law limited(int unused) => Shape.limit([\"orders\": 3]) == 3;\n}\n",
+        "Law limited reaches a collection in Shape.limit.",
     );
 }
 
@@ -4710,7 +4758,7 @@ fn a_law_body_s_match_on_a_value_that_runs_code_is_refused() {
 fn a_law_reaching_another_list_method_is_refused_by_name() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static bool known(List<int> items) => items.contains(3);\n\n    law knows(List<int> items) => Shape.known(items);\n}\n",
-        "Law knows reaches the List method contains in Shape.known. Hold the values in a List, and read it with `count()`, `map`, `filter`, a list pattern or a spread.",
+        "Law knows reaches the List method contains in Shape.known. Hold the values in a List, and read it with `count()`, an index, `map`, `filter`, a list pattern or a spread.",
     );
 }
 

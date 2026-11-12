@@ -475,6 +475,14 @@ impl<'body, 'program> Body<'body, 'program> {
                     _ => format!("({})", parts.join(" ++ ")),
                 }
             }
+            // Spec section 12: a `List` read gives the element at the index, and throws `OutOfRangeException` at an
+            // index outside the list, as the engine does.
+            Expression::ArrayAccess(access) if self.is_list(access.array) => {
+                let list = self.value(access.array);
+                let index = self.value(access.index);
+
+                self.bind(format!("int.read {list} {index}"))
+            }
             Expression::Array(_)
             | Expression::LegacyArray(_)
             | Expression::List(_)

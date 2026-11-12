@@ -147,6 +147,10 @@ impl Printer<'_, '_> {
                 let list = self.print(list);
                 Php::new(format!("{}.count()", list.at(POSTFIX)), POSTFIX)
             }
+            ("Sharp.int.read", [list, index]) => {
+                let (list, index) = (self.print(list), self.print(index));
+                Php::new(format!("{}[{}]", list.at(POSTFIX), index.at(TERNARY)), POSTFIX)
+            }
             ("Bool.true", []) => Php::new("true", POSTFIX + 1),
             ("Bool.false", []) => Php::new("false", POSTFIX + 1),
             ("Option.none", []) => Php::new("null", POSTFIX + 1),
@@ -318,6 +322,14 @@ mod tests {
         let goal = r#"["app","Sharp.holds",["app","Bind.bind",["app","Sharp.int.ofInt",["app","Nat.cast",["app","List.length",["var","items"]]]],["lam","$1",["app","Pure.pure",["app","Decidable.decide",["app","LE.le",["app","HAdd.hAdd",["app","Int64.toInt",["app","App.Shared.Money.total",["var","a"]]],["app","Int64.toInt",["var","$1"]]],["lit","5"]]]]]]]"#;
 
         assert_eq!(printed(goal, &[], &[]).as_deref(), Some("Money.total(a) + items.count() <= 5"));
+    }
+
+    /// A `List` read prints as the index read the code writes.
+    #[test]
+    fn a_list_read_prints_as_its_index_read() {
+        let goal = r#"["app","Sharp.holds",["app","Bind.bind",["app","Sharp.int.read",["var","items"],["app","Sharp.int.add",["var","i"],["lit","1"]]],["lam","$1",["app","Pure.pure",["app","Decidable.decide",["app","GE.ge",["app","Int64.toInt",["var","$1"]],["lit","1"]]]]]]]"#;
+
+        assert_eq!(printed(goal, &[], &[]).as_deref(), Some("items[i + 1] >= 1"));
     }
 
     /// A goal that holds a part only Lean writes, as the `match` of `total` that Lean names `total.match_1`, has no

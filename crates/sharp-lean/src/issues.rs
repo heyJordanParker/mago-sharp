@@ -29,7 +29,7 @@ pub(crate) const RESERVED_NAME: &str =
 pub(crate) const PLAIN_PHP: &str =
     "Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.";
 pub(crate) const COLLECTION: &str =
-    "Hold the values in a List, and read it with `count()`, `map`, `filter`, a list pattern or a spread.";
+    "Hold the values in a List, and read it with `count()`, an index, `map`, `filter`, a list pattern or a spread.";
 pub(crate) const LIBRARY: &str = "Write the code in a PHP# class of the project: of the standard library, a law reaches a List's `count()`, `map` and `filter`, and `Math.max` and `Math.min` on ints.";
 pub(crate) const LOOP: &str = "Write the method as recursion that calls itself on a smaller value.";
 pub(crate) const RECURSION: &str = "Write the method as recursion that calls itself on a smaller value: a list's rest from a list pattern, or an int one step towards a bound a condition tested.";
