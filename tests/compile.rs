@@ -3464,6 +3464,49 @@ fn a_law_reaches_an_enum_s_cases_in_declaration_order() {
     );
 }
 
+/// A backed enum `Status` stating `laws`.
+fn backed_status(laws: &str) -> String {
+    format!(
+        "namespace App.Shop;\n\npublic enum Status : string\n{{\n    case Open = \"open\";\n    case Paid = \"paid\";\n\n    {laws}\n}}\n"
+    )
+}
+
+/// A law reaches a backed enum's `from`, the case whose value matches, which throws `ValueError` for any other value as
+/// the engine does, and its `tryFrom`, the case or `null`. A false law over either is not proven.
+#[test]
+fn a_law_reaches_a_backed_enum_s_from_and_try_from() {
+    let directory = lawful_project(&[(
+        "app/Shop/Status.sharp",
+        &backed_status(
+            "law fromValueGivesTheCase(Status s) => Status.from(s.value) == s;\n    law tryFromOfAnUnknownValueIsNull(int unused) => Status.tryFrom(\"lost\") == null;",
+        ),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shop/Status.sharp").exists());
+
+    for (law, claim) in [
+        ("fromOpenIsPaid", "Status.from(\"open\") == Status.Paid"),
+        ("tryFromOfPaidIsNull", "Status.tryFrom(\"paid\") == null"),
+    ] {
+        let directory =
+            lawful_project(&[("app/Shop/Status.sharp", &backed_status(&format!("law {law}(int unused) => {claim};")))]);
+
+        let output = compile(directory.path());
+
+        assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+        assert!(
+            printed(&output)
+                .contains(&format!("error[law-unproven]: law {law} is not proven\n = still to show: {claim}\n")),
+            "{}",
+            printed(&output)
+        );
+    }
+}
+
 /// Spec section 28's `state-machine-law` example as it stands.
 const STATE_MACHINE: &str = "namespace App.Shop;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n    case Paid = \"paid\";\n    case Refunded = \"refunded\";\n\n    public Status after(Payment e) => match (this) {                               // pure: the next status for every status and event\n        Status.Open => Status.Paid,\n        Status.Paid => Status.Refunded,\n        Status.Refunded => Status.Refunded,\n    };\n    law refundedIsFinal(Payment e) => Status.Refunded.after(e) == Status.Refunded;\n}\n";
 

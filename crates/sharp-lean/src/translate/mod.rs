@@ -438,11 +438,40 @@ impl Translator<'_, '_> {
             let mut body = Body::new(self.checked, self.reach, full, format!("{short}.value"));
             let r#type = body.r#type(&backing.hint);
             let mut lines = vec![format!("def {} : {lean} → {type}", names::member(&lean, b"value"))];
-            for (case, value) in values {
+            for (case, value) in &values {
                 lines.push(format!("  | .{case} => {value}"));
             }
             self.translation.receivers.push((names::member(&lean, b"value"), true));
             self.declare(body, names::member(&lean, b"value"), r#enum.name.span, lines.join("\n"), true);
+
+            // `from` and `tryFrom` give the case whose value matches. For any other value `from` throws `ValueError`, as
+            // the engine does, and `tryFrom` gives null.
+            for (method, nullable) in [(b"from".as_slice(), false), (b"tryFrom".as_slice(), true)] {
+                if !self.reach.reaches(full, method) {
+                    continue;
+                }
+                let place = format!("{short}.{}", String::from_utf8_lossy(method));
+                let mut body = Body::new(self.checked, self.reach, full, place);
+                let class = body.class_type(r#enum.name.span, full);
+                let returns = if nullable { format!("(Option {class})") } else { class };
+                let parameter = format!("(value : {})", body.r#type(&backing.hint));
+                let (mut lines, uses, unmodeled) = body.finish();
+                let mut chosen = if nullable { "pure none" } else { "throw Throwable.ValueError" }.to_owned();
+                for (case, value) in values.iter().rev() {
+                    let case = format!("{lean}.{case}");
+                    let found = if nullable { format!("(some {case})") } else { case };
+                    chosen = format!("if value == {value} then pure {found} else {chosen}");
+                }
+                lines.push(chosen);
+                self.define(
+                    names::member(&lean, method),
+                    r#enum.name.span,
+                    &[parameter],
+                    &returns,
+                    (lines, uses, unmodeled),
+                    None,
+                );
+            }
         }
         // An enum whose cases carry no data has `cases()`, the list of its cases in the order it declares them.
         if self.reach.reaches(full, b"cases") {

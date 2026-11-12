@@ -22,6 +22,8 @@ inductive Throwable where
   | UnhandledMatchError
   /-- A `List` read `x[i]` at an index outside the list. -/
   | OutOfRangeException
+  /-- A backed enum's `from` of a value no case has. -/
+  | ValueError
   deriving Repr, DecidableEq
 
 /-- The monad translated code runs in. -/
