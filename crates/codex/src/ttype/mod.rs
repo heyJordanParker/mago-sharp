@@ -1631,6 +1631,19 @@ pub fn crosses_outward(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool {
     keys_hold_in_array(r#type, codebase) && may_hold_collection(r#type, codebase)
 }
 
+/// Whether PHP declares a PHP# result of `r#type` as `\Sharp\Map|array` or `\Sharp\Set|array`, spec section 22.
+///
+/// It does when the result's PHP type names a `Map` or a `Set`, and plain PHP gets the value's PHP array, as
+/// [`crosses_outward`] says.
+#[must_use]
+pub fn declares_table_or_array(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    crosses_outward(r#type, codebase)
+        && get_php_declared_type(r#type, codebase).types.iter().any(|atomic| {
+            matches!(atomic, TAtomic::Object(TObject::Named(object))
+                if [b"Sharp\\Map".as_slice(), b"Sharp\\Set"].iter().any(|table| object.name.as_bytes().eq_ignore_ascii_case(table)))
+        })
+}
+
 /// Whether a value of `r#type` can hold a `Map` or a `Set` at any depth, when the code runs.
 ///
 /// A type that names one can, and so can `Any`, a type parameter whose bound can and an `Iterable` of them, which say
@@ -2184,13 +2197,19 @@ pub fn get_sharp_type(atomic: &TAtomic) -> Option<SharpType<'_>> {
 }
 
 /// Whether PHP# can write `union`, each member, each type it intersects and each type inside them, as
-/// [`get_sharp_type`] reads them. `mixed` is `Any?`.
+/// [`get_sharp_type`] reads them.
+///
+/// `mixed` is `Any?`. A class named before the codebase resolves it, as a declaration's type is when an extension host
+/// refines it, is a class PHP# writes by its name.
 #[must_use]
 pub fn is_written_in_sharp(union: &TUnion) -> bool {
     union.types.iter().all(|atomic| {
         atomic.is_null()
             || atomic.is_mixed()
             || std::iter::once(atomic).chain(atomic.get_intersection_types().unwrap_or_default()).all(|member| {
+                if let TAtomic::Reference(TReference::Symbol { parameters, .. }) = member {
+                    return parameters.iter().flatten().all(is_written_in_sharp);
+                }
                 match get_sharp_type(member) {
                     None => false,
                     Some(SharpType::Class(_, inner)) => inner.iter().all(is_written_in_sharp),

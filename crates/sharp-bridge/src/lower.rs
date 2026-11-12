@@ -25,6 +25,7 @@ use mago_codex::ttype::get_crossing_array;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_php_array_form;
 use mago_codex::ttype::get_php_declared_type;
+use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::may_hold_collection;
 use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::takes_array;
@@ -278,6 +279,7 @@ use types::every_array_is_list;
 use types::number_kinds;
 use types::receiver_classes;
 use types::receiver_intersections;
+use types::with_written_keys;
 
 /// The values php-src gives the attrs the lowering emits, from `zend_compile.h` and `zend_vm_opcodes.h`. The tokens
 /// it emits are generated in `kind.rs`.
@@ -564,6 +566,9 @@ struct Lowering<'lowering, 'arena> {
     /// The declared return type of the method being lowered, which a value it returns crosses into. A lambda declares
     /// none.
     returns: Option<TUnion>,
+    /// The PHP result a plain PHP method declares, which the method being lowered overrides and keeps, as
+    /// [`Types::plain_result`] says, so a value it returns is stored as the PHP array that type holds. A lambda has none.
+    plain_result: Option<TUnion>,
     /// The declared type of each typed local lowered so far, by the offset of its declaration, which a reference
     /// parameter's local crosses back into.
     local_types: HashMap<u32, TUnion>,
@@ -615,6 +620,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             inlined: Vec::new(),
             function_types: Vec::new(),
             returns: None,
+            plain_result: None,
             local_types: HashMap::default(),
             promoted_beside: false,
             type_parameters: HashMap::default(),
@@ -2677,13 +2683,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     .return_type_hint
                     .as_ref()
                     .map(|return_type| self.types.declared_type(&return_type.hint).clone());
+                self.plain_result = self.types.plain_result(self.class, php_method_name(method)).cloned();
                 let body = self.method_body(&method.body, method.returns_value(), statements);
                 self.returns = None;
+                self.plain_result = None;
 
                 body
             }
         };
-        let crossing = self.crossing_result(method.return_type_hint.as_ref().map(|return_type| &return_type.hint));
+        // A method that returns plain PHP's array gives every caller that array, so no caller's array is made of it.
+        let crossing = self.crossing_result(method.return_type_hint.as_ref().map(|return_type| &return_type.hint))
+            && self.types.plain_result(self.class, php_method_name(method)).is_none();
         let (start, return_type) = match &method.return_type_hint {
             Some(return_type_hint) => {
                 (return_type_hint.span(), self.return_hint(php_method_name(method), &return_type_hint.hint, crossing))
@@ -2767,8 +2777,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             MethodBody::Expression(body) => {
                 let line = self.line(body);
                 statements.push(if returns_value {
-                    let returns = self.returns.clone();
-                    let expression = self.crossed_value(body.expression, returns.as_ref());
+                    let expression = self.returned(body.expression);
 
                     self.node(SHARP_AST_RETURN, 0, line, &[expression])
                 } else {
@@ -3380,7 +3389,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// A parameter's default, `value`. Spec section 9: it is any expression, which runs each time a call leaves the
     /// argument out, as [`Self::computed`] makes it.
     fn default_value(&mut self, value: &Expression) -> u32 {
-        let (lowered, _) = self.lambda_body(|lowering| lowering.default_expression(value));
+        let (lowered, _) = self.lambda_body(|lowering| lowering.default_expression(value, None));
 
         self.computed(value, lowered)
     }
@@ -3606,12 +3615,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let name = self.string(0, line, variable.name);
         let type_parameters = self.type_parameter_names();
+        // An override of a property plain PHP declares keeps plain PHP's storage, which holds the PHP array plain PHP
+        // code reads, with no crossing of its own, spec section 12.
+        let stored = self.types.plain_property_type(self.class, &[b"$", variable.name].concat());
         let default = match property.initial_value() {
             Some(value)
                 if !property.initial_value_runs_in_constructor(&type_parameters)
                     && !property.initial_value_runs_after_class(&type_parameters) =>
             {
-                let lowered = self.default_expression(value);
+                let lowered = self.default_expression(value, stored.clone());
 
                 self.computed(value, lowered)
             }
@@ -3625,7 +3637,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         // A member with no access modifier is private, spec section 5.
         let access = if flags & access_flags == 0 { ZEND_ACC_PRIVATE } else { 0 };
         let flags = flags | access;
-        let crossing = self.crossing_attribute(property.hint());
+        let crossing = if stored.is_some() { None } else { self.crossing_attribute(property.hint()) };
         let attributes = self.attributes(attribute_lists, r#override, crossing);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])
@@ -4558,7 +4570,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let variable = property.first_variable();
         let line = self.line(variable);
         let name = self.string(0, line, variable.name);
-        let value = self.expression(value);
+        let stored = self.types.plain_property_type(self.class, &[b"$", variable.name].concat());
+        let value = self.stored_in_plain_place(line, value, stored).unwrap_or_else(|| self.expression(value));
         let this = self.variable(variable.span, b"this");
         let runs_set_hook = matches!(property, Property::Hooked(hooked) if hooked.behaviors.is_none()
         && hooked.hook_list.hooks.iter().any(|accessor| {
@@ -4623,15 +4636,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The PHP return type of the method `method`, which returns `hint`, or none where PHP's would be `mixed`, as for
     /// `Any`, `Any?` and a type parameter without a bound, so a plain PHP implementation without a return type fits
     /// it. PHP# checks the result itself. An override of a plain PHP method that declares a return type keeps `mixed`,
-    /// which PHP requires of it. A result plain PHP gets the PHP array of, `crossing`, is [`Self::result_hint`]'s.
+    /// which PHP requires of it, and one whose result PHP would declare `\Sharp\Map|array` keeps that method's type, as
+    /// [`Types::plain_result`] says. A result plain PHP gets the PHP array of, `crossing`, is [`Self::result_hint`]'s.
     fn return_hint(&mut self, method: &[u8], hint: &Hint, crossing: bool) -> u32 {
+        if let Some(plain) = self.types.plain_result(self.class, method) {
+            return self.declared_type(plain, self.line(hint));
+        }
         let union = match without_readonly(hint) {
             Hint::Nullable(NullableHint { hint: Hint::Parenthesized(parenthesized), .. }) => parenthesized.hint,
             Hint::Nullable(nullable) => nullable.hint,
             hint => hint,
         };
         if union_members(union).into_iter().any(|member| matches!(self.erase(member), PhpType::Mixed))
-            && !self.types.overrides_typed_result(self.class, method)
+            && self.types.overridden_php_result(self.class, method).is_none()
         {
             return NULL;
         }
@@ -4820,10 +4837,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     fn r#return(&mut self, r#return: &Return) -> u32 {
-        let returns = self.returns.clone();
-        let value = r#return.value.map_or(NULL, |value| self.crossed_value(value, returns.as_ref()));
+        let value = r#return.value.map_or(NULL, |value| self.returned(value));
 
         self.node(SHARP_AST_RETURN, 0, self.line(r#return), &[value])
+    }
+
+    /// `value` as the method being lowered returns it: crossed into its declared result, or stored as the PHP array of
+    /// the plain PHP result it keeps, as [`Types::plain_result`] says, spec section 12.
+    fn returned(&mut self, value: &Expression) -> u32 {
+        let line = self.line(value);
+        if let Some(stored) = self.plain_result.clone() {
+            return self.received_value(line, value, takes_array(&stored), None);
+        }
+        let returns = self.returns.clone();
+
+        self.crossed_value(value, returns.as_ref())
     }
 
     /// A `for … of` is the `foreach` of its collection. A loop variable is each element, spec sections 17 and 30, and a
@@ -5250,6 +5278,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return self.null_safe_chain(expression, link, receiver);
         }
 
+        // Plain PHP takes the value of its own call as the call gave it.
+        let read = match arrival {
+            Arrival::Map(map) => Some(map),
+            Arrival::Read | Arrival::Plain => None,
+        };
+        if !(matches!(arrival, Arrival::Plain) && self.plain_value(expression))
+            && let Some(returned) = self.returned_call(line, expression, read)
+        {
+            return returned;
+        }
+
         let lowered = self.unchecked_expression(line, expression);
         let arrives_as_list = self.arrives_as_list(expression);
         let in_static = self.static_type_parameters.is_some();
@@ -5265,6 +5304,124 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some((text, target)) => self.verified(line, lowered, &text, target.as_bytes()),
             None => lowered,
         }
+    }
+
+    /// The call `expression` as PHP# reads its result of the type `read`, the call's own type when None, when the method
+    /// that runs may be plain PHP's, spec section 22:
+    /// `\Sharp\Internal\returned($receiver->status(), $receiver, 'status', 'Map<string, string>', 'Source.status()')`.
+    /// The engine finds the method that ran on the receiver, or on `static::class` for `Self.` and on the class a class
+    /// value names, and gives a PHP# method's result as it is, in a time that doesn't grow with the result. Plain PHP's,
+    /// a test double's or an override's, crosses in as the type the call reads, each PHP array a `Map` or `Set` it
+    /// holds becoming the object, and is checked against it. The call crosses where it is written, so an argument, a
+    /// spread and a collection literal's element read the declared type too. A call that names a class's static method
+    /// runs that PHP# method alone, and takes none.
+    fn returned_call(&mut self, line: u32, expression: &Expression, read: Option<&TUnion>) -> Option<u32> {
+        // A call a hidden local holds already read its result, where the local took it.
+        if self.held_receivers.iter().any(|(span, _)| *span == expression.span()) {
+            return None;
+        }
+        let read = |this: &Self| read.unwrap_or_else(|| this.types.expression_type(expression)).clone();
+        // Plain PHP's call gives the PHP array of each `Map` and `Set` its result holds. A result PHP# can't write, as
+        // a PHP docblock's shape, crosses where a place that declares its type takes it.
+        if self.plain_value(expression) {
+            let read = with_written_keys(&read(self));
+            if !is_written_in_sharp(&read) {
+                return None;
+            }
+            self.crossing_array(&read)?;
+            let check = self.types.plain_returned_check(expression, &read)?;
+            let lowered = self.unchecked_expression(line, expression);
+            let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+            return Some(self.returned_result(line, lowered, null, b"", check));
+        }
+        let (Expression::Call(Call::Method(MethodCall { object, .. }))
+        | Expression::Call(Call::NullSafeMethod(NullSafeMethodCall { object, .. }))) = expression.unparenthesized()
+        else {
+            return None;
+        };
+        // `parent.` runs the parent's own method, as `parent::` does. A receiver that may be a collection runs the
+        // member of the kind it holds, whose own method `Self::selected_call` reads.
+        if matches!(object, Expression::Parent(_) | Expression::SuperOf(_))
+            || self.types.members_by_kind(expression).is_some()
+        {
+            return None;
+        }
+        let (class, member) = self.types.replaceable_member(expression, None)?;
+        let is_static = member.method_metadata.as_ref().is_some_and(|method| method.is_static);
+        if is_static
+            && let Expression::Call(Call::Method(call)) = expression.unparenthesized()
+            && self.names.static_call_class(call).is_some()
+        {
+            return None;
+        }
+        let read = read(self);
+        let null_safe = matches!(expression.unparenthesized(), Expression::Call(Call::NullSafeMethod(_)));
+        let check = self.types.returned_check(class, member, &read, null_safe)?;
+        // A generic method's PHP# body reads its own type parameters as any type, so its result is checked against the
+        // type the call gives too, as `Types::binding_call` says.
+        let binding = self.types.binding_check(expression, &read, self.static_type_parameters.is_some());
+        let returned = match object {
+            Expression::Self_(keyword) => {
+                let late = self.string(ZEND_NAME_NOT_FQ, self.line(keyword), b"static");
+                let late = self.node(SHARP_AST_CLASS_NAME, 0, line, &[late]);
+                let lowered = self.unchecked_expression(line, expression);
+
+                self.returned_result(line, lowered, late, member.name.as_bytes(), check)
+            }
+            object => self.with_held_receiver(line, object, |this| {
+                let lowered = this.unchecked_expression(line, expression);
+                let implementer = this.expression(object);
+
+                this.returned_result(line, lowered, implementer, member.name.as_bytes(), check)
+            }),
+        };
+
+        Some(match binding {
+            Some((text, target)) => self.verified(line, returned, &text, target.as_bytes()),
+            None => returned,
+        })
+    }
+
+    /// `call`, the own method `expression` runs on `receiver` when it is an object of one of `classes`, as
+    /// [`Self::selected_call`] lowers it, read as [`Self::returned_call`] reads a call of a member plain PHP may
+    /// implement. The call's type holds what the other branches give too, so the method's own result type is read,
+    /// or the call's where the result names a type parameter.
+    fn returned_own(&mut self, expression: &Expression, receiver: &Expression, classes: &[Word], call: u32) -> u32 {
+        let line = self.line(expression);
+        let Some((class, member)) = self.types.replaceable_member(expression, Some(classes)) else {
+            return call;
+        };
+        let read = match &member.return_type_metadata {
+            Some(declared) if !declared.type_union.has_template_types() => &declared.type_union,
+            _ => self.types.expression_type(expression),
+        };
+        let null_safe = matches!(expression.unparenthesized(), Expression::Call(Call::NullSafeMethod(_)));
+        let Some(check) = self.types.returned_check(class, member, read, null_safe) else {
+            return call;
+        };
+        let implementer = self.expression(receiver);
+
+        self.returned_result(line, call, implementer, member.name.as_bytes(), check)
+    }
+
+    /// `\Sharp\Internal\returned($lowered, $implementer, $method, $types, $target)`, with the type list and the name of
+    /// `check`, as [`Self::returned_call`] says.
+    fn returned_result(
+        &mut self,
+        line: u32,
+        lowered: u32,
+        implementer: u32,
+        method: &[u8],
+        check: (String, String),
+    ) -> u32 {
+        let (text, target) = check;
+        let text = self.engine_type_text(&text);
+        let method = self.string(0, line, method);
+        let text = self.string(0, line, text.as_bytes());
+        let target = self.string(0, line, target.as_bytes());
+
+        self.global_call(line, b"Sharp\\Internal\\returned", &[lowered, implementer, method, text, target])
     }
 
     /// Whether `value` is plain PHP's array the checker reads as a `List`, as [`Types::arrives_as_list`] says, that no
@@ -5669,11 +5826,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                                 stored
                             }
                             AssignmentOperator::Assign(_) => {
-                                let declared = self
-                                    .types
-                                    .property_type(assignment.lhs)
-                                    .cloned()
-                                    .or_else(|| self.typed_local(assignment.lhs).map(|(_, declared)| declared));
+                                // A pattern's variable holds the value it tests as that value arrives in PHP#, of the
+                                // type it reads as, spec section 12, so `as`, `is` and `match` test plain PHP's array
+                                // as the `Map` or the `List` a local that holds it is.
+                                let declared = match assignment.lhs {
+                                    Expression::Variable(_) => Some(self.types.expression_type(assignment.rhs).clone()),
+                                    _ => self
+                                        .types
+                                        .property_type(assignment.lhs)
+                                        .cloned()
+                                        .or_else(|| self.typed_local(assignment.lhs).map(|(_, declared)| declared)),
+                                };
 
                                 self.crossed_value(assignment.rhs, declared.as_ref())
                             }
@@ -6800,7 +6963,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// checker took from the value's function type, on `target` read once where the value is read:
     /// `(function ($receiver) { return function (...$arguments) use ($receiver) { return
     /// $receiver->member(...$arguments, <T>); }; })($object)`. A PHP# interface's member is such a closure too, whose
-    /// call checks its result as a call of the member does, spec section 22.
+    /// call reads its result through `\Sharp\Internal\returned` as a call of the member does, spec section 22.
     fn method_value(&mut self, value: &Expression, call: sharp_kind, target: u32, member: u32) -> u32 {
         let line = self.line(value);
         let check = self.types.method_value_check(value);
@@ -6821,11 +6984,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.receiver_closure(value, target, type_arguments.as_deref(), |this, receiver, arguments| {
             let arguments = this.node(SHARP_AST_ARG_LIST, 0, line, arguments);
             let called = this.node(call, 0, line, &[receiver, member, arguments]);
+            let Some((method, text, name)) = check else {
+                return called;
+            };
+            let implementer = this.variable(value.span(), b"receiver");
 
-            match check {
-                Some((text, name)) => this.verified(line, called, &text, name.as_bytes()),
-                None => called,
-            }
+            this.returned_result(line, called, implementer, method.as_bytes(), (text, name))
         })
     }
 
@@ -7261,10 +7425,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn lambda_body<T>(&mut self, lower: impl FnOnce(&mut Self) -> T) -> (T, bool) {
         let loops = std::mem::take(&mut self.loops);
         let returns = self.returns.take();
+        let plain_result = self.plain_result.take();
         let around = std::mem::take(&mut self.captures_type_arguments);
         let body = lower(self);
         self.loops = loops;
         self.returns = returns;
+        self.plain_result = plain_result;
         let captures_type_arguments = self.captures_type_arguments;
         self.captures_type_arguments |= around;
 
@@ -7405,13 +7571,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The default `value` of a property, a static or a parameter, which PHP evaluates as a constant expression. A
     /// `Map` or a `Set` constant's read is the PHP array the constant holds, which the property's crossing and the
     /// parameter's make the object, as [`Self::constant_expression`] lowers it. A read inside another expression is the
-    /// object, as everywhere else.
-    fn default_expression(&mut self, value: &Expression) -> u32 {
+    /// object, as everywhere else. A property whose storage plain PHP declares, of the type `stored`, holds the value as
+    /// that place stores it, as [`Self::stored_in_plain_place`] says.
+    fn default_expression(&mut self, value: &Expression, stored: Option<TUnion>) -> u32 {
         let outer = std::mem::replace(&mut self.in_default, true);
+        let line = self.line(value);
         let lowered = if self.reads_collection_constant(value) {
             self.constant_expression(value)
         } else {
-            self.expression(value)
+            self.stored_in_plain_place(line, value, stored).unwrap_or_else(|| self.expression(value))
         };
         self.in_default = outer;
 
@@ -8642,7 +8810,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CALL, 0, line, &[property, arguments])
             } else {
-                self.node(SHARP_AST_METHOD_CALL, 0, line, &[value, member, arguments])
+                let call = self.node(SHARP_AST_METHOD_CALL, 0, line, &[value, member, arguments]);
+                self.returned_own(expression, receiver, &classes, call)
             };
             own.push((classes, call));
         }
@@ -9121,6 +9290,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return self.expression(value);
         };
 
+        // A call of plain PHP crosses where it is written, into the type the place declares.
+        let line = self.line(value);
+        if let Some(returned) = self.returned_call(line, value, Some(r#type)) {
+            return returned;
+        }
         let arrival = match self.crossing_array(r#type) {
             Some(TArray::Keyed(_)) => Arrival::Map(r#type),
             _ => Arrival::Read,
@@ -9159,9 +9333,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.crossed_value(receiver, Some(&r#type))
     }
 
-    /// Whether `value` can be a PHP array PHP# types as a `Map` or a `Set`: what plain PHP gives, a call of it, a call of
-    /// a PHP# interface's member a plain PHP class may implement, or a property it declares, and what a local declared
-    /// without a type holds. A literal, a `new`, any other call of PHP#, a property PHP# declares, a parameter and a
+    /// Whether `value` can be a PHP array PHP# types as a `Map` or a `Set`: what plain PHP gives, a call of it or a
+    /// property it declares, and what a local declared without a type holds. A literal, a `new`, any other call of
+    /// PHP#, which reads plain PHP's result as `Self::returned_call` says, a property PHP# declares, a parameter and a
     /// typed local hold the object, as does an element of any of them.
     fn may_be_php_array(&self, value: &Expression) -> bool {
         match value.unparenthesized() {
@@ -9171,7 +9345,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.may_be_php_array(conditional.then.unwrap_or(conditional.condition))
                     || self.may_be_php_array(conditional.r#else)
             }
-            Expression::Call(_) => self.plain_value(value) || self.types.runs_result_checked_member(value),
+            Expression::Call(_) => self.plain_value(value),
             Expression::Access(Access::Property(_)) => self.plain_value(value),
             Expression::ConstantAccess(access) => match self.names.binding(&access.name) {
                 Some(Binding::Local(local)) => local.kind != LocalKind::Parameter && self.typed_local(value).is_none(),
@@ -9182,10 +9356,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Whether plain PHP gives `value` itself, the result of a call of plain PHP or a property plain PHP declares,
-    /// which holds a PHP array where PHP# reads a `Map` or a `Set`.
+    /// which holds a PHP array where PHP# reads a `Map` or a `Set`. A PHP# method that keeps a plain PHP method's result,
+    /// as [`Types::plain_result`] says, gives it too.
     fn plain_value(&self, value: &Expression) -> bool {
         match value.unparenthesized() {
-            Expression::Call(_) => self.types.call_parameters(value).is_some(),
+            Expression::Call(_) => self.types.call_parameters(value).is_some() || self.types.runs_plain_result(value),
             Expression::Access(Access::Property(_)) => self.types.plain_property(value),
             _ => false,
         }

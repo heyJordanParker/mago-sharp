@@ -518,7 +518,7 @@ fn apply_inheritance_work(codebase: &mut CodebaseMetadata, mut inheritance_work:
                 type_union
             };
 
-            Some(TypeMetadata { type_union: narrowed_type, span, from_docblock, inferred: true })
+            Some(TypeMetadata { type_union: narrowed_type, span, from_docblock, inferred: true, host_refinement: None })
         } else {
             None
         };
@@ -536,7 +536,8 @@ fn apply_inheritance_work(codebase: &mut CodebaseMetadata, mut inheritance_work:
                 && let Some(child_param) = child_method.parameters.get_mut(i)
                 && let Some((type_union, span, from_docblock)) = substituted_param
             {
-                child_param.type_metadata = Some(TypeMetadata { type_union, span, from_docblock, inferred: true });
+                child_param.type_metadata =
+                    Some(TypeMetadata { type_union, span, from_docblock, inferred: true, host_refinement: None });
             }
         }
 

@@ -552,15 +552,24 @@ impl CodebaseMetadata {
         self.get_method_by_id(constructor)
     }
 
-    /// Whether the method `method` of `class_like` overrides or implements a plain PHP method that declares a return
-    /// type, such as `JsonSerializable::jsonSerialize(): mixed`, which PHP requires its override to declare too.
+    /// The return type a plain PHP method that the method `method` of `class_like` overrides or implements declares,
+    /// such as `JsonSerializable::jsonSerialize(): mixed`, which PHP requires its override to declare too. None when no
+    /// such method declares one. A trait's method counts only when it is abstract, since PHP checks a class's method
+    /// against no other method of a trait it uses.
     #[must_use]
-    pub fn overrides_typed_php_method(&self, class_like: &ClassLikeMetadata, method: &[u8]) -> bool {
-        class_like.overridden_method_ids.get(&ascii_lowercase_word(method)).is_some_and(|overridden| {
+    pub fn get_overridden_php_result(&self, class_like: &ClassLikeMetadata, method: &[u8]) -> Option<&TypeMetadata> {
+        class_like.overridden_method_ids.get(&ascii_lowercase_word(method)).and_then(|overridden| {
             overridden
                 .values()
-                .filter_map(|parent| self.get_method_by_id(parent))
-                .any(|parent| !parent.flags.is_sharp() && parent.return_type_declaration_metadata.is_some())
+                .filter_map(|parent| {
+                    Some((self.get_class_like_by_word(parent.get_class_name())?, self.get_method_by_id(parent)?))
+                })
+                .filter(|(owner, parent)| {
+                    !parent.flags.is_sharp()
+                        && (!owner.kind.is_trait()
+                            || parent.method_metadata.as_ref().is_some_and(|method| method.is_abstract))
+                })
+                .find_map(|(_, parent)| parent.return_type_declaration_metadata.as_ref())
         })
     }
 

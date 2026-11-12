@@ -9,17 +9,23 @@ use Mago\Sdk\Analyzer\CodebaseScanContext;
 use Mago\Sdk\Analyzer\CodebaseScanFile;
 use Mago\Sdk\Analyzer\CodebaseScanHook;
 use Mago\Sdk\Analyzer\Declaration\ClassLikeRefinement;
+use Mago\Sdk\Analyzer\Declaration\FunctionLikeRefinement;
 use Mago\Sdk\Analyzer\Declaration\RefinedType;
 use Mago\Sdk\Analyzer\Declaration\RefinementIssue;
 use Mago\Sdk\Analyzer\Declaration\SignatureRefinement;
 use Mago\Sdk\Analyzer\Declaration\TypeParameter;
+use Mago\Sdk\Analyzer\Metadata\FunctionLikeKind;
 use Mago\Sdk\Analyzer\Plugin;
 use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Analyzer\Type;
+use Mago\Sdk\Analyzer\Type\ArrayItem;
+use Mago\Sdk\Analyzer\Type\ArrayKey;
+use Mago\Sdk\Analyzer\Type\ArrayKeyKind;
 use Mago\Sdk\Analyzer\Type\GenericParameterType;
 use Mago\Sdk\Analyzer\Type\GenericParent;
 use Mago\Sdk\Analyzer\Type\GenericParentKind;
+use Mago\Sdk\Analyzer\Type\KeyedArrayType;
 use Mago\Sdk\Analyzer\Type\ReferenceType;
 use Mago\Sdk\Analyzer\Type\ReferenceTypeKind;
 use Mago\Sdk\Extension;
@@ -36,6 +42,7 @@ require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
  * applications of that class on another class's members, all read from the scanned source.
  *
  * @mago-expect lint:file-name
+ * @mago-expect lint:cyclomatic-complexity
  */
 final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
 {
@@ -43,7 +50,9 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
 
     public function getTargets(): array
     {
-        return ['src/**/*.php'];
+        // The one PHP# file refined is `src/Notice.sharp`: a class `mago convert` turns into PHP# keeps its marker, and
+        // writes the types its refinement gave.
+        return ['src/**/*.php', 'src/Notice.sharp'];
     }
 
     public function getDefinition(): PluginDefinition
@@ -73,6 +82,15 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
                         'Proof\Box' => self::box($file, $attribute->location->span),
                         'Proof\Holder' => self::holder($file, $attribute->location->span),
                         'Proof\Factory' => self::factory($file, $attribute->location->span),
+                        'Proof\Notice' => self::notice($context, $file, $attribute->location->span),
+                        'Proof\Shelf' => new ClassLikeRefinement($file->path, 'Proof\Shelf', methods: [
+                            'make' => new SignatureRefinement(
+                                return: new RefinedType(
+                                    self::symbol('Proof\Crate', self::symbol('Proof\Spec')),
+                                    $attribute->location->span,
+                                ),
+                            ),
+                        ]),
                         'Proof\Relay', 'Proof\Outer', 'Proof\Top', 'Proof\Ping', 'Proof\Pong' => self::relay(
                             $file,
                             $classLike->originalName,
@@ -143,6 +161,71 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
                 'plain' => new RefinedType(self::symbol('Proof\Box', self::symbol('Proof\Spec')), $span),
             ],
             methods: ['make' => new SignatureRefinement(returnFromBody: true)],
+        );
+    }
+
+    /**
+     * A PHP# class whose `Map` members a host refines to an array shape, which PHP# can't write, and whose `Spec`
+     * members it refines to `Special`, which fits and narrows, and to `Other`, which doesn't fit, as it refines the
+     * `Spec?` parameter of the lambda the class declares.
+     */
+    private static function notice(
+        CodebaseScanContext $context,
+        CodebaseScanFile $file,
+        Span $span,
+    ): ClassLikeRefinement {
+        foreach ($file->functionLikes as $lambda) {
+            if ($lambda->kind !== FunctionLikeKind::ArrowFunction) {
+                continue;
+            }
+
+            $context->refine(
+                new FunctionLikeRefinement(
+                    $file->path,
+                    '',
+                    new SignatureRefinement(parameters: [
+                        'spec' => new RefinedType(self::symbol('Proof\Other'), $lambda->location->span),
+                    ]),
+                    declaredAt: $lambda->location->span->start,
+                ),
+            );
+        }
+
+        $shape = Type::fromAtomic(
+            new KeyedArrayType(
+                [
+                    new ArrayItem(new ArrayKey(ArrayKeyKind::String, 'key'), false, Type::string()),
+                    new ArrayItem(new ArrayKey(ArrayKeyKind::String, 'reason'), false, Type::string()),
+                ],
+                null,
+                null,
+                false,
+            ),
+        );
+
+        return new ClassLikeRefinement(
+            $file->path,
+            'Proof\Notice',
+            properties: [
+                'fields' => new RefinedType($shape, $span),
+                'chosen' => new RefinedType(self::symbol('Proof\Special'), $span),
+                'opened' => new RefinedType(self::symbol('Proof\Special'), $span),
+                'subject' => new RefinedType(self::symbol('Proof\Other'), $span),
+            ],
+            methods: [
+                'merged' => new SignatureRefinement(
+                    parameters: ['extra' => new RefinedType($shape, $span)],
+                    return: new RefinedType($shape, $span),
+                ),
+                'kept' => new SignatureRefinement(parameters: [
+                    'spec' => new RefinedType(self::symbol('Proof\Other'), $span),
+                ]),
+                'first' => new SignatureRefinement(return: new RefinedType(self::symbol('Proof\Other'), $span)),
+                'passed' => new SignatureRefinement(parameters: [
+                    'spec' => new RefinedType(self::symbol('Proof\Special'), $span),
+                ]),
+                'latest' => new SignatureRefinement(return: new RefinedType(self::symbol('Proof\Special'), $span)),
+            ],
         );
     }
 

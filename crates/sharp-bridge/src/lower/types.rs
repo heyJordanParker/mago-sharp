@@ -41,8 +41,10 @@ use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
+use mago_codex::ttype::declares_table_or_array;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_collection_object;
+use mago_codex::ttype::get_int_or_string;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::is_written_in_sharp;
@@ -684,10 +686,30 @@ impl<'analysis> Types<'analysis> {
         self.function_type(&function, &parameters, result)
     }
 
-    /// Whether the method `method` of `class` overrides a plain PHP method that declares a return type, as
-    /// [`CodebaseMetadata::overrides_typed_php_method`] tells.
-    pub(crate) fn overrides_typed_result(&self, class: &[u8], method: &[u8]) -> bool {
-        self.codebase.overrides_typed_php_method(self.scanned(class), method)
+    /// The return type a plain PHP method that the method `method` of `class` overrides declares, as
+    /// [`CodebaseMetadata::get_overridden_php_result`] gives it.
+    pub(crate) fn overridden_php_result(&self, class: &[u8], method: &[u8]) -> Option<&'analysis TUnion> {
+        self.codebase.get_overridden_php_result(self.scanned(class), method).map(|declared| &declared.type_union)
+    }
+
+    /// The PHP result the PHP# method `method` of `class` keeps, spec section 12: the type a plain PHP method it
+    /// overrides declares, where PHP would declare its own result `\Sharp\Map|array`, as
+    /// [`declares_table_or_array`] says, which PHP refuses under that method. The method then returns the PHP array to
+    /// every caller, as the plain PHP method does. None for any other method.
+    pub(crate) fn plain_result(&self, class: &[u8], method: &[u8]) -> Option<&'analysis TUnion> {
+        let own = &self.codebase.get_method(class, method)?.return_type_declaration_metadata.as_ref()?.type_union;
+
+        declares_table_or_array(own, self.codebase).then(|| self.overridden_php_result(class, method)).flatten()
+    }
+
+    /// Whether the call `call` runs a PHP# method that returns plain PHP's array, as [`Self::plain_result`] says, which
+    /// PHP# reads as it reads a plain PHP call's result.
+    pub(crate) fn runs_plain_result(&self, call: &Expression) -> bool {
+        self.artifacts.get_callees(call).any(|target| {
+            matches!(target, CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }
+                if self.codebase.get_declaring_method_class(class.as_bytes(), method.as_bytes())
+                    .is_some_and(|declaring| self.plain_result(declaring.as_bytes(), method.as_bytes()).is_some()))
+        })
     }
 
     /// Whether each PHP# call of the method `method` of `class` checks its result, as
@@ -830,9 +852,9 @@ impl<'analysis> Types<'analysis> {
     ///
     /// A call whose result no PHP# code checked, as [`Self::unchecked_result_call`] finds it, checks its result when the
     /// result holds a `float`, an `Any` or an `Object`, spec section 24: plain PHP's `int` becomes the `float`, and its
-    /// null or non-object is refused where it enters. A call of a PHP# interface member is checked as
-    /// [`Self::member_result_check`] says, and a call that gives a generic method its type arguments as
-    /// [`Self::binding_call`] says, in a static member when `in_static` holds.
+    /// null or non-object is refused where it enters. A call that gives a generic method its type arguments is checked
+    /// as [`Self::binding_call`] says, in a static member when `in_static` holds. A call of a member a plain PHP class
+    /// may implement is checked by `\Sharp\Internal\returned`, as [`Self::returned_check`] says.
     pub(crate) fn call_check(&self, call: &Expression, in_static: bool) -> Option<(String, String)> {
         self.call_check_as(call, self.artifacts.get_expression_type(call)?, in_static)
     }
@@ -849,14 +871,8 @@ impl<'analysis> Types<'analysis> {
             return needs_result_check(r#type)
                 .then(|| (text(r#type, self.codebase, Parameter::Index), format!("{name}()")));
         }
-        if let Some((class, member)) = self.artifacts.get_callees(call).find_map(|target| match target {
-            CallTarget::FunctionLike { callee, .. } => self.result_checked_member(callee),
-            _ => None,
-        }) {
-            return self.member_result_check(class, member, r#type);
-        }
         if let Some((class, method)) = self.binding_call(call, in_static) {
-            return self.result_check(class, method, r#type, r#type);
+            return self.result_check(class, method, r#type);
         }
         let (name, metadata) = self.plain_php_call(call)?;
         let text = self.checked_text(r#type, metadata.flags.is_user_defined())?;
@@ -935,6 +951,28 @@ impl<'analysis> Types<'analysis> {
         self.codebase.get_declaring_method(class, method).filter(|metadata| metadata.flags.is_sharp())
     }
 
+    /// The type text and the name `\Sharp\Internal\returned` takes for the call `call`, whose result plain PHP gives
+    /// as the PHP array of `r#type`, spec section 12: the whole type, and the name PHP's return check gives the call, as
+    /// `Lib\Pager::orders()`. A PHP# method that keeps a plain PHP method's result, as [`Self::plain_result`] says, is
+    /// named as PHP# writes it.
+    pub(crate) fn plain_returned_check(&self, call: &Expression, r#type: &TUnion) -> Option<(String, String)> {
+        let crossing = text(r#type, self.codebase, Parameter::Index);
+        // A plain PHP call is checked as `Self::call_check` checks it. PHP# made the PHP array a PHP# method keeps.
+        let (checked, name) = match self.plain_php_call(call) {
+            Some((name, metadata)) => {
+                (self.checked_text(r#type, metadata.flags.is_user_defined()).unwrap_or_else(|| "Any?".to_owned()), name)
+            }
+            None => {
+                let (class, method) = self.artifacts.get_callees(call).find_map(called_method)?;
+                let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
+
+                ("Any?".to_owned(), format!("{}.{}()", class_text(class, self.codebase), metadata.original_name))
+            }
+        };
+
+        Some((returned_types(crossing, checked), name))
+    }
+
     /// The name PHP's return check gives `call`, as `Lib\Pager::orders()`, and the metadata of the plain PHP function or
     /// method the checker resolved it to.
     fn plain_php_call(&self, call: &Expression) -> Option<(String, &'analysis FunctionLikeMetadata)> {
@@ -989,67 +1027,99 @@ impl<'analysis> Types<'analysis> {
         (runs_in_engine && takes_function_value).then(|| method.original_name.to_string())
     }
 
-    /// Whether the call `call` runs a member of a PHP# interface, as [`Self::result_checked_member`] finds it, which a
-    /// plain PHP class may implement, so its result may be plain PHP's value: a PHP array for a `Map` or a `Set`.
-    pub(crate) fn runs_result_checked_member(&self, call: &Expression) -> bool {
-        self.artifacts.get_callees(call).any(|target| {
-            matches!(target, CallTarget::FunctionLike { callee, .. } if self.result_checked_member(callee).is_some())
+    /// The class and the metadata of the method the call `call` names when a plain PHP class may implement or override
+    /// it, so the method that runs may be plain PHP's, spec section 22: a method that isn't `private`, of a PHP# class
+    /// that isn't `final` or of a PHP# interface, as a test double PHPUnit or Mockery generates overrides one. A method
+    /// that is not `virtual` is one too: the checker reads it as final, but the engine runs it as an open PHP method a
+    /// test double replaces. Whether the call reaches an override depends on how it names the method, as
+    /// `Lowering::returned_call` says. A call that runs the member of the kind its receiver holds names the method of
+    /// one of the classes `among`.
+    pub(crate) fn replaceable_member(
+        &self,
+        call: &Expression,
+        among: Option<&[Word]>,
+    ) -> Option<(Word, &'analysis FunctionLikeMetadata)> {
+        self.artifacts.get_callees(call).filter_map(called_method).find_map(|(class, method)| {
+            let member = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
+            let owner = self.scanned(class.as_bytes());
+
+            (owner.flags.is_sharp()
+                && !owner.flags.is_final()
+                && member.method_metadata.as_ref().is_some_and(|method| !method.visibility.is_private())
+                && among.is_none_or(|among| {
+                    among.iter().any(|named| named.as_bytes().eq_ignore_ascii_case(class.as_bytes()))
+                }))
+            .then_some((class, member))
         })
     }
 
-    /// The class and the metadata of `callee` when it is a member of a PHP# interface, whose result each PHP# call
-    /// checks, spec section 22.
-    fn result_checked_member(
-        &self,
-        callee: &FunctionLikeIdentifier,
-    ) -> Option<(Word, &'analysis FunctionLikeMetadata)> {
-        let FunctionLikeIdentifier::Method(class, method) = callee else {
-            return None;
-        };
-        let member = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
-
-        self.scanned(class.as_bytes()).checks_results_at_call(member).then_some((*class, member))
-    }
-
-    /// The check a PHP# call of `member`, a method of the PHP# interface `class`, takes on its result of the type
-    /// `r#type`, spec section 22, as [`Self::result_check`] says. A plain PHP class may implement the member with a
-    /// method that declares no return type. A null-safe call's result is null where its receiver is, and its error names
-    /// the type the member declares.
-    fn member_result_check(
+    /// The type text and the name `\Sharp\Internal\returned` takes for a call's result of the type `r#type`, from
+    /// `member`, a method of `class`, when the method that ran is plain PHP's, spec section 22: the whole type, whose
+    /// each `Map` and `Set` the result crosses into and which its error names, and the type it is checked against,
+    /// as `Self::result_check` says. The engine gives a `null_safe` call's null back as it is where its receiver is
+    /// null, so the call reads the member's result as the member declares it. None for a result of any value, `Any?`,
+    /// `void` or `never`, and for a class's member whose result PHP checks whole: a plain PHP override declares a
+    /// return type PHP checks under the member's, and only an interface's implementation may declare none.
+    pub(crate) fn returned_check(
         &self,
         class: Word,
         member: &FunctionLikeMetadata,
         r#type: &TUnion,
+        null_safe: bool,
     ) -> Option<(String, String)> {
-        let declares_null = member.return_type_metadata.as_ref().is_some_and(|result| result.type_union.can_be_null());
-        let shown = if declares_null { r#type.clone() } else { r#type.to_non_nullable() };
+        let declared = &member.return_type_metadata.as_ref()?.type_union;
+        let r#type = if null_safe && !declared.can_be_null() && !declared.has_template_types() {
+            r#type.to_non_nullable()
+        } else {
+            r#type.clone()
+        };
+        if r#type.is_void()
+            || r#type.is_never()
+            || (r#type.is_mixed() && r#type.can_be_null())
+            || (!self.scanned(class.as_bytes()).checks_results_at_call(member) && php_checks_whole(&r#type))
+        {
+            return None;
+        }
+        // The check reads each collection alone, so it takes a time that doesn't grow with the result.
+        let checked = if needs_result_check(&r#type) { r#type.clone() } else { collections_alone(&r#type) };
+        let types = returned_types(
+            text(&r#type, self.codebase, Parameter::Index),
+            text(&checked, self.codebase, Parameter::Index),
+        );
 
-        self.result_check(class, member, r#type, &shown)
+        Some((types, format!("{}.{}()", class_text(class, self.codebase), member.original_name)))
     }
 
     /// The check a PHP# call of `method`, a method of `class`, takes on its result of the type `r#type`, and the method
-    /// as PHP# writes it, `App.Taggable.morphToMany()`, with `shown` as the type its error names. The call checks the
-    /// result as it checks a value plain PHP gives, in a time that doesn't grow with the value: a `List`, a `Set`, a
-    /// `Map` or an `Iterable` as the collection alone, `List<Any?>`, at any depth, and every other type whole. A result
-    /// that holds a `float`, an `Any` or an `Object` is checked whole, collections too, as [`Self::call_check`] checks
-    /// any other call plain PHP may answer, since each such part converts or refuses a value of its own. None for a
-    /// result of any value, `Any?`, `void` or `never`.
-    fn result_check(
-        &self,
-        class: Word,
-        method: &FunctionLikeMetadata,
-        r#type: &TUnion,
-        shown: &TUnion,
-    ) -> Option<(String, String)> {
+    /// as PHP# writes it, `App.Repo.first()`. The call checks the result as it checks a value plain PHP gives, in a time
+    /// that doesn't grow with the value: a `List`, a `Set`, a `Map` or an `Iterable` as the collection alone,
+    /// `List<Any?>`, at any depth, and every other type whole, the error naming `r#type`. A result that holds a `float`,
+    /// an `Any` or an `Object` is checked whole, collections too, as [`Self::call_check`] checks any other call plain
+    /// PHP may answer, since each such part converts or refuses a value of its own. None for a result of any value,
+    /// `Any?`, `void` or `never`.
+    fn result_check(&self, class: Word, method: &FunctionLikeMetadata, r#type: &TUnion) -> Option<(String, String)> {
         if r#type.is_void() || r#type.is_never() || (r#type.is_mixed() && r#type.can_be_null()) {
             return None;
         }
         let checked = if needs_result_check(r#type) { r#type.clone() } else { collections_alone(r#type) };
         let checked = text(&checked, self.codebase, Parameter::Index);
-        let shown = text(shown, self.codebase, Parameter::Index);
+        let shown = text(r#type, self.codebase, Parameter::Index);
         let checked = if checked == shown { checked } else { format!("{checked}, {shown}") };
 
         Some((checked, format!("{}.{}()", class_text(class, self.codebase), method.original_name)))
+    }
+
+    /// The check the call `call` takes on its result of the type `r#type` when it gives a PHP# method the type
+    /// arguments its result names, as [`Self::binding_call`] says, in a static member when `in_static` holds.
+    pub(crate) fn binding_check(
+        &self,
+        call: &Expression,
+        r#type: &TUnion,
+        in_static: bool,
+    ) -> Option<(String, String)> {
+        let (class, method) = self.binding_call(call, in_static)?;
+
+        self.result_check(class, method, r#type)
     }
 
     /// The class and the metadata of the PHP# method the call `call` runs when the call gives the type arguments the
@@ -1072,12 +1142,7 @@ impl<'analysis> Types<'analysis> {
         {
             return None;
         }
-        let (class, method) = self.artifacts.get_callees(call).find_map(|target| match target {
-            CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. } => {
-                Some((*class, *method))
-            }
-            _ => None,
-        })?;
+        let (class, method) = self.artifacts.get_callees(call).find_map(called_method)?;
         let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
         let static_method = metadata.method_metadata.as_ref().is_some_and(|method| method.is_static);
         let binds = names_parameter(&metadata.return_type_metadata.as_ref()?.type_union, static_method);
@@ -1090,17 +1155,24 @@ impl<'analysis> Types<'analysis> {
         .then_some((class, metadata))
     }
 
-    /// The check each call of the method value `value` takes on its result, when it is the value of a PHP# interface's
-    /// member, as [`Self::member_result_check`] says.
-    pub(crate) fn method_value_check(&self, value: &Expression) -> Option<(String, String)> {
+    /// The method name, the type text and the name `\Sharp\Internal\returned` takes for each call of the method value
+    /// `value`, when it is the value of a PHP# interface's member, as [`Self::returned_check`] says.
+    pub(crate) fn method_value_check(&self, value: &Expression) -> Option<(String, String, String)> {
         let Some(TAtomic::Callable(TCallable::Signature(signature))) =
             self.expression_type(value).types.iter().find(|atomic| atomic.is_callable())
         else {
             unreachable!("the analysis types a method value as its signature, not the value at {:?}", value.span());
         };
-        let (class, member) = self.result_checked_member(&signature.get_source()?)?;
+        let FunctionLikeIdentifier::Method(class, method) = signature.get_source()? else {
+            unreachable!("a method value's signature comes from its method, not the value at {:?}", value.span());
+        };
+        let member = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
+        if !self.scanned(class.as_bytes()).checks_results_at_call(member) {
+            return None;
+        }
+        let (types, target) = self.returned_check(class, member, signature.get_return_type()?, false)?;
 
-        self.member_result_check(class, member, signature.get_return_type()?)
+        Some((member.name.to_string(), types, target))
     }
 
     /// The name of the function value the call `call` runs, as the file writes it: the local of `f(2)` and `f?.(2)`,
@@ -1941,7 +2013,7 @@ impl<'analysis> Types<'analysis> {
     /// The type plain PHP declares for the property `variable`, `$`-prefixed, that the fully qualified class name
     /// `class` declares or inherits, as [`Self::plain_place_type`] gives it. A write to a name the class has no
     /// property for runs its `__set`, so the place is the value parameter of a `__set` plain PHP declares, as Eloquent's
-    /// `Model` does. None for a property PHP# declares.
+    /// `Model` does. None for a property PHP# declares first. A PHP# override's place is its own type's.
     pub(crate) fn plain_property_type(&self, class: &[u8], variable: &[u8]) -> Option<TUnion> {
         let declared = match self.codebase.get_declaring_property(class, variable) {
             Some(_) if !self.plain_declares(class, variable) => return None,
@@ -1954,12 +2026,15 @@ impl<'analysis> Types<'analysis> {
         Some(declared.cloned().unwrap_or_else(get_mixed))
     }
 
-    /// Whether plain PHP declares the property `variable`, `$`-prefixed, that `class` declares or inherits.
+    /// Whether plain PHP declares the property `variable`, `$`-prefixed, that `class` declares or inherits, spec section
+    /// 12: on the class or a parent, so a PHP# override of a plain PHP parent's property keeps the parent's storage, which
+    /// holds the PHP array plain PHP code reads, as Eloquent's `Model` reads `$casts`.
     fn plain_declares(&self, class: &[u8], variable: &[u8]) -> bool {
-        self.codebase
-            .get_declaring_property_class(class, variable)
-            .and_then(|declaring| self.codebase.get_class_like(declaring.as_bytes()))
-            .is_some_and(|declaring| !declaring.flags.is_sharp())
+        self.codebase.get_declaring_property_class(class, variable).is_some()
+            && self
+                .codebase
+                .get_class_like(self.root_property(class, variable).0.as_bytes())
+                .is_some_and(|root| !root.flags.is_sharp())
     }
 
     /// The class and the `$`-prefixed name of the property `target` reads, `object.property`, `object?.property`, which
@@ -2480,6 +2555,33 @@ pub fn type_text(r#type: &TUnion, codebase: &CodebaseMetadata) -> String {
     text(r#type, codebase, Parameter::Any)
 }
 
+/// `r#type`, a plain PHP result, with each `array-key` in it, at any depth of its `List`s and `Map`s, as the `int|string`
+/// PHP# writes, as PHP# reads a bare `array` as a `Map<int|string, Any?>`, spec section 12. Plain PHP writes no `Set`.
+pub(crate) fn with_written_keys(r#type: &TUnion) -> TUnion {
+    let written = |inner: &TUnion| Arc::new(with_written_keys(inner));
+
+    TUnion::from_vec(
+        r#type
+            .types
+            .iter()
+            .flat_map(|atomic| match atomic {
+                TAtomic::Scalar(TScalar::ArrayKey) => get_int_or_string().types.into_owned(),
+                TAtomic::Array(TArray::Keyed(TKeyedArray {
+                    known_items: None,
+                    parameters: Some((key, value)),
+                    ..
+                })) => {
+                    vec![TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(written(key), written(value))))]
+                }
+                TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none() && list.known_elements.is_none() => {
+                    vec![TAtomic::Array(TArray::List(TList::new(written(&list.element_type))))]
+                }
+                atomic => vec![atomic.clone()],
+            })
+            .collect(),
+    )
+}
+
 /// `r#type` with each `List`, `Set`, `Map` and `Iterable` in it, a tuple's elements included, taking `Any?` elements,
 /// keys and values, so a check of it tests each collection and none of its elements.
 fn collections_alone(r#type: &TUnion) -> TUnion {
@@ -2508,6 +2610,41 @@ fn collections_alone(r#type: &TUnion) -> TUnion {
             })
             .collect(),
     )
+}
+
+/// The class and the name of the method `target` runs, when it runs a method.
+fn called_method(target: &CallTarget) -> Option<(Word, Word)> {
+    match target {
+        CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. } => {
+            Some((*class, *method))
+        }
+        _ => None,
+    }
+}
+
+/// The type list `\Sharp\Internal\returned` takes: the type the result crosses into, which the error names, and the
+/// type it is checked against, left out where it is the first.
+fn returned_types(crossing: String, checked: String) -> String {
+    if checked == crossing { crossing } else { format!("{crossing}, {checked}") }
+}
+
+/// Whether the PHP type a PHP# result of `r#type` declares says all `r#type` says, so PHP checks a plain PHP override's
+/// result whole: each member is null, a scalar, an enum, `Object` or a class with no type arguments. A collection,
+/// a class's type arguments, a type parameter, a function type and `Any`, which PHP writes `mixed`, say more.
+fn php_checks_whole(r#type: &TUnion) -> bool {
+    r#type.types.iter().all(|atomic| match get_sharp_type(atomic) {
+        Some(SharpType::Class(_, arguments)) => arguments.is_empty(),
+        Some(
+            SharpType::Int
+            | SharpType::Float
+            | SharpType::Bool
+            | SharpType::String
+            | SharpType::Void
+            | SharpType::Enum(_)
+            | SharpType::Object,
+        ) => true,
+        _ => atomic.is_null(),
+    })
 }
 
 /// Whether `r#type` holds, itself or as a collection's element, key or value, a part an entry check acts on for a

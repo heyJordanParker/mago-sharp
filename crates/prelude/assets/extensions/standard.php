@@ -1734,6 +1734,8 @@ function ord(string $character): int {}
 function parse_str(string $string, &$result): void {}
 
 /**
+ * @return list<string|null>
+ *
  * @pure
  */
 function str_getcsv(string $string, string $separator = ',', string $enclosure = '"', string $escape = "\\"): array {}

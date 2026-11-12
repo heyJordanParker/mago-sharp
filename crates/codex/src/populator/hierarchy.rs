@@ -249,6 +249,7 @@ pub fn populate_class_like_metadata_iterative(
                     type_union: TUnion::from_atomic(TAtomic::Alias(TAlias::new(source_class_name, imported_type))),
                     from_docblock: true,
                     inferred: false,
+                    host_refinement: None,
                 };
 
                 metadata.type_aliases.insert(local_name, alias_metadata);

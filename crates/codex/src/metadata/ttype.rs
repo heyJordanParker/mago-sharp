@@ -1,6 +1,18 @@
 use mago_span::Span;
+use mago_word::Word;
 
 use crate::ttype::union::TUnion;
+
+/// An extension host's declaration refinement of a member's type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct HostRefinement {
+    /// The host's plugin, as it names itself.
+    pub host: Word,
+    /// The type the host gave a PHP# member when PHP# can't write it, such as an `array{…}` shape. The member then
+    /// keeps the type it declares.
+    pub refused: Option<TUnion>,
+}
 
 /// Contains metadata associated with a specific type instance within the type system.
 ///
@@ -37,6 +49,10 @@ pub struct TypeMetadata {
     /// - `true` if the type checker inferred this type (e.g., from a variable initialization like `$x = 10;`).
     /// - `false` if the type was explicitly written by the user (e.g., `int $x;`).
     pub inferred: bool,
+
+    /// The extension host's refinement this type comes from, or that a PHP# member refused and kept this declared
+    /// type instead.
+    pub host_refinement: Option<Box<HostRefinement>>,
 }
 
 impl TypeMetadata {
@@ -55,7 +71,7 @@ impl TypeMetadata {
     /// A new `TypeMetadata` instance with `is_nullable`, `from_docblock`, and `inferred` set to `false`.
     #[must_use]
     pub fn new(type_union: TUnion, span: Span) -> Self {
-        Self { span, type_union, from_docblock: false, inferred: false }
+        Self { span, type_union, from_docblock: false, inferred: false, host_refinement: None }
     }
 
     /// Creates new `TypeMetadata` for a type extracted from a documentation block.
@@ -73,7 +89,7 @@ impl TypeMetadata {
     /// A new `TypeMetadata` instance with `from_docblock` set to `true` and `inferred` set to `false`.
     #[must_use]
     pub fn from_docblock(type_union: TUnion, span: Span) -> Self {
-        Self { span, type_union, from_docblock: true, inferred: false }
+        Self { span, type_union, from_docblock: true, inferred: false, host_refinement: None }
     }
 
     /// Creates a new `TypeMetadata` by applying a function to the inner `TUnion`.
@@ -97,6 +113,7 @@ impl TypeMetadata {
             type_union: f(self.type_union),
             from_docblock: self.from_docblock,
             inferred: self.inferred,
+            host_refinement: self.host_refinement,
         }
     }
 }

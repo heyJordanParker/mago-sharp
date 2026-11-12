@@ -7029,7 +7029,7 @@ fn a_list_search_is_the_engine_function_of_its_name() {
 
 /// ```php
 /// $x = 1;
-/// return \Sharp\Internal\contains($this->bump($xs), $this->n)
+/// return \Sharp\Internal\contains(\Sharp\Internal\returned($this->bump($xs), $this, 'bump', …), $this->n)
 ///     && \Sharp\Internal\indexOf(\App\Tenant\Report::pick($xs, $x = 2), $x) === 0
 ///     && [${'receiver#1'} = $this->bumped(), ${'argument#2'} = $this->n,
 ///         \Sharp\Internal\remove(${'receiver#1'}->items, ${'argument#2'})][2];
@@ -7063,13 +7063,21 @@ fn a_search_runs_its_receiver_before_its_value() {
                     CALL
                       ZVAL "Sharp\\Internal\\contains"
                       ARG_LIST
-                        METHOD_CALL
-                          VAR
-                            ZVAL "this"
-                          ZVAL "bump"
+                        CALL
+                          ZVAL "Sharp\\Internal\\returned"
                           ARG_LIST
+                            METHOD_CALL
+                              VAR
+                                ZVAL "this"
+                              ZVAL "bump"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "xs"
                             VAR
-                              ZVAL "xs"
+                              ZVAL "this"
+                            ZVAL "bump"
+                            ZVAL "List<int>, List<Any?>"
+                            ZVAL "App.Tenant.Report.bump()"
                         PROP
                           VAR
                             ZVAL "this"
@@ -7194,11 +7202,12 @@ fn a_search_runs_its_receiver_before_its_value() {
 /// `last()` is the last element, and throws `OutOfRangeException` on an empty list, as Kotlin's `last()` throws.
 /// `Sharp\Internal\nonEmpty` throws on an empty list rather than `\array_last` giving null, which a `List<int?>` may
 /// hold last, and the receiver runs once. Its result is no generic call's to check: the list's elements are checked.
+/// `Report` is `final`, so no override replaces `make` and its call reads no result of plain PHP.
 #[test]
 fn last_is_the_last_element_and_throws_on_an_empty_list() {
     assert_eq!(
         Lowered::new(
-            "namespace App.Tenant;\n\nclass Report\n{\n    public List<int> make() => [1];\n\n    public int run(List<int> sizes)\n    {\n        const last = sizes.last();\n        return last + this.make().last();\n    }\n}\n"
+            "namespace App.Tenant;\n\nfinal class Report\n{\n    public List<int> make() => [1];\n\n    public int run(List<int> sizes)\n    {\n        const last = sizes.last();\n        return last + this.make().last();\n    }\n}\n"
         )
         .body(),
         indoc! {r#"
@@ -7553,7 +7562,7 @@ fn an_extension_on_a_union_runs_on_the_parts_without_its_member_beside_the_objec
 /// Spec section 26: an extension member runs beside the own member of every union shape, each part told apart by its
 /// own class: both of three parts, the union's after the `null` test of `?.`, an interface, a plain PHP class, one
 /// whose member a trait gives, and a type parameter's bound. A receiver that is no local runs once, in a hidden
-/// variable.
+/// variable. The interface's own member reads its result as `Lowering::returned_call` says, in its branch alone.
 #[test]
 fn an_extension_member_runs_beside_the_own_member_of_every_union_shape() {
     let plain_order = "<?php\n\nnamespace App\\Billing;\n\nclass PlainOrder\n{\n    public function label(): string\n    {\n        return 'plain order';\n    }\n}\n";
@@ -7672,25 +7681,30 @@ fn an_extension_member_runs_beside_the_own_member_of_every_union_shape() {
             named:
             STMT_LIST
               RETURN
-                VERIFY_TYPE_ARGS
-                  CONDITIONAL [1]
-                    INSTANCEOF
-                      VAR
-                        ZVAL "value"
-                      ZVAL "App\\Billing\\Labeled"
-                    METHOD_CALL
-                      VAR
-                        ZVAL "value"
-                      ZVAL "label"
-                      ARG_LIST
-                    STATIC_CALL
-                      ZVAL "App\\Billing\\Labels"
-                      ZVAL "label"
-                      ARG_LIST
+                CONDITIONAL [1]
+                  INSTANCEOF
+                    VAR
+                      ZVAL "value"
+                    ZVAL "App\\Billing\\Labeled"
+                  CALL
+                    ZVAL "Sharp\\Internal\\returned"
+                    ARG_LIST
+                      METHOD_CALL
                         VAR
                           ZVAL "value"
-                  ZVAL "string"
-                  ZVAL "App.Billing.Labeled.label()"
+                        ZVAL "label"
+                        ARG_LIST
+                      VAR
+                        ZVAL "value"
+                      ZVAL "label"
+                      ZVAL "string"
+                      ZVAL "App.Billing.Labeled.label()"
+                  STATIC_CALL
+                    ZVAL "App\\Billing\\Labels"
+                    ZVAL "label"
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
             plain:
             STMT_LIST
               RETURN
@@ -8058,12 +8072,30 @@ fn an_extension_read_on_a_union_reads_the_objects_own_member_beside_the_extensio
 /// return \count([$receiver#1 = ($listed ? $items : $names),
 ///         \is_array($receiver#1) ? $receiver#1 : \Sharp\Internal\Sequence::from($receiver#1)->toList()][1])
 ///     + \count([$receiver#1 = ($listed ? $this : $names), $receiver#1 instanceof \App\Tenant\Report
-///         ? $receiver#1->toList() : \Sharp\Internal\Sequence::from($receiver#1)->toList()][1]);
+///         ? \Sharp\Internal\returned($receiver#1->toList(), $receiver#1, 'tolist', 'List<int>, List<Any?>', …)
+///         : \Sharp\Internal\Sequence::from($receiver#1)->toList()][1]);
 /// ```
 ///
 /// Spec section 12: a member of a value that may be a `List` or an `Iterable` runs the `List`'s member on a PHP array
 /// and the `Iterable`'s on any other value, last, since an `Iterable` may be any value a loop reads. An object that runs
 /// its own method is told apart by its class before the `Iterable`'s member, since an `Iterable` may be an object too.
+/// An override may replace the object's own method, so it reads its result as its own type declares it.
+#[test]
+fn a_member_of_a_value_that_may_be_a_generic_object_or_an_iterable_reads_the_object_s_result_as_the_call_types_it() {
+    let body = Lowered::with(
+        "namespace App.Tenant;\n\nfinal class Report\n{\n    public int run(bool boxed, Box<int> box, Iterable<string> names) => (boxed ? box : names).toList().count();\n}\n",
+        &[(
+            "src/App/Tenant/Box.sharp",
+            "namespace App.Tenant;\n\npublic class Box<T>\n{\n    public Box() { }\n\n    public List<T> toList() => [];\n}\n",
+        )],
+    )
+    .body_of("run");
+
+    // `List<T>` names the class's type parameter, which the caller's frame doesn't spell, so the call's type is read.
+    assert!(body.contains("ZVAL \"List<int|string>, List<Any?>\"\n"), "{body}");
+    assert!(body.contains("ZVAL \"App.Tenant.Box.toList()\"\n"), "{body}");
+}
+
 #[test]
 fn a_member_of_a_value_that_may_be_a_list_or_an_iterable_runs_the_iterable_s_last() {
     let body = Lowered::new(
@@ -8137,11 +8169,19 @@ fn a_member_of_a_value_that_may_be_a_list_or_an_iterable_runs_the_iterable_s_las
                                 VAR
                                   ZVAL "receiver#1"
                                 ZVAL "App\\Tenant\\Report"
-                              METHOD_CALL
-                                VAR
-                                  ZVAL "receiver#1"
-                                ZVAL "toList"
+                              CALL
+                                ZVAL "Sharp\\Internal\\returned"
                                 ARG_LIST
+                                  METHOD_CALL
+                                    VAR
+                                      ZVAL "receiver#1"
+                                    ZVAL "toList"
+                                    ARG_LIST
+                                  VAR
+                                    ZVAL "receiver#1"
+                                  ZVAL "tolist"
+                                  ZVAL "List<int>, List<Any?>"
+                                  ZVAL "App.Tenant.Report.toList()"
                               METHOD_CALL
                                 STATIC_CALL
                                   ZVAL "Sharp\\Internal\\Sequence"
@@ -8245,13 +8285,14 @@ fn a_null_safe_member_of_a_value_that_may_be_either_collection_tests_null_then_e
 ///
 /// A `List<int>`'s `max()` and `min()` are its largest and smallest element, PHP's `\max` and `\min` on the array,
 /// and throw `OutOfRangeException` on an empty list, as `last()` does, where PHP's throw a `ValueError`:
-/// `Sharp\Internal\nonEmpty` gives the list it takes, and throws on an empty one. The receiver runs once.
+/// `Sharp\Internal\nonEmpty` gives the list it takes, and throws on an empty one. The receiver runs once. `Report` is
+/// `final`, so no override replaces `make`.
 #[test]
 fn max_and_min_are_the_largest_and_smallest_element_and_throw_on_an_empty_list() {
     for method in ["max", "min"] {
         assert_eq!(
             Lowered::new(&format!(
-                "namespace App.Tenant;\n\nclass Report\n{{\n    public List<int> make() => [1];\n\n    public int run(List<int> sizes) => sizes.{method}() + this.make().{method}();\n}}\n"
+                "namespace App.Tenant;\n\nfinal class Report\n{{\n    public List<int> make() => [1];\n\n    public int run(List<int> sizes) => sizes.{method}() + this.make().{method}();\n}}\n"
             ))
             .body(),
             format!(
@@ -9913,13 +9954,14 @@ fn a_write_into_a_list_a_hooked_property_holds_sets_it_through_the_property() {
 /// ```php
 /// $lines = ($holder === null) ? null : \count($holder->lines);
 /// $next = (($nullsafe#1 = $other->next) === null) ? null : \count($nullsafe#1->lines);
-/// $made = ($holder === null) ? null : \count($holder->make());
+/// $made = ($holder === null) ? null : \count(\Sharp\Internal\returned($holder->make(), $holder, 'make', 'List<int>, …'));
 /// $parenthesized = ($holder === null) ? null : \count($holder->lines);
 /// ```
 ///
 /// A collection method that runs as a PHP function after a `?.` link tests the link's receiver around the whole
-/// chain, as `?->` cannot skip a function call, and reads the link plainly inside it. PHP's `?->` skips the chain
-/// past parentheses too, so a parenthesized link is tested the same way.
+/// chain, as `?->` cannot skip a function call, and reads the link plainly inside it, a call's result as the member
+/// declares it, without the null of the `?.`. PHP's `?->` skips the chain past parentheses too, so a parenthesized link
+/// is tested the same way.
 #[test]
 fn a_collection_method_after_a_null_safe_link_tests_the_link_around_the_function() {
     let holder = (
@@ -9984,11 +10026,19 @@ fn a_collection_method_after_a_null_safe_link_tests_the_link_around_the_function
                   CALL
                     ZVAL "count"
                     ARG_LIST
-                      METHOD_CALL
-                        VAR
-                          ZVAL "holder"
-                        ZVAL "make"
+                      CALL
+                        ZVAL "Sharp\\Internal\\returned"
                         ARG_LIST
+                          METHOD_CALL
+                            VAR
+                              ZVAL "holder"
+                            ZVAL "make"
+                            ARG_LIST
+                          VAR
+                            ZVAL "holder"
+                          ZVAL "make"
+                          ZVAL "List<int>, List<Any?>"
+                          ZVAL "App.Tenant.Holder.make()"
               ASSIGN
                 VAR
                   ZVAL "parenthesized"
@@ -10683,6 +10733,20 @@ fn a_null_safe_set_method_tests_its_receiver_first() {
 /// once, so a promoted `Set` parameter is a plain parameter beside the property it declares, `[129]`
 /// `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, which the body sets to the `Set`. A method without a body has no
 /// statements.
+/// A method without a body lowers its parameters' defaults as a method with one does, since the analysis types them
+/// both: an interface's `Map` default is the `Map` literal a class's is.
+#[test]
+fn a_default_of_a_method_without_a_body_lowers_as_one_with_a_body() {
+    let interface =
+        Lowered::new("namespace App.Tenant;\n\ninterface Source\n{\n    int read(Map<string, int> limits = [:]);\n}\n");
+    let class = Lowered::new(
+        "namespace App.Tenant;\n\nclass Store\n{\n    public int read(Map<string, int> limits = [:]) => limits.count();\n}\n",
+    );
+    let parameters = |lowered: &Lowered| lowered.render(lowered.child(lowered.method_named("read"), 0));
+
+    assert_eq!(parameters(&interface), parameters(&class));
+}
+
 #[test]
 fn a_set_parameter_becomes_a_set_before_the_body_runs() {
     let interface = Lowered::new("namespace App.Tenant;\n\ninterface Tagged\n{\n    void keep(Set<string> kept);\n}\n");
@@ -13793,14 +13857,22 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
         indoc! {r##"
             STMT_LIST
               RETURN
-                METHOD_CALL
-                  VAR
-                    ZVAL "this"
-                  ZVAL "pairWith"
+                CALL
+                  ZVAL "Sharp\\Internal\\returned"
                   ARG_LIST
-                    SHARP_TYPE_ARGS
-                      null
-                      ZVAL "#0"
+                    METHOD_CALL
+                      VAR
+                        ZVAL "this"
+                      ZVAL "pairWith"
+                      ARG_LIST
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL "#0"
+                    VAR
+                      ZVAL "this"
+                    ZVAL "pairwith"
+                    ZVAL "App.Pair<$0, #0>"
+                    ZVAL "App.PaginatedList.pairWith()"
         "##}
     );
 
@@ -14231,7 +14303,8 @@ fn a_type_argument_a_plain_php_refinement_fixes_carries_its_php_sharp_text() {
 }
 
 /// A value of a type parameter is a value of its bound, so a generic method called on it carries its type arguments as
-/// a call on the bound does, and checks the result against the type they give, spec section 22.
+/// a call on the bound does, and checks the result against the type they give, spec section 22, whichever method ran: a
+/// plain PHP override's result is read as `Lowering::returned_call` says first.
 #[test]
 fn a_generic_call_on_a_value_of_a_type_parameter_carries_its_type_arguments() {
     let lowered = Lowered::with(
@@ -14255,14 +14328,22 @@ fn a_generic_call_on_a_value_of_a_type_parameter_carries_its_type_arguments() {
             STMT_LIST
               RETURN
                 VERIFY_TYPE_ARGS
-                  METHOD_CALL
-                    VAR
-                      ZVAL "shelf"
-                    ZVAL "make"
+                  CALL
+                    ZVAL "Sharp\\Internal\\returned"
                     ARG_LIST
-                      SHARP_TYPE_ARGS
-                        null
-                        ZVAL "App.Order"
+                      METHOD_CALL
+                        VAR
+                          ZVAL "shelf"
+                        ZVAL "make"
+                        ARG_LIST
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "App.Order"
+                      VAR
+                        ZVAL "shelf"
+                      ZVAL "make"
+                      ZVAL "App.Box<App.Order>"
+                      ZVAL "App.Shelf.make()"
                   ZVAL "App.Box<App.Order>"
                   ZVAL "App.Shelf.make()"
         "#}
@@ -15045,14 +15126,19 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
               STMT_LIST
                 RETURN
                   BINARY_OP [8]
-                    VERIFY_TYPE_ARGS
-                      METHOD_CALL
+                    CALL
+                      ZVAL "Sharp\\Internal\\returned"
+                      ARG_LIST
+                        METHOD_CALL
+                          VAR
+                            ZVAL "owner"
+                          ZVAL "hi"
+                          ARG_LIST
                         VAR
                           ZVAL "owner"
                         ZVAL "hi"
-                        ARG_LIST
-                      ZVAL "string"
-                      ZVAL "App.Greeter.hi()"
+                        ZVAL "string"
+                        ZVAL "App.Greeter.hi()"
                     METHOD_CALL
                       VAR
                         ZVAL "owner"
@@ -16385,6 +16471,167 @@ fn an_override_of_a_property_with_no_type_has_no_type() {
                       null
         "#}
     );
+}
+
+/// ```php
+/// #[\Override] protected $casts = (static fn() => \Sharp\Internal\arrayOf(new \Sharp\Map<string, string>(…)))();
+/// #[\Override] protected array $formats = …;   // with the type text "Map<string, string>"
+/// return \Sharp\Internal\get(\is_array($crossing#1 = $this->casts) ? new \Sharp\Map<string, string>(…) : …, $key);
+/// $this->formats = \Sharp\Internal\arrayOf(new \Sharp\Map<string, string>(…));
+/// ```
+///
+/// Spec section 12: a property plain PHP declares, on the class or a parent, holds what a parameter of its type takes,
+/// so an override of a plain PHP parent's property, typed or not, keeps the parent's storage, the PHP array the parent's
+/// code reads, as Eloquent's `Model` reads `$casts`. Its initial value and each PHP# write store the PHP array, with no
+/// `#[\Sharp\Crossing]`, and a PHP# read crosses it in, as it reads a plain PHP property it inherits.
+#[test]
+fn an_override_of_a_plain_php_property_keeps_its_storage() {
+    let lowered = Lowered::with(
+        "class Invoice : Model\n{\n    protected override Map<string, string> casts { get; set; } = [\"paid\": \"bool\"];\n    protected override Map<string, string> formats { get; set; } = [\"total\": \"%.2f\"];\n\n    public string? castOf(string key) => this.casts.get(key);\n\n    public void format() { this.formats = [\"total\": \"%.3f\"]; }\n}\n",
+        &[(
+            "src/Model.php",
+            "<?php class Model { /** @var array<string, string> */ protected $casts = []; /** @var array<string, string> */ protected array $formats = []; }",
+        )],
+    );
+    let tree = lowered.tree();
+
+    assert!(!tree.contains("Sharp\\\\Crossing"), "{tree}");
+    assert_eq!(tree.matches("ZVAL \"Sharp\\\\Internal\\\\arrayOf\"").count(), 3, "{tree}");
+    assert!(tree.contains("ZVAL \"crossing#1\""), "{tree}");
+}
+
+/// ```php
+/// #[\Override] public function errors(): array { return \Sharp\Internal\arrayOf(new \Sharp\Map<string, List<string>>(…)); }
+/// public function count(): int {
+///     return \Sharp\Internal\count(\Sharp\Internal\returned($this->errors(), null, '', 'Map<…>, Any?', 'Form.errors()'));
+/// }
+/// ```
+///
+/// Spec section 12: an override of a plain PHP method keeps that method's PHP result, as an override of its property
+/// keeps the storage, so the engine links the class: `array`, not the `\Sharp\Map|array` PHP refuses under it. The
+/// method returns the PHP array to every caller, with no result crossing of its own, and a PHP# call of it crosses the
+/// array in, as it crosses a plain PHP call's result. The method made the array, so the crossing checks nothing.
+#[test]
+fn an_override_of_a_plain_php_method_keeps_its_result() {
+    let lowered = Lowered::with(
+        "final class Form : Checker\n{\n    public override Map<string, List<string>> errors() => [\"name\": [\"required\"]];\n\n    public int count() => this.errors().count();\n}\n",
+        &[("src/Checker.php", "<?php abstract class Checker { public function errors(): array { return []; } }")],
+    );
+    let errors = lowered.render(lowered.method_named("errors"));
+    let count = lowered.body_of("count");
+
+    assert!(errors.contains("SHARP_TYPE_ARGS\n    TYPE [7]\n"), "{errors}");
+    assert!(!errors.contains("Sharp\\\\Map\"\n      TYPE [7]"), "{errors}");
+    assert!(errors.contains("ZVAL \"Sharp\\\\Internal\\\\arrayOf\""), "{errors}");
+    assert!(
+        count.contains("ZVAL \"Map<string, List<string>>, Any?\"\n            ZVAL \"Form.errors()\"\n"),
+        "{count}"
+    );
+}
+
+/// ```php
+/// $payload = new \Sharp\Map(…, ...\Sharp\Internal\returned($feed->payload(), null, '', 'Map<int|string, Any?>', …)…);
+/// ```
+///
+/// Spec section 12: a call of plain PHP crosses where it is written, so a spread of its result into a collection
+/// literal reads the `Map` or the `List` it declares, as an argument and a literal's element do.
+#[test]
+fn a_spread_of_a_plain_php_result_reads_the_collection_it_declares() {
+    let feed = (
+        "src/App/Tenant/Feed.php",
+        "<?php namespace App\\Tenant; interface Feed { public function payload(): array; /** @return list<string> */ public function names(): array; }",
+    );
+    let payload = body_in(
+        "int run(Feed feed)",
+        "        Map<int|string, Any?> payload = [...feed.payload(), \"extra\": \"kept\"];\n        return payload.count();\n",
+        &[feed],
+    );
+    let names = body_in(
+        "int run(Feed feed)",
+        "        List<string> names = [...feed.names(), \"third\"];\n        return names.count();\n",
+        &[feed],
+    );
+
+    assert!(payload.contains("ZVAL \"Sharp\\\\Internal\\\\returned\""), "{payload}");
+    assert!(names.contains("UNPACK"), "{names}");
+}
+
+/// ```php
+/// \Lib\Calc::keep(\Sharp\Internal\returned($owner->relate('tags'), $owner, 'relate', 'App.Tenant.Relation', …));
+/// \Lib\Calc::keep(\Lib\Calc::own());
+/// ```
+///
+/// Spec section 22: the result of a call whose method may be plain PHP's is read where the call is written, an argument
+/// of plain PHP too, so plain PHP takes the checked value. Plain PHP takes its own call's value as the call gave it.
+#[test]
+fn a_result_plain_php_takes_is_read_where_the_call_is_written() {
+    let body = body_in(
+        "void run(Taggable owner)",
+        "        Calc.keep(owner.relate(\"tags\"));\n        Calc.keep(Calc.own());\n",
+        &[
+            (
+                "src/App/Tenant/Taggable.sharp",
+                "namespace App.Tenant;\n\npublic interface Taggable\n{\n    Relation relate(string name);\n}\n",
+            ),
+            (
+                "src/App/Tenant/Relation.sharp",
+                "namespace App.Tenant;\n\npublic class Relation\n{\n    public Relation() { }\n}\n",
+            ),
+            (
+                "src/Lib/Calc.php",
+                "<?php namespace Lib; final class Calc { public static function keep(mixed $value): void {} /** @return array<string, int> */ public static function own(): array { return []; } }",
+            ),
+        ],
+    );
+
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"").count(), 1, "{body}");
+    assert!(body.contains("ZVAL \"App.Tenant.Taggable.relate()\""), "{body}");
+}
+
+/// Spec section 22: a call that runs one PHP# method alone reads its result as it is: `super.` runs the parent's own
+/// method, and a static method its class names runs that method. Plain PHP's array shape, which PHP# can't write, is
+/// read where a place that declares its type takes it, as the generic method's parameter here. That method's result is
+/// the `Map` the checker writes for the shape, read as an override may give it.
+#[test]
+fn a_call_that_runs_one_php_sharp_method_or_gives_a_shape_reads_its_result_as_it_is() {
+    let base = (
+        "src/App/Tenant/Shelf.sharp",
+        "namespace App.Tenant;\n\npublic class Shelf\n{\n    public Shelf() { }\n\n    public virtual List<int> sizes() => [1];\n\n    public static List<int> shared() => [2];\n\n    public static virtual List<int> made() => [3];\n\n    public T pick<T>(T value) => value;\n}\n",
+    );
+    let calc = (
+        "src/Lib/Calc.php",
+        "<?php namespace Lib; final class Calc { /** @return array{a: int} */ public static function shape(): array { return ['a' => 1]; } }",
+    );
+    let body = Lowered::with(
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\npublic class Pantry : Shelf\n{\n    public Pantry() : super() { }\n\n    public override List<int> sizes() => super.sizes();\n\n    public int run()\n    {\n        const shared = Shelf.shared();\n        const picked = this.pick(Calc.shape());\n        const late = Self.made();\n        const valued = Class.of(this).made();\n        return shared.count();\n    }\n}\n",
+        &[base, calc],
+    )
+    .tree();
+
+    // `Self.` reads the method on `static::class`, and a class value on its class.
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"").count(), 3, "{body}");
+    assert!(body.contains("CLASS_NAME\n                  ZVAL [1] \"static\"\n"), "{body}");
+    assert_eq!(body.matches("ZVAL \"App.Tenant.Shelf.made()\"").count(), 2, "{body}");
+    assert!(
+        body.contains(
+            "ZVAL \"Map<string, int>, Map<Any?, Any?>\"\n                  ZVAL \"App.Tenant.Shelf.pick()\"\n"
+        ),
+        "{body}"
+    );
+}
+
+/// A PHP# method that overrides a method of a plain PHP trait its class uses keeps its own result,
+/// `\Sharp\Map|array`, since PHP checks a class's method against no method of a trait but an abstract one.
+#[test]
+fn an_override_of_a_plain_php_trait_method_keeps_its_own_result() {
+    let lowered = Lowered::with(
+        "final class Form : Listing\n{\n    public override Map<string, List<string>> errors() => [\"name\": [\"required\"]];\n}\n",
+        &[("src/Listing.php", "<?php trait Listing { public function errors(): array { return []; } }")],
+    );
+    let errors = lowered.render(lowered.method_named("errors"));
+
+    assert!(errors.contains("Sharp\\\\Map\""), "{errors}");
+    assert!(!errors.contains("ZVAL \"Sharp\\\\Internal\\\\arrayOf\""), "{errors}");
 }
 
 /// ```php
@@ -18340,8 +18587,8 @@ fn a_null_safe_write_is_a_conditional_on_its_receiver() {
 }
 
 /// ```php
-/// (($nullsafe#1 = $other) === null ? null : $nullsafe#1->prices = \is_array($crossing#2 = <checked>(\Lib\Calc::prices()))
-///     ? new \Sharp\Map<string, int>(…(string) $key#3…) : $crossing#2);
+/// (($nullsafe#1 = $other) === null ? null
+///     : $nullsafe#1->prices = \Sharp\Internal\returned(\Lib\Calc::prices(), null, '', 'Map<string, int>', …));
 /// ```
 ///
 /// Spec section 14.4: a write through `?.` writes its value as a write through `.` does, so a plain PHP array written
@@ -18374,71 +18621,17 @@ fn a_null_safe_write_takes_its_value_as_a_write_through_a_dot() {
                     VAR
                       ZVAL "nullsafe#1"
                     ZVAL "prices"
-                  CONDITIONAL
-                    CALL
-                      ZVAL "is_array"
-                      ARG_LIST
-                        ASSIGN
-                          VAR
-                            ZVAL "crossing#2"
-                          VERIFY_TYPE_ARGS
-                            STATIC_CALL
-                              ZVAL "Lib\\Calc"
-                              ZVAL "prices"
-                              ARG_LIST
-                            ZVAL "Map<string, int>"
-                            ZVAL "Lib\\Calc::prices()"
-                    SHARP_TYPE_ARGS
-                      NEW
-                        ZVAL "Sharp\\Map"
+                  CALL
+                    ZVAL "Sharp\\Internal\\returned"
+                    ARG_LIST
+                      STATIC_CALL
+                        ZVAL "Lib\\Calc"
+                        ZVAL "prices"
                         ARG_LIST
-                          CALL
-                            ZVAL "array_merge"
-                            ARG_LIST
-                              ARRAY [3]
-                              UNPACK
-                                CALL
-                                  ZVAL "array_map"
-                                  ARG_LIST
-                                    ARROW_FUNC "" @11-11
-                                      PARAM_LIST
-                                        PARAM
-                                          null
-                                          ZVAL "key#3"
-                                          null
-                                          null
-                                          null
-                                          null
-                                        PARAM
-                                          null
-                                          ZVAL "value#4"
-                                          null
-                                          null
-                                          null
-                                          null
-                                      null
-                                      ARRAY [3]
-                                        ARRAY_ELEM
-                                          CAST [6]
-                                            VAR
-                                              ZVAL "key#3"
-                                          null
-                                        ARRAY_ELEM
-                                          VAR
-                                            ZVAL "value#4"
-                                          null
-                                      null
-                                      null
-                                    CALL
-                                      ZVAL "array_keys"
-                                      ARG_LIST
-                                        VAR
-                                          ZVAL "crossing#2"
-                                    VAR
-                                      ZVAL "crossing#2"
-                      ZVAL "string, int"
-                    VAR
-                      ZVAL "crossing#2"
+                      ZVAL null
+                      ZVAL ""
+                      ZVAL "Map<string, int>"
+                      ZVAL "Lib\\Calc::prices()"
         "#}
     );
 }
@@ -19020,11 +19213,11 @@ fn a_call_of_a_generic_class_s_static_field_calls_the_function_of_its_type_argum
 }
 
 /// ```php
-/// return ($steps[0])($extra) + ($this->make())($extra) + (fn (int $a) => $a)($extra);
+/// return ($steps[0])($extra) + (\Sharp\Internal\returned($this->make(), …))($extra) + (fn (int $a) => $a)($extra);
 /// ```
 ///
 /// Spec section 14: any expression that gives a function is called as PHP calls what the expression gives, as
-/// `f?.(x)` is.
+/// `f?.(x)` is. An override may replace `make`, so its result is read as `Lowering::returned_call` says.
 #[test]
 fn a_call_of_any_expression_that_gives_a_function_calls_what_it_gives() {
     let tree = body_in(
@@ -19049,11 +19242,19 @@ fn a_call_of_any_expression_that_gives_a_function_calls_what_it_gives() {
                         VAR
                           ZVAL "extra"
                     CALL
-                      METHOD_CALL
-                        VAR
-                          ZVAL "this"
-                        ZVAL "make"
+                      CALL
+                        ZVAL "Sharp\\Internal\\returned"
                         ARG_LIST
+                          METHOD_CALL
+                            VAR
+                              ZVAL "this"
+                            ZVAL "make"
+                            ARG_LIST
+                          VAR
+                            ZVAL "this"
+                          ZVAL "make"
+                          ZVAL "Function<int(int)>"
+                          ZVAL "App.Tenant.Report.make()"
                       ARG_LIST
                         VAR
                           ZVAL "extra"
@@ -21674,12 +21875,13 @@ fn a_call_of_a_function_value_checks_a_float_result() {
 }
 
 /// ```php
-/// $read = $source->read(); return \Sharp\Internal\map($numbers, $f);
+/// $read = \Sharp\Internal\returned($source->read(), $source, 'read', 'Any', 'App.Tenant.Source.read()');
+/// return \Sharp\Internal\map($numbers, $f);
 /// ```
 ///
 /// Spec section 24: a plain PHP class may implement a PHP# interface, and the engine runs the function value a
 /// collection method takes and keeps what it returns, so a call of either checks a result that holds an `Any` or a
-/// `float`. A lambda written in PHP# returns what its type says, so the collection method given one checks nothing,
+/// `float`, the interface member's through `\Sharp\Internal\returned`. A lambda written in PHP# returns what its type says, so the collection method given one checks nothing,
 /// and a PHP# method given a function value checks its own result where it returns.
 #[test]
 fn an_interface_method_and_a_collection_method_given_a_function_value_check_their_results() {
@@ -21698,10 +21900,14 @@ fn an_interface_method_and_a_collection_method_given_a_function_value_check_thei
     )
     .body();
 
-    assert!(body.contains("      ZVAL \"Any\"\n      ZVAL \"App.Tenant.Source.read()\"\n"), "{body}");
+    assert!(
+        body.contains("ZVAL \"read\"\n        ZVAL \"Any\"\n        ZVAL \"App.Tenant.Source.read()\"\n"),
+        "{body}"
+    );
     assert!(body.contains("      ZVAL \"List<float>\"\n      ZVAL \"map()\"\n"), "{body}");
     assert!(body.contains("ZVAL \"apply\""), "{body}");
-    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 2, "{body}");
+    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 1, "{body}");
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"").count(), 1, "{body}");
 }
 
 /// Spec section 22: each PHP# call of a PHP# interface's instance member checks its result, so `[2]`,
@@ -21722,15 +21928,16 @@ fn an_interface_member_marks_its_return_type_as_checked_by_each_call() {
 }
 
 /// ```php
-/// $tags = \Sharp\verify($owner->relate('tags'), 'App.Relation', 'App.Taggable.relate()');
+/// $tags = \Sharp\Internal\returned($owner->relate('tags'), $owner, 'relate', 'App.Relation', 'App.Taggable.relate()');
 /// ```
 ///
 /// Spec section 22: a plain PHP class implements a PHP# interface's member with a method that may declare no return
-/// type, so each PHP# call of the member checks its result, as is a call of its method value, named as PHP# writes the
-/// member. The check tests a collection alone, `List<Any?>`, inside a tuple too, and the type argument of a generic
-/// interface's member, and a second type in the text names the member's type for the error where the check reads less,
-/// a null-safe call's included. A result of any value, a `void` or `never` one and a call of a PHP# class's own method
-/// check nothing.
+/// type, so each PHP# call of the member reads its result through `\Sharp\Internal\returned`, as does a call of its
+/// method value, named as PHP# writes the member. The result of plain PHP's method crosses into the type the call reads
+/// and is checked as a collection alone, `List<Any?>`, inside a tuple too, and as the type argument of a generic
+/// interface's member. A null-safe call reads the type the member declares, since the engine gives its null back where
+/// the receiver is null. A result of any value, a `void` or `never` one and a call of a PHP# class's own method take
+/// none.
 #[test]
 fn a_call_of_an_interface_member_checks_its_result() {
     let body = Lowered::with(
@@ -21752,64 +21959,34 @@ fn a_call_of_an_interface_member_checks_its_result() {
     )
     .body();
 
-    assert!(
-        body.contains("      ZVAL \"App.Tenant.Relation\"\n      ZVAL \"App.Tenant.Taggable.relate()\"\n"),
-        "{body}"
-    );
-    assert!(
-        body.contains(
-            "                    ZVAL \"App.Tenant.Relation\"\n                    ZVAL \"App.Tenant.Taggable.relate()\"\n"
-        ),
-        "{body}"
-    );
-    assert!(
-        body.contains("      ZVAL \"List<Any?>, List<int>\"\n      ZVAL \"App.Tenant.Taggable.ids()\"\n"),
-        "{body}"
-    );
-    // The typed local makes the `Set` and the `Map` the object after the check, as
-    // `a_set_or_a_map_an_interface_member_gives_becomes_the_object` shows.
-    assert!(
-        body.contains(
-            "              ZVAL \"Set<Any?>, Set<string>\"\n              ZVAL \"App.Tenant.Taggable.names()\"\n"
-        ),
-        "{body}"
-    );
-    assert!(
-        body.contains(
-            "              ZVAL \"Map<Any?, Any?>, Map<string, int>\"\n              ZVAL \"App.Tenant.Taggable.counts()\"\n"
-        ),
-        "{body}"
-    );
-    assert!(
-        body.contains("      ZVAL \"Iterable<Any?>, Iterable<int>\"\n      ZVAL \"App.Tenant.Taggable.stream()\"\n"),
-        "{body}"
-    );
-    assert!(
-        body.contains(
-            "      ZVAL \"[List<Any?>, string], [List<int>, string]\"\n      ZVAL \"App.Tenant.Taggable.pair()\"\n"
-        ),
-        "{body}"
-    );
-    assert!(
-        body.contains(
-            "ZVAL \"App.Tenant.Relation?, App.Tenant.Relation\"\n      ZVAL \"App.Tenant.Taggable.relate()\"\n"
-        ),
-        "{body}"
-    );
-    assert!(body.contains("      ZVAL \"App.Tenant.Relation\"\n      ZVAL \"App.Tenant.Source.read()\"\n"), "{body}");
-    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 9, "{body}");
+    let flat = body.lines().map(str::trim).collect::<Vec<_>>().join("\n");
+    let returned = |method: &str, types: &str, target: &str| {
+        flat.matches(&format!("ZVAL \"{method}\"\nZVAL \"{types}\"\nZVAL \"App.Tenant.{target}()\"\n")).count()
+    };
+
+    // The relate of the call, of the null-safe call and of the method value's call.
+    assert_eq!(returned("relate", "App.Tenant.Relation", "Taggable.relate"), 3, "{body}");
+    assert_eq!(returned("ids", "List<int>, List<Any?>", "Taggable.ids"), 1, "{body}");
+    assert_eq!(returned("names", "Set<string>, Set<Any?>", "Taggable.names"), 1, "{body}");
+    assert_eq!(returned("counts", "Map<string, int>, Map<Any?, Any?>", "Taggable.counts"), 1, "{body}");
+    assert_eq!(returned("stream", "Iterable<int>, Iterable<Any?>", "Taggable.stream"), 1, "{body}");
+    assert_eq!(returned("pair", "[List<int>, string], [List<Any?>, string]", "Taggable.pair"), 1, "{body}");
+    assert_eq!(returned("read", "App.Tenant.Relation", "Source.read"), 1, "{body}");
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"").count(), 9, "{body}");
+    assert!(!body.contains("VERIFY_TYPE_ARGS"), "{body}");
 }
 
 /// ```php
-/// $names = \is_array($crossing#1 = verify($owner->names(), …)) ? new \Sharp\Set<string>($crossing#1) : $crossing#1;
-/// return \Sharp\Internal\containsKey(\is_array($crossing#1 = verify($owner->names(), …)) ? new \Sharp\Set<string>(…) : …, 'b')
-///     && \Sharp\Internal\containsKey(… ? new \Sharp\Map<string, int>(…each key as a string…) : …, 'a');
+/// $names = \Sharp\Internal\returned($owner->names(), $owner, 'names', 'Set<string>, Set<Any?>', …);
+/// return \Sharp\Internal\containsKey(\Sharp\Internal\returned($owner->names(), …), 'b')
+///     && \Sharp\Internal\containsKey(\Sharp\Internal\returned($owner->counts(), …), 'a')
+///     && \Lib\Calc::total(\Sharp\Internal\arrayOf(\Sharp\Internal\returned($owner->counts(), …))) > 0;
 /// ```
 ///
 /// Spec section 22: a plain PHP class may implement a PHP# interface's member, so the `Set` or the `Map` a call of the
-/// member gives may be the PHP array it crosses into. A typed local that holds it and a member that reads it make it the
-/// object first, as they make what a call of plain PHP gives, so each member runs on the object and a key keeps its type.
-/// A PHP# class may implement the member too, so the result plain PHP takes still crosses out as its PHP array.
+/// member gives may be the PHP array it crosses into. The call makes it the object where it is written, as a call of
+/// plain PHP does, so a typed local holds the object, each member runs on it and a key keeps its type. The result plain
+/// PHP takes still crosses out as its PHP array.
 #[test]
 fn a_set_or_a_map_an_interface_member_gives_becomes_the_object() {
     let body = Lowered::with(
@@ -21830,20 +22007,102 @@ fn a_set_or_a_map_an_interface_member_gives_becomes_the_object() {
     )
     .body();
 
-    assert_eq!(body.matches("ZVAL \"Sharp\\\\Set\"\n").count(), 2, "{body}");
-    assert_eq!(body.matches("ZVAL \"Sharp\\\\Map\"\n").count(), 1, "{body}");
-    assert_eq!(body.matches("ZVAL \"string\"\n").count(), 2, "{body}");
-    assert!(body.contains("ZVAL \"string, int\"\n"), "{body}");
+    assert_eq!(body.matches("ZVAL \"Set<string>, Set<Any?>\"\n").count(), 2, "{body}");
+    assert_eq!(body.matches("ZVAL \"Map<string, int>, Map<Any?, Any?>\"\n").count(), 2, "{body}");
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"\n").count(), 4, "{body}");
     assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\arrayOf\"\n").count(), 1, "{body}");
 }
 
 /// ```php
-/// $tags = \Sharp\verify($contact->relate('tags'), 'App.Tenant.Relation', 'App.Tenant.Taggable.relate()');
+/// return \Sharp\Internal\get(\Sharp\Internal\returned($source->status(), $source, 'status', 'Map<string, string>', …), 'status');
+/// ```
+///
+/// Spec section 22: a plain PHP class may override a PHP# class's method, and PHPUnit's or Mockery's test double of the
+/// class overrides each one, a method that is not `virtual` included, so the `Map` a call gives may be the PHP array it
+/// crosses into, as an interface member's may. The call reads its result through `\Sharp\Internal\returned`, which
+/// makes such an array the object. A `static` method its class names, a `private` method, and a method of a `final`
+/// class, has no override, so its call holds the object.
+#[test]
+fn a_map_a_class_method_gives_becomes_the_object_where_a_plain_override_may_give_it() {
+    let source = (
+        "src/App/Tenant/Source.sharp",
+        "namespace App.Tenant;\n\npublic class Source\n{\n    public virtual Map<string, string> status() => [\"status\": \"active\"];\n\n    public Map<string, string> closed() => [\"status\": \"closed\"];\n\n    public static Map<string, string> shared() => [\"status\": \"shared\"];\n\n    public string? own() => this.kept().get(\"status\");\n\n    private Map<string, string> kept() => [\"status\": \"kept\"];\n}\n",
+    );
+    let fixed = (
+        "src/App/Tenant/Fixed.sharp",
+        "namespace App.Tenant;\n\npublic final class Fixed\n{\n    public Map<string, string> status() => [\"status\": \"fixed\"];\n}\n",
+    );
+    let crossed = |statements: &str| {
+        let body = body_in("string? run(Source source, Fixed fixed)", statements, &[source, fixed]);
+
+        body.contains("ZVAL \"Sharp\\\\Internal\\\\returned\"") || body.contains("ZVAL \"crossing#")
+    };
+
+    assert!(crossed("        return source.status().get(\"status\");\n"));
+    assert!(crossed("        const status = source.status();\n        return status.get(\"status\");\n"));
+    assert!(crossed("        Map<string, string> status = source.closed();\n        return status.get(\"status\");\n"));
+    assert!(!crossed("        return Source.shared().get(\"status\");\n"));
+    assert!(!crossed("        return fixed.status().get(\"status\");\n"));
+    let own = Lowered::with(
+        "namespace App.Tenant;\n\npublic final class Reader\n{\n    public string? run(Source source) => source.own();\n}\n",
+        &[source],
+    )
+    .body();
+    assert!(!own.contains("crossing#") && !own.contains("returned"), "{own}");
+}
+
+/// ```php
+/// return (($as#1 = \is_array($crossing#2 = $folder->records) ? \Sharp\Map::from($crossing#2) : $crossing#2) instanceof Map<…> ? … : null) != null;
+/// ```
+///
+/// Spec section 12: plain PHP's `?array` arrives as a `Map<int|string, Any?>?`, whatever keys it holds, and one it
+/// declares `list<…>` as a `List`. A pattern's variable holds the value it tests as it arrives, so `as`, `is` and
+/// `match` test the `Map` or the `List` a local holding the value holds, never plain PHP's array. A `List` test of the
+/// `Map` is a compile error, which the analyzer's tests hold.
+#[test]
+fn a_pattern_tests_plain_php_s_array_as_it_arrives() {
+    let folder = (
+        "src/App/Tenant/Folder.php",
+        "<?php namespace App\\Tenant; final class Folder { public ?array $records = null; /** @var list<array<string, ?string>>|null */ public ?array $listed = null; }",
+    );
+    let records =
+        body_in("bool run(Folder folder)", "        return folder.records as Map<string, Any?> != null;\n", &[folder]);
+    let held = body_in(
+        "bool run(Folder folder)",
+        "        return folder.records is Map<int|string, Any?> records && records.has(0);\n",
+        &[folder],
+    );
+    let listed = body_in(
+        "bool run(Folder folder)",
+        "        return folder.listed as List<Map<string, string?>> != null;\n",
+        &[folder],
+    );
+
+    assert!(
+        records
+            .contains("ZVAL \"as#1\"\n            CONDITIONAL\n              CALL\n                ZVAL \"is_array\""),
+        "{records}"
+    );
+    assert!(records.contains("ZVAL \"Sharp\\\\Map\"\n                ZVAL \"from\""), "{records}");
+    assert!(
+        held.contains("ZVAL \"records\"\n          CONDITIONAL\n            CALL\n              ZVAL \"is_array\""),
+        "{held}"
+    );
+    assert!(
+        listed
+            .contains("ZVAL \"as#1\"\n            CONDITIONAL\n              CALL\n                ZVAL \"is_array\""),
+        "{listed}"
+    );
+    assert!(listed.contains("ZVAL \"string, string?\""), "{listed}");
+}
+
+/// ```php
+/// $tags = \Sharp\Internal\returned($contact->relate('tags'), $contact, 'relate', 'App.Tenant.Relation', 'App.Tenant.Taggable.relate()');
 /// ```
 ///
 /// Spec section 22: a call of a plain PHP class's method that declares no return type, under a PHP# interface's member
-/// the class implements, is a call of the member: the checker types it by the member, and the call checks its result.
-/// A PHP# subclass's call on `this` is one too.
+/// the class implements, is a call of the member: the checker types it by the member, and the call checks the result
+/// of the method that ran. A PHP# subclass's call on `this` is one too.
 #[test]
 fn a_call_of_a_plain_class_method_under_an_interface_member_checks_its_result() {
     let library = [
@@ -21868,7 +22127,13 @@ fn a_call_of_a_plain_class_method_under_an_interface_member_checks_its_result() 
     .body();
 
     for body in [body, subclass] {
-        assert!(body.contains("ZVAL \"App.Tenant.Relation\"\n      ZVAL \"App.Tenant.Taggable.relate()\"\n"), "{body}");
+        assert!(body.contains("ZVAL \"Sharp\\\\Internal\\\\returned\""), "{body}");
+        assert!(
+            body.contains(
+                "ZVAL \"relate\"\n        ZVAL \"App.Tenant.Relation\"\n        ZVAL \"App.Tenant.Taggable.relate()\"\n"
+            ),
+            "{body}"
+        );
     }
 }
 
@@ -21918,14 +22183,19 @@ fn a_call_of_a_generic_method_checks_its_result_against_the_type_it_gives() {
         indoc! {r##"
             STMT_LIST
               RETURN
-                VERIFY_TYPE_ARGS
-                  METHOD_CALL
+                CALL
+                  ZVAL "Sharp\\Internal\\returned"
+                  ARG_LIST
+                    METHOD_CALL
+                      VAR
+                        ZVAL "source"
+                      ZVAL "read"
+                      ARG_LIST
                     VAR
                       ZVAL "source"
                     ZVAL "read"
-                    ARG_LIST
-                  ZVAL "#0"
-                  ZVAL "App.Tenant.Source.read()"
+                    ZVAL "#0"
+                    ZVAL "App.Tenant.Source.read()"
         "##}
     );
 }
@@ -23254,16 +23524,16 @@ fn a_typed_for_counter_is_the_assignment_of_its_value() {
 }
 
 /// ```php
-/// foreach (<check Map<int|string, int>>(\Lib\Calc::make(2)) as $key#1 => $value#2) {
+/// foreach (\Sharp\Internal\returned(\Lib\Calc::make(2), null, '', 'Map<int|string, int>', …) as $key#1 => $value#2) {
 ///     $entry = [$key#1, $value#2];
 ///     $extra += $entry[1];
 /// }
-/// foreach (<check Map<int|string, int>>(\Lib\Calc::make(3)) as $key => $value) {
+/// foreach (\Sharp\Internal\returned(\Lib\Calc::make(3), …) as $key => $value) {
 /// }
 /// ```
 ///
 /// `FOREACH` takes the collection, the value variable, the key variable or null, and the body. The map a plain PHP
-/// docblock claims is checked entry by entry first, and one loop variable over it is each entry.
+/// docblock claims crosses in and is checked entry by entry first, and one loop variable over it is each entry.
 #[test]
 fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
     assert_eq!(
@@ -23278,14 +23548,18 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
         indoc! {r#"
             STMT_LIST
               FOREACH
-                VERIFY_TYPE_ARGS
-                  STATIC_CALL
-                    ZVAL "Lib\\Calc"
-                    ZVAL "make"
-                    ARG_LIST
-                      ZVAL 2
-                  ZVAL "Map<int|string, int>"
-                  ZVAL "Lib\\Calc::make()"
+                CALL
+                  ZVAL "Sharp\\Internal\\returned"
+                  ARG_LIST
+                    STATIC_CALL
+                      ZVAL "Lib\\Calc"
+                      ZVAL "make"
+                      ARG_LIST
+                        ZVAL 2
+                    ZVAL null
+                    ZVAL ""
+                    ZVAL "Map<int|string, int>"
+                    ZVAL "Lib\\Calc::make()"
                 VAR
                   ZVAL "value#2"
                 VAR
@@ -23312,14 +23586,18 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
                           ZVAL "entry"
                         ZVAL 1
               FOREACH
-                VERIFY_TYPE_ARGS
-                  STATIC_CALL
-                    ZVAL "Lib\\Calc"
-                    ZVAL "make"
-                    ARG_LIST
-                      ZVAL 3
-                  ZVAL "Map<int|string, int>"
-                  ZVAL "Lib\\Calc::make()"
+                CALL
+                  ZVAL "Sharp\\Internal\\returned"
+                  ARG_LIST
+                    STATIC_CALL
+                      ZVAL "Lib\\Calc"
+                      ZVAL "make"
+                      ARG_LIST
+                        ZVAL 3
+                    ZVAL null
+                    ZVAL ""
+                    ZVAL "Map<int|string, int>"
+                    ZVAL "Lib\\Calc::make()"
                 VAR
                   ZVAL "value"
                 VAR
@@ -23333,14 +23611,14 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
 }
 
 /// ```php
-/// return \Sharp\Internal\containsKey(\is_array($crossing#1 = \Lib\Calc::prices()) ? \Sharp\Map::from($crossing#1)
-///     : $crossing#1, 5)
-///     && (($nullsafe#1 = \Lib\Calc::maybe()) === null ? null
+/// return \Sharp\Internal\containsKey(\Sharp\Internal\returned(\Lib\Calc::prices(), null, '', 'Map<int|string, int>', …), 5)
+///     && (($nullsafe#1 = \Sharp\Internal\returned(\Lib\Calc::maybe(), …)) === null ? null
 ///         : \Sharp\Internal\containsKey(\is_array($crossing#2 = $nullsafe#1) ? … : $crossing#2, 5)) == true;
 /// ```
 ///
 /// Spec section 12: a plain PHP array a `Map` member reads becomes the `\Sharp\Map` first, as it does where a typed
-/// local holds it, null-safe or not, so the member runs on the `Map` and a key keeps its type.
+/// local holds it, null-safe or not, so the member runs on the `Map` and a key keeps its type. The call runs once: the
+/// hidden local a null-safe link holds it in takes the result as the call reads it.
 #[test]
 fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
     assert_eq!(
@@ -23359,25 +23637,17 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
                   CALL
                     ZVAL "Sharp\\Internal\\containsKey"
                     ARG_LIST
-                      CONDITIONAL
-                        CALL
-                          ZVAL "is_array"
-                          ARG_LIST
-                            ASSIGN
-                              VAR
-                                ZVAL "crossing#1"
-                              STATIC_CALL
-                                ZVAL "Lib\\Calc"
-                                ZVAL "prices"
-                                ARG_LIST
-                        STATIC_CALL
-                          ZVAL "Sharp\\Map"
-                          ZVAL "from"
-                          ARG_LIST
-                            VAR
-                              ZVAL "crossing#1"
-                        VAR
-                          ZVAL "crossing#1"
+                      CALL
+                        ZVAL "Sharp\\Internal\\returned"
+                        ARG_LIST
+                          STATIC_CALL
+                            ZVAL "Lib\\Calc"
+                            ZVAL "prices"
+                            ARG_LIST
+                          ZVAL null
+                          ZVAL ""
+                          ZVAL "Map<int|string, int>"
+                          ZVAL "Lib\\Calc::prices()"
                       ZVAL 5
                   BINARY_OP [16]
                     CONDITIONAL [1]
@@ -23385,10 +23655,17 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
                         ASSIGN
                           VAR
                             ZVAL "nullsafe#1"
-                          STATIC_CALL
-                            ZVAL "Lib\\Calc"
-                            ZVAL "maybe"
+                          CALL
+                            ZVAL "Sharp\\Internal\\returned"
                             ARG_LIST
+                              STATIC_CALL
+                                ZVAL "Lib\\Calc"
+                                ZVAL "maybe"
+                                ARG_LIST
+                              ZVAL null
+                              ZVAL ""
+                              ZVAL "Map<int|string, int>?"
+                              ZVAL "Lib\\Calc::maybe()"
                         ZVAL null
                       ZVAL null
                       CALL
@@ -23418,13 +23695,14 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
 }
 
 /// ```php
-/// foreach (\is_array($crossing#1 = \Lib\Calc::prices()) ? new \Sharp\Map(…(string) $key#2…) : $crossing#1
+/// foreach (\Sharp\Internal\returned(\Lib\Calc::prices(), null, '', 'Map<string, int>', 'Lib\Calc::prices()')
 ///     as $sku => $count) {}
-/// foreach (\Lib\Calc::counts() as $id => $count) {}
+/// foreach (\Sharp\Internal\returned(\Lib\Calc::counts(), null, '', 'Map<int|string, int>', …) as $id => $count) {}
 /// ```
 ///
 /// Spec section 12: PHP holds an all-digit `string` key as an `int`, so a loop over a plain PHP array keyed by `string`
-/// runs over the `\Sharp\Map` that takes each key back as its `string`. One keyed by `int|string` keeps its keys.
+/// runs over the `\Sharp\Map` that takes each key back as its `string`. One keyed by `array-key` is the
+/// `Map<int|string, …>` that keeps its keys.
 #[test]
 fn a_loop_over_a_plain_php_array_keyed_by_string_takes_its_keys_back() {
     assert_eq!(
@@ -23439,81 +23717,34 @@ fn a_loop_over_a_plain_php_array_keyed_by_string_takes_its_keys_back() {
         indoc! {r#"
             STMT_LIST
               FOREACH
-                CONDITIONAL
-                  CALL
-                    ZVAL "is_array"
-                    ARG_LIST
-                      ASSIGN
-                        VAR
-                          ZVAL "crossing#1"
-                        VERIFY_TYPE_ARGS
-                          STATIC_CALL
-                            ZVAL "Lib\\Calc"
-                            ZVAL "prices"
-                            ARG_LIST
-                          ZVAL "Map<string, int>"
-                          ZVAL "Lib\\Calc::prices()"
-                  SHARP_TYPE_ARGS
-                    NEW
-                      ZVAL "Sharp\\Map"
+                CALL
+                  ZVAL "Sharp\\Internal\\returned"
+                  ARG_LIST
+                    STATIC_CALL
+                      ZVAL "Lib\\Calc"
+                      ZVAL "prices"
                       ARG_LIST
-                        CALL
-                          ZVAL "array_merge"
-                          ARG_LIST
-                            ARRAY [3]
-                            UNPACK
-                              CALL
-                                ZVAL "array_map"
-                                ARG_LIST
-                                  ARROW_FUNC "" @9-9
-                                    PARAM_LIST
-                                      PARAM
-                                        null
-                                        ZVAL "key#2"
-                                        null
-                                        null
-                                        null
-                                        null
-                                      PARAM
-                                        null
-                                        ZVAL "value#3"
-                                        null
-                                        null
-                                        null
-                                        null
-                                    null
-                                    ARRAY [3]
-                                      ARRAY_ELEM
-                                        CAST [6]
-                                          VAR
-                                            ZVAL "key#2"
-                                        null
-                                      ARRAY_ELEM
-                                        VAR
-                                          ZVAL "value#3"
-                                        null
-                                    null
-                                    null
-                                  CALL
-                                    ZVAL "array_keys"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "crossing#1"
-                                  VAR
-                                    ZVAL "crossing#1"
-                    ZVAL "string, int"
-                  VAR
-                    ZVAL "crossing#1"
+                    ZVAL null
+                    ZVAL ""
+                    ZVAL "Map<string, int>"
+                    ZVAL "Lib\\Calc::prices()"
                 VAR
                   ZVAL "count"
                 VAR
                   ZVAL "sku"
                 STMT_LIST
               FOREACH
-                STATIC_CALL
-                  ZVAL "Lib\\Calc"
-                  ZVAL "counts"
+                CALL
+                  ZVAL "Sharp\\Internal\\returned"
                   ARG_LIST
+                    STATIC_CALL
+                      ZVAL "Lib\\Calc"
+                      ZVAL "counts"
+                      ARG_LIST
+                    ZVAL null
+                    ZVAL ""
+                    ZVAL "Map<int|string, int>"
+                    ZVAL "Lib\\Calc::counts()"
                 VAR
                   ZVAL "count"
                 VAR
@@ -24499,8 +24730,9 @@ fn a_template_is_an_encaps_list_of_its_text_and_interpolations() {
 }
 
 /// Spec section 12: plain PHP's `array<int, T>` arrives as a `List<T>`, renumbered where PHP# reads it with
-/// `\array_values`, a `List` of `Map`s too. A `Map` place keeps its keys and makes the `Map` of them, an argument of
-/// plain PHP takes the array as plain PHP gave it, and a value plain PHP declares a list is one already.
+/// `\array_values`. A `List` of `Map`s crosses through `\Sharp\Internal\returned`, which renumbers it as it makes each
+/// `Map`. A `Map` place keeps its keys and makes the `Map` of them, an argument of plain PHP takes the array as plain PHP
+/// gave it, and a value plain PHP declares a list is one already.
 #[test]
 fn a_plain_php_int_keyed_array_is_renumbered_where_it_arrives() {
     let ids = (
@@ -24512,7 +24744,7 @@ fn a_plain_php_int_keyed_array_is_renumbered_where_it_arrives() {
     assert!(lowered("        List<int> all = Ids.all();\n        return all[0];\n").contains("ZVAL \"array_values\""));
     assert!(
         lowered("        List<Map<string, int>> rows = Ids.rows();\n        return rows.count();\n")
-            .contains("ZVAL \"array_values\"")
+            .contains("ZVAL \"Sharp\\\\Internal\\\\returned\"")
     );
     assert!(
         !lowered("        Map<int, int> byId = Ids.all();\n        return byId.count();\n")
@@ -26325,7 +26557,7 @@ fn a_map_or_set_goes_into_a_plain_php_array_parameter_as_its_php_array() {
 /// ```php
 /// \Lib\Calc::total(\Sharp\Internal\arrayOf($either));
 /// \Lib\Calc::total(\Sharp\Internal\arrayOf($listed));
-/// \Lib\Takers::counted($stock); // its result checked as Map<string, int>
+/// \Sharp\Internal\returned(\Lib\Takers::counted($stock), null, '', 'Map<string, int>', 'Lib\Takers::counted()');
 /// return \Lib\Takers::kept(\Sharp\Internal\arrayOf($stock));
 /// ```
 ///
@@ -26379,18 +26611,22 @@ fn a_value_that_may_be_several_collections_and_a_type_parameter_take_the_php_arr
                           ZVAL "listed"
             "#},
             indoc! {r#"
-                VERIFY_TYPE_ARGS
-                  STATIC_CALL
-                    ZVAL "Lib\\Takers"
-                    ZVAL "counted"
-                    ARG_LIST
-                      VAR
-                        ZVAL "stock"
-                      SHARP_TYPE_ARGS
-                        null
-                        ZVAL "Map<string, int>"
-                  ZVAL "Map<string, int>"
-                  ZVAL "Lib\\Takers::counted()"
+                CALL
+                  ZVAL "Sharp\\Internal\\returned"
+                  ARG_LIST
+                    STATIC_CALL
+                      ZVAL "Lib\\Takers"
+                      ZVAL "counted"
+                      ARG_LIST
+                        VAR
+                          ZVAL "stock"
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL "Map<string, int>"
+                    ZVAL null
+                    ZVAL ""
+                    ZVAL "Map<string, int>"
+                    ZVAL "Lib\\Takers::counted()"
             "#},
             indoc! {r#"
                 RETURN
@@ -26706,9 +26942,7 @@ fn a_map_a_method_stores_in_a_plain_php_collection_goes_in_as_its_element_takes_
 }
 
 /// ```php
-/// $this->stock = \is_array($crossing = \Lib\Prices::all())
-///     ? new \Sharp\Map<string, int>(\array_merge([], ...\array_map(fn ($key, $value) => [(string) $key, $value], \array_keys($crossing), $crossing)))
-///     : $crossing;
+/// $this->stock = \Sharp\Internal\returned(\Lib\Prices::all(), null, '', 'Map<string, int>', 'Lib\Prices::all()');
 /// $this->names = \is_array($renumbered = \Lib\Calc::names()) ? \array_values($renumbered) : $renumbered;
 /// ```
 ///
@@ -26736,71 +26970,17 @@ fn plain_php_s_array_written_into_a_php_sharp_base_s_property_crosses_as_its_typ
                     VAR
                       ZVAL "this"
                     ZVAL "stock"
-                  CONDITIONAL
-                    CALL
-                      ZVAL "is_array"
-                      ARG_LIST
-                        ASSIGN
-                          VAR
-                            ZVAL "crossing#1"
-                          VERIFY_TYPE_ARGS
-                            STATIC_CALL
-                              ZVAL "Lib\\Prices"
-                              ZVAL "all"
-                              ARG_LIST
-                            ZVAL "Map<string, int>"
-                            ZVAL "Lib\\Prices::all()"
-                    SHARP_TYPE_ARGS
-                      NEW
-                        ZVAL "Sharp\\Map"
+                  CALL
+                    ZVAL "Sharp\\Internal\\returned"
+                    ARG_LIST
+                      STATIC_CALL
+                        ZVAL "Lib\\Prices"
+                        ZVAL "all"
                         ARG_LIST
-                          CALL
-                            ZVAL "array_merge"
-                            ARG_LIST
-                              ARRAY [3]
-                              UNPACK
-                                CALL
-                                  ZVAL "array_map"
-                                  ARG_LIST
-                                    ARROW_FUNC "" @10-10
-                                      PARAM_LIST
-                                        PARAM
-                                          null
-                                          ZVAL "key#2"
-                                          null
-                                          null
-                                          null
-                                          null
-                                        PARAM
-                                          null
-                                          ZVAL "value#3"
-                                          null
-                                          null
-                                          null
-                                          null
-                                      null
-                                      ARRAY [3]
-                                        ARRAY_ELEM
-                                          CAST [6]
-                                            VAR
-                                              ZVAL "key#2"
-                                          null
-                                        ARRAY_ELEM
-                                          VAR
-                                            ZVAL "value#3"
-                                          null
-                                      null
-                                      null
-                                    CALL
-                                      ZVAL "array_keys"
-                                      ARG_LIST
-                                        VAR
-                                          ZVAL "crossing#1"
-                                    VAR
-                                      ZVAL "crossing#1"
-                      ZVAL "string, int"
-                    VAR
-                      ZVAL "crossing#1"
+                      ZVAL null
+                      ZVAL ""
+                      ZVAL "Map<string, int>"
+                      ZVAL "Lib\\Prices::all()"
             "#},
             indoc! {r#"
                 ASSIGN
@@ -27103,41 +27283,30 @@ fn nested(tree: &str, levels: usize) -> String {
 
 /// ```php
 /// $levels = \is_array($levels) ? new \Sharp\Map<Lib.Level, int>(\array_merge([], ...\array_map(fn ($key#1, $value#2) => [\Lib\Level::from($key#1), $value#2], \array_keys($levels), $levels))) : $levels;
-/// $names = \is_array(${'crossing#1'} = \Lib\Calc::names()) ? \Sharp\Map::from(${'crossing#1'}, 'int, string') : ${'crossing#1'};
-/// return \is_array(${'crossing#1'} = \Lib\Calc::names()) ? \Sharp\Map::from(${'crossing#1'}, 'int, string') : ${'crossing#1'};
+/// $names = \Sharp\Internal\returned(\Lib\Calc::names(), null, '', 'Map<int, string>', 'Lib\Calc::names()');
+/// return \Sharp\Internal\returned(\Lib\Calc::names(), null, '', 'Map<int, string>', 'Lib\Calc::names()');
 /// ```
 ///
 /// A value plain PHP gives enters PHP# with each `Map` it holds made the object, spec section 12: a parameter, a typed
-/// local and a `return`. A call's result is checked in its `VERIFY_TYPE_ARGS` first, then made the object. A `Map` keyed by an `int`-backed enum takes each backing value back as its case as it is,
-/// where a `string`-backed one casts it first, as `a_backed_enum_key_beside_a_map_spread_goes_in_as_its_case` shows.
+/// local and a `return`. A call's result is made the object and checked in `\Sharp\Internal\returned`. A `Map` keyed by
+/// an `int`-backed enum takes each backing value back as its case as it is, where a `string`-backed one casts it first,
+/// as `a_backed_enum_key_beside_a_map_spread_goes_in_as_its_case` shows.
 #[test]
 fn a_value_plain_php_gives_enters_php_sharp_as_the_object() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Level;\n\nclass Report\n{\n    public Map<int, string> run(Map<Level, int> levels)\n    {\n        Map<int, string> names = Calc.names();\n        return Calc.names();\n    }\n}\n";
     let level = ("src/Lib/Level.php", "<?php namespace Lib; enum Level: int { case Low = 1; }");
     let crossing = indoc! {r#"
-        CONDITIONAL
-          CALL
-            ZVAL "is_array"
-            ARG_LIST
-              ASSIGN
-                VAR
-                  ZVAL "crossing#1"
-                VERIFY_TYPE_ARGS
-                  STATIC_CALL
-                    ZVAL "Lib\\Calc"
-                    ZVAL "names"
-                    ARG_LIST
-                  ZVAL "Map<int, string>"
-                  ZVAL "Lib\\Calc::names()"
-          STATIC_CALL
-            ZVAL "Sharp\\Map"
-            ZVAL "from"
-            ARG_LIST
-              VAR
-                ZVAL "crossing#1"
-              ZVAL "int, string"
-          VAR
-            ZVAL "crossing#1"
+        CALL
+          ZVAL "Sharp\\Internal\\returned"
+          ARG_LIST
+            STATIC_CALL
+              ZVAL "Lib\\Calc"
+              ZVAL "names"
+              ARG_LIST
+            ZVAL null
+            ZVAL ""
+            ZVAL "Map<int, string>"
+            ZVAL "Lib\\Calc::names()"
     "#};
 
     assert_eq!(

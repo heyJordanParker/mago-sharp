@@ -464,6 +464,7 @@ where
     }
 
     let tests_function_type = hints.iter().any(|hint| names_function_type(hint));
+    let hint_spans: Vec<Span> = hints.iter().map(|hint| hint.span()).collect();
     let mut case_types = generic_case_types(node, &hints, context, block_context, artifacts)?;
     let mut is_refused = false;
     for hint in hints {
@@ -796,7 +797,8 @@ where
         }
 
         let Some(earlier) = handled_earlier(node, pattern, context, block_context, artifacts) else {
-            context.collector.report(never_matches(pattern));
+            let map = map_tested_as_list(context, artifacts, tested_value(node), &hint_spans, pattern);
+            context.collector.report(never_matches(pattern, map));
             continue;
         };
         handled_arms.extend(arm_of(node, pattern));
@@ -1768,12 +1770,46 @@ fn enum_value(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Option<(Word, Op
 }
 
 /// The error at a pattern that can never match the value it tests.
-fn never_matches(pattern: Span) -> Issue {
-    Issue::error("This pattern never matches the value it tests.")
+/// `map`, when the pattern tests a `List`, is the type of the value it tests, which holds only `Map`s.
+fn never_matches(pattern: Span, map: Option<String>) -> Issue {
+    let message = match map {
+        Some(map) => format!("This pattern never matches the value it tests, a `{map}`: a `Map` is never a `List`."),
+        None => "This pattern never matches the value it tests.".to_owned(),
+    };
+
+    Issue::error(message)
         .with_code(IssueCode::ImpossibleTypeComparison.as_str())
         .with_annotation(Annotation::primary(pattern).with_message("Never matches."))
         .with_note("PHP# makes a pattern that can never match an error, as C# does (CS8121).")
         .with_help("Remove the pattern, or test a value that can match it.")
+}
+
+/// The type of `tested`, the value a pattern at `pattern` tests, when it holds only `Map`s, maybe null, and the pattern
+/// tests a `List`, as one of `hints`, the spans of the types the patterns test, says. A `Map` is never a `List`, spec
+/// section 12, as a plain PHP `array` that PHP# reads as a `Map<int|string, Any?>` isn't.
+fn map_tested_as_list<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    tested: &Expression<'_>,
+    hints: &[Span],
+    pattern: Span,
+) -> Option<String>
+where
+    A: Arena,
+{
+    let tested_type = artifacts.get_expression_type(tested)?;
+    let is_map =
+        |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::Keyed(keyed)) if keyed.parameters.is_some());
+    let tests_list = hints.iter().filter(|hint| pattern.contains(&hint.start)).any(|hint| {
+        artifacts
+            .get_tested_type(hint)
+            .is_some_and(|list| list.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)))))
+    });
+
+    (tests_list
+        && tested_type.types.iter().all(|atomic| atomic.is_null() || is_map(atomic))
+        && tested_type.types.iter().any(is_map))
+    .then(|| display_sharp_type(context, tested_type))
 }
 
 /// The arms of `node`, when it is a `match`.
@@ -1954,7 +1990,7 @@ fn refuse_list_patterns_on_other_values(
         }
 
         refused.extend([list, read.span()]);
-        refusals.push(never_matches(list));
+        refusals.push(never_matches(list, None));
     }
 
     issues

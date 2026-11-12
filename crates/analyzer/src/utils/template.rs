@@ -555,17 +555,17 @@ fn find_atomic_template_positions(
                 find_template_positions(codebase, argument, owner, argument_position, positions);
             }
         }
+        // A plain PHP `Closure` type may leave out a parameter's type or its return type, which reads as `Any?` and uses
+        // no type parameter.
         TAtomic::Callable(TCallable::Signature(signature)) => {
-            for parameter in signature.get_parameters() {
-                let Some(parameter_type) = parameter.get_type_signature() else {
-                    unreachable!("a PHP# function type writes the type of each parameter");
-                };
+            for parameter_type in
+                signature.get_parameters().iter().filter_map(|parameter| parameter.get_type_signature())
+            {
                 find_template_positions(codebase, parameter_type, owner, position.flip(), positions);
             }
-            let Some(return_type) = signature.get_return_type() else {
-                unreachable!("a PHP# function type writes its return type");
-            };
-            find_template_positions(codebase, return_type, owner, position, positions);
+            if let Some(return_type) = signature.get_return_type() {
+                find_template_positions(codebase, return_type, owner, position, positions);
+            }
         }
         _ => {
             for child in atomic.get_child_nodes() {
@@ -768,4 +768,38 @@ fn written_type(union: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use std::borrow::Cow;
+
+    use mago_allocator::LocalArena;
+    use mago_codex::scanner::scan_program;
+    use mago_database::file::File;
+    use mago_names::resolver::NameResolver;
+    use mago_syntax::parser::parse_file;
+    use mago_word::word;
+
+    use super::*;
+    use crate::settings::Settings;
+
+    /// A plain PHP `Closure` type may leave out its return type, as a host's refinement of a PHP# member may give it,
+    /// and then uses no type parameter there: `T` is taken in by the lambda `taker` takes, which hands it out again,
+    /// and handed out by the lambda `giver` takes, which takes it in.
+    #[test]
+    fn a_closure_type_without_its_return_type_uses_a_type_parameter_only_where_it_names_it() {
+        let code = "<?php\n\n/** @template T */\nfinal class Box\n{\n    /**\n     * @param Closure(T) $taker\n     * @param Closure(): T $giver\n     */\n    public function pass(Closure $taker, Closure $giver): void {}\n}\n";
+        let file = File::ephemeral(Cow::Borrowed(b"src/Box.php"), Cow::Borrowed(code.as_bytes()));
+        let arena = LocalArena::new();
+        let program = parse_file(&arena, &file);
+        let names = NameResolver::new(&arena).resolve(program);
+        let codebase = scan_program(&arena, &file, program, &names, Settings::default().version);
+        let pass = codebase.function_likes.get(&(word("box"), word("pass"))).expect("`Box` declares `pass`");
+
+        let positions = find_method_positions(&codebase, pass, &GenericParent::ClassLike(word("box")));
+
+        assert_eq!(positions, [(word("T"), Variance::Covariant), (word("T"), Variance::Contravariant)]);
+    }
 }

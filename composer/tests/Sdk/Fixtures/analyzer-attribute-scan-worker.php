@@ -14,6 +14,8 @@ use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 use RuntimeException;
 
+use function array_column;
+use function array_merge;
 use function dirname;
 use function file_put_contents;
 use function getenv;
@@ -28,8 +30,8 @@ use const LOCK_EX;
 require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
 
 /**
- * Records each class attribute argument a host receives as its name, its type and its value's kind and parts, without
- * evaluating it, so a test compares what a PHP# file and its PHP twin send.
+ * Records each argument of a class's or a property's attribute a host receives as its name, its type and its value's
+ * kind and parts, without evaluating it, so a test compares what a PHP# file and its PHP twin send.
  *
  * @mago-expect lint:cyclomatic-complexity
  * @mago-expect lint:file-name
@@ -63,7 +65,11 @@ final class AttributeScanProofPlugin implements CodebaseScanHook, Plugin
         foreach ($context->files as $file) {
             $arguments = [];
             foreach ($file->classLikes as $classLike) {
-                foreach ($classLike->attributes as $attribute) {
+                $attributes = array_merge(
+                    $classLike->attributes,
+                    ...array_column($file->getProperties($classLike), 'attributes'),
+                );
+                foreach ($attributes as $attribute) {
                     foreach ($attribute->arguments as $argument) {
                         $arguments[] = json_encode([
                             $argument->name,

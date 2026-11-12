@@ -13,15 +13,20 @@ use mago_codex::get_anonymous_class_name;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::ttype::HostRefinement;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::scanner::merge_type_preserving_nullability;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_extension::PayloadReader;
+use mago_names::display_sharp_member;
+use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::Level;
@@ -44,6 +49,7 @@ const FUNCTION_LIKE: u8 = 2;
 // covers a conflict however it was declared.
 const INVALID_TEMPLATE_TAG: &str = "invalid-template-tag";
 const INVALID_EXTENDS_TAG: &str = "invalid-extends-tag";
+const DOCBLOCK_TYPE_MISMATCH: &str = "docblock-type-mismatch";
 // The plugin's own code for a declaration it cannot state, reused for a body it cannot resolve.
 const UNRESOLVED_BODY_RETURN: &str = "unsupported-type";
 
@@ -51,6 +57,8 @@ const UNRESOLVED_BODY_RETURN: &str = "unsupported-type";
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclarationRefinement {
     file_id: FileId,
+    /// The plugin of the host that refines the declaration.
+    host: Word,
     declaration: Declaration,
     issues: Vec<Issue>,
 }
@@ -214,7 +222,12 @@ pub(super) fn decode(
             );
         }
 
-        refinements.push(DeclarationRefinement { file_id: file.id, declaration, issues });
+        refinements.push(DeclarationRefinement {
+            file_id: file.id,
+            host: word(plugin.as_bytes()),
+            declaration,
+            issues,
+        });
     }
 
     Ok(refinements)
@@ -253,6 +266,7 @@ impl DeclarationRefinement {
             Declaration::ClassLike { class, templates, inherited, required_extends, properties, methods } => {
                 apply_class_like(
                     codebase,
+                    self.host,
                     class,
                     templates,
                     inherited,
@@ -271,14 +285,16 @@ impl DeclarationRefinement {
                 })?;
 
                 function_like.issues.extend(self.issues);
-                apply_signature(function_like, key, *signature)
+                apply_signature(function_like, self.host, key, *signature)
             }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_class_like(
     codebase: &mut CodebaseMetadata,
+    host: Word,
     class_name: Word,
     templates: Vec<RefinedTemplate>,
     inherited: Vec<InheritedApplication>,
@@ -294,6 +310,19 @@ fn apply_class_like(
     };
 
     class.issues.extend(issues);
+    let sharp = class.flags.is_sharp();
+    let shown = short_name(class.original_name.as_bytes());
+    let templates = keep_written(sharp, templates, &mut class.issues, |template| {
+        let part = format!("the bound of `{shown}`'s type parameter `{}`", template.name);
+        unwritten(host, &part, &template.bound.type_union, template.bound.span, INVALID_TEMPLATE_TAG)
+    });
+    let inherited = keep_written(sharp, inherited, &mut class.issues, |application| {
+        let part = format!("a type argument `{shown}` gives its parent");
+        application
+            .arguments
+            .iter()
+            .find_map(|argument| unwritten(host, &part, argument, application.span, INVALID_EXTENDS_TAG))
+    });
     let mut class_templates = Vec::with_capacity(templates.len());
     if !templates.is_empty() {
         if class.template_types.is_empty() {
@@ -340,11 +369,15 @@ fn apply_class_like(
             )));
         };
 
-        let merged = merge_type_preserving_nullability(
-            TypeMetadata::from_docblock(refined.type_union, refined.span),
-            property.type_declaration_metadata.as_ref(),
-        );
-        property.set_type_metadata(Some(merged));
+        // A PHP# property declares its type, unless `Mago\UntypedSince` or `Mago\UntypedUntil` drops it for the
+        // project's PHP version.
+        match member_type(sharp, host, refined, property.type_declaration_metadata.as_ref()) {
+            Ok(refined) => property.set_type_metadata(Some(refined)),
+            Err(refused) => {
+                let part = format!("`{}`", display_sharp_member(&shown, name));
+                class.issues.push(refusal(host, &part, &refused.type_union, refused.span, DOCBLOCK_TYPE_MISMATCH));
+            }
+        }
     }
 
     let method_names = class.methods.clone();
@@ -373,7 +406,7 @@ fn apply_class_like(
                 ))
             })?;
 
-        apply_signature(function_like, (class_name, method), signature)?;
+        apply_signature(function_like, host, (class_name, method), signature)?;
     }
 
     Ok(())
@@ -383,14 +416,25 @@ fn apply_class_like(
 /// closure passed to a parameter runs with, and a closure's own `$this`.
 fn apply_signature(
     function_like: &mut FunctionLikeMetadata,
+    host: Word,
     key: (Word, Word),
     signature: SignatureRefinement,
 ) -> Result<(), ExternalAnalyzerError> {
     let display = if key.0.is_empty() { key.1.to_string() } else { format!("{}::{}", key.0, key.1) };
+    let sharp = function_like.flags.is_sharp();
+    let shown = if function_like.kind.is_closure() || function_like.kind.is_arrow_function() {
+        "a lambda".to_owned()
+    } else {
+        format!("`{}`", function_like.original_name)
+    };
 
-    if !signature.templates.is_empty() {
+    let templates = keep_written(sharp, signature.templates, &mut function_like.issues, |template| {
+        let part = format!("the bound of {shown}'s type parameter `{}`", template.name);
+        unwritten(host, &part, &template.bound.type_union, template.bound.span, INVALID_TEMPLATE_TAG)
+    });
+    if !templates.is_empty() {
         let mut context = function_like.type_resolution_context.clone().unwrap_or_default();
-        for template in signature.templates {
+        for template in templates {
             let definition = GenericTemplate::new(GenericParent::FunctionLike(key), template.bound.type_union);
             function_like.add_template_type(template.name, definition.clone());
             context = context.with_template_definition(template.name, vec![definition]);
@@ -402,14 +446,24 @@ fn apply_signature(
         let parameter = function_like.get_parameter_mut(name).ok_or_else(|| {
             protocol(format!("a declaration refinement names parameter `{name}` of `{display}`, which is not declared"))
         })?;
-        let merged = merge_type_preserving_nullability(
-            TypeMetadata::from_docblock(refined.type_union, refined.span),
-            parameter.type_declaration_metadata.as_ref(),
-        );
-        parameter.set_type_metadata(Some(merged));
+        match member_type(sharp, host, refined, parameter.type_declaration_metadata.as_ref()) {
+            Ok(refined) => parameter.set_type_metadata(Some(refined)),
+            Err(refused) => {
+                let part = format!("the parameter `{}` of {shown}", name.as_str_lossy().trim_start_matches('$'));
+                let issue = refusal(host, &part, &refused.type_union, refused.span, DOCBLOCK_TYPE_MISMATCH);
+                function_like.issues.push(issue);
+            }
+        }
     }
 
-    for (name, refined) in signature.closure_this {
+    let closure_this = keep_written(sharp, signature.closure_this, &mut function_like.issues, |(name, refined)| {
+        let part = format!(
+            "the `this` of a lambda given to the parameter `{}` of {shown}",
+            name.as_str_lossy().trim_start_matches('$')
+        );
+        unwritten(host, &part, &refined.type_union, refined.span, DOCBLOCK_TYPE_MISMATCH)
+    });
+    for (name, refined) in closure_this {
         let parameter = function_like.get_parameter_mut(name).ok_or_else(|| {
             protocol(format!(
                 "a declaration refinement binds `$this` for parameter `{name}` of `{display}`, which is not declared"
@@ -419,10 +473,14 @@ fn apply_signature(
     }
 
     if let Some(refined) = signature.return_type {
-        function_like.return_type_metadata = Some(merge_type_preserving_nullability(
-            TypeMetadata::from_docblock(refined.type_union, refined.span),
-            function_like.return_type_declaration_metadata.as_ref(),
-        ));
+        match member_type(sharp, host, refined, function_like.return_type_declaration_metadata.as_ref()) {
+            Ok(refined) => function_like.return_type_metadata = Some(refined),
+            Err(refused) => {
+                let part = format!("the result of {shown}");
+                let issue = refusal(host, &part, &refused.type_union, refused.span, DOCBLOCK_TYPE_MISMATCH);
+                function_like.issues.push(issue);
+            }
+        }
     }
 
     if let Some(issue) = signature.return_from_body {
@@ -445,10 +503,77 @@ fn apply_signature(
                 "a declaration refinement binds `$this` for `{display}`, which is no closure"
             )));
         }
-        function_like.refined_this_type = Some(TypeMetadata::from_docblock(refined.type_union, refined.span));
+        let refused = unwritten(host, "a lambda's `this`", &refined.type_union, refined.span, DOCBLOCK_TYPE_MISMATCH);
+        match refused.filter(|_| sharp) {
+            Some(issue) => function_like.issues.push(issue),
+            None => {
+                function_like.refined_this_type = Some(TypeMetadata::from_docblock(refined.type_union, refined.span))
+            }
+        }
     }
 
     Ok(())
+}
+
+/// The type a member takes from `refined`, the refinement `host` gives it, nullable where `declared`, the type the
+/// member declares, is. A member of a PHP# declaration, `sharp`, takes only a type PHP# can write: otherwise it keeps
+/// `declared`, which records the refused type, so the analysis reports it at the member. A PHP# member that declares
+/// no type keeps none, and the refinement comes back as the error.
+fn member_type(
+    sharp: bool,
+    host: Word,
+    refined: RefinedType,
+    declared: Option<&TypeMetadata>,
+) -> Result<TypeMetadata, RefinedType> {
+    let (mut member, refused) = match declared {
+        _ if !sharp || is_written_in_sharp(&refined.type_union) => (
+            merge_type_preserving_nullability(TypeMetadata::from_docblock(refined.type_union, refined.span), declared),
+            None,
+        ),
+        Some(declared) => (declared.clone(), Some(refined.type_union)),
+        None => return Err(refined),
+    };
+    member.host_refinement = Some(Box::new(HostRefinement { host, refused }));
+
+    Ok(member)
+}
+
+/// The parts of a declaration's refinement it keeps: all of them for plain PHP, and for PHP#, `sharp`, each one
+/// `refusal` finds no error in. Each error goes in `issues`.
+fn keep_written<T>(
+    sharp: bool,
+    parts: Vec<T>,
+    issues: &mut Vec<Issue>,
+    refusal: impl Fn(&T) -> Option<Issue>,
+) -> Vec<T> {
+    if !sharp {
+        return parts;
+    }
+
+    parts
+        .into_iter()
+        .filter(|part| {
+            let Some(issue) = refusal(part) else {
+                return true;
+            };
+            issues.push(issue);
+            false
+        })
+        .collect()
+}
+
+/// [`refusal`] of `refined`, at `span`, when PHP# can't write it.
+fn unwritten(host: Word, part: &str, refined: &TUnion, span: Span, code: &str) -> Option<Issue> {
+    (!is_written_in_sharp(refined)).then(|| refusal(host, part, refined, span, code))
+}
+
+/// The error for `refused`, a type PHP# can't write, that `host` gives `part` of a PHP# declaration at `span`, as "the
+/// result of `merged`". The declaration keeps no refinement of that part.
+fn refusal(host: Word, part: &str, refused: &TUnion, span: Span, code: &str) -> Issue {
+    Issue::error(format!("The host `{host}` refines {part} to `{}`, which PHP# can't write.", refused.get_id()))
+        .with_code(code)
+        .with_annotation(Annotation::primary(span).with_message("The host refines it here."))
+        .with_help("A host refines a PHP# declaration only to a type PHP# can write.")
 }
 
 fn apply_inherited(class: &mut ClassLikeMetadata, application: InheritedApplication) {
@@ -574,4 +699,172 @@ fn variable(name: &[u8]) -> Result<Word, ExternalAnalyzerError> {
     variable.push(b'$');
     variable.extend_from_slice(name);
     Ok(word(&variable))
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use std::borrow::Cow;
+
+    use mago_allocator::LocalArena;
+    use mago_codex::scanner::scan_program;
+    use mago_codex::ttype::get_arraykey;
+    use mago_codex::ttype::get_named_object;
+    use mago_codex::ttype::get_string;
+    use mago_names::resolver::NameResolver;
+    use mago_syntax::parser::parse_file;
+
+    use super::*;
+    use crate::settings::Settings;
+
+    /// A PHP# file whose class takes a type parameter and a parent's type argument, holds a property `Mago\UntypedSince`
+    /// leaves untyped, whose methods take a lambda, a type parameter of their own and a value, and which declares a
+    /// lambda with no types.
+    const NOTICE: &str = "namespace Proof;\n\npublic class Base<T> { }\n\npublic class Notice<T> : Base<string>\n{\n    [\\Mago\\UntypedSince(80000)]\n    public string? label { get; set; } = null;\n\n    public void each(Function<void()> run) { }\n\n    public U pick<U>(U item) => item;\n\n    public void run()\n    {\n        const echo = (value) => value;\n    }\n}\n";
+
+    /// A refinement by the host `typing` of `NOTICE`'s `declaration`.
+    fn refinement(file: &File, declaration: Declaration) -> DeclarationRefinement {
+        DeclarationRefinement { file_id: file.id, host: word("typing"), declaration, issues: Vec::new() }
+    }
+
+    /// `array-key`, which PHP# can't write, at the start of `file`.
+    fn unwritable(file: &File) -> RefinedType {
+        RefinedType { type_union: get_arraykey(), span: Span::new(file.id, Position::new(0), Position::new(0)) }
+    }
+
+    /// `type_union`, a type PHP# writes, with no place in a file.
+    fn written(type_union: TUnion) -> RefinedType {
+        RefinedType { type_union, span: Span::dummy(0, 0) }
+    }
+
+    fn signature() -> SignatureRefinement {
+        SignatureRefinement {
+            templates: Vec::new(),
+            parameters: Vec::new(),
+            closure_this: Vec::new(),
+            return_type: None,
+            this: None,
+            return_from_body: None,
+        }
+    }
+
+    /// Spec section 1: a host refines each part of a PHP# declaration only to a type PHP# can write, where the
+    /// refinement enters the codebase: a type parameter's bound, a parent's type argument, the `this` of a lambda a
+    /// parameter takes, a lambda's own `this`, parameter and result, which declare no type here, and a property
+    /// `Mago\UntypedSince` leaves untyped. Each refused part
+    /// keeps no refinement, and its error names the host and the part. A type parameter's bound and a lambda's `this`
+    /// PHP# writes apply.
+    #[test]
+    fn a_host_refines_each_part_of_a_sharp_declaration_only_to_a_type_sharp_writes() {
+        let file = File::ephemeral(Cow::Borrowed(b"src/Proof/Notice.sharp"), Cow::Borrowed(NOTICE.as_bytes()));
+        let arena = LocalArena::new();
+        let program = parse_file(&arena, &file);
+        let names = NameResolver::new(&arena).resolve(program);
+        let mut codebase = scan_program(&arena, &file, program, &names, Settings::default().version);
+        let notice = word("proof\\notice");
+        let lambda_key = *codebase
+            .function_likes
+            .iter()
+            .find_map(|(key, function)| function.kind.is_arrow_function().then_some(key))
+            .expect("the file declares a lambda");
+        let template =
+            |name: &str| RefinedTemplate { name: word(name), bound: unwritable(&file), variance: Variance::Invariant };
+
+        let class = Declaration::ClassLike {
+            class: notice,
+            templates: vec![template("T")],
+            inherited: vec![InheritedApplication {
+                ancestor: word("proof\\base"),
+                span: unwritable(&file).span,
+                arguments: vec![get_arraykey()],
+            }],
+            required_extends: Vec::new(),
+            properties: vec![(word("$label"), unwritable(&file))],
+            methods: vec![
+                (
+                    word("each"),
+                    SignatureRefinement { closure_this: vec![(word("$run"), unwritable(&file))], ..signature() },
+                ),
+                (
+                    word("pick"),
+                    SignatureRefinement {
+                        templates: vec![
+                            template("U"),
+                            RefinedTemplate {
+                                name: word("V"),
+                                bound: written(get_string()),
+                                variance: Variance::Invariant,
+                            },
+                        ],
+                        ..signature()
+                    },
+                ),
+            ],
+        };
+        let lambda_refinement = Declaration::FunctionLike {
+            key: lambda_key,
+            signature: Box::new(SignatureRefinement {
+                parameters: vec![(word("$value"), unwritable(&file))],
+                return_type: Some(unwritable(&file)),
+                this: Some(unwritable(&file)),
+                ..signature()
+            }),
+        };
+        refinement(&file, class).apply(&mut codebase).expect("the class refinement applies");
+        refinement(&file, lambda_refinement).apply(&mut codebase).expect("the lambda refinement applies");
+
+        let messages = |issues: &[Issue]| issues.iter().map(|issue| issue.message.clone()).collect::<Vec<_>>();
+        let class = codebase.class_likes.get(&notice).expect("the file declares `Notice`");
+        let each = codebase.function_likes.get(&(notice, word("each"))).expect("`Notice` declares `each`");
+        let pick = codebase.function_likes.get(&(notice, word("pick"))).expect("`Notice` declares `pick`");
+        let lambda = codebase.function_likes.get(&lambda_key).expect("the file declares a lambda");
+
+        assert_eq!(
+            messages(&class.issues),
+            [
+                "The host `typing` refines the bound of `Notice`'s type parameter `T` to `array-key`, which PHP# can't write.",
+                "The host `typing` refines a type argument `Notice` gives its parent to `array-key`, which PHP# can't write.",
+                "The host `typing` refines `Notice.label` to `array-key`, which PHP# can't write.",
+            ]
+        );
+        assert_eq!(
+            messages(&each.issues),
+            [
+                "The host `typing` refines the `this` of a lambda given to the parameter `run` of `each` to `array-key`, which PHP# can't write."
+            ]
+        );
+        assert_eq!(
+            messages(&pick.issues),
+            [
+                "The host `typing` refines the bound of `pick`'s type parameter `U` to `array-key`, which PHP# can't write."
+            ]
+        );
+        assert_eq!(
+            messages(&lambda.issues),
+            [
+                "The host `typing` refines the parameter `value` of a lambda to `array-key`, which PHP# can't write.",
+                "The host `typing` refines the result of a lambda to `array-key`, which PHP# can't write.",
+                "The host `typing` refines a lambda's `this` to `array-key`, which PHP# can't write.",
+            ]
+        );
+        assert!(
+            class.template_types.values().all(|template| template.constraint != get_arraykey()),
+            "{:?}",
+            class.template_types
+        );
+        assert_eq!(pick.template_types.get(&word("V")).map(|template| &template.constraint), Some(&get_string()));
+        assert!(lambda.refined_this_type.is_none());
+        assert!(lambda.return_type_metadata.is_none());
+
+        let this = Box::new(SignatureRefinement { this: Some(written(get_named_object(notice, None))), ..signature() });
+        refinement(&file, Declaration::FunctionLike { key: lambda_key, signature: this })
+            .apply(&mut codebase)
+            .expect("the lambda refinement applies");
+        let lambda = codebase.function_likes.get(&lambda_key).expect("the file declares a lambda");
+
+        assert_eq!(
+            lambda.refined_this_type.as_ref().map(|this| &this.type_union),
+            Some(&get_named_object(notice, None))
+        );
+    }
 }

@@ -100,10 +100,13 @@ use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::is_union_for_a_class_bound;
+use crate::statement::function_like::refined_by_host;
+use crate::statement::function_like::report_host_refinement;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_bound_types;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::function_like::report_union_for_a_class_bound;
+use crate::statement::function_like::written_type;
 use crate::utils::missing_type_hints;
 use crate::utils::names::and_list;
 use crate::utils::names::article;
@@ -1673,13 +1676,26 @@ where
                         && let Some(type_meta) = &prop_meta.type_metadata
                     {
                         report_undefined_type_references(context, type_meta);
-                        report_invalid_template_arguments(context, type_meta, HintPlace::Declaration);
-
+                        let written = written_type(context, type_meta, prop_meta.type_declaration_metadata.as_ref());
+                        report_invalid_template_arguments(context, written, HintPlace::Declaration);
                         if type_meta.from_docblock
                             && let Some(type_decl_meta) = &prop_meta.type_declaration_metadata
                         {
                             report_undefined_type_references(context, type_decl_meta);
-                            report_property_type_mismatch(context, class_like_metadata, type_meta, type_decl_meta);
+                            report_property_type_mismatch(
+                                context,
+                                class_like_metadata,
+                                prop_meta,
+                                type_meta,
+                                type_decl_meta,
+                            );
+                        } else if refined_by_host(context, type_meta) {
+                            // A refused refinement leaves the property its declared type.
+                            let member = format!(
+                                "`{}`",
+                                display_member(context, class_like_metadata.original_name, property_name)
+                            );
+                            report_host_refinement(context, &member, type_meta, None, None, false);
                         }
                     }
                 }
@@ -5045,6 +5061,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
 fn report_property_type_mismatch<A>(
     context: &mut Context<'_, '_, A>,
     class_like_metadata: &ClassLikeMetadata,
+    property: &PropertyMetadata,
     docblock_type: &TypeMetadata,
     native_type: &TypeMetadata,
 ) where
@@ -5060,12 +5077,18 @@ fn report_property_type_mismatch<A>(
     let mut expanded_native = native_type.type_union.clone();
     expand_union(context.codebase, &mut expanded_native, &options);
 
-    if union_comparator::is_contained_by_with_erased_template_arguments(
-        context.codebase,
-        &expanded_docblock,
-        &expanded_native,
-        &mut ComparisonResult::default(),
-    ) {
+    // Plain PHP writes a property whose `set` isn't private.
+    let member = format!("`{}`", display_member(context, class_like_metadata.original_name, property.name.0));
+    let plain_writes = !property.write_visibility.is_private();
+    let expanded = Some((&expanded_docblock, &expanded_native));
+    if report_host_refinement(context, &member, docblock_type, Some(native_type), expanded, plain_writes)
+        || union_comparator::is_contained_by_with_erased_template_arguments(
+            context.codebase,
+            &expanded_docblock,
+            &expanded_native,
+            &mut ComparisonResult::default(),
+        )
+    {
         return;
     }
 

@@ -264,6 +264,130 @@ fn a_return_taken_from_the_body_reaches_callers_and_follows_body_edits() {
     assert_eq!(edited, fresh, "incremental analysis after a body edit matches a fresh analysis");
 }
 
+/// A PHP# class the worker refines: its `Map` members to an array shape, `chosen`, `opened`, the parameter of `passed`
+/// and the result of `latest` to `Special`, and `subject`, the parameter of `kept` and the result of `first` to `Other`.
+/// `picked` reads `chosen` as the `Special` it is refined to.
+const NOTICE: &str = r#"namespace Proof;
+
+[Refined]
+public abstract class Notice
+{
+    public Map<string, string>? fields { get; set; } = null;
+
+    public Spec? chosen { get; private set; } = null;
+
+    public Spec? opened { get; set; } = null;
+
+    public Spec? subject { get; set; } = null;
+
+    public Map<string, string> merged(Map<string, string> extra) => extra;
+
+    public Special? picked() => this.chosen;
+
+    public Spec? latest() => this.chosen;
+
+    public void kept(Spec? spec) { }
+
+    public void passed(Spec? spec) { }
+
+    public abstract Spec? first();
+
+    public bool holds()
+    {
+        const has = (Spec? spec) => spec != null;
+        return has(null);
+    }
+}
+"#;
+
+/// A host may refine a PHP# member only to a type PHP# can write that fits the member's declared type. A shape on a
+/// `Map` is refused at the member, naming the member, the host and the declared type, and analysis goes on with the
+/// declared type. `Special` fits `Spec`, and `Other` doesn't, on a property, a parameter, a result, an abstract
+/// method's result and a lambda's parameter. `Special` narrows `Spec`, which a result and a property only PHP# writes
+/// take, and a property and a parameter plain PHP gives values to don't, since the engine checks those against `Spec`
+/// alone.
+#[test]
+fn a_host_refines_a_sharp_member_only_to_a_type_sharp_writes_that_fits_it() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the PHP# member refinement test") {
+        return;
+    }
+
+    let mut database = Database::new(common::database_configuration("/refinement-proof", vec![Cow::Borrowed(b".")]));
+    let refined = "<?php\n\nnamespace Proof;\n\nfinal class Refined {}\n";
+    for (name, code) in [("src/Box.php", BOX), ("src/Refined.php", refined), ("src/Notice.sharp", NOTICE)] {
+        database.add(File::new(Cow::Borrowed(name.as_bytes()), FileType::Host, None, Cow::Borrowed(code.as_bytes())));
+    }
+    let issues = service(&database, registry(repository)).analyze().expect("the analysis goes on").issues;
+    // This codebase loads no PHP stubs, so `Refined` can't declare `#[\Attribute]`.
+    let mut messages: Vec<(String, String)> = issues
+        .iter()
+        .map(|issue| (issue.code.clone().unwrap_or_default(), issue.message.clone()))
+        .filter(|(code, _)| code != "class-not-marked-as-attribute")
+        .collect();
+    messages.sort();
+
+    let shape = "array{'key': string, 'reason': string}";
+    let host = "The host `declaration-refinement-proof` refines";
+    let expected = [
+        format!(
+            "{host} `Notice.fields` to `{shape}`, which PHP# can't write, so it keeps its declared type `Map<string, string>?`."
+        ),
+        format!("{host} `Notice.subject` to `Other?`, which doesn't fit its declared type `Spec?`."),
+        format!(
+            "{host} `Notice.opened` to `Special?`, which narrows its declared type `Spec?`, and plain PHP may give it any `Spec?`."
+        ),
+        format!(
+            "{host} the parameter `spec` of `Notice.passed` to `Special?`, which narrows its declared type `Spec?`, and plain PHP may give it any `Spec?`."
+        ),
+        format!(
+            "{host} the parameter `spec` of `Notice.kept` to `Other?`, which doesn't fit its declared type `Spec?`."
+        ),
+        format!("{host} the result of `Notice.first` to `Other?`, which doesn't fit its declared type `Spec?`."),
+        format!("{host} the parameter `spec` of a lambda to `Other?`, which doesn't fit its declared type `Spec?`."),
+        format!(
+            "{host} the parameter `extra` of `Notice.merged` to `{shape}`, which PHP# can't write, so it keeps its declared type `Map<string, string>`."
+        ),
+        format!(
+            "{host} the result of `Notice.merged` to `{shape}`, which PHP# can't write, so it keeps its declared type `Map<string, string>`."
+        ),
+    ];
+    let mut expected: Vec<(String, String)> =
+        expected.into_iter().map(|message| ("docblock-type-mismatch".to_owned(), message)).collect();
+    expected.sort();
+
+    assert_eq!(messages, expected);
+}
+
+/// Every check of a PHP# declaration reads the declaration as written, whatever a host refines it to. `Shelf.make`
+/// writes a bare `Crate`, whose type argument PHP# requires, and the worker refines its result to `Crate<Spec>`, as a
+/// result it takes from the body replaces it. The bare `Crate` is still the error it is with no host loaded.
+#[test]
+fn a_host_refinement_never_hides_an_error_in_a_sharp_declaration() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the PHP# declaration check test") {
+        return;
+    }
+
+    let crate_class = "<?php\n\nnamespace Proof;\n\n/** @template T */\nfinal class Crate\n{\n    /** @param T $item */\n    public function __construct(public mixed $item) {}\n}\n";
+    let shelf = "namespace Proof;\n\n[Refined]\npublic class Shelf\n{\n    public Crate make()\n    {\n        return new Crate<Spec>(new Spec());\n    }\n}\n";
+    let refined = "<?php\n\nnamespace Proof;\n\nfinal class Refined {}\n";
+    let mut database = Database::new(common::database_configuration("/refinement-proof", vec![Cow::Borrowed(b".")]));
+    for (name, code) in
+        [("src/Box.php", BOX), ("src/Refined.php", refined), ("src/Crate.php", crate_class), ("src/Shelf.sharp", shelf)]
+    {
+        database.add(File::new(Cow::Borrowed(name.as_bytes()), FileType::Host, None, Cow::Borrowed(code.as_bytes())));
+    }
+    let issues = service(&database, registry(repository)).analyze().expect("the analysis goes on").issues;
+    let codes: Vec<&str> = issues
+        .iter()
+        .filter_map(|issue| issue.code.as_deref())
+        .filter(|code| *code != "class-not-marked-as-attribute")
+        .collect();
+
+    assert_eq!(codes, ["missing-template-parameter"]);
+}
+
 /// A refined class whose `make` returns what the `make` of class `inner` returns, which the worker takes from its body.
 /// Only the body names `inner`, so no signature edge leads from this class to it.
 fn relay(class: &str, inner: &str) -> String {
