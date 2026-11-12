@@ -170,7 +170,7 @@ impl InlineForms {
         self.0.get(name)
     }
 
-    /// Each form, with the class and the member it runs, both lowercase.
+    /// Each form, with the class it runs on, lowercase, and the member it runs, as [`key`] gives them.
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8], &InlineForm)> {
         self.0.iter().filter_map(|(name, form)| {
             let separator = name.windows(2).position(|pair| pair == b"::")?;
@@ -189,9 +189,10 @@ impl FromIterator<(Vec<u8>, InlineForm)> for InlineForms {
     }
 }
 
-/// The name of `class`'s method `method`, as `sharp\text::shout`: both lowercase, as PHP matches them.
+/// The name of the PHP# class `class`'s method `method`, as `sharp\text::startsWith`: the class lowercase, as PHP
+/// matches it, and the method exact, as a PHP# class keys it, spec section 24.
 pub(crate) fn key(class: &[u8], method: &[u8]) -> Vec<u8> {
-    [class.to_ascii_lowercase().as_slice(), b"::", method.to_ascii_lowercase().as_slice()].concat()
+    [class.to_ascii_lowercase().as_slice(), b"::", method].concat()
 }
 
 /// The inline form of each public method of `checked` the inlining rule takes, with its name.

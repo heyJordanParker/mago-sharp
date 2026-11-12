@@ -10,6 +10,7 @@ use mago_database::file::FileId;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
+use mago_word::word;
 
 /// What the analysis knows about a class a law reaches, from outside the class's own file.
 #[derive(Debug, Clone, Copy)]
@@ -19,6 +20,9 @@ pub(crate) struct ReachedClass {
     pub(crate) file: FileId,
     /// Whether a `.sharp` file declares it, and not plain PHP.
     pub(crate) sharp: bool,
+    /// Whether it finds its methods only by their exact names, spec section 24, as a PHP# class and every class below
+    /// one do.
+    exact_names: bool,
 }
 
 /// What the analysis knows about a method a law reaches, from outside its class's file.
@@ -37,8 +41,8 @@ pub(crate) struct ReachedMethod {
 /// mention, along the codebase's reference edges.
 #[derive(Debug, Default)]
 pub struct Reach {
-    /// Each reached declaration by its lowercase class and lowercase member, and each reached class with an empty
-    /// member.
+    /// Each reached declaration by its lowercase class and its member as the class keys it, and each reached class with
+    /// an empty member.
     declarations: HashSet<SymbolIdentifier>,
     classes: HashMap<Word, ReachedClass>,
     methods: HashMap<SymbolIdentifier, ReachedMethod>,
@@ -53,13 +57,13 @@ pub struct Reach {
 
 impl Reach {
     /// Walks from each law of `codebase` along the signature and body edges of `references`. A law's body records its
-    /// references under the law's own symbol, its lowercase class and lowercase name.
+    /// references under the law's own symbol, its class and its name as the class keys a method.
     #[must_use]
     pub fn new(codebase: &CodebaseMetadata, references: &SymbolReferences) -> Reach {
         let mut edges: HashMap<SymbolIdentifier, Vec<SymbolIdentifier>> = HashMap::default();
         for edge in references.cascade_edges(codebase) {
             if let CascadeEdge::Signature { from, to } | CascadeEdge::Body { from, to } = edge {
-                edges.entry(lowercase(from)).or_default().push(lowercase(to));
+                edges.entry(keyed(codebase, from)).or_default().push(keyed(codebase, to));
             }
         }
 
@@ -68,7 +72,7 @@ impl Reach {
             let law_file = class.span.file_id;
             let mut reached: HashSet<SymbolIdentifier> = HashSet::default();
             let mut pending: Vec<SymbolIdentifier> =
-                class.laws.keys().map(|law| lowercase((class.name, *law))).collect();
+                class.laws.keys().map(|law| keyed(codebase, (class.name, *law))).collect();
             while let Some(next) = pending.pop() {
                 if !reached.insert(next) {
                     continue;
@@ -93,9 +97,10 @@ impl Reach {
                     name: metadata.original_name,
                     file,
                     sharp: metadata.flags.is_sharp(),
+                    exact_names: metadata.exact_names,
                 });
                 if member.is_empty() {
-                    reach.record_member(codebase, class, ascii_lowercase_word(b"__construct"));
+                    reach.record_member(codebase, class, metadata.method_key(b"__construct"));
                 } else {
                     reach.record_member(codebase, class, member);
                 }
@@ -153,7 +158,7 @@ impl Reach {
 
     /// Whether a law reaches `member` of the fully qualified `class`, or `class` itself when `member` is empty.
     pub(crate) fn reaches(&self, class: &[u8], member: &[u8]) -> bool {
-        self.declarations.contains(&(ascii_lowercase_word(class), ascii_lowercase_word(member)))
+        self.declarations.contains(&self.member_key(class, member))
     }
 
     /// What the analysis knows about the reached class `class`.
@@ -163,7 +168,16 @@ impl Reach {
 
     /// What the analysis knows about the reached method `method` of `class`.
     pub(crate) fn method(&self, class: &[u8], method: &[u8]) -> Option<ReachedMethod> {
-        self.methods.get(&(ascii_lowercase_word(class), ascii_lowercase_word(method))).copied()
+        self.methods.get(&self.member_key(class, method)).copied()
+    }
+
+    /// `class`'s member `member` as the reach keys it: a method by its exact name on a class that finds its methods so,
+    /// and else lowercase, as `keyed` keys it, and a property, written with `$`, by its name.
+    fn member_key(&self, class: &[u8], member: &[u8]) -> SymbolIdentifier {
+        let class = ascii_lowercase_word(class);
+        let exact = member.starts_with(b"$") || self.classes.get(&class).is_some_and(|reached| reached.exact_names);
+
+        (class, if exact { word(member) } else { ascii_lowercase_word(member) })
     }
 
     /// Whether `class`'s property `property` holds a value, so its structure has a field for it.
@@ -177,13 +191,12 @@ impl Reach {
     }
 }
 
-/// The symbol with its class lowercase, and its member lowercase unless it is a property, whose name keeps its case.
-fn lowercase((class, member): SymbolIdentifier) -> SymbolIdentifier {
-    let member = if member.as_bytes().starts_with(b"$") { member } else { lowercase_word(member) };
+/// The symbol with its class lowercase, and a method as its class keys it, by its exact name on a PHP# class, spec
+/// section 24, and lowercase on a plain PHP one. A property keeps its name.
+fn keyed(codebase: &CodebaseMetadata, (class, member): SymbolIdentifier) -> SymbolIdentifier {
+    let class = ascii_lowercase_word(class.as_bytes());
+    let member =
+        if member.as_bytes().starts_with(b"$") { member } else { codebase.method_key(class, member.as_bytes()) };
 
-    (lowercase_word(class), member)
-}
-
-fn lowercase_word(word: Word) -> Word {
-    ascii_lowercase_word(word.as_bytes())
+    (class, member)
 }

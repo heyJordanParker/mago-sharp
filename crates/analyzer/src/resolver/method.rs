@@ -132,7 +132,8 @@ pub struct ResolvedMethod {
 pub struct UndocumentedMethod {
     /// The class on which the undocumented method was requested.
     pub classname: Word,
-    /// The requested method name, rather than `__call` or `__callStatic`.
+    /// The requested method name, rather than `__call` or `__callStatic`, as the class keys a method: as written on a
+    /// class with exact names, spec section 24, and lowercase on any other, as PHP folds it.
     pub method_name: Word,
     /// The span of the receiver or class expression.
     pub target_span: Span,
@@ -571,7 +572,10 @@ where
                                 result.undocumented_methods.extend(resolved_magic_call_method.iter().cloned().map(
                                     |magic_method| UndocumentedMethod {
                                         classname,
-                                        method_name,
+                                        method_name: context.codebase.method_key(
+                                            ascii_lowercase_word(classname.as_bytes()),
+                                            method_name.as_bytes(),
+                                        ),
                                         target_span: object.span(),
                                         selector_span: selector.span(),
                                         magic_method,
@@ -847,7 +851,7 @@ where
         } else if !magic_call.is_empty() {
             result.undocumented_methods.extend(magic_call.into_iter().map(|magic_method| UndocumentedMethod {
                 classname: name,
-                method_name,
+                method_name: context.codebase.method_key(ascii_lowercase_word(name.as_bytes()), method_name.as_bytes()),
                 target_span,
                 selector_span: selector.span(),
                 magic_method,
