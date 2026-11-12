@@ -140,6 +140,11 @@ pub(crate) fn unshown_condition(law: &Law, call: &LawCall, goal: Option<&str>) -
         .with_note(format!("{}still to show for the call {}: {goal}", when(&call.conditions), call.written))
 }
 
+/// `issue` with the note that the steps of its case or its call ran out of their time budget before they finished.
+pub(crate) fn out_of_time(issue: Issue) -> Issue {
+    issue.with_note("the proof ran out of time before it finished")
+}
+
 /// A law whose proof calls the law `called` states, which is not proven.
 pub(crate) fn through(law: &Law, called: &str) -> Issue {
     Issue::error(format!("law {} is not proven", law.name))

@@ -95,7 +95,7 @@ def kind : Decode UInt16 := do
   return kind
 
 def header (kind : UInt16) : ByteArray :=
-  lawMagic |>.push 0 |>.push 2 |>.push 0 |>.push 0 |>.push (kind >>> 8).toUInt8 |>.push kind.toUInt8
+  lawMagic |>.push 0 |>.push 2 |>.push 0 |>.push 1 |>.push (kind >>> 8).toUInt8 |>.push kind.toUInt8
     |>.push 0 |>.push 0
 
 /-! The `Check` request and its answer. -/
@@ -148,11 +148,14 @@ def runCore (env : Environment) (action : CoreM α) : IO α := do
   return value
 
 /-- The step of a proof whose goal stays open, from the error `Sharp/Lean/Proof.lean` logs for it: `0` for a case and
-`1` for a call's condition, its index, and its goal as Mago's tree. -/
+`1` for a call's condition, `2` and `3` for one whose steps ran out of their time budget, its index, and its goal as
+Mago's tree. -/
 def openStep (message : String) : Option (UInt8 × Nat × String) := do
   let kind ← match message.splitOn " " with
     | "sharp-case" :: _ => some (0 : UInt8)
     | "sharp-condition" :: _ => some 1
+    | "sharp-case-out-of-time" :: _ => some 2
+    | "sharp-condition-out-of-time" :: _ => some 3
     | _ => none
   let parts := message.splitOn " "
   let index ← parts[1]? >>= String.toNat?
@@ -175,14 +178,16 @@ def reachedOf (env : Environment) (name : Name) (targets : Array Name) : Option 
 /-- Elaborates each theorem in order, each with the theorems before it in scope, and appends to `b` the count of judged
 ones and the answer for each: `0` when it is proven; `1` and each step whose goal stays open, as its kind, its index and
 its goal; `2` and the statement of the law not proven that it holds through; or `3` and Lean's first error, when Lean
-rejected the theorem, or the axioms it rests on, when it has a gap no law it holds through explains. -/
+rejected the theorem, or the axioms it rests on, when it has a gap no law it holds through explains. A theorem has no
+time budget of its own: each step `Sharp/Lean/Proof.lean` runs has its own, and Mago's limits on the runner bound the
+rest. -/
 def answer (env : Environment) (request : Check) (b : ByteArray) : IO ByteArray := do
   let mut env := env
   let mut gaps : Array Name := #[]
   let mut b := putU32 b (request.theorems.filter (·.judged)).size.toUInt32
   for item in request.theorems do
     let input := Parser.mkInputContext s!"open Sharp\n{item.text}" "<law>"
-    let state ← IO.processCommands input {} (Command.mkState env {} {})
+    let state ← IO.processCommands input {} (Command.mkState env {} (maxHeartbeats.set {} 0))
     env := state.commandState.env
     let name := item.statement ++ `proof
     let mut steps := #[]

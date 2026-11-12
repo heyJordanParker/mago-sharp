@@ -410,7 +410,7 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
                 !steps[..*place].iter().any(|before| before.index == step.index && before.condition == step.condition)
             })
             .map(|(_, step)| {
-                if step.condition {
+                let issue = if step.condition {
                     let call = &law.proof.calls[step.index - 1];
                     let names = Names { receivers, declared, arguments: &call.arguments };
                     issues::unshown_condition(law, call, goal::conjunction(&step.goal, &names).as_deref())
@@ -418,7 +418,8 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
                     let case = &law.proof.cases[step.index - 1];
                     let names = Names { receivers, declared, arguments: &[] };
                     issues::unproven_case(law, case, goal::php(&step.goal, &names).as_deref())
-                }
+                };
+                if step.out_of_time { issues::out_of_time(issue) } else { issue }
             })
             .collect(),
     }

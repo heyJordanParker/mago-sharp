@@ -330,7 +330,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         self.statements(&statements(default), otherwise, &mut tactics);
         // Where every arm failed on an enum, whose arms cover its cases, the cases show that no value is left.
         let otherwise = if body.kind(r#type) == Kind::Enum {
-            let mut covered = vec![format!("try (cases {subject} <;> simp_all; done)"), "all_goals".to_owned()];
+            let mut covered = vec![format!("sharp_attempt (cases {subject} <;> simp_all)"), "all_goals".to_owned()];
             covered.extend(tactics.into_iter().map(|line| format!("  {line}")));
             covered
         } else {

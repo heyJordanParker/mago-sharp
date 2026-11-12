@@ -4239,6 +4239,34 @@ fn a_false_law_over_a_list_index_read_is_not_proven_and_a_map_key_read_is_refuse
     );
 }
 
+/// A case whose proof runs out of its time budget is not proven, as any case left open is: it is refused as
+/// `law-unproven`, names the case, and says the proof ran out of time. The case after it still runs, and is reported on
+/// its own. The slow case's claim has 18 `||` choices for `omega` to split on, 2^18 cases in all.
+#[test]
+fn a_law_whose_proof_runs_out_of_time_is_not_proven_and_its_other_cases_still_run() {
+    let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r"];
+    let bits = names.map(|name| format!("({name} == 0 || {name} == 1)")).join(" && ");
+    let claim = format!("slow ? !({bits}) || {} <= 18 : a < a", names.join(" + "));
+    let parameters = names.map(|name| format!("int {name}")).join(", ");
+    let source = format!(
+        "namespace App.Shared;\n\npublic class Steps\n{{\n    law bits(bool slow, {parameters})\n        => {claim}\n    {{\n        if (slow) {{\n            return;\n        }}\n        return;\n    }}\n}}\n"
+    );
+    let directory = lawful_project(&[("app/Shared/Steps.sharp", &source)]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    for refused in [
+        format!(
+            "error[law-unproven]: law bits is not proven\n = when slow, still to show: {claim}\n = the proof ran out of time before it finished\n"
+        ),
+        "error[law-unproven]: law bits is not proven\n = when !slow, still to show: a < a\nerror".to_owned(),
+    ] {
+        assert!(printed(&output).contains(&refused), "{}", printed(&output));
+    }
+    assert!(!printed(&output).contains("bug in the PHP# checker"), "{}", printed(&output));
+}
+
 /// A law body's `match` with an arm for every case of an enum is exhaustive, as the same `match` in a method is, and
 /// splits the law's proof on the cases.
 #[test]

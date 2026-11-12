@@ -17,7 +17,7 @@ use crate::package::Refusal;
 
 const LAW_PROTOCOL_MAGIC: [u8; 4] = *b"MLAW";
 const LAW_PROTOCOL_MAJOR: u16 = 2;
-const LAW_PROTOCOL_MINOR: u16 = 0;
+const LAW_PROTOCOL_MINOR: u16 = 1;
 const CHECK_REQUEST: u16 = 1;
 const CHECKED_RESPONSE: u16 = 2;
 
@@ -43,11 +43,12 @@ pub(crate) enum Judgment {
     Rejected(String),
 }
 
-/// A step of a proof whose goal stayed open: the case or the call of its index, and the goal as the tree
-/// `Sharp/Lean/Proof.lean` writes.
+/// A step of a proof whose goal stayed open: the case or the call of its index, whether its steps ran out of their
+/// time budget, and the goal as the tree `Sharp/Lean/Proof.lean` writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Open {
     pub(crate) condition: bool,
+    pub(crate) out_of_time: bool,
     pub(crate) index: usize,
     pub(crate) goal: String,
 }
@@ -278,14 +279,16 @@ fn judgments(reader: &mut PayloadReader<'_>, count: usize) -> Result<Vec<Judgmen
                 let steps = reader.read_count("open step count", reader.remaining()).map_err(error)?;
                 let mut open = Vec::with_capacity(steps);
                 for _ in 0..steps {
-                    let condition = match reader.read_u8("open step kind").map_err(error)? {
-                        0 => false,
-                        1 => true,
+                    let (condition, out_of_time) = match reader.read_u8("open step kind").map_err(error)? {
+                        0 => (false, false),
+                        1 => (true, false),
+                        2 => (false, true),
+                        3 => (true, true),
                         kind => return Err(format!("the runner answered with the unknown open step {kind}")),
                     };
                     let index = reader.read_u32("open step index").map_err(error)? as usize;
                     let goal = reader.read_string("open step goal").map_err(error)?;
-                    open.push(Open { condition, index, goal });
+                    open.push(Open { condition, out_of_time, index, goal });
                 }
                 Judgment::Open(open)
             }
