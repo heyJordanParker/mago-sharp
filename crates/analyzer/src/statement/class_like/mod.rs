@@ -1783,19 +1783,20 @@ where
     if !context.codebase.is_sharp_iterable(class_like_metadata.name.as_bytes()) {
         return;
     }
-    let (Some(element), Some(span)) = (
-        class_like_metadata.template_extended_parameters.get(&iterated).and_then(|parameters| parameters.get_index(1)),
-        class_like_metadata.name_span,
-    ) else {
-        return;
-    };
-    let element = element.1;
+    // The element type the header names, which the populator gives every class whose header or base names
+    // `Iterable<T>`, and the class's name, which every class has.
+    let element = class_like_metadata
+        .template_extended_parameters
+        .get(&iterated)
+        .and_then(|parameters| parameters.get_index(1))
+        .map_or_else(get_mixed, |(_, element)| element.clone());
+    let span = class_like_metadata.name_span.unwrap_or(class_like_metadata.span);
     // A subclass is checked for the member it inherits, and its type where the class names `Iterable<T>` or declares
     // `elements()` itself.
     let declared_here = class_like_metadata.methods.contains(&word("elements"));
     let own = declared_here || class_like_metadata.template_extended_offsets.contains_key(&iterated);
     let class_name = display_class_like_name(context, class_like_metadata.original_name);
-    let iterable = TUnion::from_atomic(TAtomic::Iterable(TIterable::sharp_of(Arc::new(element.clone()))));
+    let iterable = TUnion::from_atomic(TAtomic::Iterable(TIterable::sharp_of(Arc::new(element))));
     let iterable_name = display_type(context, &iterable);
     let declared = context.codebase.get_declaring_method(class_like_metadata.name.as_bytes(), b"elements");
     let Some(elements) =

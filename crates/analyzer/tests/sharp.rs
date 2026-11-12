@@ -24863,19 +24863,14 @@ fn a_class_whose_header_names_iterable_is_one_and_declares_its_elements() {
         "src/Demo/Rows.sharp",
         "namespace Demo;\n\npublic static class Rows\n{\n    extension<T>(Iterable<T> items)\n    {\n        public int size() => items.toList().count();\n    }\n}\n",
     );
-    let sized = "namespace Demo;\n\npublic class Sized\n{\n    public int of(Bag<Order> bag) => bag.size();\n}\n";
+    // A type parameter bounded by the class reaches `Iterable<T>`'s members through its bound.
+    let sized = "namespace Demo;\n\npublic class Sized\n{\n    public int of(Bag<Order> bag) => bag.size();\n\n    public int ofAny<TBag : Bag<Order>>(TBag bag) => bag.toList().count();\n}\n";
     for (path, code) in
         [("src/Demo/Orders.sharp", ORDERS.1), ("src/Demo/Picks.sharp", picks), ("src/Demo/Pile.sharp", pile)]
     {
         assert_eq!(written_errors(code, &issues(path, code)), Vec::<String>::new(), "{path}");
     }
-    assert_eq!(
-        written_errors(
-            sized,
-            &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sized.sharp", sized), &[ORDER, BAG, rows])
-        ),
-        Vec::<String>::new()
-    );
+    assert_eq!(refusals(("src/Demo/Sized.sharp", sized), &[ORDER, BAG, rows]), Vec::<String>::new());
 
     // A plain PHP parent's `elements()` without a return type gives `Any?`, which is no `Iterable<int>`, and a plain PHP
     // parent that is PHP's `IteratorAggregate` asks a PHP# subclass for no `elements()`.
