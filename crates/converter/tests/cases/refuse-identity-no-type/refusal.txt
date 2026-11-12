@@ -1,0 +1,6 @@
+14:16: `===` between `string` and `class-string` has no PHP# form: a PHP# class value equals only a class value, and a string is none (spec section 25)
+21:26: PHP# has no type `resource`
+21:35: PHP# has no type `resource`
+23:16: `===` between `resource` and `resource` has no PHP# form: PHP# has no type `resource`
+27:42: PHP# has no type `false`
+29:16: `===` between `array{'height': int, 'width': int}|false` and `false` has no PHP# form: PHP# has no type `array{'height': int, 'width': int}`

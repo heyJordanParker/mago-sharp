@@ -1,4 +1,4 @@
-16:18: a keyed loop over `array<string, int>` has no PHP# form: PHP turns a numeric string key into an `int`, as `'42'` into 42, and a PHP# `Map` keeps it as written (spec section 12)
-29:17: a spread of `array<string, int>` has no PHP# form: a `List` spread appends, and a `Map` spread keeps each key, where PHP renumbers an `int` key and reads `'42'` as one (spec section 12)
-38:16: `array_keys` has no PHP# form: no standard library member runs `array_keys` with PHP's meaning (decision 083)
-44:16: `key` has no PHP# form: no standard library member runs `key` with PHP's meaning (decision 083)
+17:18: a keyed loop over `array<string, int>` reads the key other than as text or as a key, which has no PHP# form: PHP turns a numeric string key into an `int`, as `'42'` into 42, and a PHP# `Map` keeps it a string (spec section 12)
+32:17: a spread of `array<string, int>` has no PHP# form: a `List` spread appends, and a `Map` spread keeps each key, where PHP renumbers an `int` key and reads `'42'` as one (spec section 12)
+41:16: `array_keys` has no PHP# form: no standard library member runs `array_keys` with PHP's meaning (decision 083)
+47:16: `key` has no PHP# form: no standard library member runs `key` with PHP's meaning (decision 083)

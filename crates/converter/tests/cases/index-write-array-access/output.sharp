@@ -1,0 +1,16 @@
+namespace App;
+
+// `=` at an index of an `ArrayAccess` object, as a framework's collection or a model, calls its `offsetSet` both ways,
+// and `unset` at one calls its `offsetUnset`.
+public final class Checkout
+{
+    public void add(Order order, string sku, int quantity)
+    {
+        order[sku] = quantity;
+    }
+
+    public void drop(Order order, string sku)
+    {
+        order.offsetUnset(sku);
+    }
+}

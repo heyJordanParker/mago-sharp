@@ -7,6 +7,7 @@ use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Break;
 use mago_syntax::cst::Continue;
 use mago_syntax::cst::DoWhile;
@@ -200,7 +201,8 @@ impl Converter<'_, '_> {
         true
     }
     /// `match`, whose arms take blocks when it stands as a statement, as a PHP# `match` statement's do.
-    pub(super) fn match_expression(&mut self, r#match: &Match<'_>, statement: bool) {
+    pub(super) fn match_expression(&mut self, r#match: &Match<'_>, place: MatchPlace) {
+        let statement = place == MatchPlace::Statement;
         let subject = r#match.expression;
         if !r#match.arms.iter().any(MatchArm::is_default) && !self.is(subject, &[Kind::Enum]) {
             let shown = self.shown(subject);
@@ -208,6 +210,14 @@ impl Converter<'_, '_> {
                 r#match.r#match.span,
                 format!("a `match` on `{shown}` with no `default` arm is not converted yet: PHP throws `UnhandledMatchError` where no arm fits, and a PHP# `match` on a value that is no enum has a `default` arm (spec section 21)"),
             );
+        }
+
+        let guarded = r#match
+            .arms
+            .iter()
+            .any(|arm| matches!(arm, MatchArm::Expression(arm) if arm.conditions.iter().any(|condition| !is_constant(condition))));
+        if guarded && matches!(subject, Expression::Literal(Literal::True(_))) {
+            return self.match_true(r#match, place);
         }
 
         self.expression(subject, None);
@@ -246,13 +256,70 @@ impl Converter<'_, '_> {
         }
     }
 
+    /// `match (true)`, which runs the arm of the first condition that is `true`, as a chain of ternaries, `a ? x : b ? y
+    /// : z`, or as `if … else if … else` where it stands as a statement (spec section 21). PHP compares each condition
+    /// with `true` by `===`, which holds for a `bool` just when it is `true`, and tries them in order, as the chain does.
+    /// The `match` has a `default` arm, which ends the chain. The chain takes parentheses where an operator around it
+    /// would bind tighter than `?:`, as `match (true) { … } + $extra` is `(express ? 5 : 0) + extra`.
+    fn match_true(&mut self, r#match: &Match<'_>, place: MatchPlace) {
+        let statement = place == MatchPlace::Statement;
+        let mut arms: Vec<(Option<String>, String)> = Vec::new();
+        for arm in r#match.arms.iter() {
+            let (conditions, value) = match arm {
+                MatchArm::Expression(arm) => (Some(&arm.conditions), arm.expression),
+                MatchArm::Default(arm) => (None, arm.expression),
+            };
+            let test = match conditions {
+                Some(conditions) => {
+                    let mut tests = Vec::new();
+                    for condition in conditions.iter() {
+                        if !self.is(condition, &[Kind::Bool]) {
+                            let shown = self.shown(condition);
+                            return self.refuse(
+                                condition.span(),
+                                format!("a `match (true)` arm on `{shown}` compares it with `true` by PHP's `===`, which a PHP# condition gives only for a `bool` (spec sections 19 and 21)"),
+                            );
+                        }
+                        if !self.proven(condition) {
+                            return;
+                        }
+                        self.expression(condition, None);
+                        tests.push(grouped(condition, self.render(condition)));
+                    }
+                    Some(tests.join(" || "))
+                }
+                None => None,
+            };
+            self.expression(value, None);
+            let rendered = self.render(value);
+            // A statement's arm is a statement of its own, where nothing binds around it.
+            arms.push((test, if statement { rendered } else { grouped(value, rendered) }));
+        }
+        let Some(default) = arms.iter().position(|(test, _)| test.is_none()) else {
+            return;
+        };
+        // The arms after `default` never run, as PHP's `default` runs only when no arm fits.
+        let (_, otherwise) = arms.remove(default);
+        let tested: Vec<(String, String)> =
+            arms.into_iter().filter_map(|(test, value)| test.map(|test| (test, value))).collect();
+        let indentation = self.indentation(r#match.span().start.offset);
+        let text = if statement {
+            let branches: Vec<String> = tested
+                .iter()
+                .map(|(test, value)| format!("if ({test}) {{\n{indentation}    {value};\n{indentation}}}"))
+                .collect();
+            format!("{} else {{\n{indentation}    {otherwise};\n{indentation}}}", branches.join(" else "))
+        } else {
+            let arms: Vec<String> = tested.iter().map(|(test, value)| format!("{test} ? {value}")).collect();
+            let chain = format!("{}\n{indentation}    : {otherwise}", arms.join(&format!("\n{indentation}    : ")));
+            if place == MatchPlace::Operand { format!("({chain})") } else { chain }
+        };
+        self.edits.replace(r#match.span(), text);
+    }
+
     /// One of an arm's conditions, which PHP compares with the value using `===`, as a constant pattern.
     fn pattern(&mut self, subject: &Expression<'_>, condition: &Expression<'_>) {
-        let constant = matches!(
-            condition,
-            Expression::Literal(_) | Expression::ConstantAccess(_) | Expression::Access(Access::ClassConstant(_))
-        );
-        if !constant {
+        if !is_constant(condition) {
             return self.refuse(
                 condition.span(),
                 "a `match` arm on a value that is no constant is not converted yet: a PHP# pattern takes types and constants only (spec section 21)",
@@ -262,11 +329,41 @@ impl Converter<'_, '_> {
             let (compared, constant) = (self.shown(subject), self.shown(condition));
             return self.refuse(
                 condition.span(),
-                format!("a `match` arm compares `{compared}` with `{constant}` by PHP's `===`, which a PHP# pattern gives only between one scalar type, enums, or `null` (spec sections 19 and 21)"),
+                format!("a `match` arm compares `{compared}` with `{constant}` by PHP's `===`, which a PHP# pattern gives only between scalars of a type they share, with no `int` beside a `float`, enums, or `null` (spec sections 19 and 21)"),
             );
         }
         self.expression(condition, None);
     }
+}
+
+/// Where a `match` stands, which decides its PHP# form.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum MatchPlace {
+    /// A statement of its own.
+    Statement,
+    /// The whole value a `return` gives or an assignment writes, where nothing binds around it.
+    Value,
+    /// Inside another expression, as an operand.
+    Operand,
+}
+
+/// `rendered`, the PHP# text of `expression`, in parentheses where an operator of a ternary chain around it would bind
+/// tighter than its own: a ternary, an assignment and `??`.
+fn grouped(expression: &Expression<'_>, rendered: String) -> String {
+    let loose = match expression {
+        Expression::Conditional(_) | Expression::Assignment(_) => true,
+        Expression::Binary(binary) => matches!(binary.operator, BinaryOperator::NullCoalesce(_)),
+        _ => false,
+    };
+    if loose { format!("({rendered})") } else { rendered }
+}
+
+/// Whether `condition` is a constant a PHP# pattern takes: a literal or a named constant (spec section 21).
+fn is_constant(condition: &Expression<'_>) -> bool {
+    matches!(
+        condition,
+        Expression::Literal(_) | Expression::ConstantAccess(_) | Expression::Access(Access::ClassConstant(_))
+    )
 }
 
 /// Finds a `break` or `continue` that leaves the `switch` the walked statements sit in: one outside any loop, or one

@@ -4,12 +4,12 @@ declare(strict_types=1);
 
 namespace App;
 
-// A `(string)` of a value only PHPDoc types a string refuses: the value may be another type at runtime, and a PHP# cast
-// converts a number (spec section 24).
+// A `(string)` of a value that may be one of several types refuses: a PHP# cast converts a number, and a template shows
+// one type, so neither shows `int|string` PHP's way (spec sections 18 and 24).
 final class Labels
 {
-    public function label(Row $row): string
+    public function code(Row $row): string
     {
-        return (string) $row->label;
+        return (string) $row->code;
     }
 }

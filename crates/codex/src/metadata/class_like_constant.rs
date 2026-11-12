@@ -27,6 +27,9 @@ pub struct ClassLikeConstantMetadata {
     /// name, as `Billing.TRIAL_DAYS` and `Code.A` in `Code.A.value` give. A lambda in the value reads them only when
     /// it is called, so its reads are left out.
     pub read_constants: Vec<(Word, Word)>,
+    /// PHP's own constant a standard library constant's value is, as `global.PHP_INT_MAX` is `Int.MAX`'s (spec section
+    /// 23).
+    pub(crate) php_constant: Option<Word>,
     pub flags: MetadataFlags,
     pub version_constraint: VersionConstraint,
 }
@@ -43,6 +46,7 @@ impl ClassLikeConstantMetadata {
             type_metadata: None,
             inferred_type: None,
             read_constants: Vec::new(),
+            php_constant: None,
             flags,
             version_constraint: VersionConstraint::unconstrained(),
         }
@@ -54,6 +58,13 @@ impl ClassLikeConstantMetadata {
         }
 
         self.type_declaration = Some(type_declaration);
+    }
+
+    /// PHP's own constant this standard library constant's value is, as `PHP_INT_MAX` is `Int.MAX`'s, which PHP# code
+    /// reads in its place (spec section 23).
+    #[must_use]
+    pub fn php_constant(&self) -> Option<Word> {
+        self.php_constant
     }
 
     /// Returns `true` when this class constant is available in the given PHP

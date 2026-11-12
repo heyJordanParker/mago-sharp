@@ -10,14 +10,18 @@ use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameter;
+use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Method as MethodDeclaration;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
+use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::Variable;
+use mago_syntax::walker::MutWalker;
 use mago_word::word;
 
 use crate::Converter;
+use crate::types::raw_generic;
 
 use super::NameCase;
 use super::accessors;
@@ -62,6 +66,13 @@ impl Converter<'_, '_> {
             declared
         };
         let union = declared.unwrap_or_else(get_mixed);
+        if let Some((shown, raw)) = raw_generic(&union, self.input.codebase) {
+            self.refuse(
+                parameter.variable.span,
+                format!("a `{shown}` {kind} has no PHP# form: plain PHP creates a PHP# generic object without type arguments, so it passes a `{raw}`, and PHP# checks it where it enters and throws (spec section 11)"),
+            );
+            return;
+        }
         let Some(written) = self.type_text(&union, parameter.variable.span) else {
             return;
         };
@@ -73,7 +84,8 @@ impl Converter<'_, '_> {
                 self.edits.insert(at, format!("{written} "));
             }
         }
-        self.edits.replace(parameter.variable.span, Self::variable_name(parameter.variable.name));
+        let name = self.variable_name(parameter.variable.name);
+        self.edits.replace(parameter.variable.span, name);
 
         if promoted {
             // PHP's `private(set)` is the `set` accessor's own visibility in PHP# (spec section 6).
@@ -145,6 +157,29 @@ impl Converter<'_, '_> {
         };
         self.edits.insert(method.parameter_list.right_parenthesis.end.offset, format!(" : super{arguments}"));
     }
+}
+
+/// Whether `members` declare a constructor and write `new static(…)`, whose PHP# form, `new Self(…)`, calls a
+/// constructor marked `required` on the class and on every subclass (spec section 25). PHP's `new static(…)` calls the
+/// constructor of the class PHP called, as `new Self(…)` does, and `required` asks a PHP# subclass to keep one it can
+/// call, which PHP leaves to the call at runtime.
+pub(super) fn required_constructor(members: &Sequence<'_, ClassLikeMember<'_>>) -> bool {
+    struct NewStatic(bool);
+    impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for NewStatic {
+        fn walk_in_instantiation(&mut self, instantiation: &'ast Instantiation<'arena>, _: &mut ()) {
+            self.0 |= matches!(instantiation.class, Expression::Static(_));
+        }
+    }
+
+    let mut new_static = NewStatic(false);
+    let mut declares = false;
+    for member in members {
+        declares |=
+            matches!(member, ClassLikeMember::Method(method) if method.name.value.eq_ignore_ascii_case(b"__construct"));
+        new_static.walk_class_like_member(member, &mut ());
+    }
+
+    declares && new_static.0
 }
 
 /// Each property, as `$name`, that `class`'s constructor sets with `$this->name = …` in a statement of its own body,

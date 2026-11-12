@@ -1,0 +1,10 @@
+namespace App;
+
+// PHP# has no `(bool)`, and the comparison a condition of the value's type gives replaces it (spec sections 21 and 24).
+public final class Basket
+{
+    public List<bool> flags(int count, string? note, List<string> items)
+    {
+        return [(count != 0), (note != null && note != "" && note != "0"), !items.isEmpty()];
+    }
+}

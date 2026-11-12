@@ -38,4 +38,25 @@ final class Order
     {
         return shout($this->reference);
     }
+
+    // `!==` between a union of scalars and `false`, which PHP#'s `!=` gives with the same types and values.
+    public function found(string|bool $position): string
+    {
+        return $position !== false ? 'found' : 'missing';
+    }
+
+    // An intersection type, and a `class-string`, which the engine checks where each enters PHP#.
+    public function labelled(Spec&\Countable $spec): string
+    {
+        return $spec->label();
+    }
+
+    /**
+     * @param class-string $type
+     * @return class-string
+     */
+    public function same(string $type): string
+    {
+        return $type;
+    }
 }

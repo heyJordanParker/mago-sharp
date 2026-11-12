@@ -1,5 +1,5 @@
 14:50: `$stored` is an `iterable` the constructor stores as a property, and a PHP# `Iterable<V>` parameter takes a new sequence of its values, numbered from 0, so its keys and class are another's (spec section 12)
 19:36: `$items` is an `iterable` the body reads other than by a loop over its values, and a PHP# `Iterable<V>` parameter takes a new sequence of its values, numbered from 0, so its keys and class are another's (spec section 12)
-22:18: `foreach` over `iterable<mixed, string>` is not converted yet: PHP# loops over a `List`, a `Map`, a `Set` or an `Iterable`, and gives a key only from a `List` or a `Map` (spec section 17)
+22:18: `foreach` over `iterable<mixed, string>` has no PHP# form: PHP# loops over a `List`, a `Map`, a `Set`, an `Iterable` or the values of a `Traversable` object, and gives a key only from a `List` or a `Map` (spec section 17)
 33:38: `$items` is an `iterable` the body reads other than by a loop over its values, and a PHP# `Iterable<V>` parameter takes a new sequence of its values, numbered from 0, so its keys and class are another's (spec section 12)
 52:36: `$items` is an `iterable` the body reads other than by a loop over its values, and a PHP# `Iterable<V>` parameter takes a new sequence of its values, numbered from 0, so its keys and class are another's (spec section 12)

@@ -13196,6 +13196,23 @@ fn a_list_literal_where_a_map_is_declared_is_an_error() {
     );
 }
 
+/// Spec section 12: an element of a literal lands in the value type of the collection its place declares, so a `List`
+/// literal is an error as a `Map`'s value or a `List`'s element where that is a `Map`, at any depth, and a `Map`
+/// literal where that is a `List`. The bridge lowers each literal by that type, and panicked on the `List` literal.
+#[test]
+fn a_literal_inside_a_literal_takes_the_kind_its_value_type_declares() {
+    let sharp = "namespace Demo;\n\nclass Menu\n{\n    public Map<string, Map<int, string>> courses() => [\"starters\": [\"soup\"]];\n\n    public List<Map<int, string>> rows() => [[\"soup\"], [0: \"bread\"]];\n\n    public Map<string, List<List<int>>> grid() => [\"a\": [[0: 1]]];\n}\n";
+
+    assert_eq!(
+        reported(("src/Demo/Menu.sharp", sharp), &[]),
+        [
+            "5:68 invalid-array-element A Map literal is written `[key: value]`.",
+            "7:46 invalid-array-element A Map literal is written `[key: value]`.",
+            "9:58 invalid-array-element A List literal is written `[a, b]`.",
+        ]
+    );
+}
+
 /// `[0: 1]` is a `Map` literal, so it is an error wherever a `List` is declared, even where its keys run from 0 as a
 /// `List`'s do: a property default, a parameter default, a declaration, an assignment, an argument and a return.
 #[test]

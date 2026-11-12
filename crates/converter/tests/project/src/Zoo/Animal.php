@@ -22,8 +22,37 @@ abstract class Animal
 
     abstract public function kind(): string;
 
+    // A call through `self` of a static method that reads no late static binding, called through a subclass.
+    public static function counted(int $animals): string
+    {
+        return $animals . ' ' . self::plural($animals);
+    }
+
+    private static function plural(int $count): string
+    {
+        return $count === 1 ? 'animal' : 'animals';
+    }
+
     public function describe(): string
     {
         return $this->name . ' ' . $this->kind() . ' says ' . $this->sound . ' on ' . $this->legs . ' legs';
+    }
+
+    // A method declared `array` that a converted subclass overrides with a `Map`, whose result this class's own code
+    // reads as the PHP array while it is plain PHP.
+    /** @return array<string, int> */
+    public function traits(): array
+    {
+        return ['legs' => $this->legs];
+    }
+
+    public function summary(): string
+    {
+        $text = '';
+        foreach ($this->traits() as $trait => $count) {
+            $text .= $trait . '=' . $count . ';';
+        }
+
+        return $text;
     }
 }

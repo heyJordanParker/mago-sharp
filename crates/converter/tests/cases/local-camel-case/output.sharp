@@ -1,0 +1,23 @@
+namespace App;
+
+// PHP# names a local and a `catch` variable in camel case (spec section 24), and no code outside the method reaches
+// one by its name, so each takes its camel case name wherever the method names it, its lambdas included.
+public final class Invoice
+{
+    public string total(List<int> prices, int tax)
+    {
+        let sumSoFar = 0;
+        for (const unitPrice of prices) {
+            sumSoFar += unitPrice;
+        }
+        const taxRate = tax;
+        const withTax = (int amount) => amount + taxRate;
+        try {
+            const grandTotal = withTax(sumSoFar);
+
+            return `total: ${grandTotal}`;
+        } catch (RuntimeException failedSum) {
+            return failedSum.getMessage();
+        }
+    }
+}

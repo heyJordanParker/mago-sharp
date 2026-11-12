@@ -4,5 +4,5 @@
 19:9: `include`, `require` and `eval` have no PHP# form: a .sharp file declares one type (spec section 27)
 20:24: a member named by a variable has no PHP# form (spec section 25)
 21:19: a call of `string` has no PHP# form: PHP# calls a function value only (spec section 14.1)
-22:19: `?:` has no PHP# form: `??` covers null (spec section 14)
+22:19: `?:` of `$this->title()` has no PHP# form: `??` covers null, and PHP's truthiness test reads the value a second time, which the converter writes only for a variable or a property (spec section 21)
 23:9: `exit` and `die` are removed: `Process` exits, which a class receives through its constructor (spec section 8)

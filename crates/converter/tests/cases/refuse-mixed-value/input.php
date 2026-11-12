@@ -28,7 +28,7 @@ final class Loose
 
     public function compare($value): bool
     {
-        return $value === 'yes';
+        return $value === 1;
     }
 
     public function key($value): int

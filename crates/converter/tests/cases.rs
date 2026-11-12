@@ -1,7 +1,7 @@
 //! Runs each fixture pair of `tests/cases/<construct>/` through the converter, against a project of the case's own
 //! `.php` files, analyzed as `mago convert` analyzes a project. `input.php` is the file it converts, and every other
-//! `.php` file is a class it reaches. The converted text must equal `output.sharp` byte for byte, or the refusals,
-//! each `line:column: reason`, the lines of `refusal.txt`.
+//! `.php` file, or `.sharp` file but `output.sharp`, is a class it reaches. The converted text must equal
+//! `output.sharp` byte for byte, or the refusals, each `line:column: reason`, the lines of `refusal.txt`.
 
 #![allow(
     clippy::unwrap_used,
@@ -90,8 +90,8 @@ fn declared(folder: &Path) -> String {
         .unwrap_or_else(|| panic!("{} declares no type", folder.display()))
 }
 
-/// The project of the case at `folder`, analyzed: its `.php` files, with `converted` in place of `input.php`, under its
-/// class's `.sharp` name, when it is given.
+/// The project of the case at `folder`, analyzed: its `.php` and `.sharp` files, with `converted` in place of
+/// `input.php`, under its class's `.sharp` name, when it is given.
 fn analyzed(folder: &Path, converted: Option<&str>) -> Server {
     let mut database = Database::new(DatabaseConfiguration::new(folder, vec![], vec![], vec![], vec![]));
     // The PHP# standard library gives `List`, `Map` and the rest their members, and its files are the project's own, as
@@ -99,6 +99,9 @@ fn analyzed(folder: &Path, converted: Option<&str>) -> Server {
     let library = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../composer/library").canonicalize().unwrap();
     let mut sources = Vec::new();
     files_of(&library, "sharp", &mut sources);
+    // A case's own PHP# classes, which a plain PHP project holds beside its PHP, as a generic one.
+    files_of(folder, "sharp", &mut sources);
+    sources.retain(|path| path != &folder.join("output.sharp"));
     for path in sources {
         let name = Cow::Owned(path.to_string_lossy().into_owned().into_bytes());
         let contents = Cow::Owned(std::fs::read(&path).unwrap());

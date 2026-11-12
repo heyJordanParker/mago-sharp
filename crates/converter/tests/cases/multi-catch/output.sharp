@@ -1,0 +1,14 @@
+namespace App;
+
+// A `catch` of several classes takes their union (spec section 31).
+public final class Guard
+{
+    public string run()
+    {
+        try {
+            return 'ok';
+        } catch (RuntimeException|LogicException e) {
+            return e.getMessage();
+        }
+    }
+}

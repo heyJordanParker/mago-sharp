@@ -1,0 +1,15 @@
+namespace App;
+
+// PHP's own constant, read through the standard library constant whose value it is (spec section 23).
+public final class Limits
+{
+    public int highest()
+    {
+        return Int.MAX;
+    }
+
+    public int lowest()
+    {
+        return Int.MIN;
+    }
+}

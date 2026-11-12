@@ -5,6 +5,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
@@ -79,12 +80,9 @@ impl Converter<'_, '_> {
         if let Some(given) = given
             && !declared.is_empty()
             && declared.iter().all(|declared| declared.takes_more_parameters_than(given))
+            && !self.passed_parameters(expression.span(), &declared, parameters)
         {
-            let takes = parameters.parameters.len();
-            return self.refuse(
-                expression.span(),
-                format!("this lambda takes {takes} parameters, fewer than the function type it lands in passes: a PHP# lambda takes every parameter its function type passes (spec section 14.1)"),
-            );
+            return;
         }
 
         let mut captures = Captures { every_name: matches!(body, Body::Expression(_)), names: Vec::new() };
@@ -122,6 +120,7 @@ impl Converter<'_, '_> {
         let resolution = self.method.as_ref().map(|method| method.resolution.clone()).unwrap_or_default();
         let around = self.method.take();
         self.method = Some(Method {
+            name: None,
             returning: returning.clone(),
             resolution,
             parameters: parameters.parameters.iter().map(|parameter| parameter.variable.name.to_vec()).collect(),
@@ -154,6 +153,76 @@ impl Converter<'_, '_> {
             }
             self.captured(capture);
         }
+    }
+
+    /// Writes each parameter a lambda that takes fewer than its function types pass lacks, after its own, and gives
+    /// whether it did. PHP passes the extra arguments to a lambda that ignores them, and a PHP# lambda names each one
+    /// (spec section 14.1), so `fn ($id) => …` that a collection's `map` calls with a value and a key is
+    /// `(int id, int unused) => …`. It takes the parameters of the function type that passes fewest, each of the type
+    /// that function type gives it and named as it names it, or `unused` when it names none, which the body never
+    /// reads. Refuses the lambda at `span` where one of them is passed by reference.
+    fn passed_parameters(
+        &mut self,
+        span: Span,
+        declared: &[&TCallableSignature],
+        parameters: &FunctionLikeParameterList<'_>,
+    ) -> bool {
+        let Some(fewest) = declared.iter().min_by_key(|signature| signature.parameters.len()) else {
+            return false;
+        };
+        let takes = parameters.parameters.len();
+        let at = parameters.parameters.last().map_or(parameters.left_parenthesis.end, |last| last.span().end);
+        let (mut written, mut chosen) = (Vec::new(), Vec::new());
+        for parameter in fewest.parameters.iter().skip(takes) {
+            if parameter.has_default() || parameter.is_variadic() {
+                break;
+            }
+            if parameter.is_by_reference() {
+                self.refuse(
+                    span,
+                    format!("this lambda takes {takes} parameters, fewer than the function type it lands in passes, and the next one it passes is by reference: a PHP# lambda takes every parameter its function type passes, and never by reference (spec section 14.1)"),
+                );
+                return false;
+            }
+            // A name PHP# takes as it is, in camel case.
+            let named = parameter
+                .get_name()
+                .map(|name| name.0.as_str_lossy().trim_start_matches('$').to_owned())
+                .filter(|name| name.starts_with(|first: char| first.is_ascii_lowercase()) && !name.contains('_'));
+            let name = self.unused_name(named.as_deref().unwrap_or("unused"), &chosen);
+            let union = parameter.get_type_signature().cloned().unwrap_or_else(get_mixed);
+            let Some(text) = self.type_text(&union, parameters.span()) else {
+                return false;
+            };
+            written.push(format!("{text} {name}"));
+            chosen.push(name);
+        }
+        if !written.is_empty() {
+            let separator = if takes == 0 { "" } else { ", " };
+            self.edits.insert(at.offset, format!("{separator}{}", written.join(", ")));
+        }
+
+        true
+    }
+
+    /// `name`, or `name2`, `name3` and on, the first that names no variable of the file and none of `chosen`. The
+    /// file names fewer variables than it has bytes, so one of the first that many numbers is free.
+    fn unused_name(&self, name: &str, chosen: &[String]) -> String {
+        let taken = |candidate: &str| {
+            let variable = format!("${candidate}");
+            chosen.iter().any(|chosen| chosen == candidate)
+                || self.source.windows(variable.len()).enumerate().any(|(at, window)| {
+                    window == variable.as_bytes()
+                        && self
+                            .source
+                            .get(at + variable.len())
+                            .is_none_or(|next| !(next.is_ascii_alphanumeric() || *next == b'_'))
+                })
+        };
+        (1..=self.source.len() + chosen.len() + 1)
+            .map(|n| if n == 1 { name.to_owned() } else { format!("{name}{n}") })
+            .find(|candidate| !taken(candidate))
+            .unwrap_or_default()
     }
 
     /// The lambda's attributes and parameters, without `static`, `fn` or `function`, `use` and the return type, which
@@ -203,7 +272,8 @@ impl Converter<'_, '_> {
                 (Some(hint), None) => self.refuse(hint.span(), "the analysis holds no type of this parameter"),
                 (None, None) => {}
             }
-            self.edits.replace(parameter.variable.span, Self::variable_name(parameter.variable.name));
+            let name = self.variable_name(parameter.variable.name);
+            self.edits.replace(parameter.variable.span, name);
             if let Some(default) = &parameter.default_value {
                 self.expression(default.value, None);
             }

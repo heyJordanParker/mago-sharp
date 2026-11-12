@@ -1,0 +1,21 @@
+namespace App;
+
+// In a class a subclass can extend, `self::rate()` is `Tax.rate()` where `rate`, and each method it calls through
+// `self`, names neither `static` nor `parent`, so no late static binding reads the class PHP called.
+public class Tax
+{
+    public static virtual int total(int amount)
+    {
+        return amount + Tax.rate(amount);
+    }
+
+    public static virtual int rate(int amount)
+    {
+        return Tax.percent() * amount;
+    }
+
+    private static int percent()
+    {
+        return 2;
+    }
+}

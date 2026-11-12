@@ -18,8 +18,8 @@ build="$root/sharp/build/$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
 engine="$build/sapi/cli/php"
 mago=("$build/mago/debug/mago" --no-version-check --colors never)
 project="$1"
-converted=(src/Box.php src/Spec.php src/Shop/Crate.php src/Shop/Label.php src/Shop/Note.php src/Shop/Order.php
-    src/Shop/Shelf.php src/Shop/Stock.php src/Shop/Tagged.php src/Shop/Tally.php)
+converted=(src/Box.php src/Spec.php src/Shop/Coupon.php src/Shop/Crate.php src/Shop/Label.php src/Shop/Note.php src/Shop/Order.php
+    src/Shop/Shelf.php src/Shop/Source.php src/Shop/Stock.php src/Shop/Tagged.php src/Shop/Tally.php)
 plain=(src/Factory.php src/Shop/Counter.php src/Shop/Feed.php src/Shop/Ledger.php src/Shop/Pair.php)
 expected_warnings='too-wide-member|redundant-docblock-type'
 
@@ -56,7 +56,7 @@ for file in "${converted[@]}"; do
 done
 
 step "${mago[@]}" convert src/Spec.php src/Box.php src/Factory.php src/Shop 2>&1 | tee ../convert
-[ "${PIPESTATUS[0]}" = 1 ] || fail "mago convert exits 0 although files stay plain PHP"
+[ "${PIPESTATUS[0]}" = 0 ] || fail "mago convert exits non-zero although the run completed and only kept files plain PHP"
 for file in "${plain[@]}"; do
     grep -q "$file stays plain PHP:" ../convert || fail "$file converted"
     [ -f "$file" ] || fail "$file is gone"

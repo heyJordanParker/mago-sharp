@@ -19,11 +19,7 @@ final class Locals
 
     public function inside(?string $text): string
     {
-        if (($found = $text) !== null) {
-            return $found;
-        }
-
-        return '';
+        return ($found = $text) !== null ? $found : '';
     }
 
     /** @param list<int> $items */

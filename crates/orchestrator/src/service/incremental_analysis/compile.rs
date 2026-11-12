@@ -716,7 +716,20 @@ impl IncrementalAnalysisService {
         let session = self.plugin_registry.create_external_analysis_session(self.database.files());
         let reach = Reach::new(&self.codebase, &self.native_symbol_references);
         let effects = self.effects();
-        let (_, forms) = self.lower_library(&library, (&errors, &unrefused), &reach, &effects, session.as_ref())?;
+        let (lowered, forms) =
+            self.lower_library(&library, (&errors, &unrefused), &reach, &effects, session.as_ref())?;
+        // A library file whose lowering panicked gives no forms, so a defect of the checker never leaves a caller
+        // without them unseen: it fails the call with the panic's text.
+        let panics: Vec<&str> = lowered
+            .iter()
+            .filter_map(|lowered| lowered.as_ref().err())
+            .flat_map(|issues| issues.iter())
+            .filter(|issue| issue.code.as_deref() == Some(LOWERING_PANIC))
+            .map(|issue| issue.message.as_str())
+            .collect();
+        if !panics.is_empty() {
+            return Err(OrchestratorError::General(panics.join("\n")));
+        }
 
         Ok(forms)
     }
@@ -779,9 +792,10 @@ impl IncrementalAnalysisService {
     }
 
     /// Lowers each of `files` with `forms` to inline, and translates it to Lean as far as `reach` asks, the files with
-    /// errors that refuse them refused. A file with only `unrefused` errors lowers as far as its code allows: the
-    /// lowering assumes a program the checker accepted, so one it can't lower is refused with those errors, as
-    /// rust-analyzer turns a panic on broken code into a failed request.
+    /// errors that refuse them refused. A file with only `unrefused` errors lowers as far as its code allows. The
+    /// lowering assumes a program the checker accepted, so one it can't lower is refused with those errors and the
+    /// panic's own text, [`LOWERING_PANIC`], as rust-analyzer turns a panic on broken code into a failed request. A
+    /// panic on a file with no error is a defect of the checker, which the same refusal names.
     fn lower_all(
         &self,
         files: &[&Arc<File>],
@@ -829,11 +843,12 @@ impl IncrementalAnalysisService {
                                 translate(&checked, reach),
                             )
                         };
-                        match unrefused.get(&file.id) {
-                            None => Ok(lowered()),
-                            Some(errors) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(lowered))
-                                .map_err(|_| errors.clone()),
-                        }
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(lowered)).map_err(|panic| {
+                            let mut refused = unrefused.get(&file.id).cloned().unwrap_or_default();
+                            let accepted = refused.is_empty();
+                            refused.push(lowering_panic(file, panic.as_ref(), accepted));
+                            refused
+                        })
                     }
                     Err(Refusal::Parse(errors)) => Err(errors.iter().map(Issue::from).collect()),
                     Err(Refusal::Compile(errors)) => Err(IssueCollection::from(errors)),
@@ -841,6 +856,28 @@ impl IncrementalAnalysisService {
             })
             .collect()
     }
+}
+
+/// The code of the issue that refuses a file whose lowering panicked.
+pub const LOWERING_PANIC: &str = "lowering-panic";
+
+/// The error that refuses `file`, whose lowering panicked with `panic`, with the panic's text. A panic on a file the
+/// checker `accepted` is a defect of the checker, and one on a file with errors is the lowering of a program the
+/// checker refuses.
+fn lowering_panic(file: &File, panic: &(dyn std::any::Any + Send), accepted: bool) -> Issue {
+    let text = panic
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic with no text".to_owned());
+    let name = String::from_utf8_lossy(&file.name);
+    let message = if accepted {
+        format!("The lowering of {name} panicked though the checker accepted it, a defect of the checker: {text}")
+    } else {
+        format!("The lowering of {name} panicked on the checker's errors in it: {text}")
+    };
+
+    Issue::error(message).with_code(LOWERING_PANIC)
 }
 
 /// The name `listing` enters a key under: what it lists, and the class-like or namespace it lists for or the method
@@ -1283,6 +1320,58 @@ mod tests {
         assert!(errors.iter().all(|issue| issue.level == Level::Error), "{errors:?}");
     }
 
+    /// A compile whose errors refuse nothing, as the hosts' compile, lowers a file with errors as far as its code
+    /// allows. A lowering that panics on it refuses the file with the panic's text beside its errors, so the panic
+    /// never passes unseen: a `Map` spread into a `List` literal is an error the bridge doesn't survive.
+    #[test]
+    fn a_lowering_that_panics_refuses_its_file_with_the_panic_s_text() {
+        let menu = "namespace App;\n\npublic class Menu\n{\n    public List<int|string> names(Map<string, int> counts)\n    {\n        return [...counts, \"soup\"];\n    }\n}\n";
+        let database = project(&[("app/Menu.sharp", menu)]);
+        let mut service = analyzed(&database);
+
+        let compiled = service
+            .compile(empty_stamp, proved, &Library::default(), |_| IssueCollection::default())
+            .expect("the compile runs");
+
+        let [(_, Compilation::Refused(errors))] = compiled.as_slice() else {
+            panic!("app/Menu.sharp is not refused: {compiled:?}");
+        };
+        let panics: Vec<&str> = errors
+            .iter()
+            .filter(|issue| issue.code.as_deref() == Some(LOWERING_PANIC))
+            .map(|issue| issue.message.as_str())
+            .collect();
+        assert_eq!(
+            panics,
+            [
+                "The lowering of app/Menu.sharp panicked on the checker's errors in it: internal error: entered unreachable code: the checker refuses a `List` element in a `Map` literal"
+            ]
+        );
+        assert!(errors.iter().any(|issue| issue.code.as_deref() == Some("invalid-array-element")), "{errors:?}");
+    }
+
+    /// A panic's text is its `&str` or `String`, as `std` prints it, and a panic on a file the checker accepted names a
+    /// defect of the checker.
+    #[test]
+    fn a_lowering_panic_names_its_text_and_whether_the_checker_accepted_the_file() {
+        let file = File::ephemeral(Cow::Borrowed(b"app/Menu.sharp"), Cow::Borrowed(b""));
+        let message = |panic: &(dyn std::any::Any + Send), accepted| lowering_panic(&file, panic, accepted).message;
+
+        assert_eq!(
+            message(&"boom", true),
+            "The lowering of app/Menu.sharp panicked though the checker accepted it, a defect of the checker: boom"
+        );
+        assert_eq!(
+            message(&"boom".to_owned(), false),
+            "The lowering of app/Menu.sharp panicked on the checker's errors in it: boom"
+        );
+        assert_eq!(
+            message(&1, false),
+            "The lowering of app/Menu.sharp panicked on the checker's errors in it: a panic with no text"
+        );
+        assert_eq!(lowering_panic(&file, &"boom", true).code.as_deref(), Some(LOWERING_PANIC));
+    }
+
     /// Spec section 11: a type parameter's bound is a class or an interface, so `Any?` is a refused bound, which bounds
     /// nothing, and its one error is its own file's. A file that creates the class has none, and compiles.
     #[test]
@@ -1677,6 +1766,27 @@ mod tests {
             Compilation::Refused(_)
         ));
         assert!(!compiled.contains_key(name));
+    }
+
+    /// A library file whose lowering panics fails the library's forms with the panic's text, where its forms would
+    /// leave unseen. Its errors refuse nothing here, as the hosts' compile's don't, and a `Map` spread into a `List`
+    /// literal is an error the bridge doesn't survive.
+    #[test]
+    fn a_library_file_whose_lowering_panics_fails_the_library_forms_with_the_panic() {
+        let menu = "namespace Sharp;\n\npublic class Menu\n{\n    public static List<int|string> names(Map<string, int> counts)\n    {\n        return [...counts, \"soup\"];\n    }\n}\n";
+        let database =
+            project(&[(TEXT_PATH, TEXT), ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Menu.sharp", menu)]);
+        let mut service = analyzed(&database);
+
+        let Err(OrchestratorError::General(message)) = service.standard_library_forms(|_| IssueCollection::default())
+        else {
+            panic!("the library's forms ignore the panic");
+        };
+
+        assert_eq!(
+            message,
+            "The lowering of vendor/heyjordanparker/php-sharp-composer/library/Sharp/Menu.sharp panicked on the checker's errors in it: internal error: entered unreachable code: the checker refuses a `List` element in a `Map` literal"
+        );
     }
 
     /// A function several polyfill files declare, each its own way, is read as the declaration the codebase keeps,

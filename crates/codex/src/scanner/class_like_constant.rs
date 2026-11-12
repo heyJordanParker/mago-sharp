@@ -5,6 +5,7 @@ use mago_phpdoc_syntax::cst::TagValue;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::ClassLikeConstant;
 use mago_syntax::cst::ClassLikeMemberSelector;
@@ -97,6 +98,19 @@ where
             meta.inferred_type = infer(context, scope, item.value, classname).map(TUnion::get_single_owned);
             if context.program.dialect.is_sharp() {
                 meta.read_constants = read_constants(context.resolved_names, item.value);
+            }
+            // Spec section 23: in the standard library, `global.PHP_INT_MAX` reads PHP's constant through its root
+            // namespace, and a constant whose value is that read is how PHP# code reads PHP's.
+            if context.file.is_standard_library
+                && let Expression::Access(Access::Property(
+                    access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(constant), .. },
+                )) = item.value.unparenthesized()
+                && context
+                    .resolved_names
+                    .static_property_class(access)
+                    .is_some_and(|class| class.name.value() == b"global")
+            {
+                meta.php_constant = Some(word(constant.value));
             }
 
             if let Some(TAtomic::Reference(TReference::Member {

@@ -11,11 +11,13 @@ use foldhash::HashMap;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
 use mago_codex::ttype::atomic::scalar::int::TInteger;
 use mago_codex::ttype::atomic::scalar::string::TStringCasing;
 use mago_codex::ttype::get_sharp_type;
@@ -117,6 +119,27 @@ fn reserved(name: &str) -> bool {
     ["Any", EQUATABLE, "Error"].iter().any(|reserved| reserved.eq_ignore_ascii_case(name))
 }
 
+/// The first PHP# generic class `union` holds, at any depth, with a type argument other than its bound, as
+/// `Page<Order>` under `Page<TItem : Item>`, and the class with its bounds, `Page<Item>`. Plain PHP creates a PHP#
+/// generic object without type arguments, so such an object holds its bounds, and PHP# checks it against the narrower
+/// type where it enters PHP#, and throws (spec section 11).
+pub fn raw_generic(union: &TUnion, codebase: &CodebaseMetadata) -> Option<(String, String)> {
+    union.get_all_child_nodes().into_iter().find_map(|node| {
+        let TypeRef::Atomic(atomic @ TAtomic::Object(TObject::Named(object))) = node else {
+            return None;
+        };
+        let arguments = object.get_type_parameters()?;
+        let class = codebase.get_class_like(object.name.as_bytes()).filter(|class| class.flags.is_sharp())?;
+        let bounds: Vec<&TUnion> = class.template_types.iter().map(|(_, template)| &template.constraint).collect();
+        if bounds.iter().zip(arguments).all(|(bound, argument)| bound.get_id() == argument.get_id()) {
+            return None;
+        }
+        let bounds: Vec<String> = bounds.iter().map(|bound| bound.get_id().to_string()).collect();
+
+        Some((atomic.get_id().to_string(), format!("{}<{}>", class.original_name, bounds.join(", "))))
+    })
+}
+
 /// `union` in PHP#'s spelling, or the reason PHP# can't write it.
 pub fn type_text(union: &TUnion, codebase: &CodebaseMetadata, imports: &mut Imports) -> Result<String, String> {
     if union.types.iter().any(TAtomic::is_mixed) {
@@ -127,6 +150,15 @@ pub fn type_text(union: &TUnion, codebase: &CodebaseMetadata, imports: &mut Impo
     let mut members = Vec::new();
     let mut collections = Vec::new();
     for atomic in union.types.iter().filter(|atomic| !atomic.is_null()) {
+        // PHP's `array-key` is `int|string`, the keys a PHP array holds.
+        if matches!(atomic, TAtomic::Scalar(TScalar::ArrayKey)) {
+            for text in ["int", "string"] {
+                if !members.iter().any(|member| member == text) {
+                    members.push(text.to_owned());
+                }
+            }
+            continue;
+        }
         let text = atomic_text(atomic, codebase, imports)?;
         if matches!(get_sharp_type(atomic), Some(SharpType::List(_) | SharpType::Set(_) | SharpType::Map(..))) {
             collections.push(text.clone());
@@ -143,6 +175,15 @@ pub fn type_text(union: &TUnion, codebase: &CodebaseMetadata, imports: &mut Impo
         ));
     }
 
+    // An intersection inside a union or a nullable type takes parentheses, as `(Order & Shareable)?`.
+    if members.len() > 1 || union.has_null() {
+        for member in &mut members {
+            if member.contains(" & ") {
+                *member = format!("({member})");
+            }
+        }
+    }
+
     Ok(match (union.has_null(), members.as_slice()) {
         (_, []) => return Err("`null` alone is no PHP# type".to_owned()),
         (false, [member]) => member.clone(),
@@ -153,8 +194,19 @@ pub fn type_text(union: &TUnion, codebase: &CodebaseMetadata, imports: &mut Impo
 }
 
 fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, imports: &mut Imports) -> Result<String, String> {
-    if atomic.get_intersection_types().is_some_and(|intersected| !intersected.is_empty()) {
-        return Err(format!("the intersection type `{}` is not converted yet", atomic.get_id()));
+    // `Order & Shareable` holds a value of each class (spec section 21).
+    if let Some(intersected) = atomic.get_intersection_types().filter(|intersected| !intersected.is_empty()) {
+        let TAtomic::Object(TObject::Named(named)) = atomic else {
+            return Err(format!("PHP# has no type `{}`", atomic.get_id()));
+        };
+        let mut alone = named.clone();
+        alone.intersection_types = None;
+        let mut parts = vec![atomic_text(&TAtomic::Object(TObject::Named(alone)), codebase, imports)?];
+        for other in intersected {
+            parts.push(atomic_text(other, codebase, imports)?);
+        }
+
+        return Ok(parts.join(" & "));
     }
     // `get_sharp_type` reads a literal as its general type, which would widen `int|false` to `int|bool`.
     let literal = matches!(atomic, TAtomic::Scalar(scalar) if scalar.is_literal_value());
@@ -263,6 +315,11 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, imports: &mut Impo
                 });
             }
             format!("[{}]", written.join(", "))
+        }
+        // `class-string` holds the name of any class, whose PHP# class value is a `Class<Object>`: a string that names
+        // no class is none, which PHP's PHPDoc type says too (spec section 21).
+        SharpType::ClassValue(TClassLikeString::Any { kind: TClassLikeStringKind::Class }) => {
+            "Class<Object>".to_owned()
         }
         SharpType::ClassValue(_) => return Err(format!("the type `{}` is not converted yet", atomic.get_id())),
     })

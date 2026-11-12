@@ -231,6 +231,12 @@ pub enum MagoCommand {
     /// of `Foo.php` for each file that converts, and names each construct that
     /// keeps a file plain PHP.
     ///
+    /// Exits 0 when the run completes, whatever files stay plain PHP, since the
+    /// report says why each one stays. Exits 1 when the run itself fails: a
+    /// path it names reaches no plain PHP file, a proof can't finish, the
+    /// written files' proof with the extension hosts doesn't hold, a write
+    /// fails, or a lowering panics.
+    ///
     /// **Usage**: `mago convert <PATHS>... [--dry-run]`
     #[command(name = "convert")]
     Convert(ConvertCommand),

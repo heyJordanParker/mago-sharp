@@ -44,30 +44,29 @@ fn logged(output: &Output, level: &str, message: &str) -> bool {
     printed(output).lines().any(|line| line.contains(&format!(" {level} ")) && line.ends_with(&format!(": {message}")))
 }
 
-/// Git that can't read the repository, here a linked worktree whose git folder a container doesn't mount, stops the
-/// run with exit code 2, the git command and git's own reason. `GIT_TRACE` prints trace lines before the reason, so
-/// the reason is git's `fatal:` line, never its first line. On 0.6.3 every file stayed plain PHP for "commit it first".
+/// A linked worktree whose `.git` file names a git folder that isn't there, as in a container that mounts the worktree
+/// alone, stops the run with exit code 2 and says what to do: mount the main repository's `.git` folder, or run in a
+/// plain clone. On 0.6.5 it said "`git rev-parse` failed (exit status: 128): fatal: not a git repository" with the
+/// host's path alone, and on 0.6.3 every file stayed plain PHP for "commit it first".
 #[test]
-fn a_repository_git_cannot_read_stops_the_run_with_gits_reason() {
+fn a_worktree_whose_git_folder_is_missing_says_to_mount_it_or_run_in_a_plain_clone() {
     let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    project(root, &[("Clean.php", CLASS)]);
+    let root = directory.path().canonicalize().unwrap();
+    project(&root, &[("Clean.php", CLASS)]);
     std::fs::write(root.join(".git"), "gitdir: /missing/.git/worktrees/design\n").unwrap();
-    // Git words its reason by its version, as `not a git repository` or `gitfile does not point to a valid repository`.
-    let git = process::output(Command::new("git").args(["rev-parse", "--verify", "--quiet", "HEAD"]).current_dir(root))
-        .unwrap();
-    let printed_by_git = String::from_utf8_lossy(&git.stderr);
-    let fatal = printed_by_git.lines().find(|line| line.starts_with("fatal: ")).expect(&printed_by_git);
 
-    let output = convert(root, &[("GIT_TRACE", "1")]);
+    let output = convert(&root, &[]);
 
     assert_eq!(output.status.code(), Some(2), "{}", printed(&output));
-    let reason = format!("`git rev-parse` failed (exit status: 128): {fatal}");
+    let reason = format!(
+        "{} names the git folder /missing/.git/worktrees/design, which doesn't exist here, as in a container that mounts a git worktree alone. mago convert converts only files git holds, so mount the main repository's .git folder at the path it has where the worktree was made, so that folder exists, or run mago convert in a plain clone.",
+        root.join(".git").display()
+    );
     assert!(logged(&output, "ERROR", &reason), "{}", printed(&output));
 }
 
 /// A repository with no commit holds no file, which `git rev-parse` tells by its exit code 1 whatever it prints, so
-/// each file stays plain PHP for git holding no commit of it, with `GIT_TRACE` on.
+/// each file stays plain PHP for git holding no commit of it, with `GIT_TRACE` on. The run completes, so it exits 0.
 #[test]
 fn a_repository_with_no_commit_holds_no_file() {
     let directory = tempfile::tempdir().unwrap();
@@ -78,7 +77,7 @@ fn a_repository_with_no_commit_holds_no_file() {
 
     let output = convert(root, &[("GIT_TRACE", "1")]);
 
-    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert_eq!(output.status.code(), Some(0), "{}", printed(&output));
     let reason = "  src/Clean.php: git holds no commit of it as it is: commit it first, so git holds its plain PHP";
     assert!(logged(&output, "WARN", reason), "{}", printed(&output));
 }
@@ -97,7 +96,8 @@ fn a_missing_git_stops_the_run_and_says_so() {
     assert!(logged(&output, "ERROR", reason), "{}", printed(&output));
 }
 
-/// Shape decides before git, so a script stays plain PHP for being a script, with no `git` to run.
+/// Shape decides before git, so a script stays plain PHP for being a script, with no `git` to run, and the run
+/// completes with exit code 0.
 #[test]
 fn a_script_stays_plain_php_without_git() {
     let directory = tempfile::tempdir().unwrap();
@@ -106,7 +106,7 @@ fn a_script_stays_plain_php_without_git() {
 
     let output = convert(root, &[("PATH", "")]);
 
-    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert_eq!(output.status.code(), Some(0), "{}", printed(&output));
     let reason = "  src/helpers.php: it declares no class, interface or enum, so it is a script";
     assert!(logged(&output, "WARN", reason), "{}", printed(&output));
 }

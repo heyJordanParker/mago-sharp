@@ -16,6 +16,7 @@ use mago_syntax::cst::LiteralStringKind;
 use mago_syntax::cst::StringPart;
 
 use super::Kind;
+use super::is_primary;
 use super::kinds;
 use crate::Converter;
 
@@ -65,21 +66,37 @@ impl Converter<'_, '_> {
                 template.push_str(&String::from_utf8_lossy(value));
                 continue;
             }
-            if !self.is(part, &[Kind::Int, Kind::Float, Kind::String]) {
+            let Some(shown) = self.shown_value(part) else {
                 let shown = self.shown(part);
                 return self.refuse(
                     part.span(),
                     format!("`.` of `{shown}` shows it PHP's way, and a template shows only `int`, `float` and `string` that way (spec section 18)"),
                 );
-            }
-            self.expression(part, None);
-            let rendered = self.render(part);
-            template.push_str("${");
-            template.push_str(&rendered);
-            template.push('}');
+            };
+            template.push_str(&shown);
         }
         template.push('`');
         self.edits.replace(expression.span(), template);
+    }
+
+    /// `${value}`, the template part that shows `value` as PHP's `.` and interpolation show it, or `None` where PHP#
+    /// shows it another way. A template shows an `int`, a `float` and a `string` as PHP does, and PHP shows `null` as
+    /// nothing, which `${value ?? ""}` gives a `string` that may be null. A template shows no union of two of them, so
+    /// an `int` that may be null has no part. PHP shows an object of a plain PHP class by its `__toString`, which a
+    /// template shows it by, as its `toString()` (spec section 18).
+    fn shown_value(&mut self, value: &Expression<'_>) -> Option<String> {
+        let shows = self.plain_stringable(value) || self.is(value, &[Kind::Int, Kind::Float, Kind::String]);
+        if !shows && !self.is(value, &[Kind::String, Kind::Null]) {
+            return None;
+        }
+        self.expression(value, None);
+        let rendered = self.render(value);
+
+        Some(match (shows, is_primary(value)) {
+            (true, _) => format!("${{{rendered}}}"),
+            (false, true) => format!("${{{rendered} ?? \"\"}}"),
+            (false, false) => format!("${{({rendered}) ?? \"\"}}"),
+        })
     }
 
     /// `"Hi $name"`, a heredoc and a nowdoc as a template, `` `Hi ${name}` `` (spec section 18). A template shows an
@@ -127,18 +144,14 @@ impl Converter<'_, '_> {
                 StringPart::BracedExpression(braced) => braced.expression,
             };
             starts_line = false;
-            if !self.is(value, &[Kind::Int, Kind::Float, Kind::String]) {
+            let Some(shown) = self.shown_value(value) else {
                 let shown = self.shown(value);
                 return self.refuse(
                     value.span(),
                     format!("a string shows `{shown}` PHP's way, and a template shows only `int`, `float` and `string` that way (spec section 18)"),
                 );
-            }
-            self.expression(value, None);
-            let rendered = self.render(value);
-            template.push_str("${");
-            template.push_str(&rendered);
-            template.push('}');
+            };
+            template.push_str(&shown);
         }
         template.push('`');
         self.edits.replace(expression.span(), template);

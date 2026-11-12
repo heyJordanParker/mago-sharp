@@ -7,8 +7,7 @@ namespace App;
 // A model whose attributes PHPDoc types, as a framework's `@property` does, and which holds whatever its storage gave
 // it at runtime, as `"5"` from a database.
 /**
- * @property int $quantity
- * @property string $label
+ * @property int|string $code
  */
 final class Row
 {

@@ -1,0 +1,13 @@
+namespace App;
+
+// A static property keeps the name its class declares, which code outside the method reaches it by, beside a local
+// the method renames to camel case.
+public final class Catalog
+{
+    public int pages(int count)
+    {
+        const pageSize = Settings.page_size;
+
+        return count * pageSize;
+    }
+}

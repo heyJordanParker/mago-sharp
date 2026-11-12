@@ -1,0 +1,21 @@
+namespace App;
+
+// An intersection of classes is PHP#'s `A & B`, and a `class-string` the class value of any class, `Class<Object>`,
+// which a string that names no class is not, as PHPDoc says (spec section 21).
+public final class Sharing
+{
+    public string link(Item & Shareable item)
+    {
+        return item.link();
+    }
+
+    public string? maybe((Item & Shareable)? item)
+    {
+        return item?.link();
+    }
+
+    public Class<Object> same(Class<Object> type)
+    {
+        return type;
+    }
+}

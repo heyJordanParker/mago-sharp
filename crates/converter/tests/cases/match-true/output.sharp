@@ -1,0 +1,37 @@
+namespace App;
+
+// `match (true)` runs the arm of the first condition that is `true`, which PHP compares by `===`, so for `bool`
+// conditions it is a chain of ternaries, or `if … else if … else` as a statement (spec section 21).
+public final class Shipping
+{
+    public string note { get; set; } = '';
+
+    public string rate(int weight, bool express, bool abroad)
+    {
+        return weight > 30 ? 'freight'
+            : express || abroad ? 'priority'
+            : 'standard';
+    }
+
+    // An operator around the chain binds tighter than `?:`, so the chain takes parentheses, and a local's value takes
+    // none.
+    public int fee(bool express, int extra)
+    {
+        const base = express ? 5
+            : 0;
+
+        return (express ? 5
+            : 0) + extra + base;
+    }
+
+    public void mark(bool fragile, bool heavy)
+    {
+        if (fragile) {
+            this.note = 'fragile';
+        } else if (heavy) {
+            this.note = 'heavy';
+        } else {
+            this.note = '';
+        }
+    }
+}

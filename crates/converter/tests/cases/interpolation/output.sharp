@@ -1,6 +1,7 @@
 namespace App;
 
 // An interpolated string is a template, which shows an `int`, a `float` and a `string` as PHP does (spec section 18).
+// PHP shows `null` as nothing, which `?? ""` gives.
 public final class Greeter
 {
     public string greet(string name, int count, float share)
@@ -9,5 +10,10 @@ public final class Greeter
         const second = `Share ${share} of \$5`;
 
         return first + second;
+    }
+
+    public string signed(string? title, int rank)
+    {
+        return `${`Dear ${title ?? ""} #${rank}, `}${title ?? ""}.`;
     }
 }

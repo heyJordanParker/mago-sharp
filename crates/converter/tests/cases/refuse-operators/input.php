@@ -19,13 +19,13 @@ final class Operators
         $power = $count ** $count;
         $before = $text < 'b';
         $shown = 'flag ' . $flag;
-        $text .= $count;
+        $text .= $flag;
         $text++;
         $negative = -$text;
         $inverted = ~$rate;
         $same = $count === $rate;
         $lists = $list === $list;
-        $mixed = $text === $count;
+        $mixed = $flag === $count;
         $rate /= 2;
     }
 }

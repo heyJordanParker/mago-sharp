@@ -22,11 +22,15 @@ use mago_sharp_bridge::PhpCall;
 use mago_sharp_bridge::PhpCallArgument;
 use mago_word::Word;
 
-/// The standard library's members whose body is one call of a PHP function, by that function.
+/// The standard library's members whose body is one call of a PHP function, by that function, and its constants whose
+/// value is one of PHP's own, by that constant.
 #[derive(Debug, Default)]
 pub struct Library {
     /// Each function's members, by its lowercase name, as PHP matches a function's name.
     members: HashMap<Vec<u8>, Vec<Member>>,
+    /// The class and the name of the constant whose value is each of PHP's own constants, as `Int.MAX` is
+    /// `PHP_INT_MAX`'s, by PHP's name, which PHP matches in its case.
+    constants: HashMap<Vec<u8>, (Word, Word)>,
 }
 
 /// A standard library member whose body is one call of a PHP function.
@@ -83,14 +87,29 @@ impl Library {
         for found in members.values_mut() {
             found.sort_by(|a, b| (a.class.as_bytes(), a.name.as_bytes()).cmp(&(b.class.as_bytes(), b.name.as_bytes())));
         }
+        let constants = codebase
+            .class_likes
+            .values()
+            .flat_map(|class| {
+                class.constants.values().filter_map(|constant| {
+                    constant.php_constant().map(|php| (php.as_bytes().to_vec(), (class.original_name, constant.name)))
+                })
+            })
+            .collect();
 
-        Self { members }
+        Self { members, constants }
     }
 
     /// The members whose body calls `function`, a PHP function's name in any case.
     #[must_use]
     pub fn members(&self, function: &[u8]) -> &[Member] {
         self.members.get(&function.to_ascii_lowercase()).map_or(&[], Vec::as_slice)
+    }
+
+    /// The class and the name of the constant whose value is PHP's own constant `constant`.
+    #[must_use]
+    pub fn constant(&self, constant: &[u8]) -> Option<(Word, Word)> {
+        self.constants.get(constant).copied()
     }
 }
 

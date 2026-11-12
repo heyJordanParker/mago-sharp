@@ -1,0 +1,28 @@
+namespace App;
+
+// An `if` that tests the value it assigns is the assignment on its own line and the test of the local, since a PHP#
+// assignment is a statement. An `else if` that assigns refuses, since its assignment runs only when the first test
+// fails, and `refuse-assigned-condition` keeps that.
+public final class Orders
+{
+    private Map<string, Order> orders = [:];
+
+    public Order? find(string reference)
+    {
+        return this.orders[reference] ?? null;
+    }
+
+    public int total(string reference, string fallback)
+    {
+        let order = this.find(reference);
+        if (order != null) {
+            return order.total;
+        }
+        order = this.find(fallback);
+        if (order != null) {
+            return order.total;
+        } else {
+            return 0;
+        }
+    }
+}

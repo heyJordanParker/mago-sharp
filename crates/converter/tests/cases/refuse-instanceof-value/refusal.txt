@@ -1,0 +1,2 @@
+14:16: `instanceof` of a class value or of `static` has no PHP# form: `is` tests a type the code names, which a class value is not, and `Self` names the class PHP called only as a return type (spec sections 21 and 25)
+19:16: `instanceof` of a class value or of `static` has no PHP# form: `is` tests a type the code names, which a class value is not, and `Self` names the class PHP called only as a return type (spec sections 21 and 25)

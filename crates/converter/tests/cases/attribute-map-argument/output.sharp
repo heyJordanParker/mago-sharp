@@ -1,0 +1,16 @@
+namespace App;
+
+// A list literal an attribute passes where a plain `array`, a `Map`, is declared, in the attribute and in a `new` it
+// holds, on a property and on a parameter.
+public final class Order
+{
+    [Rule(anyOf: ['paid', 'shipped'])]
+    [Rule(of: new Rule(anyOf: [0: 'paid', 1: 'shipped']))]
+    public string status { get; set; } = 'paid';
+
+    public Order(
+        [Rule(of: new Rule(anyOf: [0: typeof(Order), 1: typeof(Rule)]))]
+        public string payment { get; set; } = 'card',
+    ) {
+    }
+}

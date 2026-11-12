@@ -28,11 +28,19 @@ impl Converter<'_, '_> {
             return self.refuse(expression.span(), "the analysis holds no constant of this name");
         };
         let name = metadata.name.as_str_lossy().into_owned();
+        // PHP# code reads PHP's own constant through the standard library constant whose value it is, as `Int.MAX`
+        // reads `PHP_INT_MAX` (spec section 23).
         if metadata.flags.is_built_in() {
-            return self.refuse(
-                expression.span(),
-                format!("`{name}` is PHP's own constant, which is not converted yet: the standard library names it"),
-            );
+            let Some((class, member)) = self.input.library.constant(metadata.name.as_bytes()) else {
+                return self.refuse(
+                    expression.span(),
+                    format!("`{name}` has no PHP# form: no standard library member reads it (decision 083)"),
+                );
+            };
+            return match self.imports.name_of(&class.as_str_lossy()) {
+                Ok(class) => self.edits.replace(expression.span(), format!("{class}.{member}")),
+                Err(reason) => self.refuse(expression.span(), reason),
+            };
         }
         let Some(text) = self.through_namespace(expression.span(), &name, metadata.span) else {
             return;
@@ -40,9 +48,11 @@ impl Converter<'_, '_> {
         self.edits.replace(expression.span(), text);
     }
 
-    /// `__DIR__` and `__FILE__` as what `Position.current()` gives (spec section 27). `__LINE__` gives the line of the
-    /// PHP file, which the conversion moves. PHP's other magic constants name a function, a class or a namespace PHP's
-    /// way, which `Position` doesn't.
+    /// `__DIR__` and `__FILE__` as what `Position.current()` gives (spec section 27), and `__CLASS__` as `self::class`
+    /// is, `typeof` of the class. `__METHOD__`, `__FUNCTION__`, `__NAMESPACE__` and `__TRAIT__` as the text PHP compiles
+    /// in their place, which the file's own declarations fix and the conversion keeps. `__LINE__` gives the line of the
+    /// PHP file, which the conversion moves, and so does the name PHP gives a lambda, which `__FUNCTION__` and
+    /// `__METHOD__` give in one.
     pub(super) fn magic_constant(&mut self, constant: &MagicConstant<'_>) {
         let member = match constant {
             MagicConstant::Directory(_) => "directory",
@@ -53,12 +63,37 @@ impl Converter<'_, '_> {
                     "`__LINE__` gives the line of the PHP file, and the conversion moves lines, so `Position.current().line` would give another one",
                 );
             }
+            MagicConstant::Class(_) if let Some(class) = self.class.as_ref() => {
+                let class = format!("typeof({})", class.name);
+                return self.edits.replace(constant.span(), class);
+            }
             _ => {
-                let shown = String::from_utf8_lossy(self.text(constant.span())).into_owned();
-                return self.refuse(
-                    constant.span(),
-                    format!("`{shown}` has no PHP# form: `Position` gives a file, a directory, a line, a column and a dotted function name (spec section 27)"),
-                );
+                let class = self.class.as_ref().map(|class| class.metadata.original_name.as_str_lossy().into_owned());
+                let function = self.method.as_ref().and_then(|method| method.name.as_deref());
+                let function = function.map(|name| String::from_utf8_lossy(name).into_owned());
+                let text = match constant {
+                    MagicConstant::Namespace(_) => class.map(|class| {
+                        class.rsplit_once('\\').map_or_else(String::new, |(namespace, _)| namespace.to_owned())
+                    }),
+                    // A class file declares no trait, and PHP gives `''` outside one.
+                    MagicConstant::Trait(_) => class.map(|_| String::new()),
+                    MagicConstant::Function(_) => function,
+                    MagicConstant::Method(_) => class.zip(function).map(|(class, method)| format!("{class}::{method}")),
+                    _ => None,
+                };
+                let Some(text) = text else {
+                    let shown = String::from_utf8_lossy(self.text(constant.span())).into_owned();
+                    let in_lambda = self.method.as_ref().is_some_and(|method| method.captures.is_some());
+                    return self.refuse(
+                        constant.span(),
+                        if in_lambda {
+                            format!("`{shown}` in a lambda gives PHP's name of the lambda, which holds the line it starts on, and the conversion moves lines")
+                        } else {
+                            format!("`{shown}` outside a method, or in a property accessor, is not converted yet")
+                        },
+                    );
+                };
+                return self.edits.replace(constant.span(), format!("\"{}\"", text.replace('\\', "\\\\")));
             }
         };
         self.edits.replace(constant.span(), format!("Position.current().{member}"));
@@ -118,7 +153,11 @@ impl Converter<'_, '_> {
                 self.expression(access.class, None);
                 self.edits.replace(access.double_colon, ".");
                 match &access.property {
-                    Variable::Direct(variable) => self.edits.replace(variable.span, Self::variable_name(variable.name)),
+                    // The name its class declares, which no renamed local of the method changes.
+                    Variable::Direct(variable) => {
+                        let name = String::from_utf8_lossy(&variable.name[1..]).into_owned();
+                        self.edits.replace(variable.span, name);
+                    }
                     _ => self.refuse(
                         access.property.span(),
                         "a property named by a variable has no PHP# form (spec section 25)",

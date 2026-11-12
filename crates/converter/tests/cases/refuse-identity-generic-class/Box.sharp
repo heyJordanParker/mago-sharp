@@ -1,0 +1,7 @@
+namespace App;
+
+// A PHP# generic class, whose objects carry their type arguments in their class, as `Class.of` gives it.
+public class Box<T>
+{
+    public Box(public T value { get; }) { }
+}

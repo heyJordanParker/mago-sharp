@@ -1,0 +1,1 @@
+13:16: `new static(…)` in a class that declares no constructor of its own has no PHP# form: its `new Self(…)` calls the class's own `required` constructor (spec section 25), and declaring one changes the constructor PHP's reflection gives

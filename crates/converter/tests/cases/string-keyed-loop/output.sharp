@@ -1,0 +1,29 @@
+namespace App;
+
+// A keyed loop over a `string`-keyed `Map` converts where the body reads the key only as text or as a key. PHP turns
+// the key `'42'` into the `int` 42 and a PHP# `Map` keeps the string `"42"`, and both show as `42` and find the same
+// entry (spec section 12).
+public final class Prices
+{
+    public string shown(Map<string, int> prices)
+    {
+        let shown = '';
+        for (const [sku, price] of prices) {
+            shown += `${sku}=${price};`;
+        }
+
+        return shown;
+    }
+
+    public Map<string, int> kept(Map<string, int> prices, Map<string, bool> wanted)
+    {
+        Map<string, int> kept = [:];
+        for (const [sku, price] of prices) {
+            if (wanted.get(sku) != null) {
+                kept[sku] = price;
+            }
+        }
+
+        return kept;
+    }
+}

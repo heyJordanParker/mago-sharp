@@ -8,6 +8,7 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
@@ -15,6 +16,7 @@ use mago_syntax::cst::Access;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
+use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Construct;
 use mago_syntax::cst::Expression;
@@ -25,6 +27,7 @@ use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::Variable;
 
 use super::Kind;
+use super::atomic_kinds;
 use super::kinds;
 use crate::Converter;
 
@@ -47,9 +50,23 @@ impl Converter<'_, '_> {
                 return self
                     .refuse(expression.span(), "a reference has no PHP# form: PHP# passes every value as it is");
             }
-            UnaryPrefixOperator::BoolCast(..)
-            | UnaryPrefixOperator::BooleanCast(..)
-            | UnaryPrefixOperator::ArrayCast(..)
+            // PHP# has no `(bool)`, and a condition's comparison replaces it (spec section 24): the test of PHP's
+            // truthiness that a condition of the value's type gives, as `count != 0` (spec section 21).
+            UnaryPrefixOperator::BoolCast(..) | UnaryPrefixOperator::BooleanCast(..) => {
+                if self.is(operand, &[Kind::Bool]) {
+                    let shown = self.shown(operand);
+                    return self.refuse(
+                        expression.span(),
+                        format!("`(bool)` of `{shown}` has no PHP# form: PHP# has no `(bool)`, and a type only PHPDoc gives is no proof that the value is a `bool` (spec section 24)"),
+                    );
+                }
+                if let Some(test) = self.truthiness(operand, false, false) {
+                    let test = if test.starts_with('(') || !test.contains(' ') { test } else { format!("({test})") };
+                    self.edits.replace(expression.span(), test);
+                }
+                return;
+            }
+            UnaryPrefixOperator::ArrayCast(..)
             | UnaryPrefixOperator::ObjectCast(..)
             | UnaryPrefixOperator::UnsetCast(..)
             | UnaryPrefixOperator::VoidCast(..) => {
@@ -82,6 +99,9 @@ impl Converter<'_, '_> {
                 // `!is_string($x)` and `!$x instanceof A` are `x is not string` and `x is not A` (spec section 21).
                 if let Some((value, tested)) = self.test(operand) {
                     return self.edits.replace(expression.span(), format!("{value} is not {tested}"));
+                }
+                if !self.proven(operand) {
+                    return;
                 }
             }
             UnaryPrefixOperator::BitwiseNot(_) if !self.is(operand, &[Kind::Int]) => {
@@ -126,16 +146,28 @@ impl Converter<'_, '_> {
         }
         // PHP# casts a number, and its `(int)` and `(float)` run PHP's own conversion at runtime, so they stay. A
         // `(string)` of a string leaves only where a native declaration or a literal makes it one at runtime: a type
-        // only PHPDoc gives, as a framework's `@property`, is no proof of the value.
-        if kind == Kind::String && self.is(operand, &[Kind::String]) {
-            if self.holds_string_at_runtime(operand) {
+        // only PHPDoc gives, as a framework's `@property`, is no proof of the value. A template shows any other value
+        // the analysis types `string` as PHP's interpolation does, which converts it to text as `(string)` does, and
+        // `null` as `""` once `?? ""` gives it (spec section 18).
+        if kind == Kind::String && self.is(operand, &[Kind::String, Kind::Null]) {
+            let nullable = !self.is(operand, &[Kind::String]);
+            if !nullable && self.holds_type_at_runtime(operand) {
                 return self.edits.delete(expression.span().start.offset, operand.span().start.offset);
             }
-            let written = String::from_utf8_lossy(self.text(operand.span())).into_owned();
-            return self.refuse(
-                expression.span(),
-                format!("`(string)` of `{written}` has no PHP# form: a PHP# cast converts a number, and nothing but PHPDoc makes `{written}` a string at runtime (spec section 24)"),
-            );
+            let rendered = self.render(operand);
+            let text = match (nullable, super::is_primary(operand)) {
+                (false, _) => rendered,
+                (true, true) => format!("{rendered} ?? \"\""),
+                (true, false) => format!("({rendered}) ?? \"\""),
+            };
+            return self.edits.replace(expression.span(), format!("`${{{text}}}`"));
+        }
+        // PHP's `(string)` of an object calls its `__toString`, which is a plain PHP class's `toString()` (spec section
+        // 18).
+        if kind == Kind::String && self.plain_stringable(operand) {
+            let rendered = self.render(operand);
+            let rendered = if super::is_primary(operand) { rendered } else { format!("({rendered})") };
+            return self.edits.replace(expression.span(), format!("{rendered}.toString()"));
         }
         if !self.is(operand, &[Kind::Int, Kind::Float]) {
             let shown = self.shown(operand);
@@ -147,18 +179,20 @@ impl Converter<'_, '_> {
         self.edits.replace(span, written);
     }
 
-    /// Whether `value`, which the analysis gives `string`, is one at runtime: a literal or a text expression, a
-    /// parameter of the method, whose PHP# type the compiled PHP declares, or a property or a call whose native PHP
-    /// declaration, or the converted class's own PHP# one, says `string`.
-    fn holds_string_at_runtime(&self, value: &Expression<'_>) -> bool {
-        let native_string = |metadata: Option<&TypeMetadata>| {
+    /// Whether `value` holds the type the analysis gives it at runtime, as a scalar PHP# reads by that type: a literal,
+    /// a constant, an expression whose operator gives that type, as a comparison gives a `bool` and `.` a string, a
+    /// parameter of the method, whose PHP# type the compiled PHP declares, a local each write of which holds its type,
+    /// or a property or a call whose native PHP declaration, or the converted class's own PHP# one, gives the type. A
+    /// type only PHPDoc gives, as a framework's `@property`, is no proof: PHP may hold `1` where it says `bool`.
+    pub(super) fn holds_type_at_runtime(&self, value: &Expression<'_>) -> bool {
+        let wanted: Vec<Kind> = self
+            .type_of(value)
+            .map(|union| kinds(union).into_iter().filter(|kind| *kind != Kind::Null).collect())
+            .unwrap_or_default();
+        let native = |metadata: Option<&TypeMetadata>| {
             metadata.is_some_and(|metadata| {
-                !metadata.from_docblock
-                    && metadata
-                        .type_union
-                        .types
-                        .iter()
-                        .all(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::String(_))))
+                let declared = kinds(&metadata.type_union);
+                !metadata.from_docblock && !wanted.is_empty() && wanted.iter().all(|kind| declared.contains(kind))
             })
         };
         let codebase = self.input.codebase;
@@ -171,17 +205,51 @@ impl Converter<'_, '_> {
         };
         let returns = |function: Option<&FunctionLikeMetadata>| {
             function.is_some_and(|function| {
-                native_string(function.return_type_declaration_metadata.as_ref()) || declared_here(function)
+                native(function.return_type_declaration_metadata.as_ref()) || declared_here(function)
             })
         };
         match value {
-            Expression::Parenthesized(parenthesized) => self.holds_string_at_runtime(parenthesized.expression),
-            Expression::Literal(_) | Expression::CompositeString(_) => true,
-            Expression::Binary(binary) => matches!(binary.operator, BinaryOperator::StringConcat(_)),
-            Expression::Variable(Variable::Direct(variable)) => self
-                .method
-                .as_ref()
-                .is_some_and(|method| method.parameters.iter().any(|parameter| parameter == variable.name)),
+            Expression::Parenthesized(parenthesized) => self.holds_type_at_runtime(parenthesized.expression),
+            Expression::Literal(_)
+            | Expression::CompositeString(_)
+            | Expression::ConstantAccess(_)
+            | Expression::Access(Access::ClassConstant(_))
+            | Expression::Construct(Construct::Isset(_) | Construct::Empty(_)) => true,
+            Expression::Binary(binary) => match &binary.operator {
+                // Each gives its own type, whatever its operands hold.
+                BinaryOperator::StringConcat(_) | BinaryOperator::Instanceof(_) => true,
+                operator if operator.is_comparison() || operator.is_logical() => true,
+                // `??` gives one of its sides, and an arithmetic operator a number its operands make.
+                _ => self.holds_type_at_runtime(binary.lhs) && self.holds_type_at_runtime(binary.rhs),
+            },
+            Expression::UnaryPrefix(unary) => match &unary.operator {
+                UnaryPrefixOperator::Not(_)
+                | UnaryPrefixOperator::BoolCast(..)
+                | UnaryPrefixOperator::BooleanCast(..)
+                | UnaryPrefixOperator::IntCast(..)
+                | UnaryPrefixOperator::IntegerCast(..)
+                | UnaryPrefixOperator::FloatCast(..)
+                | UnaryPrefixOperator::DoubleCast(..)
+                | UnaryPrefixOperator::RealCast(..)
+                | UnaryPrefixOperator::StringCast(..)
+                | UnaryPrefixOperator::BinaryCast(..) => true,
+                UnaryPrefixOperator::Negation(_) | UnaryPrefixOperator::Plus(_) => {
+                    self.holds_type_at_runtime(unary.operand)
+                }
+                _ => false,
+            },
+            Expression::Conditional(conditional) => {
+                conditional.then.is_none_or(|then| self.holds_type_at_runtime(then))
+                    && self.holds_type_at_runtime(conditional.r#else)
+            }
+            Expression::Variable(Variable::Direct(variable)) => {
+                variable.name == b"$this"
+                    || self
+                        .method
+                        .as_ref()
+                        .is_some_and(|method| method.parameters.iter().any(|parameter| parameter == variable.name))
+                    || self.local_holds_type_at_runtime(variable.name)
+            }
             Expression::Access(Access::Property(PropertyAccess { object, property, .. })) => {
                 let ClassLikeMemberSelector::Identifier(name) = property else {
                     return false;
@@ -198,7 +266,7 @@ impl Converter<'_, '_> {
                 let own = self.class.as_ref().is_some_and(|own| {
                     own.metadata.name == class.name && own.metadata.properties.contains_key(&mago_word::word(&property))
                 });
-                own || declaring.is_some_and(|metadata| native_string(metadata.type_declaration_metadata.as_ref()))
+                own || declaring.is_some_and(|metadata| native(metadata.type_declaration_metadata.as_ref()))
             }
             Expression::Call(Call::Method(call)) => returns(self.method_of(self.type_of(call.object), &call.method)),
             Expression::Call(Call::StaticMethod(call)) => returns(self.static_method_of(call)),
@@ -209,24 +277,145 @@ impl Converter<'_, '_> {
         }
     }
 
+    /// Whether `value` is never null and each class it may be is a plain PHP class or interface that declares or
+    /// inherits `__toString`, which PHP's `(string)`, `.` and interpolation call, and which PHP# reads as the class's
+    /// `toString()` (spec section 18).
+    pub(super) fn plain_stringable(&self, value: &Expression<'_>) -> bool {
+        let codebase = self.input.codebase;
+        self.type_of(value).is_some_and(|union| {
+            !union.types.is_empty()
+                && union.types.iter().all(|atomic| {
+                    matches!(atomic, TAtomic::Object(TObject::Named(named))
+                        if codebase
+                            .get_declaring_method(named.name.as_bytes(), b"__tostring")
+                            .is_some_and(|method| !method.flags.is_sharp()))
+                })
+        })
+    }
+
+    /// The PHP# string literal of the class name `X::class` gives, for `X` a class's name or `self`, which name the
+    /// class where PHP compiles the code. `static::class` names the class PHP called, which only the running code knows.
+    fn class_name_text(&self, expression: &Expression<'_>) -> Option<String> {
+        let Expression::Access(Access::ClassConstant(access)) = expression else {
+            return None;
+        };
+        let ClassLikeConstantSelector::Identifier(constant) = &access.constant else {
+            return None;
+        };
+        if !constant.value.eq_ignore_ascii_case(b"class")
+            || !matches!(access.class, Expression::Identifier(_) | Expression::Self_(_))
+        {
+            return None;
+        }
+        let [TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Literal { value }))] =
+            self.type_of(expression)?.types.as_ref()
+        else {
+            return None;
+        };
+
+        Some(format!("\"{}\"", value.as_str_lossy().replace('\\', "\\\\")))
+    }
+
+    /// Whether `side` is `Order::class` of a class that takes no type arguments, `typeof(Order)`.
+    fn names_plain_class(&self, side: &Expression<'_>) -> bool {
+        if self.class_name_text(side).is_none() {
+            return false;
+        }
+        let Some([TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Literal { value }))]) =
+            self.type_of(side).map(|union| union.types.as_ref())
+        else {
+            return false;
+        };
+
+        self.input.codebase.get_class_like(value.as_bytes()).is_some_and(|class| class.template_types.is_empty())
+    }
+
+    /// Whether `side`, a class value, may be the class of an object of a PHP# generic class, as `Class.of(box)` is,
+    /// which carries the object's type arguments, so PHP#'s `==` with `typeof(Box)` is false for a `Box<int>`, where
+    /// PHP's `===` compares names (spec section 25). `Box::class` is `typeof(Box)`, which carries none.
+    fn may_carry_type_arguments(&self, side: &Expression<'_>) -> bool {
+        if self.class_name_text(side).is_some() {
+            return false;
+        }
+        let Some(union) = self.type_of(side) else {
+            return false;
+        };
+        let codebase = self.input.codebase;
+        // Whether a PHP# generic class an object can be of is `class` or extends or implements it, or is any class for
+        // `None`.
+        let generic_under = |class: Option<&[u8]>| {
+            codebase.class_likes.values().any(|candidate| {
+                candidate.flags.is_sharp()
+                    && candidate.kind.is_class()
+                    && !candidate.flags.is_abstract()
+                    && !candidate.template_types.is_empty()
+                    && class.is_none_or(|class| codebase.is_instance_of(candidate.name.as_bytes(), class))
+            })
+        };
+        let object_may = |atomic: &TAtomic| match atomic {
+            TAtomic::Object(TObject::Named(object)) => generic_under(Some(object.name.as_bytes())),
+            TAtomic::Null | TAtomic::Scalar(_) => false,
+            _ => generic_under(None),
+        };
+
+        union.types.iter().any(|atomic| match atomic {
+            TAtomic::Scalar(TScalar::ClassLikeString(class)) => match class {
+                TClassLikeString::Literal { .. } => false,
+                TClassLikeString::OfType { constraint, .. } => constraint.types.iter().any(object_may),
+                TClassLikeString::Generic { constraint, .. } => object_may(constraint),
+                TClassLikeString::Any { .. } => generic_under(None),
+            },
+            _ => false,
+        })
+    }
+
     pub(super) fn binary(&mut self, expression: &Expression<'_>, binary: &Binary<'_>) {
         let (lhs, rhs) = (binary.lhs, binary.rhs);
         let numbers = [Kind::Int, Kind::Float];
         let operator = String::from_utf8_lossy(self.text(binary.operator.span())).into_owned();
         let refusal = match &binary.operator {
             BinaryOperator::StringConcat(_) => return self.concatenation(expression),
+            // `self` names the class that declares the method. `static` names the class PHP called, which PHP#'s `Self`
+            // names only as a return type.
             BinaryOperator::Instanceof(keyword) => {
-                let Expression::Identifier(class) = rhs else {
-                    return self.refuse(expression.span(), "`instanceof` of a class value is not converted yet");
-                };
+                if !matches!(rhs, Expression::Identifier(_) | Expression::Self_(_)) {
+                    return self.refuse(
+                        expression.span(),
+                        "`instanceof` of a class value or of `static` has no PHP# form: `is` tests a type the code names, which a class value is not, and `Self` names the class PHP called only as a return type (spec sections 21 and 25)",
+                    );
+                }
                 self.edits.replace(keyword.span, "is");
-                self.rename_class(class);
+                self.expression(rhs, None);
                 return self.expression(lhs, None);
             }
             BinaryOperator::Identical(span) | BinaryOperator::NotIdentical(span) => {
+                let equal = matches!(binary.operator, BinaryOperator::Identical(_));
+                // `Order::class` is the string of the class's name, which PHP compiles in, so a string compares with
+                // that text, `"Shop\\Order"`, as PHP's `===` compares two strings (spec section 25).
+                for (named, other) in [(lhs, rhs), (rhs, lhs)] {
+                    if let Some(text) = self.class_name_text(named)
+                        && self.is(other, &[Kind::String, Kind::Null])
+                        && !self.is(other, &[Kind::Null])
+                    {
+                        self.edits.replace(named.span(), text);
+                        self.edits.replace(*span, if equal { "==" } else { "!=" });
+                        return self.expression(other, None);
+                    }
+                }
                 match identity(self.type_of(lhs), self.type_of(rhs)) {
                     Ok(true) => {
-                        let equal = matches!(binary.operator, BinaryOperator::Identical(_));
+                        // A class value equals `typeof(Order)` of a class that takes no type arguments just when it
+                        // names that class, as PHP's `===` of names does, whatever arguments it carries.
+                        let names_plain_class = [lhs, rhs].into_iter().any(|side| self.names_plain_class(side));
+                        if !names_plain_class
+                            && let Some(side) = [lhs, rhs].into_iter().find(|side| self.may_carry_type_arguments(side))
+                        {
+                            let shown = self.shown(side);
+                            return self.refuse(
+                                expression.span(),
+                                format!("`===` of `{shown}` has no PHP# form: it may be the class of an object of a PHP# generic class, which carries the object's type arguments, as a `Box<int>`'s does, where PHP's `::class` is the name alone (spec section 25)"),
+                            );
+                        }
                         self.edits.replace(*span, if equal { "==" } else { "!=" });
                         None
                     }
@@ -253,6 +442,9 @@ impl Converter<'_, '_> {
                         "has no PHP# form: `xor` is removed, and `!=` gives it between two `bool`s (spec section 21)",
                     ))
                 } else {
+                    if !self.proven(lhs) || !self.proven(rhs) {
+                        return;
+                    }
                     self.edits.replace(span.span, "!=");
                     for side in [lhs, rhs] {
                         self.grouped(side);
@@ -279,6 +471,14 @@ impl Converter<'_, '_> {
             BinaryOperator::NullCoalesce(_) if let Expression::ArrayAccess(access) = lhs => {
                 self.untyped(access.array, "an index");
                 self.untyped(access.index, "a key");
+                self.numeric_key(access.array, access.index);
+                // A `List` read past its end throws, and `getOrNull(i)` gives null there, as PHP's `??` reads it.
+                if self.is(access.array, &[Kind::List]) && self.is(access.index, &[Kind::Int]) {
+                    let list = self.render(access.array);
+                    let list = if super::is_primary(access.array) { list } else { format!("({list})") };
+                    let index = self.render(access.index);
+                    self.edits.replace(lhs.span(), format!("{list}.getOrNull({index})"));
+                }
                 return self.expression(rhs, None);
             }
             BinaryOperator::NullCoalesce(_) => None,
@@ -403,10 +603,20 @@ pub(super) fn identity(lhs: Option<&TUnion>, rhs: Option<&TUnion>) -> Result<boo
     if left == [Kind::Null] || right == [Kind::Null] {
         return Ok(true);
     }
-    // PHP#'s `===` compares two objects only, and a value of no known type may hold anything.
-    if [lhs, rhs].iter().any(|union| union.types.iter().any(TAtomic::is_mixed)) {
+    // An `Any?` compared with `==` against a string, a `bool` or an enum is equal only when it holds the same type and
+    // value, as PHP's `===` (spec section 19). Against a number it compares an `int` with a `float` by value, and
+    // PHP#'s `===` compares two objects only, so any other value of no known type refuses.
+    let mixed = |union: &TUnion| union.types.iter().any(TAtomic::is_mixed);
+    let exact = |kinds: &[Kind]| {
+        !kinds.is_empty()
+            && kinds.iter().all(|kind| matches!(kind, Kind::String | Kind::Bool | Kind::Enum | Kind::Null))
+    };
+    if (mixed(lhs) && !mixed(rhs) && exact(&right)) || (mixed(rhs) && !mixed(lhs) && exact(&left)) {
+        return Ok(true);
+    }
+    if mixed(lhs) || mixed(rhs) {
         return Err(format!(
-            "`===` between `{}` and `{}` is not converted yet: PHP#'s `===` compares two objects, so narrow the value with `is` first (spec section 19)",
+            "`===` between `{}` and `{}` has no PHP# form: PHP#'s `===` compares two objects, and an `Any?` compares an `int` with a `float` by value, so narrow the value with `is` first (spec section 19)",
             lhs.get_id(),
             rhs.get_id()
         ));
@@ -414,19 +624,49 @@ pub(super) fn identity(lhs: Option<&TUnion>, rhs: Option<&TUnion>) -> Result<boo
     if left.contains(&Kind::Object) || right.contains(&Kind::Object) {
         return Ok(false);
     }
+    // A class value is the class's name, and PHP#'s `==` of two compares the names as PHP's `===` does, since a class
+    // value PHP gives carries no type arguments (spec section 25). A string is no class value in PHP#.
+    if left.contains(&Kind::Class) || right.contains(&Kind::Class) {
+        let class = |kinds: &[Kind]| kinds.iter().all(|kind| matches!(kind, Kind::Class | Kind::Null));
+        return if class(&left) && class(&right) {
+            Ok(true)
+        } else {
+            Err(format!(
+                "`===` between `{}` and `{}` has no PHP# form: a PHP# class value equals only a class value, and a string is none (spec section 25)",
+                lhs.get_id(),
+                rhs.get_id()
+            ))
+        };
+    }
+    // A resource, an `array{…}` shape or `never` has no PHP# type to compare.
+    if let Some(other) = lhs.types.iter().chain(rhs.types.iter()).find(|atomic| atomic_kinds(atomic) == [Kind::Other]) {
+        return Err(format!(
+            "`===` between `{}` and `{}` has no PHP# form: PHP# has no type `{}`",
+            lhs.get_id(),
+            rhs.get_id(),
+            other.get_id()
+        ));
+    }
     if collection(&left) || collection(&right) {
         return Err(
             "PHP's `===` on arrays compares keys, order and types, and PHP#'s `==` on collections compares their elements (spec section 19)"
                 .to_owned(),
         );
     }
-    let bare = |kinds: &[Kind]| kinds.iter().copied().filter(|kind| *kind != Kind::Null).collect::<Vec<_>>();
-    match (bare(&left).as_slice(), bare(&right).as_slice()) {
-        ([Kind::Int], [Kind::Float]) | ([Kind::Float], [Kind::Int]) => {
-            Err("PHP's `1 === 1.0` is false, and PHP# compares an `int` with a `float` by value (spec section 12)"
-                .to_owned())
-        }
-        ([a], [b]) if a == b && *a != Kind::Other => Ok(true),
-        _ => Err(format!("`===` between `{}` and `{}` is not converted yet", lhs.get_id(), rhs.get_id())),
+    let either = |kind: Kind| left.contains(&kind) || right.contains(&kind);
+    if either(Kind::Int) && either(Kind::Float) {
+        return Err("PHP's `1 === 1.0` is false, and PHP# compares an `int` with a `float` by value (spec section 12)"
+            .to_owned());
+    }
+    // What is left is two scalar types, or unions of them, as `string|false` and `false`, between which PHP#'s `==` is
+    // PHP's `===`: equal when both hold the same type and value. Two sides that share no type never compare in PHP#.
+    if left.iter().any(|kind| *kind != Kind::Null && right.contains(kind)) {
+        Ok(true)
+    } else {
+        Err(format!(
+            "`===` between `{}` and `{}` is always false, and PHP# has no `==` between types that share no value (spec section 19)",
+            lhs.get_id(),
+            rhs.get_id()
+        ))
     }
 }

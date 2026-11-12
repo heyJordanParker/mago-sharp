@@ -1,0 +1,11 @@
+namespace App;
+
+// An override of a plain PHP method declared `array` returns a `Map`, which keeps the plain PHP method's `array` in
+// the PHP PHP# compiles to, so PHP links it (spec section 12).
+public final class SalesReport : Report
+{
+    public override Map<string, int> totals()
+    {
+        return ['north': 3];
+    }
+}

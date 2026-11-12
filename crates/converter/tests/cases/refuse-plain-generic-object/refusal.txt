@@ -1,0 +1,3 @@
+13:18: a `App\Page<App\Order>` property has no PHP# form: plain PHP creates a PHP# generic object without type arguments, so it sets a `App\Page<App\Item>`, and PHP# checks it where it enters and throws (spec section 11)
+25:16: a plain PHP call that returns `App\Page<App\Order>` has no PHP# form: plain PHP creates a PHP# generic object without type arguments, so it is a `App\Page<App\Item>`, and PHP# checks it where it enters and throws (spec section 11)
+35:32: a `App\Page<App\Order>` parameter has no PHP# form: plain PHP creates a PHP# generic object without type arguments, so it passes a `App\Page<App\Item>`, and PHP# checks it where it enters and throws (spec section 11)

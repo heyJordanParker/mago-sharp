@@ -1,3 +1,3 @@
 13:16: a `match` on `int` with no `default` arm is not converted yet: PHP throws `UnhandledMatchError` where no arm fits, and a PHP# `match` on a value that is no enum has a `default` arm (spec section 21)
 21:13: a `match` arm on a value that is no constant is not converted yet: a PHP# pattern takes types and constants only (spec section 21)
-29:13: a `match` arm compares `int|string` with `int(200)` by PHP's `===`, which a PHP# pattern gives only between one scalar type, enums, or `null` (spec sections 19 and 21)
+29:13: a `match` arm compares `float|int` with `int(200)` by PHP's `===`, which a PHP# pattern gives only between scalars of a type they share, with no `int` beside a `float`, enums, or `null` (spec sections 19 and 21)

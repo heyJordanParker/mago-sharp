@@ -1,0 +1,26 @@
+namespace App;
+
+// `===` of two class values is `==`, which compares the names as PHP's `===` does, where neither may be the class of an
+// object of a PHP# generic class, or one is a class that takes no type arguments, and so is `===` of an `array-key`,
+// which is `int|string`, with a string. A class value is always truthy, so its test is its null check.
+public final class Router
+{
+    public bool same(Class<Router> handler, Class<Router>? fallback)
+    {
+        return handler == fallback;
+    }
+
+    public bool routed(Class<Object>? fallback)
+    {
+        if (fallback != null) {
+            return fallback != typeof(Router);
+        }
+
+        return false;
+    }
+
+    public bool isId(int|string key)
+    {
+        return key == 'id';
+    }
+}

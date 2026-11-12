@@ -77,6 +77,7 @@ pub fn convert(input: &Input<'_, '_>) -> Result<Vec<u8>, Vec<Refusal>> {
         deleted_lines: None,
         class: None,
         method: None,
+        renamed: Vec::new(),
     };
     converter.program();
     if !converter.refusals.is_empty() {
@@ -119,10 +120,15 @@ struct Class<'input> {
     is_final: bool,
     /// Each property, as `$name`, the class's constructor sets in a statement of its own body, which runs on every path.
     set_by_constructor: Vec<Vec<u8>>,
+    /// Whether the class's own constructor is `required`, since the class writes `new static(…)` and isn't `final`.
+    required: bool,
 }
 
 /// The method or the property accessor whose body is converted.
 struct Method {
+    /// The method's name as the class declares it, which PHP's `__FUNCTION__` gives, or `None` in a lambda and a
+    /// property accessor, which PHP names by the line it starts on and by its property.
+    name: Option<Vec<u8>>,
     /// The declared return, which a returned value lands in, or `None` in a constructor and a `set` accessor.
     returning: Option<TUnion>,
     /// The type parameters a `@var` tag in the body reads, the class's and the method's.
@@ -158,6 +164,9 @@ struct Converter<'input, 'arena> {
     deleted_lines: Option<(u32, u32)>,
     class: Option<Class<'input>>,
     method: Option<Method>,
+    /// Each local and `catch` variable of the method being converted, by its PHP name, with the camel case name PHP#
+    /// gives it (spec section 24). Its lambdas share it, since their captures are its variables.
+    renamed: Vec<(Vec<u8>, String)>,
 }
 
 impl<'input> Converter<'input, '_> {
@@ -260,11 +269,13 @@ impl<'input> Converter<'input, '_> {
         }
     }
 
-    /// The PHP# name of a variable `$name`: the name alone, with `@` before a PHP# keyword (spec section 2). `$this`
-    /// is the keyword `this`.
-    fn variable_name(name: &[u8]) -> String {
-        let bare = name.strip_prefix(b"$").unwrap_or(name);
-        let bare = String::from_utf8_lossy(bare).into_owned();
+    /// The PHP# name of a variable `$name`: the name alone, or the camel case name a local takes, with `@` before a
+    /// PHP# keyword (spec sections 2 and 24). `$this` is the keyword `this`.
+    fn variable_name(&self, name: &[u8]) -> String {
+        let bare = match self.renamed.iter().find(|(local, _)| local == name) {
+            Some((_, camel)) => camel.clone(),
+            None => String::from_utf8_lossy(name.strip_prefix(b"$").unwrap_or(name)).into_owned(),
+        };
         if bare != "this" && is_sharp_keyword(bare.as_bytes()) { format!("@{bare}") } else { bare }
     }
 

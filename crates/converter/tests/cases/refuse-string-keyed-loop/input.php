@@ -4,20 +4,23 @@ declare(strict_types=1);
 
 namespace App;
 
-// PHP turns a numeric string key into an `int`, as `'42'` into 42, and a PHP# `Map` keeps the key as written, so a
-// keyed loop or a spread of a `Map` keyed by anything but `int` refuses (spec section 12), and `array_keys` and `key`
-// have no PHP# form. An `int`-keyed loop converts.
+// PHP turns a numeric string key into an `int`, as `'42'` into 42, and a PHP# `Map` keeps it a string, so a keyed loop
+// over a `Map` keyed by anything but `int` refuses where it reads the key other than as text or as a key, as `===`
+// does, and so does a spread of one (spec section 12). `array_keys` and `key` have no PHP# form. An `int`-keyed loop
+// converts.
 final class Prices
 {
     /** @param array<string, int> $prices */
-    public function shown(array $prices): string
+    public function priceOf(array $prices, string $wanted): int
     {
-        $shown = '';
+        $found = 0;
         foreach ($prices as $sku => $price) {
-            $shown .= $sku . '=' . $price . ' ';
+            if ($sku === $wanted) {
+                $found = $price;
+            }
         }
 
-        return $shown;
+        return $found;
     }
 
     /**

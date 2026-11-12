@@ -1,5 +1,5 @@
 14:28: a `foreach` by reference has no PHP# form: PHP# passes every value as it is, so the loop writes the collection back
-16:18: `foreach` over `int` is not converted yet: PHP# loops over a `List`, a `Map`, a `Set` or an `Iterable`, and gives a key only from a `List` or a `Map` (spec section 17)
+16:18: `foreach` over `int` has no PHP# form: PHP# loops over a `List`, a `Map`, a `Set`, an `Iterable` or the values of a `Traversable` object, and gives a key only from a `List` or a `Map` (spec section 17)
 20:23: a count of loops to leave is not converted yet: a PHP# `break` or `continue` names the loop it leaves (spec section 17)
 24:28: `$name` is named before the loop, and a PHP# loop declares its own variables (spec section 17)
 38:15: `unset` of a variable or a property has no PHP# form: a PHP# value is never unset

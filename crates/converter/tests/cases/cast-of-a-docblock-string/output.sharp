@@ -1,0 +1,12 @@
+namespace App;
+
+// A `(string)` of a value only PHPDoc types a string is a template: the value may be another type at runtime, and a
+// template shows a `string` as PHP's interpolation does, which converts any value to text as `(string)` does, and a
+// `null` as `""` once `?? ""` gives it (spec sections 18 and 24).
+public final class Labels
+{
+    public string label(Row row)
+    {
+        return `${row.label}` + ' ' + `${row.note ?? ""}`;
+    }
+}

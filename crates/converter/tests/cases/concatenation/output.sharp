@@ -20,8 +20,10 @@ public final class Label
         return `price ${price}`;
     }
 
-    public void grow(string more)
+    public void grow(string more, int count, string? note)
     {
         this.text += more;
+        this.text += `${count}`;
+        this.text += `${note ?? ""}`;
     }
 }

@@ -1,2 +1,2 @@
-13:16: `PHP_EOL` is PHP's own constant, which is not converted yet: the standard library names it
-18:16: `shout` is declared in PHP's root namespace beside no class of its library, so it has no namespace to be reached through (spec section 23)
+14:16: `PHP_EOL` has no PHP# form: no standard library member reads it (decision 083)
+19:16: `shout` is declared in PHP's root namespace beside no class of its library, so it has no namespace to be reached through (spec section 23)

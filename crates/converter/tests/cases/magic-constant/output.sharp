@@ -1,6 +1,8 @@
 namespace App;
 
-// `__DIR__` and `__FILE__` are what `Position.current()` gives (spec section 27).
+// `__DIR__` and `__FILE__` are what `Position.current()` gives (spec section 27), and `__CLASS__` is `self::class`, the
+// class value (spec section 25). `__METHOD__`, `__FUNCTION__`, `__NAMESPACE__` and `__TRAIT__` are the text PHP
+// compiles in their place, which the class's own declarations fix, in a lambda too for the namespace.
 public final class Paths
 {
     public string stubs()
@@ -8,5 +10,17 @@ public final class Paths
         const file = Position.current().file;
 
         return Position.current().directory + '/stubs:' + file;
+    }
+
+    public string traced()
+    {
+        const named = () => 'in ' + "App";
+
+        return "App\\Paths::traced" + ' ' + "traced" + ' ' + named() + "";
+    }
+
+    public Class<Paths> kind()
+    {
+        return typeof(Paths);
     }
 }

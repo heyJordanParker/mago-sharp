@@ -7,7 +7,7 @@ namespace App;
 use LogicException;
 use RuntimeException;
 
-// A `catch` of several types waits for a later slice.
+// A `catch` of several classes takes their union (spec section 31).
 final class Guard
 {
     public function run(): string

@@ -1,0 +1,2 @@
+14:16: `===` of `class-string` has no PHP# form: it may be the class of an object of a PHP# generic class, which carries the object's type arguments, as a `Box<int>`'s does, where PHP's `::class` is the name alone (spec section 25)
+19:16: `===` of `class-string` has no PHP# form: it may be the class of an object of a PHP# generic class, which carries the object's type arguments, as a `Box<int>`'s does, where PHP's `::class` is the name alone (spec section 25)

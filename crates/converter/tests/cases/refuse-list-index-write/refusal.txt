@@ -1,1 +1,2 @@
-15:9: a write at an index of `non-empty-list<string>` is not converted yet: a PHP# `Map` sets a key, and a `List` replaces an element
+16:9: a write at an index of `non-empty-list<string>` has no PHP# form: PHP adds a key past a list's end, and a PHP# `List` replaces an element and throws past its end (spec section 12)
+21:15: `unset` at an index of `list<string>` has no PHP# form: PHP leaves the keys after it as they are, and a PHP# `List` renumbers its elements after it (spec section 12)

@@ -6,9 +6,10 @@ namespace App;
 
 final class Runner
 {
-    /** @param \Closure(Runner): void $callback */
+    /** @param \Closure(Runner, int &$count): void $callback */
     public function run(\Closure $callback): void
     {
-        $callback($this);
+        $count = 0;
+        $callback($this, $count);
     }
 }

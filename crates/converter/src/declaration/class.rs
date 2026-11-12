@@ -20,6 +20,7 @@ use crate::Class;
 use crate::Converter;
 
 use super::NameCase;
+use super::constructor::required_constructor;
 use super::constructor::set_by_constructor;
 use super::has;
 
@@ -224,7 +225,8 @@ impl<'input> Converter<'input, '_> {
         members: &Sequence<'_, ClassLikeMember<'_>>,
     ) {
         let name = String::from_utf8_lossy(name.value).into_owned();
-        self.class = Some(Class { name, metadata, is_final, set_by_constructor });
+        let required = !is_final && required_constructor(members);
+        self.class = Some(Class { name, metadata, is_final, set_by_constructor, required });
         for member in members {
             match member {
                 ClassLikeMember::Method(method) => self.method(method),

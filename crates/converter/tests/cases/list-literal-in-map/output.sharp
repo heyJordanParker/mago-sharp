@@ -1,0 +1,26 @@
+namespace App;
+
+// PHP numbers the elements of `['a', 'b']` from 0, so where a `Map` is declared they are its keys, since `[a, b]` is a
+// `List` literal. Each element of a literal lands in the value type its place declares, at any depth (spec section 12).
+public final class Menu
+{
+    public Map<int, string> names()
+    {
+        return [0: 'soup', 1: 'bread'];
+    }
+
+    public Map<string, Map<int, string>> courses()
+    {
+        return ['starters': [0: 'soup', 1: 'bread'], 'mains': [:]];
+    }
+
+    public Map<int, Class<Object>> kinds()
+    {
+        return [0: typeof(Menu), 1: typeof(Menu)];
+    }
+
+    public Map<string, List<string>> grouped(bool vegan)
+    {
+        return ['starters': vegan ? ['soup'] : []];
+    }
+}

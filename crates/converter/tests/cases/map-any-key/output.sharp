@@ -1,0 +1,29 @@
+namespace App;
+
+// PHP's `array-key` is `int|string`, so a plain `array`, as a request's input, is a `Map` keyed by `int|string`, whose
+// keys a PHP array gives as PHP holds them (spec section 12). A key the body reads or writes by is an `int`, or a
+// string PHP keeps a string.
+public final class Input
+{
+    public int count(Map<int|string, string> fields)
+    {
+        let count = 0;
+        for (const [name, value] of fields) {
+            count++;
+        }
+
+        return count;
+    }
+
+    public string email(Map<int|string, Any?> input)
+    {
+        input['source'] = 'form';
+
+        return input.get('email') != null ? 'given' : 'missing';
+    }
+
+    public int|string same(int|string id)
+    {
+        return id;
+    }
+}

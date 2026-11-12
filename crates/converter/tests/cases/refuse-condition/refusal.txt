@@ -1,4 +1,3 @@
 18:17: a condition of `App\Untested` reads PHP's truthiness, which PHP# has no test for: a PHP# condition is a `bool` (spec section 21)
 23:16: a condition of `mixed` reads PHP's truthiness, which PHP# has no test for: a PHP# condition is a `bool` (spec section 21)
-28:16: a condition of `string` is not converted yet: its PHP# test reads the value more than once, which the converter writes only for a local
-33:22: `isset` at an index of `list<int>` is not converted yet: PHP# reads a missing key only from a `Map`
+28:16: a condition of `string` has no PHP# form here: its PHP# test reads the value more than once, which gives what PHP's one read gives only for a variable or a property

@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 namespace Proof\Shop;
 
-// Text: an interpolated string, a heredoc and a nowdoc as templates, and `__DIR__` as `Position`.
+// Text: an interpolated string, a heredoc and a nowdoc as templates, `__DIR__` as `Position`, and the class, method
+// and namespace names PHP compiles in as their text.
 final class Label
 {
     public function render(string $title, int $count): string
@@ -23,6 +24,27 @@ final class Label
     public function folder(): string
     {
         return __DIR__ === '' ? 'nowhere' : 'somewhere';
+    }
+
+    public function traced(): string
+    {
+        return __METHOD__ . ' ' . __FUNCTION__ . ' ' . __NAMESPACE__;
+    }
+
+    /** @return class-string<self> */
+    public function kind(): string
+    {
+        return __CLASS__;
+    }
+
+    // `match (true)` as guards on the pattern `true`.
+    public function size(int $count, bool $bulk): string
+    {
+        return match (true) {
+            $count > 100 => 'huge',
+            $bulk, $count > 10 => 'large',
+            default => 'small',
+        };
     }
 
     // A `switch` as a `match` statement.

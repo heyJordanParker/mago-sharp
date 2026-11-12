@@ -1,0 +1,12 @@
+namespace App;
+
+// A PHP# generic class that plain PHP creates, which gives a page its bound, `Page<Item>`, as its type argument.
+public class Page<TItem : Item>
+{
+    public List<TItem> items { get; }
+
+    public Page(TItem ...items)
+    {
+        this.items = items;
+    }
+}

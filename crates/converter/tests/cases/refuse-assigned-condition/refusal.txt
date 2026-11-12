@@ -1,0 +1,2 @@
+20:19: an `else if` whose condition assigns `$found` has no PHP# form: a PHP# assignment is a statement, and a line before the `if` runs it every time, where PHP runs this one only when the conditions before it fail
+21:20: `$found` is first named here, outside an assignment of its own, which has no PHP# form: a PHP# local is declared by a statement that assigns it (spec section 2), and PHP assigns this one inside an expression, through a reference, or not at all

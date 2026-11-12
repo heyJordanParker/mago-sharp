@@ -23,4 +23,10 @@ final class Cat extends Animal
     {
         return 'quietly, ' . parent::describe();
     }
+
+    /** @return array<string, int> */
+    public function traits(): array
+    {
+        return ['legs' => 4, 'lives' => 9];
+    }
 }

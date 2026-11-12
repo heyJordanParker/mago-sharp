@@ -1,0 +1,22 @@
+namespace App;
+
+// An `if` whose condition first assigns a local that a comparison reads: the assignment runs on its own line before
+// the `if`, as PHP runs it before the rest of the condition, and the comparison reads the local.
+public final class Orders
+{
+    public int total(int id)
+    {
+        let total = 0;
+        const count = this.count(id);
+        if ((count) != 0 && count > 1) {
+            total = count * 2;
+        }
+
+        return total;
+    }
+
+    private int count(int id)
+    {
+        return id;
+    }
+}

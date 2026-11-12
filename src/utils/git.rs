@@ -172,9 +172,9 @@ pub struct Committed {
 ///
 /// # Errors
 ///
-/// Returns [`Error::RunningGit`] when git can't start, and [`Error::GitFailed`] with git's reason when it can't read
-/// the repository: outside one, or in a linked worktree whose git folder isn't there, as in a container that mounts
-/// the worktree alone.
+/// Returns [`Error::RunningGit`] when git can't start, [`Error::GitFolderMissing`] in a linked worktree whose git
+/// folder isn't there, as in a container that mounts the worktree alone, and [`Error::GitFailed`] with git's reason
+/// when it can't read the repository otherwise, as outside one.
 pub fn committed_files(workspace: &Path) -> Result<Committed, Error> {
     let head =
         process::output(Command::new("git").args(["rev-parse", "--verify", "--quiet", "HEAD"]).current_dir(workspace))
@@ -182,6 +182,11 @@ pub fn committed_files(workspace: &Path) -> Result<Committed, Error> {
     // `--verify --quiet` exits 1 when `HEAD` names no commit, and git exits 128 when it can't read the repository.
     if head.status.code() == Some(1) {
         return Ok(Committed::default());
+    }
+    if !head.status.success()
+        && let Some((file, target)) = missing_git_folder(workspace)
+    {
+        return Err(Error::GitFolderMissing { file, target });
     }
     succeeded("rev-parse", head)?;
     let entries = |output: Output| -> Vec<String> {
@@ -222,6 +227,19 @@ pub fn committed_files(workspace: &Path) -> Result<Committed, Error> {
     }
 
     Ok(committed)
+}
+
+/// The `.git` file nearest `workspace`, in it or a folder above it, with the git folder its `gitdir:` line names,
+/// when that folder doesn't exist. A linked worktree's `.git` is such a file, and its target is a folder of the main
+/// repository's `.git`, which a container that mounts the worktree alone doesn't hold.
+fn missing_git_folder(workspace: &Path) -> Option<(PathBuf, PathBuf)> {
+    let file = workspace.ancestors().map(|folder| folder.join(".git")).find(|git| git.exists())?;
+    let contents = std::fs::read_to_string(&file).ok()?;
+    let named = contents.lines().find_map(|line| line.strip_prefix("gitdir:"))?.trim();
+    // A relative `gitdir:` is relative to the folder of the `.git` file.
+    let target = file.parent()?.join(named);
+
+    (!target.exists()).then_some((file, target))
 }
 
 /// Records in the index the rename of the tracked file `from` to `to`, both relative to `workspace`, with `from`'s

@@ -222,6 +222,10 @@ pub enum Error {
     /// which says why.
     GitFailed { command: &'static str, status: std::process::ExitStatus, reason: String },
 
+    /// The `.git` file `file` of a linked git worktree names the git folder `target`, which doesn't exist, as in a
+    /// container that mounts the worktree alone, so git can't read the repository.
+    GitFolderMissing { file: PathBuf, target: PathBuf },
+
     /// Failed to parse the `composer.json` file.
     ///
     /// This error occurs when `composer.json` contains invalid JSON syntax or unexpected
@@ -372,6 +376,12 @@ impl std::fmt::Display for Error {
             }
             Self::RunningGit { command, source } => write!(f, "Failed to run `git {command}`: {source}"),
             Self::GitFailed { command, status, reason } => write!(f, "`git {command}` failed ({status}): {reason}"),
+            Self::GitFolderMissing { file, target } => write!(
+                f,
+                "{} names the git folder {}, which doesn't exist here, as in a container that mounts a git worktree alone. mago convert converts only files git holds, so mount the main repository's .git folder at the path it has where the worktree was made, so that folder exists, or run mago convert in a plain clone.",
+                file.display(),
+                target.display(),
+            ),
             Self::Analysis(error) => write!(f, "Failed to analyze the source code: {error}"),
             Self::ThreadPoolBuildError(error) => {
                 write!(f, "Failed to build the thread pool: {error}")

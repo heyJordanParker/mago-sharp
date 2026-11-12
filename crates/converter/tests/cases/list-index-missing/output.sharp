@@ -1,0 +1,16 @@
+namespace App;
+
+// A `List` read past its end throws, and `getOrNull(i)` gives null there, as PHP's `??` and `isset` read a missing
+// index (spec section 12).
+public final class Queue
+{
+    public string next(List<string> jobs, int at)
+    {
+        return jobs.getOrNull(at) ?? 'none';
+    }
+
+    public bool has(List<string> jobs, int at)
+    {
+        return jobs.getOrNull(at) != null;
+    }
+}

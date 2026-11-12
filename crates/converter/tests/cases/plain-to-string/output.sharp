@@ -1,0 +1,16 @@
+namespace App;
+
+// PHP's `(string)`, `.` and interpolation of an object call its class's `__toString`, which PHP# reads as a plain PHP
+// class's `toString()` (spec section 18).
+public final class Mailer
+{
+    public string address(Email to)
+    {
+        return to.self().toString();
+    }
+
+    public string line(Email to)
+    {
+        return `to ${to}${` (${to})`}`;
+    }
+}

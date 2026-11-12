@@ -50,6 +50,7 @@ use mago_database::matcher::contains_glob_metacharacters;
 use mago_names::resolver::NameResolver;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
+use mago_orchestrator::service::incremental_analysis::compile::LOWERING_PANIC;
 use mago_reporting::CompiledIgnoreSet;
 use mago_reporting::IssueCollection;
 use mago_reporting::Level;
@@ -153,10 +154,11 @@ struct Candidate {
     text: Vec<u8>,
 }
 
-/// What one analysis and in-memory compile of the project found: each issue, and each file `mago compile` refuses.
+/// What one analysis and in-memory compile of the project found: each issue, and each file `mago compile` refuses,
+/// with the errors that refuse it.
 struct Proof {
     issues: Issues,
-    refused: HashSet<Vec<u8>>,
+    refused: HashMap<Vec<u8>, IssueCollection>,
 }
 
 /// What a proof found that the plain project's didn't: each converted file's own issues, by its plain name, the other
@@ -207,6 +209,9 @@ struct Outcome {
     expected: Vec<Found>,
     /// How many proofs of the converted files ran, each a whole analysis of the project with fresh extension hosts.
     proofs: usize,
+    /// Whether the run itself failed: a proof could not finish, the written files' proof did not hold, a write failed
+    /// or a lowering panicked. A file that stays plain PHP fails nothing, since the report says why.
+    failed: bool,
 }
 
 impl ConvertCommand {
@@ -289,11 +294,10 @@ impl ConvertCommand {
         mut outcome: Outcome,
         checked: Checked,
     ) -> Result<(ExitCode, Outcome), Error> {
-        // With no file to convert, a file stays plain PHP or a named path reaches none, since the command line names a
-        // path at least, so the run fails.
+        // With no file to convert, the run is done: each file it reached stays plain PHP for its reason.
         if checked.is_empty() {
             outcome.report(self.dry_run, color_choice);
-            return Ok((ExitCode::FAILURE, outcome));
+            return Ok((outcome.exit_code(), outcome));
         }
 
         let workspace = configuration.source.workspace.clone();
@@ -304,6 +308,12 @@ impl ConvertCommand {
             return Ok((ExitCode::FAILURE, outcome));
         };
         let plain = session.proof(&prover)?;
+        // The judgement leaves out a file the plain project's compile refuses too, so a lowering that panicked there,
+        // a defect of the checker, is an error of the run of its own.
+        let panics = panics(&plain);
+        for panic in &panics {
+            tracing::error!("{panic}");
+        }
         // The forms come from the library files the proof's compile accepts, so a converted call runs what it does.
         let database = session.server.database().read_only();
         let forms = session.server.standard_library_forms(|issues| prover.hidden.shown(issues, &database))?;
@@ -336,12 +346,13 @@ impl ConvertCommand {
             .map(|candidate| (candidate.name.clone(), candidate.original.clone(), candidate.text.clone()))
             .collect();
 
-        let mut unproven = false;
+        // A lowering that panicked is a defect of the checker, which fails the run.
+        outcome.failed |= !panics.is_empty();
         if !self.dry_run && !accepted.is_empty() {
             let mut written = 0;
             for candidate in &accepted {
                 if let Err(error) = write(&workspace, &candidate.name, &candidate.text) {
-                    unproven = true;
+                    outcome.failed = true;
                     let name = display(&sharp_name(&candidate.name));
                     tracing::error!(
                         "{name} could not be written, so it and the files after it stay plain PHP: {error}"
@@ -352,14 +363,13 @@ impl ConvertCommand {
             }
             outcome.converted.truncate(written);
             if written > 0 && !prover.prove_written(&plain, &accepted[..written]) {
-                unproven = true;
+                outcome.failed = true;
             }
         }
 
         outcome.report(self.dry_run, color_choice);
 
-        let failed = !outcome.refused.is_empty() || !outcome.unreached.is_empty() || unproven;
-        Ok((if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }, outcome))
+        Ok((outcome.exit_code(), outcome))
     }
 }
 
@@ -432,6 +442,7 @@ impl<'configuration> Prover<'configuration> {
                 Err(error) => {
                     // The error once, as a host's carries up to 64 KiB of its stderr, and each file names the proof.
                     let proof = outcome.proofs;
+                    outcome.failed = true;
                     tracing::error!("Proof {proof} could not finish, so the files it proves stay plain PHP: {error}");
                     for &index in &set {
                         let name = &candidates[index].name;
@@ -570,8 +581,10 @@ impl<'configuration> Session<'configuration> {
         )?;
         let refused = compilations
             .into_iter()
-            .filter(|(_, compilation)| matches!(compilation, Compilation::Refused(_)))
-            .filter_map(|(file_id, _)| database.get(&file_id).ok().map(|file| file.name.to_vec()))
+            .filter_map(|(file_id, compilation)| match compilation {
+                Compilation::Refused(errors) => database.get(&file_id).ok().map(|file| (file.name.to_vec(), errors)),
+                Compilation::Accepted(_) => None,
+            })
             .collect();
         tracing::trace!("The project's proof ran in {:?}.", start.elapsed());
 
@@ -666,6 +679,19 @@ fn whole_workspace(configuration: &Configuration, color_choice: ColorChoice) -> 
     orchestrator
 }
 
+/// The text of each lowering of `proof` that panicked, in file name order, each a defect of the checker.
+fn panics(proof: &Proof) -> Vec<String> {
+    let mut refused: Vec<(&Vec<u8>, &IssueCollection)> = proof.refused.iter().collect();
+    refused.sort_by(|a, b| a.0.cmp(b.0));
+
+    refused
+        .into_iter()
+        .flat_map(|(_, errors)| errors.iter())
+        .filter(|error| error.code.as_deref() == Some(LOWERING_PANIC))
+        .map(|error| error.message.clone())
+        .collect()
+}
+
 /// What `proof`, of the project with `swaps` converted, found that `plain`, of the plain project, didn't: each issue
 /// by its file, level, code, message and line, with duplicates counted, and each file `mago compile` refuses. Every
 /// issue of a converted file counts but a note, and decision 9's warnings are expected wherever they appear. An issue
@@ -703,15 +729,21 @@ fn judge(plain: &Proof, proof: &Proof, swaps: &[&Candidate]) -> Judgement {
             judgement.others.push(found);
         }
     }
-    for file in proof.refused.difference(&plain.refused) {
-        let written = format!("{}: mago compile would refuse it", display(file));
+    for (file, errors) in proof.refused.iter().filter(|(file, _)| !plain.refused.contains_key(*file)) {
+        // The compile's first error says why it refuses the file. A lowering that panicked names a defect of the
+        // checker, so its text is the reason whatever else the file holds, never hidden.
+        let reason = errors
+            .iter()
+            .find(|error| error.code.as_deref() == Some(LOWERING_PANIC))
+            .or_else(|| errors.iter().next())
+            .map_or_else(String::new, |error| format!(": {}", error.message));
+        let written = format!("{}: mago compile would refuse it{reason}", display(file));
         let found = |shown: String| Found { shown, written: written.clone(), files: BTreeSet::from([file.clone()]) };
         match owner(file) {
-            Some(candidate) => judgement
-                .own
-                .entry(candidate.name.clone())
-                .or_default()
-                .push(found(format!("{}: mago compile would refuse it once converted", display(&candidate.name)))),
+            Some(candidate) => judgement.own.entry(candidate.name.clone()).or_default().push(found(format!(
+                "{}: mago compile would refuse it once converted{reason}",
+                display(&candidate.name)
+            ))),
             None => judgement.others.push(found(written.clone())),
         }
     }
@@ -724,6 +756,12 @@ impl Outcome {
     fn adds(&mut self, name: &[u8], others: Vec<Found>) {
         let reasons = others.into_iter().map(|found| format!("{}, which converting it adds", found.shown));
         self.refused.entry(name.to_vec()).or_default().extend(reasons);
+    }
+
+    /// Failure when the run itself failed or a path the command line names reaches no file, and success when the run
+    /// completed, whatever files it kept plain PHP, since each keeps its reason in the report.
+    fn exit_code(&self) -> ExitCode {
+        if self.failed || !self.unreached.is_empty() { ExitCode::FAILURE } else { ExitCode::SUCCESS }
     }
 
     fn report(&self, dry_run: bool, color_choice: ColorChoice) {
@@ -1218,7 +1256,8 @@ mod tests {
 
         let (exit_code, outcome) = convert_contracts(&files);
 
-        assert_eq!(exit_code, ExitCode::FAILURE);
+        // A file that stays plain PHP is an outcome the report names, never a failure of the run.
+        assert_eq!(exit_code, ExitCode::SUCCESS);
         let refused: Vec<String> = outcome.refused.keys().map(|name| display(name)).collect();
         assert_eq!(refused, ["src/Contracts/Named0.php"], "{:#?}", outcome.refused);
         assert_eq!(outcome.converted.len(), 12);
@@ -1237,7 +1276,7 @@ mod tests {
 
         let (exit_code, outcome) = convert_contracts(&files);
 
-        assert_eq!(exit_code, ExitCode::FAILURE);
+        assert_eq!(exit_code, ExitCode::SUCCESS);
         let refused: Vec<String> = outcome.refused.keys().map(|name| display(name)).collect();
         assert_eq!(refused, ["src/Contracts/Sink0.php", "src/Contracts/Sink1.php", "src/Contracts/Sink2.php"]);
         assert!(
@@ -1562,7 +1601,7 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
 
         let (exit_code, outcome) = convert_contracts(&files);
 
-        assert_eq!(exit_code, ExitCode::FAILURE);
+        assert_eq!(exit_code, ExitCode::SUCCESS);
         let refused: Vec<String> = outcome.refused.keys().map(|name| display(name)).collect();
         assert_eq!(refused, ["src/Contracts/Sink0.php"]);
         assert_eq!(outcome.converted.len(), 12);
@@ -1630,7 +1669,8 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     }
 
     /// A path the command line names that the project's analysis doesn't load gets one message saying why, a file as
-    /// a folder, and a run with nothing to prove makes no proof.
+    /// a folder, and fails the run, since the run didn't reach what it was asked to convert. A run with nothing to
+    /// prove makes no proof.
     #[test]
     fn each_named_path_the_analysis_does_not_load_says_why() {
         let directory = tempfile::tempdir().unwrap();
@@ -1700,7 +1740,8 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         assert_eq!(outcome.proofs, 0);
     }
 
-    /// A run whose every file is refused before its proof, here by its shape, starts no extension host.
+    /// A run whose every file is refused before its proof, here by its shape, starts no extension host, and succeeds:
+    /// the file stays plain PHP with its reason.
     #[test]
     fn a_run_whose_every_file_is_refused_by_its_shape_starts_no_extension_host() {
         let directory = tempfile::tempdir().unwrap();
@@ -1730,7 +1771,7 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
 
         assert!(!started.exists(), "the run started the extension host");
         let (exit_code, outcome) = run.unwrap();
-        assert_eq!(exit_code, ExitCode::FAILURE);
+        assert_eq!(exit_code, ExitCode::SUCCESS);
         let refused: Vec<String> = outcome.refused.values().flatten().cloned().collect();
         assert_eq!(refused, ["src/Contracts/helpers.php: it declares no class, interface or enum, so it is a script"]);
         assert_eq!(outcome.proofs, 0);
@@ -1805,6 +1846,56 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         assert!(lines[4].contains("int item") && lines[8].contains("int size()"), "{written}");
     }
 
+    /// A file the compile refuses once converted fails its proof with the compile's first error, and a converted file
+    /// whose lowering panicked with the panic's text, a defect of the checker, whatever else the refusal names.
+    #[test]
+    fn a_refused_compile_names_its_first_error_and_a_lowering_that_panicked_names_the_panic() {
+        let candidate = Candidate {
+            name: b"src/Box.php".to_vec(),
+            path: None,
+            original: b"<?php\n\nnamespace App;\n\nfinal class Box\n{\n}\n".to_vec(),
+            text: Vec::new(),
+        };
+        let panicked = IssueCollection::from(vec![
+            Issue::error("Invalid return.").with_code("invalid-return-statement"),
+            Issue::error("A defect of the checker: boom").with_code(LOWERING_PANIC),
+        ]);
+        let linked = IssueCollection::from(vec![Issue::error("Shelf::size() must be compatible with Box::size().")]);
+        let plain = Proof { issues: Issues::default(), refused: HashMap::new() };
+        let proof = Proof {
+            issues: Issues::default(),
+            refused: HashMap::from([(b"src/Box.sharp".to_vec(), panicked), (b"src/Shelf.php".to_vec(), linked)]),
+        };
+
+        let judgement = judge(&plain, &proof, &[&candidate]);
+
+        let shown: Vec<&str> = judgement.own[&candidate.name].iter().map(|found| found.shown.as_str()).collect();
+        assert_eq!(shown, ["src/Box.php: mago compile would refuse it once converted: A defect of the checker: boom"]);
+        let others: Vec<&str> = judgement.others.iter().map(|found| found.shown.as_str()).collect();
+        assert_eq!(
+            others,
+            ["src/Shelf.php: mago compile would refuse it: Shelf::size() must be compatible with Box::size()."]
+        );
+    }
+
+    /// A lowering that panicked in the plain project's proof, which the judgement leaves out with the file it refuses,
+    /// names its panic, so the run fails on it, and a file refused for another error names none.
+    #[test]
+    fn a_lowering_that_panicked_in_the_plain_proof_names_its_panic() {
+        let panicked = IssueCollection::from(vec![
+            Issue::error("Invalid return.").with_code("invalid-return-statement"),
+            Issue::error("The lowering of src/Box.sharp panicked: boom").with_code(LOWERING_PANIC),
+        ]);
+        let refused =
+            IssueCollection::from(vec![Issue::error("Invalid return.").with_code("invalid-return-statement")]);
+        let plain = Proof {
+            issues: Issues::default(),
+            refused: HashMap::from([(b"src/Box.sharp".to_vec(), panicked), (b"src/Shelf.sharp".to_vec(), refused)]),
+        };
+
+        assert_eq!(panics(&plain), ["The lowering of src/Box.sharp panicked: boom"]);
+    }
+
     /// Two issues of one member with one message stay two, told apart by their line of the PHP#, and an issue outside
     /// any class-like keeps its line.
     #[test]
@@ -1821,8 +1912,8 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         };
         let issues =
             Issues::from([issue(9, &["Box::size()", "Box"]), issue(10, &["Box::size()", "Box"]), issue(3, &[])]);
-        let plain = Proof { issues: Issues::default(), refused: HashSet::new() };
-        let proof = Proof { issues, refused: HashSet::new() };
+        let plain = Proof { issues: Issues::default(), refused: HashMap::new() };
+        let proof = Proof { issues, refused: HashMap::new() };
 
         let judgement = judge(&plain, &proof, &[&candidate]);
 

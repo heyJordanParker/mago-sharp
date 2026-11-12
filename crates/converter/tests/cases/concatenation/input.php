@@ -24,8 +24,10 @@ final class Label
         return 'price ' . $price;
     }
 
-    public function grow(string $more): void
+    public function grow(string $more, int $count, ?string $note): void
     {
         $this->text .= $more;
+        $this->text .= $count;
+        $this->text .= $note;
     }
 }

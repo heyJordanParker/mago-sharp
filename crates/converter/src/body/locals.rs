@@ -22,21 +22,26 @@ use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Assignment;
 use mago_syntax::cst::AssignmentOperator;
+use mago_syntax::cst::Binary;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::StaticPropertyAccess;
 use mago_syntax::cst::TokenSeparatedSequence;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::Variable;
+use mago_syntax::walker::MutWalker;
 
 use super::Kind;
+use super::conditions::unproven_scalar;
 use crate::Converter;
-use crate::declaration::NameCase;
 
 /// The variables PHP fills for every scope, which PHP# removes (spec sections 2 and 29).
 const SUPERGLOBALS: [&[u8]; 9] =
@@ -59,6 +64,34 @@ pub(crate) struct Locals {
     copied: Vec<(Vec<u8>, Span)>,
     /// Each parameter the body writes.
     written_parameters: Vec<Vec<u8>>,
+}
+
+/// Each variable a method's body names and each parameter of a lambda in it, by their PHP names, which a local's new
+/// name must be none of.
+#[derive(Debug, Default)]
+pub(crate) struct Names {
+    variables: Vec<Vec<u8>>,
+    parameters: Vec<Vec<u8>>,
+}
+
+impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Names {
+    fn walk_in_direct_variable(&mut self, variable: &'ast DirectVariable<'arena>, _: &mut ()) {
+        if !self.variables.iter().any(|name| name == variable.name) {
+            self.variables.push(variable.name.to_vec());
+        }
+    }
+
+    fn walk_in_function_like_parameter(&mut self, parameter: &'ast FunctionLikeParameter<'arena>, _: &mut ()) {
+        self.parameters.push(parameter.variable.name.to_vec());
+    }
+
+    /// `Settings::$page_size` names a member of its class, which keeps its name, and no variable of the method.
+    fn walk_static_property_access(&mut self, access: &'ast StaticPropertyAccess<'arena>, context: &mut ()) {
+        self.walk_expression(access.class, context);
+        if !matches!(access.property, Variable::Direct(_)) {
+            self.walk_variable(&access.property, context);
+        }
+    }
 }
 
 /// What a lambda captures from the body around it (spec section 14.2).
@@ -106,6 +139,9 @@ struct Local {
     keyed: Vec<(Write, Write)>,
     /// Each `[]` written to it, whose PHP# form, `[]` or `[:]`, its declared type decides.
     empties: Vec<Span>,
+    /// The first condition that reads it as the scalar it holds, which every later write keeps true only when it holds
+    /// its type at runtime too.
+    tested: Option<Span>,
 }
 
 impl Local {
@@ -121,6 +157,7 @@ impl Local {
             appends: Vec::new(),
             keyed: Vec::new(),
             empties: Vec::new(),
+            tested: None,
         }
     }
 }
@@ -141,6 +178,8 @@ struct Write {
     /// The analysis's type of what the write leaves in the local.
     union: Option<TUnion>,
     source: Source,
+    /// Whether the value holds that type at runtime, which [`Converter::holds_type_at_runtime`] gives.
+    runtime: bool,
 }
 
 /// Where the type of a value written to a local comes from (decision 2).
@@ -180,7 +219,7 @@ impl Converter<'_, '_> {
             && assignment.operator.is_assign()
             && let Some(elements) = destructured(assignment.lhs)
         {
-            self.destructure(statement, assignment, elements);
+            self.destructure(assignment, elements);
             return true;
         }
         let Expression::Assignment(Assignment { lhs: Expression::Variable(Variable::Direct(variable)), operator, rhs }) =
@@ -221,21 +260,53 @@ impl Converter<'_, '_> {
         }
         let expected = written.map(|(_, union)| union);
         match &expected {
-            Some(tagged) => self.wrote(variable.name, rhs.span(), Some(tagged.clone()), Source::Tagged),
-            None => self.wrote(variable.name, rhs.span(), self.type_of(rhs).cloned(), self.source(rhs)),
+            Some(tagged) => self.wrote(variable.name, rhs, rhs, Some(tagged.clone()), Source::Tagged),
+            None => self.wrote(variable.name, rhs, rhs, self.type_of(rhs).cloned(), self.source(rhs)),
         }
-        self.expression(rhs, expected.as_ref());
+        self.value(rhs, expected.as_ref());
 
         true
     }
 
-    /// Records that a write gives the local `name` the value at `at`, of type `union`, whose type comes from `source`.
-    fn wrote(&mut self, name: &[u8], at: Span, union: Option<TUnion>, source: Source) {
-        let Some(method) = self.method.as_mut() else {
+    /// Records that a write gives the local `name` the value `value`, of type `union`, whose type comes from `source`,
+    /// and which `left`, the value or the compound assignment that makes it, leaves. A condition that read the local as
+    /// the scalar it holds refuses when this value may not hold that type at runtime.
+    fn wrote(
+        &mut self,
+        name: &[u8],
+        value: &Expression<'_>,
+        left: &Expression<'_>,
+        union: Option<TUnion>,
+        source: Source,
+    ) {
+        let runtime = self.holds_type_at_runtime(left);
+        let Some(local) = self.current(name) else {
             return;
         };
-        if let Some((_, local)) = method.locals.entries.iter_mut().rev().find(|(local, _)| local.as_slice() == name) {
-            local.writes.push(Write { at, union, source });
+        local.writes.push(Write { at: value.span(), union, source, runtime });
+        if let (false, Some(tested)) = (runtime, local.tested) {
+            self.refuse(tested, unproven_scalar(&String::from_utf8_lossy(name)));
+        }
+    }
+
+    /// Whether the local `name` holds the type the analysis gives it at runtime: each value written to it so far
+    /// does, and it has one.
+    pub(super) fn local_holds_type_at_runtime(&self, name: &[u8]) -> bool {
+        let local = self
+            .method
+            .as_ref()
+            .and_then(|method| method.locals.entries.iter().rev().find(|(local, _)| local.as_slice() == name));
+
+        local.is_some_and(|(_, local)| !local.writes.is_empty() && local.writes.iter().all(|write| write.runtime))
+    }
+
+    /// Records that a condition at `at` reads the local `name` as the scalar it holds, which a later write that may not
+    /// hold that type at runtime refuses.
+    pub(super) fn tested_local(&mut self, name: &[u8], at: Span) {
+        if let Some(local) = self.current(name)
+            && local.tested.is_none()
+        {
+            local.tested = Some(at);
         }
     }
 
@@ -274,7 +345,12 @@ impl Converter<'_, '_> {
 
     /// The write of `value`, written to a local at its own place: its type and where that comes from.
     fn write_of(&self, value: &Expression<'_>) -> Write {
-        Write { at: value.span(), union: self.type_of(value).cloned(), source: self.source(value) }
+        Write {
+            at: value.span(),
+            union: self.type_of(value).cloned(),
+            source: self.source(value),
+            runtime: self.holds_type_at_runtime(value),
+        }
     }
 
     /// Where the type of `value`, written to a local, comes from: a literal, a parameter, a property, the return of a
@@ -364,9 +440,52 @@ impl Converter<'_, '_> {
             .is_some_and(|metadata| metadata.type_metadata.is_some())
     }
 
+    /// Names each local and `catch` variable of the method `walk` visits, whose own parameters are `parameters`, in the
+    /// camel case spec section 24 gives a local, as `$line_total` is `lineTotal`. Code outside the method never reaches
+    /// one by its name, since the converter refuses `compact`, `extract` and a variable named by a variable, so the
+    /// new name keeps PHP's meaning where no other variable or parameter of the method, its lambdas' included, has it.
+    pub(crate) fn rename_locals(&mut self, parameters: &[Vec<u8>], walk: impl FnOnce(&mut Names)) {
+        let mut names = Names::default();
+        walk(&mut names);
+        let parameters: Vec<&[u8]> = parameters.iter().chain(&names.parameters).map(Vec::as_slice).collect();
+        let taken = |name: &[u8]| parameters.contains(&name) || names.variables.iter().any(|variable| variable == name);
+        let candidates: Vec<(Vec<u8>, String)> = names
+            .variables
+            .iter()
+            .filter(|name| name.as_slice() != b"$this" && !parameters.contains(&name.as_slice()))
+            .filter(|name| !mago_casing::is_camel_case(&name[1..]))
+            .filter_map(|name| {
+                let camel = String::from_utf8_lossy(&mago_casing::to_camel_case(&name[1..])).into_owned();
+                let fits = mago_casing::is_camel_case(camel.as_bytes()) && !taken(format!("${camel}").as_bytes());
+                fits.then(|| (name.clone(), camel))
+            })
+            .collect();
+        // Two names of one camel case name, as `$line_total` and `$line__total`, would be one variable.
+        self.renamed = candidates
+            .iter()
+            .filter(|(_, camel)| candidates.iter().filter(|(_, other)| other == camel).count() == 1)
+            .cloned()
+            .collect();
+    }
+
+    /// Refuses the local or `catch` variable `variable` when its name breaks the camel case spec section 24 gives a
+    /// local, and the method couldn't rename it, since its camel case name is another variable's or parameter's.
+    pub(super) fn misnamed_local(&mut self, variable: &DirectVariable<'_>) {
+        let name = &variable.name[1..];
+        if mago_casing::is_camel_case(name) || self.renamed.iter().any(|(local, _)| local == variable.name) {
+            return;
+        }
+        let (shown, camel) =
+            (String::from_utf8_lossy(name), String::from_utf8_lossy(&mago_casing::to_camel_case(name)).into_owned());
+        self.refuse(
+            variable.span,
+            format!("the local `{shown}` has no PHP# name: PHP# names a local in camel case, and `{camel}` is the name of another variable or parameter of the method (spec section 24)"),
+        );
+    }
+
     /// Declares the local `variable` at its first assignment, in `statement`, with the type `written` gives.
     fn declare(&mut self, statement: &Statement<'_>, variable: &DirectVariable<'_>, written: Option<String>) {
-        self.misnamed(&variable.name[1..], variable.span, "local", NameCase::Camel);
+        self.misnamed_local(variable);
         let block = self.method.as_ref().and_then(|method| method.locals.blocks.last().copied());
         let Some(method) = self.method.as_mut() else {
             return;
@@ -375,81 +494,46 @@ impl Converter<'_, '_> {
             at: variable.span.start.offset,
             block: block.unwrap_or(statement.span()),
             written,
-            hoistable: matches!(statement, Statement::Expression(_)),
+            // An `if` whose condition assigns it declares it before the `if`, as its own statement.
+            hoistable: matches!(statement, Statement::Expression(_) | Statement::If(_)),
         };
         method
             .locals
             .entries
             .push((variable.name.to_vec(), Local::new(variable.span, Some(declaration), false, Vec::new())));
-        self.edits.replace(variable.span, Self::variable_name(variable.name));
+        let name = self.variable_name(variable.name);
+        self.edits.replace(variable.span, name);
     }
 
-    /// `['id' => $id, 'name' => $name] = $row;` of a `Map` as one read per key, `const id = row.get('id');`, each a
-    /// `TValue?` as PHP gives `null` for a missing key (spec section 12). The `Map` is read once per key, so it must be
-    /// a variable.
-    fn destructure(&mut self, statement: &Statement<'_>, assignment: &Assignment<'_>, elements: Elements<'_, '_>) {
-        let source = assignment.rhs;
-        let mut targets = Vec::new();
-        for element in elements.iter() {
-            match element {
-                ArrayElement::KeyValue(element)
-                    if matches!(element.key, Expression::Literal(Literal::String(_) | Literal::Integer(_))) =>
-                {
-                    let Expression::Variable(Variable::Direct(variable)) = element.value else {
-                        self.refuse(
-                            element.value.span(),
-                            "destructuring into a place that is no variable has no PHP# form: read each key into a local",
-                        );
-                        return self.unassigned(elements);
-                    };
-                    targets.push((element.key, variable));
-                }
-                _ => {
-                    self.refuse(
-                        assignment.lhs.span(),
-                        "destructuring by position, or by a key that is no literal, has no PHP# form: PHP# destructures a tuple, and reads a `Map` key by key (spec sections 12 and 30)",
-                    );
-                    return self.unassigned(elements);
-                }
-            }
-        }
-        if targets.is_empty()
-            || !matches!(source, Expression::Variable(Variable::Direct(_)))
-            || !self.is(source, &[Kind::Map])
-        {
-            let shown = self.shown(source);
-            self.refuse(
-                source.span(),
-                format!("destructuring `{shown}` by key converts for a `Map` variable only, which PHP# reads once per key (spec section 12)"),
-            );
-            return self.unassigned(elements);
-        }
+    /// Declares the local `assignment` writes in the condition of `statement`, an `if`, where the condition named it
+    /// first, since the converter writes the assignment on its own line before the `if`. A local assigned before keeps
+    /// its declaration, and this is a write of it.
+    pub(super) fn declared_by(&mut self, statement: &Statement<'_>, assignment: &Assignment<'_>) {
+        let Expression::Variable(Variable::Direct(variable)) = assignment.lhs else {
+            return;
+        };
+        let block = self.method.as_ref().and_then(|method| method.locals.blocks.last().copied());
+        let write = self.write_of(assignment.rhs);
+        let Some(local) = self.current(variable.name).filter(|local| local.first == variable.span) else {
+            return;
+        };
+        local.declaration = Some(Declaration {
+            at: variable.span.start.offset,
+            block: block.unwrap_or(statement.span()),
+            written: None,
+            hoistable: true,
+        });
+        local.rewritten = false;
+        local.writes.push(write);
+        self.misnamed_local(variable);
+    }
 
-        self.expression(source, None);
-        let read = self.render(source);
-        let indentation = self.indentation(statement.span().start.offset);
-        let mut start = assignment.lhs.span().start.offset;
-        let last = targets.len() - 1;
-        for (index, (key, variable)) in targets.into_iter().enumerate() {
-            self.expression(key, None);
-            let key = self.render(key);
-            self.edits.delete(start, variable.span.start.offset);
-            if !self.is_local(variable.name) || self.in_scope(variable.name, variable.span.start.offset) {
-                self.variable(variable, true);
-            } else {
-                self.declare(statement, variable, None);
-            }
-            let union = self.input.artifacts.get_expression_type(variable).cloned();
-            self.wrote(variable.name, variable.span, union, self.source(source));
-            let end = variable.span.end.offset;
-            if index == last {
-                self.edits.insert(end, format!(" = {read}.get({key})"));
-                self.edits.delete(end, assignment.rhs.span().end.offset);
-            } else {
-                self.edits.insert(end, format!(" = {read}.get({key});\n{indentation}"));
-            }
-            start = end;
-        }
+    /// Refuses `['id' => $id] = $row;` and `[$first, $second] = $pair;`. A destructuring by key reads keys the array may
+    /// lack, as a `Map` read does, and a plain PHP array is no tuple, so a destructuring by position has no PHP# form
+    /// (spec sections 12 and 30).
+    fn destructure(&mut self, assignment: &Assignment<'_>, elements: Elements<'_, '_>) {
+        self.refuse(assignment.lhs.span(), unpacked(elements));
+        self.unassigned(elements);
     }
 
     /// Takes the variables a refused destructuring assigns as given, so the refusal covers each later read of them,
@@ -528,12 +612,14 @@ impl Converter<'_, '_> {
             );
             return false;
         }
-        self.misnamed(&variable.name[1..], variable.span, "local", NameCase::Camel);
-        // Each pass writes the loop's variable an element of what it loops over, whose type that value's source gives.
+        self.misnamed_local(variable);
+        // Each pass writes the loop's variable an element of what it loops over, whose type that value's source gives,
+        // and which nothing proves holds that type at runtime.
         let write = Write {
             at: variable.span,
             union: self.input.artifacts.get_expression_type(variable).cloned(),
             source: self.source(iterable),
+            runtime: false,
         };
         let Some(method) = self.method.as_mut() else {
             return false;
@@ -549,7 +635,7 @@ impl Converter<'_, '_> {
 
     /// Whether `name` is a local of the method being converted: no parameter, no `catch` variable, no variable a
     /// lambda captures and not `$this`.
-    fn is_local(&self, name: &[u8]) -> bool {
+    pub(super) fn is_local(&self, name: &[u8]) -> bool {
         name != b"$this"
             && self.method.as_ref().is_some_and(|method| {
                 !method.parameters.iter().any(|parameter| parameter == name)
@@ -675,7 +761,7 @@ impl Converter<'_, '_> {
             }
             let first = self.skip_whitespace(body.start.offset + 1);
             let indentation = self.indentation(first);
-            let declared = format!("{written} {} = {initial};\n{indentation}", Self::variable_name(name));
+            let declared = format!("{written} {} = {initial};\n{indentation}", self.variable_name(name));
             self.edits.insert(first, declared);
         }
         // Each assignment of a hoisted local writes it after its declaration.
@@ -698,7 +784,7 @@ impl Converter<'_, '_> {
             let Some(declaration) = local.declaration else {
                 self.refuse(
                     local.first,
-                    format!("`{shown}` is first named here, outside an assignment of its own, which is not converted yet: a PHP# local is declared where it is first assigned"),
+                    format!("`{shown}` is first named here, outside an assignment of its own, which has no PHP# form: a PHP# local is declared by a statement that assigns it (spec section 2), and PHP assigns this one inside an expression, through a reference, or not at all"),
                 );
                 continue;
             };
@@ -711,10 +797,12 @@ impl Converter<'_, '_> {
                 }
                 continue;
             }
+            // A local an assignment declares is declared first in the body when it escapes its block, so one that
+            // escapes here is a loop's variable.
             if let Some(span) = local.escapes {
                 self.refuse(
                     span,
-                    format!("`{shown}` is named here, after the block it is first assigned in, which is not converted yet: PHP# scopes a local to its block (spec section 3)"),
+                    format!("`{shown}` is named here, after the loop that declares it, which has no PHP# form: a PHP# loop declares its own variables, which live in its block (spec sections 3 and 17)"),
                 );
                 continue;
             }
@@ -865,7 +953,8 @@ impl Converter<'_, '_> {
             );
         }
         self.local(variable, write);
-        self.edits.replace(variable.span, Self::variable_name(variable.name));
+        let name = self.variable_name(variable.name);
+        self.edits.replace(variable.span, name);
     }
 
     /// Converts `place`, the target of a write, and records the write on the local it names.
@@ -916,15 +1005,22 @@ impl Converter<'_, '_> {
                     local.keyed.push(written);
                 }
             }
-            // A `Map` sets a key PHP's way, and a `List`'s index write replaces an element where PHP's adds one.
-            if !starts_empty && !self.is(access.array, &[Kind::Map]) {
+            // A `Map` sets a key PHP's way, and `=` at an index of an `ArrayAccess` object calls its `offsetSet`, as the
+            // bridge lowers it. A `List`'s index write replaces an element and throws past its end, where PHP's adds the
+            // key.
+            let array_access = assignment.operator.is_assign() && self.is_array_access(access.array);
+            if !starts_empty && !self.is(access.array, &[Kind::Map]) && !array_access {
                 let shown = self.shown(access.array);
-                return self.refuse(
-                    expression.span(),
-                    format!("a write at an index of `{shown}` is not converted yet: a PHP# `Map` sets a key, and a `List` replaces an element"),
-                );
+                let reason = if self.is(access.array, &[Kind::List]) {
+                    "PHP adds a key past a list's end, and a PHP# `List` replaces an element and throws past its end (spec section 12)"
+                } else {
+                    "PHP# writes by index into a `Map`, a `List` or an `ArrayAccess` object only (spec section 12)"
+                };
+                return self
+                    .refuse(expression.span(), format!("a write at an index of `{shown}` has no PHP# form: {reason}"));
             }
             self.written(access.array);
+            self.numeric_key(access.array, access.index);
             self.expression(access.index, None);
             return self.expression(rhs, None);
         }
@@ -933,15 +1029,45 @@ impl Converter<'_, '_> {
         let refusal = match &assignment.operator {
             AssignmentOperator::Assign(_) | AssignmentOperator::Coalesce(_) => None,
             AssignmentOperator::Concat(span) => {
-                if self.is(lhs, &[Kind::String]) && self.is(rhs, &[Kind::String]) {
+                // PHP's `.` and an interpolated string give a string, which their own conversion checks part by part,
+                // and the analysis keeps no type of such a value `.=` appends.
+                let text = matches!(
+                    rhs,
+                    Expression::Binary(Binary { operator: BinaryOperator::StringConcat(_), .. })
+                        | Expression::CompositeString(_)
+                );
+                let appended = self.is(lhs, &[Kind::String]);
+                if appended && (text || self.is(rhs, &[Kind::String])) {
                     self.edits.replace(*span, "+=");
+                    None
+                } else if appended
+                    && (self.is(rhs, &[Kind::Int, Kind::Float]) || self.is(rhs, &[Kind::String, Kind::Null]))
+                {
+                    // A number shows in a template as PHP's `.` shows it, and `null` as nothing, which `?? ""` gives
+                    // a `string` that may be null (spec section 18).
+                    self.edits.replace(*span, "+=");
+                    let (start, end) = (rhs.span().start.offset, rhs.span().end.offset);
+                    match (self.is(rhs, &[Kind::Int, Kind::Float]), super::is_primary(rhs)) {
+                        (true, _) => {
+                            self.edits.insert(start, "`${");
+                            self.edits.insert(end, "}`");
+                        }
+                        (false, true) => {
+                            self.edits.insert(start, "`${");
+                            self.edits.insert(end, " ?? \"\"}`");
+                        }
+                        (false, false) => {
+                            self.edits.insert(start, "`${(");
+                            self.edits.insert(end, ") ?? \"\"}`");
+                        }
+                    }
                     None
                 } else {
                     Some(self.operands(
                         ".=",
                         lhs,
                         rhs,
-                        "shows a value PHP's way, which is not converted yet: PHP# joins only strings with `+=`",
+                        "shows a value PHP's way, and a template shows only `int`, `float` and `string` that way (spec section 18)",
                     ))
                 }
             }
@@ -1001,9 +1127,9 @@ impl Converter<'_, '_> {
         if let Expression::Variable(Variable::Direct(variable)) = lhs {
             // A compound write leaves what its operator gives, as `$sum += 0.5` makes an `int` sum a `float`.
             let left = if assignment.operator.is_assign() { rhs } else { expression };
-            self.wrote(variable.name, rhs.span(), self.type_of(left).cloned(), self.source(rhs));
+            self.wrote(variable.name, rhs, left, self.type_of(left).cloned(), self.source(rhs));
         }
-        self.expression(rhs, declared.as_ref());
+        self.value(rhs, declared.as_ref());
         // PHP stores any value in a typed property and checks it there, and PHP# takes one of a known type.
         if property.is_some_and(|property| !property.types.iter().any(TAtomic::is_mixed)) {
             self.mixed(rhs, "a property of a known type");
@@ -1032,10 +1158,19 @@ impl Converter<'_, '_> {
 }
 
 /// The elements of a destructuring's place.
-type Elements<'ast, 'arena> = &'ast TokenSeparatedSequence<'arena, ArrayElement<'arena>>;
+pub(super) type Elements<'ast, 'arena> = &'ast TokenSeparatedSequence<'arena, ArrayElement<'arena>>;
 
-/// The elements `place` destructures into, when the place of a write is a destructuring.
-fn destructured<'ast, 'arena>(place: &'ast Expression<'arena>) -> Option<Elements<'ast, 'arena>> {
+/// Why a destructuring into `elements`, an assignment's or a loop's, has no PHP# form.
+pub(super) fn unpacked(elements: Elements<'_, '_>) -> &'static str {
+    if elements.iter().all(|element| matches!(element, ArrayElement::KeyValue(_))) {
+        super::MISSING_KEY
+    } else {
+        "destructuring by position has no PHP# form: a plain PHP array is no tuple, which PHP# destructures (spec sections 12 and 30)"
+    }
+}
+
+/// The elements `place` destructures into, when the place of a write, or of a loop's value, is a destructuring.
+pub(super) fn destructured<'ast, 'arena>(place: &'ast Expression<'arena>) -> Option<Elements<'ast, 'arena>> {
     match place {
         Expression::Array(array) => Some(&array.elements),
         Expression::LegacyArray(array) => Some(&array.elements),
