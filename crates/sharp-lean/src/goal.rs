@@ -44,14 +44,43 @@ impl Php {
     }
 }
 
-/// `tree`, a goal `Sharp/Lean/Proof.lean` wrote as JSON, in PHP#, or `None` when it is no tree or holds a part PHP#
-/// has no expression for.
-pub(crate) fn php(tree: &str, names: &Names<'_>) -> Option<String> {
-    let tree: Value = serde_json::from_str(tree).ok()?;
+/// `tree`, the goal of a case `Sharp/Lean/Proof.lean` wrote as JSON: what holds of each enum value the proof split on,
+/// as `retry is Retry.ExponentialRamp`, and the goal in PHP#, or `None` when it is no tree or holds a part PHP# has no
+/// expression for. A split's goal is `["split", [[value, case]…], goal]`.
+pub(crate) fn case(tree: &str, names: &Names<'_>) -> (Vec<String>, Option<String>) {
+    let Ok(tree) = serde_json::from_str::<Value>(tree) else {
+        return (Vec::new(), None);
+    };
+    let (split, goal) = match tree.as_array().map(Vec::as_slice) {
+        Some([kind, Value::Array(cases), goal]) if kind == "split" => (cases.iter().map(enum_case).collect(), goal),
+        _ => (Some(Vec::new()), &tree),
+    };
+    let Some(split) = split else {
+        return (Vec::new(), None);
+    };
     let mut printer = Printer { names, bound: Vec::new(), complete: true };
-    let goal = printer.print(&tree);
+    let goal = printer.print(goal);
 
-    printer.complete.then_some(goal.text)
+    (split, printer.complete.then_some(goal.text))
+}
+
+/// What holds of the enum value of `[value, case]`, one case of a split: `retry is Retry.ExponentialRamp`, the case as
+/// PHP# names it on its enum, and `slow` or `!slow` for a `bool`.
+fn enum_case(split: &Value) -> Option<String> {
+    let [value, case] = split.as_array()?.as_slice() else {
+        return None;
+    };
+    let (value, case) = (value.as_str()?, case.as_str()?);
+
+    Some(match case {
+        "Bool.true" => value.to_owned(),
+        "Bool.false" => format!("!{value}"),
+        _ => {
+            let mut parts = case.rsplitn(3, '.');
+            let (name, class) = (parts.next()?, parts.next()?);
+            format!("{value} is {class}.{name}")
+        }
+    })
 }
 
 /// The PHP# of each goal of a condition `tree` holds, joined by `&&`.
@@ -282,7 +311,7 @@ mod tests {
         let declared: HashSet<String> = DECLARED.iter().map(|name| (*name).to_owned()).collect();
         let arguments: Vec<String> = arguments.iter().map(|argument| (*argument).to_owned()).collect();
 
-        php(tree, &Names { receivers: &receivers, declared: &declared, arguments: &arguments })
+        case(tree, &Names { receivers: &receivers, declared: &declared, arguments: &arguments }).1
     }
 
     /// The goal of `timesKeepsCurrency` without its call of `addKeepsCurrency`, as Lean leaves it once `times` is
@@ -330,6 +359,19 @@ mod tests {
         let goal = r#"["app","Sharp.holds",["app","Bind.bind",["app","Sharp.int.read",["var","items"],["app","Sharp.int.add",["var","i"],["lit","1"]]],["lam","$1",["app","Pure.pure",["app","Decidable.decide",["app","GE.ge",["app","Int64.toInt",["var","$1"]],["lit","1"]]]]]]]"#;
 
         assert_eq!(printed(goal, &[], &[]).as_deref(), Some("items[i + 1] >= 1"));
+    }
+
+    /// The goal of one case of the enums a law without a body splits on names the case of each value, as PHP# writes
+    /// it: a case on its enum, and a `bool` as itself or its negation.
+    #[test]
+    fn a_split_s_goal_names_the_case_of_each_enum_value() {
+        let goal = r#"["split",[["retry","App.Shared.Events.Retry.ExponentialRamp"],["slow","Bool.false"]],["app","LE.le",["var","index"],["lit","1"]]]"#;
+        let (receivers, declared) = (HashMap::default(), HashSet::default());
+
+        assert_eq!(
+            case(goal, &Names { receivers: &receivers, declared: &declared, arguments: &[] }),
+            (vec!["retry is Retry.ExponentialRamp".to_owned(), "!slow".to_owned()], Some("index <= 1".to_owned()))
+        );
     }
 
     /// A goal that holds a part only Lean writes, as the `match` of `total` that Lean names `total.match_1`, has no

@@ -12,7 +12,8 @@ are the law calls of the body before it, each `sharp_call%` of the theorem of th
 law's `when` condition first. A step that cannot close its goal reports the goal, as the law reads it, in an error that starts with `sharp-case` or `sharp-condition` and its index, then admits the goal, so
 every theorem is declared and each failure is reported once. Each step has a time budget of its own, so a case whose
 steps run out of theirs is reported as `sharp-case-out-of-time` or `sharp-condition-out-of-time`, and the cases after
-it still run. The runner reads those errors, and Mago prints each goal in PHP#.
+it still run. A law without a body that proves case by case over an enum it takes reports each case left open with the
+case it is. The runner reads those errors, and Mago prints each goal in PHP#.
 -/
 
 namespace Sharp
@@ -251,9 +252,13 @@ private def presented (conditions : Array Ident) : TacticM Json := do
   return presented
 
 /-- Reports the main goal of the case `index`, with `conditions` applied, as the `outcome` of its steps left it, and
-admits it. -/
-private def report (index : TSyntax `num) (conditions : Array Ident) (outcome : Outcome) : TacticM Unit := do
+admits it. The goal of one case of the enums the proof split on is `["split", [[value, case]…], goal]`, with the case of
+each enum value `split` names. -/
+private def report (index : TSyntax `num) (conditions : Array Ident) (outcome : Outcome)
+    (split : Array (Name × Name) := #[]) : TacticM Unit := do
   let goal ← presented conditions
+  let cases := split.map fun (value, case) => Json.arr #[.str (written value), .str (written case)]
+  let goal := if split.isEmpty then goal else node "split" #[.arr cases, goal]
   let kind := if outcome == .outOfTime then "sharp-case-out-of-time" else "sharp-case"
   logError m!"{kind} {index.getNat} {goal.compress}"
   admitGoal (← getMainGoal)
@@ -267,12 +272,27 @@ private def enumsInScope : TacticM (Array Name) := do
       if !declaration.isImplementationDetail && (← isEnumType type) then found := found.push declaration.userName
     return found
 
+/-- The goal of each case of the enum values `enums` of the main goal, one for each way their cases combine, with the
+case each value is in it. -/
+private def enumCases (enums : Array Name) : TacticM (Array (MVarId × Array (Name × Name))) := do
+  let mut split := #[(← getMainGoal, #[])]
+  for enum in enums do
+    let mut next := #[]
+    for (goal, cases) in split do
+      let value ← goal.withContext do return (← getLocalDeclFromUserName enum).fvarId
+      for case in ← goal.cases value do
+        -- Only a sparse split has a case of no constructor, its catch-all.
+        let some constructor := case.ctorName | throwError "the split on {enum} has a case of no constructor"
+        next := next.push (case.mvarId, cases.push (enum, constructor))
+    split := next
+  return split
+
 /-- Proves a law without a body, whose case `index` is its whole claim: unfolds a recursive definition the claim reaches
 once, and every other one as `simp` rewrites, then runs the automatic steps. A claim over values the law writes out,
 as `Money.total([new Money(1, "EUR")])`, needs each recursion unfolded until it ends, so the steps then run with the
 recursive definitions as `simp` rewrites too. A claim over an enum the law takes, as `retry.backoff()[index]` over
 a `Retry`, reads what each case computes, so the steps then run on each case of each enum, as a body's `match` on each
-case would. -/
+case would, and each case they leave open is reported on its own, with the case it is. -/
 syntax "sharp_prove " num " [" ident,* "]" : tactic
 
 elab_rules : tactic
@@ -286,22 +306,15 @@ elab_rules : tactic
       auto ((definitions.filter (!recursive.contains ·)) ++ laws)
     let ended : TacticM Unit := auto (definitions ++ laws)
     let proven : TacticM Outcome := firstClosing (once :: if recursive.isEmpty then [] else [ended])
-    let split : TacticM Outcome := do
-      let saved ← saveState
-      for enum in enums do evalTactic (← `(tactic| all_goals cases $(mkIdent enum):ident))
-      for case in ← getGoals do
-        setGoals [case]
-        let outcome ← proven
-        unless outcome == .closed do
-          saved.restore
-          return outcome
-      return .closed
     let whole ← proven
-    let outcome ← if whole == .closed || enums.isEmpty then pure whole else do
-      match ← split with
-      | .unclosed => pure whole
-      | outcome => pure outcome
-    unless outcome == .closed do report index conditions.getElems outcome
+    if whole == .closed then return
+    if enums.isEmpty then
+      report index conditions.getElems whole
+      return
+    for (case, split) in ← enumCases enums do
+      setGoals [case]
+      let outcome ← proven
+      unless outcome == .closed do report index conditions.getElems outcome split
 
 /-- Closes the case `index` of a body with the automatic steps and the laws of the facts in scope: on the claim as the
 facts state it, else with each definition the claim calls unfolded once, else with those definitions as `simp` rewrites,

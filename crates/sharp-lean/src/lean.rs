@@ -402,26 +402,32 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
 
             vec![issues::rejected_proof(law)]
         }
-        // A case a `match` reaches both where a guard fails and where a pattern does is one case, reported once.
-        Judgment::Open(steps) => steps
-            .iter()
-            .enumerate()
-            .filter(|(place, step)| {
-                !steps[..*place].iter().any(|before| before.index == step.index && before.condition == step.condition)
-            })
-            .map(|(_, step)| {
-                let issue = if step.condition {
+        // A case a `match` reaches both where a guard fails and where a pattern does is one case, reported once. A case
+        // of the enums a law without a body splits on is a case of its own.
+        Judgment::Open(steps) => {
+            let mut reported: Vec<(usize, bool, Vec<String>)> = Vec::new();
+            let mut issues = Vec::new();
+            for step in &steps {
+                let (issue, split) = if step.condition {
                     let call = &law.proof.calls[step.index - 1];
                     let names = Names { receivers, declared, arguments: &call.arguments };
-                    issues::unshown_condition(law, call, goal::conjunction(&step.goal, &names).as_deref())
+                    (issues::unshown_condition(law, call, goal::conjunction(&step.goal, &names).as_deref()), Vec::new())
                 } else {
                     let case = &law.proof.cases[step.index - 1];
                     let names = Names { receivers, declared, arguments: &[] };
-                    issues::unproven_case(law, case, goal::php(&step.goal, &names).as_deref())
+                    let (split, goal) = goal::case(&step.goal, &names);
+                    (issues::unproven_case(law, case, &split, goal.as_deref()), split)
                 };
-                if step.out_of_time { issues::out_of_time(issue) } else { issue }
-            })
-            .collect(),
+                let key = (step.index, step.condition, split);
+                if reported.contains(&key) {
+                    continue;
+                }
+                reported.push(key);
+                issues.push(if step.out_of_time { issues::out_of_time(issue) } else { issue });
+            }
+
+            issues
+        }
     }
 }
 

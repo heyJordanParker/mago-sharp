@@ -4239,6 +4239,42 @@ fn a_false_law_over_a_list_index_read_is_not_proven_and_a_map_key_read_is_refuse
     );
 }
 
+/// A law without a body over an enum it takes that proves case by case reports each case it does not prove on its own,
+/// with the case it is: over a ramp of delays that shrinks from 30 to 20, only `Retry.ExponentialRamp`, and with
+/// `Retry.Linear`'s delays shrinking from 20 to 15 too, both.
+#[test]
+fn a_law_without_a_body_reports_each_enum_case_it_does_not_prove() {
+    let claim =
+        "index < 0 || index + 1 >= retry.backoff().count() || retry.backoff()[index] <= retry.backoff()[index + 1]";
+    let ramp = retry(&format!("law backoffNeverShrinks(Retry retry, int index) => {claim};"))
+        .replace("[30, 60, 300", "[30, 20, 300");
+    let linear = ramp.replace("[10, 20, 30]", "[10, 20, 15]");
+    for (source, cases) in
+        [(ramp, vec!["Retry.ExponentialRamp"]), (linear, vec!["Retry.Linear", "Retry.ExponentialRamp"])]
+    {
+        let directory = library_project(&[("app/Shared/Events/Retry.sharp", &source)]);
+
+        let output = compile(directory.path());
+
+        assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+        for case in &cases {
+            assert!(
+                printed(&output).contains(&format!(
+                    "error[law-unproven]: law backoffNeverShrinks is not proven\n = when retry is {case}, still to show: {claim}\n"
+                )),
+                "{}",
+                printed(&output)
+            );
+        }
+        assert_eq!(
+            printed(&output).matches("law backoffNeverShrinks is not proven").count(),
+            cases.len(),
+            "{}",
+            printed(&output)
+        );
+    }
+}
+
 /// A case whose proof runs out of its time budget is not proven, as any case left open is: it is refused as
 /// `law-unproven`, names the case, and says the proof ran out of time. The case after it still runs, and is reported on
 /// its own. The slow case's claim has 18 `||` choices for `omega` to split on, 2^18 cases in all.
