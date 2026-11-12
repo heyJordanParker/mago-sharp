@@ -30247,6 +30247,56 @@ fn a_call_of_a_body_that_calls_a_private_native_body_inlines_as_the_native_call(
     );
 }
 
+const COUNTER: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Counter.sharp",
+    "namespace Sharp;\n\npublic class Counter\n{\n    public Counter(public int count { get; }) { }\n\n    private int raw() => this.count;\n\n    public int current() => this.raw();\n}\n",
+);
+
+/// ```php
+/// return $counter->current();
+/// return $this->rank() >= $other->rank();
+/// ```
+///
+/// No subclass overrides a private method or an enum's method, and each still lowers as its call: a library method
+/// whose body calls a private method of its class gives no form, since a copy in another class could not call it, and
+/// an enum's method calls its private method on `this`.
+#[test]
+fn a_call_of_a_private_method_or_an_enum_s_method_lowers_as_its_call() {
+    let code = "namespace App.Tenant;\n\nimport Sharp.Counter;\n\nclass Report\n{\n    public int run(Counter counter) => counter.current();\n}\n";
+    let level = "enum Level\n{\n    case Low;\n    case High;\n\n    private int rank() => match (this) {\n        Level.Low => 1,\n        Level.High => 2,\n    };\n\n    public bool meets(Level other) => this.rank() >= other.rank();\n}\n";
+
+    assert_eq!(
+        Lowered::inlining(code, &[], &[COUNTER]).body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                METHOD_CALL
+                  VAR
+                    ZVAL "counter"
+                  ZVAL "current"
+                  ARG_LIST
+        "#}
+    );
+    assert_eq!(
+        Lowered::new(level).body_of("meets"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                GREATER_EQUAL
+                  METHOD_CALL
+                    VAR
+                      ZVAL "this"
+                    ZVAL "rank"
+                    ARG_LIST
+                  METHOD_CALL
+                    VAR
+                      ZVAL "other"
+                    ZVAL "rank"
+                    ARG_LIST
+        "#}
+    );
+}
+
 /// A mark of `Sharp\Internal`, which only the checker and the bridge read, stays out of the PHP the engine runs, where
 /// no class declares it: `kept` and its parameter carry marks alone, so they lower with no attribute, and `noted` keeps
 /// its `#[NoDiscard]`.
