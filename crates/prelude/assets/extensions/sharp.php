@@ -471,6 +471,18 @@ function listen(string $event, \Closure $listener): \Sharp\Listening {}
 function properties(string $type): array {}
 
 /**
+ * The instance and static methods of the class the class value `$type` names, its own first and then those it
+ * inherits, in the order they are declared, without its constructor and the magic methods PHP names with `__`. The
+ * standard library's `Class<T>.methods()` makes a `Method` of each, and a `Parameter` of each of its parameters.
+ *
+ * @return list<list<list<string>>> for each, first the class that declares it, its name, the class value of its result
+ * type without `?`, and the `?` the type ends with, or "" for a type that is not nullable, then one list per parameter:
+ * its name, the class value of its type without `?`, the `?` the type ends with, and "optional" for one a call may
+ * leave out, or "".
+ */
+function methods(string $type): array {}
+
+/**
  * The class values of the type arguments of the type the class value `$type` holds, in order. The standard library's
  * `Class<T>.typeArguments()` returns them.
  *
