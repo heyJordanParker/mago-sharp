@@ -13,7 +13,7 @@ use std::time::Duration;
 use mago_database::process;
 use serde_json::Value;
 
-mod common;
+use crate::common;
 
 const FIRST: &str = "<?php\n\n// route: /home\nfunction first(): int { return 'text'; }\n";
 

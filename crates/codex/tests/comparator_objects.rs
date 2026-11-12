@@ -1,6 +1,4 @@
-mod comparator_common;
-
-use comparator_common::*;
+use crate::comparator_common::*;
 
 const HIERARCHY: &str = "
     <?php

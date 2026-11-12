@@ -21,7 +21,7 @@ use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService
 use mago_php_version::PHPVersion;
 use mago_syntax::settings::ParserSettings;
 
-mod common;
+use crate::common;
 
 type AuditEntry = (u32, BTreeMap<String, Vec<String>>);
 

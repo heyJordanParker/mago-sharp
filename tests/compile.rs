@@ -15,7 +15,7 @@ use mago_sharp_bridge::unit::source_hash;
 use mago_sharp_bridge::unit::stamp;
 use mago_sharp_lean::PACKAGE_FOLDER;
 
-mod common;
+use crate::common;
 
 const ORDER: &str = "namespace App;\n\npublic class Order\n{\n    public int total(int extra)\n    {\n        return extra + 1;\n    }\n}\n";
 const BROKEN_ORDER: &str = "namespace App;\n\npublic class Order\n{\n    public int total(int extra)\n    {\n        return \"one\";\n    }\n}\n";

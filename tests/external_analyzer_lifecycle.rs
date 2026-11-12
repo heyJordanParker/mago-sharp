@@ -37,7 +37,7 @@ use mago_syntax::settings::ParserSettings;
 use mago_text_edit::Safety;
 use serde::Deserialize;
 
-mod common;
+use crate::common;
 
 const FILE_COUNT: usize = AFTER_FILE_ANALYSIS_BATCH_SIZE + 1;
 const NODE_TARGET_COUNT: usize = 12;

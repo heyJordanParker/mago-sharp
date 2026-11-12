@@ -1,8 +1,6 @@
 #![allow(clippy::approx_constant)]
 
-mod combiner_common;
-
-use combiner_common::*;
+use crate::combiner_common::*;
 
 use mago_codex::ttype::atomic::TAtomic;
 
