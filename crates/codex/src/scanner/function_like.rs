@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use mago_names::IMPORT;
 use mago_names::binding;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
@@ -214,10 +215,15 @@ where
                 metadata.flags |= MetadataFlags::HAS_THROW;
             }
         }
-        // A PHP# `extern` method's body is native, compiled into the engine, so it is concrete without one here.
+        // A PHP# `extern` method's body is native, compiled into the engine, and an `[Import]` method's is the call of
+        // the PHP function it names, spec section 23, so each is concrete without one here.
         MethodBody::Abstract(_) => {
             method_metadata.is_abstract =
-                !method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_)));
+                !method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_)))
+                    && !metadata
+                        .attributes
+                        .iter()
+                        .any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(IMPORT.as_bytes()));
         }
     }
 

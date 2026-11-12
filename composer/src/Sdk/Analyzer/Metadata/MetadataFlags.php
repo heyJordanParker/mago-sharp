@@ -16,6 +16,7 @@ final class MetadataFlags
 {
     public const ABSTRACT = 1;
     public const FINAL = 1 << 1;
+    public const LATE = 1 << 2;
     public const READONLY = 1 << 3;
     public const DEPRECATED = 1 << 4;
     public const ENUM_INTERFACE = 1 << 5;

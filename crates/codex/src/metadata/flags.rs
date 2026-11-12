@@ -13,6 +13,9 @@ impl MetadataFlags {
 
     pub const ABSTRACT: MetadataFlags = MetadataFlags(1 << 0);
     pub const FINAL: MetadataFlags = MetadataFlags(1 << 1);
+    /// A PHP# `late` member, spec section 6: an instance field or property with storage that the constructor may leave
+    /// unset, and whose read before its first write throws.
+    pub const LATE: MetadataFlags = MetadataFlags(1 << 2);
     pub const READONLY: MetadataFlags = MetadataFlags(1 << 3);
     pub const DEPRECATED: MetadataFlags = MetadataFlags(1 << 4);
     pub const ENUM_INTERFACE: MetadataFlags = MetadataFlags(1 << 5);
@@ -431,6 +434,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn has_default(self) -> bool {
         self.contains(Self::HAS_DEFAULT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_late(self) -> bool {
+        self.contains(Self::LATE)
     }
 
     #[inline]

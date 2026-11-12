@@ -10,6 +10,7 @@ use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
@@ -476,15 +477,22 @@ where
     // A `List`, a `Map` and a `Set` are each their own kind, spec section 12, where plain PHP takes a list as an array of
     // any key and any of them as an iterable, so an extension of one kind fits no other, and a type parameter is the
     // kind of its bound. The standard library's members of an `Iterable` belong to a value typed `Iterable`, which is a
-    // kind of its own for them alone, so one fits no value of another type, an object's class included, and a user's
-    // extension of an `Iterable` fits every value a loop reads. An empty array is no kind yet.
-    fn kinds(atomic: &TAtomic) -> Vec<CollectionKind> {
+    // kind of its own for them alone, so one fits no value of another type, a plain PHP object's class included, and a
+    // user's extension of an `Iterable` fits every value a loop reads. A PHP# class whose header names `Iterable<T>` is
+    // one, so it has them. An empty array is no kind yet.
+    fn kinds(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Vec<CollectionKind> {
         match atomic {
             TAtomic::Array(array) if array.is_empty() => vec![],
-            TAtomic::GenericParameter(parameter) => parameter.constraint.types.iter().flat_map(kinds).collect(),
+            TAtomic::GenericParameter(parameter) => {
+                parameter.constraint.types.iter().flat_map(|atomic| kinds(atomic, codebase)).collect()
+            }
+            TAtomic::Object(TObject::Named(named)) if codebase.is_sharp_iterable(named.name.as_bytes()) => {
+                vec![CollectionKind::Iterable]
+            }
             _ => CollectionKind::of(atomic).into_iter().collect(),
         }
     }
+    let kinds = |atomic: &TAtomic| kinds(atomic, context.codebase);
     let iterable_is_kind = is_collection_member(class, metadata);
     let parameter_kinds: Vec<_> = parameter
         .types

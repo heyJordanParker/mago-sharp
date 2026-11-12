@@ -66,4 +66,4 @@ Règles :
 - L'indicateur peut être répété pour substituer plusieurs fichiers à la fois.
 - En conflit avec `--stdin-input`.
 
-En interne, `TEMP` est ajouté aux chemins hôtes et `ORIG` est ajouté aux exclusions pour cette exécution, de sorte que l'analyse des dépendances continue de voir la mutation. Les problèmes signalés référencent `TEMP` plutôt que `ORIG`.
+`TEMP` est vérifié exactement comme `ORIG` le serait au chemin de `ORIG`, de sorte que l'analyse des dépendances voit la mutation à sa place. Il prend les exclusions de `ORIG`, où que se trouve `TEMP`. Les problèmes signalés référencent le chemin de `ORIG` avec l'extension de `TEMP`.

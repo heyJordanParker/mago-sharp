@@ -45,6 +45,7 @@ use crate::resolver::class_name::report_full_class_name;
 use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::resolver::class_name::statics_type_arguments;
+use crate::resolver::method::plain_text_method;
 use crate::resolver::property::resolve_method_value;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_property::StaticProperty;
@@ -470,7 +471,12 @@ pub(crate) fn report_member_of_mixed_kinds<A>(
             return;
         };
         let declares_property = codebase.get_declaring_property(class.as_bytes(), property.as_bytes()).is_some();
-        let declares_method = codebase.get_declaring_method(class.as_bytes(), name.value).is_some();
+        // Spec section 18: a plain PHP class's `__toString()` is its `toString()`.
+        let declares_method = codebase.get_declaring_method(class.as_bytes(), name.value).is_some()
+            || (name.value == b"toString"
+                && codebase
+                    .get_class_like(class.as_bytes())
+                    .is_some_and(|class| plain_text_method(codebase, class).is_some()));
         let is_method = if is_call {
             declares_method || (!declares_property && codebase.method_exists(class.as_bytes(), b"__call"))
         } else {

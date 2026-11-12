@@ -264,6 +264,8 @@ const ANY: &[u8] = b"Any";
 ///   writes `value`, and `didSet` returns no value.
 /// - Behaviors, spec section 6.4: `via` and class names after the accessors of an instance auto-property with
 ///   `get; set;`, and the analyzer checks each is a `Behavior` for the property's type.
+/// - `late`, spec section 6: on an instance field or an instance property with storage and no initial value, which the
+///   constructor may leave unset and whose read before its first write throws.
 /// - A computed property: `public`, `protected` or `private`, an optional `static` or `lazy`, a type, one name and an
 ///   expression body, as in `public string slug => Str.slug(name);`. Its expression is a method body's expression and
 ///   runs on each read, or once when `lazy`. A `static` one runs as a hidden static method of its class, because PHP
@@ -745,6 +747,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                     check_named_constructor(constructor, &class.name, class.modifiers.contains_abstract(), context);
                 }
             }
+            check_iterable_class(class, context);
 
             Some(Class)
         }
@@ -830,6 +833,18 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
+        // `is_slice_property` keeps `late` to instance storage without an initial value.
+        (Node::Modifier(Modifier::Late(_)), FieldOrProperty) => Some(FieldOrProperty),
+        (Node::Modifier(Modifier::Late(late)), _) => {
+            context.report(
+                Issue::error(
+                    "Only a field or a property with storage is `late`, written as in `public late string number { get; set; }`.",
+                )
+                .with_annotation(Annotation::primary(late.span).with_message("Written here.")),
+            );
+
+            None
+        }
         // `check_class` reports `protected` and `private` on a class, and PHP's own check `abstract` with `final`.
         // `check_static_class` reports `abstract`, `final` and `foreign` on a static class.
         (
@@ -853,6 +868,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // A header names each class and interface by its short name, and a generic one with type arguments, which are
         // a parameter's types.
         (Node::Hint(Hint::Identifier(name)), Header) if !context.names.is_type_parameter(name) => Some(Header),
+        // Spec section 12: a class's header names `Iterable<T>`, whose type argument is a parameter's type, and
+        // `check_header` keeps it to a class.
+        (Node::Hint(Hint::Generic(generic)), Header) if generic.is_iterable() => Some(Parameter),
         (Node::Hint(hint @ Hint::Generic(generic)), Header)
             if is_slice_type(hint) && built_in_generic_arity(generic.name.value).is_none() =>
         {
@@ -1283,6 +1301,18 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 check_accessors(&property.modifiers, &property.hook_list, variable, context);
             }
             check_accessor_bodies(&property.hook_list, variable.name, context);
+            // Spec section 6: a `late` member leaves its storage unset, so it has storage.
+            if let Some(late) = property.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Late(_)))
+                && !context.names.has_storage(&property.hook_list)
+            {
+                context.report(
+                    Issue::error(format!(
+                        "`{}` computes every read and write, so it has no storage to leave unset: drop `late`, or give it an auto accessor such as `get;`.",
+                        BytesDisplay(variable.name.strip_prefix(b"$").unwrap_or(variable.name))
+                    ))
+                    .with_annotation(Annotation::primary(late.span()).with_message("Written here.")),
+                );
+            }
             if let Some(initial_value) = &property.initial_value
                 && !context.names.has_storage(&property.hook_list)
             {
@@ -3442,7 +3472,39 @@ fn report_interface_member_access(modifier: &Modifier, context: &mut Context<'_,
 /// enum, `UnitEnum` or `BackedEnum`, which the engine adds to every enum or every backed one. Names compare as PHP's
 /// do, resolved and ignoring case. A generic type counts by its name, and `enter` refuses any type in a header that
 /// is not a class or a generic class type, `List`, `Map` and `Class` included, which have no resolved name.
+/// Spec section 12: plain PHP reads a class whose header names `Iterable<T>` through the `getIterator()` the bridge
+/// writes, which reads `elements()`, so the class declares no member of that name.
+fn check_iterable_class(class: &Class, context: &mut Context<'_, '_, '_>) {
+    let Some(iterable) = class.inheritance.as_ref().and_then(|inheritance| inheritance.iterable()) else {
+        return;
+    };
+    for member in &class.members {
+        let ClassLikeMember::Method(method) = member else {
+            continue;
+        };
+        if method.name.value.eq_ignore_ascii_case(b"getIterator") {
+            context.report(
+                Issue::error(format!(
+                    "`{}` names `Iterable<T>`, so plain PHP reads its `elements()` through the `getIterator()` PHP# writes: rename this method.",
+                    BytesDisplay(class.name.value)
+                ))
+                .with_annotation(Annotation::primary(method.name.span()).with_message("Declared here."))
+                .with_annotation(Annotation::secondary(iterable.span()).with_message("Named here.")),
+            );
+        }
+    }
+}
+
 fn check_header(inheritance: &Inheritance, place: Place, context: &mut Context<'_, '_, '_>) {
+    // Spec section 12: a class is an `Iterable<T>` of its `elements()`, and no other type declares one.
+    if place != Place::Class
+        && let Some(iterable) = inheritance.iterable()
+    {
+        context.report(
+            Issue::error("Only a class names `Iterable<T>` in its header, and declares the `elements()` a loop reads.")
+                .with_annotation(Annotation::primary(iterable.span()).with_message("Remove this name.")),
+        );
+    }
     let mut named: Vec<&[u8]> = Vec::new();
     for name in inheritance.names() {
         let Some(resolved) = context.names.resolve(&name) else {
@@ -3546,6 +3608,24 @@ fn is_slice_property(property: &Property) -> Result<(), Box<Issue>> {
             .with_annotation(Annotation::primary(lazy.span()).with_message("Written here."))
             .with_note("It takes no accessors and no initial value."),
         ));
+    }
+
+    // Spec section 6: a `late` member is instance storage that the constructor may leave unset until its first write.
+    if let Some(late) = modifier(|modifier| matches!(modifier, Modifier::Late(_))) {
+        let refusal = if property.modifiers().contains_static() {
+            Some("A static is never `late`: it holds its initial value before any code reads it.")
+        } else if matches!(property, Property::Computed(_)) {
+            Some("A computed property is never `late`: it has no storage to leave unset.")
+        } else if property.initial_value().is_some() {
+            Some("A `late` member takes no initial value: the code that fills it after the constructor sets it.")
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            return Err(Box::new(
+                Issue::error(refusal).with_annotation(Annotation::primary(late.span()).with_message("Written here.")),
+            ));
+        }
     }
 
     if let Property::Plain(_) = property {

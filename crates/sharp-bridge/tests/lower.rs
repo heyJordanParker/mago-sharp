@@ -14117,9 +14117,11 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
 }
 
 /// A collection the project's plain PHP returns is checked element by element where it enters PHP#, since its type is
-/// a docblock nothing checks. A collection PHP's internal functions return, which the standard library alone calls, is
-/// not: the engine guarantees their types. Neither is one whose elements take any value, nor one PHP# can't write, such
-/// as `array<array-key, int>`.
+/// a docblock nothing checks. A `Map` crosses in through `Sharp\Internal\returned`, which makes the PHP array the
+/// object. Plain PHP's `array-key` arrives as `int|string`, spec section 12, so an `array<array-key, int>` is checked
+/// as a `Map<int|string, int>` and a bare `array` as a `Map<int|string, Any?>`. A collection PHP's internal functions
+/// return, which the standard library alone calls, is not: the engine guarantees their types. Neither is a `List`
+/// whose elements take any value.
 #[test]
 fn a_collection_the_project_returns_from_plain_php_is_checked_element_by_element() {
     let body = Lowered(common::checked(
@@ -14134,7 +14136,10 @@ fn a_collection_the_project_returns_from_plain_php_is_checked_element_by_element
     .body();
 
     assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 1, "{body}");
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"").count(), 2, "{body}");
     assert!(body.contains("ZVAL \"List<int>\"\n      ZVAL \"Lib\\\\Calc::ints()\""), "{body}");
+    assert!(body.contains("ZVAL \"Map<int|string, int>\"\n        ZVAL \"Lib\\\\Calc::keyed()\""), "{body}");
+    assert!(body.contains("ZVAL \"Map<int|string, Any?>\"\n        ZVAL \"Lib\\\\Calc::untyped()\""), "{body}");
 }
 
 /// Every function a call from plain PHP reaches checks a parameter that names a PHP# class with type arguments, as a
@@ -17512,22 +17517,19 @@ fn typeof_is_the_class_name_of_the_imported_class() {
 /// return 'total';
 /// ```
 ///
-/// `nameof(X.y)` is the string `'y'`: the checker proved `X` has the property, so the running program needs its name
-/// alone.
+/// `nameof(X.y)` is the string `'y'`: the checker proved `X` has the property or the method, so the running program
+/// needs its name alone. `nameof(X)` is the class's own name, spec section 25.
 #[test]
-fn nameof_is_the_name_of_the_property() {
-    assert_eq!(
-        body_in(
-            "string run(int extra)",
-            "        return nameof(Calc.total);\n",
-            &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc { public int $total = 0; }")]
-        ),
-        indoc! {r#"
-            STMT_LIST
-              RETURN
-                ZVAL "total"
-        "#}
-    );
+fn nameof_is_the_name_of_the_member_or_the_class() {
+    let calc = [(
+        "src/Lib/Calc.php",
+        "<?php namespace Lib; final class Calc { public int $total = 0; public function run(): void {} }",
+    )];
+    let returns = |name: &str| format!("STMT_LIST\n  RETURN\n    ZVAL {name:?}\n");
+
+    assert_eq!(body_in("string run(int extra)", "        return nameof(Calc.total);\n", &calc), returns("total"));
+    assert_eq!(body_in("string run(int extra)", "        return nameof(Calc.run);\n", &calc), returns("run"));
+    assert_eq!(body_in("string run(int extra)", "        return nameof(Calc);\n", &calc), returns("Calc"));
 }
 
 /// ```php
@@ -22052,6 +22054,60 @@ fn a_map_a_class_method_gives_becomes_the_object_where_a_plain_override_may_give
 }
 
 /// ```php
+/// return \Sharp\Internal\returned($source->heldStatus(), $source, 'heldstatus', 'Map<string, string>', …);
+/// ```
+///
+/// Spec section 22: `\Sharp\Internal\returned` looks the method up in the class's `function_table`, which PHP keys in
+/// lowercase, so the call names a camelCase method in lowercase, and the engine gives the PHP# method's result as it is.
+#[test]
+fn a_camel_case_method_s_result_is_read_by_its_lowercase_name() {
+    let source = (
+        "src/App/Tenant/Source.sharp",
+        "namespace App.Tenant;\n\npublic class Source\n{\n    public virtual Map<string, string> heldStatus() => [\"status\": \"active\"];\n}\n",
+    );
+    let body = body_in("Map<string, string> run(Source source)", "        return source.heldStatus();\n", &[source]);
+
+    assert!(body.contains("ZVAL \"Sharp\\\\Internal\\\\returned\""), "{body}");
+    assert!(body.contains("ZVAL \"heldstatus\""), "{body}");
+    assert!(body.contains("ZVAL \"App.Tenant.Source.heldStatus()\""), "{body}");
+}
+
+/// ```php
+/// class Bag implements \IteratorAggregate { public function getIterator(): \Traversable { return \Sharp\Internal\elements($this, false); } }
+/// class Tally implements \IteratorAggregate { public function getIterator(): \Traversable { return \Sharp\Internal\elements($this, true); } }
+/// ```
+///
+/// Spec section 12: a class whose header names `Iterable<T>` is PHP's `\IteratorAggregate`, whose `getIterator()` reads
+/// its `elements()` through the engine, and `true` gives plain PHP each `[key, value]` tuple as its key and value.
+#[test]
+fn a_class_whose_header_names_iterable_is_an_iterator_aggregate_of_its_elements() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Bag.sharp",
+                "namespace App;\n\npublic class Bag : Iterable<string>\n{\n    public Iterable<string> elements() => [\"tea\"];\n}\n",
+            ),
+            (
+                "src/App/Tally.sharp",
+                "namespace App;\n\npublic class Tally : Iterable<[string, int]>\n{\n    public Iterable<[string, int]> elements() => [\"tea\": 3];\n}\n",
+            ),
+        ],
+        &[],
+    );
+
+    for (name, pairs) in [("Bag", "false"), ("Tally", "true")] {
+        let (lowered, class) = class_in(&files, name);
+        let interfaces = lowered.render(lowered.child(class, 1));
+        let iterator = lowered.render(lowered.method_named("getIterator"));
+
+        assert_eq!(interfaces, "NAME_LIST\n  ZVAL \"IteratorAggregate\"\n");
+        assert!(iterator.contains("ZVAL \"Sharp\\\\Internal\\\\elements\""), "{iterator}");
+        assert!(iterator.contains(&format!("ZVAL {pairs}")), "{iterator}");
+        assert!(iterator.contains("ZVAL \"Traversable\""), "{iterator}");
+    }
+}
+
+/// ```php
 /// return (($as#1 = \is_array($crossing#2 = $folder->records) ? \Sharp\Map::from($crossing#2) : $crossing#2) instanceof Map<…> ? … : null) != null;
 /// ```
 ///
@@ -23617,8 +23673,10 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
 /// ```
 ///
 /// Spec section 12: a plain PHP array a `Map` member reads becomes the `\Sharp\Map` first, as it does where a typed
-/// local holds it, null-safe or not, so the member runs on the `Map` and a key keeps its type. The call runs once: the
-/// hidden local a null-safe link holds it in takes the result as the call reads it.
+/// local holds it, null-safe or not, so the member runs on the `Map` and a key keeps its type. Plain PHP's
+/// `array-key` arrives as `int|string`, so the project's `array<array-key, int>` is checked as a `Map<int|string, int>`
+/// and its `Map` takes those type arguments. The call runs once: the hidden local a null-safe link holds it in takes
+/// the result as the call reads it.
 #[test]
 fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
     assert_eq!(
@@ -23686,6 +23744,7 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
                               ARG_LIST
                                 VAR
                                   ZVAL "crossing#2"
+                                ZVAL "int|string, int"
                             VAR
                               ZVAL "crossing#2"
                           ZVAL 5
@@ -23701,8 +23760,8 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
 /// ```
 ///
 /// Spec section 12: PHP holds an all-digit `string` key as an `int`, so a loop over a plain PHP array keyed by `string`
-/// runs over the `\Sharp\Map` that takes each key back as its `string`. One keyed by `array-key` is the
-/// `Map<int|string, …>` that keeps its keys.
+/// runs over the `\Sharp\Map` that takes each key back as its `string`. One keyed by `array-key`, which arrives as
+/// `int|string`, is the `Map<int|string, …>` that keeps its keys, and is checked as the project's collection is.
 #[test]
 fn a_loop_over_a_plain_php_array_keyed_by_string_takes_its_keys_back() {
     assert_eq!(
@@ -23808,6 +23867,78 @@ fn a_lazy_plain_php_source_is_checked_where_an_iterable_holds_it() {
                     ZVAL "count"
                     ARG_LIST
         "#}
+    );
+}
+
+/// ```php
+/// $columns = \Sharp\Internal\returned(\Lib\Calc::from(new Box()), null, '', 'Map<int|string, Any?>', 'Lib\Calc::from()');
+/// ```
+///
+/// Spec section 12: plain PHP's `array-key` is PHP#'s `int|string`. A plain PHP generic whose key type no argument
+/// fixes, as an object passed where an `array<TKey, TValue>` or an object is taken leaves it, takes the key type's
+/// default `array-key` as its type argument, which the call carries as `int|string`, and its result enters the `Map`
+/// the local declares.
+#[test]
+fn a_plain_php_array_key_enters_php_sharp_as_int_or_string() {
+    assert_eq!(
+        body_in(
+            "void run()",
+            "        Map<int|string, Any?> columns = Calc.from(new Box());\n",
+            &[
+                (
+                    "src/Lib/Calc.php",
+                    "<?php namespace Lib;\nfinal class Calc {\n/**\n * @template TKey of array-key = array-key\n * @template TValue = mixed\n * @param array<TKey, TValue>|\\WeakMap<object, TValue>|\\Traversable<TKey, TValue>|object $items\n * @return ($items is \\WeakMap ? list<TValue> : array<TKey, TValue>)\n */\npublic static function from($items) { return (array) $items; } }",
+                ),
+                ("src/App/Tenant/Box.sharp", "namespace App.Tenant;\n\nclass Box\n{\n}\n"),
+            ]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "columns"
+                CALL
+                  ZVAL "Sharp\\Internal\\returned"
+                  ARG_LIST
+                    STATIC_CALL
+                      ZVAL "Lib\\Calc"
+                      ZVAL "from"
+                      ARG_LIST
+                        NEW
+                          ZVAL "App\\Tenant\\Box"
+                          ARG_LIST
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL "int|string, Any?"
+                    ZVAL null
+                    ZVAL ""
+                    ZVAL "Map<int|string, Any?>"
+                    ZVAL "Lib\\Calc::from()"
+        "#}
+    );
+}
+
+/// A call carries the type arguments of a plain PHP method a project's class declares, which a PHP# override may run,
+/// so one PHP# can't write, as the `scalar` a template's default gives, is refused before lowering, as a PHP# method's
+/// is.
+#[test]
+fn a_plain_php_type_argument_php_sharp_can_t_write_is_refused_before_lowering() {
+    let lowered = Lowered::with(
+        &method_with("void run()", "        List<Any?> values = Calc.from(new Box());\n"),
+        &[
+            (
+                "src/Lib/Calc.php",
+                "<?php namespace Lib;\nfinal class Calc {\n/**\n * @template TValue of scalar = scalar\n * @param list<TValue>|object $items\n * @return list<TValue>\n */\npublic static function from($items) { return []; } }",
+            ),
+            ("src/App/Tenant/Box.sharp", "namespace App.Tenant;\n\nclass Box\n{\n}\n"),
+        ],
+    );
+
+    assert_eq!(
+        lowered.diagnostics(),
+        [
+            "9:29 compile error: The type argument `TValue` of the call to `Calc.from` would be `scalar`, which PHP# can't write."
+        ]
     );
 }
 
@@ -24885,6 +25016,129 @@ fn an_object_in_a_template_shows_what_its_to_string_returns() {
                       ZVAL "sku"
                     ZVAL "toString"
                     ARG_LIST
+        "#}
+    );
+}
+
+/// Spec section 18: a plain PHP class without `toString()` shows its `__toString()`, which PHP's string conversion runs,
+/// in a template and in a call of `toString()`.
+#[test]
+fn a_plain_php_object_shows_its_to_string_through_a_string_conversion() {
+    let email = (
+        "src/Lib/Email.php",
+        "<?php\n\nnamespace Lib;\n\nclass Email\n{\n    public function __toString(): string\n    {\n        return 'a@b.c';\n    }\n}\n",
+    );
+    let report = Lowered::with(
+        "namespace App.Tenant;\n\nimport Lib.Email;\n\nclass Report\n{\n    public string run(Email email) => `To: ${email}`;\n\n    public string text(Email email) => email.toString();\n}\n",
+        &[email],
+    );
+
+    assert_eq!(
+        report.body_of("run"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                ENCAPS_LIST
+                  ZVAL "To: "
+                  CAST [6]
+                    VAR
+                      ZVAL "email"
+        "#}
+    );
+    assert_eq!(
+        report.body_of("text"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CAST [6]
+                  VAR
+                    ZVAL "email"
+        "#}
+    );
+}
+
+/// `Sharp\Interop\Import` at the standard library's path, which an `[Import]` method names.
+const IMPORT_LIBRARY: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Interop/Import.sharp",
+    include_str!("../../../../composer/library/Sharp/Interop/Import.sharp"),
+);
+
+/// Spec section 23: an `[Import]` method's body is the call of the PHP function it names. A `Map` argument passes as
+/// the PHP array plain PHP receives, a variadic one spreads, the result is checked as a plain PHP value crossing into
+/// the declared type, and a `void` or `Any?` result needs no check.
+#[test]
+fn an_imported_method_s_body_calls_the_php_function_it_names() {
+    let words = Lowered::with(
+        "namespace App.Tenant;\n\nimport Sharp.Interop.Import;\n\npublic static class Words\n{\n    [Import(\"array_keys\")]\n    public static List<string> keys(Map<string, int> counts);\n\n    [Import(\"max\")]\n    public static int largest(int ...values);\n\n    [Import(\"json_decode\")]\n    public static Any? decoded(string json);\n\n    [Import(\"usleep\")]\n    public static void pause(int microseconds);\n}\n",
+        &[IMPORT_LIBRARY],
+    );
+
+    // The last statement of each body, after the checks of the arguments plain PHP may pass.
+    let call = |name: &str| {
+        let body = words.child(words.method_named(name), 2);
+
+        words.render(words.child(body, words.nodes()[body as usize].child_count - 1))
+    };
+
+    assert_eq!(
+        call("keys"),
+        indoc! {r#"
+            RETURN
+              CALL
+                ZVAL "Sharp\\Internal\\returned"
+                ARG_LIST
+                  CALL
+                    ZVAL "array_keys"
+                    ARG_LIST
+                      CALL
+                        ZVAL "Sharp\\Internal\\arrayOf"
+                        ARG_LIST
+                          VAR
+                            ZVAL "counts"
+                  ZVAL null
+                  ZVAL ""
+                  ZVAL "List<string>, List<Any?>"
+                  ZVAL "array_keys()"
+        "#}
+    );
+    assert_eq!(
+        call("largest"),
+        indoc! {r#"
+            RETURN
+              CALL
+                ZVAL "Sharp\\Internal\\returned"
+                ARG_LIST
+                  CALL
+                    ZVAL "max"
+                    ARG_LIST
+                      UNPACK
+                        VAR
+                          ZVAL "values"
+                  ZVAL null
+                  ZVAL ""
+                  ZVAL "int"
+                  ZVAL "max()"
+        "#}
+    );
+    assert_eq!(
+        call("decoded"),
+        indoc! {r#"
+            RETURN
+              CALL
+                ZVAL "json_decode"
+                ARG_LIST
+                  VAR
+                    ZVAL "json"
+        "#}
+    );
+    assert_eq!(
+        call("pause"),
+        indoc! {r#"
+            CALL
+              ZVAL "usleep"
+              ARG_LIST
+                VAR
+                  ZVAL "microseconds"
         "#}
     );
 }
@@ -29773,6 +30027,32 @@ fn a_form_that_calls_before_its_last_slot_read_inlines_with_pure_arguments() {
 }
 
 /// ```php
+/// return \str_pad(\trim($name), 8);
+/// ```
+///
+/// A call that leaves out an argument whose default is a literal inlines with that literal in its slot, as the method
+/// would run it, so `"  sku ".trim()` runs `mb_trim($text, null)` where `trim(string? characters = null)` declares one.
+#[test]
+fn a_call_that_leaves_out_a_literal_default_inlines_with_the_default() {
+    assert_eq!(
+        inlined_body("string run(string name)", "        return Text.padded(name);\n"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  ZVAL "str_pad"
+                  ARG_LIST
+                    CALL
+                      ZVAL "trim"
+                      ARG_LIST
+                        VAR
+                          ZVAL "name"
+                    ZVAL 8
+        "#}
+    );
+}
+
+/// ```php
 /// return \Sharp\Text::padded($name, \count($widths));
 /// ```
 ///
@@ -29870,7 +30150,7 @@ fn a_form_that_reads_its_slots_out_of_order_keeps_the_call_with_an_impure_receiv
     );
 }
 
-/// A named argument, an omitted default, a method without a form and a method of a project file each keep the call:
+/// A named argument, a method without a form and a method of a project file each keep the call:
 /// a body that calls a private or a protected method, calls `Self`, or can be overridden has no form.
 #[test]
 fn a_call_the_inlining_rule_does_not_take_keeps_its_call() {
@@ -29888,7 +30168,6 @@ fn a_call_the_inlining_rule_does_not_take_keeps_its_call() {
     let named = "        NAMED_ARG\n          ZVAL \"text\"\n          VAR\n            ZVAL \"name\"\n";
     let cases = [
         ("Text.capitalized(text: name)", static_call("Sharp\\\\Text", "capitalized", named)),
-        ("Text.padded(name)", static_call("Sharp\\\\Text", "padded", name)),
         ("Text.twice(name)", static_call("Sharp\\\\Text", "twice", name)),
         ("Text.trimmed(name)", static_call("Sharp\\\\Text", "trimmed", name)),
         ("Loud.capitalized(name)", static_call("Lib\\\\Loud", "capitalized", name)),

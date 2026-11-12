@@ -23,6 +23,7 @@ use mago_analyzer::settings::Settings;
 use mago_codex::scanner::scan_program;
 use mago_database::file::File;
 use mago_names::resolver::ChangingMembers;
+use mago_names::resolver::ExternNamespaces;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_php_version::PHPVersion;
@@ -233,12 +234,21 @@ pub fn checked_file<R>(
             })
             .map(|member| member.original_name)
     }));
+    let extern_namespaces = ExternNamespaces::new(
+        scanned.iter().flat_map(|scan| scan.extern_namespaces.iter().map(|declaration| declaration.namespace)),
+    );
     for (library_file, library_program) in &library {
-        let names = NameResolver::new(&arena).resolve_in(library_program, &namespace_classes, &changing_members);
+        let names = NameResolver::new(&arena).resolve_in(
+            library_program,
+            &namespace_classes,
+            &changing_members,
+            &extern_namespaces,
+        );
         metadata.extend(scan_program(&arena, library_file, library_program, &names, settings.version));
     }
 
-    let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes, &changing_members);
+    let names =
+        NameResolver::new(&arena).resolve_in(program, &namespace_classes, &changing_members, &extern_namespaces);
     let semantic_issues = SemanticsChecker::new(PHPVersion::ENGINE).check(file, program, &names);
 
     metadata.extend(scan_program(&arena, file, program, &names, settings.version));

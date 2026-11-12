@@ -1,9 +1,11 @@
 //! A bare call of a PHP built-in as the standard library member that runs that function with PHP's meaning, as
 //! `count($items)` is `items.count()` (decision 4). A member fits a call when every literal and constant it passes is
-//! the call's own, its receiver and parameters take the call's arguments, it [`differs`] in nothing, and a value it
-//! reads out of the call's order runs nothing. Any other call keeps the file plain PHP, with the difference named.
+//! the call's own, its receiver and parameters take the call's arguments, or a trailing parameter's default is PHP's
+//! own default where the call leaves the argument out, it [`differs`] in nothing, and a value it reads out of the
+//! call's order runs nothing. Any other call keeps the file plain PHP, with the difference named.
 
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by_with_erased_template_arguments;
@@ -64,7 +66,22 @@ impl Converter<'_, '_> {
                 _ => return Err("takes no named or spread argument".to_owned()),
             }
         }
-        if arguments.len() != member.call.arguments.len() {
+        let method = codebase
+            .get_method(member.class.as_bytes(), member.name.as_bytes())
+            .ok_or_else(|| "has no declaration in the analysis".to_owned())?;
+        // The member's call of `function` may pass more than this call does, where each argument this call leaves out
+        // is a parameter of the member with the default PHP's parameter has, as `x.trim()` passes `mb_trim` the `null`
+        // of `trim(string? characters = null)`.
+        let default = |parameter: Option<&FunctionLikeParameterMetadata>| {
+            parameter
+                .and_then(FunctionLikeParameterMetadata::get_default_type)
+                .map(|default| default.type_union.get_id())
+        };
+        let left_out = member.call.arguments.get(arguments.len()..).unwrap_or_default();
+        let defaulted = left_out.iter().zip(arguments.len()..).all(|(passed, position)| {
+            matches!(passed, PhpCallArgument::Slot(slot) if default(method.parameters.get(*slot)).is_some_and(|ours| Some(ours) == default(function.parameters.get(position))))
+        });
+        if arguments.len() > member.call.arguments.len() || !defaulted {
             return Err(format!(
                 "passes {} arguments, where this call passes {}",
                 member.call.arguments.len(),
@@ -106,9 +123,6 @@ impl Converter<'_, '_> {
             .collect::<Option<_>>()
             .ok_or_else(|| "reads a value this call doesn't pass".to_owned())?;
 
-        let method = codebase
-            .get_method(member.class.as_bytes(), member.name.as_bytes())
-            .ok_or_else(|| "has no declaration in the analysis".to_owned())?;
         for (index, (argument, parameter)) in slots.iter().zip(&method.parameters).enumerate() {
             let declared = parameter.get_type_metadata().map_or_else(get_mixed, |metadata| metadata.type_union.clone());
             let passed = self.type_of(argument).cloned().unwrap_or_else(get_mixed);

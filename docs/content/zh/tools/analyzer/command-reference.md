@@ -32,7 +32,7 @@ Usage: mago analyze [OPTIONS] [PATHS]...
 | `--substitute <ORIG=TEMP>` | 在本次调用中以另一个文件替换某个宿主文件。用于变异测试。可重复使用。 |
 | `--watch` | 持续运行,在文件变化时重新分析。参见[监视模式](#watch-mode)。 |
 | `--list-codes` | 以 JSON 列出每一项分析器问题的代码。 |
-| `--scan-only` | 构建代码库并运行扩展的分析前 hook,但不分析任何文件。只报告这些 hook 提出的问题,不使用 baseline。 |
+| `--scan-only` | 构建代码库并运行扩展的分析前 hook,但不分析任何文件。只报告这些 hook 提出的问题和每个文件的语法解析错误,不使用 baseline。 |
 | `-h`, `--help` | 打印帮助并退出。 |
 
 报告、修复和 baseline 的共享标志记录在[报告和修复选项](/fundamentals/shared-reporting-options/)页面。
@@ -62,7 +62,7 @@ mago analyze --substitute /abs/path/to/src/Foo.php=/tmp/mutation-42.php
 - 该标志可以重复使用,以便一次替换多个文件。
 - 与 `--stdin-input` 和 `--staged` 互斥。
 
-在内部,`TEMP` 会被加入宿主路径,`ORIG` 会被加入本次运行的排除项,因此跨文件的类型推断仍然可以看到该变异。报告的问题和 baseline 条目引用的是 `TEMP` 而非 `ORIG`。
+`TEMP` 会完全按照 `ORIG` 在其路径上的方式接受检查,因此跨文件的类型推断会在 `ORIG` 的位置看到该变异。无论 `TEMP` 位于何处,它都会采用 `ORIG` 的包、文件夹命名空间和排除项,并保留自己的扩展名,因此 `Foo.php=Foo.sharp` 会按 PHP# 检查。报告的问题和 baseline 条目引用的是带有 `TEMP` 扩展名的 `ORIG` 路径。
 
 ## 监视模式
 

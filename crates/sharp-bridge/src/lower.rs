@@ -898,6 +898,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.class_members(&class.members, parent_name, class.class.span, class.left_brace, class.right_brace);
         members.extend(self.parse_methods(&class.members, class.name.span));
         members.extend(self.string_conversion(class.members.as_slice(), class.left_brace, class.right_brace));
+        members
+            .extend(class.inheritance.as_ref().and_then(|inheritance| self.iteration(inheritance, class.right_brace)));
         if self.tested {
             members.extend(self.test_hooks(class));
         }
@@ -949,6 +951,38 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             start,
             end,
             b"__toString",
+            &[parameters, NULL, body, return_type, NULL],
+        ))
+    }
+
+    /// Spec section 12: plain PHP receives an object of a class whose header names `Iterable<T>` as a `Traversable`
+    /// whose `foreach` reads `elements()`, so the class gets `\IteratorAggregate`'s `getIterator()`:
+    /// `public function getIterator(): \Traversable { return \Sharp\Internal\elements($this, false); }`. The engine
+    /// gives PHP# code each element, and plain PHP each element under the keys 0, 1, 2 and on, or, where `T` is a
+    /// `[key, value]` tuple, `true` here, its key and value. None for a header without `Iterable<T>`.
+    fn iteration(&mut self, inheritance: &Inheritance, end: Span) -> Option<u32> {
+        let iterable = inheritance.iterable()?;
+        let line = self.line(iterable.name);
+        let pairs = iterable
+            .type_arguments
+            .arguments
+            .iter()
+            .next()
+            .is_some_and(|element| matches!(element, Hint::Tuple(tuple) if tuple.elements.len() == 2));
+        let this = self.variable(iterable.name.span, b"this");
+        let pairs = self.zval(line, if pairs { sharp_value::SHARP_TRUE } else { sharp_value::SHARP_FALSE }, |_| {});
+        let elements = self.global_call(line, b"Sharp\\Internal\\elements", &[this, pairs]);
+        let result = self.node(SHARP_AST_RETURN, 0, line, &[elements]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[result]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let return_type = self.string(ZEND_NAME_FQ, line, b"Traversable");
+
+        Some(self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            iterable.name.span,
+            end,
+            b"getIterator",
             &[parameters, NULL, body, return_type, NULL],
         ))
     }
@@ -1734,6 +1768,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                     self.method(method, modifier_flags_or_private(&method.modifiers), &[body])
                 }
+                // Spec section 23: an `[Import]` method's body is the call of the PHP function it names.
+                ClassLikeMember::Method(method)
+                    if let Some(import) = self.types.import(self.class, method.name.value) =>
+                {
+                    let body = self.imported_call(method, import);
+
+                    self.method(method, modifier_flags_or_private(&method.modifiers), &[body])
+                }
                 ClassLikeMember::Method(method) => {
                     self.method(method, modifier_flags_or_private(&method.modifiers), &[])
                 }
@@ -2088,9 +2130,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A header's interfaces, which PHP compiles as the interface list, or null when it names none. A class's base
-    /// class is its parent, and a trait is in its `use`.
+    /// class is its parent, and a trait is in its `use`. A header's `Iterable<T>` is PHP's `\IteratorAggregate`, whose
+    /// `getIterator()` [`Self::iteration`] writes, spec section 12.
     fn name_list(&mut self, inheritance: &Inheritance) -> u32 {
         let mut names = Vec::new();
+        if let Some(iterable) = inheritance.iterable() {
+            names.push(self.string(ZEND_NAME_FQ, self.line(iterable.name), b"IteratorAggregate"));
+        }
         for name in inheritance.names() {
             let full_name = self.names.get(&name);
             match self.types.class_declaration(full_name).kind {
@@ -3331,6 +3377,44 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
 
         self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+    }
+
+    /// The body of the `[Import]` method `method`, spec section 23: `return \levenshtein($a, $b);`, the call of the PHP
+    /// function `import` names, with each argument and the result crossing as any plain PHP value does. A `Map` or a
+    /// `Set` argument passes as the PHP array plain PHP receives, and the result is read as the method's result type,
+    /// checked by `\Sharp\Internal\returned`, whose error names the function. A function PHP doesn't declare throws
+    /// PHP's error that names it, at the first call.
+    fn imported_call(&mut self, method: &Method, import: (Word, Option<(String, String)>)) -> u32 {
+        let (function, check) = import;
+        let line = self.line(method.name.span);
+        let name = self.string(ZEND_NAME_FQ, line, function.as_bytes());
+        let mut arguments = Vec::new();
+        for parameter in &method.parameter_list.parameters {
+            let mut value = self.variable(parameter.variable.span, parameter.variable.name);
+            if self.crossing_type(parameter).is_some() {
+                value = self.array_of(line, value, None);
+            }
+            arguments.push(if parameter.is_variadic() {
+                self.node(SHARP_AST_UNPACK, 0, line, &[value])
+            } else {
+                value
+            });
+        }
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+        let call = self.node(SHARP_AST_CALL, 0, line, &[name, arguments]);
+        if !method.returns_value() {
+            return call;
+        }
+        let result = match check {
+            Some(check) => {
+                let implementer = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+                self.returned_result(line, call, implementer, b"", check)
+            }
+            None => call,
+        };
+
+        self.node(SHARP_AST_RETURN, 0, line, &[result])
     }
 
     /// A variadic parameter carries `ZEND_PARAM_VARIADIC`, as php-src's grammar builds `int ...$values`, and a widened
@@ -5406,7 +5490,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `\Sharp\Internal\returned($lowered, $implementer, $method, $types, $target)`, with the type list and the name of
-    /// `check`, as [`Self::returned_call`] says.
+    /// `check`, as [`Self::returned_call`] says. `method` is the method's `FunctionLikeMetadata::name`, which is
+    /// lowercase, as PHP keys a class's `function_table`, so the engine finds `getStatus` as `getstatus`.
     fn returned_result(
         &mut self,
         line: u32,
@@ -6051,7 +6136,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(SHARP_AST_CLASS_NAME, 0, line, &[class])
             }
             // The checker proved the class has the property, so the running program needs only its name.
-            Expression::NameOf(name_of) => self.string(0, line, name_of.property.value),
+            Expression::NameOf(name_of) => self.string(0, line, name_of.named()),
             Expression::Throw(throw) => {
                 let exception = self.expression(throw.exception);
 
@@ -8051,12 +8136,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// conversion gives `1` or nothing, so a `bool` is `["false", "true"][value]`: PHP indexes by `false` as 0 and
     /// `true` as 1, and the optimizer keeps the read as one `FETCH_DIM_R` of a constant array, where a conditional takes
     /// four instructions. An object shows what its `toString()` returns, `$value->toString()`, which an enum case
-    /// needs, since PHP gives an enum no string conversion. Any other value is itself.
+    /// needs, since PHP gives an enum no string conversion, and a plain PHP class without `toString()` shows its
+    /// `__toString()`, `(string) $value`. Any other value is itself.
     fn template_value(&mut self, expression: &Expression) -> u32 {
         let value = self.expression(expression);
         let r#type = self.types.expression_type(expression);
         let line = self.line(expression);
         if !r#type.types.is_empty() && r#type.types.iter().all(TAtomic::is_object_type) {
+            if self.types.shows_plain_text(r#type) {
+                return self.node(SHARP_AST_CAST, IS_STRING, line, &[value]);
+            }
             let method = self.string(0, line, b"toString");
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
 
@@ -8220,6 +8309,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         if let Some(kinds) = self.types.members_by_kind(expression) {
             return self.call_by_kind(expression, &kinds, (call.object, &call.method, &call.argument_list), false);
+        }
+        // Spec section 18: `email.toString()` of a plain PHP class without `toString()` runs its `__toString()`.
+        if let ClassLikeMemberSelector::Identifier(method) = &call.method
+            && method.value == b"toString"
+            && self.names.static_call_class(call).is_none()
+            && self.types.shows_plain_text(self.types.expression_type(call.object))
+        {
+            let value = self.expression(call.object);
+
+            return self.node(SHARP_AST_CAST, IS_STRING, self.line(call), &[value]);
         }
         if let Some(inlined) = self.inlined_call(expression, call) {
             return inlined;
@@ -9757,12 +9856,14 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             // PHP methods are open to overriding, and `method` lowers `override` to `#[\Override]`. PHP has no
             // `required` constructor, and the checker proves every subclass keeps one `new Self(…)` can call. `method`
             // gives an `extern` method the body that calls its native function. `property` gives a `lazy` property
-            // the `get` hook that keeps its value.
+            // the `get` hook that keeps its value. A `late` member has no initial value, so PHP leaves its typed
+            // property uninitialized until its first write.
             Modifier::Virtual(_)
             | Modifier::Override(_)
             | Modifier::Required(_)
             | Modifier::Extern(_)
-            | Modifier::Lazy(_) => 0,
+            | Modifier::Lazy(_)
+            | Modifier::Late(_) => 0,
             Modifier::Readonly(_)
             | Modifier::PublicSet(_)
             | Modifier::ProtectedSet(_)
@@ -9823,6 +9924,7 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::Required(_)
             | Modifier::Extern(_)
             | Modifier::Lazy(_)
+            | Modifier::Late(_)
             | Modifier::Ref(_) => unreachable!("check_slice refuses the class modifier `{modifier}`"),
         };
     }

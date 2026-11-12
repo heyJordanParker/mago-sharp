@@ -2641,6 +2641,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Modifier::Required(node) => Node::Keyword(node),
                 Modifier::Extern(node) => Node::Keyword(node),
                 Modifier::Lazy(node) => Node::Keyword(node),
+                Modifier::Late(node) => Node::Keyword(node),
                 Modifier::Internal(node) => Node::Keyword(node),
                 Modifier::Foreign(node) => Node::Keyword(node),
                 Modifier::Ref(node) => Node::Keyword(node),
@@ -2944,7 +2945,14 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 if let Some(event) = &node.event {
                     f(Node::Keyword(event));
                 }
+                if let Some(namespace) = &node.namespace {
+                    f(Node::Keyword(namespace));
+                }
                 f(Node::Identifier(&node.target));
+                if let Some(namespaced) = &node.namespaced {
+                    f(Node::Keyword(&namespaced.r#for));
+                    f(Node::Identifier(&namespaced.class));
+                }
 
                 if let Some(uses) = &node.uses {
                     f(Node::Uses(uses));
@@ -3292,7 +3300,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::NameOf(name_of) => {
                 f(Node::Keyword(&name_of.nameof));
                 f(Node::Identifier(&name_of.class));
-                f(Node::LocalIdentifier(&name_of.property));
+                if let Some(member) = &name_of.member {
+                    f(Node::LocalIdentifier(&member.name));
+                }
             }
             Node::With(with) => {
                 f(Node::Expression(with.object));

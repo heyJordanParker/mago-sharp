@@ -40,6 +40,7 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseEntryKeys;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::r#extern::ExternMetadata;
+use mago_codex::metadata::r#extern::ExternNamespaceMetadata;
 use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::populator::populate_codebase_targeted;
@@ -59,6 +60,7 @@ use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_names::ResolvedNames;
 use mago_names::resolver::ChangingMembers;
+use mago_names::resolver::ExternNamespaces;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_php_version::PHPVersion;
@@ -172,6 +174,9 @@ pub struct IncrementalAnalysisService {
     namespace_classes: NamespaceClasses,
     /// The members of the codebase that change the value they are called on, which every file's binder counts as writes.
     changing_members: ChangingMembers,
+    /// The namespaces the codebase gives libraries whose classes have none, spec section 23, which every PHP# file
+    /// resolves its class names against.
+    extern_namespaces: ExternNamespaces,
     use_progress_bars: bool,
     scan_only: bool,
     node_analysis_files: Option<HashSet<FileId>>,
@@ -204,6 +209,7 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("codebase_scan_files", &self.codebase_scan_files.len())
             .field("namespace_classes", &self.namespace_classes)
             .field("changing_members", &self.changing_members)
+            .field("extern_namespaces", &self.extern_namespaces)
             .field("use_progress_bars", &self.use_progress_bars)
             .field("scan_only", &self.scan_only)
             .field("node_analysis_files", &self.node_analysis_files.as_ref().map(HashSet::len))
@@ -254,6 +260,7 @@ impl IncrementalAnalysisService {
             codebase_scan_files: HashMap::default(),
             namespace_classes: NamespaceClasses::default(),
             changing_members: ChangingMembers::default(),
+            extern_namespaces: ExternNamespaces::default(),
             use_progress_bars: false,
             scan_only: false,
             node_analysis_files: None,
@@ -271,7 +278,7 @@ impl IncrementalAnalysisService {
 
     /// Builds the codebase and runs the before-analysis hooks, then analyzes no file.
     ///
-    /// Each analysis then reports only the issues those hooks raise.
+    /// Each analysis then reports only the issues those hooks raise and each host file's parse errors.
     #[must_use]
     pub fn scan_only(mut self) -> Self {
         self.scan_only = true;
@@ -296,6 +303,7 @@ impl IncrementalAnalysisService {
         self.codebase_scan_files.clear();
         self.namespace_classes = NamespaceClasses::default();
         self.changing_members = ChangingMembers::default();
+        self.extern_namespaces = ExternNamespaces::default();
     }
 
     /// Updates the database for a new analysis run.
@@ -529,6 +537,7 @@ impl IncrementalAnalysisService {
                         php_version,
                         codebase_scan_plan.as_deref(),
                         &NamespaceClasses::default(),
+                        &ExternNamespaces::default(),
                     )?;
 
                     arena.reset();
@@ -554,10 +563,19 @@ impl IncrementalAnalysisService {
         self.changing_members = ChangingMembers::new(
             per_file_results.iter().flat_map(|(_, _, metadata, _, _)| receiver_changing_members(metadata)),
         );
+        // A namespace a `.sharp` file gives a library, spec section 23, changes what a class name means in every PHP#
+        // file, so each is scanned again against them.
+        self.extern_namespaces = ExternNamespaces::new(per_file_results.iter().flat_map(|(_, _, metadata, _, _)| {
+            metadata.extern_namespaces.iter().map(|declaration| declaration.namespace)
+        }));
         let namespace_classes = &self.namespace_classes;
+        let extern_namespaces = &self.extern_namespaces;
         per_file_results
             .par_iter_mut()
-            .filter(|(_, _, _, _, named)| named.iter().any(|name| namespace_classes.contains(name.as_bytes())))
+            .filter(|(file, _, _, _, named)| {
+                named.iter().any(|name| namespace_classes.contains(name.as_bytes()))
+                    || (!extern_namespaces.is_empty() && file.name.ends_with(b".sharp"))
+            })
             .try_for_each_init(LocalArena::new, |arena, (file, _, metadata, codebase_scan, _)| {
                 (*metadata, *codebase_scan, _) = scan_file(
                     arena,
@@ -566,6 +584,7 @@ impl IncrementalAnalysisService {
                     php_version,
                     codebase_scan_plan.as_deref(),
                     namespace_classes,
+                    extern_namespaces,
                 )?;
                 arena.reset();
 
@@ -837,6 +856,7 @@ impl IncrementalAnalysisService {
         let php_version = self.settings.version;
         let codebase_scan_plan = self.codebase_scan_plan.clone();
         let namespace_classes = &self.namespace_classes;
+        let extern_namespaces = &self.extern_namespaces;
         let scanned_files: Vec<(FileId, CodebaseMetadata, Option<CodebaseScanFile>)> = changed_files
             .into_par_iter()
             .map_init(LocalArena::new, |arena, file| {
@@ -847,6 +867,7 @@ impl IncrementalAnalysisService {
                     php_version,
                     codebase_scan_plan.as_deref(),
                     namespace_classes,
+                    extern_namespaces,
                 )?;
 
                 arena.reset();
@@ -1026,6 +1047,37 @@ impl IncrementalAnalysisService {
         );
 
         if namespace_classes_before != namespace_classes_after {
+            return self.analyze();
+        }
+
+        // An `extern namespace` changes what a name means in every PHP# file, spec section 23, and so does the class it
+        // names, whose folder takes the namespace.
+        let extern_namespaces = |declarations: &mut dyn Iterator<Item = &ExternNamespaceMetadata>| {
+            declarations
+                .map(|declaration| {
+                    (declaration.namespace, mago_word::ascii_lowercase_word(declaration.class.as_bytes()))
+                })
+                .collect::<HashSet<_>>()
+        };
+        let extern_namespaces_before = extern_namespaces(
+            &mut self
+                .codebase
+                .extern_namespaces
+                .iter()
+                .filter(|declaration| rescanned.contains(&declaration.span.file_id)),
+        );
+        let extern_namespaces_after =
+            extern_namespaces(&mut new_file_scans.iter().flat_map(|(_, metadata)| metadata.extern_namespaces.iter()));
+        let named_class_rescanned = self.codebase.extern_namespaces.iter().any(|declaration| {
+            self.codebase
+                .get_class_like(declaration.class.as_bytes())
+                .is_some_and(|class| rescanned.contains(&class.span.file_id))
+                || new_file_scans
+                    .iter()
+                    .any(|(_, metadata)| metadata.get_class_like(declaration.class.as_bytes()).is_some())
+        });
+
+        if extern_namespaces_before != extern_namespaces_after || named_class_rescanned {
             return self.analyze();
         }
 
@@ -1582,8 +1634,12 @@ impl IncrementalAnalysisService {
 
         let arena = LocalArena::new();
         let program = parse_file_with_settings(&arena, &file, self.parser_settings);
-        let resolved_names =
-            NameResolver::new(&arena).resolve_in(program, &self.namespace_classes, &self.changing_members);
+        let resolved_names = NameResolver::new(&arena).resolve_in(
+            program,
+            &self.namespace_classes,
+            &self.changing_members,
+            &self.extern_namespaces,
+        );
 
         let mut issues = IssueCollection::new();
         if program.has_errors() {
@@ -1632,8 +1688,12 @@ impl IncrementalAnalysisService {
 
         let arena = LocalArena::new();
         let program = parse_file_with_settings(&arena, &file, self.parser_settings);
-        let resolved_names =
-            NameResolver::new(&arena).resolve_in(program, &self.namespace_classes, &self.changing_members);
+        let resolved_names = NameResolver::new(&arena).resolve_in(
+            program,
+            &self.namespace_classes,
+            &self.changing_members,
+            &self.extern_namespaces,
+        );
 
         let mut issues = IssueCollection::new();
         if program.has_errors() {
@@ -1762,6 +1822,7 @@ impl IncrementalAnalysisService {
             self.parser_settings,
             &self.namespace_classes,
             &self.changing_members,
+            &self.extern_namespaces,
             external_session.as_deref(),
         )?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -1780,9 +1841,7 @@ impl IncrementalAnalysisService {
         let host_files: Vec<_> = self
             .database
             .files()
-            .filter(|file| {
-                !self.scan_only && file.file_type == FileType::Host && !effective_skip_files.contains(&file.id)
-            })
+            .filter(|file| file.file_type == FileType::Host && !effective_skip_files.contains(&file.id))
             .map(|file| self.database.get(&file.id))
             .collect::<Result<Vec<_>, _>>()?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -1804,7 +1863,8 @@ impl IncrementalAnalysisService {
         let parser_settings = self.parser_settings;
         let namespace_classes = &self.namespace_classes;
         let changing_members = &self.changing_members;
-        let analyzing_bar = (self.use_progress_bars && !host_files.is_empty())
+        let extern_namespaces = &self.extern_namespaces;
+        let analyzing_bar = (self.use_progress_bars && !self.scan_only && !host_files.is_empty())
             .then(|| create_progress_bar(host_files.len(), "🔬 Analyzing", ProgressBarTheme::Green));
         #[cfg(not(target_arch = "wasm32"))]
         let hang_watcher = trace_enabled.then(|| HangWatcher::spawn(rayon::current_num_threads()));
@@ -1822,7 +1882,19 @@ impl IncrementalAnalysisService {
                 let mut analysis_result = AnalysisResult::new(SymbolReferences::new());
 
                 let program = parse_file_with_settings(arena, &source_file, parser_settings);
-                let resolved_names = NameResolver::new(arena).resolve_in(program, namespace_classes, changing_members);
+                // A parse error is an error in every mode, so a scan, which analyzes no file, still reports it.
+                if self.scan_only {
+                    analysis_result.issues.extend(program.errors.iter().map(Issue::from));
+                    arena.reset();
+
+                    return Ok((file_id, analysis_result, None, Vec::new(), HashSet::default()));
+                }
+                let resolved_names = NameResolver::new(arena).resolve_in(
+                    program,
+                    namespace_classes,
+                    changing_members,
+                    extern_namespaces,
+                );
 
                 let semantics_checker = SemanticsChecker::new(settings.version);
                 let mut analyzer =
@@ -2191,8 +2263,8 @@ fn names_a_refused_bound_type(codebase: &CodebaseMetadata, declared: &WordSet) -
 }
 
 /// Scans `file` into the codebase metadata it declares, with its signature and the scan `plan` captures of it, its
-/// names resolved against `namespace_classes`. Also returns each class-like of the file's namespace that would win over
-/// a default class-like the file names.
+/// names resolved against `namespace_classes` and `extern_namespaces`. Also returns each class-like of the file's
+/// namespace that would win over a default class-like the file names.
 fn scan_file(
     arena: &LocalArena,
     file: &Arc<File>,
@@ -2200,6 +2272,7 @@ fn scan_file(
     php_version: PHPVersion,
     plan: Option<&CodebaseScanPlan>,
     namespace_classes: &NamespaceClasses,
+    extern_namespaces: &ExternNamespaces,
 ) -> Result<(CodebaseMetadata, Option<CodebaseScanFile>, Vec<Word>), ExternalAnalyzerError> {
     let program = parse_file_with_settings(arena, file, parser_settings);
     if program.has_errors() {
@@ -2211,7 +2284,8 @@ fn scan_file(
     }
 
     // A scan reads no write of a local, so it needs no changing members.
-    let resolved_names = NameResolver::new(arena).resolve_in(program, namespace_classes, &ChangingMembers::default());
+    let resolved_names =
+        NameResolver::new(arena).resolve_in(program, namespace_classes, &ChangingMembers::default(), extern_namespaces);
     let mut metadata = scan_program(arena, file, program, &resolved_names, php_version);
     metadata.set_file_signature(file.id, signature_builder::build_file_signature(program, &resolved_names));
     if file.file_type.is_patch() {

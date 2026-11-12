@@ -41,6 +41,14 @@ pub use sharp_classes::EMIT_EFFECT;
 pub use sharp_classes::PROPERTY_BEHAVIOR;
 pub use sharp_classes::STANDARD_ROOT_CLASSES;
 
+/// The attribute that makes a body-less static method the call of the PHP function its argument names, spec section 23,
+/// as `[Import("levenshtein")]`.
+pub const IMPORT: &str = "Sharp\\Interop\\Import";
+
+/// The attribute that declares a global function of the name its argument gives, which calls the static method it marks,
+/// spec section 23, as `[Export("auth_redirect")]`.
+pub const EXPORT: &str = "Sharp\\Interop\\Export";
+
 /// The mark of a parameter whose argument a method writes as JSON text.
 ///
 /// The standard library marks `Json.encode`'s, so the checker refuses a `Map` key JSON can't write. The checker reads

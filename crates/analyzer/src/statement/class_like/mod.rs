@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use foldhash::HashMap;
 use foldhash::HashSet;
@@ -24,6 +25,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
+use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::bound_is_equatable;
@@ -1741,6 +1743,7 @@ where
     if context.dialect.is_sharp() && class_like_metadata.flags.is_sharp() {
         report_statics_named_like_class_members(context, members);
         report_members_named_like_inherited_members(context, class_like_metadata);
+        check_sharp_elements(context, class_like_metadata);
     }
 
     // Check trait constant overrides AFTER constants have been analyzed
@@ -1766,6 +1769,85 @@ where
     }
 
     Ok(())
+}
+
+/// Spec section 12: a class whose header names `Iterable<T>`, which the codex links as PHP's
+/// `IteratorAggregate<int, T>`, declares or inherits `Iterable<T> elements()`, the one member a loop, `toList()` and the
+/// lazy operations read. An abstract class may leave it to its subclasses. A class without one is refused with the
+/// member to declare, and one whose `elements()` returns no `Iterable<T>` with the type it returns.
+fn check_sharp_elements<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    let iterated = word("iteratoraggregate");
+    if !context.codebase.is_sharp_iterable(class_like_metadata.name.as_bytes()) {
+        return;
+    }
+    // The element type the header names, which the populator gives every class whose header or base names
+    // `Iterable<T>`, and the class's name, which every class has.
+    let element = class_like_metadata
+        .template_extended_parameters
+        .get(&iterated)
+        .and_then(|parameters| parameters.get_index(1))
+        .map_or_else(get_mixed, |(_, element)| element.clone());
+    let span = class_like_metadata.name_span.unwrap_or(class_like_metadata.span);
+    // A subclass is checked for the member it inherits, and its type where the class names `Iterable<T>` or declares
+    // `elements()` itself.
+    let declared_here = class_like_metadata.methods.contains(&word("elements"));
+    let own = declared_here || class_like_metadata.template_extended_offsets.contains_key(&iterated);
+    let class_name = display_class_like_name(context, class_like_metadata.original_name);
+    let iterable = TUnion::from_atomic(TAtomic::Iterable(TIterable::sharp_of(Arc::new(element))));
+    let iterable_name = display_type(context, &iterable);
+    let declared = context.codebase.get_declaring_method(class_like_metadata.name.as_bytes(), b"elements");
+    let Some(elements) =
+        declared.filter(|method| method.method_metadata.as_ref().is_some_and(|method| !method.is_static))
+    else {
+        if !class_like_metadata.flags.is_abstract() {
+            context.collector.report_with_code(
+                IssueCode::UnimplementedAbstractMethod,
+                Issue::error(format!(
+                    "`{class_name}` is an `{iterable_name}` and declares or inherits no `elements()`, the member a loop reads."
+                ))
+                .with_annotation(Annotation::primary(span).with_message("Declared here."))
+                .with_help(format!("Declare `public {iterable_name} elements()`, which returns an `Iterable` or uses `yield`.")),
+            );
+        }
+
+        return;
+    };
+    // A plain PHP parent's `elements()` without a return type returns `Any?`, as any untyped plain PHP method does.
+    let returned =
+        elements.return_type_metadata.as_ref().map_or_else(get_mixed, |returned| returned.type_union.clone());
+    if own
+        && !union_comparator::is_contained_by(
+            context.codebase,
+            &returned,
+            &iterable,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::new(),
+        )
+    {
+        let returned_name = display_type(context, &returned);
+        let issue = Issue::error(format!(
+            "`{class_name}.elements()` returns `{returned_name}`, and `{class_name}` is an `{iterable_name}`, so it returns an `{iterable_name}`."
+        ));
+        // An inherited `elements()` is declared in another class, so the refusal stands where this one names the type.
+        let issue = if declared_here {
+            issue
+                .with_annotation(
+                    Annotation::primary(elements.name_span.unwrap_or(elements.span)).with_message("Declared here."),
+                )
+                .with_annotation(Annotation::secondary(span).with_message(format!("Named `{iterable_name}` here.")))
+        } else {
+            issue.with_annotation(
+                Annotation::primary(span)
+                    .with_message(format!("Named `{iterable_name}` here, and `elements()` is inherited.")),
+            )
+        };
+        context.collector.report_with_code(IssueCode::IncompatibleReturnType, issue);
+    }
 }
 
 /// Reports the issues recorded since `start_recording` for a plain PHP class that extends or implements a PHP# type,

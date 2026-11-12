@@ -52,6 +52,7 @@ use mago_codex::ttype::takes_array;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
+use mago_names::IMPORT;
 use mago_names::LEAN_FUNCTION;
 use mago_names::ResolvedNames;
 use mago_names::binding::php_operator_name;
@@ -230,6 +231,18 @@ impl<'analysis> Types<'analysis> {
                 "the analysis types every expression of a file the checker accepted, not {:?}",
                 expression.span()
             )
+        })
+    }
+
+    /// Whether a class `value_type` holds declares and inherits no `toString()`, so PHP# shows it by its plain PHP
+    /// `__toString()`, spec section 18, which PHP's string conversion runs. A PHP# class's `__toString()` returns its
+    /// `toString()`, so the conversion shows each class of the value, and the checker refuses a value that also holds
+    /// an enum, which PHP converts to no string.
+    #[must_use]
+    pub fn shows_plain_text(&self, value_type: &TUnion) -> bool {
+        value_type.types.iter().any(|atomic| {
+            matches!(atomic, TAtomic::Object(TObject::Named(object))
+                if self.codebase.get_declaring_method(object.name.as_bytes(), b"toString").is_none())
         })
     }
 
@@ -1107,6 +1120,38 @@ impl<'analysis> Types<'analysis> {
         let checked = if checked == shown { checked } else { format!("{checked}, {shown}") };
 
         Some((checked, format!("{}.{}()", class_text(class, self.codebase), method.original_name)))
+    }
+
+    /// The PHP function the `[Import]` method `method` of `class` runs, spec section 23, and the check its result takes
+    /// as a plain PHP value crossing into the method's result type, as [`Self::returned_check`] builds one, the target
+    /// the function, as `levenshtein()`. None for a method without the attribute, and no check for a `void` result or
+    /// one of any value.
+    #[must_use]
+    pub(crate) fn import(&self, class: &[u8], method: &[u8]) -> Option<(Word, Option<(String, String)>)> {
+        let metadata = self.codebase.get_method(class, method)?;
+        let mark = metadata
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(IMPORT.as_bytes()))?;
+        let Some(ConstantExpression::String(function)) =
+            mark.arguments.first().and_then(|argument| argument.value.as_ref())
+        else {
+            unreachable!("the checker refuses an `[Import]` whose argument is no literal string: {mark:?}");
+        };
+        let check = metadata.return_type_metadata.as_ref().map(|declared| &declared.type_union).and_then(|r#type| {
+            if r#type.is_void() || r#type.is_never() || (r#type.is_mixed() && r#type.can_be_null()) {
+                return None;
+            }
+            let checked = if needs_result_check(r#type) { r#type.clone() } else { collections_alone(r#type) };
+            let types = returned_types(
+                text(r#type, self.codebase, Parameter::Index),
+                text(&checked, self.codebase, Parameter::Index),
+            );
+
+            Some((types, format!("{function}()")))
+        });
+
+        Some((*function, check))
     }
 
     /// The check the call `call` takes on its result of the type `r#type` when it gives a PHP# method the type

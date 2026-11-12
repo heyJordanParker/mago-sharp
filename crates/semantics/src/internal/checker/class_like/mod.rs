@@ -143,6 +143,7 @@ pub fn check_class<'ast, 'arena>(class: &'ast Class<'arena>, context: &mut Conte
             | Modifier::Required(_)
             | Modifier::Extern(_)
             | Modifier::Lazy(_)
+            | Modifier::Late(_)
             | Modifier::Internal(_)
             | Modifier::Foreign(_)
             | Modifier::Ref(_) => {}
@@ -1161,6 +1162,7 @@ pub fn check_anonymous_class<'ast, 'arena>(
             | Modifier::Required(_)
             | Modifier::Extern(_)
             | Modifier::Lazy(_)
+            | Modifier::Late(_)
             | Modifier::Internal(_)
             | Modifier::Foreign(_)
             | Modifier::Ref(_) => {}

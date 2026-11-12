@@ -55,6 +55,7 @@ use mago_database::file::FileType;
 use mago_names::ResolvedNames;
 use mago_names::STANDARD_ROOT_CLASSES;
 use mago_names::resolver::ChangingMembers;
+use mago_names::resolver::ExternNamespaces;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_prelude::Prelude;
@@ -252,9 +253,13 @@ fn analyze_with_references(
             })
             .map(|member| member.original_name)
     }));
+    let extern_namespaces = ExternNamespaces::new(
+        scanned.iter().flat_map(|scan| scan.extern_namespaces.iter().map(|declaration| declaration.namespace)),
+    );
     let mut programs = Vec::new();
     for (file, program) in parsed {
-        let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes, &changing_members);
+        let names =
+            NameResolver::new(&arena).resolve_in(program, &namespace_classes, &changing_members, &extern_namespaces);
         metadata.extend(scan_program(&arena, file, program, &names, settings.version));
         programs.push((file, program, names));
     }
@@ -416,6 +421,27 @@ fn a_plain_php_use_outside_the_namespace_keeps_a_public_member() {
             "src/App/Payments/Event.sharp 5:93 `Event.source` is public, and nothing outside `App.Payments` uses it.",
             "src/App/Payments/Carts.sharp 7:19 `Carts.hidden` is public, and nothing outside `App.Payments` uses it.",
         ]
+    );
+}
+
+/// Spec section 5: a member is too wide only on the class that declares it. A PHP# class that inherits a constant from
+/// a plain PHP parent declares no such member, whatever file the constant is in, and a plain PHP class's member is no
+/// PHP# report at all. The PHP# class's own constant still warns.
+#[test]
+fn a_member_inherited_from_a_plain_php_parent_is_not_too_wide() {
+    let store = "<?php\n\nnamespace Lib;\n\nclass Store\n{\n    public const string A = 'a';\n\n    public const string B = 'b';\n}\n";
+    let cache = "namespace App.Shop;\n\nimport Lib.Store;\n\npublic class Cache : Store\n{\n    public const string C = \"c\";\n\n    public static string name() => Cache.A;\n}\n";
+    let page = "namespace App.Web;\n\nimport App.Shop.Cache;\n\npublic class Page\n{\n    internal string show() => Cache.name();\n}\n";
+    let boot = "<?php\n\necho \\Lib\\Store::A;\n";
+
+    assert_eq!(
+        too_wide(&[
+            ("src/Lib/Store.php", store),
+            ("src/App/Shop/Cache.sharp", cache),
+            ("src/App/Web/Page.sharp", page),
+            ("src/boot.php", boot),
+        ]),
+        ["src/App/Shop/Cache.sharp 7:25 `App.Shop.Cache.C` is public, and nothing outside `App.Shop` uses it."]
     );
 }
 
@@ -3232,28 +3258,28 @@ fn an_override_of_a_plain_php_property_keeps_its_set_and_its_level() {
 }
 
 /// `nameof(X.y)` is the string `'y'`, spec section 6.3, and the checker proves `X` declares or inherits `y`, a
-/// property or a field, instance or static, readable where `nameof` is written, as C#'s `nameof` does. A method is not
-/// a property, and a misspelled name is an error wherever it is written.
+/// property, a field or a method, instance or static, readable where `nameof` is written, as C#'s `nameof` does. A
+/// misspelled name is an error wherever it is written. `nameof(X)` is the class's own name, spec section 25.
 #[test]
-fn nameof_names_a_property_the_class_has_and_is_a_string() {
+fn nameof_names_a_member_the_class_has_and_is_a_string() {
     let entity = (
         "src/Demo/Entity.sharp",
-        "namespace Demo;\n\npublic class Entity\n{\n    public int id { get; set; } = 0;\n}\n",
+        "namespace Demo;\n\npublic class Entity\n{\n    public int id { get; set; } = 0;\n    public bool save() => true;\n}\n",
     );
     let order = (
         "src/Demo/Order.sharp",
-        "namespace Demo;\n\npublic class Order : Entity\n{\n    public int total { get; set; } = 0;\n    public static int count { get; private set; } = 0;\n    private int secret = 0;\n    public int sum() => 1;\n\n    public string own() => nameof(Order.secret);\n}\n",
+        "namespace Demo;\n\npublic class Order : Entity\n{\n    public int total { get; set; } = 0;\n    public static int count { get; private set; } = 0;\n    private int secret = 0;\n    public int sum() => 1;\n    private int audit() => 2;\n\n    public string own() => nameof(Order.secret) + nameof(Order.audit);\n}\n",
     );
     let declared = [entity, order];
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public string column() => nameof(Order.total);\n    public string parent() => nameof(Order.id);\n    public string shared() => nameof(Order.count);\n    public string misspelled() => nameof(Order.totl);\n    public string hidden() => nameof(Order.secret);\n    public string method() => nameof(Order.sum);\n    public string missing() => nameof(Missing.total);\n    public int number() => nameof(Order.total);\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public string column() => nameof(Order.total);\n    public string parent() => nameof(Order.id);\n    public string shared() => nameof(Order.count);\n    public string misspelled() => nameof(Order.totl);\n    public string hidden() => nameof(Order.secret);\n    public string method() => nameof(Order.sum);\n    public string inherited() => nameof(Order.save);\n    public string audited() => nameof(Order.audit);\n    public string class() => nameof(Order);\n    public string missing() => nameof(Missing.total);\n    public int number() => nameof(Order.total);\n}\n";
 
     assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 2]);
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &declared),
         [
-            "Property `Order.totl` does not exist.",
+            "`Order.totl` is no property, field or method.",
             "`Order.secret` is `private`, so `nameof` can't name it here.",
-            "Property `Order.sum` does not exist.",
+            "`Order.audit` is `private`, so `nameof` can't name it here.",
             "Cannot find type `Demo.Missing`.",
             "Invalid return type for method `Report.number`: expected `int`, but found `string`.",
         ]
@@ -3863,6 +3889,75 @@ fn a_function_a_library_declares_outside_any_namespace_belongs_to_the_namespace_
         refusals(folder, &ROOT_HELPERS),
         [
             "5:29 non-existent-class-like `Collections` names no class, and no namespace this file imports. | Check the spelling of `Collections`, or import the class or the namespace whose member this names."
+        ]
+    );
+}
+
+/// A library whose classes and functions have no namespace, as WordPress, beside one with a namespace.
+const ROOT_LIBRARIES: [(&str, &str); 4] = [
+    (
+        "vendor/wordpress/wp-includes/class-wp-post.php",
+        "<?php\n\nclass WP_Post\n{\n    public string $post_title = '';\n}\n",
+    ),
+    (
+        "vendor/wordpress/wp-includes/plugin.php",
+        "<?php\n\nfunction add_action(string $hook, Closure $callback): bool\n{\n    return true;\n}\n\nfunction get_post(int $id): ?WP_Post\n{\n    return null;\n}\n",
+    ),
+    ("vendor/legacy/class-widget.php", "<?php\n\nclass Legacy_Widget\n{\n}\n"),
+    ("vendor/acme/src/Client.php", "<?php\n\nnamespace Acme;\n\nclass Client\n{\n}\n"),
+];
+
+/// Spec section 23: `extern namespace WordPress for WP_Post;` gives the folder of a plain PHP class of PHP's root
+/// namespace the namespace `WordPress`, so its functions are `WordPress.add_action`, its classes `import
+/// WordPress.WP_Post;`, and `extern WordPress.get_post` declares a function's effect. The class must be a library's, of
+/// PHP's root namespace, and a folder takes one namespace no class has, which no other folder takes.
+#[test]
+fn an_extern_namespace_names_a_namespace_less_library() {
+    let stubs = (
+        "app/Stubs/WordPress.sharp",
+        "namespace App.Stubs;\n\nimport WordPress;\n\nextern namespace WordPress for WP_Post;\nextern WordPress.get_post uses Database;\n",
+    );
+    let feed = (
+        "app/Blog/Feed.sharp",
+        "namespace App.Blog;\n\nimport WordPress;\nimport WordPress.WP_Post;\n\npublic class Feed\n{\n    public bool hook() => WordPress.add_action(\"init\", () => { });\n    public string title(WP_Post post) => post.post_title;\n    public WP_Post? first() => WordPress.get_post(1);\n    public bool bare() => add_action(\"init\", () => { });\n}\n",
+    );
+    let wrong = (
+        "app/Stubs/Wrong.sharp",
+        "namespace App.Stubs;\n\nextern namespace Missing for No_Such_Class;\nextern namespace Clients for Acme.Client;\nextern namespace Press for WP_Post;\nextern namespace WordPress for Legacy_Widget;\nextern namespace Acme for Legacy_Widget;\nextern namespace Pages for Page;\n",
+    );
+    let page = (
+        "app/Stubs/Page.sharp",
+        "namespace App.Stubs;\n\nimport WordPress;\n\npublic class Page\n{\n    public bool found => WordPress.get_post(1) != null;\n\n    law located(Page page) => page.found;\n}\n",
+    );
+    let others = |extra: (&'static str, &'static str)| ROOT_LIBRARIES.into_iter().chain([extra]).collect::<Vec<_>>();
+
+    assert_eq!(refusals(stubs, &others(feed)), Vec::<String>::new());
+    assert_eq!(
+        refusals(feed, &others(stubs)),
+        [
+            "11:27 non-existent-function Function `WordPress.add_action` does not exist. | Check the spelling of `WordPress.add_action`."
+        ]
+    );
+    let missing = |at: &str, class: &str| {
+        format!(
+            "{at} non-existent-class-like Cannot find the plain PHP class `{class}` outside any namespace. | `extern namespace` names a class of a library whose classes have no namespace, as `extern namespace WordPress for WP_Post;`."
+        )
+    };
+    assert_eq!(
+        effect_issues(&ROOT_LIBRARIES.into_iter().chain([stubs, page]).collect::<Vec<_>>()),
+        [
+            "app/Stubs/Page.sharp:9:31 impure-law: Law `located` reaches `Page.found`, which calls `WordPress.get_post` with the effect `Database`. Laws hold only over pure code."
+        ]
+    );
+    assert_eq!(
+        refusals(wrong, &[ROOT_LIBRARIES.as_slice(), &[stubs, page]].concat()),
+        [
+            missing("3:30", "No_Such_Class"),
+            missing("4:30", "Acme.Client"),
+            "5:1 duplicate-extern The folder of `WP_Post` already takes the namespace `WordPress`. | Delete this line: a folder takes one namespace.".to_owned(),
+            "6:1 duplicate-extern `WordPress` is already the namespace of the folder of `WP_Post`. | Give this library another namespace.".to_owned(),
+            "7:18 duplicate-extern `Acme` is already the namespace of `Client`, so no library's folder takes it. | Give the library a namespace no class has.".to_owned(),
+            missing("8:28", "Page"),
         ]
     );
 }
@@ -6901,6 +6996,20 @@ fn a_lambda_fits_a_function_type_only_with_its_parameters_and_its_void() {
     );
 }
 
+/// Spec section 14.1: a lambda fits a function type when it takes every parameter the type passes, so a parameter may
+/// take more than the type passes, and its declared type is what the body sees: `(Any? item, int i)` fits a
+/// `Function<void(Order, int)>`, and its body reads `item` as `Any?`, where the function type only checks the fit.
+#[test]
+fn a_lambda_parameter_keeps_its_declared_type_where_the_function_type_passes_a_narrower_one() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void each(Function<void(Order, int)> visit) { }\n\n    public static Function<int(Order)> counter() => (Any? item) => item is Order ? 1 : 0;\n\n    public void run()\n    {\n        Report.each((Any? item, int i) => { const order = item as Order ?? throw new Missing(); });\n        Function<void(Order, int)> visit = (Any? item, int i) => { const order = item as Order ?? throw new Missing(); };\n    }\n}\n";
+    let declared = [
+        ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order\n{\n}\n"),
+        ("src/Demo/Missing.sharp", "namespace Demo;\n\npublic class Missing : Exception\n{\n}\n"),
+    ];
+
+    assert_eq!(explained(("src/Demo/Report.sharp", sharp), &declared), Vec::<String>::new());
+}
+
 /// Spec section 14.1: a call that returns `void` gives no value through `?.` as through `.`, though `?.` types it
 /// `null`. Each use of its value is refused once, with the error its `.` twin gets: an assigned value, an argument, the
 /// value a method, a computed property or a `get` accessor that returns one returns, an operand and an interpolation,
@@ -9720,7 +9829,7 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
             ]
         ),
         [
-            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
+            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `byteLength`, `byteSubstring`, `bytes`, `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
             "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `clamp`, `floorDiv`, `format`, `mod`, `toByteString`, `toHex`.",
             "7:40 non-existent-method Method `missing` does not exist on `float`. | A `float` has the methods `abs`, `ceil`, `clamp`, `floor`, `format`, `isFinite`, `round`.",
             "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
@@ -20248,6 +20357,49 @@ fn a_call_template_no_argument_binds_records_mixed() {
     );
 }
 
+/// `Lib\Sources::from`, which takes an array or any object and returns its entries keyed by a template no argument
+/// fixes when it takes an object, whose default is `array-key`.
+const SOURCES: (&str, &str) = (
+    "src/Lib/Sources.php",
+    "<?php\n\nnamespace Lib;\n\nfinal class Sources\n{\n    /**\n     * @template TKey of array-key = array-key\n     * @template TValue = mixed\n     *\n     * @param array<TKey, TValue>|\\Traversable<TKey, TValue>|object $items\n     *\n     * @return ($items is \\WeakMap ? list<TValue> : array<TKey, TValue>)\n     */\n    public static function from($items)\n    {\n        return (array) $items;\n    }\n}\n",
+);
+
+/// Spec section 12: plain PHP's `array-key` is PHP#'s `int|string`, so a type argument a plain PHP template's default
+/// fixes as `array-key` is recorded as `int|string`, which the engine reads.
+#[test]
+fn a_plain_php_array_key_type_argument_is_recorded_as_int_or_string() {
+    let sharp = "namespace Demo;\n\nimport Lib.Sources;\n\nclass Report\n{\n    public int run(Box source)\n    {\n        Map<int|string, Any?> columns = Sources.from(source);\n        return columns.count();\n    }\n}\n";
+    let source = ("src/Demo/Box.sharp", "namespace Demo;\n\npublic class Box\n{\n}\n");
+
+    assert_eq!(
+        recorded_type_arguments(("src/Demo/Report.sharp", sharp), &[SOURCES, source], "Sources.from(source)"),
+        ["int|string", "mixed"]
+    );
+}
+
+/// Spec section 12: a plain PHP result whose type holds `array-key` arrives as `int|string`, so its keys fix a PHP#
+/// generic call's type argument as `int|string`, which PHP# writes.
+#[test]
+fn a_plain_php_result_keyed_by_array_key_arrives_keyed_by_int_or_string() {
+    let sharp = "namespace Demo;\n\nimport Lib.Sources;\n\nclass Report\n{\n    public int run(Box source)\n    {\n        const columns = Sources.from(source);\n        return Report.counted(columns.keys());\n    }\n\n    private static int counted<T>(List<T> items) => items.count();\n}\n";
+    let source = ("src/Demo/Box.sharp", "namespace Demo;\n\npublic class Box\n{\n}\n");
+    let call = "Sources.from(source)";
+    let start = sharp.find(call).unwrap() as u32;
+
+    let (issues, artifacts) =
+        analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[SOURCES, source]);
+
+    assert_eq!(issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(), Vec::<String>::new());
+    assert_eq!(
+        artifacts.expression_types.get(&(start, start + call.len() as u32)).map(|r#type| r#type.get_id().to_string()),
+        Some("array<int|string, mixed>".to_owned())
+    );
+    assert_eq!(
+        recorded_type_arguments(("src/Demo/Report.sharp", sharp), &[SOURCES, source], "Report.counted(columns.keys())"),
+        ["int|string"]
+    );
+}
+
 /// A templated class without a constructor takes the type arguments PHP#'s `new` writes, and binds no template when
 /// plain PHP creates it, so each type argument is `mixed`, `SplObjectStorage`'s too, though the analyzer types its
 /// object with `never` arguments.
@@ -22500,6 +22652,21 @@ fn a_mixin_method_called_from_sharp_has_the_type_upstream_gives_it() {
     );
 }
 
+/// A plain PHP method that returns `$this` or `static` returns its receiver's type wherever PHP# calls it: in a backed
+/// enum's method too, as in a class's, `query.from(source, "s")` is the `Query` it runs on, never the enum.
+#[test]
+fn a_plain_php_method_returning_this_returns_its_receiver_in_an_enum() {
+    let query = (
+        "src/Lib/Query.php",
+        "<?php\n\nnamespace Lib;\n\nclass Query\n{\n    public static function table(string $name): Query\n    {\n        return new Query();\n    }\n\n    /**\n     * @param Query|string $source\n     * @param string $alias\n     * @return $this\n     */\n    public function from($source, $alias)\n    {\n        return $this;\n    }\n\n    /** @return static */\n    public function limit(int $count)\n    {\n        return $this;\n    }\n}\n",
+    );
+    let status = "namespace Demo;\n\nimport Lib.Query;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n\n    public Query sourced() => Query.table(\"t\").from(Query.table(\"u\"), \"s\");\n\n    public Query limited() => Query.table(\"t\").limit(5);\n}\n";
+    let report = "namespace Demo;\n\nimport Lib.Query;\n\npublic class Report\n{\n    public Query sourced() => Query.table(\"t\").from(Query.table(\"u\"), \"s\");\n\n    public Query limited() => Query.table(\"t\").limit(5);\n}\n";
+
+    assert_eq!(explained(("src/Demo/Status.sharp", status), &[query]), Vec::<String>::new());
+    assert_eq!(explained(("src/Demo/Report.sharp", report), &[query]), Vec::<String>::new());
+}
+
 /// A PHP conditional return type is resolved before PHP# specializes the call for its receiver, once, so a receiver
 /// whose type argument names the class's own type parameter replaces it once: `pair.get(true)` on a `Pair<List<TKey>>`
 /// inside `Pair<TKey> : Box<TKey>` is a `List<TKey>`, not a `List<List<TKey>>`. The PHP twin keeps Mago's issues.
@@ -22722,10 +22889,11 @@ fn a_named_constructor_of_a_generic_class_takes_the_type_arguments_of_its_new() 
 }
 
 /// A type argument a plain PHP value fixes is refused when PHP# can't write it, since the engine carries a type
-/// argument as its PHP# text: `array-key`, `scalar`, `numeric` and `resource`, on a static call and an instance call
-/// alike. A refinement PHP# writes as a wider type is that type: `list<int>` is `List<int>`, an `array{a: int}` shape is
-/// `Map<string, int>`, as the literal `["k": [1]]` is `Map<string, List<int>>`, `non-empty-string` is `string`,
-/// `positive-int` is `int` and `class-string` is `Class<Object>`. A written type argument the value fits compiles. A
+/// argument as its PHP# text: `scalar`, `numeric` and `resource`, on a static call and an instance call alike. A type
+/// PHP# writes in its own words is that type: `array-key` is `int|string`, spec section 12. A refinement PHP# writes as
+/// a wider type is that type: `list<int>` is `List<int>`, an `array{a: int}` shape is `Map<string, int>`, as the
+/// literal `["k": [1]]` is `Map<string, List<int>>`, `non-empty-string` is `string`, `positive-int` is `int` and
+/// `class-string` is `Class<Object>`. A written type argument the value fits compiles. A
 /// `new` infers none, so it needs its type argument written. An argument the checker refuses, as it does
 /// `Pager.class() as Class<Object>|null`, shows its refusal alone on its line.
 #[test]
@@ -22746,7 +22914,6 @@ fn a_type_argument_php_sharp_cant_write_is_refused_and_a_refused_argument_shows_
         worded(("src/Demo/Registry.sharp", sharp), &[("src/Lib/Pager.php", php), crate_]),
         [
             "28:40 semantics `as` converts to a type that is not nullable or `void`. | Written here. | `as Class<Object>` already gives null for a value of another type. | Write `as Class<Object>`.".to_owned(),
-            refused(14, 9, "Registry.keep", "array-key"),
             refused(15, 9, "Registry.keep", "scalar"),
             refused(16, 9, "Registry.keep", "numeric"),
             refused(17, 9, "Registry.hold", "resource"),
@@ -24581,10 +24748,11 @@ fn an_empty_match_over_an_enum_whose_short_name_the_file_imports_shows_its_refus
     assert_eq!(written_errors(sharp, &issues), ["match semantics A `match` needs a `default` arm."]);
 }
 
-/// Iterating an enum value names the loop over its cases as the file writes it: the enum's bound short name, and the
-/// import when the file doesn't bind it. The PHP twin keeps upstream's text.
+/// Spec section 17: a PHP# loop reads an `Iterable<T>` alone, so a loop over an enum value is the error any value that
+/// is no `Iterable` gets, which names its type. The PHP twin keeps upstream's warning, which names the loop over its
+/// cases.
 #[test]
-fn an_enum_iteration_help_writes_the_name_the_file_binds_and_its_import() {
+fn a_loop_over_an_enum_value_is_refused_where_php_iterates_its_properties() {
     let billing_status =
         ("src/Billing/Status.php", "<?php\n\nnamespace Billing;\n\nenum Status\n{\n    case Due;\n}\n");
     let sharp = "namespace Demo;\n\nimport Lib.Ticket;\n\nclass Report\n{\n    public static void fields(Ticket ticket)\n    {\n        for (const field of ticket.status()) {\n        }\n    }\n}\n";
@@ -24592,7 +24760,7 @@ fn an_enum_iteration_help_writes_the_name_the_file_binds_and_its_import() {
     let iterated = |analyzed| -> Vec<String> {
         worded(analyzed, &[("src/Lib/Status.php", TICKETS), billing_status])
             .into_iter()
-            .filter(|line| line.contains(" enum-iteration "))
+            .filter(|line| line.contains(" enum-iteration ") || line.contains(" invalid-iterator "))
             .collect()
     };
 
@@ -24605,7 +24773,159 @@ fn an_enum_iteration_help_writes_the_name_the_file_binds_and_its_import() {
     assert_eq!(
         iterated(("src/Demo/Report.sharp", sharp)),
         [
-            "9:29 enum-iteration Iterating directly over the enum enum `Lib.Status`. This will yield its public properties. | This enum instance is being iterated directly | PHP allows iterating an enum case instance like an object, which exposes its public properties: `name` (string). | This is different from iterating through all defined cases of the `Lib.Status` enum using `Status.cases()`, where each item would be an enum case instance itself. | If you only need the properties of this specific instance, consider accessing them directly (e.g., `instance.name`) for better clarity, unless iterating its few properties is explicitly intended. | If your goal is to loop through all defined cases of the `Lib.Status` enum, use `Status.cases()` instead (e.g., `for (const case of Status.cases())`). Add `import Lib.Status;` to the file."
+            "9:29 invalid-iterator The expression provided to a loop is not iterable. It resolved to type `Lib.Status`, which is not iterable. | This expression cannot be iterated | A loop requires an `Iterable<T>`. | PHP would loop over an object's public properties and fail on any other value, so PHP# refuses the loop. | Ensure the expression always evaluates to an `Iterable<T>`. Check variable types and function return values."
+        ]
+    );
+}
+
+/// Spec section 17: a loop over an object whose class is no `Iterable` is the error any value that is no `Iterable`
+/// gets, which names its type, where PHP would loop over the object's public properties.
+#[test]
+fn a_loop_over_an_object_that_is_no_iterable_is_refused() {
+    let sharp = "namespace Demo;\n\npublic class Basket\n{\n    public int count()\n    {\n        let n = 0;\n        for (const item of this) {\n            n += 1;\n        }\n        return n;\n    }\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Basket.sharp", sharp), &[]);
+
+    assert_eq!(
+        written_errors(sharp, &issues),
+        [
+            "this invalid-iterator The expression provided to a loop is not iterable. It resolved to type `Basket`, which is not iterable."
+        ]
+    );
+
+    // Plain PHP still loops over an `object`'s public properties, with the warning that says so.
+    let php = "<?php\n\nnamespace Demo;\n\nfunction count_values(object $value): int\n{\n    $n = 0;\n    foreach ($value as $item) {\n        $n++;\n    }\n\n    return $n;\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/count.php", php), &[]),
+        [
+            "8:14 generic-object-iteration Iterating over a generic `object`. This will iterate its public properties. | For predictable and type-safe iteration, ensure the object is an instance of a class implementing `Iterator` or `IteratorAggregate`.",
+            "8:24 mixed-assignment Assigning `mixed` type to a variable may lead to unexpected behavior. | Consider using a more specific type to avoid potential issues.",
+        ]
+    );
+}
+
+/// Spec section 12: a class whose header names `Iterable<T>` is an `Iterable<T>` wherever one is taken, a loop gives
+/// each `T`, and `toList()` and the lazy operations read it. The class declares or inherits the `elements()` the loop
+/// reads, which returns an `Iterable<T>`, and no `getIterator()`, which PHP# writes for plain PHP.
+#[test]
+fn a_class_whose_header_names_iterable_is_one_and_declares_its_elements() {
+    const ORDER: (&str, &str) = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;\n\npublic class Order\n{\n    public bool paid { get; } = false;\n}\n",
+    );
+    const BAG: (&str, &str) = (
+        "src/Demo/Bag.sharp",
+        "namespace Demo;\n\npublic class Bag<TItem> : Iterable<TItem>\n{\n    private List<TItem> items = [];\n\n    public virtual Iterable<TItem> elements() => this.items;\n}\n",
+    );
+    const ORDERS: (&str, &str) =
+        ("src/Demo/Orders.sharp", "namespace Demo;\n\npublic class Orders : Bag<Order>\n{\n}\n");
+    let report = "namespace Demo;\n\npublic class Report\n{\n    public int tally(Iterable<Order> orders) => orders.toList().count();\n\n    public int paid(Bag<Order> bag, Orders orders)\n    {\n        let n = 0;\n        for (const order of bag) {\n            if (order.paid) {\n                n += 1;\n            }\n        }\n        for (const order of orders) {\n            n += order.paid ? 1 : 0;\n        }\n        return n + this.tally(bag) + this.tally(orders) + bag.filter(o => o.paid).toList().count();\n    }\n}\n";
+    let crate_ = "namespace Demo;\n\npublic class Crate : Iterable<int>\n{\n}\n";
+    let other_box = "namespace Demo;\n\npublic class Box : Iterable<int>\n{\n    public Iterable<string> elements() => [\"one\"];\n}\n";
+    let shelf = "namespace Demo;\n\npublic class Shelf : Iterable<int>\n{\n    private int size = 1;\n\n    public Iterable<int> elements() => [this.size];\n\n    public Iterable<int> getIterator() => [1];\n}\n";
+    let label = "namespace Demo;\n\npublic interface Label : Iterable<int>\n{\n}\n";
+
+    let issues = |path, code| analyze(&PLUGIN_REGISTRY, settings(), (path, code), &[ORDER, BAG, ORDERS]);
+
+    assert_eq!(written_errors(report, &issues("src/Demo/Report.sharp", report)), Vec::<String>::new());
+    assert_eq!(
+        written_errors(crate_, &issues("src/Demo/Crate.sharp", crate_)),
+        [
+            "Crate unimplemented-abstract-method `Crate` is an `Iterable<int>` and declares or inherits no `elements()`, the member a loop reads."
+        ]
+    );
+    assert_eq!(
+        written_errors(other_box, &issues("src/Demo/Box.sharp", other_box)),
+        [
+            "elements incompatible-return-type `Box.elements()` returns `Iterable<string>`, and `Box` is an `Iterable<int>`, so it returns an `Iterable<int>`."
+        ]
+    );
+    assert_eq!(
+        written_errors(shelf, &issues("src/Demo/Shelf.sharp", shelf)),
+        [
+            "getIterator semantics `Shelf` names `Iterable<T>`, so plain PHP reads its `elements()` through the `getIterator()` PHP# writes: rename this method."
+        ]
+    );
+    assert_eq!(
+        written_errors(label, &issues("src/Demo/Label.sharp", label)),
+        [
+            "Iterable<int> semantics Only a class names `Iterable<T>` in its header, and declares the `elements()` a loop reads."
+        ]
+    );
+
+    // A subclass inherits `elements()` or declares its own of the type, an abstract class leaves it to its subclasses,
+    // and a user's extension of an `Iterable` reaches the class.
+    let picks = "namespace Demo;\n\npublic class Picks : Bag<Order>\n{\n    public override Iterable<Order> elements() => [new Order()];\n}\n";
+    let pile = "namespace Demo;\n\npublic abstract class Pile : Iterable<int>\n{\n}\n";
+    let rows = (
+        "src/Demo/Rows.sharp",
+        "namespace Demo;\n\npublic static class Rows\n{\n    extension<T>(Iterable<T> items)\n    {\n        public int size() => items.toList().count();\n    }\n}\n",
+    );
+    // A type parameter bounded by the class reaches `Iterable<T>`'s members through its bound.
+    let sized = "namespace Demo;\n\npublic class Sized\n{\n    public int of(Bag<Order> bag) => bag.size();\n\n    public int ofAny<TBag : Bag<Order>>(TBag bag) => bag.toList().count();\n}\n";
+    for (path, code) in
+        [("src/Demo/Orders.sharp", ORDERS.1), ("src/Demo/Picks.sharp", picks), ("src/Demo/Pile.sharp", pile)]
+    {
+        assert_eq!(written_errors(code, &issues(path, code)), Vec::<String>::new(), "{path}");
+    }
+    assert_eq!(refusals(("src/Demo/Sized.sharp", sized), &[ORDER, BAG, rows]), Vec::<String>::new());
+
+    // A plain PHP parent's `elements()` without a return type gives `Any?`, which is no `Iterable<int>`, and a plain PHP
+    // parent that is PHP's `IteratorAggregate` asks a PHP# subclass for no `elements()`.
+    let library = [
+        (
+            "src/Lib/Legacy.php",
+            "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    public function elements()\n    {\n        return [];\n    }\n}\n",
+        ),
+        (
+            "src/Lib/Heap.php",
+            "<?php\n\nnamespace Lib;\n\nclass Heap implements \\IteratorAggregate\n{\n    public function getIterator(): \\Iterator\n    {\n        return new \\ArrayIterator([]);\n    }\n}\n",
+        ),
+    ];
+    let stack = "namespace Demo;\n\nimport Lib.Legacy;\n\npublic class Stack : Legacy, Iterable<int>\n{\n}\n";
+    let mound = "namespace Demo;\n\nimport Lib.Heap;\n\npublic class Mound : Heap\n{\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Stack.sharp", stack), &library),
+        [
+            "5:14 incompatible-return-type `Stack.elements()` returns `Any?`, and `Stack` is an `Iterable<int>`, so it returns an `Iterable<int>`. | "
+        ]
+    );
+    assert_eq!(refusals(("src/Demo/Mound.sharp", mound), &library), Vec::<String>::new());
+
+    // A header that names `Iterable` without its element type gets the error any generic type written bare gets.
+    let bare = "namespace Demo;\n\npublic class Loose : Iterable\n{\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Loose.sharp", bare), &[]),
+        [
+            "3:22 semantics A header names classes and interfaces, and `Iterable` is neither: list a class or an interface, as in `: DatabaseEntity, Linkable`. | "
+        ]
+    );
+    let raw = "namespace Demo;\n\npublic class Raw : Bag\n{\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Raw.sharp", raw), &[ORDER, BAG]),
+        [
+            "3:20 missing-template-parameter Too few type arguments for `Bag`: expected at least 1, but found 0. | Write a type for `TItem` in the header, as in `: Bag<…>`."
+        ]
+    );
+}
+
+/// Spec section 6: a `late` member is instance storage with no initial value that the constructor may leave unset. A
+/// static, a member with an initial value, a computed property and a property without storage are never `late`, and
+/// neither is a method or a parameter.
+#[test]
+fn a_late_member_may_stay_unset_after_the_constructor() {
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n    public late int id { get; private set; }\n    public late string number { get; set; }\n    public late string? note { get; set; }\n    private late List<string> lines;\n    public int attempts { get; set; } = 0;\n\n    public late string status { get; set; } = \"open\";\n    public static late int count { get; set; } = 0;\n    public late string label => this.number;\n    public late string code { get => \"A\"; }\n    public late void ship() { }\n\n    public string title() => `Order ${this.number} ${this.lines.count()}`;\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Order.sharp", sharp), &[]);
+
+    assert_eq!(
+        written_errors(sharp, &issues),
+        [
+            "late semantics A `late` member takes no initial value: the code that fills it after the constructor sets it.",
+            "late semantics A static is never `late`: it holds its initial value before any code reads it.",
+            "late semantics A computed property is never `late`: it has no storage to leave unset.",
+            "late semantics `code` computes every read and write, so it has no storage to leave unset: drop `late`, or give it an auto accessor such as `get;`.",
+            "late semantics Only a field or a property with storage is `late`, written as in `public late string number { get; set; }`.",
         ]
     );
 }
@@ -29010,6 +29330,129 @@ fn a_plain_php_property_typed_by_a_template_keeps_an_unchecked_default() {
     assert_eq!(issues(("src/Demo/Box.php", php), &[]), Vec::<String>::new());
 }
 
+/// PHP starts an untyped property at `null`, so an untyped plain PHP property without a default, whatever its `@var`
+/// says, may still be `null` and arrives in PHP# as `Source?`: `this.source == null` checks it, and so does
+/// `Store.shared == null` of a static one. A typed property without a default is a `Source`, since PHP throws on a read
+/// before its first write.
+#[test]
+fn an_untyped_plain_php_property_without_a_default_arrives_nullable() {
+    let php = "<?php\n\nnamespace Lib;\n\nclass Source\n{\n}\n\nclass Store\n{\n    /** @var Source */\n    protected $source;\n\n    /** @var Source */\n    public static $shared;\n\n    protected Source $typed;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Source;\nimport Lib.Store;\n\npublic class Cache : Store\n{\n    public Source loaded()\n    {\n        if (this.source == null) {\n            this.source = new Source();\n        }\n        return this.source;\n    }\n\n    public bool unset() => this.typed == null;\n\n    public bool unshared() => Store.shared == null;\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Cache.sharp", sharp), &[("src/Lib/Store.php", php)]),
+        [
+            "16:28 redundant-comparison Redundant `==` comparison: left-hand side is never equal to right-hand side. Consider simplifying or removing this comparison as it always evaluates to `false`."
+        ]
+    );
+}
+
+/// A plain PHP `literal-string` parameter takes a string written in the code, a string literal or a constant, as PHP's
+/// static analyzers read it, so a string PHP# composes while the code runs is refused with a message that names
+/// `literal-string` and points at a query's bindings for the values it holds.
+#[test]
+fn a_composed_string_for_a_plain_php_literal_string_is_refused_by_name() {
+    let query = (
+        "src/Lib/Query.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Query\n{\n    /**\n     * @param literal-string $sql\n     * @param list<mixed> $bindings\n     */\n    public function selectRaw(string $sql, array $bindings = []): self\n    {\n        return $this;\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.Query;\n\npublic class Report\n{\n    private const string TOTAL = \"sum(price) as total\";\n\n    public Query run(Query query, string column, int floor)\n    {\n        const counted = \"count(*) as count\";\n        query.selectRaw(\"max(price) as most\");\n        query.selectRaw(Report.TOTAL);\n        query.selectRaw(counted);\n        query.selectRaw(\"price > ?\", [floor]);\n        return query.selectRaw(`max(${column})`);\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[query]),
+        [
+            "16:32 possibly-invalid-argument Argument #1 of method `Query.selectRaw` takes a `literal-string`, a string literal or a constant, and this string is composed while the code runs. Write the string as a literal or a constant, and pass each value it holds separately, as a query's bindings for its `?` placeholders take them."
+        ]
+    );
+}
+
+/// A plain PHP class's `__toString()`, its own or inherited, is its `toString()`, spec section 18: a template shows it
+/// and a call runs it. A plain PHP class with neither stays a template's error, and a value that holds an enum beside
+/// such a class has no one call that shows both.
+#[test]
+fn a_plain_php_to_string_is_the_classes_to_string() {
+    let mail = (
+        "src/Lib/Mail.php",
+        "<?php\n\nnamespace Lib;\n\nclass Email\n{\n    public function __toString(): string\n    {\n        return 'a@b.c';\n    }\n}\n\nfinal class WorkEmail extends Email\n{\n}\n\nfinal class Row\n{\n}\n",
+    );
+    let status = (
+        "src/Demo/Status.sharp",
+        "namespace Demo;\n\npublic enum Status\n{\n    case Open;\n    case Closed;\n\n    public string toString() => \"open\";\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.Email;\nimport Lib.Row;\nimport Lib.WorkEmail;\n\npublic class Report\n{\n    public string run(Email email, WorkEmail work, Row row, Email|Status either)\n    {\n        const shown = `${email} ${work} ${email.toString()} ${work.toString()}`;\n        const plain = `${row}`;\n        const mixed = `${either}`;\n        return either.toString();\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[mail, status]),
+        [
+            "12:24 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `Row` is none of them. Show a value taken from it instead, such as a property or the result of a method.",
+            "13:24 invalid-operand `Status|Email` holds an enum and a plain PHP class whose `toString()` is its `__toString()`, and no one call shows both. Test which it is with `is` first, and show each part on its own.",
+            "14:16 invalid-operand `Status|Email` holds an enum and a plain PHP class whose `toString()` is its `__toString()`, and no one call shows both. Test which it is with `is` first, and show each part on its own.",
+        ]
+    );
+}
+
+/// `[Import]` marks a static method without a body and `[Export]` a static method, spec section 23, each with a string
+/// literal. One function name is imported once and exported once in the project, as PHP ignores its case, and the
+/// refusal names both methods.
+#[test]
+fn interop_attributes_mark_static_methods_of_one_name_each() {
+    let interop = [
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Interop/Import.sharp",
+            include_str!("../../../../composer/library/Sharp/Interop/Import.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Interop/Export.sharp",
+            include_str!("../../../../composer/library/Sharp/Interop/Export.sharp"),
+        ),
+        (
+            "src/Demo/Other.sharp",
+            "namespace Demo;\n\nimport Sharp.Interop.Export;\nimport Sharp.Interop.Import;\n\npublic static class Other\n{\n    [Import(\"Levenshtein\")]\n    public static int distance(string a, string b);\n\n    [Export(\"auth_redirect\")]\n    public static void redirect() { }\n}\n",
+        ),
+    ];
+    let sharp = "namespace Demo;\n\nimport Sharp.Interop.Export;\nimport Sharp.Interop.Import;\n\npublic class Words\n{\n    [Import(\"levenshtein\")]\n    public static int between(string a, string b);\n\n    [Import(\"strlen\")]\n    public int length(string text);\n\n    [Import(\"strrev\")]\n    public static string reversed(string text) => text;\n\n    [Export(\"AUTH_REDIRECT\")]\n    public static void redirect() { }\n\n    [Export(\"auth_check\")]\n    public bool check() => true;\n\n    public static int plain(string text);\n\n    public const string NAME = \"words_named\";\n\n    [Export(Words.NAME)]\n    public static void named() { }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Words.sharp", sharp), &interop),
+        [
+            "11:6 semantics",
+            "15:48 semantics",
+            "20:6 semantics",
+            "23:41 semantics",
+            "6:14 unimplemented-abstract-method",
+            "8:6 duplicate-definition",
+            "17:6 duplicate-definition",
+            "27:6 invalid-attribute-target",
+        ]
+    );
+    let words = explained(("src/Demo/Words.sharp", sharp), &interop);
+    assert!(
+        words.contains(&"8:6 duplicate-definition `[Import(\"levenshtein\")]` is on `Words.between` and on `Other.distance`, and PHP has one function of a name. Keep one `[Import(\"levenshtein\")]` in the project.".to_owned())
+            && words.contains(&"11:6 semantics `[Import]` marks a static method, and `Words.length` is an instance method. Make the method `static`.".to_owned())
+            && words.contains(&"15:48 semantics `[Import]` makes `Words.reversed` the call of the PHP function it names, and the method has a body. End the declaration with `;` instead of a body.".to_owned())
+            && words.contains(&"27:6 invalid-attribute-target `[Export]` takes the name of a PHP function as a string literal. Write the name in quotes, as `[Export(\"levenshtein\")]`.".to_owned()),
+        "{words:#?}"
+    );
+}
+
+/// `Sql.identifier(name, allowed)` gives a `literal-string`, spec section 24, so a column chosen while the code runs
+/// passes to a plain PHP `literal-string` parameter through it, and the same column passed bare is still refused.
+#[test]
+fn an_identifier_from_an_allow_list_passes_to_a_plain_php_literal_string() {
+    let query = (
+        "src/Lib/Query.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Query\n{\n    /**\n     * @param literal-string $sql\n     */\n    public function orderByRaw(string $sql): self\n    {\n        return $this;\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.Query;\nimport Sharp.Data.Sql;\n\npublic class Report\n{\n    public Query run(Query query, string column)\n    {\n        query.orderByRaw(Sql.identifier(column, [\"name\", \"created_at\"]));\n        return query.orderByRaw(column);\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[query]),
+        [
+            "11:33 possibly-invalid-argument Argument #1 of method `Query.orderByRaw` takes a `literal-string`, a string literal or a constant, and this string is composed while the code runs. Write the string as a literal or a constant, and pass each value it holds separately, as a query's bindings for its `?` placeholders take them."
+        ]
+    );
+}
+
 /// A plain PHP `class-string<Box<int, string>>` checks the template arguments of the class it names, as upstream Mago
 /// does. PHP# skips a class value's: `Class<PaginatedList>` names the class itself (spec section 11).
 #[test]
@@ -29742,6 +30185,12 @@ const JSON: (&str, &str) = (
     include_str!("../../../../composer/library/Sharp/Encoding/Json.sharp"),
 );
 
+/// The standard library's `JsonValue`, which `Json.parse` returns, as `sharp/composer/` ships it.
+const JSON_VALUE: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/JsonValue.sharp",
+    include_str!("../../../../composer/library/Sharp/Encoding/JsonValue.sharp"),
+);
+
 /// Spec sections 10 and 24: `Json.encode` takes any value, and a JSON object's key is text, so a `Map` keyed by an
 /// object without `toString()`, wherever the value holds it, is an error. A struct with `toString()`, a backed enum,
 /// an `int` and a `string` key a JSON object.
@@ -29749,6 +30198,7 @@ const JSON: (&str, &str) = (
 fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
     let shapes = [
         JSON,
+        JSON_VALUE,
         (
             "app/Shop/Point.sharp",
             "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n",
@@ -29770,7 +30220,7 @@ fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
     );
     let point = "invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.";
 
-    assert_eq!(worded(JSON, &[]), Vec::<String>::new());
+    assert_eq!(worded(JSON, &[JSON_VALUE]), Vec::<String>::new());
     assert_eq!(
         refusals(report, &shapes),
         [
@@ -29798,9 +30248,9 @@ fn a_parameter_marked_encoded_as_json_refuses_a_map_key_with_no_json_text() {
         "namespace App.Shop;\n\nimport Sharp.Encoding.Feed;\n\npublic class Report\n{\n    public static string run(Map<float, int> floats) => Feed.write(2, floats);\n}\n",
     );
 
-    assert_eq!(worded(feed, &[JSON]), Vec::<String>::new());
+    assert_eq!(worded(feed, &[JSON, JSON_VALUE]), Vec::<String>::new());
     assert_eq!(
-        refusals(report, &[feed, JSON]),
+        refusals(report, &[feed, JSON, JSON_VALUE]),
         [
             "7:71 invalid-json-key `Feed.write` writes each `Map` key as JSON text, and a `float` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`."
         ]

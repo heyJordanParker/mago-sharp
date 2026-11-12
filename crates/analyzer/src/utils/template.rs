@@ -34,6 +34,7 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_int_or_string;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
@@ -741,30 +742,35 @@ pub(crate) fn written_type_argument(union: &TUnion, codebase: &CodebaseMetadata)
 }
 
 /// `union` with each enum case in it as its enum, each tuple as the tuple of its elements' written types, spec section
-/// 30, and each other array as the `List`, `Map` or `Set` of its key and value types, the arrays inside one too.
+/// 30, each other array as the `List`, `Map` or `Set` of its key and value types, the arrays inside one too, and each
+/// `array-key`, as a plain PHP template's default gives it, as `int|string`, spec section 12.
 fn written_type(union: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
     TUnion::from_vec(
         union
             .types
             .iter()
-            .map(|atomic| match atomic {
+            .flat_map(|atomic| match atomic {
+                TAtomic::Scalar(TScalar::ArrayKey) => get_int_or_string().types.into_owned(),
                 TAtomic::Array(TArray::List(list)) if let Some(elements) = list.tuple_elements() => {
-                    TAtomic::Array(TArray::List(TList::tuple(
+                    vec![TAtomic::Array(TArray::List(TList::tuple(
                         elements.into_iter().map(|(element, name)| (written_type(element, codebase), name)).collect(),
-                    )))
+                    )))]
                 }
                 TAtomic::Array(array) => {
                     let (key, value) = get_array_parameters(array, codebase);
                     let value = Arc::new(written_type(&value, codebase));
 
-                    TAtomic::Array(match array {
+                    vec![TAtomic::Array(match array {
                         TArray::List(_) => TArray::List(TList::new(value)),
-                        TArray::Keyed(_) => TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(key), value)),
+                        TArray::Keyed(_) => TArray::Keyed(TKeyedArray::new_with_parameters(
+                            Arc::new(written_type(&key, codebase)),
+                            value,
+                        )),
                         TArray::Set(_) => TArray::Set(value),
-                    })
+                    })]
                 }
-                TAtomic::Object(TObject::Enum(r#enum)) => TAtomic::Object(TObject::Enum(TEnum::new(r#enum.name))),
-                atomic => atomic.clone(),
+                TAtomic::Object(TObject::Enum(r#enum)) => vec![TAtomic::Object(TObject::Enum(TEnum::new(r#enum.name)))],
+                atomic => vec![atomic.clone()],
             })
             .collect(),
     )

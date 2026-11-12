@@ -25,7 +25,8 @@ use crate::utils::names::display_property_name;
 /// required where the struct is created. A class's `init` property is set where its object is created. A field or a
 /// settable property holds a value from the start, so it needs one the same way, and a `T?` one has no implicit `null`. A
 /// property the class inherits from a PHP# parent is checked on the class, since an abstract parent leaves it to its
-/// subclasses, and a main constructor runs each parent's through `: super(…)`.
+/// subclasses, and a main constructor runs each parent's through `: super(…)`. A `late` member is set after the
+/// constructor, so it needs none.
 pub fn check_storage_initialization<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
 where
     A: Arena,
@@ -64,6 +65,7 @@ where
         let never_set = (get_only || set_later || struct_only)
             && !property.flags.is_promoted_property()
             && !property.flags.has_default()
+            && !property.flags.is_late()
             && !property.flags.is_static()
             && !property.flags.is_virtual_property()
             && !assigned.contains(name);

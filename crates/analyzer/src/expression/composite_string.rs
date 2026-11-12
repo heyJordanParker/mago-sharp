@@ -31,6 +31,8 @@ use crate::error::AnalysisError;
 use crate::expression::binary::utils::display_operand;
 use crate::expression::is_refused_type;
 use crate::expression::unary::cast_type_to_string;
+use crate::resolver::method::plain_text_method;
+use crate::resolver::method::refuse_mixed_text;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::quoted_source;
 
@@ -113,7 +115,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for CompositeString<'arena> {
                 continue;
             }
             if shows_its_text
-                && (check_to_string(context, part, &part_type)
+                && (refuse_mixed_text(context, &part_type, part.span())
+                    || check_to_string(context, part, &part_type)
                     || report_to_string_in_constant(context, block_context, part))
             {
                 all_literals = false;
@@ -258,14 +261,18 @@ fn declares_to_string(codebase: &CodebaseMetadata, part_type: &TUnion) -> bool {
 }
 
 /// The `toString()` each class, interface or enum `part_type` holds declares, itself or through a parent or an
-/// interface.
+/// interface, a plain PHP class's `__toString()` included.
 fn to_string_methods<'codebase>(
     codebase: &'codebase CodebaseMetadata,
     part_type: &TUnion,
 ) -> impl Iterator<Item = &'codebase FunctionLikeMetadata> {
     part_type.types.iter().filter_map(|atomic| match get_sharp_type(atomic) {
         Some(SharpType::Class(name, _) | SharpType::Enum(name)) => {
-            codebase.get_declaring_method(name.as_bytes(), b"toString")
+            codebase.get_declaring_method(name.as_bytes(), b"toString").or_else(|| {
+                let class = codebase.get_class_like(name.as_bytes())?;
+
+                codebase.get_method_by_id(&plain_text_method(codebase, class)?)
+            })
         }
         _ => None,
     })

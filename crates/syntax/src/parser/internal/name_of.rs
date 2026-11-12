@@ -4,6 +4,7 @@ use crate::T;
 use crate::cst::cst::DottedIdentifier;
 use crate::cst::cst::Identifier;
 use crate::cst::cst::NameOf;
+use crate::cst::cst::NameOfMember;
 use crate::error::ParseError;
 use crate::parser::Parser;
 
@@ -18,8 +19,9 @@ where
             && self.stream.peek_kind(1)? == Some(T!["("]))
     }
 
-    /// Parses `nameof(Order.total)`. A class written as a full name, as in `nameof(App.Order.total)`, reads as one
-    /// dotted name before the last `.`, which the analyzer refuses with the import to add, spec section 23.
+    /// Parses `nameof(Order.total)` and `nameof(Counted)`. A class written as a full name, as in
+    /// `nameof(App.Order.total)`, reads as one dotted name before the last `.`, which the analyzer refuses with the
+    /// import to add, spec section 23. A class alone is one name, as `nameof(Counted)`.
     pub(crate) fn parse_name_of(&mut self) -> Result<NameOf<'arena>, ParseError<'arena>> {
         let nameof = self.expect_any_keyword()?;
         let left_parenthesis = self.stream.eat_span(T!["("])?;
@@ -28,15 +30,13 @@ where
         } else {
             self.parse_identifier()?
         };
+        let member = if self.stream.peek_kind(0)? == Some(T!["."]) {
+            Some(NameOfMember { dot: self.stream.eat_span(T!["."])?, name: self.parse_local_identifier()? })
+        } else {
+            None
+        };
 
-        Ok(NameOf {
-            nameof,
-            left_parenthesis,
-            class,
-            dot: self.stream.eat_span(T!["."])?,
-            property: self.parse_local_identifier()?,
-            right_parenthesis: self.stream.eat_span(T![")"])?,
-        })
+        Ok(NameOf { nameof, left_parenthesis, class, member, right_parenthesis: self.stream.eat_span(T![")"])? })
     }
 
     /// Parses the names joined by `.` that start here, up to the `.` before the last one, as `App.Order` in

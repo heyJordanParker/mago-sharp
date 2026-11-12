@@ -32,4 +32,20 @@ public final class Words
     {
         return value.round(2);
     }
+
+    // An argument the call leaves out is the member's parameter whose default is PHP's own.
+    public float whole(float value)
+    {
+        return value.round();
+    }
+
+    public string trimmed(string text)
+    {
+        return text.trim();
+    }
+
+    public string unslashed(string text)
+    {
+        return text.trim('/');
+    }
 }

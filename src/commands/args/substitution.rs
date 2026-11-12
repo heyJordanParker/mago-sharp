@@ -13,11 +13,11 @@
 //!
 //! # Mechanism
 //!
-//! Substitution is implemented at the CLI layer as path manipulation: each `TEMP` is appended
-//! to the orchestrator's `paths` (so it becomes a host file) and each `ORIG` is appended to
-//! `excludes` (so it is skipped during scanning). No loader-level changes are required; the
-//! full project is still analyzed, just with the replacement file loaded in place of the
-//! original.
+//! The project loads as it would without the flag, and [`substitute`] then puts each `TEMP` in
+//! the database in place of `ORIG`, as `mago convert` swaps a converted file in. The replacement
+//! is checked exactly as the original would be at the original's path: it takes the original's
+//! name, package, folder namespace and exclusions, and keeps its own dialect, from its own
+//! extension. Its own location neither excludes it nor adds it as a file of its own.
 //!
 //! # Validation
 //!
@@ -25,9 +25,15 @@
 //! and absolute-path checks happen in [`SubstitutionArgs::resolve`] before the orchestrator is
 //! handed the mapping.
 
+use std::borrow::Cow;
+use std::path::Path;
 use std::path::PathBuf;
 
 use clap::Parser;
+use mago_database::Database;
+use mago_database::DatabaseReader;
+use mago_database::file::File;
+use mago_database::loader::mark_sharp_file;
 
 use crate::error::Error;
 
@@ -70,6 +76,56 @@ impl SubstitutionArgs {
     pub fn resolve(&self) -> Result<Vec<Substitution>, Error> {
         self.substitutions.iter().map(|raw| parse_substitute_pair(raw)).collect()
     }
+}
+
+/// Puts each substitution's `temporary` file in `database` in place of its `original`.
+///
+/// The replacement is named at the original's path, with its own extension when it has one, so
+/// its diagnostics name the file it becomes once it's swapped in, and its dialect is its own. The
+/// original's folder gives it its package, as the loader marks a file it reads there. A replaced
+/// file the database doesn't hold is one the command doesn't check, so its replacement isn't
+/// checked either. The replacement keeps its own disk path, where a fix is written.
+///
+/// # Errors
+///
+/// Returns an [`Error`] when a replacement can't be read.
+pub fn substitute(substitutions: &[Substitution], database: &mut Database<'_>, workspace: &Path) -> Result<(), Error> {
+    for substitution in substitutions {
+        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let original = database.get_by_path(&canonical(&substitution.original));
+        if let Ok(own) = database.get_by_path(&canonical(&substitution.temporary)) {
+            database.delete(own.id);
+        }
+
+        let Ok(original) = original else {
+            tracing::warn!(
+                "`{}` is not a file this command checks, so its replacement `{}` is not checked either.",
+                substitution.original.display(),
+                substitution.temporary.display()
+            );
+            continue;
+        };
+
+        let mut name = PathBuf::from(String::from_utf8_lossy(&original.name).into_owned());
+        if let Some(extension) = substitution.temporary.extension() {
+            name.set_extension(extension);
+        }
+
+        let draft = File::read(workspace, &substitution.temporary, original.file_type)?;
+        let mut replacement = File::new(
+            Cow::Owned(name.to_string_lossy().into_owned().into_bytes()),
+            original.file_type,
+            None,
+            draft.contents,
+        );
+        mark_sharp_file(&mut replacement, workspace);
+        replacement.path = Some(substitution.temporary.clone());
+
+        database.delete(original.id);
+        database.add(replacement);
+    }
+
+    Ok(())
 }
 
 fn parse_substitute_pair(raw: &str) -> Result<Substitution, Error> {

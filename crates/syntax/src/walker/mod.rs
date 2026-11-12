@@ -672,8 +672,16 @@ generate_ast_walker! {
         if let Some(event) = &r#extern.event {
             walker.walk_keyword(event, context);
         }
+        if let Some(namespace) = &r#extern.namespace {
+            walker.walk_keyword(namespace, context);
+        }
 
         walker.walk_identifier(&r#extern.target, context);
+
+        if let Some(namespaced) = &r#extern.namespaced {
+            walker.walk_keyword(&namespaced.r#for, context);
+            walker.walk_identifier(&namespaced.class, context);
+        }
 
         if let Some(uses) = &r#extern.uses {
             walker.walk_uses(uses, context);
@@ -3089,7 +3097,9 @@ generate_ast_walker! {
     'arena NameOf as name_of => {
         walker.walk_keyword(&name_of.nameof, context);
         walker.walk_identifier(&name_of.class, context);
-        walker.walk_local_identifier(&name_of.property, context);
+        if let Some(member) = &name_of.member {
+            walker.walk_local_identifier(&member.name, context);
+        }
     }
 
     'arena With as with => {

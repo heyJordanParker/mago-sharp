@@ -14,6 +14,11 @@ use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::union::TUnion;
 
+use mago_codex::metadata::attribute::AttributeMetadata;
+use mago_codex::metadata::attribute::ConstantExpression;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_names::EXPORT;
+use mago_names::IMPORT;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_method_name;
 use mago_names::display_sharp_member;
@@ -65,6 +70,7 @@ use crate::statement::function_like::unused_parameter;
 use crate::statement::function_like::unused_parameter::utils::is_variable_used_in_expression;
 use crate::utils::missing_type_hints;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_member;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
@@ -380,6 +386,11 @@ where
             .with_annotation(Annotation::primary(method.name_span).with_message("Declared `extern` here."))
             .with_note("A native body is compiled into the PHP# engine, which ships only the standard library's."),
         );
+    }
+
+    if context.dialect.is_sharp() {
+        check_interop_name(context, class_like_metadata.name, method_metadata, IMPORT, "Import");
+        check_interop_name(context, class_like_metadata.name, method_metadata, EXPORT, "Export");
     }
 
     if context.dialect.is_sharp() && matches!(method.body, MethodBody::Abstract(_)) {
@@ -756,5 +767,77 @@ where
             "`{class_name}` declares `operator ==` without `{hash}`: declare it in `{class_name}`{or_parent}, so equal values hash alike."
         ))
         .with_annotation(Annotation::primary(operator).with_message("Declared here.")),
+    );
+}
+
+/// The PHP function name the interop attribute `mark`, `IMPORT` or `EXPORT`, gives `method`, spec section 23, with the
+/// attribute: its argument, a string literal. None for a method without the attribute.
+fn interop_name<'method>(
+    method: &'method FunctionLikeMetadata,
+    mark: &str,
+) -> Option<(Option<Word>, &'method AttributeMetadata)> {
+    let attribute =
+        method.attributes.iter().find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(mark.as_bytes()))?;
+    let name = match attribute.arguments.first().and_then(|argument| argument.value.as_ref()) {
+        Some(ConstantExpression::String(name)) => Some(*name),
+        _ => None,
+    };
+
+    Some((name, attribute))
+}
+
+/// Refuses `[{label}]`, the interop attribute `mark`, spec section 23, on `method` when its argument is no string literal,
+/// or when another method of the project carries it with the same name, which PHP, whose function names ignore case,
+/// reads as the same function. The refusal names every such method.
+fn check_interop_name<A>(
+    context: &mut Context<'_, '_, A>,
+    class: Word,
+    method: &FunctionLikeMetadata,
+    mark: &str,
+    label: &str,
+) where
+    A: Arena,
+{
+    let Some((name, attribute)) = interop_name(method, mark) else {
+        return;
+    };
+    let Some(name) = name else {
+        context.collector.report_with_code(
+            IssueCode::InvalidAttributeTarget,
+            Issue::error(format!("`[{label}]` takes the name of a PHP function as a string literal."))
+                .with_annotation(
+                    Annotation::primary(attribute.span).with_message("This names no function as a string literal."),
+                )
+                .with_help(format!("Write the name in quotes, as `[{label}(\"levenshtein\")]`.")),
+        );
+
+        return;
+    };
+    let mut others: Vec<String> = context
+        .codebase
+        .function_likes
+        .iter()
+        .filter(|(_, other)| other.method_metadata.is_some() && other.span != method.span)
+        .filter(|(_, other)| {
+            interop_name(other, mark)
+                .and_then(|(other_name, _)| other_name)
+                .is_some_and(|other_name| other_name.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
+        })
+        .map(|((class, _), other)| display_member(context, *class, other.original_name))
+        .collect();
+    if others.is_empty() {
+        return;
+    }
+    others.sort_unstable();
+    let this = display_member(context, class, method.original_name);
+
+    context.collector.report_with_code(
+        IssueCode::DuplicateDefinition,
+        Issue::error(format!(
+            "`[{label}(\"{name}\")]` is on `{this}` and on `{}`, and PHP has one function of a name.",
+            others.join("` and on `")
+        ))
+        .with_annotation(Annotation::primary(attribute.span).with_message("This one is here."))
+        .with_help(format!("Keep one `[{label}(\"{name}\")]` in the project.")),
     );
 }

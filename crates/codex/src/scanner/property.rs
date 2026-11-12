@@ -241,6 +241,8 @@ where
                         item_flags |= MetadataFlags::FINAL;
                     }
 
+                    item_flags.set(MetadataFlags::LATE, is_sharp && plain_property.modifiers.contains_late());
+
                     let read_visibility = context.member_visibility(&plain_property.modifiers, class_like_metadata);
 
                     let write_visibility = match plain_property.modifiers.get_first_write_visibility() {
@@ -350,6 +352,8 @@ where
             if hooked_property.modifiers.contains_final() {
                 flags |= MetadataFlags::FINAL;
             }
+
+            flags.set(MetadataFlags::LATE, is_sharp && hooked_property.modifiers.contains_late());
 
             let mut metadata = PropertyMetadata::new(name, flags);
 

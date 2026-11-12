@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::ttype::get_literal_string;
 use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
@@ -20,8 +21,9 @@ use crate::resolver::property::resolve_declared_property;
 use crate::utils::names::display_class_like_name;
 use crate::visibility::is_visible_from_scope;
 
-/// `nameof(X.y)` is the string `'y'`, spec section 6.3, checked against the class `X`: `y` is a property or a field
-/// of `X`, its own or inherited, instance or static, visible where `nameof` is written, as C#'s `nameof` is.
+/// `nameof(X.y)` is the string `'y'`, spec section 6.3, checked against the class `X`: `y` is a property, a field or
+/// a method of `X`, its own or inherited, instance or static, visible where `nameof` is written, as C#'s `nameof` is.
+/// `nameof(X)` is the class's own name, spec section 25, the part of its name after the last `.`.
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for NameOf<'arena> {
     fn analyze<'ctx, A>(
         &'ast self,
@@ -32,7 +34,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NameOf<'arena> {
     where
         A: Arena,
     {
-        artifacts.set_expression_type(self, get_literal_string(word(self.property.value)));
+        artifacts.set_expression_type(self, get_literal_string(word(self.named())));
 
         let name = word(context.resolved_names.get(&self.class));
         artifacts.symbol_references.add_reference_to_symbol(
@@ -47,21 +49,53 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NameOf<'arena> {
             return Ok(());
         };
 
+        let Some(member) = &self.member else {
+            return Ok(());
+        };
         let scope = block_context.scope.get_class_like_name();
-        let property_name = concat_word!("$", self.property.value);
+        let property_name = concat_word!("$", member.name.value);
         let class_name = display_class_like_name(context, class.original_name);
         let property = display_sharp_member(class_name, property_name);
 
         let Some(resolution) = resolve_declared_property(context.codebase, class, property_name, true, scope) else {
+            if let Some(method) = context.codebase.get_declaring_method(class.name.as_bytes(), member.name.value)
+                && let Some(metadata) = method.method_metadata.as_ref()
+            {
+                let declaring = context.codebase.get_declaring_method_identifier(&MethodIdentifier::new(
+                    class.name,
+                    ascii_lowercase_word(member.name.value),
+                ));
+                let declaring_class = declaring.get_class_name();
+                if !is_visible_from_scope(context.codebase, metadata.visibility, declaring_class.as_bytes(), scope) {
+                    let method_name = display_sharp_member(class_name, word(member.name.value));
+                    context.collector.report_with_code(
+                        IssueCode::InvalidMethodAccess,
+                        Issue::error(format!(
+                            "`{method_name}` is `{}`, so `nameof` can't name it here.",
+                            metadata.visibility
+                        ))
+                        .with_annotation(Annotation::primary(member.name.span).with_message("Named here."))
+                        .with_help("Name a method this code can call, or widen the method's access level."),
+                    );
+                }
+                artifacts.symbol_references.add_reference_to_class_member(
+                    &block_context.scope,
+                    (ascii_lowercase_word(declaring_class.as_bytes()), ascii_lowercase_word(member.name.value)),
+                    false,
+                );
+
+                return Ok(());
+            }
             if !class.has_incomplete_hierarchy() {
+                let member_name = display_sharp_member(class_name, word(member.name.value));
                 context.collector.report_with_code(
                     IssueCode::NonExistentProperty,
-                    Issue::error(format!("Property `{property}` does not exist."))
-                        .with_annotation(Annotation::primary(self.property.span).with_message("Named here."))
+                    Issue::error(format!("`{member_name}` is no property, field or method."))
+                        .with_annotation(Annotation::primary(member.name.span).with_message("Named here."))
                         .with_note(format!(
-                            "`nameof` names a property or field that `{class_name}` declares or inherits."
+                            "`nameof` names a property, a field or a method that `{class_name}` declares or inherits."
                         ))
-                        .with_help("Check the property's name, or declare it in the class."),
+                        .with_help("Check the member's name, or declare it in the class."),
                 );
             }
 
@@ -75,7 +109,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NameOf<'arena> {
             context.collector.report_with_code(
                 IssueCode::InvalidPropertyRead,
                 Issue::error(format!("`{property}` is `{visibility}`, so `nameof` can't name it here."))
-                    .with_annotation(Annotation::primary(self.property.span).with_message("Named here."))
+                    .with_annotation(Annotation::primary(member.name.span).with_message("Named here."))
                     .with_help("Name a property this code can read, or widen the property's access level."),
             );
         }

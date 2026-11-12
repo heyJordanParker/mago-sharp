@@ -4208,8 +4208,17 @@ fn nameof_names_a_class_and_a_property() {
         panic!("expected `nameof(Order.total)`, got {:#?}", order_by.argument_list.arguments);
     };
     assert_eq!(name_of.class.value(), b"Order");
-    assert_eq!(name_of.property.value, b"total");
+    assert_eq!(name_of.member.as_ref().map(|member| member.name.value), Some(&b"total"[..]));
+    assert_eq!(name_of.named(), b"total");
     assert_eq!(source(CODE, name_of), "nameof(Order.total)");
+
+    // Spec section 25: a class alone is its own name.
+    let class = parse(
+        &arena,
+        "src/Report.sharp",
+        "class Report\n{\n    void run()\n    {\n        log(nameof(Counted));\n    }\n}\n",
+    );
+    assert!(class.errors.is_empty(), "{:#?}", class.errors);
 
     let php = parse(&arena, "src/Report.php", "<?php nameof(Order);");
     let Some(Statement::Expression(statement)) = php.statements.get(1) else {
@@ -4824,6 +4833,51 @@ fn extern_declares_a_class_a_method_or_a_function_and_its_effects() {
     };
     assert_eq!(stripe.r#extern.value, b"extern");
     assert_eq!(stripe.uses.as_ref().map(|uses| source(CODE, uses)), Some("uses Http"));
+}
+
+/// `extern namespace WordPress for WP_Post;` gives the folder of a plain PHP class a namespace, spec section 23. It
+/// declares no effect, so `uses` after it, like a missing `for`, is a parse error.
+#[test]
+fn extern_namespace_names_a_namespace_and_a_class() {
+    const CODE: &str = "namespace App.Stubs;\n\nextern namespace WordPress for WP_Post;\nextern namespace Legacy.Blog for Blog_Post;\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Stubs/WordPress.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+        panic!("expected a namespace, got {:#?}", program.statements);
+    };
+    let externs: Vec<(Option<&str>, &str, Option<&str>, &str)> = namespace
+        .statements()
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Extern(declaration) => Some(declaration),
+            _ => None,
+        })
+        .map(|declaration| {
+            (
+                declaration.namespace.as_ref().map(|keyword| source(CODE, keyword)),
+                source(CODE, &declaration.target),
+                declaration.namespaced.as_ref().map(|namespaced| source(CODE, &namespaced.class)),
+                source(CODE, declaration),
+            )
+        })
+        .collect();
+    assert_eq!(
+        externs,
+        [
+            (Some("namespace"), "WordPress", Some("WP_Post"), "extern namespace WordPress for WP_Post;"),
+            (Some("namespace"), "Legacy.Blog", Some("Blog_Post"), "extern namespace Legacy.Blog for Blog_Post;"),
+        ]
+    );
+
+    for code in [
+        "namespace App.Stubs;\n\nextern namespace WordPress;\n",
+        "namespace App.Stubs;\n\nextern namespace WordPress for WP_Post uses Http;\n",
+    ] {
+        let arena = LocalArena::new();
+        assert!(!parse(&arena, "app/Stubs/WordPress.sharp", code).errors.is_empty(), "{code}");
+    }
 }
 
 /// `extern` declares only when a name follows it, so `extern(text)` at the start of a PHP# statement stays a call.

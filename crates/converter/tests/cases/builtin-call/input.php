@@ -35,4 +35,20 @@ final class Words
     {
         return round($value, 2);
     }
+
+    // An argument the call leaves out is the member's parameter whose default is PHP's own.
+    public function whole(float $value): float
+    {
+        return round($value);
+    }
+
+    public function trimmed(string $text): string
+    {
+        return mb_trim($text);
+    }
+
+    public function unslashed(string $text): string
+    {
+        return mb_trim($text, '/');
+    }
 }

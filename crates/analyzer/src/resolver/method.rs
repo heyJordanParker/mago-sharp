@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use foldhash::HashSet;
 use mago_allocator::Arena;
 
@@ -9,10 +11,12 @@ use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
+use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
+use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::mixed::TMixed;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -23,9 +27,11 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_iterable_parameters;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
@@ -54,6 +60,7 @@ use crate::context::block::BlockContext;
 use crate::effects::Body;
 use crate::effects::ReadonlyCall;
 use crate::error::AnalysisError;
+use crate::expression::binary::utils::display_operand;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
 use crate::expression::is_refused_type;
@@ -256,6 +263,17 @@ where
 
     let resolved_selectors = resolve_member_selector(context, block_context, artifacts, selector, false)?;
 
+    if context.dialect.is_sharp()
+        && let ClassLikeMemberSelector::Identifier(name) = selector
+        && name.value == b"toString"
+        && let Some(object_type) = artifacts.get_expression_type(object).cloned()
+        && refuse_mixed_text(context, &object_type, access_span)
+    {
+        result.has_invalid_target = true;
+
+        return Ok(result);
+    }
+
     // Spec section 26: an extension runs on the parts of the receiver that declare no member of its name, alone when no
     // part declares one, and beside each other part's own member otherwise, as `label()` on an `Order|string` runs
     // `Order`'s method on an `Order` and the extension on a `string`. A collection's members are the kind's own, which
@@ -375,6 +393,19 @@ where
                     result.has_invalid_target |= report_method_access_on_null(context, object, object_type);
                 }
 
+                continue;
+            }
+
+            // A PHP# class whose header names `Iterable<T>` is an `Iterable<T>`, so a member it doesn't declare is one of
+            // `Iterable<T>`'s lazy operations, spec section 12.
+            if context.dialect.is_sharp()
+                && let TAtomic::Object(TObject::Named(named)) = object_atomic
+                && context.codebase.is_sharp_iterable(named.name.as_bytes())
+                && let ClassLikeMemberSelector::Identifier(name) = selector
+                && lacks_member(context.codebase, object_atomic, name.value)
+                && let Some((_, element)) = get_iterable_parameters(object_atomic, context.codebase)
+            {
+                collection_parts.push(TAtomic::Iterable(TIterable::sharp_of(Arc::new(element))));
                 continue;
             }
 
@@ -1052,6 +1083,52 @@ where
     resolved_methods
 }
 
+/// The `__toString()` the plain PHP class `class` declares or inherits, when it declares and inherits no `toString()`:
+/// PHP# code calls it, and a template shows the class, as its `toString()`, spec section 18.
+pub(crate) fn plain_text_method(codebase: &CodebaseMetadata, class: &ClassLikeMetadata) -> Option<MethodIdentifier> {
+    if class.flags.is_sharp() || codebase.get_declaring_method(class.original_name.as_bytes(), b"toString").is_some() {
+        return None;
+    }
+    let text_method =
+        codebase.get_declaring_method_identifier(&MethodIdentifier::new(class.original_name, word(b"__toString")));
+
+    codebase.get_method_by_id(&text_method).is_some().then_some(text_method)
+}
+
+/// Whether `value_type` holds both an enum and a plain PHP class whose `toString()` is its `__toString()`: PHP gives an
+/// enum no string conversion and the class has no method `toString`, so no one call shows both.
+pub(crate) fn mixes_enum_and_plain_text(codebase: &CodebaseMetadata, value_type: &TUnion) -> bool {
+    let parts: Vec<SharpType> = value_type.types.iter().filter_map(get_sharp_type).collect();
+
+    parts.iter().any(|part| matches!(part, SharpType::Enum(_)))
+        && parts.iter().any(|part| {
+            matches!(part, SharpType::Class(name, _) if codebase
+                .get_class_like(name.as_bytes())
+                .is_some_and(|class| plain_text_method(codebase, class).is_some()))
+        })
+}
+
+/// Refuses `toString()` at `span` on a value of `value_type` that [`mixes_enum_and_plain_text`]. Whether it did.
+pub(crate) fn refuse_mixed_text<A>(context: &mut Context<'_, '_, A>, value_type: &TUnion, span: Span) -> bool
+where
+    A: Arena,
+{
+    if !mixes_enum_and_plain_text(context.codebase, value_type) {
+        return false;
+    }
+    let name = display_operand(context, value_type);
+    context.collector.report_with_code(
+        IssueCode::InvalidOperand,
+        Issue::error(format!(
+            "`{name}` holds an enum and a plain PHP class whose `toString()` is its `__toString()`, and no one call shows both."
+        ))
+        .with_annotation(Annotation::primary(span).with_message(format!("This is `{name}`.")))
+        .with_help("Test which it is with `is` first, and show each part on its own."),
+    );
+
+    true
+}
+
 pub fn get_method_candidates_from_object<'ctx, 'arena, 'object, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
@@ -1094,6 +1171,12 @@ where
     let mut method_id = MethodIdentifier::new(class_metadata.original_name, method_name);
     if !context.codebase.method_identifier_exists(&method_id) {
         method_id = context.codebase.get_declaring_method_identifier(&method_id);
+    }
+    if context.dialect.is_sharp()
+        && method_name.as_bytes().eq_ignore_ascii_case(b"toString")
+        && let Some(text_method) = plain_text_method(context.codebase, class_metadata)
+    {
+        method_id = text_method;
     }
 
     if let Some(function_like_metadata) = context.codebase.get_method_by_id(&method_id) {

@@ -110,6 +110,15 @@ pub struct GenericHint<'arena> {
     pub case: Option<LocalIdentifier<'arena>>,
 }
 
+impl GenericHint<'_> {
+    /// Whether this is `Iterable<T>`, which a class's header names to make the class an `Iterable<T>`, spec section
+    /// 12. PHP reserves the name `iterable`, so no class is named `Iterable`.
+    #[must_use]
+    pub fn is_iterable(&self) -> bool {
+        self.name.value == b"Iterable" && self.case.is_none() && self.type_arguments.arguments.len() == 1
+    }
+}
+
 /// The number of type arguments a PHP# generic type takes when `name` is one of PHP#'s own `List`, `Map`, `Set`,
 /// `Iterable` and `Class`, which name no class, or `None` for any other name.
 #[must_use]
