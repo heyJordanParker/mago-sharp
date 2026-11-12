@@ -399,11 +399,13 @@ impl Translator<'_, '_> {
         let mut body = Body::new(self.checked, self.reach, full, short.clone());
         let mut lines = vec![format!("inductive {lean} where")];
         let mut values = Vec::new();
+        let mut cases = Vec::new();
         for member in &r#enum.members {
             let ClassLikeMember::EnumCase(case) = member else {
                 continue;
             };
             let name = case.item.name();
+            cases.push(names::member(&lean, name.value));
             if names::RESERVED.contains(&String::from_utf8_lossy(name.value).as_ref()) {
                 body.unmodeled(
                     name.span,
@@ -441,6 +443,21 @@ impl Translator<'_, '_> {
             }
             self.translation.receivers.push((names::member(&lean, b"value"), true));
             self.declare(body, names::member(&lean, b"value"), r#enum.name.span, lines.join("\n"), true);
+        }
+        // An enum whose cases carry no data has `cases()`, the list of its cases in the order it declares them.
+        if self.reach.reaches(full, b"cases") {
+            let mut body = Body::new(self.checked, self.reach, full, format!("{short}.cases"));
+            let returns = format!("(List {})", body.class_type(r#enum.name.span, full));
+            let (mut lines, uses, unmodeled) = body.finish();
+            lines.push(format!("return [{}]", cases.join(", ")));
+            self.define(
+                names::member(&lean, b"cases"),
+                r#enum.name.span,
+                &[],
+                &returns,
+                (lines, uses, unmodeled),
+                None,
+            );
         }
 
         self.members(full, &lean, &short, &r#enum.members);

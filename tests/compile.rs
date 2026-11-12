@@ -3430,6 +3430,40 @@ fn compile_proves_spec_section_28_1_s_state_machine_law_over_an_enum_match() {
     assert!(compiled(root, "app/Shop/Status.sharp").exists());
 }
 
+/// A law reaches an enum's `cases()`, the list of its cases in the order the enum declares them, so a claim of another
+/// order is not proven.
+#[test]
+fn a_law_reaches_an_enum_s_cases_in_declaration_order() {
+    let level = |claim: &str| {
+        format!(
+            "namespace App.Auth;\n\npublic enum Level\n{{\n    case Low;\n    case Mid;\n    case High;\n\n    public static Level lowest() => match (Level.cases()) {{\n        [Level first, ...List<Level> rest] => first,\n        default => Level.High,\n    }};\n\n    law lowestIsDeclaredFirst(int unused) => {claim};\n}}\n"
+        )
+    };
+    let directory = library_project(&[(
+        "app/Auth/Level.sharp",
+        &level("Level.lowest() == Level.Low && Level.cases().count() == 3"),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Auth/Level.sharp").exists());
+
+    let directory = library_project(&[("app/Auth/Level.sharp", &level("Level.lowest() == Level.High"))]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: law lowestIsDeclaredFirst is not proven\n = still to show: Level.lowest() == Level.High\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// Spec section 28's `state-machine-law` example as it stands.
 const STATE_MACHINE: &str = "namespace App.Shop;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n    case Paid = \"paid\";\n    case Refunded = \"refunded\";\n\n    public Status after(Payment e) => match (this) {                               // pure: the next status for every status and event\n        Status.Open => Status.Paid,\n        Status.Paid => Status.Refunded,\n        Status.Refunded => Status.Refunded,\n    };\n    law refundedIsFinal(Payment e) => Status.Refunded.after(e) == Status.Refunded;\n}\n";
 
@@ -4017,11 +4051,36 @@ fn a_law_reaching_a_float_is_refused() {
     );
 }
 
+/// A law reaches an instance method no subclass can override: a private one, and any method of an enum. A `virtual`
+/// method of a class a subclass can extend is refused, since a law cannot know which implementation runs, and so is a
+/// call through `Self`, even of an enum's private method.
 #[test]
-fn a_law_reaching_an_overridable_method_is_refused() {
+fn a_law_reaches_a_method_only_when_no_subclass_can_override_it() {
+    let directory = lawful_project(&[
+        (
+            "app/Auth/Level.sharp",
+            "namespace App.Auth;\n\npublic enum Level\n{\n    case Low;\n    case High;\n\n    private int rank() => match (this) {\n        Level.Low => 1,\n        Level.High => 2,\n    };\n    public bool meets(Level @required) => this.rank() >= @required.rank();\n\n    law meetsItself(Level a) => a.meets(a);\n}\n",
+        ),
+        (
+            "app/Shared/Shape.sharp",
+            "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int corners { get; }) { }\n    private int sides() => this.corners + 1;\n\n    law hasSides(Shape s) => s.corners < 0 || s.sides() > 0;\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Auth/Level.sharp").exists());
+    assert!(compiled(root, "app/Shared/Shape.sharp").exists());
+
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public virtual int sides() => 3;\n\n    law hasSides(Shape s) => s.sides() > 0;\n}\n",
         "Law hasSides reaches a call to the overridable method Shape.sides in Shape.hasSides. A law cannot know which implementation runs.",
+    );
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic enum Shape\n{\n    case Low;\n    case High;\n\n    private int rank() => match (this) {\n        Shape.Low => 1,\n        Shape.High => 2,\n    };\n    public int twice() => Self.rank() * 2;\n\n    law twiceIsPositive(Shape s) => s.twice() > 0;\n}\n",
+        "Law twiceIsPositive reaches a call through `Self` in Shape.twice. A law cannot know which implementation runs.",
     );
 }
 
@@ -4616,6 +4675,24 @@ fn a_law_body_s_match_splits_its_cases_on_every_arm_a_match_takes() {
         "{}",
         printed(&output)
     );
+}
+
+/// Spec section 28: an `if` in a law's body that compares a value with an enum's case is a case that knows the case,
+/// with the case on either side of `==`, `!=` in the `else` branch, and a local that holds a parameter, as a `match`
+/// arm is. The case reads the code each call of the claim reaches, as `weight` through `level` and `rank` through
+/// `meets`, as a law with no body does.
+#[test]
+fn a_law_body_s_if_splits_its_cases_on_an_enum_s_cases() {
+    let role = "namespace App.Auth;\n\npublic enum Role\n{\n    case Owner;\n    case Admin;\n    case Member;\n\n    public int level() => Role.weight(this);\n    private static int weight(Role role) => match (role) {\n        Role.Owner => 3,\n        Role.Admin => 2,\n        Role.Member => 1,\n    };\n    public static Role fromLevel(int level) => match (level) {\n        3 => Role.Owner,\n        2 => Role.Admin,\n        default => Role.Member,\n    };\n\n    law fromLevelUndoesLevel(Role role) => Role.fromLevel(role.level()) == role\n    {\n        if (role == Role.Owner) {\n            return;\n        }\n        if (role == Role.Admin) {\n            return;\n        }\n        if (role == Role.Member) {\n            return;\n        }\n    }\n    law fromLevelUndoesLevelOfEitherSide(Role role) => Role.fromLevel(role.level()) == role\n    {\n        const same = role;\n        if (Role.Owner == same) {\n            return;\n        }\n        if (role != Role.Admin) {\n            return;\n        } else {\n            return;\n        }\n    }\n    law fromLevelUndoesLevelByMatch(Role role) => Role.fromLevel(role.level()) == role\n    {\n        match (role) {\n            Role.Owner => { return; },\n            Role.Admin => { return; },\n            default => { return; },\n        }\n    }\n}\n";
+    let level = "namespace App.Auth;\n\npublic enum Level\n{\n    case Low;\n    case Mid;\n    case High;\n\n    private static int rank(Level level) => match (level) {\n        Level.Low => 1,\n        Level.Mid => 2,\n        Level.High => 3,\n    };\n    public bool meets(Level @required) => Level.rank(this) >= Level.rank(@required);\n\n    law sameWhenEachMeetsTheOther(Level a, Level b) => !(a.meets(b) && b.meets(a)) || a == b\n    {\n        if (b == Level.Low) {\n            return;\n        }\n        if (b == Level.Mid) {\n            return;\n        }\n        if (b == Level.High) {\n            return;\n        }\n    }\n}\n";
+    let directory = lawful_project(&[("app/Auth/Role.sharp", role), ("app/Auth/Level.sharp", level)]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Auth/Role.sharp").exists());
+    assert!(compiled(root, "app/Auth/Level.sharp").exists());
 }
 
 /// A law's proof splits its cases on a value it can name without running code, so a `match` of any other value is

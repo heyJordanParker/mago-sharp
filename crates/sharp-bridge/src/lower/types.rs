@@ -1752,7 +1752,7 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The declaration of what the analysis recorded a method call runs. A method `__call` or `__callStatic` serves is
-    /// public and, as any subclass may declare it, overridable.
+    /// public, and overridable unless the class is an enum or final, since any subclass may declare it.
     fn target_declaration(&self, target: &CallTarget) -> Declaration {
         let method = |class: Word, method: Word| {
             self.method_declaration(class.as_bytes(), method.as_bytes())
@@ -1768,7 +1768,9 @@ impl<'analysis> Types<'analysis> {
             } => {
                 let kind = match method(magic_class, magic).kind {
                     DeclarationKind::StaticMethod => DeclarationKind::StaticMethod,
-                    _ => DeclarationKind::Method { overridable: true },
+                    _ => {
+                        DeclarationKind::Method { overridable: !self.codebase.is_enum_or_final_class(class.as_bytes()) }
+                    }
                 };
 
                 Declaration { kind, class, name, public: true }
@@ -2312,13 +2314,18 @@ impl<'analysis> Types<'analysis> {
         self.operator_owner(php_operator_name(&BinaryOperator::Spaceship(Span::zero()), 2)?, &[&key, &key])
     }
 
-    /// The method `class` declares or inherits by the name `method`, if any.
+    /// The method `class` declares or inherits by the name `method`, if any. A subclass overrides an instance method
+    /// that is neither final nor private, of a class that is neither an enum nor final.
     fn method_declaration(&self, class: &[u8], method: &[u8]) -> Option<Declaration> {
         let metadata = self.codebase.get_declaring_method(class, method)?.method_metadata.as_ref()?;
         let kind = if metadata.is_static {
             DeclarationKind::StaticMethod
         } else {
-            DeclarationKind::Method { overridable: !metadata.is_final }
+            DeclarationKind::Method {
+                overridable: !metadata.is_final
+                    && !metadata.visibility.is_private()
+                    && !self.codebase.is_enum_or_final_class(class),
+            }
         };
         let declaring =
             self.codebase.get_declaring_method_identifier(&MethodIdentifier::new(word(class), word(method)));
