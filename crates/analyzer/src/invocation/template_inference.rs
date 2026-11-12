@@ -256,6 +256,10 @@ pub fn infer_templates_from_input_and_container_types<A>(
     } else {
         TUnion::from_vec(residual_input_types)
     };
+    // A type parameter's value meets an array, an iterable or a generic object through its bound, as C# and Java infer
+    // from a type parameter's bound, so a `TBag : Bag<Order>` gives `Bag<TItem>` its `Order`. A callable reads the bound
+    // as it casts the value, and a bare type parameter of the container takes the type parameter itself, below.
+    let input_through_bounds = through_bounds(&residual_input_type);
 
     let mut potential_template_violations = HashMap::default();
     let generic_container_parts_len = generic_container_parts.len();
@@ -263,7 +267,7 @@ pub fn infer_templates_from_input_and_container_types<A>(
     for container_atomic_part in &generic_container_parts {
         match container_atomic_part {
             TAtomic::Array(container_array) => {
-                for input_atomic in residual_input_type.types.as_ref() {
+                for input_atomic in input_through_bounds.types.as_ref() {
                     if let TAtomic::Array(input_array) = input_atomic {
                         match (container_array, input_array) {
                             (TArray::List(container_list), TArray::List(input_list)) => {
@@ -632,7 +636,7 @@ pub fn infer_templates_from_input_and_container_types<A>(
                 }
             }
             TAtomic::Iterable(container_iterable) => {
-                for input_atomic in residual_input_type.types.as_ref() {
+                for input_atomic in input_through_bounds.types.as_ref() {
                     let Some(mut input_params) = get_iterable_parameters(input_atomic, context.codebase) else {
                         return;
                     };
@@ -786,7 +790,7 @@ pub fn infer_templates_from_input_and_container_types<A>(
                     continue;
                 };
 
-                for input_atomic in residual_input_type.types.as_ref() {
+                for input_atomic in input_through_bounds.types.as_ref() {
                     let TAtomic::Object(TObject::Named(input_obj)) = input_atomic else {
                         continue;
                     };
@@ -1387,6 +1391,25 @@ pub fn widen_to_declared_templates<A>(
             }
         }
     }
+}
+
+/// `union` with each type parameter in it replaced by its bound, and a bound that names another type parameter by that
+/// one's in turn, as `TPart : TItem` reaches `TItem`'s bound. A union with no type parameter is itself.
+fn through_bounds(union: &TUnion) -> Cow<'_, TUnion> {
+    if !union.types.iter().any(TAtomic::is_generic_parameter) {
+        return Cow::Borrowed(union);
+    }
+
+    Cow::Owned(TUnion::from_vec(
+        union
+            .types
+            .iter()
+            .flat_map(|atomic| match atomic {
+                TAtomic::GenericParameter(parameter) => through_bounds(&parameter.constraint).types.to_vec(),
+                _ => vec![atomic.clone()],
+            })
+            .collect(),
+    ))
 }
 
 /// Replaces unbound `GenericParameter` types with their constraint types.

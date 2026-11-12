@@ -9922,6 +9922,49 @@ fn the_receiver_type_picks_among_imported_extensions_of_one_name() {
     );
 }
 
+/// Spec sections 11 and 26: a value of a type parameter has every extension its bound has, as C# resolves an extension
+/// method on a `T` constrained to the type it extends and Kotlin one on a `T : Heap`. The bound fits the extension's
+/// receiver as a value of the bound's own type does: a generic class whose type argument the bound fixes, an
+/// interface, several bounds, and a plain PHP class a loop reads. A type parameter with no bound, or with a bound the
+/// receiver does not fit, has none of them, and the call on the bound's own type reports the same error. A generic
+/// method's argument fixes a type argument through its bound as an extension's receiver does.
+#[test]
+fn a_type_parameter_has_the_extensions_of_its_bound() {
+    const OTHERS: [(&str, &str); 7] = [
+        ("src/Demo/Heap.sharp", "namespace Demo;\n\npublic class Heap<TItem>\n{\n}\n"),
+        ("src/Demo/Shape.sharp", "namespace Demo;\n\npublic interface Shape\n{\n}\n"),
+        ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order\n{\n}\n"),
+        ("src/Demo/Invoice.sharp", "namespace Demo;\n\npublic class Invoice\n{\n}\n"),
+        (
+            "src/Demo/Bag.sharp",
+            "namespace Demo;\n\npublic class Bag<TItem> : Iterable<TItem>\n{\n    private List<TItem> items = [];\n\n    public Iterable<TItem> elements() => this.items;\n}\n",
+        ),
+        (
+            "src/Lib/Pile.php",
+            "<?php\n\nnamespace Lib;\n\nclass Pile implements \\IteratorAggregate\n{\n    public function getIterator(): \\Iterator\n    {\n        return new \\ArrayIterator([]);\n    }\n}\n",
+        ),
+        (
+            "src/Demo/Sizes.sharp",
+            "namespace Demo;\n\npublic static class Sizes\n{\n    extension<TItem>(Heap<TItem> heap)\n    {\n        public int size() => 0;\n    }\n\n    extension(Shape shape)\n    {\n        public int corners() => 0;\n    }\n\n    extension<T>(Bag<T> bag)\n    {\n        public int weight() => 0;\n    }\n\n    extension(Bag<Order> orders)\n    {\n        public int paid() => 0;\n    }\n\n    extension<T>(Iterable<T> items)\n    {\n        public int length() => items.toList().count();\n    }\n}\n",
+        ),
+    ];
+    let bounded = "namespace Demo;\n\nimport Lib.Pile;\n\npublic class Report\n{\n    public int heap<THeap : Heap<int>>(THeap heap) => heap.size();\n\n    public int bag<TBag : Bag<Order>>(TBag bag) => bag.weight() + bag.paid() + bag.length();\n\n    public int shape<TShape : Shape>(TShape shape) => shape.corners();\n\n    public int both<TBoth : Heap<int> & Shape>(TBoth both) => both.size() + both.corners();\n\n    public int pile<TPile : Pile>(TPile pile) => pile.length();\n}\n";
+    let unfit = "namespace Demo;\n\npublic class Report\n{\n    public int loose<T>(T value) => value.size();\n\n    public int invoices<TBag : Bag<Invoice>>(TBag bag) => bag.paid();\n\n    public int direct(Bag<Invoice> bag) => bag.paid();\n}\n";
+    let generic = "namespace Demo;\n\npublic class Picks\n{\n    public static TItem first<TItem>(Bag<TItem> bag) => bag.toList()[0];\n\n    public static TItem next<TItem>(Iterable<TItem> items) => items.toList()[0];\n\n    public Order fromBag<TBag : Bag<Order>>(TBag bag) => Picks.first(bag);\n\n    public Order fromIterable<TBag : Bag<Order>>(TBag bag) => Picks.next(bag);\n}\n";
+
+    assert_eq!(refusals(("src/Demo/Report.sharp", bounded), &OTHERS), Vec::<String>::new());
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", unfit), &OTHERS),
+        [
+            "5:43 mixed-method-access Attempting to access a method on a non-object type (`T`). | ",
+            "5:37 mixed-return-statement Could not infer a precise return type for method `Report.loose`. Saw type `Any?`. | Add specific type hints to variables, parameters, or properties involved in calculating the return value. Consider adding a specific return type declaration to the method signature to catch potential mismatches earlier.",
+            "7:63 non-existent-method Method `paid` does not exist on `Iterable<Invoice>`. | An `Iterable<Invoice>` has the methods `filter`, `length`, `map`, `take`, `toList`.",
+            "9:48 non-existent-method Method `paid` does not exist on `Iterable<Invoice>`. | An `Iterable<Invoice>` has the methods `filter`, `length`, `map`, `take`, `toList`.",
+        ]
+    );
+    assert_eq!(refusals(("src/Demo/Picks.sharp", generic), &OTHERS), Vec::<String>::new());
+}
+
 /// Spec section 26: an extension is chosen from the receiver's type the code shows, as in C# and Kotlin. An extension
 /// member named like a real member, a method or property that type declares or inherits, in code or in a docblock, or a
 /// method a `List`, `Map` or `Set` has, can never run, so it is an error. `__call` declares none. A member only a class derived from the type declares does not
