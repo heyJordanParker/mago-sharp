@@ -851,8 +851,10 @@ fn report_unhandled<'ctx, 'arena, A>(
         .and_then(|id| block_context.locals.get(&id).map(|value| (**value).clone()))
         .or_else(|| artifacts.get_expression_type(pattern_match.expression).cloned())
         .unwrap_or_else(get_mixed);
+    // After a `match` statement whose every arm returns, a local is the value no arm handles: `never` when the arms
+    // handle every value.
     let is_closed = value_type.types.iter().all(|atomic| {
-        matches!(atomic, TAtomic::Null)
+        matches!(atomic, TAtomic::Null | TAtomic::Never)
             || enum_value(atomic, context.codebase).is_some()
             || closed_class(atomic, context.codebase).is_some()
             || list_element_type(atomic).is_some()

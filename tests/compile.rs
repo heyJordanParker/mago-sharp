@@ -4239,6 +4239,13 @@ fn a_false_law_over_a_list_index_read_is_not_proven_and_a_map_key_read_is_refuse
     );
 }
 
+/// A law body's `match` with an arm for every case of an enum is exhaustive, as the same `match` in a method is, and
+/// splits the law's proof on the cases.
+#[test]
+fn compile_proves_a_law_whose_body_matches_every_case_of_an_enum() {
+    assert_backoff_split_on("Retry.ExponentialRamp", "retry is Retry.ExponentialRamp");
+}
+
 /// A law body's `match` whose `default` arm covers the cases the arms before it leave splits the law's proof on those
 /// arms, and the `default` arm proves for every case left.
 #[test]

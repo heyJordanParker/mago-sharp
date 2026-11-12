@@ -8427,6 +8427,21 @@ fn a_match_on_a_call_names_the_enum_cases_it_misses() {
     );
 }
 
+/// A `match` statement whose every arm returns, in a law's body or a method's, handles every case its arms name, as one
+/// whose arms run on does, and still names the cases its arms miss.
+#[test]
+fn a_match_statement_whose_arms_return_handles_the_cases_it_names() {
+    let stage = (
+        "src/Demo/Stage.sharp",
+        "namespace Demo;\n\npublic enum Stage\n{\n    case Open;\n    case Paid;\n\n    law known(Stage stage) => true\n    {\n        match (stage) {\n            Stage.Open => { return; },\n            Stage.Paid => { return; },\n        }\n    }\n\n    public static void check(Stage stage)\n    {\n        match (stage) {\n            Stage.Open => { return; },\n            Stage.Paid => { return; },\n        }\n    }\n\n    public static void missing(Stage stage)\n    {\n        match (stage) {\n            Stage.Open => { return; },\n        }\n    }\n}\n",
+    );
+
+    assert_eq!(
+        written_errors(stage.1, &analyze(&PLUGIN_REGISTRY, settings(), stage, &[])),
+        ["match match-not-exhaustive This `match` misses `Stage.Paid`."]
+    );
+}
+
 /// Only the last arm of a `match` takes what the arms before it leave, as `default` does. An arm before it that is
 /// always true leaves nothing for the arms after it.
 #[test]
