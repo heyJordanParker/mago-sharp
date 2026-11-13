@@ -23,6 +23,7 @@ use mago_codex::metadata::module::top_dispatcher_namespaces;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferences;
+use mago_codex::signature::DefSignatureNode;
 use mago_codex::symbol::SymbolIdentifier;
 use mago_codex::ttype::TType;
 use mago_database::DatabaseReader;
@@ -972,12 +973,24 @@ impl<'service> Dependencies<'service> {
             }
         }
 
+        // A library's polyfill of a name the engine builds in never declares it, since the built-in keeps the name, so
+        // its file is no input of the code that reads the name.
+        let codebase = &service.codebase;
+        let built_in = |node: &DefSignatureNode| {
+            let name = node.name.as_bytes();
+            if node.is_function {
+                codebase.get_function(name).is_some_and(|function| function.flags.is_built_in())
+            } else {
+                codebase.get_class_like(name).is_some_and(|class_like| class_like.flags.is_built_in())
+                    || codebase.get_constant(name).is_some_and(|constant| constant.flags.is_built_in())
+            }
+        };
         for (file_id, signature) in &service.codebase.file_signatures {
             if !service.database.get(file_id).is_ok_and(|file| is_source(&file)) {
                 continue;
             }
 
-            for node in signature.ast_nodes.iter().filter(|node| !node.name.is_empty()) {
+            for node in signature.ast_nodes.iter().filter(|node| !node.name.is_empty() && !built_in(node)) {
                 dependencies.declared_in.entry((node.name, empty_word())).or_default().push(*file_id);
                 for child in node.children.iter().filter(|child| !child.name.is_empty()) {
                     let member = (node.name, super::member_key(&service.codebase, node.name, child));
@@ -1614,6 +1627,48 @@ mod tests {
                 "composer.lock",
                 "lib/Rate.php",
                 "lib/aliases.php"
+            ]
+        );
+    }
+
+    /// A library's polyfill of a function the engine builds in, as `if (!function_exists('str_starts_with'))` declares,
+    /// never runs beside the engine's own, so its file is no input of a file whose code calls the function, here through
+    /// the standard library's `startsWith`. A library's polyfill of a function with no built-in of its name, as
+    /// `shop_label`, declares the function, so its file is an input.
+    #[test]
+    fn a_polyfill_of_a_built_in_function_is_no_input_and_one_of_a_library_function_is() {
+        let database = project(&[
+            (
+                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharp",
+                "namespace Sharp.Text;\n\npublic static class StringMembers\n{\n    extension(string text)\n    {\n        public bool startsWith(string prefix) => global.str_starts_with(text, prefix);\n    }\n}\n",
+            ),
+            (
+                "app/Prefix.sharp",
+                "namespace App;\n\nimport Lib;\n\npublic class Prefix\n{\n    public bool starts() => \"ab\".startsWith(\"a\");\n\n    public string label() => Lib.shop_label(\"a\");\n}\n",
+            ),
+            ("app/Externs.sharp", "namespace App;\n\nextern namespace Lib for shop_label;\n"),
+            (
+                "lib/polyfills.php",
+                "<?php\n\nif (!function_exists('str_starts_with')) {\n    function str_starts_with($haystack, $needle) {\n        return true;\n    }\n}\n",
+            ),
+            (
+                "lib/helpers.php",
+                "<?php\n\nif (!function_exists('shop_label')) {\n    function shop_label(string $name): string {\n        return $name;\n    }\n}\n",
+            ),
+        ]);
+
+        let compiled = compile(&mut analyzed(&database), empty_stamp);
+
+        assert_eq!(
+            input_paths(accepted(&compiled, "app/Prefix.sharp")),
+            [
+                "Module.sharp",
+                "app/*.sharp",
+                "app/Externs.sharp",
+                "app/Module.sharp",
+                "app/Prefix.sharp",
+                "composer.lock",
+                "lib/helpers.php"
             ]
         );
     }

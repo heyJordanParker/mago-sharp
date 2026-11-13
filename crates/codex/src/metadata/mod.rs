@@ -2149,6 +2149,15 @@ fn should_replace_metadata(
         return true;
     }
 
+    // A library's polyfill declares a name only when the engine lacks it, as `if (!function_exists('str_starts_with'))`
+    // does, so it never takes the name of one the engine builds in, for its signature, its effects or its file.
+    if existing_flags.is_built_in() && new_flags.is_polyfill() {
+        return false;
+    }
+    if new_flags.is_built_in() && existing_flags.is_polyfill() {
+        return true;
+    }
+
     let new_is_user_defined = new_flags.is_user_defined();
     let existing_is_user_defined = existing_flags.is_user_defined();
 
@@ -2245,6 +2254,16 @@ mod should_replace_metadata_tests {
         let b = MetadataFlags::USER_DEFINED;
         assert!(replaces(a, Span::dummy(0, 10), b, Span::dummy(0, 10)));
         assert!(!replaces(b, Span::dummy(0, 10), a, Span::dummy(0, 10)));
+    }
+
+    /// A library's polyfill never replaces what the engine builds in, though it is user-defined, and the built-in
+    /// replaces the polyfill whichever the scan met first.
+    #[test]
+    fn a_built_in_keeps_its_name_from_a_user_defined_polyfill() {
+        let builtin = MetadataFlags::BUILTIN;
+        let polyfill = MetadataFlags::POLYFILL | MetadataFlags::USER_DEFINED;
+        assert!(!replaces(builtin, Span::dummy(0, 10), polyfill, Span::dummy(0, 10)));
+        assert!(replaces(polyfill, Span::dummy(0, 10), builtin, Span::dummy(0, 10)));
     }
 
     #[test]

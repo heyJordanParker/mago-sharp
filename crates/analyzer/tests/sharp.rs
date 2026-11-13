@@ -15079,6 +15079,24 @@ fn library_call_types(sharp: &'static str, others: &[(&'static str, &'static str
         .collect()
 }
 
+/// A library's polyfill of a function the engine builds in, as `if (!function_exists('str_starts_with'))` declares,
+/// never runs beside the engine's own, so a call of the function has the built-in's signature, and `str_starts_with`
+/// returns a `bool` though the polyfill declares no return type. A polyfill of a function with no built-in of its
+/// name, as `shop_label`, is the function, so a call of it has the polyfill's signature.
+#[test]
+fn a_call_of_a_built_in_function_has_its_signature_and_never_a_polyfill_s() {
+    let polyfills = (
+        "lib/polyfills.php",
+        "<?php\n\nif (!function_exists('str_starts_with')) {\n    function str_starts_with($haystack, $needle) {\n        return 1;\n    }\n}\n\nif (!function_exists('shop_label')) {\n    function shop_label(string $name): string {\n        return $name;\n    }\n}\n",
+    );
+    let sharp = "namespace Sharp;\n\npublic static class Calls\n{\n    public static List<Any?> run() => [global.str_starts_with(\"ab\", \"a\"), global.shop_label(\"a\")];\n}\n";
+
+    assert_eq!(
+        library_call_types(sharp, &[polyfills], &["global.str_starts_with(\"ab\", \"a\")", "global.shop_label(\"a\")"]),
+        ["bool", "string"]
+    );
+}
+
 /// Spec section 12 passes plain PHP a `Map` keyed by a backed enum as the array keyed by each case's backing value, a
 /// `Set` as the list of its elements, and each `Map` a `List` holds as its array. So `array_keys` and `array_map` of a
 /// `Map<Status, int>`, the same calls on a `Set<Status>`, a generic function of the project whose `iterable<T, int>`
