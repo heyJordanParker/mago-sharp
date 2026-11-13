@@ -293,6 +293,13 @@ namespace Sharp\Internal;
 function equals(mixed $value, mixed $other): bool {}
 
 /**
+ * The JSON text of `$value`, as `json_encode` writes it with `$flags`. An `$indent` above 0 writes each nested value on
+ * its own line, `$indent` spaces deeper than its parent, as `JSON_PRETTY_PRINT` does with 4. The standard library's
+ * `Json.encode` writes by it.
+ */
+function jsonEncode(mixed $value, int $flags, int $indent): string {}
+
+/**
  * Marks the parameter of a standard library collection member that the member compares with the collection's elements
  * by `==`, as `List.contains`'s, so the checker refuses a value whose `==` against an element is no comparison.
  */
