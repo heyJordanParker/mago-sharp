@@ -261,28 +261,6 @@ final class Listening
     private function __construct() {}
 }
 
-namespace Sharp\Data;
-
-/**
- * SQL a query writes from the application's own names, which the engine declares.
- */
-final class Sql
-{
-    private function __construct() {}
-
-    /**
-     * `$name` as SQL, a column or a table chosen while the code runs, when it is one of `$allowed`, so it passes to a
-     * plain PHP `literal-string` parameter as one of the application's own names. Throws `ValueError` for any other.
-     *
-     * @param list<string> $allowed
-     *
-     * @return literal-string
-     *
-     * @throws \ValueError
-     */
-    public static function identifier(string $name, array $allowed): string {}
-}
-
 namespace Sharp\Internal;
 
 /**

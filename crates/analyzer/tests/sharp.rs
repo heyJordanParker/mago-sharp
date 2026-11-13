@@ -30109,20 +30109,34 @@ fn interop_attributes_mark_static_methods_of_one_name_each() {
     );
 }
 
-/// `Sql.identifier(name, allowed)` gives a `literal-string`, spec section 24, so a column chosen while the code runs
-/// passes to a plain PHP `literal-string` parameter through it, and the same column passed bare is still refused.
+/// Spec section 24, decision 98: a string-backed enum case's `value` is a `literal-string` wherever the case comes from,
+/// a parameter, a variable, a case, a collection's element, a method's result or a type parameter's bound, so a column
+/// chosen while the code runs passes to a plain PHP `literal-string` parameter as one of the enum's names, and a string
+/// passed bare is still refused. `Sharp.Data.Sql` and its `identifier` no longer exist.
 #[test]
-fn an_identifier_from_an_allow_list_passes_to_a_plain_php_literal_string() {
+fn an_allow_list_enum_s_value_passes_to_a_plain_php_literal_string() {
     let query = (
         "src/Lib/Query.php",
         "<?php\n\nnamespace Lib;\n\nfinal class Query\n{\n    /**\n     * @param literal-string $sql\n     */\n    public function orderByRaw(string $sql): self\n    {\n        return $this;\n    }\n}\n",
     );
-    let sharp = "namespace Demo;\n\nimport Lib.Query;\nimport Sharp.Data.Sql;\n\npublic class Report\n{\n    public Query run(Query query, string column)\n    {\n        query.orderByRaw(Sql.identifier(column, [\"name\", \"created_at\"]));\n        return query.orderByRaw(column);\n    }\n}\n";
+    let column = (
+        "src/Demo/SortColumn.sharp",
+        "namespace Demo;\n\npublic enum SortColumn : string\n{\n    case Name = \"name\";\n    case CreatedAt = \"created_at\";\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.Query;\n\npublic class Report\n{\n    public Query run(Query query, SortColumn column, string chosen)\n    {\n        query.orderByRaw(column.value);\n        SortColumn held = column;\n        query.orderByRaw(held.value);\n        query.orderByRaw(SortColumn.Name.value);\n        List<SortColumn> all = [column];\n        query.orderByRaw(all[0].value);\n        query.orderByRaw(this.pick().value);\n        return query.orderByRaw(chosen);\n    }\n\n    public SortColumn pick() => SortColumn.Name;\n\n    public Query bounded<T : SortColumn>(Query query, T column) => query.orderByRaw(column.value);\n}\n";
+    let sql =
+        ("src/Demo/Identifiers.sharp", "namespace Demo;\n\nimport Sharp.Data.Sql;\n\npublic class Identifiers\n{\n}\n");
 
     assert_eq!(
-        explained(("src/Demo/Report.sharp", sharp), &[query]),
+        explained(("src/Demo/Report.sharp", sharp), &[query, column]),
         [
-            "11:33 possibly-invalid-argument Argument #1 of method `Query.orderByRaw` takes a `literal-string`, a string literal or a constant, and this string is composed while the code runs. Write the string as a literal or a constant, and pass each value it holds separately, as a query's bindings for its `?` placeholders take them."
+            "16:33 possibly-invalid-argument Argument #1 of method `Query.orderByRaw` takes a `literal-string`, a string literal or a constant, and this string is composed while the code runs. Write the string as a literal or a constant, and pass each value it holds separately, as a query's bindings for its `?` placeholders take them."
+        ]
+    );
+    assert_eq!(
+        refusals(sql, &[]),
+        [
+            "3:8 non-existent-use-import Imported class, interface, trait, or enum `Sharp.Data.Sql` does not exist. | Ensure that the class, interface, trait, or enum `Sharp.Data.Sql` is defined in the codebase."
         ]
     );
 }
