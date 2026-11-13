@@ -583,12 +583,21 @@ fn refusal(host: Word, part: &str, refused: &TUnion, span: Span, code: &str) -> 
         .with_help("A host refines a PHP# declaration only to a type PHP# can write.")
 }
 
-/// Applies `application`'s arguments to the direct parent it names, in any case, as a docblock's `@extends` does: the
-/// header's names stay as written until the populator keys them, spec section 24.
+/// Applies `application`'s arguments to the direct parent it names, as a docblock's `@extends` does. The header's names
+/// stay as written until the populator keys them, spec section 24, so the parent written as the host names it wins, as
+/// the PHP# `Named` over its twin `NAMED`, and a plain PHP parent is found in any case after it.
 fn apply_inherited(class: &mut ClassLikeMetadata, application: InheritedApplication) {
-    let names = |name: &Word| name.as_bytes().eq_ignore_ascii_case(application.ancestor.as_bytes());
-    let parent_interface = class.direct_parent_interfaces.iter().find(|name| names(name)).copied();
-    let parent_class = class.direct_parent_class.filter(names);
+    let written = application.ancestor.as_bytes();
+    let parents = |names: &dyn Fn(&[u8]) -> bool| {
+        (
+            class.direct_parent_class.filter(|name| names(name.as_bytes())),
+            class.direct_parent_interfaces.iter().find(|name| names(name.as_bytes())).copied(),
+        )
+    };
+    let (parent_class, parent_interface) = match parents(&|name| name == written) {
+        (None, None) => parents(&|name| name.eq_ignore_ascii_case(written)),
+        found => found,
+    };
     let ancestor = parent_class.or(parent_interface).unwrap_or(application.ancestor);
     let is_parent_interface = parent_interface.is_some();
     let counts = if parent_class.is_some() || (class.kind.is_interface() && is_parent_interface) {
@@ -878,5 +887,37 @@ mod tests {
             lambda.refined_this_type.as_ref().map(|this| &this.type_union),
             Some(&get_named_object(notice, None))
         );
+    }
+
+    /// A host that names a PHP# parent as the header writes it, spec section 24, reaches that parent, so its arguments
+    /// meet the ones `Notice : Base<string>` already gives it, and are refused as applied twice rather than as given to
+    /// no direct parent.
+    #[test]
+    fn a_host_reaches_the_parent_it_names_as_written() {
+        let file = File::ephemeral(Cow::Borrowed(b"src/Proof/Notice.sharp"), Cow::Borrowed(NOTICE.as_bytes()));
+        let arena = LocalArena::new();
+        let program = parse_file(&arena, &file);
+        let names = NameResolver::new(&arena).resolve(program);
+        let mut codebase = scan_program(&arena, &file, program, &names, Settings::default().version);
+        let notice = word("Proof\\Notice");
+        let class = Declaration::ClassLike {
+            class: notice,
+            templates: Vec::new(),
+            inherited: vec![InheritedApplication {
+                ancestor: word("Proof\\Base"),
+                span: Span::dummy(0, 0),
+                arguments: vec![get_string()],
+            }],
+            required_extends: Vec::new(),
+            properties: Vec::new(),
+            methods: Vec::new(),
+        };
+
+        refinement(&file, class).apply(&mut codebase).expect("the class refinement applies");
+        let class = codebase.class_likes.get(&notice).expect("the file declares `Notice`");
+
+        let messages: Vec<_> = class.issues.iter().map(|issue| issue.message.as_str()).collect();
+
+        assert_eq!(messages, ["A parent's arguments are applied twice."]);
     }
 }

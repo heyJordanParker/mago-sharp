@@ -1160,7 +1160,7 @@ where
                         [Some(&final_parameter_type), own_type_parameter_type(invocation, &parameter_ref)]
                             .into_iter()
                             .flatten()
-                            .find(|declared| declared.drops_readonly_of(&argument_value_type))
+                            .find(|declared| declared.drops_readonly_of(context.codebase, &argument_value_type))
                 {
                     report_readonly_argument(
                         context,
@@ -1574,7 +1574,7 @@ where
             );
 
             // Spec section 13: a spread passes each element, so each keeps its readonly.
-            if context.dialect.is_sharp() && parameter_type.drops_readonly_of(&element_type) {
+            if context.dialect.is_sharp() && parameter_type.drops_readonly_of(context.codebase, &element_type) {
                 report_readonly_argument(
                     context,
                     block_context,

@@ -302,21 +302,13 @@ pub(crate) fn record_function_values<A>(
         }
     }
 
-    let mut allowed: Option<Vec<Word>> = None;
-    for atomic in declared.types.iter() {
-        let TAtomic::Callable(TCallable::Signature(TCallableSignature { effects: Some(effects), .. })) = atomic else {
-            continue;
-        };
-
-        allowed = Some(match allowed {
-            None => effects.clone(),
-            Some(known) => known
-                .into_iter()
-                .filter(|known| effects.iter().any(|effect| effect.as_bytes().eq_ignore_ascii_case(known.as_bytes())))
-                .collect(),
-        });
-    }
-    let Some(allowed) = allowed else {
+    // A declared type holds one function type at most, as the checker refuses a union that writes `Function` twice.
+    let Some(allowed) = declared.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Callable(TCallable::Signature(TCallableSignature { effects: Some(effects), .. })) => {
+            Some(effects.clone())
+        }
+        _ => None,
+    }) else {
         return;
     };
 
@@ -938,7 +930,7 @@ where
             && let Some(function_type) = self.artifacts.get_expression_type(function)
         {
             let cause = (empty_word(), self.text(function.span()));
-            for effect in declared_effects(function_type) {
+            for effect in declared_effects(self.context.codebase, function_type) {
                 self.summary.effects.push((Effect::Foreign(effect), span, cause));
             }
         }
@@ -1002,7 +994,9 @@ where
         let cause =
             (class_like.original_name, word(property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes())));
         if class_like.flags.is_sharp() {
-            for effect in property_type.map(declared_effects).unwrap_or_default() {
+            for effect in
+                property_type.map(|property_type| declared_effects(codebase, property_type)).unwrap_or_default()
+            {
                 self.summary.effects.push((Effect::Foreign(effect), span, cause));
             }
 
@@ -1151,7 +1145,12 @@ where
         self.method_value(value, span, reached);
 
         // A value the analysis gave no type passes no function type's effects.
-        let effects = self.artifacts.get_expression_type(value).map(declared_effects).unwrap_or_default();
+        let codebase = self.context.codebase;
+        let effects = self
+            .artifacts
+            .get_expression_type(value)
+            .map(|value_type| declared_effects(codebase, value_type))
+            .unwrap_or_default();
         let cause = (empty_word(), self.text(span));
         for effect in effects {
             self.summary.effects.push((Effect::Foreign(effect), span, cause));
@@ -1584,8 +1583,8 @@ fn lambda_literal<'ast, 'arena>(expression: &'ast Expression<'arena>) -> Option<
 }
 
 /// The effects the function types of `value_type` list, each once. A function value with a `source` runs a PHP# body,
-/// whose effects its body's summary records instead.
-fn declared_effects(value_type: &TUnion) -> Vec<Word> {
+/// whose effects its body's summary records instead. An effect is a class-like, named by its key, spec section 24.
+fn declared_effects(codebase: &CodebaseMetadata, value_type: &TUnion) -> Vec<Word> {
     let mut effects: Vec<Word> = Vec::new();
     for atomic in value_type.types.iter() {
         let TAtomic::Callable(TCallable::Signature(signature)) = atomic else {
@@ -1596,7 +1595,8 @@ fn declared_effects(value_type: &TUnion) -> Vec<Word> {
         }
 
         for effect in signature.effects.iter().flatten() {
-            if !effects.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes())) {
+            let key = codebase.class_key(effect.as_bytes());
+            if !effects.iter().any(|known| codebase.class_key(known.as_bytes()) == key) {
                 effects.push(*effect);
             }
         }

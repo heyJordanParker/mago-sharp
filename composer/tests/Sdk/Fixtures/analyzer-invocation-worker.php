@@ -960,6 +960,50 @@ final class InvocationMethodCallHook implements MethodCallAnalysisHook
 }
 
 /**
+ * Provides the result of the PHP# `Demo\Box::total`, and never of its twin `Total`, a method of its own, spec section
+ * 24. It records each call it provides.
+ *
+ * @mago-expect lint:single-class-per-file
+ */
+final class InvocationTwinProvider implements MethodReturnTypeProvider
+{
+    public function getTargets(): array
+    {
+        return [MethodTarget::exact('Demo\\Box', 'total')];
+    }
+
+    public function getReturnType(ReturnTypeProviderContext $context): ?Type
+    {
+        InvocationAudit::record('twin-provided-' . $context->invocation->name);
+
+        return null;
+    }
+}
+
+/**
+ * Hooks each call of the PHP# `Demo\Box::Total`, and never of its twin `total`, spec section 24.
+ *
+ * @mago-expect lint:single-class-per-file
+ */
+final class InvocationTwinHook implements MethodCallAnalysisHook
+{
+    public function getTargets(): array
+    {
+        return [MethodTarget::exact('Demo\\Box', 'Total')];
+    }
+
+    public function getRequirements(): array
+    {
+        return [FileAnalysisRequirement::TargetSubtree, FileAnalysisRequirement::SourceText];
+    }
+
+    public function analyze(NodeAnalysisContext $context): void
+    {
+        InvocationAudit::record('twin-hook-' . $context->source->getText($context->node));
+    }
+}
+
+/**
  * Forwards each call on `ForwardingModel` to a `ForwardedQuery`, as a framework's model forwards a call to its query
  * builder, and records each call it forwards.
  *
@@ -987,13 +1031,15 @@ final class InvocationCallForwardingProvider implements CallForwardingProvider
 final class InvocationPlugin implements IssueFilterHook, Plugin
 {
     /**
+     * @param list<MethodReturnTypeProvider> $methodProviders the method providers the test's switches turn on
      * @param list<NodeAnalysisHook> $nodeAnalysisHooks the node-analysis hooks the test's switches turn on
+     * @param list<MethodCallAnalysisHook> $methodCallHooks the method-call hooks the test's switches turn on
      */
     public function __construct(
-        private readonly bool $registerMethodProvider,
+        private readonly array $methodProviders,
         private readonly bool $registerIssueFilter,
         private readonly array $nodeAnalysisHooks,
-        private readonly bool $registerMethodCallHook,
+        private readonly array $methodCallHooks,
     ) {}
 
     public function getDefinition(): PluginDefinition
@@ -1010,8 +1056,8 @@ final class InvocationPlugin implements IssueFilterHook, Plugin
         $registry->registerFunctionReturnTypeProvider(new InvocationFunctionProvider());
         $registry->registerFunctionAssertionProvider(new InvocationFunctionAssertionProvider());
         $registry->registerMethodAssertionProvider(new InvocationMethodAssertionProvider());
-        if ($this->registerMethodProvider) {
-            $registry->registerMethodReturnTypeProvider(new InvocationMethodProvider());
+        foreach ($this->methodProviders as $provider) {
+            $registry->registerMethodReturnTypeProvider($provider);
         }
         $registry->registerPropertyTypeProvider(new InvocationPropertyProvider());
         $registry->registerPropertyInitializationProvider(new InvocationPropertyInitializationProvider());
@@ -1023,8 +1069,8 @@ final class InvocationPlugin implements IssueFilterHook, Plugin
         foreach ($this->nodeAnalysisHooks as $hook) {
             $registry->registerNodeAnalysisHook($hook);
         }
-        if ($this->registerMethodCallHook) {
-            $registry->registerMethodCallAnalysisHook(new InvocationMethodCallHook());
+        foreach ($this->methodCallHooks as $hook) {
+            $registry->registerMethodCallAnalysisHook($hook);
         }
     }
 
@@ -1058,7 +1104,12 @@ final class InvocationPlugin implements IssueFilterHook, Plugin
     }
 }
 
-$registerMethodProvider = getenv('MAGO_INVOCATION_FUNCTION_ONLY') !== '1';
+$methodProviders = getenv('MAGO_INVOCATION_FUNCTION_ONLY') !== '1' ? [new InvocationMethodProvider()] : [];
+$methodCallHooks = getenv('MAGO_INVOCATION_METHOD_CALL_HOOK') === '1' ? [new InvocationMethodCallHook()] : [];
+if (getenv('MAGO_INVOCATION_TWINS') === '1') {
+    $methodProviders[] = new InvocationTwinProvider();
+    $methodCallHooks[] = new InvocationTwinHook();
+}
 $registerIssueFilter = getenv('MAGO_INVOCATION_ISSUE_FILTER') === '1';
 $callKindTargets = match (true) {
     getenv('MAGO_INVOCATION_CALL_KINDS') === '1' => [NodeKind::MethodCall, NodeKind::StaticMethodCall],
@@ -1077,18 +1128,12 @@ if (getenv('MAGO_INVOCATION_BARE_CALL_HOOKS') === '1') {
 if (getenv('MAGO_INVOCATION_ATTRIBUTED_METHODS') === '1') {
     $nodeAnalysisHooks[] = new InvocationAttributedMethodsHook();
 }
-$registerMethodCallHook = getenv('MAGO_INVOCATION_METHOD_CALL_HOOK') === '1';
 
 (new Worker(new Extension(
     identifier: 'mago/invocation-proof',
     name: 'Mago invocation proof',
     version: '1.0.0',
     analyzerPlugins: [
-        new InvocationPlugin(
-            $registerMethodProvider,
-            $registerIssueFilter,
-            $nodeAnalysisHooks,
-            $registerMethodCallHook,
-        ),
+        new InvocationPlugin($methodProviders, $registerIssueFilter, $nodeAnalysisHooks, $methodCallHooks),
     ],
 )))->run();

@@ -448,12 +448,13 @@ fn a_sharp_file_without_a_type_takes_any_name() {
     assert_eq!(issues_in("app/Shop/CheckoutTest.sharp", test), Vec::<String>::new());
 }
 
-/// A module's laws are named by the module and their own names, compared ignoring case, so each name is stated once.
+/// A module's laws are named by the module and their own names, as declared, spec section 24, so each name is stated
+/// once, and `same` and `Same` are two laws.
 #[test]
 fn a_module_states_each_law_once() {
-    let code = "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n    law Same(int b) => b == b;\n}\n";
+    let code = "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n    law Same(int b) => b == b;\n    law same(int c) => c == c;\n}\n";
 
-    assert_eq!(issues_in("app/Shop/Module.sharp", code), ["6:9 The module already states a law named `same`."]);
+    assert_eq!(issues_in("app/Shop/Module.sharp", code), ["7:9 The module already states a law named `same`."]);
 }
 
 /// A law has no `this`, so a bare member in it is written through the class name, as in a static method.
@@ -1720,7 +1721,8 @@ fn a_named_constructor_passes_control_with_this_and_its_arguments_cannot_use_thi
 /// constructors are not inherited, so it declares only `required` ones, which each subclass declares again.
 #[test]
 fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_and_a_body() {
-    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n    public required Order.parsed() : this(1) { }\n}\n";
+    // A PHP# class names its members as declared, spec section 24, so `Order.order` is no `Order.Order`.
+    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.Order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public Order.order() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n    public required Order.parsed() : this(1) { }\n}\n";
     // A `required` one is the contract each subclass keeps, so an abstract class declares it, spec section 11.
     let r#abstract = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    public Shape(int sides) { }\n\n    public Shape.triangle() : this(3) { }\n    public required Shape.parsed() : this(3) { }\n}\n";
 
@@ -1730,9 +1732,9 @@ fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_a
             "7:12 A named constructor is declared on its own class, as in `Order.copy`.",
             "8:18 A named constructor cannot have its class's name: `new Order(…)` calls the main constructor.",
             "9:18 A named constructor's name cannot start with `__`: PHP reserves those names for its magic methods.",
-            "10:12 A named constructor takes only `public`, `protected`, `private` or `required`: remove `static`.",
-            "12:23 A named constructor's parameter declares no property: only the main constructor's parameters do.",
-            "13:35 A named constructor needs a body, even an empty `{ }`.",
+            "11:12 A named constructor takes only `public`, `protected`, `private` or `required`: remove `static`.",
+            "13:23 A named constructor's parameter declares no property: only the main constructor's parameters do.",
+            "14:35 A named constructor needs a body, even an empty `{ }`.",
         ]
     );
     assert_eq!(
@@ -2270,6 +2272,34 @@ fn an_interface_property_is_get_only_settable_or_init() {
 #[test]
 fn a_constant_or_an_enum_case_is_read_in_a_default_a_constant_value_and_an_initial_value() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = Calc.MAX + 1;\n    private Order sort = Order.Ascending;\n\n    [Field(Mode.Write)]\n    public int run(Order extra = Order.Descending)\n    {\n        return 1;\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// Spec section 24: a PHP# class names itself only as written, so a constant reads no static member of `Report` through
+/// its twin `REPORT`.
+#[test]
+fn a_constant_reads_no_static_member_through_a_twin_class() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    public const int TWIN = REPORT.count;\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// Spec section 24: a PHP# enum names its members as declared, so a method `Seconds` is no clash with a case's field
+/// `seconds`.
+#[test]
+fn a_method_twin_of_a_case_field_is_no_clash() {
+    let code =
+        "namespace App.Shop;\n\nenum Timing\n{\n    case Later(int seconds);\n\n    public int Seconds() => 1;\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// Spec sections 12 and 24: a PHP# class names its methods as declared, so a `GetIterator` of an `Iterable<T>` class is
+/// no `getIterator` PHP# writes.
+#[test]
+fn an_iterable_class_may_declare_a_get_iterator_twin() {
+    let code = "namespace App.Shop;\n\npublic class Bag : Iterable<int>\n{\n    public Iterable<int> elements() => [];\n\n    public int GetIterator() => 1;\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
@@ -3212,14 +3242,12 @@ fn a_bare_member_name_is_an_error_that_names_this() {
     );
 }
 
+/// Spec section 24: a PHP# class names its methods as declared, so a bare `Total` names no method `total`.
 #[test]
-fn a_bare_method_name_matches_ignoring_case_as_in_php() {
+fn a_bare_name_in_another_case_names_no_method() {
     let code = "class Report\n{\n    public int total() { return 0; }\n\n    public int run() { return Total; }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        ["5:31 Write `this.total()`: members of the same object are always written with `this.`."]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
@@ -6278,7 +6306,8 @@ fn enum_shapes_are_backed_or_not() {
     let plan =
         "namespace App.Shop;\n\nenum Plan : string\n{\n    case Free = \"free\";\n    case Custom(int seats);\n}\n";
     let payment = "namespace App.Shop;\n\nenum PaymentResult\n{\n    case Paid(public string transactionId);\n    case Declined(string ...reasons);\n    case Tagged(Set<string> tags);\n    case Held(string reason { get; });\n}\n";
-    let timing = "namespace App.Shop;\n\nenum Timing\n{\n    case Later(int seconds);\n    case Never;\n    case Void;\n\n    public int later() => 1;\n    public int void() => 2;\n}\n";
+    // A PHP# enum names its members as declared, spec section 24, so only `Later` meets the case `Later`.
+    let timing = "namespace App.Shop;\n\nenum Timing\n{\n    case Later(int seconds);\n    case Never;\n    case Void;\n\n    public int Later() => 1;\n    public int void() => 2;\n    public int later() => 3;\n}\n";
 
     assert_eq!(issues(plan), ["6:16 Case `Custom` of backed enum `Plan` must not carry data."]);
     assert_eq!(
@@ -6292,7 +6321,7 @@ fn enum_shapes_are_backed_or_not() {
     assert_eq!(
         issues(timing),
         [
-            "9:16 The method `later` shares its name with the case `Later`, which `Timing.Later(…)` creates.",
+            "9:16 The method `Later` shares its name with the case `Later`, which `Timing.Later(…)` creates.",
             "6:10 A case of an enum whose cases carry data or type arguments is a class, so it can't be named `Never`.",
             "7:10 A case of an enum whose cases carry data or type arguments is a class, so it can't be named `Void`.",
         ]
@@ -6311,7 +6340,8 @@ fn enum_shapes_are_backed_or_not() {
 
 #[test]
 fn an_enum_method_without_a_return_type_is_an_error() {
-    let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    public status() {}\n    public label() {}\n}\n";
+    // A PHP# enum names its members as declared, spec section 24, so `status` is no constructor of `Status`.
+    let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    public Status() {}\n    public status() {}\n}\n";
 
     assert_eq!(
         issues(code),
@@ -6324,8 +6354,9 @@ fn an_enum_method_without_a_return_type_is_an_error() {
 
 /// Spec section 20: each case is its own type, with its fields and every member of its enum, so a field named like a
 /// property or a method of the enum gives the case two members of one name, an error that names both, as Kotlin refuses
-/// a property that hides one of its supertype's. A method compares ignoring case, as it is called. Two cases may give
-/// one field name, and a member of another name is no clash.
+/// a property that hides one of its supertype's. A method is named as declared, spec section 24, so the method
+/// `Currency` is no clash with the field `currency`. Two cases may give one field name, and a member of another name is
+/// no clash.
 #[test]
 fn a_case_field_named_like_a_member_of_its_enum_is_an_error_that_names_both() {
     let code = "namespace App;\n\npublic enum Amount\n{\n    case Some(int cents, string currency, int total);\n    case Other(int cents);\n    case None;\n\n    public int cents => 7;\n\n    public string Currency() => \"USD\";\n\n    public static int total() => 1;\n\n    public int sum => 0;\n}\n";
@@ -6334,7 +6365,6 @@ fn a_case_field_named_like_a_member_of_its_enum_is_an_error_that_names_both() {
         issues(code),
         [
             "5:19 The field `cents` of the case `Amount.Some` shares its name with the property `Amount.cents`, which every case has.",
-            "5:33 The field `currency` of the case `Amount.Some` shares its name with the method `Amount.Currency`, which every case has.",
             "5:47 The field `total` of the case `Amount.Some` shares its name with the method `Amount.total`, which every case has.",
             "6:20 The field `cents` of the case `Amount.Other` shares its name with the property `Amount.cents`, which every case has.",
         ]
@@ -6790,8 +6820,9 @@ fn a_function_type_takes_no_void_parameter() {
     );
 }
 
-/// A call `x.priceOf(line)` runs the property's function only when the class has no method `priceOf`, and PHP finds
-/// a method ignoring case, so a method named as a field, a property or a constructor-declared member is an error.
+/// A call `x.priceOf(line)` runs the property's function only when the class has no method `priceOf`, and a PHP# class
+/// finds a method only as declared, spec section 24, so a method named as a field, a property or a constructor-declared
+/// member is an error, and a method `priceof` beside the property `priceOf` is another member.
 #[test]
 fn a_method_named_as_a_property_of_its_class_is_an_error() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Function<int(int)> priceOf;\n    public int views { get; set; }\n\n    public Report(private Function<bool()> ready) {}\n\n    public int priceof(int amount) => amount;\n    public int views() => 1;\n    public bool ready() => true;\n    public int other() => 2;\n}\n";
@@ -6799,7 +6830,6 @@ fn a_method_named_as_a_property_of_its_class_is_an_error() {
     assert_eq!(
         issues(code),
         [
-            "10:16 The class `Report` declares a method and a property named `priceof`.",
             "11:16 The class `Report` declares a method and a property named `views`.",
             "12:17 The class `Report` declares a method and a property named `ready`.",
         ]

@@ -1,6 +1,7 @@
 use mago_allocator::Arena;
 use std::rc::Rc;
 
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
@@ -347,7 +348,7 @@ pub fn insert_variable_from_docblock<'ctx, A>(
             && !previous_type.contains_placeholder();
 
         let could_share_object_runtime_instance =
-            unions_could_share_object_runtime_instance(&previous_type, &variable_type);
+            unions_could_share_object_runtime_instance(context.codebase, &previous_type, &variable_type);
 
         let is_impossible = !is_redundant
             && !is_super
@@ -429,7 +430,7 @@ pub fn check_docblock_type_incompatibility<A>(
     let is_impossible = !is_redundant
         && !is_super
         && !is_sub
-        && !unions_could_share_object_runtime_instance(inferred_type, docblock_type)
+        && !unions_could_share_object_runtime_instance(context.codebase, inferred_type, docblock_type)
         && !can_expression_types_be_identical(context.codebase, inferred_type, docblock_type, false, true);
 
     if is_impossible {
@@ -525,18 +526,25 @@ pub fn check_docblock_type_incompatibility<A>(
     }
 }
 
-fn unions_could_share_object_runtime_instance(inferred_type: &TUnion, docblock_type: &TUnion) -> bool {
+/// Whether a class-like `inferred_type` names is one `docblock_type` names, by its key, spec section 24, so the PHP#
+/// `Order` is not `ORDER`.
+fn unions_could_share_object_runtime_instance(
+    codebase: &CodebaseMetadata,
+    inferred_type: &TUnion,
+    docblock_type: &TUnion,
+) -> bool {
     for inferred_atomic in inferred_type.types.iter() {
         let TAtomic::Object(TObject::Named(inferred_named)) = inferred_atomic else {
             continue;
         };
+        let inferred = codebase.class_key(inferred_named.name.as_bytes());
 
         for docblock_atomic in docblock_type.types.iter() {
             let TAtomic::Object(TObject::Named(docblock_named)) = docblock_atomic else {
                 continue;
             };
 
-            if inferred_named.name.as_bytes().eq_ignore_ascii_case(docblock_named.name.as_bytes()) {
+            if codebase.class_key(docblock_named.name.as_bytes()) == inferred {
                 return true;
             }
         }

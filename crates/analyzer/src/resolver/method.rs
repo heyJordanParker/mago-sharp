@@ -1177,7 +1177,7 @@ where
         method_id = context.codebase.get_declaring_method_identifier(&method_id);
     }
     if context.dialect.is_sharp()
-        && method_key.as_bytes().eq_ignore_ascii_case(b"toString")
+        && method_key == class_metadata.method_key(b"toString")
         && let Some(text_method) = plain_text_method(context.codebase, class_metadata)
     {
         method_id = text_method;

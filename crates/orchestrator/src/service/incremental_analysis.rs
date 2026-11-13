@@ -559,7 +559,7 @@ impl IncrementalAnalysisService {
         // A class-like's name never depends on how names resolve, so the first scan finds every class-like that wins
         // over a default class-like, and the files that name one are scanned again against them.
         self.namespace_classes = NamespaceClasses::new(per_file_results.iter().flat_map(|(_, _, metadata, _, _)| {
-            metadata.class_likes.values().map(|class_like| class_like.original_name)
+            metadata.class_likes.values().map(|class_like| (class_like.original_name, class_like.flags.is_sharp()))
         }));
         // An extension changes only as a whole analysis runs again, so the members that change their receiver stay.
         self.changing_members = ChangingMembers::new(
@@ -1052,13 +1052,11 @@ impl IncrementalAnalysisService {
                 .class_likes
                 .values()
                 .filter(|class_like| rescanned.contains(&class_like.span.file_id))
-                .map(|class_like| class_like.original_name),
+                .map(|class_like| (class_like.original_name, class_like.flags.is_sharp())),
         );
-        let namespace_classes_after = NamespaceClasses::new(
-            new_file_scans
-                .iter()
-                .flat_map(|(_, metadata)| metadata.class_likes.values().map(|class_like| class_like.original_name)),
-        );
+        let namespace_classes_after = NamespaceClasses::new(new_file_scans.iter().flat_map(|(_, metadata)| {
+            metadata.class_likes.values().map(|class_like| (class_like.original_name, class_like.flags.is_sharp()))
+        }));
 
         if namespace_classes_before != namespace_classes_after {
             return self.analyze();

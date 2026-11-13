@@ -421,12 +421,13 @@ impl TUnion {
     /// Whether a value of `input` placed where this declared type goes would lose its readonly, spec section 13: a
     /// readonly value where this type takes a writable object, a type parameter not written `readonly`, or any value,
     /// a collection or a type argument of readonly values where this type's takes writable ones, and a function value
-    /// that [`TCallableSignature::drops_readonly_of`] refuses where this type is a function type.
+    /// that [`TCallableSignature::drops_readonly_of`] refuses where this type is a function type. A class's type
+    /// arguments meet those of the class of its key, spec section 24, so the PHP# `Box` never meets its twin `BOX`.
     #[must_use]
-    pub fn drops_readonly_of(&self, input: &TUnion) -> bool {
+    pub fn drops_readonly_of(&self, codebase: &CodebaseMetadata, input: &TUnion) -> bool {
         input.types.iter().any(|atomic| match atomic {
             TAtomic::Callable(TCallable::Signature(given)) => self.types.iter().any(|declared| {
-                matches!(declared, TAtomic::Callable(TCallable::Signature(declared)) if declared.drops_readonly_of(given).is_some())
+                matches!(declared, TAtomic::Callable(TCallable::Signature(declared)) if declared.drops_readonly_of(codebase, given).is_some())
             }),
             atomic if atomic.is_readonly_value() => self.types.iter().any(|declared| match declared {
                 TAtomic::Object(TObject::Named(_)) | TAtomic::GenericParameter(_) => !declared.is_readonly_value(),
@@ -444,17 +445,17 @@ impl TUnion {
                         reached
                             .iter()
                             .zip(declared_reach.iter())
-                            .any(|(input, declared)| declared.drops_readonly_of(input))
+                            .any(|(input, declared)| declared.drops_readonly_of(codebase, input))
                     }
                     (TAtomic::Object(TObject::Named(input)), TAtomic::Object(TObject::Named(declared)))
-                        if input.name.as_bytes().eq_ignore_ascii_case(declared.name.as_bytes()) =>
+                        if codebase.class_key(input.name.as_bytes()) == codebase.class_key(declared.name.as_bytes()) =>
                     {
                         input
                             .type_parameters
                             .iter()
                             .flatten()
                             .zip(declared.type_parameters.iter().flatten())
-                            .any(|(input, declared)| declared.drops_readonly_of(input))
+                            .any(|(input, declared)| declared.drops_readonly_of(codebase, input))
                     }
                     (_, TAtomic::Mixed(_)) => true,
                     _ => false,

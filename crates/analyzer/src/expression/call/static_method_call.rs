@@ -201,17 +201,18 @@ where
         );
         crate::utils::availability::check_method_availability(context, method_metadata, &method_display, call.span);
 
+        // A type that parses is a struct or a PHP# class, which keys its methods by their declared names, spec section
+        // 24, so a `Parse` of its own is not the generated `parse`.
         let method_name = resolved_method.method_identifier.get_method_name();
         if context.dialect.is_sharp()
             && context.codebase.parses(metadata.name.as_bytes())
-            && (method_name.as_bytes().eq_ignore_ascii_case(b"parse")
-                || method_name.as_bytes().eq_ignore_ascii_case(b"tryParse"))
+            && matches!(method_name.as_bytes(), b"parse" | b"tryParse")
         {
             check_struct_parse(
                 context,
                 metadata,
                 class_type_arguments.as_deref().unwrap_or_default(),
-                method_name.as_bytes().eq_ignore_ascii_case(b"parse"),
+                method_name.as_bytes() == b"parse",
                 call.span,
             );
         }
@@ -293,7 +294,7 @@ where
         };
 
         metadata
-            .has_attribute(STARTS_LISTENER.as_bytes())
+            .has_attribute(context.codebase, STARTS_LISTENER.as_bytes())
             .then(|| display_member(context, *class, metadata.original_name))
     });
     let parser = invocation_targets.iter().filter(|_| context.dialect.is_sharp()).find_map(|target| {
@@ -304,7 +305,7 @@ where
         };
 
         metadata
-            .has_attribute(PARSES_TYPE_ARGUMENT.as_bytes())
+            .has_attribute(context.codebase, PARSES_TYPE_ARGUMENT.as_bytes())
             .then(|| display_member(context, *class, metadata.original_name))
     });
 
@@ -314,8 +315,10 @@ where
         else {
             return None;
         };
-        let position =
-            metadata.parameters.iter().position(|parameter| parameter.has_attribute(ENCODED_AS_JSON.as_bytes()))?;
+        let position = metadata
+            .parameters
+            .iter()
+            .position(|parameter| parameter.has_attribute(context.codebase, ENCODED_AS_JSON.as_bytes()))?;
 
         Some((display_member(context, *class, metadata.original_name), position))
     });

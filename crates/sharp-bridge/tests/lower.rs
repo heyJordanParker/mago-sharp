@@ -669,7 +669,7 @@ fn the_php_sharp_form_a_refused_php_construct_names_compiles() {
 /// The lowering takes only a checked program, so an enum the slice refuses lowers no node of the enum.
 #[test]
 fn an_enum_the_slice_refuses_returns_its_error_and_no_nodes() {
-    let lowered = Lowered::new("enum Status\n{\n    case Active;\n\n    public status() {}\n}\n");
+    let lowered = Lowered::new("enum Status\n{\n    case Active;\n\n    public Status() {}\n}\n");
 
     assert_eq!(
         lowered.diagnostics(),

@@ -47,7 +47,7 @@ pub(crate) fn is_contained_by(
         return false;
     }
 
-    if input_signature.has_effect_outside(container_signature) {
+    if input_signature.has_effect_outside(codebase, container_signature) {
         return false;
     }
 

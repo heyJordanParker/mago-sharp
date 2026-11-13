@@ -1351,14 +1351,16 @@ fn scrape_type_properties(
     }
 
     // Two signatures with one id share their parameter and return types. The folded one keeps the PHP# rule for its
-    // parameters if PHP# wrote either, and the effects of both, the first one's first.
+    // parameters if PHP# wrote either, and the effects of both, the first one's first. An effect is a class-like, named
+    // by its key, spec section 24.
     if let TAtomic::Callable(TCallable::Signature(signature)) = &mut atomic
         && let Some(TAtomic::Callable(TCallable::Signature(existing))) = combination.value_types.get(&id)
         && let Some(existing_effects) = &existing.effects
     {
         let mut effects = existing_effects.clone();
         for effect in signature.effects.take().unwrap_or_default() {
-            if !effects.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes())) {
+            let key = codebase.class_key(effect.as_bytes());
+            if !effects.iter().any(|known| codebase.class_key(known.as_bytes()) == key) {
                 effects.push(effect);
             }
         }

@@ -444,6 +444,7 @@ fn write_method_projection(
     encode_function_like_identifier(
         writer,
         method_identifier(codebase, class_like.name.as_bytes(), method_name.as_bytes(), metadata),
+        codebase,
     )?;
 
     if fields & METHOD_FIELDS_NAMES != 0 {
@@ -858,7 +859,7 @@ fn write_function_like(
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
-    encode_function_like_identifier(writer, identifier)?;
+    encode_function_like_identifier(writer, identifier, codebase)?;
     writer.write_u8(match metadata.kind {
         FunctionLikeKind::Function => 1,
         FunctionLikeKind::Method => 2,

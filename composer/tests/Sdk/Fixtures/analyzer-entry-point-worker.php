@@ -35,6 +35,8 @@ final class EntryPointPlugin implements Plugin
         $registry->registerEntryPoint(MethodTarget::exact('FrameworkTestCase', 'inheritedEntry'));
         $registry->registerEntryPoint(MethodTarget::exact('FrameworkTestCase', 'traitEntry'));
         $registry->registerAttributedEntryPoint('FrameworkTestCase', 'FrameworkEntry');
+        $registry->registerEntryPoint(MethodTarget::exact('Demo\\Box', 'total'));
+        $registry->registerEntryPoint(new MethodTarget('demo\\Bo*', 'run'));
     }
 }
 

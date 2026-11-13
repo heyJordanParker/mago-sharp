@@ -788,7 +788,9 @@ pub fn are_definitely_not_identical(
             && let (left_enum, Some(left_case)) = left_cases[0]
             && let (right_enum, Some(right_case)) = right_cases[0]
         {
-            return !left_enum.as_bytes().eq_ignore_ascii_case(right_enum.as_bytes()) || left_case != right_case;
+            // An enum is named by its key, spec section 24, so the PHP# `Status` and `STATUS` are two enums.
+            return codebase.class_key(left_enum.as_bytes()) != codebase.class_key(right_enum.as_bytes())
+                || left_case != right_case;
         }
     }
 

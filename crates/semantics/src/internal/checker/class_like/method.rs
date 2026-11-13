@@ -32,12 +32,13 @@ fn check_interop(
         return false;
     }
     let mut is_import = false;
+    // Both marks are PHP# class-likes of the standard library, whose key is their exact name, spec section 24.
     for attribute in method.attribute_lists.iter().flat_map(|list| list.attributes.iter()) {
         let name = context.names.get(&attribute.name);
-        let label = if name.eq_ignore_ascii_case(IMPORT.as_bytes()) {
+        let label = if name == IMPORT.as_bytes() {
             is_import = true;
             "Import"
-        } else if name.eq_ignore_ascii_case(EXPORT.as_bytes()) {
+        } else if name == EXPORT.as_bytes() {
             "Export"
         } else {
             continue;

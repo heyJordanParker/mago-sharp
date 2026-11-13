@@ -511,7 +511,13 @@ where
                 return None;
             };
 
-            Some(infer_class_constant(class_name, identifier.value, enclosing_class, class_constants))
+            Some(infer_class_constant(
+                context.program.dialect.is_sharp(),
+                class_name,
+                identifier.value,
+                enclosing_class,
+                class_constants,
+            ))
         }
         Expression::Access(Access::Property(
             property_access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(constant), .. },
@@ -524,6 +530,7 @@ where
             }
 
             Some(infer_class_constant(
+                context.program.dialect.is_sharp(),
                 context.resolved_names.get(&class.name),
                 constant.value,
                 enclosing_class,
@@ -535,7 +542,8 @@ where
                 return None;
             };
 
-            if !property_name.value.eq_ignore_ascii_case(b"value") {
+            // A property is named as declared, in PHP as in PHP#, so `VALUE` is no backed case's `value`.
+            if property_name.value != b"value" {
                 return None;
             }
 
@@ -580,7 +588,13 @@ where
         Expression::TypeOf(TypeOf { r#type: Hint::Identifier(class), .. })
             if !context.resolved_names.is_type_parameter(class) =>
         {
-            Some(infer_class_constant(context.resolved_names.get(class), b"class", enclosing_class, class_constants))
+            Some(infer_class_constant(
+                context.program.dialect.is_sharp(),
+                context.resolved_names.get(class),
+                b"class",
+                enclosing_class,
+                class_constants,
+            ))
         }
         Expression::Array(Array { elements, .. }) | Expression::LegacyArray(LegacyArray { elements, .. })
             if is_list_array_expression(expression) =>
@@ -766,15 +780,20 @@ fn join_strings(lhs: &TString, rhs: &TString) -> TString {
 
 /// The type of the class constant `constant` of `class_name`: its inferred type when the enclosing class declares it,
 /// the class's name for `class`, the flag bits for a target or the repeat flag of `Attribute`, and a reference to the
-/// member otherwise.
+/// member otherwise. The enclosing class is the file's, a PHP# one in a `.sharp` file, when `sharp`, which `class_name`
+/// names only as written, spec section 24, and a plain PHP one otherwise, which it names in any case.
 fn infer_class_constant(
+    sharp: bool,
     class_name: &[u8],
     constant: &[u8],
     enclosing_class: Option<Word>,
     class_constants: Option<&WordMap<ClassLikeConstantMetadata>>,
 ) -> TUnion {
+    let names_enclosing = |enclosing: Word| {
+        if sharp { class_name == enclosing.as_bytes() } else { class_name.eq_ignore_ascii_case(enclosing.as_bytes()) }
+    };
     if let Some(class_constants) = class_constants
-        && enclosing_class.is_some_and(|enclosing| class_name.eq_ignore_ascii_case(enclosing.as_bytes()))
+        && enclosing_class.is_some_and(names_enclosing)
         && let Some(metadata) = class_constants.get(&word(constant))
         && let Some(inferred_type) = &metadata.inferred_type
     {

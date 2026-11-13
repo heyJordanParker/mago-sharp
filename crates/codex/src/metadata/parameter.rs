@@ -1,6 +1,7 @@
 use mago_span::HasSpan;
 use mago_span::Span;
 
+use crate::metadata::CodebaseMetadata;
 use crate::metadata::attribute::AttributeMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::ttype::TypeMetadata;
@@ -131,11 +132,14 @@ impl FunctionLikeParameterMetadata {
         self.default_type.as_ref()
     }
 
-    /// Whether an attribute of the full name `name`, compared ignoring case, marks the parameter.
+    /// Whether an attribute of the class-like the full name `name` names marks the parameter, by `codebase`'s key, spec
+    /// section 24: a PHP# attribute only as written, and a plain PHP one in any case.
     #[inline]
     #[must_use]
-    pub fn has_attribute(&self, name: &[u8]) -> bool {
-        self.attributes.iter().any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(name))
+    pub fn has_attribute(&self, codebase: &CodebaseMetadata, name: &[u8]) -> bool {
+        let name = codebase.class_key(name);
+
+        self.attributes.iter().any(|attribute| codebase.class_key(attribute.name.as_bytes()) == name)
     }
 
     /// Sets the attributes, replacing any existing ones.

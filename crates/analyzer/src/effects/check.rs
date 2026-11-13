@@ -158,7 +158,7 @@ pub(crate) fn function_values_must_fit_their_types(
     short_name_counts: &OnceCell<HashMap<String, u32>>,
 ) -> IssueCollection {
     effects
-        .unfit_function_values()
+        .unfit_function_values(codebase)
         .map(|(value, name, imports, scope, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
             let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
@@ -278,7 +278,8 @@ pub(crate) fn check_declaration_uses<A>(
             .uses
             .iter()
             .filter(|effect| {
-                !declaration.uses.iter().any(|allowed| allowed.as_bytes().eq_ignore_ascii_case(effect.as_bytes()))
+                let effect = codebase.class_key(effect.as_bytes());
+                !declaration.uses.iter().any(|allowed| codebase.class_key(allowed.as_bytes()) == effect)
             })
             .copied()
             .collect();

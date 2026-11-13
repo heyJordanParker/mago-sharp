@@ -222,9 +222,9 @@ pub fn checked_file<R>(
             scan_program(&arena, file, program, &names, settings.version)
         })
         .collect();
-    let namespace_classes = NamespaceClasses::new(
-        scanned.iter().flat_map(|scan| scan.class_likes.values().map(|class_like| class_like.original_name)),
-    );
+    let namespace_classes = NamespaceClasses::new(scanned.iter().flat_map(|scan| {
+        scan.class_likes.values().map(|class_like| (class_like.original_name, class_like.flags.is_sharp()))
+    }));
     let changing_members = ChangingMembers::new(scanned.iter().flat_map(|scan| {
         scan.function_likes
             .values()

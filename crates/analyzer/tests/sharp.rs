@@ -242,9 +242,9 @@ fn analyze_with_references(
             scan_program(&arena, file, program, &names, settings.version)
         })
         .collect();
-    let namespace_classes = NamespaceClasses::new(
-        scanned.iter().flat_map(|scan| scan.class_likes.values().map(|class_like| class_like.original_name)),
-    );
+    let namespace_classes = NamespaceClasses::new(scanned.iter().flat_map(|scan| {
+        scan.class_likes.values().map(|class_like| (class_like.original_name, class_like.flags.is_sharp()))
+    }));
     let changing_members = ChangingMembers::new(scanned.iter().flat_map(|scan| {
         scan.function_likes
             .values()
@@ -28548,6 +28548,126 @@ fn a_static_field_holding_a_foreign_object_is_refused() {
             &[store, money]
         ),
         Vec::<String>::new()
+    );
+}
+
+/// Spec sections 23 and 24: a class-like of a file's namespace wins over the default class-like of its exact short name,
+/// so the PHP# `App\RANDOM` leaves a bare `Random` in `App` naming `Sharp\Random`.
+#[test]
+fn a_twin_of_a_default_class_in_the_namespace_leaves_the_default_class() {
+    let twin = ("src/RANDOM.sharp", "namespace App;\n\npublic class RANDOM\n{\n}\n");
+    let shape = (
+        "src/Shape.sharp",
+        "namespace App;\n\npublic class Shape\n{\n    public Random? pick(Random? random) => random;\n}\n",
+    );
+
+    assert_eq!(messages(shape, &[twin]), Vec::<String>::new());
+}
+
+/// Spec sections 10 and 24: a struct names its members as declared, so a `Parse` of its own leaves it the generated
+/// `parse` and `tryParse`, and a call of `Parse` is no call of the generated pair.
+#[test]
+fn a_struct_s_own_parse_twin_keeps_the_generated_parse() {
+    let spot = (
+        "src/Spot.sharp",
+        "namespace Demo;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n\n    public static Spot Parse(string text) => new Spot(1);\n}\n",
+    );
+    let reads = (
+        "src/Reads.sharp",
+        "namespace Demo;\n\nclass Reads\n{\n    public Spot read(Map<string, Any?> input) => Spot.parse(input);\n\n    public Spot? tried(Map<string, Any?> input) => Spot.tryParse(input);\n\n    public Spot text() => Spot.Parse(\"1\");\n}\n",
+    );
+
+    assert_eq!(messages(reads, &[spot]), Vec::<String>::new());
+}
+
+/// Spec section 24: a PHP# enum keys its methods by their declared names, so a `Cases` its interface declares is no
+/// built-in `cases`, and the enum must implement it.
+#[test]
+fn a_sharp_enum_implements_a_cases_twin_of_its_interface() {
+    let listed = ("src/Listed.sharp", "namespace Demo;\n\npublic interface Listed\n{\n    int Cases();\n}\n");
+    let size = ("src/Size.sharp", "namespace Demo;\n\npublic enum Size : Listed\n{\n    case Small;\n}\n");
+
+    assert_eq!(messages(size, &[listed]), ["Class `Size` does not implement the abstract method `Cases`."]);
+}
+
+/// Spec section 24: a PHP# enum's own static `Cases` is no built-in `cases`, so the provider of `cases` never types its
+/// call.
+#[test]
+fn a_call_of_a_sharp_enum_s_cases_twin_has_its_own_type() {
+    let size = (
+        "src/Size.sharp",
+        "namespace Demo;\n\npublic enum Size\n{\n    case Small;\n\n    public static int Cases() => 1;\n}\n",
+    );
+    let count = ("src/Count.sharp", "namespace Demo;\n\nclass Count\n{\n    public int all() => Size.Cases();\n}\n");
+
+    assert_eq!(messages(count, &[size]), Vec::<String>::new());
+}
+
+/// Spec sections 18 and 24: PHP# calls a plain PHP class's `__toString()` as its `toString()`, by the class's rule, so a
+/// plain class with exact names, as one that implements a PHP# interface, has no `ToString`.
+#[test]
+fn a_plain_class_with_exact_names_has_no_to_string_twin() {
+    let shown = ("src/Web/Shown.sharp", "namespace App.Web;\n\npublic interface Shown\n{\n    int id();\n}\n");
+    let room = (
+        "src/Web/Room.php",
+        "<?php\n\nnamespace App\\Web;\n\nfinal class Room implements Shown\n{\n    public function id(): int\n    {\n        return 1;\n    }\n\n    public function __toString(): string\n    {\n        return 'room';\n    }\n}\n",
+    );
+    let page = (
+        "src/Web/Page.sharp",
+        "namespace App.Web;\n\npublic class Page\n{\n    public string title(Room room) => room.toString();\n\n    public string twin(Room room) => room.ToString();\n}\n",
+    );
+
+    assert_eq!(messages(page, &[shown, room]), ["Method `Room.ToString` does not exist."]);
+}
+
+/// Spec section 24: a setting names a class-like as written, so the PHP# exception `NotFound` it leaves unchecked
+/// leaves its twin `NOTFOUND` checked.
+#[test]
+fn an_unchecked_exception_setting_names_only_its_own_class() {
+    let not_found = ("src/Errors/NotFound.sharp", "namespace App.Errors;\n\npublic class NotFound : Exception\n{\n}\n");
+    let twin = ("src/Errors/NOTFOUND.sharp", "namespace App.Errors;\n\npublic class NOTFOUND : Exception\n{\n}\n");
+    let thrower = (
+        "src/Thrower.php",
+        "<?php\n\nnamespace App;\n\nfinal class Thrower\n{\n    public function first(): void\n    {\n        throw new Errors\\NotFound();\n    }\n\n    public function twin(): void\n    {\n        throw new Errors\\NOTFOUND();\n    }\n}\n",
+    );
+    let named = || std::iter::once(word(b"App\\Errors\\NotFound")).collect();
+
+    // `unchecked-exception-classes` names the class alone, and `unchecked-exceptions` the class and its subclasses.
+    for settings in [
+        Settings { unchecked_exception_classes: named(), ..settings() },
+        Settings { unchecked_exceptions: named(), ..settings() },
+    ] {
+        assert_eq!(
+            messages_with(settings, thrower, &[not_found, twin]),
+            ["Potentially unhandled exception `App\\Errors\\NOTFOUND` in `App\\Thrower::twin`."]
+        );
+    }
+}
+
+/// Spec sections 24 and 29: an effect is a class-like named by its key, so the `foreign` PHP# classes `Disk` and `DISK`
+/// are two effects, and `uses DISK` allows no call of a `Disk`.
+#[test]
+fn an_effect_allows_only_its_own_class_and_not_its_twin() {
+    let disk = (
+        "app/Cache/Disk.sharp",
+        "namespace App.Cache;\n\npublic foreign class Disk\n{\n    public int size() => 3;\n}\n",
+    );
+    let twin = (
+        "app/Cache/DISK.sharp",
+        "namespace App.Cache;\n\npublic foreign class DISK\n{\n    public int size() => 4;\n}\n",
+    );
+    let store =
+        ("app/Cache/Store.sharp", "namespace App.Cache;\n\npublic interface Store\n{\n    int size() uses DISK;\n}\n");
+    let disk_store = (
+        "app/Cache/DiskStore.sharp",
+        "namespace App.Cache;\n\npublic class DiskStore : Store\n{\n    public DiskStore(private Disk disk) { }\n\n    public int size() => this.disk.size();\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[disk, twin, store, disk_store]),
+        [
+            "app/Cache/DiskStore.sharp:7:26 incompatible-effects: `DiskStore.size` calls `App.Cache.Disk.size`, which has the effect `App.Cache.Disk`, so `uses App.Cache.DISK` on `Store.size` cannot accept it."
+        ]
     );
 }
 

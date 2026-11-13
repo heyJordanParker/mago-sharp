@@ -582,11 +582,10 @@ where
             own.push(named);
         } else if let Some(alias) = context.imported_names.get(&ascii_lowercase_word(class.as_bytes())) {
             let full = context.codebase.get_class_like(class.as_bytes()).map_or(class, |class| class.original_name);
-            let renamed = if alias.as_bytes().eq_ignore_ascii_case(short_name(full).as_bytes()) {
-                String::new()
-            } else {
-                format!(" as {alias}")
-            };
+            // Only PHP# declares an extension, spec section 26, so its class is renamed by any alias but its exact
+            // name, spec section 24.
+            let renamed =
+                if alias.as_bytes() == short_name(full).as_bytes() { String::new() } else { format!(" as {alias}") };
             imported.push((named, format!("`import {}{renamed};`", full.as_str_lossy().replace('\\', "."))));
         } else {
             default.push(named);

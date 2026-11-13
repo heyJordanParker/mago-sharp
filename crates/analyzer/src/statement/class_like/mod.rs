@@ -1362,14 +1362,14 @@ where
                 continue;
             }
             if class_like_metadata.kind.is_enum() {
-                if method_name.as_bytes().eq_ignore_ascii_case(b"cases") {
+                // An enum keys its built-in methods by its own rule, spec section 24, so a PHP# enum's `Cases` is a
+                // method of its own.
+                let built_in = |name: &[u8]| *method_name == class_like_metadata.method_key(name);
+                if built_in(b"cases") {
                     continue;
                 }
 
-                if class_like_metadata.enum_type.is_some()
-                    && (method_name.as_bytes().eq_ignore_ascii_case(b"from")
-                        || method_name.as_bytes().eq_ignore_ascii_case(b"tryFrom"))
-                {
+                if class_like_metadata.enum_type.is_some() && (built_in(b"from") || built_in(b"tryFrom")) {
                     continue;
                 }
             }

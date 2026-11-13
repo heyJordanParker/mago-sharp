@@ -1,7 +1,5 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::hash::Hash;
-use std::hash::Hasher;
 
 use mago_allocator::prelude::*;
 use mago_span::HasSpan;
@@ -152,7 +150,7 @@ pub struct NameWalker<'arena, 'classes> {
     /// list each, innermost last.
     type_parameters: std::vec::Vec<std::vec::Vec<(&'arena [u8], Span)>>,
     /// The names of the class-likes the file declares, compared as PHP compares class names.
-    declared_classes: foldhash::HashSet<IgnoringCase<'arena>>,
+    declared_classes: foldhash::HashSet<&'arena [u8]>,
     /// The class-likes of the project that win over a default class-like in their namespace.
     namespace_classes: &'classes NamespaceClasses,
     /// The members of the project that change the value they are called on.
@@ -171,36 +169,9 @@ struct ExtensionReceiver<'arena> {
     members: std::vec::Vec<Span>,
 }
 
-/// The member names of one class, compared as PHP compares them: method names ignoring case, and property and
-/// constant names exactly.
-#[derive(Debug, Default)]
-struct ClassMembers<'arena> {
-    methods: foldhash::HashSet<IgnoringCase<'arena>>,
-    others: foldhash::HashSet<&'arena [u8]>,
-}
-
-/// A name that hashes and compares ignoring ASCII case, as PHP compares method names.
-#[derive(Debug, Clone, Copy)]
-struct IgnoringCase<'name>(&'name [u8]);
-
-impl PartialEq for IgnoringCase<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.eq_ignore_ascii_case(other.0)
-    }
-}
-
-impl Eq for IgnoringCase<'_> {}
-
-impl Hash for IgnoringCase<'_> {
-    fn hash<H>(&self, state: &mut H)
-    where
-        H: Hasher,
-    {
-        for byte in self.0 {
-            state.write_u8(byte.to_ascii_lowercase());
-        }
-    }
-}
+/// The member names of one PHP# class-like, each as declared: a PHP# class-like names its methods, properties and
+/// constants exactly, spec section 24, so its `total` binds no bare `Total`.
+type ClassMembers<'arena> = foldhash::HashSet<&'arena [u8]>;
 
 impl<'arena, 'classes> NameWalker<'arena, 'classes> {
     pub fn new(
@@ -378,9 +349,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
     }
 
     fn is_member(&self, name: &[u8]) -> bool {
-        self.class_members
-            .last()
-            .is_some_and(|members| members.others.contains(name) || members.methods.contains(&IgnoringCase(name)))
+        self.class_members.last().is_some_and(|members| members.contains(name))
     }
 
     /// Declares a pattern's variable where the pattern is. It comes into scope only where the pattern's test holds:
@@ -469,7 +438,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         if self.sharp
             && let Some(separator) = name.iter().position(|byte| *byte == b'\\').filter(|separator| *separator > 0)
             && let ((enum_class, false), _) = self.class_meaning(context, &name[..separator])
-            && default_class(&name[..separator]).is_some_and(|class| class.eq_ignore_ascii_case(enum_class))
+            && default_class(&name[..separator]).is_some_and(|class| class == enum_class)
         {
             return ((context.intern(&[enum_class, &name[separator..]].concat()), false), None);
         }
@@ -488,7 +457,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         if self.sharp && fqn.eq_ignore_ascii_case(b"Closure") {
             return ((context.intern(&[b"\\", fqn].concat()), imported), None);
         }
-        if !self.sharp || imported || self.declared_classes.contains(&IgnoringCase(name)) {
+        if !self.sharp || imported || self.declared_classes.contains(name) {
             return ((fqn, imported), None);
         }
 
@@ -624,8 +593,8 @@ fn class_member_names<'arena>(members: &Sequence<'arena, ClassLikeMember<'arena>
     for member in members {
         match member {
             ClassLikeMember::Method(method) => {
-                names.methods.insert(IgnoringCase(method.name.value));
-                names.others.extend(
+                names.insert(method.name.value);
+                names.extend(
                     method
                         .parameter_list
                         .parameters
@@ -634,14 +603,14 @@ fn class_member_names<'arena>(members: &Sequence<'arena, ClassLikeMember<'arena>
                         .map(|parameter| trim_start_byte(parameter.variable.name, b'$')),
                 );
             }
-            ClassLikeMember::Property(property) => names
-                .others
-                .extend(property.variables().into_iter().map(|variable| trim_start_byte(variable.name, b'$'))),
+            ClassLikeMember::Property(property) => {
+                names.extend(property.variables().into_iter().map(|variable| trim_start_byte(variable.name, b'$')));
+            }
             ClassLikeMember::Constant(constant) => {
-                names.others.extend(constant.items.iter().map(|item| item.name.value));
+                names.extend(constant.items.iter().map(|item| item.name.value));
             }
             ClassLikeMember::EnumCase(case) => {
-                names.others.insert(case.item.name().value);
+                names.insert(case.item.name().value);
             }
             _ => {}
         }
@@ -650,8 +619,9 @@ fn class_member_names<'arena>(members: &Sequence<'arena, ClassLikeMember<'arena>
     names
 }
 
-/// The names of the class-likes declared at the top of the program and in its namespaces, where PHP# declares them.
-fn declared_class_names<'arena>(program: &Program<'arena>) -> foldhash::HashSet<IgnoringCase<'arena>> {
+/// The names of the class-likes declared at the top of the program and in its namespaces, where PHP# declares them,
+/// each as declared: a PHP# class-like is named only as written, spec section 24.
+fn declared_class_names<'arena>(program: &Program<'arena>) -> foldhash::HashSet<&'arena [u8]> {
     let namespaced = program
         .statements
         .iter()
@@ -666,12 +636,12 @@ fn declared_class_names<'arena>(program: &Program<'arena>) -> foldhash::HashSet<
         .iter()
         .chain(namespaced)
         .filter_map(|statement| match statement {
-            Statement::Class(class) => Some(IgnoringCase(class.name.value)),
-            Statement::Interface(interface) => Some(IgnoringCase(interface.name.value)),
-            Statement::Trait(r#trait) => Some(IgnoringCase(r#trait.name.value)),
-            Statement::Enum(r#enum) => Some(IgnoringCase(r#enum.name.value)),
-            Statement::Event(event) => Some(IgnoringCase(event.name.value)),
-            Statement::Struct(r#struct) => Some(IgnoringCase(r#struct.name.value)),
+            Statement::Class(class) => Some(class.name.value),
+            Statement::Interface(interface) => Some(interface.name.value),
+            Statement::Trait(r#trait) => Some(r#trait.name.value),
+            Statement::Enum(r#enum) => Some(r#enum.name.value),
+            Statement::Event(event) => Some(event.name.value),
+            Statement::Struct(r#struct) => Some(r#struct.name.value),
             _ => None,
         })
         .collect()
@@ -755,7 +725,7 @@ where
         if r#extern.event.is_none()
             && !target.is_dotted()
             && !imported
-            && !self.declared_classes.contains(&IgnoringCase(class))
+            && !self.declared_classes.contains(class)
             && default_class(class) != Some(fqn)
         {
             self.resolved_names.insert_at(target.span(), written, false);

@@ -98,6 +98,9 @@ final class TypeConstructionTest extends TestCase
             static fn(): object => new NamedObjectType('', null, null, false, false, null, false),
             static fn(): object => new FunctionLikeIdentifier(FunctionLikeKind::Method, 'run'),
             static fn(): object => new FunctionLikeIdentifier(FunctionLikeKind::Function_, 'run', 'Example'),
+            // Only a method carries its class's rule, and a PHP# class keys its methods by their declared names.
+            static fn(): object => new FunctionLikeIdentifier(FunctionLikeKind::Function_, 'run', exactNames: true),
+            static fn(): object => new FunctionLikeIdentifier(FunctionLikeKind::Method, 'run', 'Example', sharp: true),
             static fn(): object => new GenericParent(GenericParentKind::ClassLike, ''),
             static fn(): object => new GenericParent(GenericParentKind::ClassLike, 'Example', 'run'),
             static fn(): object => new GenericParent(GenericParentKind::FunctionLike, 'run'),

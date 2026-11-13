@@ -195,7 +195,7 @@ where
         // Spec section 13: a field or a property keeps only a writable value, since `readonly` never goes on one.
         let mut dropped_readonly = false;
         if context.dialect.is_sharp()
-            && resolved_property.property_type.drops_readonly_of(assigned_value_type)
+            && resolved_property.property_type.drops_readonly_of(context.codebase, assigned_value_type)
             && let Some(value) = assigned_value
         {
             let action = format!(

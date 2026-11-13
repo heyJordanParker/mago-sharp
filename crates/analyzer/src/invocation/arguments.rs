@@ -757,7 +757,7 @@ fn can_argument_be_identical(
                 !matches!(
                     (input, parameter),
                     (TAtomic::Callable(TCallable::Signature(input)), TAtomic::Callable(TCallable::Signature(parameter)))
-                        if input.has_effect_outside(parameter)
+                        if input.has_effect_outside(codebase, parameter)
                             || (is_sharp && parameter.takes_more_parameters_than(input))
                 )
             })
@@ -785,9 +785,10 @@ fn effects_outside(codebase: &CodebaseMetadata, input_type: &TUnion, parameter_t
     let allowed: Vec<Vec<Word>> = parameter_type.types.iter().filter_map(lists).collect();
     let mut outside: Vec<Word> = Vec::new();
     for effect in input_type.types.iter().filter_map(lists).flatten() {
-        let listed = allowed
-            .iter()
-            .all(|effects| effects.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes())));
+        // An effect is a class-like, named by its key, spec section 24.
+        let key = codebase.class_key(effect.as_bytes());
+        let listed =
+            allowed.iter().all(|effects| effects.iter().any(|known| codebase.class_key(known.as_bytes()) == key));
         if !listed && !outside.contains(&effect) {
             outside.push(effect);
         }

@@ -7,7 +7,6 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
-use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
@@ -671,7 +670,7 @@ where
         };
         // A collection member orders by the keys the function in a parameter marked `ComparedByOrder` returns, as
         // `sortedBy` does, so a key type `<` cannot order is refused.
-        if is_marked(parameter, COMPARED_BY_ORDER)
+        if parameter.has_attribute(context.codebase, COMPARED_BY_ORDER)
             && !argument.is_unpacked()
             && let Some(TAtomic::Callable(TCallable::Signature(function))) =
                 artifacts.get_expression_type(value).filter(|function| function.is_single()).map(TUnion::get_single)
@@ -684,7 +683,7 @@ where
             });
         }
         // A spread, as `contains(...[cart])`, passes the elements of the list it spreads, so the search compares those.
-        if is_marked(parameter, COMPARED_BY_EQUALITY)
+        if parameter.has_attribute(context.codebase, COMPARED_BY_EQUALITY)
             && let Some(value_type) = artifacts.get_expression_type(value).cloned().and_then(|value_type| {
                 if argument.is_unpacked() {
                     get_unpacked_argument_type(context, &value_type, value.span())
@@ -863,7 +862,7 @@ pub(crate) fn can_compare_elements(
     receiver_type: &TUnion,
     codebase: &CodebaseMetadata,
 ) -> bool {
-    !metadata.parameters.iter().skip(1).any(|parameter| is_marked(parameter, COMPARED_BY_EQUALITY))
+    !metadata.parameters.iter().skip(1).any(|parameter| parameter.has_attribute(codebase, COMPARED_BY_EQUALITY))
         || searched_element_type(&read_receiver(metadata, receiver_type, codebase), codebase)
             .is_none_or(|element_type| search_refusal(&element_type, &element_type, codebase).is_none())
 }
@@ -873,11 +872,6 @@ const COMPARED_BY_EQUALITY: &[u8] = b"Sharp\\Internal\\ComparedByEquality";
 
 /// The prelude attribute that marks a collection member's parameter whose function gives the keys it orders by.
 const COMPARED_BY_ORDER: &[u8] = b"Sharp\\Internal\\ComparedByOrder";
-
-/// Whether `parameter` carries the prelude attribute `mark`.
-fn is_marked(parameter: &FunctionLikeParameterMetadata, mark: &[u8]) -> bool {
-    parameter.attributes.iter().any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(mark))
-}
 
 /// Applies active method call assertions to narrow the return type.
 ///

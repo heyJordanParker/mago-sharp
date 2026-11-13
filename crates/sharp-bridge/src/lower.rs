@@ -1413,10 +1413,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 _ => None,
             })
             .collect();
+        // A type that parses is PHP#, named only as written, spec section 24.
         structs.sort_by_key(|class| {
-            written.iter().position(|member| {
-                matches!(member, Hint::Identifier(name) if self.names.get(name).eq_ignore_ascii_case(class.name.as_bytes()))
-            })
+            written.iter().position(
+                |member| matches!(member, Hint::Identifier(name) if self.names.get(name) == class.name.as_bytes()),
+            )
         });
         if !structs.is_empty() {
             let readable =
@@ -9748,15 +9749,14 @@ impl PhpType {
     }
 
     /// Whether every value of `other` is a value of this type, so a union that holds this type needs no `other`. Names
-    /// are compared as the engine compares them, ignoring case. No union holds two keyword types: the checker refuses
-    /// two collections, which share PHP's `array`, and `Self` twice.
+    /// are compared as the engine compares them in a `.sharp` file: a built-in type in any case, and a class as written,
+    /// spec section 24, so `Box|BOX` keeps both classes. No union holds two keyword types: the checker refuses two
+    /// collections, which share PHP's `array`, and `Self` twice.
     fn holds(&self, other: &PhpType) -> bool {
         match (self, other) {
             (PhpType::Mixed, _) => true,
             (PhpType::Named(name), PhpType::Named(other)) => name.eq_ignore_ascii_case(other),
-            (PhpType::Classes(classes), PhpType::Classes(others)) => classes
-                .iter()
-                .all(|class| others.iter().any(|other| class.as_bytes().eq_ignore_ascii_case(other.as_bytes()))),
+            (PhpType::Classes(classes), PhpType::Classes(others)) => classes.iter().all(|class| others.contains(class)),
             _ => false,
         }
     }

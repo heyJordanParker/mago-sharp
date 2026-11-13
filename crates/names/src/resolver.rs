@@ -4,6 +4,7 @@ use mago_syntax::cst::Program;
 use mago_syntax::walker::MutWalker;
 
 use crate::ResolvedNames;
+use crate::default_class;
 use crate::internal::context::NameResolutionContext;
 use crate::internal::walker::NameWalker;
 use crate::scope::trim_start_byte;
@@ -78,29 +79,42 @@ where
 /// Spec section 23: a class-like in a file's own namespace wins over the default one, as a class of the same package
 /// does in Kotlin, C# and Java. With `App\Math` among them, a bare `Math` in the namespace `App` is `App\Math`, and in
 /// any other namespace it stays `Sharp\Math`.
+///
+/// Each is named by the engine's rule, spec section 24: a PHP# class-like only as written, so `App\MATH` wins over no
+/// `Math`, and a plain PHP one in any case, as PHP compares class names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct NamespaceClasses(HashSet<std::vec::Vec<u8>>);
+pub struct NamespaceClasses {
+    sharp: HashSet<std::vec::Vec<u8>>,
+    plain: HashSet<std::vec::Vec<u8>>,
+}
 
 impl NamespaceClasses {
-    /// The class-likes among `names`, the full names of a project's class-likes, whose short name `Sharp` imports by
-    /// default. PHP compares class names ignoring case, and so does [`contains`](Self::contains).
-    pub fn new<N>(names: impl IntoIterator<Item = N>) -> Self
+    /// The class-likes among `names`, each the full name of a project's class-like and whether it is PHP#, whose short
+    /// name `Sharp` imports by default.
+    pub fn new<N>(names: impl IntoIterator<Item = (N, bool)>) -> Self
     where
         N: AsRef<[u8]>,
     {
-        Self(
-            names
-                .into_iter()
-                .map(|name| trim_start_byte(name.as_ref(), b'\\').to_ascii_lowercase())
-                .filter(|name| shadows_a_default_class(name.rsplit(|byte| *byte == b'\\').next().unwrap_or(name)))
-                .collect(),
-        )
+        let mut classes = Self::default();
+        for (name, sharp) in names {
+            let name = trim_start_byte(name.as_ref(), b'\\');
+            let short = name.rsplit(|byte| *byte == b'\\').next().unwrap_or(name);
+            if sharp && default_class(short).is_some() {
+                classes.sharp.insert(name.to_vec());
+            } else if !sharp && shadows_a_default_class(short) {
+                classes.plain.insert(name.to_ascii_lowercase());
+            }
+        }
+
+        classes
     }
 
     /// Whether `name`, a full name, is one of these class-likes.
     #[must_use]
     pub fn contains(&self, name: &[u8]) -> bool {
-        self.0.contains(&trim_start_byte(name, b'\\').to_ascii_lowercase())
+        let name = trim_start_byte(name, b'\\');
+
+        self.sharp.contains(name) || self.plain.contains(&name.to_ascii_lowercase())
     }
 }
 

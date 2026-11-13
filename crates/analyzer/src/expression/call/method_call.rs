@@ -1235,8 +1235,9 @@ where
         for atomic in return_type_meta.type_union.types.iter() {
             match atomic {
                 TAtomic::Object(TObject::Named(named_obj)) if named_obj.is_static => return true,
+                // A class-like is named by its key, spec section 24, so the PHP# `Order` is not `ORDER`.
                 TAtomic::Object(TObject::Named(named_obj))
-                    if named_obj.name.as_bytes().eq_ignore_ascii_case(class_name.as_bytes()) =>
+                    if context.codebase.class_key(named_obj.name.as_bytes()) == class_name =>
                 {
                     return true;
                 }

@@ -618,13 +618,15 @@ fn a_class_the_file_declares_after_its_use_is_the_class_and_not_the_standard_lib
     }
 }
 
+/// Spec section 24: a PHP# class-like is named only as written, so the file's `random` leaves a bare `Random` naming
+/// the standard library's `Sharp\Random`.
 #[test]
-fn a_class_like_the_file_declares_matches_a_standard_library_name_as_php_matches_class_names() {
+fn a_class_like_the_file_declares_matches_a_standard_library_name_only_as_written() {
     const CODE: &str = "namespace App.Tenant.Store;\n\ninterface random\n{\n}\n\nclass Report\n{\n    public void run()\n    {\n        Random.current();\n    }\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
-    assert_eq!(resolved(&names, CODE, "Random.current", 0), b"App\\Tenant\\Store\\Random");
+    assert_eq!(resolved(&names, CODE, "Random.current", 0), b"Sharp\\Random");
 }
 
 #[test]
@@ -842,7 +844,8 @@ fn a_collection_type_keeps_its_written_name_unresolved() {
 #[test]
 fn a_class_like_of_the_files_namespace_wins_over_a_default_one() {
     const CODE: &str = "namespace App;\n\nclass Shape\n{\n    private Random? random = null;\n\n    public bool run(Any value, Position position)\n    {\n        const made = new Random();\n        Random.clear();\n        Int.parse(\"1\");\n        return value is Random;\n    }\n}\n";
-    let namespace_classes = NamespaceClasses::new(["App\\Random", "Shop\\Position", "App\\Order"]);
+    let namespace_classes =
+        NamespaceClasses::new([("App\\Random", true), ("Shop\\Position", true), ("App\\Order", true)]);
     let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
     let arena = LocalArena::new();
     let program = parse_file(&arena, &file);
@@ -943,7 +946,7 @@ fn the_default_class_likes_are_generated_from_the_standard_library_and_the_prelu
 /// namespace wins over it, as the other default classes do. A case written through `Result` resolves under the enum.
 #[test]
 fn error_always_names_the_standard_interface_and_result_is_a_default_class() {
-    let namespace_classes = NamespaceClasses::new(["App\\Error", "Shop\\Result"]);
+    let namespace_classes = NamespaceClasses::new([("App\\Error", true), ("Shop\\Result", true)]);
 
     for (code, error, result) in [
         (
@@ -1055,14 +1058,17 @@ fn a_case_or_method_of_the_enclosing_enum_without_this_is_recorded() {
     assert_eq!(binding(&names, CODE, "this", 0), Some(Binding::This));
 }
 
+/// Spec section 24: a PHP# class names its members only as declared, so neither `Total` nor `Rate` names a member of
+/// a class that declares `total` and `RATE`.
 #[test]
-fn a_member_name_matches_as_php_matches_it() {
-    const CODE: &str = "class Report\n{\n    const int RATE = 2;\n\n    public int total()\n    {\n        return Total + Rate;\n    }\n}\n";
+fn a_member_name_matches_only_as_declared() {
+    const CODE: &str = "class Report\n{\n    const int RATE = 2;\n\n    public int total()\n    {\n        return Total + Rate + total;\n    }\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
-    assert_eq!(binding(&names, CODE, "Total", 0), Some(Binding::Member));
+    assert_eq!(binding(&names, CODE, "Total", 0), Some(Binding::Constant));
     assert_eq!(binding(&names, CODE, "Rate", 0), Some(Binding::Constant));
+    assert_eq!(binding(&names, CODE, "total", 1), Some(Binding::Member));
 }
 
 #[test]

@@ -878,7 +878,7 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
     if context.dialect.is_sharp()
         && let Some(value) = source_expression
         && let Some((local_type, _)) = block_context.local_types.get(&variable_id).cloned()
-        && local_type.drops_readonly_of(&assigned_type)
+        && local_type.drops_readonly_of(context.codebase, &assigned_type)
     {
         let name = display_variable_name(context, variable_id.as_bytes());
         let fix =

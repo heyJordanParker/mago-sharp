@@ -1232,7 +1232,12 @@ impl PluginRegistry {
         indices
     }
 
-    fn get_method_provider_indices(&self, class_name: &[u8], method_name: &[u8]) -> Vec<usize> {
+    fn get_method_provider_indices(
+        &self,
+        codebase: &CodebaseMetadata,
+        class_name: &[u8],
+        method_name: &[u8],
+    ) -> Vec<usize> {
         use mago_word::concat_word;
         let key = concat_word!(ascii_lowercase_word(class_name), b"::", ascii_lowercase_word(method_name));
         let mut indices = Vec::new();
@@ -1244,7 +1249,7 @@ impl PluginRegistry {
         for (targets, idx) in &self.method_wildcard {
             if !indices.contains(idx) {
                 for target in targets {
-                    if target.matches(class_name, method_name) {
+                    if target.matches(codebase, class_name, method_name) {
                         indices.push(*idx);
                         break;
                     }
@@ -1431,7 +1436,7 @@ impl PluginRegistry {
         invocation: &Invocation<'ctx, '_, '_>,
         external_session: Option<&ExternalAnalysisSession>,
     ) -> ProviderResult {
-        let indices = self.get_method_provider_indices(class_name, method_name);
+        let indices = self.get_method_provider_indices(codebase, class_name, method_name);
         let mut all_issues = Vec::new();
 
         for idx in indices {
@@ -1652,7 +1657,12 @@ impl PluginRegistry {
         indices
     }
 
-    fn get_method_assertion_provider_indices(&self, class_name: &[u8], method_name: &[u8]) -> Vec<usize> {
+    fn get_method_assertion_provider_indices(
+        &self,
+        codebase: &CodebaseMetadata,
+        class_name: &[u8],
+        method_name: &[u8],
+    ) -> Vec<usize> {
         if self.method_assertion_exact.is_empty() && self.method_assertion_wildcard.is_empty() {
             return Vec::new();
         }
@@ -1668,7 +1678,7 @@ impl PluginRegistry {
         for (targets, idx) in &self.method_assertion_wildcard {
             if !indices.contains(idx) {
                 for target in targets {
-                    if target.matches(class_name, method_name) {
+                    if target.matches(codebase, class_name, method_name) {
                         indices.push(*idx);
                         break;
                     }
@@ -1790,7 +1800,7 @@ impl PluginRegistry {
             return None;
         }
 
-        let indices = self.get_method_assertion_provider_indices(class_name, method_name);
+        let indices = self.get_method_assertion_provider_indices(codebase, class_name, method_name);
 
         for idx in indices {
             let provider_context =
@@ -1861,7 +1871,12 @@ impl PluginRegistry {
         indices
     }
 
-    fn get_method_throw_provider_indices(&self, class_name: &[u8], method_name: &[u8]) -> Vec<usize> {
+    fn get_method_throw_provider_indices(
+        &self,
+        codebase: &CodebaseMetadata,
+        class_name: &[u8],
+        method_name: &[u8],
+    ) -> Vec<usize> {
         if self.method_throw_providers.is_empty()
             && self.method_throw_exact.is_empty()
             && self.method_throw_wildcard.is_empty()
@@ -1880,7 +1895,7 @@ impl PluginRegistry {
         for (targets, idx) in &self.method_throw_wildcard {
             if !indices.contains(idx) {
                 for target in targets {
-                    if target.matches(class_name, method_name) {
+                    if target.matches(codebase, class_name, method_name) {
                         indices.push(*idx);
                         break;
                     }
@@ -1949,7 +1964,7 @@ impl PluginRegistry {
         invocation: &Invocation<'ctx, '_, '_>,
     ) -> WordSet {
         let mut exceptions = WordSet::default();
-        let indices = self.get_method_throw_provider_indices(class_name, method_name);
+        let indices = self.get_method_throw_provider_indices(codebase, class_name, method_name);
 
         for idx in indices {
             let provider_context =

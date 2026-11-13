@@ -216,14 +216,12 @@ where
             }
         }
         // A PHP# `extern` method's body is native, compiled into the engine, and an `[Import]` method's is the call of
-        // the PHP function it names, spec section 23, so each is concrete without one here.
+        // the PHP function it names, spec section 23, so each is concrete without one here. `[Import]` is a PHP#
+        // class-like, keyed by its exact name, spec section 24.
         MethodBody::Abstract(_) => {
             method_metadata.is_abstract =
                 !method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_)))
-                    && !metadata
-                        .attributes
-                        .iter()
-                        .any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(IMPORT.as_bytes()));
+                    && !metadata.attributes.iter().any(|attribute| attribute.name.as_bytes() == IMPORT.as_bytes());
         }
     }
 

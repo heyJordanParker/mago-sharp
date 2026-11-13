@@ -366,7 +366,7 @@ where
         && block_context
             .scope
             .get_function_like()
-            .is_some_and(|function| function.has_attribute(PARSES_TYPE_ARGUMENT.as_bytes()))
+            .is_some_and(|function| function.has_attribute(context.codebase, PARSES_TYPE_ARGUMENT.as_bytes()))
     {
         let parsed = TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new(word(PARSED)))));
         parameter = TUnion::from_atomic(TAtomic::GenericParameter(TGenericParameter {
@@ -985,14 +985,20 @@ where
             && report_full_class_name(context, written, span);
     }
 
-    // A capitalized keyword is a name, spec section 2, so a class of that name is what the code meant.
+    // A capitalized keyword is a name, spec section 2, so a class of that name is what the code meant. A short name
+    // names a PHP# class-like as written and a plain PHP one in any case, spec section 24, so the PHP# `Order` is the
+    // one class `Order` means beside its twin `ORDER`.
     let classes: Vec<Word> = context
         .codebase
         .class_likes
         .values()
         .filter(|class| {
-            short_name(class.original_name).as_bytes().eq_ignore_ascii_case(written)
-                && !is_php_closure(class.original_name.as_bytes())
+            let short = short_name(class.original_name);
+            (if class.flags.is_sharp() {
+                short.as_bytes() == written
+            } else {
+                short.as_bytes().eq_ignore_ascii_case(written)
+            }) && !is_php_closure(class.original_name.as_bytes())
                 && !is_hidden_php_class(context, class.original_name.as_bytes())
         })
         .map(|class| class.original_name)

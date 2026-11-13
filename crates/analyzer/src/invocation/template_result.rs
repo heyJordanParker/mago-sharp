@@ -108,13 +108,10 @@ pub fn populate_template_result_from_invocation<'ctx, 'arena, A>(
         );
 
         // A subclass passes its type arguments to the declaring class, and PHP#'s `Counter<Order>.track(order)` writes
-        // the declaring class's own.
+        // the declaring class's own. A class-like is named by its key, spec section 24.
         if let Some(instance_type) = get_named_static_class_type(&method_context.class_type)
             && (instance_type.type_parameters.is_some()
-                || !instance_type
-                    .name
-                    .as_bytes()
-                    .eq_ignore_ascii_case(declaring_class_metadata.original_name.as_bytes()))
+                || context.codebase.class_key(instance_type.name.as_bytes()) != declaring_class_metadata.name)
             && let Some(calling_class_metadata) = context.codebase.get_class_like(instance_type.name.as_bytes())
         {
             for (template_name, _) in &declaring_class_metadata.template_types {
@@ -176,7 +173,7 @@ pub fn populate_template_result_from_invocation<'ctx, 'arena, A>(
     };
 
     let is_declaring_instance =
-        instance_type.name.as_bytes().eq_ignore_ascii_case(method_context.class_like_metadata.original_name.as_bytes());
+        context.codebase.class_key(instance_type.name.as_bytes()) == method_context.class_like_metadata.name;
 
     if is_declaring_instance && let Some(type_parameters) = &instance_type.type_parameters {
         for (template_index, template_type) in type_parameters.iter().enumerate() {

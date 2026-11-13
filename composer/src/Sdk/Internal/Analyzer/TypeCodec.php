@@ -74,6 +74,12 @@ final class TypeCodec
 {
     private const MAXIMUM_MEMBERS = 65_536;
 
+    /** A method identifier's rule: its class is a PHP# class-like. */
+    private const SHARP_CLASS = 1;
+
+    /** A method identifier's rule: its class keys its methods by their declared names. */
+    private const EXACT_NAMES = 2;
+
     public static function read(PayloadReader $reader, ?string $description = null): Type
     {
         [$handle, $flags, $atomicTypes] = self::readUnion($reader, true);
@@ -704,6 +710,11 @@ final class TypeCodec
         }
 
         $writer->writeBytes($identifier->name);
+        if ($identifier->kind === FunctionLikeKind::Method) {
+            $writer->writeU8(
+                ($identifier->sharp ? self::SHARP_CLASS : 0) | ($identifier->exactNames ? self::EXACT_NAMES : 0),
+            );
+        }
     }
 
     /** @param null|list<Type> $types */
@@ -1220,8 +1231,19 @@ final class TypeCodec
     private static function readMethodIdentifier(PayloadReader $reader): FunctionLikeIdentifier
     {
         $class = $reader->readBytes();
+        $name = $reader->readBytes();
+        $rule = $reader->readU8();
+        if (($rule & ~(self::SHARP_CLASS | self::EXACT_NAMES)) !== 0) {
+            throw new ProtocolException("Unknown method identifier rule {$rule}.");
+        }
 
-        return new FunctionLikeIdentifier(FunctionLikeKind::Method, $reader->readBytes(), $class);
+        return new FunctionLikeIdentifier(
+            FunctionLikeKind::Method,
+            $name,
+            $class,
+            ($rule & self::SHARP_CLASS) !== 0,
+            ($rule & self::EXACT_NAMES) !== 0,
+        );
     }
 
     /** @return null|list<Type> */

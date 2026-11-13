@@ -1995,20 +1995,24 @@ fn is_exception_unchecked<A>(context: &Context<'_, '_, A>, exception_name: Word)
 where
     A: Arena,
 {
-    // Check exact match in unchecked_exception_classes
+    // A setting names a class-like as written, which the codebase keys, spec section 24, so the PHP# `NotFound` names
+    // no `NOTFOUND`.
+    let exception = context.codebase.class_key(exception_name.as_bytes());
     if context
         .settings
         .unchecked_exception_classes
         .iter()
-        .any(|unchecked| exception_name.as_bytes().eq_ignore_ascii_case(unchecked.as_bytes()))
+        .any(|unchecked| context.codebase.class_key(unchecked.as_bytes()) == exception)
     {
         return true;
     }
 
-    if context.settings.unchecked_exceptions.iter().any(|unchecked| {
-        exception_name.as_bytes().eq_ignore_ascii_case(unchecked.as_bytes())
-            || context.codebase.is_instance_of(exception_name.as_bytes(), unchecked.as_bytes())
-    }) {
+    if context
+        .settings
+        .unchecked_exceptions
+        .iter()
+        .any(|unchecked| context.codebase.is_instance_of(exception_name.as_bytes(), unchecked.as_bytes()))
+    {
         return true;
     }
 

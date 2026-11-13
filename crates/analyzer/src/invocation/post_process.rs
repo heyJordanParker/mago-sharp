@@ -654,7 +654,11 @@ fn clear_object_property_narrowings<'ctx, 'arena, A>(
             Some(FunctionLikeIdentifier::Method(class_name, _)) => block_context
                 .scope
                 .get_class_like_name()
-                .is_some_and(|current_class| current_class.as_bytes().eq_ignore_ascii_case(class_name.as_bytes())),
+                // A class-like is named by its key, spec section 24, so the PHP# `Order` is not `ORDER`.
+                .is_some_and(|current_class| {
+                    context.codebase.class_key(current_class.as_bytes())
+                        == context.codebase.class_key(class_name.as_bytes())
+                }),
             _ => false,
         };
 

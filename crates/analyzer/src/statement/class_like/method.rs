@@ -770,13 +770,13 @@ where
 }
 
 /// The PHP function name the interop attribute `mark`, `IMPORT` or `EXPORT`, gives `method`, spec section 23, with the
-/// attribute: its argument, a string literal. None for a method without the attribute.
+/// attribute: its argument, a string literal. None for a method without the attribute. Both marks are PHP# class-likes
+/// of the standard library, whose key is their exact name, spec section 24, so only that name writes one.
 fn interop_name<'method>(
     method: &'method FunctionLikeMetadata,
     mark: &str,
 ) -> Option<(Option<Word>, &'method AttributeMetadata)> {
-    let attribute =
-        method.attributes.iter().find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(mark.as_bytes()))?;
+    let attribute = method.attributes.iter().find(|attribute| attribute.name.as_bytes() == mark.as_bytes())?;
     let name = match attribute.arguments.first().and_then(|argument| argument.value.as_ref()) {
         Some(ConstantExpression::String(name)) => Some(*name),
         _ => None,

@@ -5,6 +5,7 @@ use mago_word::concat_word;
 use mago_word::word;
 
 use crate::identifier::function_like::FunctionLikeIdentifier;
+use crate::metadata::CodebaseMetadata;
 use crate::misc::VariableIdentifier;
 use crate::ttype::TType;
 use crate::ttype::TypeRef;
@@ -90,18 +91,19 @@ impl TCallableSignature {
     #[must_use]
     pub fn drops_readonly_of<'signature>(
         &'signature self,
+        codebase: &CodebaseMetadata,
         given: &'signature TCallableSignature,
     ) -> Option<DroppedReadonly<'signature>> {
         let parameter = self.parameters.iter().zip(&given.parameters).find_map(|(declared, given)| {
             let (passed, taken) = (declared.get_type_signature()?, given.get_type_signature()?);
 
-            taken.drops_readonly_of(passed).then_some(DroppedReadonly::Parameter { passed, taken })
+            taken.drops_readonly_of(codebase, passed).then_some(DroppedReadonly::Parameter { passed, taken })
         });
 
         parameter.or_else(|| {
             let (expected, returned) = (self.get_return_type()?, given.get_return_type()?);
 
-            expected.drops_readonly_of(returned).then_some(DroppedReadonly::Return { returned, expected })
+            expected.drops_readonly_of(codebase, returned).then_some(DroppedReadonly::Return { returned, expected })
         })
     }
 
@@ -187,17 +189,19 @@ impl TCallableSignature {
 
     /// Spec section 29: whether this function value's type lists an effect the `slot` function type does not list, so
     /// the slot never holds it. A value with a `source` runs a PHP# body, whose effects only the effects solve knows, so
-    /// the solve judges it instead. A PHP signature lists no effects, and keeps PHP's rules.
+    /// the solve judges it instead. A PHP signature lists no effects, and keeps PHP's rules. An effect is a class-like,
+    /// named by its key, spec section 24.
     #[must_use]
-    pub fn has_effect_outside(&self, slot: &TCallableSignature) -> bool {
+    pub fn has_effect_outside(&self, codebase: &CodebaseMetadata, slot: &TCallableSignature) -> bool {
         let (Some(effects), Some(allowed)) = (&self.effects, &slot.effects) else {
             return false;
         };
 
         self.source.is_none()
-            && !effects
-                .iter()
-                .all(|effect| allowed.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes())))
+            && !effects.iter().all(|effect| {
+                let effect = codebase.class_key(effect.as_bytes());
+                allowed.iter().any(|known| codebase.class_key(known.as_bytes()) == effect)
+            })
     }
 
     /// Returns a new instance with the given parameters.

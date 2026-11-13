@@ -363,14 +363,15 @@ final class Worker
                     }
                 }
 
+                // A hook's targets name class-likes and methods as written, since the worker knows no class's rule:
+                // `Box::open` and `Box::Open` are two methods of a class with exact names, and the PHP# `Demo\Order`
+                // and `Demo\ORDER` two class-likes, spec section 24. Mago matches each by the codebase's keys.
                 $registeredMethodCallAnalysisHooks = self::registerTargetedCallbacks(
                     $registry->getMethodCallAnalysisHooks(),
                     $methodCallAnalysisHooks,
                     $definition->identifier,
                     'analyzer method-call analysis hook',
-                    static fn(MethodTarget $target): string => (
-                        strtolower($target->class) . '::' . strtolower($target->method)
-                    ),
+                    static fn(MethodTarget $target): string => $target->class . '::' . $target->method,
                 );
                 $registeredMethodCallAnalysisHooksByIndex = [];
                 foreach ($registeredMethodCallAnalysisHooks as $registeredHook) {
@@ -382,7 +383,7 @@ final class Worker
                     $classLikeAnalysisHooks,
                     $definition->identifier,
                     'analyzer class-like analysis hook',
-                    static fn(ClassLikeTarget $target): string => strtolower($target->ancestor),
+                    static fn(ClassLikeTarget $target): string => $target->ancestor,
                 );
                 $registeredClassLikeAnalysisHooksByIndex = [];
                 foreach ($registeredClassLikeAnalysisHooks as $registeredHook) {

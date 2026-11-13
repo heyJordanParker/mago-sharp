@@ -630,7 +630,8 @@ where
         }
 
         // Spec section 31: in PHP# `Error` names the interface of the failures a method returns, which nothing throws.
-        if context.dialect.is_sharp() && caught_type.as_bytes().eq_ignore_ascii_case(b"Sharp\\Error") {
+        // It is a PHP# class-like, keyed by its exact name, spec section 24.
+        if context.dialect.is_sharp() && caught_type.as_bytes() == b"Sharp\\Error" {
             context.collector.report_with_code(
                 IssueCode::InvalidCatchType,
                 Issue::error("`Error` is PHP#'s interface of the failures a method returns, and no exception is one.")

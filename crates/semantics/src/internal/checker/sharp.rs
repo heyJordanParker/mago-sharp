@@ -1476,7 +1476,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Method(method), Enum)
             if method.return_type_hint.is_none()
                 && enclosing_class(context.program, method.span())
-                    .is_some_and(|r#enum| r#enum.name.value.eq_ignore_ascii_case(method.name.value)) =>
+                    .is_some_and(|r#enum| r#enum.name.value == method.name.value) =>
         {
             report_refusal(
                 Issue::error("An enum has no constructor: its cases are its only values.")
@@ -2959,13 +2959,12 @@ fn check_operator(operator: &Operator, context: &mut Context<'_, '_, '_>) {
     }
 }
 
-/// Whether a parameter's type is the class `class_fqcn`, written by its name, nullable or not, or as `Self`.
+/// Whether a parameter's type is the PHP# class `class_fqcn`, written by its exact name, spec section 24, nullable or
+/// not, or as `Self`.
 fn is_class_type(hint: &Hint, class_fqcn: &[u8], names: &ResolvedNames) -> bool {
     match hint {
         Hint::Nullable(nullable) => is_class_type(nullable.hint, class_fqcn, names),
-        Hint::Identifier(identifier) => {
-            names.resolve(identifier).is_some_and(|name| name.eq_ignore_ascii_case(class_fqcn))
-        }
+        Hint::Identifier(identifier) => names.resolve(identifier).is_some_and(|name| name == class_fqcn),
         Hint::Self_(_) => true,
         _ => false,
     }
@@ -3482,7 +3481,8 @@ fn check_iterable_class(class: &Class, context: &mut Context<'_, '_, '_>) {
         let ClassLikeMember::Method(method) = member else {
             continue;
         };
-        if method.name.value.eq_ignore_ascii_case(b"getIterator") {
+        // A PHP# class names its methods as declared, spec section 24, so a `GetIterator` of its own is another method.
+        if method.name.value == b"getIterator" {
             context.report(
                 Issue::error(format!(
                     "`{}` names `Iterable<T>`, so plain PHP reads its `elements()` through the `getIterator()` PHP# writes: rename this method.",
@@ -3742,9 +3742,9 @@ fn report_static_without_initial_value(property: &Property, context: &mut Contex
     );
 }
 
-/// Reports each method named as a property of its class, compared ignoring case as PHP finds a method. Spec section 14
-/// calls a property holding a function as `order.priceOf(line)`, and the engine calls the property only when the
-/// class has no method of that name, so one name declares one member, as in C#.
+/// Reports each method named as a property of its class, compared as declared, as a PHP# class finds a method, spec
+/// section 24. Spec section 14 calls a property holding a function as `order.priceOf(line)`, and the engine calls the
+/// property only when the class has no method of that name, so one name declares one member, as in C#.
 fn report_methods_named_as_properties(class: ClassLike, context: &mut Context<'_, '_, '_>) {
     let mut properties: Vec<&DirectVariable> = Vec::new();
     for member in class.members {
@@ -3772,8 +3772,7 @@ fn report_methods_named_as_properties(class: ClassLike, context: &mut Context<'_
             continue;
         }
 
-        if let Some(property) = properties.iter().find(|property| property.name.eq_ignore_ascii_case(method.name.value))
-        {
+        if let Some(property) = properties.iter().find(|property| property.name == method.name.value) {
             context.report(
                 Issue::error(format!(
                     "The class `{}` declares a method and a property named `{}`.",
@@ -5614,7 +5613,8 @@ fn check_named_constructor(
         );
     }
 
-    if constructor.name.value.eq_ignore_ascii_case(class.value) {
+    // A PHP# class names its members as declared, spec section 24, so only its exact name is its class's.
+    if constructor.name.value == class.value {
         report(
             format!(
                 "A named constructor cannot have its class's name: `new {class_name}(…)` calls the main constructor."
@@ -5713,13 +5713,12 @@ fn intersection_members<'ast, 'arena>(
     }
 }
 
-/// Whether `first` and `second` write one type, as the engine compares them: a class by its full name, ignoring case,
-/// and a generic type by its name and each type argument.
+/// Whether `first` and `second` write one type, as the engine compares them in a `.sharp` file: a class by its full
+/// name as written, spec section 24, so `Box | BOX` names two classes, and a generic type by its name and each type
+/// argument.
 fn is_same_type(first: &Hint, second: &Hint, context: &Context<'_, '_, '_>) -> bool {
     match (first, second) {
-        (Hint::Identifier(first), Hint::Identifier(second)) => {
-            context.names.get(first).eq_ignore_ascii_case(context.names.get(second))
-        }
+        (Hint::Identifier(first), Hint::Identifier(second)) => context.names.get(first) == context.names.get(second),
         (Hint::Generic(first), Hint::Generic(second)) => {
             let (first_name, second_name) = (
                 context.names.resolve(&first.name).unwrap_or(first.name.value),
@@ -5728,7 +5727,7 @@ fn is_same_type(first: &Hint, second: &Hint, context: &Context<'_, '_, '_>) -> b
             let (first_arguments, second_arguments) =
                 (&first.type_arguments.arguments, &second.type_arguments.arguments);
 
-            first_name.eq_ignore_ascii_case(second_name)
+            first_name == second_name
                 && first_arguments.len() == second_arguments.len()
                 && first_arguments
                     .iter()
@@ -6623,12 +6622,12 @@ pub fn check_module(module: &Module, context: &mut Context<'_, '_, '_>) {
         }
         check_law_parameters(law, context);
 
-        if let Some(earlier) = stated.iter().find(|earlier| earlier.value.eq_ignore_ascii_case(law.name.value)) {
+        // A law is a member of its module, a PHP# class-like, named as stated, spec section 24.
+        if let Some(earlier) = stated.iter().find(|earlier| earlier.value == law.name.value) {
             context.report(
                 Issue::error(format!("The module already states a law named `{}`.", BytesDisplay(earlier.value)))
                     .with_annotation(Annotation::primary(law.name.span).with_message("Stated again here."))
-                    .with_annotation(Annotation::secondary(earlier.span).with_message("First stated here."))
-                    .with_note("Law names are case-insensitive."),
+                    .with_annotation(Annotation::secondary(earlier.span).with_message("First stated here.")),
             );
         } else {
             stated.push(&law.name);
@@ -6953,8 +6952,9 @@ fn check_case_class_names(r#enum: &mago_syntax::cst::Enum, context: &mut Context
             );
         }
 
+        // A PHP# enum names its members as declared, spec section 24, so only a method `Declined` meets the case.
         let method = r#enum.members.iter().find_map(|member| match member {
-            ClassLikeMember::Method(method) if method.name.value.eq_ignore_ascii_case(name.value) => Some(method),
+            ClassLikeMember::Method(method) if method.name.value == name.value => Some(method),
             _ => None,
         });
         if let (mago_syntax::cst::EnumCaseItem::Data(_), Some(method)) = (&case.item, method) {
@@ -6976,7 +6976,7 @@ fn check_case_class_names(r#enum: &mago_syntax::cst::Enum, context: &mut Context
 
 /// Refuses a field of a case named like a property or a method of its enum, spec section 20: each case is its own type,
 /// with its fields and every member of its enum, so `some.cents` would read two members, as Kotlin refuses a property
-/// that hides one of its supertype's. A method compares ignoring case, as it is called.
+/// that hides one of its supertype's. A method is named as declared, as a PHP# class names it, spec section 24.
 fn check_case_fields_named_like_members(r#enum: &Enum, context: &mut Context<'_, '_, '_>) {
     let enum_name = BytesDisplay(r#enum.name.value);
     for member in &r#enum.members {
@@ -6991,7 +6991,7 @@ fn check_case_fields_named_like_members(r#enum: &Enum, context: &mut Context<'_,
                     .into_iter()
                     .find(|variable| variable.name == field.name)
                     .map(|variable| ("property", "Property", variable.name, variable.span)),
-                ClassLikeMember::Method(method) if method.name.value.eq_ignore_ascii_case(field.name) => {
+                ClassLikeMember::Method(method) if method.name.value == field.name => {
                     Some(("method", "Method", method.name.value, method.name.span))
                 }
                 _ => None,
@@ -7125,14 +7125,15 @@ fn enclosing_static_method_class<'ast, 'arena>(
         .then_some(class)
 }
 
-/// The method named `name` of the class whose body holds `span`. Method names are case-insensitive.
+/// The method named `name` of the class whose body holds `span`, a PHP# class, which names its methods as declared,
+/// spec section 24.
 fn enclosing_class_method<'ast, 'arena>(
     program: &'ast Program<'arena>,
     span: Span,
     name: &[u8],
 ) -> Option<&'ast Method<'arena>> {
     enclosing_class(program, span)?.members.iter().find_map(|member| match member {
-        ClassLikeMember::Method(method) if method.name.value.eq_ignore_ascii_case(name) => Some(method),
+        ClassLikeMember::Method(method) if method.name.value == name => Some(method),
         _ => None,
     })
 }
@@ -7295,9 +7296,11 @@ fn report_static_member_in_constant(
     span: Span,
     context: &mut Context<'_, '_, '_>,
 ) {
-    let declared = declarations(context.program).classes.into_iter().any(|declared| {
-        declared.name.value.eq_ignore_ascii_case(class.name.value()) && is_static_property(declared, member.value)
-    });
+    // The file's classes are PHP#, named only as written, spec section 24.
+    let declared = declarations(context.program)
+        .classes
+        .into_iter()
+        .any(|declared| declared.name.value == class.name.value() && is_static_property(declared, member.value));
     if !declared {
         return;
     }

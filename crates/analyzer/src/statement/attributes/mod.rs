@@ -287,8 +287,9 @@ where
             used_attributes.insert((*place, attribute_name_bytes), attribute.name.span());
         }
 
+        // `Sharp\Key` is a PHP# class-like, keyed by its exact name, spec section 24.
         if context.dialect.is_sharp()
-            && attribute_name_bytes.eq_ignore_ascii_case(b"Sharp\\Key")
+            && attribute_name_bytes == b"Sharp\\Key"
             && !is_parsed_parameter(context.codebase, block_context, target)
         {
             context.collector.report_with_code(

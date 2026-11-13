@@ -116,7 +116,14 @@ where
                 class_like_name,
                 member_selector: TReferenceMemberSelector::Identifier(member_name),
             })) = meta.inferred_type.as_ref()
-                && classname.is_some_and(|c| c.as_bytes().eq_ignore_ascii_case(class_like_name.as_bytes()))
+                // The class is the file's, a PHP# one named only as written, spec section 24, or a plain PHP one.
+                && classname.is_some_and(|c| {
+                    if context.program.dialect.is_sharp() {
+                        c == *class_like_name
+                    } else {
+                        c.as_bytes().eq_ignore_ascii_case(class_like_name.as_bytes())
+                    }
+                })
                 && member_name.as_bytes() == item.name.value
             {
                 meta.inferred_type = Some(TAtomic::Never);

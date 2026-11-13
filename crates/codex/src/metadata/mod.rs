@@ -858,10 +858,11 @@ impl CodebaseMetadata {
                     let r#type = parameter.type_metadata.as_ref().or(parameter.type_declaration_metadata.as_ref())?;
                     let name = parameter.name.0.as_bytes();
                     let name = name.strip_prefix(b"$").unwrap_or(name);
+                    // `Sharp\Key` is a PHP# class-like, keyed by its exact name, spec section 24.
                     let key = parameter
                         .attributes
                         .iter()
-                        .find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Key"))
+                        .find(|attribute| attribute.name.as_bytes() == b"Sharp\\Key")
                         .and_then(|attribute| match attribute.arguments.first()?.value.as_ref()? {
                             ConstantExpression::String(key) => Some(key.as_bytes()),
                             _ => None,

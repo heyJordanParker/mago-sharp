@@ -525,7 +525,8 @@ struct MethodTarget {
 
 impl MethodTarget {
     fn matches(&self, codebase: &CodebaseMetadata, class: &[u8], method: &[u8]) -> bool {
-        class_pattern_matches(codebase, &self.class, class) && pattern_matches(&self.method, method)
+        class_pattern_matches(codebase, &self.class, class)
+            && method_pattern_matches(codebase, class, &self.method, method)
     }
 }
 
@@ -718,6 +719,10 @@ impl NodeAnalysisRequirements {
 
 type ProviderExactIndex = WordMap<Vec<u16>>;
 type ProviderWildcardIndex<T> = Vec<(u16, Vec<T>)>;
+/// The providers of each exact class-like or member target, each with its target, under the target's name in lowercase:
+/// a name in any case finds every target it may meet, and the target's own `matches` decides whether it meets it by the
+/// key rule, spec section 24.
+type ProviderTargetIndex<T> = WordMap<Vec<(u16, T)>>;
 
 enum ProviderIndices {
     One(u16),
@@ -910,19 +915,19 @@ struct Backend<T> {
     function_signature_wildcard: Vec<(u16, Vec<FunctionTarget>)>,
     function_assertion_exact: WordMap<Vec<u16>>,
     function_assertion_wildcard: Vec<(u16, Vec<FunctionTarget>)>,
-    method_exact: WordMap<Vec<u16>>,
+    method_exact: ProviderTargetIndex<MethodTarget>,
     method_wildcard: Vec<(u16, Vec<MethodTarget>)>,
-    method_signature_exact: WordMap<Vec<u16>>,
+    method_signature_exact: ProviderTargetIndex<MethodTarget>,
     method_signature_wildcard: Vec<(u16, Vec<MethodTarget>)>,
-    method_assertion_exact: WordMap<Vec<u16>>,
+    method_assertion_exact: ProviderTargetIndex<MethodTarget>,
     method_assertion_wildcard: Vec<(u16, Vec<MethodTarget>)>,
-    property_exact: ProviderExactIndex,
+    property_exact: ProviderTargetIndex<PropertyTarget>,
     property_wildcard: ProviderWildcardIndex<PropertyTarget>,
-    property_initialization_exact: ProviderExactIndex,
+    property_initialization_exact: ProviderTargetIndex<PropertyTarget>,
     property_initialization_wildcard: ProviderWildcardIndex<PropertyTarget>,
-    class_initializer_exact: ProviderExactIndex,
+    class_initializer_exact: ProviderTargetIndex<Vec<u8>>,
     class_initializer_wildcard: ProviderWildcardIndex<Vec<u8>>,
-    call_forwarding_exact: WordMap<Vec<u16>>,
+    call_forwarding_exact: ProviderTargetIndex<MethodTarget>,
     call_forwarding_wildcard: Vec<(u16, Vec<MethodTarget>)>,
     issue_filter_indices: Box<[u16]>,
     issue_filter_codes: foldhash::HashSet<String>,
@@ -1221,7 +1226,13 @@ impl<T> Backend<T> {
         codebase: &CodebaseMetadata,
         class: &[u8],
     ) -> (Option<ProviderIndices>, usize) {
-        let (exact, exact_candidates) = matching_exact_class_providers(&self.class_initializer_exact, codebase, class);
+        let (exact, exact_candidates) = matching_target_providers(
+            &self.class_initializer_exact,
+            codebase,
+            class,
+            |candidate| candidate,
+            |target: &Vec<u8>| class_pattern_matches(codebase, target, class),
+        );
         let candidates = exact_candidates + self.class_initializer_wildcard.len();
         let wildcards = self
             .class_initializer_wildcard
@@ -1242,6 +1253,13 @@ impl<T> Backend<T> {
         }
 
         let mut matches = 0;
+        // An attribute names its class as the code writes it, which the codebase keys, spec section 24.
+        let attributes = self
+            .registration
+            .attributed_entry_points
+            .iter()
+            .map(|entry_point| codebase.class_key(&entry_point.attribute))
+            .collect::<Vec<_>>();
         for class in codebase.class_likes.values() {
             for entry_point in &self.registration.entry_points {
                 if !class_pattern_matches(codebase, &entry_point.target.class, class.name.as_bytes()) {
@@ -1250,7 +1268,12 @@ impl<T> Backend<T> {
 
                 let mut matched_class = false;
                 for (method, declaring_method) in &class.declaring_method_ids {
-                    if !pattern_matches(&entry_point.target.method, method.as_bytes()) {
+                    if !method_pattern_matches(
+                        codebase,
+                        class.name.as_bytes(),
+                        &entry_point.target.method,
+                        method.as_bytes(),
+                    ) {
                         continue;
                     }
 
@@ -1267,7 +1290,7 @@ impl<T> Backend<T> {
                 }
             }
 
-            for entry_point in &self.registration.attributed_entry_points {
+            for (entry_point, attribute_key) in self.registration.attributed_entry_points.iter().zip(&attributes) {
                 if !class_pattern_matches(codebase, &entry_point.class, class.name.as_bytes()) {
                     continue;
                 }
@@ -1280,7 +1303,7 @@ impl<T> Backend<T> {
                     if !method
                         .attributes
                         .iter()
-                        .any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(&entry_point.attribute))
+                        .any(|attribute| codebase.class_key(attribute.name.as_bytes()) == *attribute_key)
                     {
                         continue;
                     }
@@ -1305,7 +1328,7 @@ impl<T> Backend<T> {
 
 fn index_class_providers(
     providers: &[ClassInitializerProvider],
-) -> (ProviderExactIndex, ProviderWildcardIndex<Vec<u8>>) {
+) -> (ProviderTargetIndex<Vec<u8>>, ProviderWildcardIndex<Vec<u8>>) {
     let mut exact = WordMap::default();
     let mut wildcard = Vec::new();
     for provider in providers {
@@ -1314,10 +1337,10 @@ fn index_class_providers(
             if target.contains(&b'*') {
                 wildcard_targets.push(target.clone());
             } else {
-                let indices = exact.entry(ascii_lowercase_word(target)).or_insert_with(Vec::new);
-                if indices.last() != Some(&provider.index) {
-                    indices.push(provider.index);
-                }
+                exact
+                    .entry(ascii_lowercase_word(target))
+                    .or_insert_with(Vec::new)
+                    .push((provider.index, target.clone()));
             }
         }
 
@@ -1355,7 +1378,7 @@ fn index_function_providers<'provider>(
 
 fn index_method_providers<'provider>(
     providers: impl IntoIterator<Item = &'provider ProviderRegistration<MethodTarget>>,
-) -> (ProviderExactIndex, ProviderWildcardIndex<MethodTarget>) {
+) -> (ProviderTargetIndex<MethodTarget>, ProviderWildcardIndex<MethodTarget>) {
     let mut exact = WordMap::default();
     let mut wildcard = Vec::new();
     for provider in providers {
@@ -1366,10 +1389,10 @@ fn index_method_providers<'provider>(
             } else {
                 let class = ascii_lowercase_word(&target.class);
                 let method = ascii_lowercase_word(&target.method);
-                push_provider_index(
-                    exact.entry(concat_word!(class, b"::", method)).or_insert_with(Vec::new),
-                    provider.index,
-                );
+                exact
+                    .entry(concat_word!(class, b"::", method))
+                    .or_insert_with(Vec::new)
+                    .push((provider.index, target.clone()));
             }
         }
         if !wildcard_targets.is_empty() {
@@ -1403,14 +1426,20 @@ fn matching_function_provider_indices(
 }
 
 fn matching_method_provider_indices(
-    exact_index: &ProviderExactIndex,
+    exact_index: &ProviderTargetIndex<MethodTarget>,
     wildcard_index: &ProviderWildcardIndex<MethodTarget>,
     codebase: &CodebaseMetadata,
     class: &[u8],
     method: &[u8],
 ) -> (Option<ProviderIndices>, usize) {
-    let (exact, exact_candidates) =
-        matching_exact_member_providers(exact_index, codebase, class, ascii_lowercase_word(method).as_bytes());
+    let bucket = ascii_lowercase_word(method);
+    let (exact, exact_candidates) = matching_target_providers(
+        exact_index,
+        codebase,
+        class,
+        |candidate| concat_word!(candidate, b"::", bucket),
+        |target: &MethodTarget| target.matches(codebase, class, method),
+    );
     let candidates = exact_candidates + wildcard_index.len();
     let wildcards = wildcard_index
         .iter()
@@ -1449,32 +1478,9 @@ fn providers_have_capability(capabilities: &[u8], indices: &[u16], capability: u
     indices.iter().all(|index| capabilities.get(usize::from(*index)).is_some_and(|flags| flags & capability != 0))
 }
 
-fn matching_exact_class_providers(
-    index: &ProviderExactIndex,
-    codebase: &CodebaseMetadata,
-    class: &[u8],
-) -> (Option<ProviderIndices>, usize) {
-    let mut providers: Option<ProviderIndices> = None;
-    let mut candidates = 0;
-    for candidate in class_hierarchy(codebase, class) {
-        let Some(indices) = index.get(&candidate) else {
-            continue;
-        };
-        candidates += indices.len();
-        for provider in indices {
-            match &mut providers {
-                Some(providers) => providers.insert_sorted(*provider),
-                None => providers = Some(ProviderIndices::One(*provider)),
-            }
-        }
-    }
-
-    (providers, candidates)
-}
-
 fn index_property_providers(
     providers: &[PropertyProvider],
-) -> (ProviderExactIndex, ProviderWildcardIndex<PropertyTarget>) {
+) -> (ProviderTargetIndex<PropertyTarget>, ProviderWildcardIndex<PropertyTarget>) {
     let mut exact = WordMap::default();
     let mut wildcard = Vec::new();
     for provider in providers {
@@ -1484,11 +1490,10 @@ fn index_property_providers(
                 wildcard_targets.push(target.clone());
             } else {
                 let class = ascii_lowercase_word(&target.class);
-                let indices =
-                    exact.entry(concat_word!(class, b"::", target.property.as_slice())).or_insert_with(Vec::new);
-                if indices.last() != Some(&provider.index) {
-                    indices.push(provider.index);
-                }
+                exact
+                    .entry(concat_word!(class, b"::", target.property.as_slice()))
+                    .or_insert_with(Vec::new)
+                    .push((provider.index, target.clone()));
             }
         }
 
@@ -1501,13 +1506,19 @@ fn index_property_providers(
 }
 
 fn matching_property_provider_indices(
-    exact_index: &ProviderExactIndex,
+    exact_index: &ProviderTargetIndex<PropertyTarget>,
     wildcard_index: &ProviderWildcardIndex<PropertyTarget>,
     codebase: &CodebaseMetadata,
     class: &[u8],
     property: &[u8],
 ) -> (Option<ProviderIndices>, usize) {
-    let (exact, exact_candidates) = matching_exact_member_providers(exact_index, codebase, class, property);
+    let (exact, exact_candidates) = matching_target_providers(
+        exact_index,
+        codebase,
+        class,
+        |candidate| concat_word!(candidate, b"::", property),
+        |target: &PropertyTarget| target.matches(codebase, class, property),
+    );
     let candidates = exact_candidates + wildcard_index.len();
     let wildcards = wildcard_index
         .iter()
@@ -1517,21 +1528,23 @@ fn matching_property_provider_indices(
     (ProviderIndices::add_wildcards(exact, wildcards), candidates)
 }
 
-fn matching_exact_member_providers(
-    index: &WordMap<Vec<u16>>,
+/// The providers of `index` with a target that `meets`, and the number of targets weighed: those under the `bucket` of
+/// `class` and of each class-like above it.
+fn matching_target_providers<T>(
+    index: &ProviderTargetIndex<T>,
     codebase: &CodebaseMetadata,
     class: &[u8],
-    member: &[u8],
+    bucket: impl Fn(Word) -> Word,
+    meets: impl Fn(&T) -> bool,
 ) -> (Option<ProviderIndices>, usize) {
     let mut providers: Option<ProviderIndices> = None;
     let mut candidates = 0;
     for candidate in class_hierarchy(codebase, class) {
-        let key = concat_word!(candidate, b"::", member);
-        let Some(indices) = index.get(&key) else {
+        let Some(targets) = index.get(&bucket(candidate)) else {
             continue;
         };
-        candidates += indices.len();
-        for provider in indices {
+        candidates += targets.len();
+        for (provider, _) in targets.iter().filter(|(_, target)| meets(target)) {
             match &mut providers {
                 Some(providers) => providers.insert_sorted(*provider),
                 None => providers = Some(ProviderIndices::One(*provider)),
@@ -1542,8 +1555,7 @@ fn matching_exact_member_providers(
     (providers, candidates)
 }
 
-/// `class` and each class-like above it, in lowercase, as the exact index of provider targets names them: a target is
-/// matched in any case, and the codebase finds `class` by its key, exact for a PHP# class-like, spec section 24.
+/// `class` and each class-like above it, in lowercase, as [`ProviderTargetIndex`] buckets the targets that name them.
 fn class_hierarchy<'codebase>(
     codebase: &'codebase CodebaseMetadata,
     class: &[u8],
@@ -3847,20 +3859,39 @@ impl<T> Drop for ExternalAnalyzer<T> {
     }
 }
 
-fn pattern_matches(pattern: &[u8], value: &[u8]) -> bool {
-    if pattern == b"*" {
-        return true;
-    }
+/// Whether `pattern`, a name or a prefix of one ending in `*`, names `name`: exactly when `exact`, and in any case
+/// otherwise.
+fn pattern_matches(pattern: &[u8], name: &[u8], exact: bool) -> bool {
+    let same = |name: &[u8], written: &[u8]| if exact { name == written } else { name.eq_ignore_ascii_case(written) };
 
-    if let Some(prefix) = pattern.strip_suffix(b"*") {
-        starts_with_ignore_case(value, prefix)
-    } else {
-        value.eq_ignore_ascii_case(pattern)
+    match pattern.strip_suffix(b"*") {
+        Some(prefix) => name.get(..prefix.len()).is_some_and(|start| same(start, prefix)),
+        None => same(name, pattern),
     }
 }
 
+/// Whether the class pattern `pattern` names `class` or a class-like above it, by the key rule, spec section 24. A whole
+/// name names a PHP# class-like as written and a plain PHP one in any case, as the codebase keys them. A prefix's
+/// namespace, as `App\` in `App\*`, is found in any case, and the start of a class name it holds by the same rule.
 fn class_pattern_matches(codebase: &CodebaseMetadata, pattern: &[u8], class: &[u8]) -> bool {
-    pattern_matches(pattern, class) || (!pattern.contains(&b'*') && codebase.is_instance_of(class, pattern))
+    if !pattern.ends_with(b"*") {
+        return codebase.is_instance_of(class, pattern);
+    }
+
+    let namespace = pattern.iter().rposition(|byte| *byte == b'\\').map_or(0, |separator| separator + 1);
+    let sharp = codebase.get_class_like(class).is_some_and(|metadata| metadata.flags.is_sharp());
+
+    starts_with_ignore_case(class, &pattern[..namespace])
+        && pattern_matches(&pattern[namespace..], &class[namespace..], sharp)
+}
+
+/// Whether the method pattern `pattern` names the method `method` of `class`, by `class`'s rule, spec section 24: as
+/// declared in a class-like with exact names, so `total` names no `Total`, and in any case otherwise, as PHP finds a
+/// method.
+fn method_pattern_matches(codebase: &CodebaseMetadata, class: &[u8], pattern: &[u8], method: &[u8]) -> bool {
+    let exact = codebase.get_class_like(class).is_some_and(|metadata| metadata.exact_names);
+
+    pattern_matches(pattern, method, exact)
 }
 
 fn property_pattern_matches(pattern: &[u8], property: &[u8]) -> bool {

@@ -140,7 +140,11 @@ use crate::invocation::MethodTargetContext;
 
 pub const ANALYZER_PROTOCOL_MAGIC: [u8; 4] = *b"MANA";
 pub const ANALYZER_PROTOCOL_MAJOR: u16 = 1;
-pub const ANALYZER_PROTOCOL_MINOR: u16 = 13;
+pub const ANALYZER_PROTOCOL_MINOR: u16 = 14;
+/// A method identifier's rule, as the codebase answers it for its class: a PHP# class-like, spec section 24.
+const METHOD_OF_SHARP_CLASS: u8 = 1;
+/// A method identifier's rule: its class keys its methods by their declared names.
+const METHOD_OF_EXACT_NAMES: u8 = 2;
 
 const HEADER_LENGTH: usize = 12;
 const INITIAL_MESSAGE_CAPACITY: usize = 256;
@@ -1464,7 +1468,7 @@ fn encode_return_type_arguments<'type_info>(
     // the declaration it is written in. A call outside any function-like has none.
     writer.write_bool(calling_function_like.is_some());
     if let Some(calling_function_like) = calling_function_like {
-        encode_function_like_identifier(&mut writer, calling_function_like)?;
+        encode_function_like_identifier(&mut writer, calling_function_like, codebase)?;
     }
 
     let mut types = Vec::with_capacity(receiver_type_count + argument_types.len());
@@ -1839,7 +1843,7 @@ fn encode_callable_snapshot<'type_info>(
 
             writer.write_bool(signature.source.is_some());
             if let Some(source) = signature.source {
-                encode_function_like_identifier(writer, source)?;
+                encode_function_like_identifier(writer, source, types.codebase)?;
             }
 
             write_snapshot_count(writer, signature.constraints.len(), "callable constraints")?;
@@ -1855,7 +1859,7 @@ fn encode_callable_snapshot<'type_info>(
         }
         TCallable::Alias(identifier) => {
             writer.write_u8(2);
-            encode_function_like_identifier(writer, *identifier)?;
+            encode_function_like_identifier(writer, *identifier, types.codebase)?;
         }
     }
 
@@ -2168,9 +2172,12 @@ pub(super) fn encode_generic_parent(
     Ok(())
 }
 
+/// Writes `identifier`, a method with its class's rule as `codebase` answers it, so the SDK tells `Box::total` from
+/// `Box::Total` of a class with exact names, spec section 24.
 pub(super) fn encode_function_like_identifier(
     writer: &mut PayloadWriter,
     identifier: FunctionLikeIdentifier,
+    codebase: &CodebaseMetadata,
 ) -> Result<(), ExternalAnalyzerError> {
     match identifier {
         FunctionLikeIdentifier::Function(name) => {
@@ -2181,6 +2188,11 @@ pub(super) fn encode_function_like_identifier(
             writer.write_u8(2);
             writer.write_bytes(class.as_bytes())?;
             writer.write_bytes(method.as_bytes())?;
+            let class = codebase.get_class_like(class.as_bytes());
+            writer.write_u8(
+                if class.is_some_and(|class| class.flags.is_sharp()) { METHOD_OF_SHARP_CLASS } else { 0 }
+                    | if class.is_some_and(|class| class.exact_names) { METHOD_OF_EXACT_NAMES } else { 0 },
+            );
         }
         FunctionLikeIdentifier::Closure(name) => {
             writer.write_u8(3);
@@ -3281,10 +3293,15 @@ pub(super) fn decode_function_like_identifier(
 ) -> Result<FunctionLikeIdentifier, ExternalAnalyzerError> {
     Ok(match reader.read_u8("function-like identifier kind")? {
         1 => FunctionLikeIdentifier::Function(word(reader.read_bytes("function name")?)),
-        2 => FunctionLikeIdentifier::Method(
-            word(reader.read_bytes("method class")?),
-            word(reader.read_bytes("method name")?),
-        ),
+        2 => {
+            let method = FunctionLikeIdentifier::Method(
+                word(reader.read_bytes("method class")?),
+                word(reader.read_bytes("method name")?),
+            );
+            // The codebase keys the method by its class's own rule, so Mago skips the rule the SDK sends back.
+            reader.read_u8("method rule")?;
+            method
+        }
         3 => FunctionLikeIdentifier::Closure(word(reader.read_bytes("closure name")?)),
         unknown => return Err(protocol(format!("unknown function-like identifier kind {unknown}"))),
     })
@@ -3627,6 +3644,26 @@ pub(super) mod testing {
 
         assert_eq!(sent(get_int()), "class-string<int>");
         assert_eq!(sent(either), "class-string");
+    }
+
+    /// A method a callable names goes with its class's rule, spec section 24, so the SDK compares its name as the
+    /// codebase does: exactly for the PHP# `App\Shelf`, and in any case for the plain `Lib\Sink`.
+    #[test]
+    fn a_callable_of_a_method_carries_its_class_rule() {
+        analyzed(&[SHELF, SINK], |analysis| {
+            let sent = |class: &[u8], method: &[u8]| {
+                let identifier = FunctionLikeIdentifier::Method(word(class), word(method));
+                let union = TUnion::from_atomic(TAtomic::Callable(TCallable::Alias(identifier)));
+                let mut writer = PayloadWriter::new();
+                encode_union_snapshot(&mut writer, &union, &mut Vec::new(), analysis.codebase, Dialect::Php, 0)
+                    .unwrap();
+
+                writer.finish()
+            };
+
+            assert!(names(&sent(b"App\\Shelf", b"total"), b"total\x03"));
+            assert!(names(&sent(b"Lib\\Sink", b"take"), b"take\x00"));
+        });
     }
 
     /// An external analyzer's payload has no spec section 13 readonly flag, so a class it names is never readonly.

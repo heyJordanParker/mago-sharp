@@ -941,6 +941,35 @@ fn hooks_without_the_subtree_split_sharp_method_and_static_calls() -> Result<(),
     Ok(())
 }
 
+/// A provider of the PHP# `Demo\Box::total` provides only `total`, and a hook of `Demo\Box::Total` hooks only `Total`:
+/// the twins are two methods, spec section 24.
+#[test]
+fn a_provider_and_a_hook_of_a_sharp_method_reach_it_and_not_its_twin() -> Result<(), Box<dyn std::error::Error>> {
+    if !php_sdk_is_available() {
+        return Ok(());
+    }
+
+    const BOX: (&str, &str) = (
+        "src/Box.sharp",
+        "namespace Demo;\n\npublic class Box\n{\n    public int total() => 1;\n\n    public int Total() => 2;\n}\n",
+    );
+    const SHELF: (&str, &str) = (
+        "src/Shelf.sharp",
+        "namespace Demo;\n\npublic class Shelf\n{\n    public static int count(Box box) => box.total() + box.Total();\n}\n",
+    );
+
+    let observation =
+        analyze_files_with_fixture(&[BOX, SHELF], &["MAGO_INVOCATION_FUNCTION_ONLY", "MAGO_INVOCATION_TWINS"])?;
+
+    assert_eq!(
+        observation.issues,
+        [(Some("method-name-case".to_owned()), "Method name `Total` should be in camel case.".to_owned())]
+    );
+    assert_eq!(observation.invocations, ["twin-provided-total", "twin-hook-box.Total()"]);
+
+    Ok(())
+}
+
 /// Analyzes `source`, saved as `file`, with the invocation fixture worker. Each name in `switches` is a fixture
 /// environment variable set to `1`.
 fn analyze_with_fixture(

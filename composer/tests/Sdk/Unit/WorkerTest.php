@@ -10,10 +10,15 @@ use Mago\Sdk\Analyzer\AfterFileAnalysisContext;
 use Mago\Sdk\Analyzer\AfterFileAnalysisHook;
 use Mago\Sdk\Analyzer\BeforeAnalysisContext;
 use Mago\Sdk\Analyzer\BeforeAnalysisHook;
+use Mago\Sdk\Analyzer\ClassLikeAnalysisHook;
+use Mago\Sdk\Analyzer\ClassLikeTarget;
 use Mago\Sdk\Analyzer\CodebaseScanContext;
 use Mago\Sdk\Analyzer\CodebaseScanHook;
 use Mago\Sdk\Analyzer\InitializationContext;
 use Mago\Sdk\Analyzer\InitializationHook;
+use Mago\Sdk\Analyzer\MethodCallAnalysisHook;
+use Mago\Sdk\Analyzer\MethodTarget;
+use Mago\Sdk\Analyzer\NodeAnalysisContext;
 use Mago\Sdk\Analyzer\Plugin;
 use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
@@ -76,6 +81,33 @@ final class WorkerTest extends TestCase
             self::plugin(new PluginDefinition('first', 'First', 'First plugin.', ['shared'])),
         ]), new Extension('acme/second', 'Second', '1.0.0', analyzerPlugins: [
             self::plugin(new PluginDefinition('second', 'Second', 'Second plugin.', ['SHARED'])),
+        ]));
+    }
+
+    /**
+     * A hook's targets name class-likes and methods as written, since only Mago knows a class's rule: `Box::open` and
+     * `Box::Open` are two methods of a PHP# class, and `Demo\Order` and `Demo\ORDER` two PHP# class-likes, spec
+     * section 24. Only one name written twice is refused.
+     */
+    public function testAHookTargetsTwoNamesThatDifferOnlyInCase(): void
+    {
+        $worker = new Worker(new Extension('acme/twins', 'Twins', '1.0.0', analyzerPlugins: [
+            self::targetingPlugin([MethodTarget::exact('Demo\Box', 'open'), MethodTarget::exact('Demo\Box', 'Open')], [
+                ClassLikeTarget::descendantsOf('Demo\Order'),
+                ClassLikeTarget::descendantsOf('Demo\ORDER'),
+            ]),
+        ]));
+        self::assertInstanceOf(Worker::class, $worker);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'A analyzer method-call analysis hook in `twins` targets `Demo\Box::open` more than once.',
+        );
+
+        new Worker(new Extension('acme/twins', 'Twins', '1.0.0', analyzerPlugins: [
+            self::targetingPlugin([MethodTarget::exact('Demo\Box', 'open'), MethodTarget::exact('Demo\Box', 'open')], [
+                ClassLikeTarget::descendantsOf('Demo\Order'),
+            ]),
         ]));
     }
 
@@ -293,6 +325,71 @@ final class WorkerTest extends TestCase
             public function beforeAnalysis(BeforeAnalysisContext $context): void {}
 
             public function afterAnalysis(AfterAnalysisContext $context): void {}
+        };
+    }
+
+    /**
+     * A plugin `twins` with one method-call hook of `$methods` and one class-like hook of `$classLikes`.
+     *
+     * @param non-empty-list<MethodTarget> $methods
+     * @param non-empty-list<ClassLikeTarget> $classLikes
+     */
+    private static function targetingPlugin(array $methods, array $classLikes): Plugin
+    {
+        return new class($methods, $classLikes) implements Plugin {
+            /**
+             * @param non-empty-list<MethodTarget> $methods
+             * @param non-empty-list<ClassLikeTarget> $classLikes
+             */
+            public function __construct(
+                private readonly array $methods,
+                private readonly array $classLikes,
+            ) {}
+
+            public function getDefinition(): PluginDefinition
+            {
+                return new PluginDefinition('twins', 'Twins', 'Hooks names that differ only in case.');
+            }
+
+            public function register(PluginRegistry $registry): void
+            {
+                $registry->registerMethodCallAnalysisHook(new class($this->methods) implements MethodCallAnalysisHook {
+                    /** @param non-empty-list<MethodTarget> $targets */
+                    public function __construct(
+                        private readonly array $targets,
+                    ) {}
+
+                    public function getTargets(): array
+                    {
+                        return $this->targets;
+                    }
+
+                    public function getRequirements(): array
+                    {
+                        return [];
+                    }
+
+                    public function analyze(NodeAnalysisContext $context): void {}
+                });
+                $registry->registerClassLikeAnalysisHook(new class($this->classLikes) implements ClassLikeAnalysisHook {
+                    /** @param non-empty-list<ClassLikeTarget> $targets */
+                    public function __construct(
+                        private readonly array $targets,
+                    ) {}
+
+                    public function getTargets(): array
+                    {
+                        return $this->targets;
+                    }
+
+                    public function getRequirements(): array
+                    {
+                        return [];
+                    }
+
+                    public function analyze(NodeAnalysisContext $context): void {}
+                });
+            }
         };
     }
 
@@ -555,10 +652,11 @@ final class WorkerTest extends TestCase
         $message->writeLength(1);
         $message->writeBytes(self::ROUTE_CLASS);
         $message->writeBytes(self::ROUTE_METHOD);
-        // The method's function-like identifier: kind 2, a method.
+        // The method's function-like identifier: kind 2, a method, of a plain PHP class, rule 0.
         $message->writeU8(2);
         $message->writeBytes(self::ROUTE_CLASS);
         $message->writeBytes(self::ROUTE_METHOD);
+        $message->writeU8(0);
 
         return $message->finish();
     }

@@ -51,6 +51,22 @@ final class ValueTest extends TestCase
         self::assertTrue($method->equals(new FunctionLikeIdentifier(FunctionLikeKind::Method, 'RUN', 'job')));
         self::assertFalse($method->equals(new FunctionLikeIdentifier(FunctionLikeKind::Method, 'stop', 'Job')));
 
+        // A method of a class with exact names is found only as declared, and a PHP# class only by its exact name,
+        // spec section 24: `Box::total` and `Box::Total` are two methods, as the host answers each identifier's rule,
+        // and an identifier a plugin builds is compared by that rule.
+        $total = new FunctionLikeIdentifier(FunctionLikeKind::Method, 'total', 'Demo\Box', true, true);
+
+        self::assertTrue($total->equals(new FunctionLikeIdentifier(FunctionLikeKind::Method, 'total', 'Demo\Box')));
+        self::assertFalse($total->equals(
+            new FunctionLikeIdentifier(FunctionLikeKind::Method, 'Total', 'Demo\Box', true, true),
+        ));
+        self::assertFalse((new FunctionLikeIdentifier(FunctionLikeKind::Method, 'Total', 'Demo\Box'))->equals($total));
+        self::assertFalse($total->equals(new FunctionLikeIdentifier(FunctionLikeKind::Method, 'total', 'Demo\BOX')));
+
+        $synced = new FunctionLikeIdentifier(FunctionLikeKind::Method, 'syncedId', 'Room', exactNames: true);
+        self::assertTrue($synced->equals(new FunctionLikeIdentifier(FunctionLikeKind::Method, 'syncedId', 'room')));
+        self::assertFalse($synced->equals(new FunctionLikeIdentifier(FunctionLikeKind::Method, 'syncedid', 'Room')));
+
         $property = new PropertyType(Type::string(), Type::int());
         self::assertSame('string', (string) $property->readType);
         self::assertSame('int', (string) $property->writeType);

@@ -1075,8 +1075,10 @@ impl<'analysis> Types<'analysis> {
             (owner.flags.is_sharp()
                 && !owner.flags.is_final()
                 && member.method_metadata.as_ref().is_some_and(|method| !method.visibility.is_private())
+                // A class-like is named by its key, spec section 24, so the PHP# `Box` is not `BOX`.
                 && among.is_none_or(|among| {
-                    among.iter().any(|named| named.as_bytes().eq_ignore_ascii_case(class.as_bytes()))
+                    let class = self.codebase.class_key(class.as_bytes());
+                    among.iter().any(|named| self.codebase.class_key(named.as_bytes()) == class)
                 }))
             .then_some((class, member))
         })
@@ -1145,10 +1147,8 @@ impl<'analysis> Types<'analysis> {
     #[must_use]
     pub(crate) fn import(&self, class: &[u8], method: &[u8]) -> Option<(Word, Option<(String, String)>)> {
         let metadata = self.codebase.get_method(class, method)?;
-        let mark = metadata
-            .attributes
-            .iter()
-            .find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(IMPORT.as_bytes()))?;
+        // `[Import]` is a PHP# class-like of the standard library, keyed by its exact name, spec section 24.
+        let mark = metadata.attributes.iter().find(|attribute| attribute.name.as_bytes() == IMPORT.as_bytes())?;
         let Some(ConstantExpression::String(function)) =
             mark.arguments.first().and_then(|argument| argument.value.as_ref())
         else {
@@ -1646,9 +1646,7 @@ impl<'analysis> Types<'analysis> {
             .iter()
             .skip(written.argument_list.arguments.len())
             .filter_map(|parameter| {
-                let marked = |mark: &[u8]| {
-                    parameter.attributes.iter().any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(mark))
-                };
+                let marked = |mark: &[u8]| parameter.has_attribute(self.codebase, mark);
 
                 if marked(TAKES_RESULT_TYPE) {
                     Some(RESULT_TYPE_SLOT)

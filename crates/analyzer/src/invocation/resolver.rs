@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
@@ -222,15 +223,20 @@ where
 }
 
 /// Names `calling_class`, the class a member runs on, where `declaring_class`, a trait that declares the member, names
-/// itself, as PHP runs a trait's `self`.
-pub(crate) fn rename_trait_objects(declaring_class: &ClassLikeMetadata, calling_class: Word, union: &mut TUnion) {
+/// itself, by its key, spec section 24, as PHP runs a trait's `self`.
+pub(crate) fn rename_trait_objects(
+    codebase: &CodebaseMetadata,
+    declaring_class: &ClassLikeMetadata,
+    calling_class: Word,
+    union: &mut TUnion,
+) {
     if !declaring_class.kind.is_trait() {
         return;
     }
 
     for atomic in union.types.to_mut() {
         if let TAtomic::Object(TObject::Named(named_object)) = atomic
-            && named_object.name.as_bytes().eq_ignore_ascii_case(declaring_class.name.as_bytes())
+            && codebase.class_key(named_object.name.as_bytes()) == declaring_class.name
         {
             named_object.name = calling_class;
         }
@@ -285,7 +291,12 @@ where
             .is_some_and(|metadata| metadata.is_final);
         let declaring_class = get_declaring_class(context, method_context);
         if declaring_class.name != method_context.class_like_metadata.name {
-            rename_trait_objects(declaring_class, method_context.class_like_metadata.name, &mut resulting_union);
+            rename_trait_objects(
+                context.codebase,
+                declaring_class,
+                method_context.class_like_metadata.name,
+                &mut resulting_union,
+            );
         }
     } else {
         static_class_type = StaticClassType::default();

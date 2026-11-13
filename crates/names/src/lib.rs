@@ -123,8 +123,8 @@ pub(crate) fn standard_effect(name: &[u8]) -> Option<&'static [u8]> {
         .map(str::as_bytes)
 }
 
-/// Whether a class-like whose short name is `name` wins over a default class-like in its namespace, compared ignoring
-/// case as PHP compares class names.
+/// Whether a plain PHP class-like whose short name is `name` wins over a default class-like in its namespace, compared
+/// ignoring case as PHP compares class names.
 pub(crate) fn shadows_a_default_class(name: &[u8]) -> bool {
     default_classes().any(|class| default_short_name(class).eq_ignore_ascii_case(name))
 }

@@ -452,7 +452,8 @@ pub fn handle_return_value<'ctx, A>(
         }
 
         // Spec section 13: a readonly value never leaves through a return type that would let its caller change it.
-        if context.dialect.is_sharp() && expected_return_type.drops_readonly_of(&inferred_return_type) {
+        if context.dialect.is_sharp() && expected_return_type.drops_readonly_of(context.codebase, &inferred_return_type)
+        {
             let readonly_return = display_type(context, &expected_return_type.clone().to_readonly());
             // An operator's operands are readonly by definition, so one it returns is readonly or a new value.
             let fix = if block_context.scope.get_function_like().is_some_and(|function| function.flags.is_operator()) {

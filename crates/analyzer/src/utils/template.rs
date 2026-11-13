@@ -607,10 +607,10 @@ where
     let [TAtomic::Object(TObject::Named(given_object))] = input.types.as_ref() else {
         return unchanged(issue);
     };
+    // A class-like is named by its key, spec section 24, so the PHP# `Box` is not `BOX`.
+    let given = codebase.class_key(given_object.name.as_bytes());
     let Some((wanted, wanted_object)) = expected.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Object(TObject::Named(object))
-            if object.name.as_bytes().eq_ignore_ascii_case(given_object.name.as_bytes()) =>
-        {
+        TAtomic::Object(TObject::Named(object)) if codebase.class_key(object.name.as_bytes()) == given => {
             Some((atomic, object))
         }
         _ => None,

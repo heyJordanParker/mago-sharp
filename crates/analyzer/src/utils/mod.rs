@@ -243,7 +243,7 @@ pub fn report_dropped_readonly<A>(
         };
 
         declared.types.iter().find_map(|declared| match declared {
-            TAtomic::Callable(TCallable::Signature(declared)) => declared.drops_readonly_of(given),
+            TAtomic::Callable(TCallable::Signature(declared)) => declared.drops_readonly_of(context.codebase, given),
             _ => None,
         })
     });

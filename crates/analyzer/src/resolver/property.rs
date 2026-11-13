@@ -1875,12 +1875,12 @@ where
     let mut member_type = inferred_type_replacer::replace(&member_type, &type_arguments, context.codebase);
     expander::expand_union(context.codebase, &mut member_type, &TypeExpansionOptions::default());
 
-    rename_trait_objects(declaring_class, calling_class, &mut member_type);
+    rename_trait_objects(context.codebase, declaring_class, calling_class, &mut member_type);
     for atomic in member_type.types.to_mut() {
         if let TAtomic::Callable(TCallable::Signature(signature)) = atomic
             && let Some(return_type) = signature.get_return_type_mut()
         {
-            rename_trait_objects(declaring_class, calling_class, return_type);
+            rename_trait_objects(context.codebase, declaring_class, calling_class, return_type);
         }
     }
 

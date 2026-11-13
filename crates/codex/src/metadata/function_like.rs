@@ -12,6 +12,7 @@ use mago_word::WordSet;
 
 use crate::assertion::Assertion;
 use crate::issue::ScanningIssueKind;
+use crate::metadata::CodebaseMetadata;
 use crate::metadata::attribute::AttributeMetadata;
 use crate::metadata::class_like::TemplateTypes;
 use crate::metadata::flags::MetadataFlags;
@@ -314,11 +315,14 @@ impl FunctionLikeMetadata {
         &self.attributes
     }
 
-    /// Whether an attribute of the full name `name`, compared ignoring case, marks the function or method.
+    /// Whether an attribute of the class-like the full name `name` names marks the function or method, by `codebase`'s
+    /// key, spec section 24: a PHP# attribute only as written, and a plain PHP one in any case.
     #[inline]
     #[must_use]
-    pub fn has_attribute(&self, name: &[u8]) -> bool {
-        self.attributes.iter().any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(name))
+    pub fn has_attribute(&self, codebase: &CodebaseMetadata, name: &[u8]) -> bool {
+        let name = codebase.class_key(name);
+
+        self.attributes.iter().any(|attribute| codebase.class_key(attribute.name.as_bytes()) == name)
     }
 
     /// Returns a mutable reference to the method-specific info, if this is a method.
