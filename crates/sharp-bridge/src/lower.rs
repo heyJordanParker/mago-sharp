@@ -1099,7 +1099,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The `parse` and `tryParse` of the struct or PHP# class being lowered, whose `members` are declared and whose name
     /// is at `span`, where the codex gives it them, spec section 10. No input holds a function, so a type with a
-    /// function field, also inside a collection, has neither, and the checker refuses its call.
+    /// function field, also inside a collection, has neither, and the checker refuses its call. Each carries its whole
+    /// type, as a declared method does, with the effects the analysis records for it, so `is` and `methods()` read it.
     fn parse_methods(&mut self, members: &Sequence<ClassLikeMember>, span: Span) -> Vec<u32> {
         if !self.types.parses(self.class) {
             return Vec::new();
@@ -1214,6 +1215,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.static_type_parameters = None;
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let return_type = self.string(ZEND_NAME_FQ, line, self.class);
+        let return_type = self.function_type(return_type, self.types.method_type(self.class, b"parse"), 0, line);
 
         Some(self.declaration(
             SHARP_AST_METHOD,
@@ -1262,6 +1264,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#try]);
         let return_type = self.string(ZEND_NAME_FQ, line, self.class);
         self.nodes[return_type as usize].attr |= ZEND_TYPE_NULLABLE;
+        let return_type = self.function_type(return_type, self.types.method_type(self.class, b"tryParse"), 0, line);
 
         self.declaration(
             SHARP_AST_METHOD,

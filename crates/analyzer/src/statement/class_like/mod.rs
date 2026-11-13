@@ -89,6 +89,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_statics;
+use crate::effects::summary::record_parse;
 use crate::error::AnalysisError;
 use crate::expression::binary::comparison::missing_equality;
 use crate::plugin::context::HookContext;
@@ -1245,6 +1246,9 @@ where
     }
 
     context.prepare_class_initializers(class_like_metadata)?;
+    if context.codebase.parses(class_like_metadata.name.as_bytes()) {
+        record_parse(context, artifacts, class_like_metadata);
+    }
     report_class_like_named_as_a_namespace(context, class_like_metadata, name_span.unwrap_or(declaration_span));
     report_namespace_named_as_a_plain_php_class_like(
         context,

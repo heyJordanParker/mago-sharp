@@ -6,12 +6,14 @@ use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::r#extern::ExternMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
@@ -150,6 +152,116 @@ pub(crate) fn record_behaviors<A>(
             imports: Arc::clone(&context.imported_names),
             scope: Arc::clone(&context.scope),
         });
+    }
+}
+
+/// Records the `parse` and `tryParse` spec section 10 gives the struct or PHP# class `class`, whose bodies the bridge
+/// writes, so each one's function type lists the effects of what it runs. `parse` calls the main constructor, writes
+/// each property field through its `set` accessor, and calls the `parse` of each struct or class a field's type holds,
+/// and `tryParse` calls `parse`. Each makes the object it gives, so neither changes state. A call that reaches a
+/// `foreign` object has its class's effect, as a written call does.
+pub(crate) fn record_parse<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    class: &ClassLikeMetadata,
+) where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return;
+    }
+
+    let codebase = context.codebase;
+    let span = class.span;
+    let summary = |body, member: &[u8]| {
+        // Each member of a `foreign` class has its class's effect, as `record` gives a written one.
+        let effects = foreign_class(codebase, class.name)
+            .map(|effect| (Effect::Foreign(effect), span, member_of_foreign_class()))
+            .into_iter()
+            .collect();
+
+        EffectSummary {
+            body,
+            member: word(member),
+            effects,
+            calls: Vec::new(),
+            changes: Vec::new(),
+            function_values: Vec::new(),
+            readonly_calls: Vec::new(),
+            imports: Arc::clone(&context.imported_names),
+            scope: Arc::clone(&context.scope),
+        }
+    };
+    // `callee`, a member of an object of `object` that messages name `member`, runs as a written call of it does.
+    let reach = |summary: &mut EffectSummary, object: Word, callee: Body, member: &[u8]| {
+        if let Some(effect) = foreign_class(codebase, object) {
+            let class_name =
+                codebase.get_class_like(object.as_bytes()).map_or(object, |metadata| metadata.original_name);
+            summary.effects.push((Effect::Foreign(effect), span, (class_name, word(member))));
+        } else {
+            summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
+        }
+    };
+    let parse = Body::Method(class.name, class.method_key(b"parse"));
+
+    let mut parsing = summary(parse, b"parse");
+    let constructor = codebase
+        .get_declaring_method_class(class.name.as_bytes(), b"__construct")
+        .and_then(|declaring| codebase.get_class_like(declaring.as_bytes()));
+    if let Some(constructor) = constructor {
+        if constructor.flags.is_sharp() {
+            reach(&mut parsing, class.name, Body::Method(constructor.name, word(b"__construct")), b"__construct");
+        } else {
+            let callee = (constructor.original_name, empty_word());
+            let declaration = extern_of(codebase, class.name, word(b"__construct"));
+            parsing
+                .effects
+                .extend(plain_php_effects(declaration, callee).into_iter().map(|effect| (effect, span, callee)));
+        }
+    }
+    let mut nested = Vec::new();
+    for field in codebase.struct_parse_fields(class.name.as_bytes()) {
+        if !field.is_parameter {
+            let property = word([b"$".as_slice(), field.name].concat());
+            if let Some(declaring) = class.declaring_property_ids.get(&property) {
+                let set = Body::Accessor(codebase.class_key(declaring.as_bytes()), property, word(b"set"));
+                reach(&mut parsing, class.name, set, field.name);
+            }
+        }
+        parsed_classes(codebase, field.r#type, &mut nested);
+    }
+    for nested in nested {
+        reach(&mut parsing, nested.name, Body::Method(nested.name, nested.method_key(b"parse")), b"parse");
+    }
+
+    let mut trying = summary(Body::Method(class.name, class.method_key(b"tryParse")), b"tryParse");
+    reach(&mut trying, class.name, parse, b"parse");
+
+    artifacts.effect_summaries.push(parsing);
+    artifacts.effect_summaries.push(trying);
+}
+
+/// Pushes onto `parsed` each struct or PHP# class `r#type` holds, also as a collection's element, once each, whose
+/// `parse` the bridge writes. A `parse` that reads a field of `r#type` calls each one's `parse`, as the bridge's
+/// `parse_build` writes it.
+fn parsed_classes<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    r#type: &TUnion,
+    parsed: &mut Vec<&'codebase ClassLikeMetadata>,
+) {
+    for atomic in r#type.types.iter() {
+        match atomic {
+            TAtomic::Object(TObject::Named(object)) if codebase.parses(object.name.as_bytes()) => {
+                let Some(class) = codebase.get_class_like(object.name.as_bytes()) else {
+                    continue;
+                };
+                if !parsed.iter().any(|seen| seen.name == class.name) {
+                    parsed.push(class);
+                }
+            }
+            TAtomic::Array(array) => parsed_classes(codebase, &get_array_parameters(array, codebase).1, parsed),
+            _ => {}
+        }
     }
 }
 

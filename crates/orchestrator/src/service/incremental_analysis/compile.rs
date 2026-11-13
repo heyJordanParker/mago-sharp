@@ -1427,9 +1427,19 @@ mod tests {
 
         let compiled = compile(&mut service, empty_stamp);
 
+        // `Cash` holds the `parse` that overrides `Money`'s, which `Money`'s `tryParse` calls, so the effects of the
+        // bodies `Order` reaches through `Money` can come from its file.
         assert_eq!(
             input_paths(accepted(&compiled, "app/Order.sharp")),
-            ["Module.sharp", "app/Module.sharp", "app/Money.sharp", "app/Order.sharp", "composer.lock", "lib/Rate.php"],
+            [
+                "Module.sharp",
+                "app/Cash.sharp",
+                "app/Module.sharp",
+                "app/Money.sharp",
+                "app/Order.sharp",
+                "composer.lock",
+                "lib/Rate.php"
+            ],
             "a vendor file is left to composer.lock"
         );
         assert_eq!(

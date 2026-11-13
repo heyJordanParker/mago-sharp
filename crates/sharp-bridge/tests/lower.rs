@@ -22068,9 +22068,26 @@ fn a_camel_case_method_s_result_is_read_by_its_declared_name() {
     );
     let body = body_in("Map<string, string> run(Source source)", "        return source.heldStatus();\n", &[source]);
 
-    assert!(body.contains("ZVAL \"Sharp\\\\Internal\\\\returned\""), "{body}");
-    assert!(body.contains("ZVAL \"heldStatus\""), "{body}");
-    assert!(body.contains("ZVAL \"App.Tenant.Source.heldStatus()\""), "{body}");
+    assert_eq!(
+        body,
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  ZVAL "Sharp\\Internal\\returned"
+                  ARG_LIST
+                    METHOD_CALL
+                      VAR
+                        ZVAL "source"
+                      ZVAL "heldStatus"
+                      ARG_LIST
+                    VAR
+                      ZVAL "source"
+                    ZVAL "heldStatus"
+                    ZVAL "Map<string, string>, Map<Any?, Any?>"
+                    ZVAL "App.Tenant.Source.heldStatus()"
+        "#}
+    );
 }
 
 /// ```php
@@ -30423,7 +30440,8 @@ fn the_unit_names_each_form_it_inlines_with_its_fingerprint() {
 }
 
 /// The unit names the function type of each method its file declares with the xxh3-64 of the type text `is` tests a
-/// closure of it by, which `Reads::function_types` takes, since the effects the text lists come from other files.
+/// closure of it by, which `Reads::function_types` takes, since the effects the text lists come from other files. The
+/// `parse` and `tryParse` spec section 10 gives the class carry theirs too.
 #[test]
 fn the_unit_names_each_function_type_with_the_hash_of_its_text() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int twice(int x) => x * 2;\n}\n";
@@ -30436,7 +30454,20 @@ fn the_unit_names_each_function_type_with_the_hash_of_its_text() {
         .map(|read| (String::from_utf8_lossy(&read.name).into_owned(), read.fingerprint))
         .collect();
 
-    assert_eq!(function_types, [("App\\Tenant\\Report::twice".to_owned(), xxh3_64(b"Function<int(int)>"))]);
+    assert_eq!(
+        function_types,
+        [
+            (
+                "App\\Tenant\\Report::parse".to_owned(),
+                xxh3_64(b"Function<App.Tenant.Report(Map<string, Any?>|Object)>")
+            ),
+            (
+                "App\\Tenant\\Report::tryParse".to_owned(),
+                xxh3_64(b"Function<App.Tenant.Report?(Map<string, Any?>|Object)>")
+            ),
+            ("App\\Tenant\\Report::twice".to_owned(), xxh3_64(b"Function<int(int)>")),
+        ]
+    );
 }
 
 /// Each node an inlined form copies takes the line of its call, as the call's own nodes would, and each value keeps
@@ -32294,7 +32325,9 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
                 RETURN
                   VAR
                     ZVAL "object#5"
-              ZVAL "App\\Ticket"
+              SHARP_TYPE_ARGS
+                ZVAL "App\\Ticket"
+                ZVAL "Function<App.Ticket(Map<string, Any?>|Object)>"
               null
 
             METHOD [17] "tryParse" @5-5
@@ -32328,7 +32361,9 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
                         RETURN
                           ZVAL null
                   null
-              ZVAL [256] "App\\Ticket"
+              SHARP_TYPE_ARGS
+                ZVAL [256] "App\\Ticket"
+                ZVAL "Function<App.Ticket?(Map<string, Any?>|Object)>"
               null
         "#}
     );
@@ -34641,7 +34676,9 @@ fn a_class_parses_as_a_struct_does() {
                         RETURN
                           ZVAL null
                   null
-              ZVAL [256] "App\\Ticket"
+              SHARP_TYPE_ARGS
+                ZVAL [256] "App\\Ticket"
+                ZVAL "Function<App.Ticket?(Map<string, Any?>|Object)>"
               null
         "#}
     );
@@ -34752,6 +34789,49 @@ fn a_class_parses_as_a_struct_does() {
             "namespace App;\n\npublic struct Cents\n{\n    public Cents(public int value { get; }) { }\n\n    public static Cents parse(string text) => new Cents(1);\n}\n"
         ),
         ["__construct", "parse", "op_Equality"]
+    );
+}
+
+/// Spec sections 10 and 29: the `parse` and `tryParse` a class gets carry their whole type, as a declared method does,
+/// with the effects of what `parse` runs: the main constructor, the `set` accessor of a property it writes, and the
+/// `parse` of a class a field holds, here a `foreign` class's.
+#[test]
+fn a_generated_parse_lists_the_effects_of_what_it_runs() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Ledger.sharp",
+                "namespace App;\n\npublic foreign class Ledger\n{\n    public static int opened() => 1;\n}\n",
+            ),
+            (
+                "src/App/Audit.sharp",
+                "namespace App;\n\npublic foreign class Audit\n{\n    public static string cleaned(string text) => text;\n}\n",
+            ),
+            (
+                "src/App/Line.sharp",
+                "namespace App;\n\npublic foreign class Line\n{\n    public Line(public int count { get; }) { }\n}\n",
+            ),
+            (
+                "src/App/Order.sharp",
+                "namespace App;\n\npublic class Order\n{\n    public Order(int id)\n    {\n        this.id = id + Ledger.opened();\n    }\n\n    public int id { get; }\n\n    public string note { get; set => field = Audit.cleaned(value); } = \"\";\n\n    public List<Line> lines { get; init; } = [];\n}\n",
+            ),
+        ],
+        &[],
+    );
+    let (order, _) = class_in(&files, "Order");
+    let result = |method: &str| order.render(order.child(order.method_named(method), 3));
+
+    assert_eq!(
+        [result("parse"), result("tryParse")].join("\n"),
+        indoc! {r#"
+            SHARP_TYPE_ARGS
+              ZVAL "App\\Order"
+              ZVAL "Function<App.Order(Map<string, Any?>|Object) uses App.Audit, App.Ledger, App.Line>"
+
+            SHARP_TYPE_ARGS
+              ZVAL [256] "App\\Order"
+              ZVAL "Function<App.Order?(Map<string, Any?>|Object) uses App.Audit, App.Ledger, App.Line>"
+        "#}
     );
 }
 
