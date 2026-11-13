@@ -504,6 +504,27 @@ where
     context.codebase.get_method(class_name.as_bytes(), method_name.as_bytes()).map_or(method_name, |m| m.original_name)
 }
 
+/// The name `class` answers to for its method `key`, as written, whose metadata is `method`: the name `method`
+/// declares, or the alias a `use` adaptation of the class or a parent class writes for a trait's method. A class with
+/// exact names keys a plain PHP ancestor's method by it, as the engine does, spec section 24.
+pub(crate) fn declared_method_name(
+    codebase: &CodebaseMetadata,
+    class: &ClassLikeMetadata,
+    key: Word,
+    method: &FunctionLikeMetadata,
+) -> Word {
+    if class.method_key(method.original_name.as_bytes()) == key {
+        return method.original_name;
+    }
+
+    std::iter::once(class)
+        .chain(class.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(parent.as_bytes())))
+        .flat_map(|class| class.get_trait_alias_map().values())
+        .copied()
+        .find(|alias| class.method_key(alias.as_bytes()) == key)
+        .unwrap_or(method.original_name)
+}
+
 /// Returns the case-preserved name of a global function for user-facing
 /// diagnostics. Falls back to the input if metadata is missing.
 #[inline]

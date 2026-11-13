@@ -520,19 +520,20 @@ impl CodebaseMetadata {
         self.get_closure(&name)
     }
 
-    /// The method `class` declares or inherits whose name differs from `method` only in case, for the error a call of
-    /// `method` gets on a class-like with `exact_names`, which finds a method only as declared, spec section 24. Of
-    /// twins, as `total` and `Total`, the one whose key sorts first.
+    /// The name of the method `class` has whose name differs from `method` only in case, for the error a call of
+    /// `method` gets on a class-like with `exact_names`, which finds a method only as declared, spec section 24. It is
+    /// the name the class answers to, so a trait's method under an alias is the alias. Of twins, as `total` and
+    /// `Total`, the one that sorts first.
     #[must_use]
-    pub fn get_method_in_another_case(&self, class: &[u8], method: &[u8]) -> Option<&FunctionLikeMetadata> {
+    pub fn get_method_name_in_another_case(&self, class: &[u8], method: &[u8]) -> Option<Word> {
         let class_meta = self.get_class_like(class).filter(|class_meta| class_meta.exact_names)?;
-        let (_, id) = class_meta
-            .appearing_method_ids
-            .iter()
-            .filter(|(key, _)| key.as_bytes() != method && key.as_bytes().eq_ignore_ascii_case(method))
-            .min_by_key(|(key, _)| key.as_bytes())?;
 
-        self.get_method_by_id(id)
+        class_meta
+            .appearing_method_ids
+            .keys()
+            .filter(|key| key.as_bytes() != method && key.as_bytes().eq_ignore_ascii_case(method))
+            .min_by_key(|key| key.as_bytes())
+            .copied()
     }
 
     /// Retrieves method metadata by `MethodIdentifier`.
@@ -1242,8 +1243,8 @@ impl CodebaseMetadata {
         let method_key = class_meta.method_key(method);
 
         // First check if there's a trait visibility override for this method
-        if let Some(overridden_visibility) = class_meta.trait_visibility_map.get(&method_key) {
-            return Some(*overridden_visibility);
+        if let Some(overridden_visibility) = class_meta.trait_visibility(method) {
+            return Some(overridden_visibility);
         }
 
         // Fall back to the method's declared visibility, by the key its declaring class gives it

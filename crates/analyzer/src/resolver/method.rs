@@ -87,6 +87,7 @@ use crate::utils::expression::analyze_member_object;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::expression::is_this;
 use crate::utils::names::article;
+use crate::utils::names::declared_method_name;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
@@ -542,6 +543,26 @@ where
                                 } else if has_incomplete_hierarchy {
                                     result.encountered_mixed = true;
                                 } else {
+                                    // Of an intersection, the error names the part that has the method in another
+                                    // case, as `Ledger` of `Countable&Ledger`, so it says which name was meant.
+                                    let classname = std::iter::once(classname)
+                                        .chain(obj_type.get_intersection_types().into_iter().flatten().filter_map(
+                                            |part| match part {
+                                                TAtomic::Object(part) => part.get_name(),
+                                                _ => None,
+                                            },
+                                        ))
+                                        .find(|name| {
+                                            context
+                                                .codebase
+                                                .get_method_name_in_another_case(
+                                                    name.as_bytes(),
+                                                    method_name.as_bytes(),
+                                                )
+                                                .is_some()
+                                        })
+                                        .unwrap_or(classname);
+
                                     // A PHP# union of one generic class, as `Pair<int, Order>|Pair<string, Order>`,
                                     // misses the method once.
                                     if !context.dialect.is_sharp() || missing.insert((classname, method_name)) {
@@ -1129,6 +1150,30 @@ where
     true
 }
 
+/// Whether the class of a value of `object` has exact names, spec section 24. A class has them when a class it extends
+/// or an interface it implements has them, so a value of `Ledger&Countable` is of a class with `Ledger`'s.
+fn has_exact_names(codebase: &CodebaseMetadata, object: &TObject) -> bool {
+    let exact = |object: &TObject| {
+        object
+            .get_name()
+            .and_then(|name| codebase.get_class_like(name.as_bytes()))
+            .is_some_and(|class| class.exact_names)
+    };
+
+    exact(object)
+        || object.get_intersection_types().is_some_and(|parts| {
+            parts.iter().any(|part| match part {
+                TAtomic::Object(part) => exact(part),
+                TAtomic::GenericParameter(parameter) => parameter
+                    .constraint
+                    .types
+                    .iter()
+                    .any(|constraint| matches!(constraint, TAtomic::Object(constraint) if exact(constraint))),
+                _ => false,
+            })
+        })
+}
+
 pub fn get_method_candidates_from_object<'ctx, 'arena, 'object, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
@@ -1170,8 +1215,11 @@ where
 
     // The call's name as the class keys it: as written for a class with `exact_names`, so another case of it reaches
     // nothing, spec section 24, and in lowercase for any other. Every other class the call reaches, a parent, a
-    // required class, a mixin or another part of an intersection, keys the name as written by its own rule.
+    // required class or a mixin, keys the name as written by its own rule. A plain part of an intersection with a part
+    // that has exact names, as `Countable` of `Ledger&Countable`, is a class the value's class extends or implements,
+    // which then has exact names, so it has the method only by the name it declares.
     let method_key = class_metadata.method_key(method_name.as_bytes());
+    let exact_receiver = !class_metadata.exact_names && has_exact_names(context.codebase, outer_object);
     let mut method_id = MethodIdentifier::new(class_metadata.original_name, method_key);
     if !context.codebase.method_identifier_exists(&method_id) {
         method_id = context.codebase.get_declaring_method_identifier(&method_id);
@@ -1183,7 +1231,11 @@ where
         method_id = text_method;
     }
 
-    if let Some(function_like_metadata) = context.codebase.get_method_by_id(&method_id) {
+    if let Some(function_like_metadata) = context.codebase.get_method_by_id(&method_id).filter(|method| {
+        !exact_receiver
+            || declared_method_name(context.codebase, class_metadata, method_key, method).as_bytes()
+                == method_name.as_bytes()
+    }) {
         if !check_method_visibility(
             context,
             block_context.scope.get_class_like_name(),
@@ -2009,10 +2061,8 @@ pub(crate) fn report_non_existent_method<A>(
 
     // Spec section 24: a class with exact names finds a method only as declared, so a call in another case names the
     // method it meant, as the engine's `Error` does.
-    if let Some(declared) = context
-        .codebase
-        .get_method_in_another_case(classname.as_bytes(), method_name.as_bytes())
-        .map(|method| method.original_name)
+    if let Some(declared) =
+        context.codebase.get_method_name_in_another_case(classname.as_bytes(), method_name.as_bytes())
     {
         let class = display_class_like_name(context, classname);
         context.collector.report_with_code(

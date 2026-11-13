@@ -403,6 +403,16 @@ impl ClassLikeMetadata {
         self.trait_visibility_map.insert(method, visibility)
     }
 
+    /// The visibility a `use` adaptation gives the method `name`. The scanner keeps each adaptation's name as written,
+    /// so this keys it by the class-like's rule, which it knows only once its hierarchy is populated, spec section 24.
+    #[must_use]
+    pub fn trait_visibility(&self, name: &[u8]) -> Option<Visibility> {
+        let key = self.method_key(name);
+        self.trait_visibility_map
+            .iter()
+            .find_map(|(written, visibility)| (self.method_key(written.as_bytes()) == key).then_some(*visibility))
+    }
+
     /// Adds a single template type definition.
     #[inline]
     pub fn add_template_type(&mut self, name: Word, constraint: GenericTemplate) {

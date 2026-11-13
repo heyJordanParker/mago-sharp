@@ -2481,6 +2481,43 @@ mod tests {
         (only_a, only_b)
     }
 
+    /// The interop matrix's reference cells, spec section 24: plain PHP calls the twin `Total` of a PHP# class, and the
+    /// method a plain class takes from a PHP# interface's `Defaults` trait, by its name and by an alias. The references
+    /// the analysis records, which the SDK's `getReferencesTo()` and `getReferencesFrom()` read, name each method the
+    /// call reaches by its exact name, and never its twin.
+    #[test]
+    fn the_references_of_a_plain_call_name_the_php_sharp_method_it_reaches_exactly() {
+        let db = make_database(vec![
+            (
+                "src/Interop/Ledger.sharp",
+                "namespace Interop;\n\npublic class Ledger\n{\n    public virtual int total() => 3;\n\n    public virtual int Total() => 4;\n}\n",
+            ),
+            (
+                "src/Interop/Recording.sharp",
+                "namespace Interop;\n\npublic interface Recording\n{\n    int recordEntry() => 2;\n}\n",
+            ),
+            (
+                "src/Demo/Matrix.php",
+                "<?php\n\nnamespace Demo;\n\nclass Inherits extends \\Interop\\Ledger {}\n\nclass TakesDefaults implements \\Interop\\Recording { use \\Interop\\Recording\\Defaults; }\n\nclass Aliases implements \\Interop\\Recording { use \\Interop\\Recording\\Defaults { recordEntry as entry; } }\n\nfunction upper(Inherits $o): int { return $o->Total(); }\n\nfunction taken(TakesDefaults $o): int { return $o->recordEntry(); }\n\nfunction aliased(Aliases $o): int { return $o->entry(); }\n",
+            ),
+        ]);
+        let mut service = make_service(&db);
+        service.analyze().expect("the matrix analyzes");
+        let referencing = |class: &[u8], method: &[u8]| {
+            service.symbol_references().count_referencing_symbols(&(word(class), word(method)), false)
+        };
+
+        assert_eq!(
+            [
+                referencing(b"Interop\\Ledger", b"Total"),
+                referencing(b"Interop\\Ledger", b"total"),
+                referencing(b"Interop\\Recording\\Defaults", b"recordEntry"),
+                referencing(b"Interop\\Recording\\Defaults", b"recordentry"),
+            ],
+            [1, 0, 2, 0]
+        );
+    }
+
     #[test]
     fn test_initial_analysis_runs_successfully() {
         let db = make_database(vec![(

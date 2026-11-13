@@ -1772,13 +1772,15 @@ where
                         match adaptation {
                             TraitUseAdaptation::Precedence(_) => {}
                             TraitUseAdaptation::Alias(adaptation) => {
-                                let method_name = class_like_metadata.method_key(match &adaptation.method_reference {
+                                // The names as written: a plain PHP class gains exact names only once its hierarchy is
+                                // populated, spec section 24, so each reader keys them, the method by its trait's rule
+                                // and the alias by the class's.
+                                let method_name = word(match &adaptation.method_reference {
                                     TraitUseMethodReference::Identifier(local_identifier) => local_identifier.value,
                                     TraitUseMethodReference::Absolute(reference) => reference.method_name.value,
                                 });
 
-                                let method_alias =
-                                    adaptation.alias.as_ref().map(|alias| class_like_metadata.method_key(alias.value));
+                                let method_alias = adaptation.alias.as_ref().map(|alias| word(alias.value));
 
                                 if let Some(alias) = method_alias {
                                     class_like_metadata.add_trait_alias(method_name, alias);

@@ -944,7 +944,9 @@ final class InvocationAttributedMethodsHook implements NodeAnalysisHook
     {
         foreach (['Probe\\Marked', 'Probe\\Tagged'] as $attribute) {
             foreach ($context->codebase->findMethods(withAnyAttribute: [$attribute]) as $method) {
-                InvocationAudit::record('attributed-' . $attribute . '-' . $method->method->member);
+                InvocationAudit::record(
+                    'attributed-' . $attribute . '-' . $method->method->class . '::' . $method->method->member,
+                );
             }
         }
     }

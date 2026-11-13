@@ -20116,6 +20116,242 @@ fn a_value_of_another_type_narrowed_to_a_type_parameter_is_of_the_type_parameter
     assert_eq!(explained(("src/Demo/Sweep.sharp", sweep), &[]), Vec::<String>::new());
 }
 
+/// The PHP# side of the interop matrix: a class, an abstract class, an interface with default bodies and an enum, each
+/// with `count`, `recordEntry` and the twins `total` and `Total`, as Zend/tests/sharp/InteropMatrix declares them.
+const INTEROP: [(&str, &str); 4] = [
+    (
+        "src/Interop/Ledger.sharp",
+        "namespace Interop;\n\npublic class Ledger\n{\n    public virtual int count() => 1;\n\n    public virtual int recordEntry() => 2;\n\n    public virtual int total() => 3;\n\n    public virtual int Total() => 4;\n\n    public static int kind() => 5;\n}\n",
+    ),
+    (
+        "src/Interop/Account.sharp",
+        "namespace Interop;\n\npublic abstract class Account\n{\n    public virtual int count() => 1;\n\n    public virtual int recordEntry() => 2;\n\n    public virtual int total() => 3;\n\n    public virtual int Total() => 4;\n}\n",
+    ),
+    (
+        "src/Interop/Recording.sharp",
+        "namespace Interop;\n\npublic interface Recording\n{\n    int count() => 1;\n\n    int recordEntry() => 2;\n\n    int total() => 3;\n\n    int Total() => 4;\n}\n",
+    ),
+    (
+        "src/Interop/Kind.sharp",
+        "namespace Interop;\n\npublic enum Kind\n{\n    case Open;\n\n    public int count() => 1;\n\n    public int recordEntry() => 2;\n\n    public int total() => 3;\n\n    public int Total() => 4;\n}\n",
+    ),
+];
+
+/// Spec section 24, the interop matrix in the checker: plain PHP extends, overrides, implements and uses each PHP#
+/// type, by `as` and `insteadof` too, and reaches it through a union and an intersection in either order. A call, an
+/// instance or a static first-class callable with a method's exact name gives no issue, and one in another case is
+/// the undefined-method error naming the method the class answers to, an alias included. A value of `Ledger&Countable`
+/// is of a class with `Ledger`'s exact names, so plain `Countable`'s `count` is no `Count`. Each row is a plain PHP file
+/// of its own, whose correct calls are on line 9 and wrong ones on line 14.
+#[test]
+fn interop_matrix_plain_php_reaches_each_php_sharp_method_only_by_its_exact_name() {
+    const ALL: &str =
+        "$o->count(); $o->recordEntry(); $o->total(); $o->Total(); ($o->total(...))(); ($o->Total(...))();";
+    const WRONG: &str = "$o->Count(); $o->recordentry(); $o->TOTAL(); ($o->TOTAL(...))();";
+    const MEANT: &[(&str, &str)] =
+        &[("Count", "count"), ("recordentry", "recordEntry"), ("TOTAL", "Total"), ("TOTAL", "Total")];
+    const LEDGER: &[&str] = &["Interop\\Ledger"];
+    // Each row: its name, the plain PHP it declares, the receiver's type, its correct and its wrong calls, the classes a
+    // wrong call's error names, and each wrong name with the name it meant.
+    type Row = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        &'static [(&'static str, &'static str)],
+    );
+    let rows: [Row; 15] = [
+        (
+            "plain extends a class",
+            "class Inherits extends \\Interop\\Ledger {}",
+            "Inherits",
+            ALL,
+            WRONG,
+            &["Demo\\Inherits"],
+            MEANT,
+        ),
+        (
+            "plain overrides one twin",
+            "class Overrides extends \\Interop\\Ledger { public function Total(): int { return 14; } }",
+            "Overrides",
+            ALL,
+            WRONG,
+            &["Demo\\Overrides"],
+            MEANT,
+        ),
+        (
+            "plain extends an abstract class",
+            "class InheritsAbstract extends \\Interop\\Account {}",
+            "InheritsAbstract",
+            ALL,
+            WRONG,
+            &["Demo\\InheritsAbstract"],
+            MEANT,
+        ),
+        (
+            "plain takes default bodies",
+            "class TakesDefaults implements \\Interop\\Recording { use \\Interop\\Recording\\Defaults; }",
+            "TakesDefaults",
+            ALL,
+            WRONG,
+            &["Demo\\TakesDefaults"],
+            MEANT,
+        ),
+        (
+            "plain overrides the camelCase default body",
+            "class OverridesEntry implements \\Interop\\Recording { use \\Interop\\Recording\\Defaults; public function recordEntry(): int { return 12; } }",
+            "OverridesEntry",
+            ALL,
+            WRONG,
+            &["Demo\\OverridesEntry"],
+            MEANT,
+        ),
+        (
+            "plain overrides one twin's default body",
+            "class OverridesTwin implements \\Interop\\Recording { use \\Interop\\Recording\\Defaults; public function Total(): int { return 14; } }",
+            "OverridesTwin",
+            ALL,
+            WRONG,
+            &["Demo\\OverridesTwin"],
+            MEANT,
+        ),
+        (
+            "plain takes a plain parent's static camelCase method as a first-class callable",
+            "abstract class FinderBase { public static function findOrFail(int $id): int { return $id; } } class Finder extends FinderBase implements \\Interop\\Recording { use \\Interop\\Recording\\Defaults; }",
+            "Finder",
+            "array_map(Finder::findOrFail(...), [1, 2]);",
+            "array_map(Finder::findorfail(...), [1, 2]);",
+            &["Demo\\Finder"],
+            &[("findorfail", "findOrFail")],
+        ),
+        (
+            "plain aliases default bodies with as",
+            "class Aliases implements \\Interop\\Recording { use \\Interop\\Recording\\Defaults { recordEntry as entry; Total as grandTotal; } }",
+            "Aliases",
+            "$o->entry(); $o->grandTotal(); $o->Total();",
+            "$o->ENTRY(); $o->grandtotal();",
+            &["Demo\\Aliases"],
+            &[("ENTRY", "entry"), ("grandtotal", "grandTotal")],
+        ),
+        (
+            "plain picks a plain trait insteadof Defaults",
+            "trait PlainEntries { public function recordEntry(): int { return 22; } } class Chooses implements \\Interop\\Recording { use PlainEntries, \\Interop\\Recording\\Defaults { PlainEntries::recordEntry insteadof \\Interop\\Recording\\Defaults; \\Interop\\Recording\\Defaults::recordEntry as sharpEntry; } }",
+            "Chooses",
+            "$o->recordEntry(); $o->sharpEntry();",
+            "$o->SharpEntry();",
+            &["Demo\\Chooses"],
+            &[("SharpEntry", "sharpEntry")],
+        ),
+        (
+            "a union, the class first",
+            "",
+            "\\Interop\\Ledger|\\Interop\\Account",
+            ALL,
+            WRONG,
+            &["Interop\\Ledger", "Interop\\Account"],
+            MEANT,
+        ),
+        (
+            "a union, the abstract class first",
+            "",
+            "\\Interop\\Account|\\Interop\\Ledger",
+            ALL,
+            WRONG,
+            &["Interop\\Ledger", "Interop\\Account"],
+            MEANT,
+        ),
+        ("an intersection, the class first", "", "\\Interop\\Ledger&\\Countable", ALL, WRONG, LEDGER, MEANT),
+        ("an intersection, the interface first", "", "\\Countable&\\Interop\\Ledger", ALL, WRONG, LEDGER, MEANT),
+        ("an enum case", "", "\\Interop\\Kind", ALL, WRONG, &["Interop\\Kind"], MEANT),
+        (
+            "a static first-class callable",
+            "",
+            "\\Interop\\Ledger",
+            "(\\Interop\\Ledger::kind(...))();",
+            "(\\Interop\\Ledger::Kind(...))();",
+            LEDGER,
+            &[("Kind", "kind")],
+        ),
+    ];
+
+    // Each row whose issues differ, with them, so a failure lists every failing cell.
+    let failing: Vec<String> = rows
+        .into_iter()
+        .filter_map(|(row, declarations, receiver, calls, wrong, classes, meant)| {
+            let php: &'static str = format!(
+                "<?php\n\nnamespace Demo;\n\n{declarations}\n\nfunction reach({receiver} $o): void\n{{\n    {calls}\n}}\n\nfunction wrong({receiver} $o): void\n{{\n    {wrong}\n}}\n"
+            )
+            .leak();
+            let found = explained(("src/Demo/Matrix.php", php), &INTEROP);
+            let expected: Vec<String> = meant
+                .iter()
+                .flat_map(|(written, declared)| {
+                    classes.iter().map(move |class| {
+                        format!("14 `{class}` has no member `{written}`; did you mean `{declared}`? Write `{declared}`.")
+                    })
+                })
+                .collect();
+            // A wrong first-class callable is also a value of type `never`, called or passed on, which follows from its
+            // error.
+            let reported: Vec<String> = found
+                .iter()
+                .filter(|issue| !(issue.starts_with("14:") && issue.contains("type `never`")))
+                .map(|issue| {
+                    let (line, rest) = issue.split_once(':').unwrap();
+                    format!("{line} {}", rest.split_once(" non-existent-method ").map_or(rest, |(_, message)| message))
+                })
+                .collect();
+
+            (reported != expected).then(|| format!("{row}: {reported:#?}"))
+        })
+        .collect();
+
+    assert!(failing.is_empty(), "{failing:#?}");
+}
+
+/// Spec section 24, the interop matrix's reverse direction in the checker: a PHP# class extends a plain class, overrides
+/// a plain abstract class, implements a plain interface and uses a plain trait, and keys each method it takes by its
+/// declared name, so PHP# code reaches it by that name, and another case is the error naming it.
+#[test]
+fn interop_matrix_php_sharp_reaches_each_plain_php_method_only_by_its_declared_name() {
+    let plain = (
+        "src/Lib/Interop/Plain.php",
+        "<?php\n\nnamespace Lib\\Interop;\n\nclass PlainLedger\n{\n    public function count(): int { return 31; }\n\n    public function recordEntry(): int { return 32; }\n}\n\nabstract class PlainAccount\n{\n    public function count(): int { return 31; }\n\n    public function recordEntry(): int { return 32; }\n}\n\ninterface PlainRecording\n{\n    public function count(): int;\n\n    public function recordEntry(): int;\n}\n\ntrait PlainCounting\n{\n    public function count(): int { return 31; }\n\n    public function recordEntry(): int { return 32; }\n}\n",
+    );
+    let types = [
+        (
+            "src/Interop/SharpLedger.sharp",
+            "namespace Interop;\n\nimport Lib.Interop.PlainLedger;\n\npublic class SharpLedger : PlainLedger\n{\n}\n",
+        ),
+        (
+            "src/Interop/SharpOverride.sharp",
+            "namespace Interop;\n\nimport Lib.Interop.PlainAccount;\n\npublic class SharpOverride : PlainAccount\n{\n    public override int count() => 41;\n\n    public override int recordEntry() => 42;\n}\n",
+        ),
+        (
+            "src/Interop/SharpRecording.sharp",
+            "namespace Interop;\n\nimport Lib.Interop.PlainRecording;\n\npublic class SharpRecording : PlainRecording\n{\n    public int count() => 41;\n\n    public int recordEntry() => 42;\n}\n",
+        ),
+        (
+            "src/Interop/SharpCounting.sharp",
+            "namespace Interop;\n\nimport Lib.Interop.PlainCounting;\n\npublic class SharpCounting : PlainCounting\n{\n}\n",
+        ),
+        plain,
+    ];
+    let probe = "namespace Interop;\n\npublic class Probe\n{\n    public static int reach(SharpLedger a, SharpOverride b, SharpRecording c, SharpCounting d) =>\n        a.count() + a.recordEntry() + b.count() + b.recordEntry() + c.count() + c.recordEntry() + d.count() + d.recordEntry();\n\n    public static int wrong(SharpLedger a, SharpOverride b, SharpRecording c, SharpCounting d) =>\n        a.Count() + b.recordentry() + c.COUNT() + d.RecordEntry();\n}\n";
+
+    assert_eq!(
+        explained(("src/Interop/Probe.sharp", probe), &types),
+        [
+            "9:11 non-existent-method `SharpLedger` has no member `Count`; did you mean `count`? Write `count`.",
+            "9:23 non-existent-method `SharpOverride` has no member `recordentry`; did you mean `recordEntry`? Write `recordEntry`.",
+            "9:41 non-existent-method `SharpRecording` has no member `COUNT`; did you mean `count`? Write `count`.",
+            "9:53 non-existent-method `SharpCounting` has no member `RecordEntry`; did you mean `recordEntry`? Write `recordEntry`.",
+        ]
+    );
+}
+
 /// `is` and `as` of a generic class test its type arguments while the code runs, so the value they narrow has the
 /// class's type with its type arguments.
 #[test]

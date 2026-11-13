@@ -896,7 +896,53 @@ fn a_method_search_finds_a_method_by_a_sharp_attribute_as_by_a_plain_one() -> Re
     );
     assert_eq!(
         observation.invocations,
-        ["attributed-Probe\\Marked-markedMethod", "attributed-Probe\\Tagged-taggedMethod"]
+        [
+            "attributed-Probe\\Marked-Probe\\Holder::markedMethod",
+            "attributed-Probe\\Tagged-Probe\\Holder::taggedMethod"
+        ]
+    );
+
+    Ok(())
+}
+
+/// The interop matrix's attribute search, spec section 24: the PHP# attribute `Marked` marks the twin `Total` of a PHP#
+/// class and the camelCase default body `recordEntry` of a PHP# interface. A search for it finds each where it appears,
+/// in the PHP# types, the `Defaults` trait and the plain classes that inherit, take or alias it, and never the twin
+/// `total` or a plain override that carries no attribute.
+#[test]
+fn a_method_search_finds_each_matrix_method_a_sharp_attribute_marks() -> Result<(), Box<dyn std::error::Error>> {
+    if !php_sdk_is_available() {
+        return Ok(());
+    }
+
+    const MARKED: (&str, &str) = ("src/Probe/Marked.sharp", "namespace Probe;\n\npublic class Marked\n{\n}\n");
+    const LEDGER: (&str, &str) = (
+        "src/Interop/Ledger.sharp",
+        "namespace Interop;\n\nimport Probe.Marked;\n\npublic class Ledger\n{\n    public virtual int total() => 3;\n\n    [Marked]\n    public virtual int Total() => 4;\n}\n",
+    );
+    const RECORDING: (&str, &str) = (
+        "src/Interop/Recording.sharp",
+        "namespace Interop;\n\nimport Probe.Marked;\n\npublic interface Recording\n{\n    [Marked]\n    int recordEntry() => 2;\n}\n",
+    );
+    const MATRIX: (&str, &str) = (
+        "src/Demo/Matrix.php",
+        "<?php\n\nnamespace Demo;\n\nclass Inherits extends \\Interop\\Ledger {}\n\nclass Overrides extends \\Interop\\Ledger { public function Total(): int { return 14; } }\n\nclass TakesDefaults implements \\Interop\\Recording { use \\Interop\\Recording\\Defaults; }\n\nclass Aliases implements \\Interop\\Recording { use \\Interop\\Recording\\Defaults { recordEntry as entry; } }\n\nfunction run(Inherits $o): int { return $o->Total(); }\n",
+    );
+
+    let observation =
+        analyze_files_with_fixture(&[MATRIX, MARKED, LEDGER, RECORDING], &["MAGO_INVOCATION_ATTRIBUTED_METHODS"])?;
+
+    assert_eq!(
+        observation.invocations,
+        [
+            "attributed-Probe\\Marked-Interop\\Ledger::Total",
+            "attributed-Probe\\Marked-Interop\\Recording::recordEntry",
+            "attributed-Probe\\Marked-Interop\\Recording\\Defaults::recordEntry",
+            "attributed-Probe\\Marked-Demo\\Aliases::entry",
+            "attributed-Probe\\Marked-Demo\\Aliases::recordEntry",
+            "attributed-Probe\\Marked-Demo\\Inherits::Total",
+            "attributed-Probe\\Marked-Demo\\TakesDefaults::recordEntry",
+        ]
     );
 
     Ok(())

@@ -512,15 +512,16 @@ where
     let method = context
         .codebase
         .get_method(class.name.as_bytes(), name)
-        .or_else(|| context.codebase.get_method_in_another_case(class.name.as_bytes(), name))?;
+        .map(|method| method.original_name)
+        .or_else(|| context.codebase.get_method_name_in_another_case(class.name.as_bytes(), name))?;
 
     Some(if block_context.scope.is_static() {
         format!(
             "Write `{}()`: a static method reaches the members of its class through the class name.",
-            display_code_member(context, class.original_name, method.original_name)
+            display_code_member(context, class.original_name, method)
         )
     } else {
-        format!("Write `this.{}()`: members of the same object are always written with `this.`.", method.original_name)
+        format!("Write `this.{method}()`: members of the same object are always written with `this.`.")
     })
 }
 

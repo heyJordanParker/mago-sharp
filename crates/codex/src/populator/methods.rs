@@ -17,11 +17,15 @@ pub fn inherit_methods_from_parent(
     let class_like_name = metadata.name;
     let parent_is_trait = parent_metadata.kind.is_trait();
 
+    // An adaptation's names are as written: the method is keyed as the trait keys its own, and the alias as the class
+    // keys its own, spec section 24, so a plain class's `recordEntry as entry` meets a PHP# trait's `recordEntry`.
     let reverse_alias_map: Option<HashMap<Word, Vec<Word>>> = if parent_is_trait && !metadata.trait_alias_map.is_empty()
     {
         let mut map: HashMap<Word, Vec<Word>> = HashMap::default();
         for (original, alias) in metadata.get_trait_alias_map() {
-            map.entry(*original).or_default().push(*alias);
+            map.entry(parent_metadata.method_key(original.as_bytes()))
+                .or_default()
+                .push(metadata.method_key(alias.as_bytes()));
         }
         Some(map)
     } else {
@@ -115,9 +119,7 @@ pub fn inherit_methods_from_parent(
                 || metadata.kind.is_trait()
                 || is_ctor_or_clone
                 || metadata
-                    .trait_visibility_map
-                    .get(&aliased_method_name)
-                    .copied()
+                    .trait_visibility(aliased_method_name.as_bytes())
                     .or_else(|| {
                         codebase.get_method_visibility(parent_metadata.name.as_bytes(), aliased_method_name.as_bytes())
                     })
