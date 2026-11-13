@@ -33,6 +33,9 @@ use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::ascii_lowercase_constant_name_word;
 use mago_word::concat_word;
+use mago_word::empty_word;
+use mago_word::f64_word;
+use mago_word::i64_word;
 use mago_word::word;
 
 use crate::flags::attribute::AttributeFlags;
@@ -63,6 +66,7 @@ use crate::ttype::get_false;
 use crate::ttype::get_float;
 use crate::ttype::get_int;
 use crate::ttype::get_int_or_float;
+use crate::ttype::get_literal_float;
 use crate::ttype::get_literal_int;
 use crate::ttype::get_literal_string;
 use crate::ttype::get_mixed;
@@ -315,11 +319,24 @@ where
                 Some(value) => get_literal_int(value as i64),
                 None => get_int_or_float(),
             }),
+            // A PHP# float constant is fixed while the code compiles, so a template shows its text, spec section 24. A
+            // plain PHP one stays a `float`, as upstream Mago reads it, so `PHP_FLOAT_MAX > 0.0` is no redundant check.
+            Literal::Float(literal_float) if context.program.dialect.is_sharp() => {
+                Some(get_literal_float(*literal_float.value))
+            }
             Literal::Float(_) => Some(get_float()),
             Literal::True(_) => Some(get_true()),
             Literal::False(_) => Some(get_false()),
             Literal::Null(_) => Some(get_null()),
         },
+        Expression::CompositeString(composite_string)
+            if context.program.dialect.is_sharp()
+                && let Some(fixed) = fixed_template(composite_string.parts().as_slice(), |part| {
+                    infer_with_constant_sources(context, scope, part, enclosing_class, constants, class_constants)
+                }) =>
+        {
+            Some(fixed)
+        }
         Expression::CompositeString(composite_string) => {
             let mut contains_content = false;
             for part in composite_string.parts() {
@@ -379,51 +396,10 @@ where
                 _ => None,
             }
         }
-        Expression::Binary(Binary { operator: BinaryOperator::StringConcat(_), lhs, rhs }) => {
-            let Some(lhs_type) =
-                infer_with_constant_sources(context, scope, lhs, enclosing_class, constants, class_constants)
-            else {
-                return Some(get_string());
-            };
-            let Some(rhs_type) =
-                infer_with_constant_sources(context, scope, rhs, enclosing_class, constants, class_constants)
-            else {
-                return Some(get_string());
-            };
-
-            let TAtomic::Scalar(TScalar::String(lhs_string)) = lhs_type.get_single_owned() else {
-                return Some(get_string());
-            };
-
-            let TAtomic::Scalar(TScalar::String(rhs_string)) = rhs_type.get_single_owned() else {
-                return Some(get_string());
-            };
-
-            if let (Some(left_val), Some(right_val)) =
-                (lhs_string.get_known_literal_value(), rhs_string.get_known_literal_value())
-            {
-                return Some(wrap_atomic(TAtomic::Scalar(TScalar::String(TString::known_literal(concat_word!(
-                    left_val, right_val
-                ))))));
-            }
-
-            let is_non_empty = lhs_string.is_non_empty() || rhs_string.is_non_empty();
-            let is_truthy = lhs_string.is_truthy() || rhs_string.is_truthy();
-            let is_literal_origin = lhs_string.is_literal_origin() && rhs_string.is_literal_origin();
-            let casing = match (lhs_string.casing, rhs_string.casing) {
-                (TStringCasing::Lowercase, TStringCasing::Lowercase) => TStringCasing::Lowercase,
-                (TStringCasing::Uppercase, TStringCasing::Uppercase) => TStringCasing::Uppercase,
-                _ => TStringCasing::Unspecified,
-            };
-
-            let final_string_type = if is_literal_origin {
-                TString::unspecified_literal_with_props(false, is_truthy, is_non_empty, false, casing)
-            } else {
-                TString::general_with_props(false, is_truthy, is_non_empty, false, casing)
-            };
-
-            Some(wrap_atomic(TAtomic::Scalar(TScalar::String(final_string_type))))
-        }
+        Expression::Binary(Binary { operator: BinaryOperator::StringConcat(_), lhs, rhs }) => Some(joined(
+            infer_with_constant_sources(context, scope, lhs, enclosing_class, constants, class_constants),
+            infer_with_constant_sources(context, scope, rhs, enclosing_class, constants, class_constants),
+        )),
         Expression::Binary(Binary { operator, lhs, rhs }) if operator.is_bitwise() => {
             let lhs = infer_with_constant_sources(context, scope, lhs, enclosing_class, constants, class_constants);
             let rhs = infer_with_constant_sources(context, scope, rhs, enclosing_class, constants, class_constants);
@@ -476,6 +452,17 @@ where
         Expression::Binary(Binary { operator, lhs, rhs }) if operator.is_arithmetic() => {
             let lhs = infer_with_constant_sources(context, scope, lhs, enclosing_class, constants, class_constants);
             let rhs = infer_with_constant_sources(context, scope, rhs, enclosing_class, constants, class_constants);
+
+            // Spec section 18: PHP#'s `+` joins a string, as PHP's `.` does. A string with a number is the checker's
+            // error, and the code that meant to join reads a string.
+            if matches!(operator, BinaryOperator::Addition(_))
+                && context.program.dialect.is_sharp()
+                && [&lhs, &rhs].into_iter().flatten().any(|operand| {
+                    operand.types.iter().any(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::String(_))))
+                })
+            {
+                return Some(joined(lhs, rhs));
+            }
 
             match (
                 lhs.and_then(|v| v.get_single_literal_int_value()),
@@ -692,6 +679,89 @@ where
         )))),
         _ => None,
     })
+}
+
+/// The string PHP's `.`, or PHP#'s `+` of two strings, gives for a value of `lhs` joined with one of `rhs`, or a
+/// `string` when either is unknown or shows no fixed text.
+fn joined(lhs: Option<TUnion>, rhs: Option<TUnion>) -> TUnion {
+    match (lhs.as_ref().and_then(shown_string), rhs.as_ref().and_then(shown_string)) {
+        (Some(lhs), Some(rhs)) => wrap_atomic(TAtomic::Scalar(TScalar::String(join_strings(&lhs, &rhs)))),
+        _ => get_string(),
+    }
+}
+
+/// The string a PHP# template whose parts are `parts` gives, each value's type inferred by `infer`, when every value it
+/// shows has one of the types `shown_string` takes. Spec section 24: a template of literals and constants is fixed
+/// while the code compiles, so it is a literal string, as `1.0 / ${Weights.COUNT} as weight` is.
+fn fixed_template<'arena>(
+    parts: &[StringPart<'arena>],
+    infer: impl Fn(&'arena Expression<'arena>) -> Option<TUnion>,
+) -> Option<TUnion> {
+    let mut text = TString::known_literal(empty_word());
+    for part in parts {
+        let shown = match part {
+            StringPart::Literal(literal) => match literal.value {
+                Some(value) => TString::known_literal(word(value)),
+                None => TString::unspecified_literal_with_props(
+                    false,
+                    false,
+                    !literal.raw.is_empty(),
+                    false,
+                    TStringCasing::Unspecified,
+                ),
+            },
+            StringPart::Expression(expression) => shown_string(&infer(expression)?)?,
+            StringPart::BracedExpression(braced) => shown_string(&infer(braced.expression)?)?,
+        };
+        text = join_strings(&text, &shown);
+    }
+
+    Some(wrap_atomic(TAtomic::Scalar(TScalar::String(text))))
+}
+
+/// The string a value of `value_type` shows where a template or a join writes it: a string as it is, a literal number
+/// as its text, and a constant of another class, which is read before its type is known, as a literal string, since
+/// a constant is fixed while the code compiles. `None` for any other value.
+fn shown_string(value_type: &TUnion) -> Option<TString> {
+    if !value_type.is_single() {
+        return None;
+    }
+
+    match value_type.get_single() {
+        TAtomic::Scalar(TScalar::String(string)) => Some(*string),
+        TAtomic::Scalar(TScalar::Integer(integer)) => {
+            integer.get_literal_value().map(|value| TString::known_literal(i64_word(value)))
+        }
+        TAtomic::Scalar(TScalar::Float(float)) => {
+            float.get_literal_value().map(|value| TString::known_literal(f64_word(value)))
+        }
+        TAtomic::Reference(TReference::Member { .. }) => {
+            Some(TString::unspecified_literal_with_props(false, false, false, false, TStringCasing::Unspecified))
+        }
+        _ => None,
+    }
+}
+
+/// The string `lhs` joined with `rhs` gives: their joined text when both texts are known, and otherwise a string that
+/// is literal when both are, non-empty or truthy when either is, and in lowercase or uppercase when both are.
+fn join_strings(lhs: &TString, rhs: &TString) -> TString {
+    if let (Some(left), Some(right)) = (lhs.get_known_literal_value(), rhs.get_known_literal_value()) {
+        return TString::known_literal(concat_word!(left, right));
+    }
+
+    let is_non_empty = lhs.is_non_empty() || rhs.is_non_empty();
+    let is_truthy = lhs.is_truthy() || rhs.is_truthy();
+    let casing = match (lhs.casing, rhs.casing) {
+        (TStringCasing::Lowercase, TStringCasing::Lowercase) => TStringCasing::Lowercase,
+        (TStringCasing::Uppercase, TStringCasing::Uppercase) => TStringCasing::Uppercase,
+        _ => TStringCasing::Unspecified,
+    };
+
+    if lhs.is_literal_origin() && rhs.is_literal_origin() {
+        TString::unspecified_literal_with_props(false, is_truthy, is_non_empty, false, casing)
+    } else {
+        TString::general_with_props(false, is_truthy, is_non_empty, false, casing)
+    }
 }
 
 /// The type of the class constant `constant` of `class_name`: its inferred type when the enclosing class declares it,

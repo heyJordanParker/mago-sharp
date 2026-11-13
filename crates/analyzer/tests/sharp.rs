@@ -29467,6 +29467,56 @@ fn a_composed_string_for_a_plain_php_literal_string_is_refused_by_name() {
     );
 }
 
+/// A value fixed when the code compiles is a `literal-string`, spec section 24: a template or a `+` join whose parts are
+/// literals and constants of type `int`, `float` or `string` passes to a plain PHP `literal-string` parameter, as a
+/// constant that holds one does, and a template that holds a value of the running code is still refused.
+#[test]
+fn a_string_fixed_when_the_code_compiles_passes_to_a_plain_php_literal_string() {
+    let query = (
+        "src/Lib/Query.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Query\n{\n    /**\n     * @param literal-string $sql\n     */\n    public function selectRaw(string $sql): self\n    {\n        return $this;\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.Query;\n\npublic enum Weights\n{\n    case One;\n\n    private const int COUNT = 3;\n    private const float SHARE = 0.5;\n    private const string TOUCHES = \"COUNT(*) OVER (PARTITION BY order_id)\";\n    private const string LINEAR = `1.0 / ${Weights.TOUCHES} as weight`;\n    private const string PER = \"1.0 / \" + Weights.TOUCHES;\n\n    public Query weigh(Query query, string column)\n    {\n        query.selectRaw(Weights.LINEAR);\n        query.selectRaw(Weights.PER);\n        query.selectRaw(`${Weights.SHARE} / ${Weights.COUNT} as weight, ${\"x\"}`);\n        query.selectRaw(\"max(\" + Weights.TOUCHES + \")\");\n        return query.selectRaw(`max(${column})`);\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Weights.sharp", sharp), &[query]),
+        [
+            "21:32 possibly-invalid-argument Argument #1 of method `Query.selectRaw` takes a `literal-string`, a string literal or a constant, and this string is composed while the code runs. Write the string as a literal or a constant, and pass each value it holds separately, as a query's bindings for its `?` placeholders take them."
+        ]
+    );
+}
+
+/// A constant's type is its declared type, which its value may only narrow, so a constant of the wrong type is refused
+/// and a read of one has the type it declares. Its value follows spec section 18 as a body's code does, so a string
+/// joined with a number is refused where the constant is declared, with help naming the template that writes it.
+#[test]
+fn a_constant_has_its_declared_type_and_its_value_follows_the_operators_of_a_body() {
+    let sharp = "namespace Demo;\n\npublic enum Weights\n{\n    case One;\n\n    private const int COUNT = 3;\n    private const string LABEL = \"1.0 / \" + Weights.COUNT + \" as weight\";\n    private const int X = \"a\";\n    private const string SHOWN = `1.0 / ${Weights.COUNT} as weight`;\n\n    public string label() => Weights.LABEL;\n\n    public int x() => Weights.X;\n\n    public string shown() => Weights.SHOWN;\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Weights.sharp", sharp), &[]),
+        [
+            "8:34 invalid-operand `+` cannot join `\"1.0 / \"` and `3`: it joins two strings or adds two numbers. Put the value in a template written between backticks, as in `1.0 / ${Weights.COUNT} as weight`.",
+            "9:27 invalid-constant-value Value for constant `Weights.X` is not assignable to its declared type. Change the value to match the declared type, or update the declared type to accept the value.",
+        ]
+    );
+}
+
+/// Spec section 18: a chain of `+` that joins a string with a number is refused once, at its first such `+`, with help
+/// that writes the whole chain as a template, the numbers it adds before its first string as one value.
+#[test]
+fn a_chain_that_joins_a_string_with_a_number_is_refused_with_its_template() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public string run(int count, string name)\n    {\n        const items = count + 1 + \" items\";\n        const shown = name + \": \" + count + \"/\" + 3;\n        return items + shown;\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "7:23 invalid-operand `+` cannot join `int` and `\" items\"`: it joins two strings or adds two numbers. Put the value in a template written between backticks, as in `${count + 1} items`.",
+            "8:23 invalid-operand `+` cannot join `string` and `int`: it joins two strings or adds two numbers. Put the value in a template written between backticks, as in `${name}: ${count}/${3}`.",
+        ]
+    );
+}
+
 /// A plain PHP class's `__toString()`, its own or inherited, is its `toString()`, spec section 18: a template shows it
 /// and a call runs it. A plain PHP class with neither stays a template's error, and a value that holds an enum beside
 /// such a class has no one call that shows both.

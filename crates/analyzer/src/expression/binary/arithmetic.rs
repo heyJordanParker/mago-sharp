@@ -31,6 +31,7 @@ use mago_syntax::cst::Access;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Literal;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -59,12 +60,135 @@ pub fn analyze_arithmetic_operation<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    // A PHP# chain of `+`, as `"1.0 / " + count + " as weight"`, is one join, so its outermost `+` reports a string
+    // joined with another value once, with help that writes the whole chain as a template.
+    let joins = context.dialect.is_sharp() && is_join(binary);
+    let in_chain = block_context.flags.inside_join();
+    let outer_failure = if joins && !in_chain { block_context.failed_join.take() } else { None };
+
     let was_inside_general_use = block_context.flags.inside_general_use();
     block_context.flags.set_inside_general_use(true);
+    block_context.flags.set_inside_join(joins && matches!(binary.lhs, Expression::Binary(lhs) if is_join(lhs)));
     binary.lhs.analyze(context, block_context, artifacts)?;
+    block_context.flags.set_inside_join(false);
     binary.rhs.analyze(context, block_context, artifacts)?;
+    block_context.flags.set_inside_join(in_chain);
     block_context.flags.set_inside_general_use(was_inside_general_use);
 
+    analyze_operation(binary, context, block_context, artifacts)?;
+
+    if joins && !in_chain {
+        if let Some(failed) = block_context.failed_join.take() {
+            report_join(context, artifacts, binary, failed);
+        }
+        block_context.failed_join = outer_failure;
+    }
+
+    Ok(())
+}
+
+/// Whether `binary` is a `+`, which PHP# reads as a join when a string meets it, spec section 18.
+fn is_join(binary: &Binary<'_>) -> bool {
+    matches!(binary.operator, BinaryOperator::Addition(_))
+}
+
+/// Reports the `+` at `failed` of the chain of `+` that `chain` ends, which joins a string with another value, spec
+/// section 18, with help that writes the whole chain as the template that joins it.
+fn report_join<A>(context: &mut Context<'_, '_, A>, artifacts: &AnalysisArtifacts, chain: &Binary<'_>, failed: Span)
+where
+    A: Arena,
+{
+    let mut joins = vec![chain];
+    while let Expression::Binary(inner) = joins[joins.len() - 1].lhs
+        && is_join(inner)
+    {
+        joins.push(inner);
+    }
+    joins.reverse();
+    let Some(join) = joins.iter().find(|join| join.span() == failed) else {
+        unreachable!("the `+` that joins a string with another value is in the chain that reports it");
+    };
+    let BinaryOperator::Addition(operator) = join.operator else {
+        unreachable!("a chain holds only `+`");
+    };
+    let fallback = get_mixed();
+    let type_of = |operand: &Expression<'_>| artifacts.get_expression_type(operand).unwrap_or(&fallback).clone();
+    let left = display_type(context, &type_of(join.lhs));
+    let right = display_type(context, &type_of(join.rhs));
+    let operands: Vec<&Expression<'_>> =
+        std::iter::once(joins[0].lhs).chain(joins.iter().map(|join| join.rhs)).collect();
+    let template = template_of(context, artifacts, &operands);
+
+    context.collector.report_with_code(
+        IssueCode::InvalidOperand,
+        Issue::error(format!("`+` cannot join `{left}` and `{right}`: it joins two strings or adds two numbers."))
+            .with_annotation(Annotation::primary(join.span()).with_message("A string may meet another value here."))
+            .with_annotation(Annotation::secondary(operator).with_message("`+` used here."))
+            .with_note("PHP# joins a string only with another string, so `\"1\" + 1` cannot produce `\"11\"`.")
+            .with_help(format!("Put the value in a template written between backticks, as in {template}.")),
+    );
+}
+
+/// The template that joins `operands`, the operands of a chain of `+` in order: a string literal's or a template's text
+/// as it is written, and every other value between `${` and `}`. The numbers a chain adds before its first string are
+/// one value, as `count + 1` in `count + 1 + " items"`.
+fn template_of<A>(context: &Context<'_, '_, A>, artifacts: &AnalysisArtifacts, operands: &[&Expression<'_>]) -> String
+where
+    A: Arena,
+{
+    let source =
+        |span: Span| String::from_utf8_lossy(&context.source_file.contents[span.to_range_usize()]).into_owned();
+    let numbers = operands
+        .iter()
+        .take_while(|operand| {
+            artifacts.get_expression_type(**operand).is_some_and(|operand_type| {
+                operand_type
+                    .types
+                    .iter()
+                    .all(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::Integer(_) | TScalar::Float(_))))
+            })
+        })
+        .count();
+    let value = |span: Span| ["${", &source(span), "}"].concat();
+
+    let mut parts = Vec::with_capacity(operands.len());
+    let rest = if numbers > 1 {
+        parts.push(value(operands[0].span().join(operands[numbers - 1].span())));
+
+        &operands[numbers..]
+    } else {
+        operands
+    };
+    for operand in rest {
+        parts.push(match operand {
+            Expression::Literal(Literal::String(literal)) => {
+                let written = String::from_utf8_lossy(literal.raw);
+
+                written[1..written.len() - 1].replace('`', "\\`").replace("${", "\\${")
+            }
+            Expression::CompositeString(composite) => {
+                let written = source(composite.span());
+
+                written[1..written.len() - 1].to_owned()
+            }
+            _ => value(operand.span()),
+        });
+    }
+
+    ["`", &parts.concat(), "`"].concat()
+}
+
+/// Gives the arithmetic or join `binary`, whose operands are analyzed, its type, and reports what its operation can't
+/// run on.
+fn analyze_operation<'ctx, 'arena, A>(
+    binary: &Binary<'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
     let fallback = Rc::new(get_mixed());
     let left_type = artifacts.get_rc_expression_type(&binary.lhs).cloned().unwrap_or_else(|| Rc::clone(&fallback));
     let right_type = artifacts.get_rc_expression_type(&binary.rhs).cloned().unwrap_or_else(|| Rc::clone(&fallback));
@@ -107,9 +231,9 @@ where
     }
 
     // In PHP# `+` joins two strings, as PHP's `.` does, and adds two numbers, as spec section 18 decides. A string
-    // with any other value is an error, so `"1" + 1` never runs. A `mixed` operand keeps its `mixed-operand` report,
-    // because a value of unknown type must be checked before use.
-    if let BinaryOperator::Addition(operator) = binary.operator
+    // with any other value is an error, so `"1" + 1` never runs, and the outermost `+` of its chain reports it. A
+    // `mixed` operand keeps its `mixed-operand` report, because a value of unknown type must be checked before use.
+    if is_join(binary)
         && context.dialect.is_sharp()
         && [&left_type, &right_type].into_iter().any(|operand| {
             !operand.has_mixed()
@@ -134,19 +258,7 @@ where
             return Ok(());
         }
 
-        let left = display_type(context, &left_type);
-        let right = display_type(context, &right_type);
-
-        context.collector.report_with_code(
-            IssueCode::InvalidOperand,
-            Issue::error(format!("`+` cannot join `{left}` and `{right}`: it joins two strings or adds two numbers."))
-                .with_annotation(
-                    Annotation::primary(binary.span()).with_message("A string may meet another value here."),
-                )
-                .with_annotation(Annotation::secondary(operator).with_message("`+` used here."))
-                .with_note("PHP# joins a string only with another string, so `\"1\" + 1` cannot produce `\"11\"`.")
-                .with_help("Put the value in a template written between backticks, as in `Total: ${count}`."),
-        );
+        block_context.failed_join.get_or_insert(binary.span());
 
         // The code meant to join, so the rest of it is checked as if the join gave a string.
         assign_arithmetic_type(artifacts, get_string(), binary);

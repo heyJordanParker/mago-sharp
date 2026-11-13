@@ -32,6 +32,9 @@ impl BlockContextFlags {
     /// Set while analyzing a PHP# law's body, spec section 28, where a call statement may call a law and `return;` ends
     /// the case it closes.
     pub const INSIDE_LAW_BODY: u32 = 1 << 21;
+    /// Set while analyzing the left operand of a PHP# `+` that is itself a `+`, as `"a" + 1` in `"a" + 1 + "b"`. The
+    /// outermost `+` of the chain reports a string joined with another value, spec section 18, for the whole chain.
+    pub const INSIDE_JOIN: u32 = 1 << 22;
 
     #[inline]
     pub const fn new() -> Self {
@@ -171,6 +174,11 @@ impl BlockContextFlags {
     }
 
     #[inline(always)]
+    pub const fn inside_join(&self) -> bool {
+        self.contains(Self::INSIDE_JOIN)
+    }
+
+    #[inline(always)]
     pub fn set_inside_conditional(&mut self, value: bool) {
         self.set(Self::INSIDE_CONDITIONAL, value);
     }
@@ -273,5 +281,10 @@ impl BlockContextFlags {
     #[inline(always)]
     pub fn set_inside_constant_expression(&mut self, value: bool) {
         self.set(Self::INSIDE_CONSTANT_EXPRESSION, value);
+    }
+
+    #[inline(always)]
+    pub fn set_inside_join(&mut self, value: bool) {
+        self.set(Self::INSIDE_JOIN, value);
     }
 }

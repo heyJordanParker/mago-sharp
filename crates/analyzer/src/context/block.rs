@@ -100,6 +100,10 @@ pub struct BlockContext<'ctx> {
     /// Bitflags for various context states (inside_conditional, inside_isset, etc.)
     pub flags: BlockContextFlags,
 
+    /// The first `+` of the PHP# `+` chain being analyzed that joins a string with another value, which the chain's
+    /// outermost `+` reports once for the whole chain, spec section 18.
+    pub failed_join: Option<Span>,
+
     pub clauses: Vec<Rc<Clause>>,
     pub reconciled_expression_clauses: Vec<Rc<Clause>>,
     pub known_functions: WordSet,
@@ -239,6 +243,7 @@ impl<'ctx> BlockContext<'ctx> {
             local_types: WordMap::default(),
             enclosing_locals: WordSet::default(),
             flags: BlockContextFlags::new(),
+            failed_join: None,
             clauses: Vec::new(),
             reconciled_expression_clauses: Vec::new(),
             known_functions: WordSet::default(),

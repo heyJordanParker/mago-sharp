@@ -1,6 +1,7 @@
 use mago_allocator::Arena;
 use mago_word::Word;
 
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like_constant::ClassLikeConstantMetadata;
 use mago_codex::ttype::atomic::TAtomic;
@@ -10,6 +11,8 @@ use mago_codex::ttype::atomic::object::r#enum::TEnum;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
@@ -342,18 +345,7 @@ where
             const_span,
         );
 
-        let mut const_type = read_type(constant_metadata, metadata.flags.is_sharp());
-
-        expander::expand_union(
-            context.codebase,
-            &mut const_type,
-            &TypeExpansionOptions {
-                self_class: Some(metadata.name),
-                static_class_type: StaticClassType::Name(metadata.name),
-                function_is_final: metadata.flags.is_final(),
-                ..Default::default()
-            },
-        );
+        let const_type = read_type(context.codebase, metadata, constant_metadata);
 
         return Some(ResolvedConstant { const_type });
     }
@@ -377,18 +369,7 @@ where
         };
 
         if let Some(constant_metadata) = required_metadata.constants.get(&const_name) {
-            let mut const_type = read_type(constant_metadata, required_metadata.flags.is_sharp());
-
-            expander::expand_union(
-                context.codebase,
-                &mut const_type,
-                &TypeExpansionOptions {
-                    self_class: Some(required_metadata.name),
-                    static_class_type: StaticClassType::Name(required_metadata.name),
-                    function_is_final: required_metadata.flags.is_final(),
-                    ..Default::default()
-                },
-            );
+            let const_type = read_type(context.codebase, required_metadata, constant_metadata);
 
             return Some(ResolvedConstant { const_type });
         }
@@ -412,30 +393,58 @@ where
     None
 }
 
-/// The type a read of `constant` gives. Its docblock type (`@var`) reflects the type the user intends, so it comes first.
-/// A collection literal takes its type from where PHP# writes it, spec section 12, so a PHP# constant that declares a
-/// collection, a tuple or an `Iterable` reads as that type, where its value's own type is only a list or a keyed array,
-/// and one that declares a function type reads as it, where a lambda's own type is only a `Closure`. The type its value
-/// is inferred to have is more specific than the declared type, which it is copied from, so it comes next.
-fn read_type(constant: &ClassLikeConstantMetadata, sharp: bool) -> TUnion {
+/// The type a read of `constant`, a constant of `class`, gives. Its docblock type (`@var`) reflects the type the user
+/// intends, so it comes first. A collection literal takes its type from where PHP# writes it, spec section 12, so a PHP#
+/// constant that declares a collection, a tuple or an `Iterable` reads as that type, where its value's own type is only
+/// a list or a keyed array, and one that declares a function type reads as it, where a lambda's own type is only a
+/// `Closure`. Otherwise a constant's type is its declared type, which its value may only narrow, as a literal string
+/// narrows `string`, so the type its value is inferred to have comes instead when the declared type holds it.
+fn read_type(codebase: &CodebaseMetadata, class: &ClassLikeMetadata, constant: &ClassLikeConstantMetadata) -> TUnion {
+    let expanded = |mut union: TUnion| {
+        expander::expand_union(
+            codebase,
+            &mut union,
+            &TypeExpansionOptions {
+                self_class: Some(class.name),
+                static_class_type: StaticClassType::Name(class.name),
+                function_is_final: class.flags.is_final(),
+                ..Default::default()
+            },
+        );
+
+        union
+    };
+    let declared = constant.type_metadata.as_ref().map(|declared| expanded(declared.type_union.clone()));
     if let Some(type_metadata) = &constant.type_metadata
         && (type_metadata.from_docblock
-            || (sharp
+            || (class.flags.is_sharp()
                 && type_metadata
                     .type_union
                     .types
                     .iter()
                     .any(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Iterable(_) | TAtomic::Callable(_)))))
     {
-        return type_metadata.type_union.clone();
+        return declared.unwrap_or_else(get_mixed);
     }
 
-    constant
-        .inferred_type
-        .clone()
-        .map(wrap_atomic)
-        .or_else(|| constant.type_metadata.clone().map(|declared| declared.type_union))
-        .unwrap_or_else(get_mixed)
+    let inferred = constant.inferred_type.clone().map(|inferred| expanded(wrap_atomic(inferred)));
+    match (inferred, declared) {
+        (Some(inferred), Some(declared))
+            if !union_comparator::is_contained_by(
+                codebase,
+                &inferred,
+                &declared,
+                false,
+                false,
+                false,
+                &mut ComparisonResult { sharp_rules: class.flags.is_sharp(), ..ComparisonResult::new() },
+            ) =>
+        {
+            declared
+        }
+        (Some(inferred), _) => inferred,
+        (None, declared) => declared.unwrap_or_else(get_mixed),
+    }
 }
 
 /// Reports an error for a class-like that cannot be found in the codebase.
