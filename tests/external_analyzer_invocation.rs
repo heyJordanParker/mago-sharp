@@ -782,6 +782,52 @@ fn node_hooks_see_a_sharp_call_of_self_a_case_and_a_local_as_the_php_that_means_
     Ok(())
 }
 
+/// A host's node hooks read each PHP# call form, its type arguments apart from its arguments: an instance call
+/// `calc.wrap<int>(1)`, a null-safe one `maybe?.wrap<int>(2)`, a static one `Calc.pair<int>(3)`, a call on a call
+/// `Calc.pair<int>(3).first<int>()`, a null-safe call of a function value `doubler?.(4)`, and `new Box<int>(5)`, which no
+/// SDK view reads. Each passes its type arguments to the call as written, where 0.6.10's view of a call that passes any
+/// refused it with "A call node has no argument list." and stopped the analysis of the file.
+#[test]
+fn node_hooks_read_each_sharp_call_form_and_its_type_arguments() -> Result<(), Box<dyn std::error::Error>> {
+    if !php_sdk_is_available() {
+        return Ok(());
+    }
+
+    const BOX: (&str, &str) =
+        ("src/Box.sharp", "namespace Demo;\n\npublic class Box<T>\n{\n    public Box(public T item { get; }) { }\n}\n");
+    const CALC: (&str, &str) = (
+        "src/Calc.sharp",
+        "namespace Demo;\n\npublic class Calc\n{\n    public int wrap<TItem>(TItem item) => 1;\n\n    public static Calc pair<TItem>(TItem item) => new Calc();\n\n    public TItem? first<TItem>() => null;\n}\n",
+    );
+    const REPORT: (&str, &str) = (
+        "src/Report.sharp",
+        "namespace Demo;\n\npublic class Report\n{\n    public static int total(Calc calc, Calc? maybe, Function<int(int)>? doubler)\n    {\n        const wrapped = calc.wrap<int>(1);\n        const maybeWrapped = maybe?.wrap<int>(2);\n        const first = Calc.pair<int>(3).first<int>();\n        const doubled = doubler?.(4);\n        const box = new Box<int>(5);\n        return wrapped + (maybeWrapped ?? 0) + (first ?? 0) + (doubled ?? 0) + box.item;\n    }\n}\n",
+    );
+
+    let observation = analyze_files_with_fixture(&[BOX, CALC, REPORT], &["MAGO_INVOCATION_EVERY_CALL_KIND"])?;
+
+    assert_eq!(observation.issues, []);
+    assert_eq!(
+        observation.invocations,
+        [
+            "call-kind-wrap-instance",
+            "type-arguments-wrap<int>(1)",
+            "call-kind-wrap-instance",
+            "type-arguments-wrap<int>(1)",
+            "call-kind-first-instance",
+            "receiver-call-kind-pair-static",
+            "type-arguments-first<int>(0)",
+            "call-kind-pair-static",
+            "type-arguments-pair<int>(1)",
+            "call-kind-unnamed-function",
+            "Instantiation-hook-new Box<int>(5)",
+            "Instantiation-hook-new Calc()",
+        ]
+    );
+
+    Ok(())
+}
+
 /// `Pdf.render(…)` after `import Vendor.Pdf;` calls the plain PHP function `Vendor\Pdf\render`, spec section 23, where
 /// no class is named `Vendor\Pdf`, as `render(…)` does in PHP after `use function Vendor\Pdf\render;`. A host reads it
 /// as that function's call, named at `render`, as Roslyn's semantic model gives a call's symbol.

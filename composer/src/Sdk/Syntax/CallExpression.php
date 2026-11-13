@@ -25,12 +25,15 @@ final class CallExpression
 
     /**
      * @param list<CallArgument> $arguments
+     * @param ?Node $typeArguments The PHP# type arguments the call passes, as the `<Order>` of `Json.decode<Order>(body)`,
+     *     or null for a call that passes none, which every PHP call is.
      */
     private function __construct(
         public readonly Node $node,
         public readonly Node $callee,
         public readonly ?Node $receiver,
         public readonly ?Node $member,
+        public readonly ?Node $typeArguments,
         array $arguments,
         private readonly bool $static,
         private readonly bool $function,
@@ -42,6 +45,7 @@ final class CallExpression
     {
         if (
             $node->kind !== NodeKind::FunctionCall
+            && $node->kind !== NodeKind::NullSafeFunctionCall
             && $node->kind !== NodeKind::MethodCall
             && $node->kind !== NodeKind::NullSafeMethodCall
             && $node->kind !== NodeKind::StaticMethodCall
@@ -50,38 +54,20 @@ final class CallExpression
         }
 
         $children = $source->getChildren($node);
-        $function = $node->kind === NodeKind::FunctionCall;
+        $function = $node->kind === NodeKind::FunctionCall || $node->kind === NodeKind::NullSafeFunctionCall;
         $callee = self::unwrapExpression(
             $source,
             $children[0] ?? throw new InvalidArgumentException('A call node has no callee.'),
         );
         $member = $function ? null : $children[1] ?? null;
-        $argumentList = $children[$function ? 1 : 2] ?? null;
+        // A PHP# method call's type arguments come before its argument list, as `attributes<Action>()`.
+        $next = $function ? 1 : 2;
+        $typeArguments = ($children[$next] ?? null)?->kind === NodeKind::TypeArgumentList ? $children[$next++] : null;
+        $argumentList = $children[$next] ?? null;
         if ($argumentList === null || $argumentList->kind !== NodeKind::ArgumentList) {
             throw new InvalidArgumentException('A call node has no argument list.');
         }
-
-        $arguments = [];
-        foreach ($source->getChildren($argumentList) as $argument) {
-            $variant = $source->getChildren($argument)[0] ?? null;
-            if ($variant === null) {
-                continue;
-            }
-            $parts = $source->getChildren($variant);
-            $named = $variant->kind === NodeKind::NamedArgument;
-            $value = $parts[$named ? 1 : 0] ?? null;
-            if ($value === null) {
-                continue;
-            }
-            $value = self::unwrapExpression($source, $value);
-            $arguments[] = new CallArgument(
-                count($arguments),
-                $argument,
-                $value,
-                $named ? $source->getText($parts[0]) : null,
-                str_starts_with($source->getText($variant), '...'),
-            );
-        }
+        $arguments = self::arguments($source, $argumentList);
 
         // Mago names a class at the member of `PaymentResult.Declined(…)`, which builds that enum case, spec section 20,
         // as `new PaymentResult\Declined(…)` does: no call of a function or a method.
@@ -104,10 +90,19 @@ final class CallExpression
         // A PHP# call of a plain PHP function, `global.max()` or `Pdf.render()`, is a method call whose member Mago
         // names as the function.
         if ($member !== null && $memberName !== null && !$builds) {
-            return new self($node, $member, null, $member, $arguments, false, true);
+            return new self($node, $member, null, $member, $typeArguments, $arguments, false, true);
         }
 
-        return new self($node, $callee, $function || $builds ? null : $callee, $member, $arguments, $static, $function);
+        return new self(
+            $node,
+            $callee,
+            $function || $builds ? null : $callee,
+            $member,
+            $typeArguments,
+            $arguments,
+            $static,
+            $function,
+        );
     }
 
     public static function fromExpression(SourceFile $source, Node $node): ?self
@@ -123,6 +118,7 @@ final class CallExpression
 
         return match ($node->kind) {
             NodeKind::FunctionCall,
+            NodeKind::NullSafeFunctionCall,
             NodeKind::MethodCall,
             NodeKind::NullSafeMethodCall,
             NodeKind::StaticMethodCall,
@@ -182,6 +178,38 @@ final class CallExpression
         }
 
         return $source->getText($selector);
+    }
+
+    /**
+     * Each argument of `$argumentList`, positional, named or spread, in order.
+     *
+     * @return list<CallArgument>
+     */
+    private static function arguments(SourceFile $source, Node $argumentList): array
+    {
+        $arguments = [];
+        foreach ($source->getChildren($argumentList) as $argument) {
+            $variant = $source->getChildren($argument)[0] ?? null;
+            if ($variant === null) {
+                continue;
+            }
+            $parts = $source->getChildren($variant);
+            $named = $variant->kind === NodeKind::NamedArgument;
+            $value = $parts[$named ? 1 : 0] ?? null;
+            if ($value === null) {
+                continue;
+            }
+            $value = self::unwrapExpression($source, $value);
+            $arguments[] = new CallArgument(
+                count($arguments),
+                $argument,
+                $value,
+                $named ? $source->getText($parts[0]) : null,
+                str_starts_with($source->getText($variant), '...'),
+            );
+        }
+
+        return $arguments;
     }
 
     private static function unwrapExpression(SourceFile $source, Node $node): Node

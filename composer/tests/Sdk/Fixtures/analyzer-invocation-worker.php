@@ -879,8 +879,46 @@ final class InvocationCallKindHook implements NodeAnalysisHook
             $call->isMethod() => 'instance',
             default => 'other',
         };
-
         return $name . '-' . $kind;
+    }
+}
+
+/**
+ * Records the type arguments each call passes, apart from its arguments, as `wrap<int>(1)` for `calc.wrap<int>(1)`.
+ *
+ * @mago-expect lint:single-class-per-file
+ */
+final class InvocationTypeArgumentsHook implements NodeAnalysisHook
+{
+    public function getTargets(): array
+    {
+        return [
+            NodeKind::FunctionCall,
+            NodeKind::NullSafeFunctionCall,
+            NodeKind::MethodCall,
+            NodeKind::NullSafeMethodCall,
+            NodeKind::StaticMethodCall,
+        ];
+    }
+
+    public function getRequirements(): array
+    {
+        return [FileAnalysisRequirement::TargetSubtree, FileAnalysisRequirement::SourceText];
+    }
+
+    public function analyze(NodeAnalysisContext $context): void
+    {
+        $call = CallExpression::fromNode($context->source, $context->node);
+        if ($call->typeArguments !== null) {
+            InvocationAudit::record(
+                'type-arguments-'
+                . ($call->getName($context->source) ?? 'unnamed')
+                . $context->source->getText($call->typeArguments)
+                . '('
+                . count($call->arguments)
+                . ')',
+            );
+        }
     }
 }
 
@@ -1112,6 +1150,13 @@ if (getenv('MAGO_INVOCATION_TWINS') === '1') {
 }
 $registerIssueFilter = getenv('MAGO_INVOCATION_ISSUE_FILTER') === '1';
 $callKindTargets = match (true) {
+    getenv('MAGO_INVOCATION_EVERY_CALL_KIND') === '1' => [
+        NodeKind::FunctionCall,
+        NodeKind::NullSafeFunctionCall,
+        NodeKind::MethodCall,
+        NodeKind::NullSafeMethodCall,
+        NodeKind::StaticMethodCall,
+    ],
     getenv('MAGO_INVOCATION_CALL_KINDS') === '1' => [NodeKind::MethodCall, NodeKind::StaticMethodCall],
     getenv('MAGO_INVOCATION_STATIC_CALL_KINDS') === '1' => [NodeKind::StaticMethodCall],
     getenv('MAGO_INVOCATION_FUNCTION_CALL_KINDS') === '1' => [NodeKind::FunctionCall],
@@ -1120,6 +1165,10 @@ $callKindTargets = match (true) {
 $nodeAnalysisHooks = [];
 if ($callKindTargets !== []) {
     $nodeAnalysisHooks[] = new InvocationCallKindHook($callKindTargets);
+}
+if (getenv('MAGO_INVOCATION_EVERY_CALL_KIND') === '1') {
+    $nodeAnalysisHooks[] = new InvocationTypeArgumentsHook();
+    $nodeAnalysisHooks[] = new InvocationBareCallHook(NodeKind::Instantiation);
 }
 if (getenv('MAGO_INVOCATION_BARE_CALL_HOOKS') === '1') {
     $nodeAnalysisHooks[] = new InvocationBareCallHook(NodeKind::MethodCall);
