@@ -28551,75 +28551,55 @@ fn a_static_field_holding_a_foreign_object_is_refused() {
     );
 }
 
+/// The standard library's reflection of a class's members, spec section 25, as a project installs it.
+const REFLECTION: [(&str, &str); 6] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ClassMembers.sharp",
+        include_str!("../../../../composer/library/Sharp/ClassMembers.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Method.sharp",
+        include_str!("../../../../composer/library/Sharp/Method.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Parameter.sharp",
+        include_str!("../../../../composer/library/Sharp/Parameter.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Property.sharp",
+        include_str!("../../../../composer/library/Sharp/Property.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Visibility.sharp",
+        include_str!("../../../../composer/library/Sharp/Visibility.sharp"),
+    ),
+    BUILTINS,
+];
+
 /// Spec section 25: a reflection boolean is named `isNullable` and `isOptional`, as the standard library names every
 /// boolean, so 0.6.10's `nullable` and `optional` name no member.
 #[test]
 fn the_reflection_booleans_of_0_6_10_name_no_member() {
-    let library = [
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ClassMembers.sharp",
-            include_str!("../../../../composer/library/Sharp/ClassMembers.sharp"),
-        ),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Method.sharp",
-            include_str!("../../../../composer/library/Sharp/Method.sharp"),
-        ),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Parameter.sharp",
-            include_str!("../../../../composer/library/Sharp/Parameter.sharp"),
-        ),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Property.sharp",
-            include_str!("../../../../composer/library/Sharp/Property.sharp"),
-        ),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Visibility.sharp",
-            include_str!("../../../../composer/library/Sharp/Visibility.sharp"),
-        ),
-        BUILTINS,
-    ];
     let report = (
         "src/Report.sharp",
         "namespace App;\n\npublic class Report\n{\n    public bool read(int depth)\n    {\n        const parameter = typeof(Report).methods()[0].parameters()[0];\n        bool nullable = parameter.nullable;\n        bool optional = parameter.optional;\n        return nullable || optional || depth > 0;\n    }\n}\n",
     );
 
     assert_eq!(
-        messages(report, &library),
+        messages(report, &REFLECTION),
         ["Property `Parameter.nullable` does not exist.", "Property `Parameter.optional` does not exist."]
     );
 }
 
 /// Spec section 25: a `Method` gives the class that declares it, `isStatic`, `isNullable` and its `Visibility`, a
 /// `Property` its declaring class, `isNullable` and `Visibility`, and a `Parameter` `isNullable`, `isOptional`,
-/// `isVariadic` and its `defaultValue()`, so each read into an `int` is refused with its own type.
+/// `isVariadic` and its `defaultValue()`, so each read into an `int` is refused with its own type. So are a method's
+/// `invoke` and a property's `get`, whose results are `Any?`.
 #[test]
 fn reflection_gives_each_member_fact_its_type() {
-    let library = [
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ClassMembers.sharp",
-            include_str!("../../../../composer/library/Sharp/ClassMembers.sharp"),
-        ),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Method.sharp",
-            include_str!("../../../../composer/library/Sharp/Method.sharp"),
-        ),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Parameter.sharp",
-            include_str!("../../../../composer/library/Sharp/Parameter.sharp"),
-        ),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Property.sharp",
-            include_str!("../../../../composer/library/Sharp/Property.sharp"),
-        ),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Visibility.sharp",
-            include_str!("../../../../composer/library/Sharp/Visibility.sharp"),
-        ),
-        BUILTINS,
-    ];
     let report = (
         "src/Report.sharp",
-        "namespace App;\n\npublic class Report\n{\n    int code = 0;\n\n    public int read(int depth)\n    {\n        const method = typeof(Report).methods()[0];\n        const property = typeof(Report).properties()[0];\n        const parameter = method.parameters()[0];\n        int declaring = method.declaringClass;\n        int shared = method.isStatic;\n        int visibility = method.visibility;\n        int result = method.isNullable;\n        int owner = property.declaringClass;\n        int reach = property.visibility;\n        int held = property.isNullable;\n        int given = parameter.isNullable;\n        int optional = parameter.isOptional;\n        int variadic = parameter.isVariadic;\n        int fallback = parameter.defaultValue();\n        return declaring + shared + visibility + result + owner + reach + held + given + optional + variadic + fallback\n            + depth + this.code;\n    }\n}\n",
+        "namespace App;\n\npublic class Report\n{\n    int code = 0;\n\n    public int read(int depth)\n    {\n        const method = typeof(Report).methods()[0];\n        const property = typeof(Report).properties()[0];\n        const parameter = method.parameters()[0];\n        int declaring = method.declaringClass;\n        int shared = method.isStatic;\n        int visibility = method.visibility;\n        int result = method.isNullable;\n        int owner = property.declaringClass;\n        int reach = property.visibility;\n        int held = property.isNullable;\n        int given = parameter.isNullable;\n        int optional = parameter.isOptional;\n        int variadic = parameter.isVariadic;\n        int fallback = parameter.defaultValue();\n        int called = method.invoke(this, [depth]);\n        int value = property.get(this);\n        return declaring + shared + visibility + result + owner + reach + held + given + optional + variadic + fallback\n            + called + value + depth + this.code;\n    }\n}\n",
     );
 
     // Each refusal names the local and the type of the member read into it.
@@ -28627,7 +28607,7 @@ fn reflection_gives_each_member_fact_its_type() {
         let from = text.find(start).map(|offset| offset + start.len()).expect("the issue names it");
         text[from..].split(end).next().unwrap_or_default().to_owned()
     };
-    let read: Vec<String> = worded(report, &library)
+    let read: Vec<String> = worded(report, &REFLECTION)
         .iter()
         .map(|issue| format!("{}: {}", between(issue, "assignment to `", "`"), between(issue, "has type `", "`.")))
         .collect();
@@ -28646,6 +28626,47 @@ fn reflection_gives_each_member_fact_its_type() {
             "optional: bool",
             "variadic: bool",
             "fallback: Any?",
+            "called: Any?",
+            "value: Any?",
+        ]
+    );
+}
+
+/// Spec sections 25 and 29: `Method.invoke`, `Property.get` and `Property.set` run code the caller can't see, a method's
+/// body, a `get` or a `set`, so each may have every effect. A method that implements a pure interface method can't call
+/// one, and a method with no `uses` to keep may.
+#[test]
+fn a_reflection_call_read_or_write_may_have_every_effect() {
+    let audit =
+        ("app/Shop/Audit.sharp", "namespace App.Shop;\n\npublic interface Audit\n{\n    void run(Till till);\n}\n");
+    let till = (
+        "app/Shop/Till.sharp",
+        "namespace App.Shop;\n\npublic class Till\n{\n    public int total { get; set; } = 0;\n\n    public int add(int amount) => amount;\n}\n",
+    );
+    let calling = (
+        "app/Shop/Calling.sharp",
+        "namespace App.Shop;\n\npublic class Calling : Audit\n{\n    public void run(Till till) { typeof(Till).methods()[0].invoke(till, [1]); }\n}\n",
+    );
+    let reading = (
+        "app/Shop/Reading.sharp",
+        "namespace App.Shop;\n\npublic class Reading : Audit\n{\n    public void run(Till till) { typeof(Till).properties()[0].get(till); }\n}\n",
+    );
+    let writing = (
+        "app/Shop/Writing.sharp",
+        "namespace App.Shop;\n\npublic class Writing : Audit\n{\n    public void run(Till till) { typeof(Till).properties()[0].set(till, 2); }\n}\n",
+    );
+    let free = (
+        "app/Shop/Free.sharp",
+        "namespace App.Shop;\n\npublic class Free\n{\n    public void run(Till till) { typeof(Till).properties()[0].set(till, typeof(Till).methods()[0].invoke(till, [1])); }\n}\n",
+    );
+    let [a, b, c, d, e, f] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[calling, reading, writing, free, audit, till, a, b, c, d, e, f]),
+        [
+            "app/Shop/Calling.sharp:5:34 incompatible-effects: `Calling.run` reaches `Method.invoke`, which may have every effect, so the pure `Audit.run` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+            "app/Shop/Reading.sharp:5:34 incompatible-effects: `Reading.run` reaches `Property.get`, which may have every effect, so the pure `Audit.run` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+            "app/Shop/Writing.sharp:5:34 incompatible-effects: `Writing.run` reaches `Property.set`, which may have every effect, so the pure `Audit.run` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
         ]
     );
 }

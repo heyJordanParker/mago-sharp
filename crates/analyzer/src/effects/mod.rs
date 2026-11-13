@@ -168,6 +168,9 @@ pub(crate) struct Impurity {
     pub(crate) cause: (Word, Word),
     /// The effect of the call, or `None` when the cause is a place written.
     pub(crate) effect: Option<Effect>,
+    /// Whether the path ends at a member of the standard library that may have every effect, spec section 29, as
+    /// `Method.invoke`, whose plain PHP call with no `extern` the caller can't declare.
+    pub(crate) every_effect: bool,
 }
 
 /// The cause of the effect a member of a `foreign` class has by itself, spec section 29, which no call or write gives:
@@ -189,6 +192,12 @@ impl Impurity {
                 Some(body) => format!("reaches `{}`, {class}", written(*body, class_name)),
                 None => format!("is {class}"),
             };
+        }
+
+        if self.every_effect
+            && let Some(body) = self.path.last()
+        {
+            return format!("reaches `{}`, which may have every effect", written(*body, class_name));
         }
 
         let cause = written(self.cause, class_name);
@@ -274,6 +283,8 @@ pub struct Effects {
     bodies: Vec<Body>,
     /// Each body's lowercase class name and its member as messages name it.
     names: Vec<(Word, Word)>,
+    /// Whether each body is a member of the standard library, whose calls a caller sees only through that member.
+    standard_library: Vec<bool>,
     /// The imports and the scope of each body's file, which name the classes of a message about the body.
     imports: Vec<Arc<WordMap<Word>>>,
     scopes: Vec<Arc<NamespaceScope>>,
@@ -381,6 +392,15 @@ impl Effects {
                         (class, summary.member)
                     }
                     Body::Lambda(_) => (empty_word(), summary.member),
+                })
+                .collect(),
+            standard_library: summaries
+                .iter()
+                .map(|summary| match summary.body {
+                    Body::Method(class, _) | Body::Accessor(class, _, _) | Body::InitialValue(class, _) => codebase
+                        .get_class_like(class.as_bytes())
+                        .is_some_and(|metadata| codebase.is_standard_library_file(metadata.span.file_id)),
+                    Body::Lambda(_) => false,
                 })
                 .collect(),
             imports: summaries.iter().map(|summary| Arc::clone(&summary.imports)).collect(),
@@ -555,6 +575,7 @@ impl Effects {
 
         let span = origin.span;
         let mut path = Vec::new();
+        let mut every_effect = false;
         // Each item a call brings in was already its callee's, so the chain ends at a body's own call or write.
         while let Some((callee, callee_item)) = origin.via
             && let Some((_, callee_origin)) = self.solved[callee].iter().find(|(known, _)| *known == callee_item)
@@ -562,6 +583,16 @@ impl Effects {
             path.push(self.names[callee]);
             item = callee_item;
             origin = *callee_origin;
+            // A plain PHP call with no `extern` in the standard library is the member's own, as `Method.invoke` runs
+            // any method, so for code outside the library the chain ends at the member it calls. The library's own
+            // code is told the `extern` to write.
+            if !self.standard_library[position]
+                && self.standard_library[callee]
+                && matches!(item, Item::Effect(Effect::Unknown(_)))
+            {
+                every_effect = true;
+                break;
+            }
         }
 
         let effect = match item {
@@ -569,7 +600,7 @@ impl Effects {
             Item::Changed(_) => None,
         };
 
-        Some(Impurity { span, path, cause: origin.cause, effect })
+        Some(Impurity { span, path, cause: origin.cause, effect, every_effect })
     }
 
     /// The first function value given each place that has an effect its place's function type does not list, with
@@ -594,7 +625,15 @@ impl Effects {
                 Runs::Foreign { callee, effects } => {
                     let effect = effects.iter().find(|effect| is_outside(codebase, **effect, &value.allowed))?;
 
-                    (*callee, Impurity { span: value.span, path: Vec::new(), cause: *callee, effect: Some(*effect) })
+                    let impurity = Impurity {
+                        span: value.span,
+                        path: Vec::new(),
+                        cause: *callee,
+                        effect: Some(*effect),
+                        every_effect: false,
+                    };
+
+                    (*callee, impurity)
                 }
             };
             reported.push(value.span);

@@ -377,6 +377,9 @@ fn impure(
     let issue = Issue::error(message).with_code(code.as_str()).with_annotation(Annotation::primary(span));
 
     match impurity.effect {
+        Some(Effect::Unknown(Some(_))) if impurity.every_effect => {
+            issue.with_help("It runs code no `uses` can name, so call it where no `uses` limits the effects.")
+        }
         Some(Effect::Unknown(Some((class, member)))) => {
             let (target, import) = if class.is_empty() {
                 let (target, namespace) = written_function(member, code_class_name);

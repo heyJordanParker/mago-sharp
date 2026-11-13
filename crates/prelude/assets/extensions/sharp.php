@@ -500,6 +500,26 @@ function methods(string $type): array {}
 function typeArguments(string $type): array {}
 
 /**
+ * The result of the method `$method` that `$class` declares, called on `$receiver` with `$arguments` as a direct call
+ * from the caller's code would be. The standard library's `Method.invoke` returns it.
+ *
+ * @param list<mixed> $arguments
+ */
+function invoke(object $receiver, string $class, string $method, array $arguments): mixed {}
+
+/**
+ * The value of the property `$property` that `$class` declares, read on `$receiver` as a direct read from the caller's
+ * code would be. The standard library's `Property.get` returns it.
+ */
+function read(object $receiver, string $class, string $property): mixed {}
+
+/**
+ * Writes `$value` into the property `$property` that `$class` declares on `$receiver`, as a direct write from the
+ * caller's code would. The standard library's `Property.set` runs it.
+ */
+function write(object $receiver, string $class, string $property, mixed $value): void {}
+
+/**
  * The listeners of `$event`, one function per listener that takes the event, as `emit` gives them to the dispatcher.
  * The standard library's `Sharp\Psr\ListenerProvider` returns them to a PSR-14 dispatcher.
  *
