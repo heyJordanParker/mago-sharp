@@ -29467,6 +29467,20 @@ fn a_composed_string_for_a_plain_php_literal_string_is_refused_by_name() {
     );
 }
 
+/// An interface that isn't sealed is open, spec section 21: any class may implement it, so `Payment` minus `Paid` is
+/// still a `Payment`, never the implementers the checker happens to see, and `not (Paid or Refunded)` can match.
+#[test]
+fn an_open_interface_without_one_implementer_is_still_the_interface() {
+    let others = [
+        ("src/App/Payment.sharp", "namespace App;\n\npublic interface Payment\n{\n}\n"),
+        ("src/App/Paid.sharp", "namespace App;\n\npublic class Paid : Payment\n{\n}\n"),
+        ("src/App/Refunded.sharp", "namespace App;\n\npublic class Refunded : Payment\n{\n}\n"),
+    ];
+    let sharp = "namespace App;\n\npublic class Probe\n{\n    public bool neither(Payment given) => given is not (Paid or Refunded);\n\n    public Payment rest(Payment given)\n    {\n        if (given is not Paid) {\n            const bool refunded = given is Refunded;\n            return given;\n        }\n        return given;\n    }\n}\n";
+
+    assert_eq!(explained(("src/App/Probe.sharp", sharp), &others), Vec::<String>::new());
+}
+
 /// A value fixed when the code compiles is a `literal-string`, spec section 24: a template or a `+` join whose parts are
 /// literals and constants of type `int`, `float` or `string` passes to a plain PHP `literal-string` parameter, as a
 /// constant that holds one does, and a template that holds a value of the running code is still refused.

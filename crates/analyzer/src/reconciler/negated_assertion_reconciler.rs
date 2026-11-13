@@ -5,14 +5,12 @@ use std::sync::Arc;
 use mago_codex::assertion::Assertion;
 use mago_codex::consts::MAX_ENUM_CASES_FOR_ANALYSIS;
 use mago_word::Word;
-use mago_word::WordSet;
 
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::r#enum::TEnum;
-use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::bool::TBool;
 use mago_codex::ttype::atomic::scalar::string::TString;
@@ -23,13 +21,11 @@ use mago_codex::ttype::comparator::atomic_comparator;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::get_arraykey;
 use mago_codex::ttype::get_never;
-use mago_codex::ttype::get_placeholder;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
 use mago_span::Span;
 
 use crate::reconciler::Context;
-use crate::reconciler::assertion_reconciler::intersect_atomic_with_atomic;
 use crate::reconciler::simple_negated_assertion_reconciler;
 use crate::reconciler::trigger_issue_for_impossible;
 
@@ -110,7 +106,7 @@ where
 }
 
 fn subtract_complex_type<A>(
-    context: &mut Context<'_, '_, A>,
+    context: &Context<'_, '_, A>,
     assertion_type: &TAtomic,
     existing_var_type: &mut TUnion,
     can_be_disjunct: &mut bool,
@@ -171,27 +167,11 @@ fn subtract_complex_type<A>(
                 TAtomic::Object(TObject::Named(existing_named_object)),
                 TAtomic::Object(TObject::Named(assertion_named_object)),
             ) => {
+                // A class or an interface is open, so subtracting one of its children leaves it as it is. Only a sealed
+                // interface, an enum or an `@inheritors` hierarchy narrows to its other members, which the simple
+                // reconciler subtracts before this runs.
                 let existing_classlike_name = existing_named_object.get_name();
                 let assertion_classlike_name = assertion_named_object.get_name();
-
-                if let Some(class_like_metadata) = context.codebase.get_class_like(existing_classlike_name.as_bytes()) {
-                    // handle __Sealed classes, negating where possible
-                    if let Some(child_classlikes) = class_like_metadata.child_class_likes.as_ref()
-                        && child_classlikes.contains(&assertion_classlike_name)
-                    {
-                        handle_negated_class(
-                            context,
-                            child_classlikes,
-                            &existing_atomic,
-                            assertion_classlike_name,
-                            &mut acceptable_types,
-                        );
-
-                        *can_be_disjunct = true;
-
-                        continue;
-                    }
-                }
 
                 if (context.codebase.interface_exists(assertion_classlike_name.as_bytes())
                     || context.codebase.interface_exists(existing_classlike_name.as_bytes()))
@@ -268,38 +248,6 @@ fn subtract_complex_type<A>(
     }
 
     existing_var_type.types = Cow::Owned(acceptable_types);
-}
-
-fn handle_negated_class<A>(
-    context: &mut Context<'_, '_, A>,
-    child_classlikes: &WordSet,
-    existing_atomic: &TAtomic,
-    assertion_classlike_name: Word,
-    acceptable_types: &mut Vec<TAtomic>,
-) where
-    A: Arena,
-{
-    for child_classlike in child_classlikes {
-        if *child_classlike != assertion_classlike_name {
-            let alternate_class =
-                TAtomic::Object(TObject::Named(TNamedObject::new(*child_classlike).with_type_parameters(
-                    if let Some(child_metadata) = context.codebase.get_class_like(child_classlike.as_bytes()) {
-                        let placeholder_params =
-                            child_metadata.template_types.iter().map(|_| get_placeholder()).collect::<Vec<_>>();
-
-                        if placeholder_params.is_empty() { None } else { Some(placeholder_params) }
-                    } else {
-                        None
-                    },
-                )));
-
-            if let Some(acceptable_alternate_class) =
-                intersect_atomic_with_atomic(context, existing_atomic, &alternate_class)
-            {
-                acceptable_types.push(acceptable_alternate_class);
-            }
-        }
-    }
 }
 
 fn handle_literal_negated_equality<A>(
