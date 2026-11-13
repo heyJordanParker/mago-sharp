@@ -78,6 +78,7 @@ use crate::commands::outcome::CommandOutcome;
 use crate::config::Configuration;
 use crate::config::extension::ExtensionHostConfiguration;
 use crate::consts::PRELUDE_BYTES;
+use crate::consts::VERSION;
 use crate::error::Error;
 use crate::extensions::start_external_analyzer;
 use crate::utils::create_orchestrator;
@@ -1128,7 +1129,9 @@ const STANDARD_LIBRARY_PACKAGE: &str = "heyjordanparker/php-sharp-composer";
 /// or whose library declares no native bodies in a `native.php`, compiles against none, an all-zero fingerprint.
 ///
 /// Fails when the package's `native.php` gives no fingerprint, so no compiled file names a library it was not checked
-/// against.
+/// against, and when the package is a release other than mago's own, since mago reads the library it ships with, as
+/// the `Dispatcher` it marks. A Composer dev version, as `dev-master` or `0.6.x-dev`, and a library outside `vendor/`
+/// name no release, so they compile.
 pub(crate) fn standard_library(root: &Path, database: &impl DatabaseReader) -> Result<unit::Library, String> {
     let Some(file) = database.files().find(|file| file.is_standard_library) else {
         return Ok(unit::Library::default());
@@ -1140,6 +1143,28 @@ pub(crate) fn standard_library(root: &Path, database: &impl DatabaseReader) -> R
             source.display()
         ));
     };
+
+    let installed = package.parent().and_then(Path::parent).map(|vendor| vendor.join("composer/installed.json"));
+    let version = installed
+        .and_then(|installed| std::fs::read(installed).ok())
+        .and_then(|installed| serde_json::from_slice::<serde_json::Value>(&installed).ok())
+        .and_then(|installed| {
+            let packages = installed.get("packages").unwrap_or(&installed).as_array()?.clone();
+            packages
+                .into_iter()
+                .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(STANDARD_LIBRARY_PACKAGE))
+        })
+        .and_then(|entry| entry.get("version").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .unwrap_or_default();
+    // A tag names its release with a `v`, as the engine reads it.
+    let release =
+        version.strip_prefix('v').filter(|rest| rest.starts_with(|c: char| c.is_ascii_digit())).unwrap_or(&version);
+    if !release.is_empty() && !release.starts_with("dev-") && !release.ends_with("-dev") && release != VERSION {
+        return Err(format!(
+            "This project's PHP# standard library is {release}, and mago is {VERSION}. Move mago and the standard library \
+             to the same release: require {STANDARD_LIBRARY_PACKAGE} {VERSION}, or heyjordanparker/mago-sharp {release}."
+        ));
+    }
 
     let native = package.join("native.php");
     if !native.exists() {
@@ -1157,19 +1182,6 @@ pub(crate) fn standard_library(root: &Path, database: &impl DatabaseReader) -> R
     let Some(native_fingerprint) = fingerprint else {
         return Err(format!("{} gives no native fingerprint. Reinstall {STANDARD_LIBRARY_PACKAGE}.", native.display()));
     };
-
-    let installed = package.parent().and_then(Path::parent).map(|vendor| vendor.join("composer/installed.json"));
-    let version = installed
-        .and_then(|installed| std::fs::read(installed).ok())
-        .and_then(|installed| serde_json::from_slice::<serde_json::Value>(&installed).ok())
-        .and_then(|installed| {
-            let packages = installed.get("packages").unwrap_or(&installed).as_array()?.clone();
-            packages
-                .into_iter()
-                .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(STANDARD_LIBRARY_PACKAGE))
-        })
-        .and_then(|entry| entry.get("version").and_then(serde_json::Value::as_str).map(str::to_owned))
-        .unwrap_or_default();
 
     Ok(unit::Library { native_fingerprint, version: version.into_bytes() })
 }

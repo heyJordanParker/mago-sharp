@@ -27990,7 +27990,7 @@ fn a_static_method_value_has_its_method_s_effects_where_it_runs() {
         );
         let job = ("app/Shop/Job.sharp", Box::leak(code.into_boxed_str()) as &'static str);
 
-        assert_eq!(issues(job, &[pinged, runner, RELAY_STUB, RELAY, SCOPE]), Vec::<String>::new(), "{go}");
+        assert_eq!(issues(job, &[pinged, runner, RELAY_STUB, RELAY, SCOPE, DISPATCHER]), Vec::<String>::new(), "{go}");
         assert_eq!(
             effect_issues(&[job, pinged, runner, RELAY_STUB, RELAY, SCOPE]),
             [
@@ -31026,11 +31026,11 @@ fn emit_takes_an_event() {
         ]
     );
     assert_eq!(
-        worded(noticed, &[failed, notice]),
+        worded(noticed, &[failed, notice, DISPATCHER]),
         [format!("9:14 invalid-event `emit` takes an event, and `Notice` is not one. | Emitted here. | {note}")]
     );
     assert_eq!(
-        worded(raiser, &[order_event, order_paid, refunded, failed, money, spot]),
+        worded(raiser, &[order_event, order_paid, refunded, failed, money, spot, DISPATCHER]),
         [
             "11:116 non-existent-class-like Cannot find type `App.Shop.Missing`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.".to_owned(),
             format!("16:14 invalid-event `emit` takes an event, and `OrderEvent` is not one. | Emitted here. | {note}"),
@@ -31057,7 +31057,7 @@ fn emit_has_the_effect_events() {
         "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<void() uses Events> announce = () => { emit new OrderPaid(1); };\n\n    private Function<void()> silent = () => { emit new OrderPaid(2); };\n\n    public int paid\n    {\n        get\n        {\n            emit new OrderPaid(3);\n            return 3;\n        }\n    }\n\n    public int total => this.complete();\n\n    law completes(Checkout checkout) => checkout.complete() > 0;\n\n    law announces(Checkout checkout) => checkout.paid > 0;\n\n    public int complete()\n    {\n        emit new OrderPaid(4);\n        return 4;\n    }\n\n    public void run()\n    {\n        this.announce();\n        this.silent();\n    }\n\n    public void broadcast()\n    {\n        emit new OrderPaid(5);\n        this.announce();\n    }\n}\n",
     );
 
-    assert_eq!(issues(checkout, &ORDER_EVENTS), Vec::<String>::new());
+    assert_eq!(issues(checkout, &[order_event, order_paid, DISPATCHER]), Vec::<String>::new());
     // Its own `emit` and a call of a function whose type lists `Events` give a function type `Events` once.
     let (codebase, summaries) = summarized(&[checkout, order_event, order_paid]);
     let broadcast = FunctionLikeIdentifier::Method(word(b"App\\Shop\\Checkout"), word(b"broadcast"));
@@ -31184,6 +31184,26 @@ fn the_dispatcher_is_the_interface_the_standard_library_marks() {
         ),
         Vec::<String>::new()
     );
+}
+
+/// Spec section 15: `emit` hands its event to the dispatcher, so in a project where no interface carries the standard
+/// library's `DispatchesEmits`, which holds no standard library, an `emit` is refused. With the library's `Dispatcher`,
+/// it compiles.
+#[test]
+fn an_emit_without_a_dispatcher_is_refused() {
+    let payer = (
+        "app/Payer.sharp",
+        "namespace App;\n\npublic class Payer\n{\n    public void pay() { emit new Paid(1); }\n}\n",
+    );
+    let paid = ("app/Paid.sharp", "namespace App;\n\npublic event Paid(int orderId);\n");
+
+    assert_eq!(
+        refusals(payer, &[paid]),
+        [
+            "5:25 invalid-event `emit` hands its event to a dispatcher, and this project has none. | Require heyjordanparker/php-sharp-composer, the standard library."
+        ]
+    );
+    assert_eq!(refusals(payer, &[paid, DISPATCHER]), Vec::<String>::new());
 }
 
 /// The standard library's `Dispatcher`, as `sharp/composer/` ships it.

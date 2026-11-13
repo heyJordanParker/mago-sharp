@@ -19,6 +19,7 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleMetadata;
+use mago_codex::metadata::module::dispatcher;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::misc::GenericParent;
@@ -52,7 +53,6 @@ use mago_codex::ttype::takes_array;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
-use mago_names::DISPATCHES_EMITS;
 use mago_names::IMPORT;
 use mago_names::LEAN_FUNCTION;
 use mago_names::ResolvedNames;
@@ -219,15 +219,13 @@ impl<'analysis> Types<'analysis> {
         self.codebase
     }
 
-    /// The full name of the interface every `emit` hands its event to, the one the standard library marks
-    /// [`DispatchesEmits`](DISPATCHES_EMITS), as `Sharp\Dispatcher`. None when the project holds no standard library.
-    pub(crate) fn dispatcher(&self) -> Option<Word> {
-        self.codebase
-            .class_likes
-            .values()
-            .filter(|class_like| class_like.has_attribute(self.codebase, DISPATCHES_EMITS.as_bytes()))
-            .map(|class_like| class_like.original_name)
-            .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()))
+    /// The full name of the interface every `emit` hands its event to, as [`dispatcher`] finds it.
+    pub(crate) fn dispatcher(&self) -> Word {
+        let Some(dispatcher) = dispatcher(self.codebase) else {
+            unreachable!("the checker refuses an `emit` in a project without a dispatcher");
+        };
+
+        dispatcher
     }
 
     /// What the PHP of a pattern depends on, as the analysis answered it.

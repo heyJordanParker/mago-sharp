@@ -16383,14 +16383,13 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
 ///
 /// Spec section 15: `emit` raises the event its expression gives, through the one function the engine adds, which hands
 /// it to the app's binding of the dispatcher, the interface the standard library marks `DispatchesEmits`, with every
-/// listener of the event before it returns. A project without the standard library has no dispatcher, so it passes
-/// null.
+/// listener of the event before it returns.
 #[test]
 fn emit_is_a_call_of_the_engine_emit() {
-    const ORDER: &str = "namespace App;\n\npublic class Order\n{\n    public void run(OrderPaid paid)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n    }\n}\n";
-    const ORDER_PAID: (&str, &str) =
-        ("src/OrderPaid.sharp", "namespace App;\n\npublic event OrderPaid(int orderId);\n");
-    let lowered = Lowered::with(ORDER, &[ORDER_PAID, DISPATCHER_LIBRARY]);
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Order\n{\n    public void run(OrderPaid paid)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n    }\n}\n",
+        &[("src/OrderPaid.sharp", "namespace App;\n\npublic event OrderPaid(int orderId);\n"), DISPATCHER_LIBRARY],
+    );
 
     assert_eq!(
         lowered.body(),
@@ -16410,26 +16409,6 @@ fn emit_is_a_call_of_the_engine_emit() {
                   VAR
                     ZVAL "paid"
                   ZVAL "Sharp\\Dispatcher"
-        "#}
-    );
-    assert_eq!(
-        Lowered::with(ORDER, &[ORDER_PAID]).body(),
-        indoc! {r#"
-            STMT_LIST
-              CALL
-                ZVAL "Sharp\\Internal\\emit"
-                ARG_LIST
-                  NEW
-                    ZVAL "App\\OrderPaid"
-                    ARG_LIST
-                      ZVAL 1
-                  ZVAL null
-              CALL
-                ZVAL "Sharp\\Internal\\emit"
-                ARG_LIST
-                  VAR
-                    ZVAL "paid"
-                  ZVAL null
         "#}
     );
 }
@@ -29856,6 +29835,7 @@ fn every_construct_of_the_slice_lowers_into_nodes_of_their_kinds_child_count() {
             common::FAILURES,
             common::INT,
             common::FLOAT,
+            DISPATCHER_LIBRARY,
         ],
     );
     lowered.push(Lowered::named(

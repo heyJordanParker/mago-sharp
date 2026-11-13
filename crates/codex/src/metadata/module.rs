@@ -128,6 +128,20 @@ pub fn top_dispatcher_namespaces(modules: &[ModuleMetadata], codebase: &Codebase
     binding
 }
 
+/// The full name of the dispatcher, the interface every `emit` hands its event to, spec section 15.
+///
+/// It is the one the standard library marks [`DispatchesEmits`](mago_names::DISPATCHES_EMITS), as `Sharp\Dispatcher`.
+/// None in a project without the standard library, where the checker refuses an `emit`.
+#[must_use]
+pub fn dispatcher(codebase: &CodebaseMetadata) -> Option<Word> {
+    codebase
+        .class_likes
+        .values()
+        .filter(|class_like| class_like.has_attribute(codebase, mago_names::DISPATCHES_EMITS.as_bytes()))
+        .map(|class_like| class_like.original_name)
+        .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()))
+}
+
 impl BindingMetadata {
     /// Whether it binds the dispatcher, the service every `emit` hands its event to: the interface the standard library
     /// marks [`DispatchesEmits`](mago_names::DISPATCHES_EMITS), as `Sharp.Dispatcher`.

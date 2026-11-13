@@ -6,6 +6,7 @@ use mago_allocator::vec_in;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::module::dispatcher;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::scanner::get_union_from_hint;
 use mago_codex::ttype::atomic::TAtomic;
@@ -759,6 +760,17 @@ where
             ))
             .with_annotation(Annotation::primary(emit.value.span()).with_message("Emitted here."))
             .with_note("An event is a class that `event` declares, or a plain PHP class that `extern event` marks."),
+        );
+    }
+    if dispatcher(codebase).is_none() {
+        context.collector.report_with_code(
+            IssueCode::InvalidEvent,
+            Issue::error("`emit` hands its event to a dispatcher, and this project has none.")
+                .with_annotation(Annotation::primary(emit.span()).with_message("Emitted here."))
+                .with_note(
+                    "The dispatcher is the interface the standard library marks `DispatchesEmits`, as `Dispatcher`.",
+                )
+                .with_help("Require heyjordanparker/php-sharp-composer, the standard library."),
         );
     }
 

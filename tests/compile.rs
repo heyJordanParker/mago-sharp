@@ -138,10 +138,13 @@ fn compile_names_the_installed_standard_library_in_each_compiled_file() {
         &format!("{library}/library/Sharp/Math.sharp"),
         "namespace Sharp;\n\npublic static class Math\n{\n    public static int twice(int value) => value * 2;\n}\n",
     );
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
     write(
         root,
         "vendor/composer/installed.json",
-        "{\"packages\": [{\"name\": \"heyjordanparker/php-sharp-composer\", \"version\": \"v0.3.2\"}]}\n",
+        &format!(
+            "{{\"packages\": [{{\"name\": \"heyjordanparker/php-sharp-composer\", \"version\": \"{version}\"}}]}}\n"
+        ),
     );
     let named = |root: &Path| header(&std::fs::read(compiled(root, "app/Order.sharp")).unwrap()).unwrap().library;
 
@@ -157,7 +160,7 @@ fn compile_names_the_installed_standard_library_in_each_compiled_file() {
             native_fingerprint: [
                 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff
             ],
-            version: b"v0.3.2".to_vec(),
+            version: version.into_bytes(),
         }
     );
 
@@ -175,6 +178,49 @@ fn compile_names_the_installed_standard_library_in_each_compiled_file() {
         "{}",
         printed(&output)
     );
+}
+
+/// mago reads the standard library of its own release, as the `Dispatcher` it marks, so the compile refuses a project
+/// whose installed library is another release, naming both. A Composer dev version names no release, so it compiles.
+#[test]
+fn compile_refuses_a_standard_library_of_another_release() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let library = "vendor/heyjordanparker/php-sharp-composer";
+    write(root, &format!("{library}/composer.json"), "{\"name\": \"heyjordanparker/php-sharp-composer\"}\n");
+    write(
+        root,
+        &format!("{library}/library/Sharp/Math.sharp"),
+        "namespace Sharp;\n\npublic static class Math\n{\n    public static int twice(int value) => value * 2;\n}\n",
+    );
+    let install = |version: &str| {
+        write(
+            root,
+            "vendor/composer/installed.json",
+            &format!(
+                "{{\"packages\": [{{\"name\": \"heyjordanparker/php-sharp-composer\", \"version\": \"{version}\"}}]}}\n"
+            ),
+        );
+    };
+    let mago = env!("CARGO_PKG_VERSION");
+
+    install("v0.5.9");
+    let output = compile(root);
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(&format!(
+            "This project's PHP# standard library is 0.5.9, and mago is {mago}. Move mago and the standard library to the \
+             same release: require heyjordanparker/php-sharp-composer {mago}, or heyjordanparker/mago-sharp 0.5.9."
+        )),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Order.sharp").exists());
+
+    for version in [format!("v{mago}"), mago.to_owned(), "dev-master".to_owned(), "0.6.x-dev".to_owned()] {
+        install(&version);
+        compile_succeeds(root);
+    }
 }
 
 /// A dangling link named like a source, as Emacs leaves beside a buffer with unsaved changes, is no source: the loader
