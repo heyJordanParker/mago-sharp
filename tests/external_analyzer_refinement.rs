@@ -388,6 +388,100 @@ fn a_host_refinement_never_hides_an_error_in_a_sharp_declaration() {
     assert_eq!(codes, ["missing-template-parameter"]);
 }
 
+/// The worker refines `Packed` to give `Special` to its parent `Bin`, which the header writes as `bin` and the worker
+/// names as `Bin` declares it, every user of the trait `Unpacking` to extend `Bin`, and the `item` of an anonymous class
+/// to `Special`.
+const PACKING: &str = r"<?php
+
+namespace Proof;
+
+/** @template T of Spec */
+class Bin
+{
+    /** @param T $item */
+    public function __construct(public Spec $item) {}
+
+    /** @return T */
+    public function get(): Spec
+    {
+        return $this->item;
+    }
+}
+
+#[Refined]
+final class Packed extends bin {}
+
+#[Refined]
+trait Unpacking
+{
+    public function unpacked(): Other
+    {
+        return $this->get();
+    }
+}
+
+final class Unpacker
+{
+    public function unpack(Packed $packed): Other
+    {
+        return $packed->get();
+    }
+
+    public function made(): Other
+    {
+        $made = new #[Refined] class(new Special()) {
+            public function __construct(public object $item) {}
+        };
+
+        return $made->item;
+    }
+}
+";
+
+/// A host refines a plain PHP class's header and an anonymous class's members, spec section 24. Arguments it gives a
+/// parent reach the parent the header writes in any case, a trait's required parent lets its body call the parent's
+/// methods, and an anonymous class is the one that starts where the host says.
+#[test]
+fn a_host_refines_a_parent_in_any_case_a_traits_required_parent_and_an_anonymous_class() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the header refinement test") {
+        return;
+    }
+
+    let refined = "<?php\n\nnamespace Proof;\n\nfinal class Refined {}\n";
+    let mut database = Database::new(common::database_configuration("/refinement-proof", vec![Cow::Borrowed(b".")]));
+    for (name, code) in [("src/Box.php", BOX), ("src/Refined.php", refined), ("src/Packing.php", PACKING)] {
+        database.add(File::new(Cow::Borrowed(name.as_bytes()), FileType::Host, None, Cow::Borrowed(code.as_bytes())));
+    }
+    let issues = service(&database, registry(repository)).analyze().expect("the analysis goes on").issues;
+    // This codebase loads no PHP stubs, so `Refined` can't declare `#[\Attribute]`.
+    let mut messages: Vec<(String, String)> = issues
+        .iter()
+        .map(|issue| (issue.code.clone().unwrap_or_default(), issue.message.clone()))
+        .filter(|(code, _)| code != "class-not-marked-as-attribute")
+        .collect();
+    messages.sort();
+
+    // Each value is a `Special` or a `Spec` only through its refinement: `Bin`'s parameter left alone is its bound
+    // `Spec`, the anonymous class's `item` is an `object`, and `Unpacking` has no `get` of its own.
+    let returned = |method: &str, found: &str| {
+        (
+            "invalid-return-statement".to_owned(),
+            format!(
+                "Invalid return type for function `Proof\\{method}`: expected `Proof\\Other`, but found `Proof\\{found}`."
+            ),
+        )
+    };
+    assert_eq!(
+        messages,
+        [
+            returned("Unpacker::made", "Special"),
+            returned("Unpacker::unpack", "Special"),
+            returned("Unpacking::unpacked", "Spec"),
+        ]
+    );
+}
+
 /// A refined class whose `make` returns what the `make` of class `inner` returns, which the worker takes from its body.
 /// Only the body names `inner`, so no signature edge leads from this class to it.
 fn relay(class: &str, inner: &str) -> String {

@@ -252,6 +252,25 @@ mod tests {
         assert!(decoded(&[], &[]).expect("two empty lists").is_empty());
     }
 
+    /// A read of a class-like's direct descendants or of all its descendants lists the class-like as written, without
+    /// its leading `\`, for the codebase to key, spec section 24.
+    #[test]
+    fn a_read_of_descendants_lists_the_class_like_as_written() {
+        let mut reads = FileReads::default();
+        reads
+            .record(metadata::GET_CLASS_LIKE_RELATIONS, metadata::DIRECT_DESCENDANTS, b"\\App\\Order")
+            .expect("a direct descendants read");
+        reads.record(metadata::GET_CLASS_LIKE_RELATIONS, metadata::ALL_DESCENDANTS, b"App\\Line").expect("a read");
+
+        assert_eq!(
+            reads.listings,
+            HashSet::from_iter([
+                Listing::DirectDescendants(word(b"App\\Order")),
+                Listing::Descendants(word(b"App\\Line")),
+            ])
+        );
+    }
+
     /// Reads of one file that arrive in several responses join: each list gains the other's reads.
     #[test]
     fn reads_that_arrive_apart_join_list_by_list() {

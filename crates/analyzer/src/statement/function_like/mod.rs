@@ -2924,3 +2924,68 @@ pub(crate) fn collection_key_error(
             "{fix} an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`."
         ))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::collections::HashSet;
+
+    use mago_allocator::LocalArena;
+    use mago_codex::reference::ReferenceOrigin;
+    use mago_codex::reference::SymbolReferenceKind;
+    use mago_codex::scanner::scan_program;
+    use mago_database::file::File;
+    use mago_names::resolver::NameResolver;
+    use mago_syntax::parser::parse_file;
+    use mago_word::empty_word;
+
+    use super::*;
+    use crate::settings::Settings;
+
+    /// A host may refine a parameter to a callable that names a function or a method, and the signature that holds it
+    /// references the function by its lowercase name and the method by its class's key and its key in that class, spec
+    /// section 24: both as written for a PHP# class. Only a named function or method records a reference.
+    #[test]
+    fn a_callable_type_references_its_function_and_its_method_by_their_keys() {
+        let file = File::ephemeral(
+            Cow::Borrowed(b"src/Shop/Order.sharp"),
+            Cow::Borrowed(b"namespace Shop;\n\npublic class Order\n{\n    public int totalDue() => 1;\n}\n"),
+        );
+        let arena = LocalArena::new();
+        let program = parse_file(&arena, &file);
+        let names = NameResolver::new(&arena).resolve(program);
+        let codebase = scan_program(&arena, &file, program, &names, Settings::default().version);
+        let callables = TUnion::from_vec(vec![
+            TAtomic::Callable(TCallable::Alias(FunctionLikeIdentifier::Function(word(b"Shop\\Format")))),
+            TAtomic::Callable(TCallable::Alias(FunctionLikeIdentifier::Method(
+                word(b"Shop\\Order"),
+                word(b"totalDue"),
+            ))),
+        ]);
+        let lambda = FunctionLikeIdentifier::for_closure(&file, program.span());
+
+        let mut artifacts = AnalysisArtifacts::new();
+        add_symbol_references(
+            &codebase,
+            &callables,
+            Some(&FunctionLikeIdentifier::Function(word(b"run"))),
+            &mut artifacts,
+        );
+        add_symbol_references(&codebase, &callables, Some(&lambda), &mut artifacts);
+        add_symbol_references(&codebase, &callables, None, &mut artifacts);
+
+        let mut references = HashSet::new();
+        artifacts.symbol_references.for_each_reference(|origin, symbol, kind| {
+            references.insert((origin, symbol, kind));
+        });
+        let run = ReferenceOrigin::Symbol((word(b"run"), empty_word()));
+        assert_eq!(
+            references,
+            HashSet::from([
+                (run, (word(b"shop\\format"), empty_word()), SymbolReferenceKind::Signature),
+                (run, (word(b"Shop\\Order"), word(b"totalDue")), SymbolReferenceKind::Signature),
+                (run, (word(b"Shop\\Order"), empty_word()), SymbolReferenceKind::Body),
+            ])
+        );
+    }
+}

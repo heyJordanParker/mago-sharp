@@ -60,6 +60,92 @@ class Delegatee
 $d = new Delegatee(new Exception('My message'));
 echo $d->getMessage(); // Works - T resolves to Exception
 
+enum Suit
+{
+    case Hearts;
+
+    public function label(): string
+    {
+        return 'hearts';
+    }
+}
+
+$suit = new Delegatee(Suit::Hearts);
+echo $suit->label(); // Works - T resolves to the enum Suit
+
+/**
+ * @template T of A
+ * @mixin T
+ */
+final class BoundDelegatee
+{
+    /**
+     * @param T $delegate
+     */
+    public function __construct(
+        private A $delegate,
+    ) {}
+
+    public function __call(string $name, array $arguments): mixed
+    {
+        // @mago-expect analysis:string-member-selector
+        return $this->delegate->$name(...$arguments);
+    }
+
+    public function delegatedA(): string
+    {
+        return $this->doA(); // Works - T is the class's own parameter, so its bound A answers
+    }
+}
+
+/**
+ * @template T of Suit
+ * @mixin T
+ */
+final class SuitDelegatee
+{
+    /**
+     * @param T $delegate
+     */
+    public function __construct(
+        private Suit $delegate,
+    ) {}
+
+    public function __call(string $name, array $arguments): mixed
+    {
+        // @mago-expect analysis:string-member-selector
+        return $this->delegate->$name(...$arguments);
+    }
+
+    public function delegatedLabel(): string
+    {
+        return $this->label(); // Works - T is the class's own parameter, so its bound, the enum Suit, answers
+    }
+}
+
+/**
+ * @template T of object
+ * @mixin T
+ */
+final class PropertyDelegatee
+{
+    /**
+     * @param T $delegate
+     */
+    public function __construct(
+        private object $delegate,
+    ) {}
+
+    public function __get(string $name): mixed
+    {
+        // @mago-expect analysis:string-member-selector,ambiguous-object-property-access
+        return $this->delegate->$name;
+    }
+}
+
+$pd = new PropertyDelegatee(new A());
+echo $pd->propA; // Works - T resolves to A, whose property the mixin reads
+
 /**
  * @mixin A
  */

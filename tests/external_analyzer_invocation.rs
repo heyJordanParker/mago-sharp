@@ -374,6 +374,33 @@ take_proxy((new DynamicProxy())->dynamic('instance'));
 take_facade(DynamicFacade::dynamic('static'));
 ";
 
+/// A model whose `__call` the fixture's forwarding provider forwards to a query, whose own `__call` answers the query.
+const FORWARDED_METHOD_SOURCE: &str = r"<?php
+
+declare(strict_types=1);
+
+final class ForwardedQuery
+{
+    /** @return static */
+    public function __call(string $name, array $arguments): mixed
+    {
+        return $this;
+    }
+}
+
+final class ForwardingModel
+{
+    public function __call(string $name, array $arguments): mixed
+    {
+        return null;
+    }
+}
+
+function take_query(ForwardedQuery $_query): void {}
+
+take_query((new ForwardingModel())->whereKey('paid'));
+";
+
 const MISSING_METHOD_SOURCE: &str = r"<?php
 
 declare(strict_types=1);
@@ -536,6 +563,30 @@ fn declined_dynamic_methods_preserve_non_documented_method_diagnostics() -> Resu
         ]
     );
     assert!(observation.invocations.is_empty(), "a host without method providers must receive no dynamic requests");
+
+    Ok(())
+}
+
+/// A call a provider forwards to an object that has no such method runs that object's `__call`, which types the call,
+/// as a call written on that object does, and is as ambiguous as that call.
+#[test]
+fn a_forwarded_call_reaches_the_magic_method_of_the_object_it_is_forwarded_to() -> Result<(), Box<dyn std::error::Error>>
+{
+    if !php_sdk_is_available() {
+        return Ok(());
+    }
+
+    let observation =
+        analyze_with_fixture("src/invocation.php", FORWARDED_METHOD_SOURCE, &["MAGO_INVOCATION_FUNCTION_ONLY"])?;
+    // `take_query` takes the `static` the query's `__call` answers, so only the ambiguity is reported.
+    assert_eq!(
+        observation.issues,
+        [(
+            Some("non-documented-method".to_owned()),
+            "Ambiguous method call to `wherekey` on class `ForwardedQuery`.".to_owned()
+        )]
+    );
+    assert_eq!(observation.invocations, ["forwarded-ForwardingModel::whereKey"]);
 
     Ok(())
 }

@@ -334,11 +334,9 @@ where
     if block_context.flags.collect_initializations()
         && let ClassLikeMemberSelector::Identifier(method_ident) = selector
         && is_this_or_self_returning_chain(object, context, block_context)
+        && let Some(class_like) = block_context.scope.get_class_like()
     {
-        let method_name = block_context.scope.get_class_like().map_or_else(
-            || mago_word::ascii_lowercase_word(method_ident.value),
-            |class_like| class_like.method_key(method_ident.value),
-        );
+        let method_name = class_like.method_key(method_ident.value);
         block_context.definitely_called_methods.insert(method_name);
         block_context.called_methods.insert(method_name);
     }

@@ -65,8 +65,8 @@ pub struct DeclarationRefinement {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Declaration {
-    /// A named class-like by its lowercase name, or an anonymous class by the synthetic name its
-    /// declaration offset gives it.
+    /// A named class-like by its name as written, which `apply` keys, or an anonymous class by the
+    /// synthetic name its declaration offset gives it.
     ClassLike {
         class: Word,
         templates: Vec<RefinedTemplate>,

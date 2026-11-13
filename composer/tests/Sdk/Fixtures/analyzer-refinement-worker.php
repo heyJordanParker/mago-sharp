@@ -10,6 +10,7 @@ use Mago\Sdk\Analyzer\CodebaseScanFile;
 use Mago\Sdk\Analyzer\CodebaseScanHook;
 use Mago\Sdk\Analyzer\Declaration\ClassLikeRefinement;
 use Mago\Sdk\Analyzer\Declaration\FunctionLikeRefinement;
+use Mago\Sdk\Analyzer\Declaration\InheritedArguments;
 use Mago\Sdk\Analyzer\Declaration\RefinedType;
 use Mago\Sdk\Analyzer\Declaration\RefinementIssue;
 use Mago\Sdk\Analyzer\Declaration\SignatureRefinement;
@@ -38,8 +39,10 @@ use function dirname;
 require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
 
 /**
- * Refines declarations the way a framework adapter would: generic parameters on a class, and
- * applications of that class on another class's members, all read from the scanned source.
+ * Refines declarations the way a framework adapter would: generic parameters on a class, the
+ * arguments a class gives its parent, the parent every user of a trait extends, the members of an
+ * anonymous class, and applications of a generic class on another class's members, all read from the
+ * scanned source.
  *
  * @mago-expect lint:file-name
  * @mago-expect lint:cyclomatic-complexity
@@ -78,6 +81,23 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
                         continue;
                     }
 
+                    // An anonymous class has no name, so the refinement names it by where it starts.
+                    if ($classLike->nameLocation === null) {
+                        $context->refine(
+                            new ClassLikeRefinement(
+                                $file->path,
+                                '',
+                                properties: ['item' => new RefinedType(
+                                    self::symbol('Proof\Special'),
+                                    $attribute->location->span,
+                                )],
+                                declaredAt: $classLike->location->span->start,
+                            ),
+                        );
+
+                        continue;
+                    }
+
                     $context->refine(match ($classLike->originalName) {
                         'Proof\Box' => self::box($file, $attribute->location->span),
                         'Proof\Holder' => self::holder($file, $attribute->location->span),
@@ -94,6 +114,19 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
                         'Proof\Relay', 'Proof\Outer', 'Proof\Top', 'Proof\Ping', 'Proof\Pong' => self::relay(
                             $file,
                             $classLike->originalName,
+                        ),
+                        // The parent as `Bin` declares it, which the class's header writes in another case.
+                        'Proof\Packed' => new ClassLikeRefinement($file->path, 'Proof\Packed', inherited: [
+                            new InheritedArguments(
+                                'Proof\Bin',
+                                [self::symbol('Proof\Special')],
+                                $attribute->location->span,
+                            ),
+                        ]),
+                        'Proof\Unpacking' => new ClassLikeRefinement(
+                            $file->path,
+                            'Proof\Unpacking',
+                            requiredExtends: ['Proof\Bin'],
                         ),
                         default => throw new LogicException("Unexpected refined class `{$classLike->originalName}`."),
                     });

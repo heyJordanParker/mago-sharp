@@ -9,11 +9,14 @@ use Mago\Sdk\Analyzer\Assertion\TypeAssertionKind;
 use Mago\Sdk\Analyzer\AssertionProviderContext;
 use Mago\Sdk\Analyzer\CallableSignatureOverride;
 use Mago\Sdk\Analyzer\CallableSignatureProviderContext;
+use Mago\Sdk\Analyzer\CallForwardingProvider;
+use Mago\Sdk\Analyzer\CallForwardingProviderContext;
 use Mago\Sdk\Analyzer\ClassInitializerProvider;
 use Mago\Sdk\Analyzer\ClassInitializerProviderContext;
 use Mago\Sdk\Analyzer\ClassTarget;
 use Mago\Sdk\Analyzer\EffectiveCallableSignature;
 use Mago\Sdk\Analyzer\FileAnalysisRequirement;
+use Mago\Sdk\Analyzer\ForwardedCall;
 use Mago\Sdk\Analyzer\FunctionAssertionProvider;
 use Mago\Sdk\Analyzer\FunctionReturnTypeProvider;
 use Mago\Sdk\Analyzer\FunctionTarget;
@@ -929,6 +932,27 @@ final class InvocationMethodCallHook implements MethodCallAnalysisHook
 }
 
 /**
+ * Forwards each call on `ForwardingModel` to a `ForwardedQuery`, as a framework's model forwards a call to its query
+ * builder, and records each call it forwards.
+ *
+ * @mago-expect lint:single-class-per-file
+ */
+final class InvocationCallForwardingProvider implements CallForwardingProvider
+{
+    public function getTargets(): array
+    {
+        return [MethodTarget::allMethods('ForwardingModel')];
+    }
+
+    public function getForwardedCall(CallForwardingProviderContext $context): ForwardedCall
+    {
+        InvocationAudit::record('forwarded-' . $context->class . '::' . $context->member);
+
+        return new ForwardedCall(Type::namedObject('ForwardedQuery'), [$context->member]);
+    }
+}
+
+/**
  * @mago-expect lint:cyclomatic-complexity
  * @mago-expect lint:single-class-per-file
  */
@@ -965,6 +989,7 @@ final class InvocationPlugin implements IssueFilterHook, Plugin
         $registry->registerPropertyTypeProvider(new InvocationPropertyProvider());
         $registry->registerPropertyInitializationProvider(new InvocationPropertyInitializationProvider());
         $registry->registerClassInitializerProvider(new InvocationClassInitializerProvider());
+        $registry->registerCallForwardingProvider(new InvocationCallForwardingProvider());
         if ($this->registerIssueFilter) {
             $registry->registerIssueFilterHook($this);
         }

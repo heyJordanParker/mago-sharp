@@ -167,10 +167,6 @@ pub(crate) fn record_parse<A>(
 ) where
     A: Arena,
 {
-    if !context.dialect.is_sharp() {
-        return;
-    }
-
     let codebase = context.codebase;
     let span = class.span;
     let summary = |body, member: &[u8]| {
@@ -223,10 +219,11 @@ pub(crate) fn record_parse<A>(
     for field in codebase.struct_parse_fields(class.name.as_bytes()) {
         if !field.is_parameter {
             let property = word([b"$".as_slice(), field.name].concat());
-            if let Some(declaring) = class.declaring_property_ids.get(&property) {
-                let set = Body::Accessor(codebase.class_key(declaring.as_bytes()), property, word(b"set"));
-                reach(&mut parsing, class.name, set, field.name);
-            }
+            let Some(declaring) = class.declaring_property_ids.get(&property) else {
+                unreachable!("a property field is one of its class's properties, each of which has a declaring class");
+            };
+            let set = Body::Accessor(codebase.class_key(declaring.as_bytes()), property, word(b"set"));
+            reach(&mut parsing, class.name, set, field.name);
         }
         parsed_classes(codebase, field.r#type, &mut nested);
     }
@@ -253,7 +250,7 @@ fn parsed_classes<'codebase>(
         match atomic {
             TAtomic::Object(TObject::Named(object)) if codebase.parses(object.name.as_bytes()) => {
                 let Some(class) = codebase.get_class_like(object.name.as_bytes()) else {
-                    continue;
+                    unreachable!("a class that parses is in the codebase");
                 };
                 if !parsed.iter().any(|seen| seen.name == class.name) {
                     parsed.push(class);

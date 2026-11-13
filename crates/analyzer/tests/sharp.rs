@@ -29517,16 +29517,18 @@ fn a_constant_has_its_declared_type_and_its_value_follows_the_operators_of_a_bod
 }
 
 /// Spec section 18: a chain of `+` that joins a string with a number is refused once, at its first such `+`, with help
-/// that writes the whole chain as a template, the numbers it adds before its first string as one value.
+/// that writes the whole chain as a template, the numbers it adds before its first string as one value, and a template
+/// in the chain as the text it writes.
 #[test]
 fn a_chain_that_joins_a_string_with_a_number_is_refused_with_its_template() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public string run(int count, string name)\n    {\n        const items = count + 1 + \" items\";\n        const shown = name + \": \" + count + \"/\" + 3;\n        return items + shown;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public string run(int count, string name)\n    {\n        const items = count + 1 + \" items\";\n        const shown = name + \": \" + count + \"/\" + 3;\n        const tagged = `#${name}: ` + count;\n        return items + shown + tagged;\n    }\n}\n";
 
     assert_eq!(
         explained(("src/Demo/Report.sharp", sharp), &[]),
         [
             "7:23 invalid-operand `+` cannot join `int` and `\" items\"`: it joins two strings or adds two numbers. Put the value in a template written between backticks, as in `${count + 1} items`.",
             "8:23 invalid-operand `+` cannot join `string` and `int`: it joins two strings or adds two numbers. Put the value in a template written between backticks, as in `${name}: ${count}/${3}`.",
+            "9:24 invalid-operand `+` cannot join `string` and `int`: it joins two strings or adds two numbers. Put the value in a template written between backticks, as in `#${name}: ${count}`.",
         ]
     );
 }
