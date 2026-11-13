@@ -867,6 +867,16 @@ final class InvocationCallKindHook implements NodeAnalysisHook
         if ($receiver !== null) {
             InvocationAudit::record('receiver-call-kind-' . self::describe($context, $receiver));
         }
+
+        // A search names an attribute as written, a PHP# one by its exact name, and the host keys it.
+        if (getenv('MAGO_INVOCATION_ATTRIBUTED_METHODS') === '1') {
+            foreach (['Probe\\Marked', 'Probe\\Tagged'] as $attribute) {
+                $methods = $context->codebase->findMethods(withAnyAttribute: [$attribute], fields: MethodFields::NAMES);
+                foreach ($methods as $method) {
+                    InvocationAudit::record('attributed-' . $attribute . '-' . $method->originalName);
+                }
+            }
+        }
     }
 
     public static function describe(NodeAnalysisContext $context, CallExpression $call): string

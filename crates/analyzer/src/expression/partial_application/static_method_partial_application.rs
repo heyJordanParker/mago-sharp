@@ -1,5 +1,7 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::expander::get_parameter_dependent_signature_of_function_like_identifier;
@@ -10,8 +12,8 @@ use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_syntax::cst::StaticMethodPartialApplication;
+use mago_word::Word;
 use mago_word::WordMap;
-use mago_word::ascii_lowercase_word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -26,6 +28,7 @@ use crate::invocation::InvocationTargetParameter;
 use crate::invocation::MethodInvocationKind;
 use crate::invocation::MethodTargetContext;
 use crate::invocation::analyzer::analyze_invocation;
+use crate::resolver::method::ResolvedMethod;
 use crate::resolver::static_method::resolve_static_method_targets;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodPartialApplication<'arena> {
@@ -50,18 +53,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodPartialApplication<'
 
         let mut identifiers = vec![];
         for resolved_method in &method_resolution.resolved_methods {
-            let class_name = ascii_lowercase_word(resolved_method.classname.as_ref());
-            let method_name = resolved_method.method_identifier.get_method_name();
-            artifacts.symbol_references.add_reference_to_class_member(
+            let method_name = called_method_key(context.codebase, resolved_method);
+            artifacts.symbol_references.add_reference_for_method_call(
+                context.codebase,
                 &block_context.scope,
-                (class_name, method_name),
-                false,
+                &MethodIdentifier::new(resolved_method.classname, method_name),
             );
 
-            identifiers.push(FunctionLikeIdentifier::Method(
-                resolved_method.classname,
-                resolved_method.method_identifier.get_method_name(),
-            ));
+            identifiers.push(FunctionLikeIdentifier::Method(resolved_method.classname, method_name));
         }
 
         let resulting_type = if self.argument_list.is_first_class_callable() {
@@ -88,7 +87,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodPartialApplication<'
             for resolved_method in method_resolution.resolved_methods {
                 let identifier = FunctionLikeIdentifier::Method(
                     resolved_method.classname,
-                    resolved_method.method_identifier.get_method_name(),
+                    called_method_key(context.codebase, &resolved_method),
                 );
 
                 let Some(signature) =
@@ -165,4 +164,16 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodPartialApplication<'
 
         Ok(())
     }
+}
+
+/// The key the class the code names, `resolved.classname`, holds the method `resolved` runs under, spec section 24. A
+/// class with exact names, as a plain PHP class that implements a PHP# interface, keys each method by its declared name,
+/// a plain PHP parent's `findOrFail` included, as the engine's `zend_inherit_exact_names` does, though the parent that
+/// declares it keys it `findorfail`.
+fn called_method_key(codebase: &CodebaseMetadata, resolved: &ResolvedMethod) -> Word {
+    let declared = codebase
+        .get_method_by_id(&resolved.method_identifier)
+        .map_or(resolved.method_identifier.get_method_name(), |method| method.original_name);
+
+    codebase.method_key(resolved.classname, declared.as_bytes())
 }

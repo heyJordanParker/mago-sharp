@@ -248,15 +248,17 @@ impl CodebaseMetadata {
         aliases_changed
     }
 
+    /// The class-like `alias` names in the end, by its key: a `class_alias()` declaration names its target as written,
+    /// which [`Self::class_key`] keys, exact for a PHP# class-like, spec section 24, and lowercase for an alias.
     fn resolve_class_like_alias_declaration(&self, alias: Word) -> Option<Word> {
-        let mut current = self.class_like_alias_declarations.get(&alias)?.0;
+        let mut current = self.class_key(self.class_like_alias_declarations.get(&alias)?.0.as_bytes());
 
         for _ in 0..self.class_like_alias_declarations.len() {
             if self.class_likes.contains_key(&current) {
                 return Some(current);
             }
 
-            current = self.class_like_alias_declarations.get(&current)?.0;
+            current = self.class_key(self.class_like_alias_declarations.get(&current)?.0.as_bytes());
         }
 
         None
@@ -311,13 +313,14 @@ impl CodebaseMetadata {
         self.symbols.class_key(name)
     }
 
-    /// The key the class-like `class`, by its key, holds the method `method` under, as
+    /// The key the class-like `class`, by any name [`Self::class_key`] keys, holds the method `method` under, as
     /// [`ClassLikeMetadata::method_key`] says: the exact name for one with `exact_names`, and the lowercase name
     /// otherwise, an unknown class-like's included.
     #[inline]
     #[must_use]
     pub fn method_key(&self, class: Word, method: &[u8]) -> Word {
-        self.get_class_like_by_word(class).map_or_else(|| ascii_lowercase_word(method), |meta| meta.method_key(method))
+        self.get_class_like(class.as_bytes())
+            .map_or_else(|| ascii_lowercase_word(method), |meta| meta.method_key(method))
     }
 
     /// Checks if a class exists in the codebase, by [`Self::class_key`].

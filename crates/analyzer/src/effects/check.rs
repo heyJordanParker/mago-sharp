@@ -678,7 +678,11 @@ pub(crate) fn check_uses<A>(
 
     for name in found.names {
         let effect = context.resolved_names.get(name);
-        artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, ascii_lowercase_word(effect), false);
+        artifacts.symbol_references.add_reference_to_symbol(
+            &block_context.scope,
+            context.codebase.class_key(effect),
+            false,
+        );
         if is_effect(context.codebase, effect) {
             continue;
         }

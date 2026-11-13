@@ -550,13 +550,12 @@ where
 
     for initializer_name in context.applicable_class_initializers(class_like_metadata) {
         if let Some(method_id) = class_like_metadata.declaring_method_ids.get(&initializer_name) {
-            let declaring_class_name = method_id.get_class_name();
-
+            // The declaring class's own key for the method, which a class with exact names may not share.
             let initialized = compute_transitive_initializations(
                 artifacts,
                 context,
-                declaring_class_name,
-                initializer_name,
+                method_id.get_class_name(),
+                method_id.get_method_name(),
                 class_is_final,
                 true,
             );
@@ -573,13 +572,11 @@ where
 
         for initializer_name in context.applicable_class_initializers(parent_meta) {
             if let Some(method_id) = parent_meta.declaring_method_ids.get(&initializer_name) {
-                let declaring_class_name = method_id.get_class_name();
-
                 let initialized = compute_transitive_initializations(
                     artifacts,
                     context,
-                    declaring_class_name,
-                    initializer_name,
+                    method_id.get_class_name(),
+                    method_id.get_method_name(),
                     parent_meta.flags.is_final(),
                     true,
                 );

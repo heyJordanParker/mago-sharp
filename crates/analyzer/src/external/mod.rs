@@ -1542,21 +1542,24 @@ fn matching_exact_member_providers(
     (providers, candidates)
 }
 
+/// `class` and each class-like above it, in lowercase, as the exact index of provider targets names them: a target is
+/// matched in any case, and the codebase finds `class` by its key, exact for a PHP# class-like, spec section 24.
 fn class_hierarchy<'codebase>(
     codebase: &'codebase CodebaseMetadata,
     class: &[u8],
 ) -> impl Iterator<Item = Word> + 'codebase {
-    let class = ascii_lowercase_word(class);
-    std::iter::once(class).chain(codebase.get_class_like(class.as_bytes()).into_iter().flat_map(|metadata| {
-        metadata
-            .all_parent_classes
-            .iter()
-            .chain(&metadata.all_parent_interfaces)
-            .chain(&metadata.used_traits)
-            .chain(&metadata.require_extends)
-            .chain(&metadata.require_implements)
-            .copied()
-    }))
+    std::iter::once(ascii_lowercase_word(class)).chain(codebase.get_class_like(class).into_iter().flat_map(
+        |metadata| {
+            metadata
+                .all_parent_classes
+                .iter()
+                .chain(&metadata.all_parent_interfaces)
+                .chain(&metadata.used_traits)
+                .chain(&metadata.require_extends)
+                .chain(&metadata.require_implements)
+                .map(|ancestor| ascii_lowercase_word(ancestor.as_bytes()))
+        },
+    ))
 }
 
 #[derive(Debug)]
@@ -4442,6 +4445,37 @@ mod tests {
                  `request-timeout-ms` for hooks that run that long"
             )))
         );
+    }
+
+    /// A provider that names a plain PHP class's method serves the call of it through a PHP# subclass, as through a
+    /// plain one: the codebase finds the PHP# class by its exact name, spec section 24, and each class above it matches
+    /// a target in any case.
+    #[test]
+    fn a_method_provider_of_a_plain_parent_serves_a_sharp_subclass() {
+        const MODEL: (&str, &str) = (
+            "src/Lib/Model.php",
+            "<?php\n\nnamespace Lib;\n\nclass Model\n{\n    public function find(): void\n    {\n    }\n}\n",
+        );
+        const POST: (&str, &str) =
+            ("src/App/Post.sharp", "namespace App;\n\nimport Lib.Model;\n\npublic class Post : Model\n{\n}\n");
+        let provider = MethodProvider {
+            plugin: 0,
+            index: 0,
+            capabilities: 0,
+            targets: vec![MethodTarget { class: b"Lib\\Model".to_vec(), method: b"find".to_vec() }],
+        };
+        let (exact, wildcard) = index_method_providers([&provider]);
+
+        protocol::testing::analyzed(&[POST, MODEL], |analysis| {
+            let found = |class: &[u8]| {
+                matching_method_provider_indices(&exact, &wildcard, analysis.codebase, class, b"find")
+                    .0
+                    .map(|indices| indices.as_slice().to_vec())
+            };
+
+            assert_eq!(found(b"App\\Post"), Some(vec![0]));
+            assert_eq!(found(b"Lib\\Model"), Some(vec![0]));
+        });
     }
 
     #[test]

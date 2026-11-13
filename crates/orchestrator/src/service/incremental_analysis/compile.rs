@@ -991,6 +991,7 @@ impl<'service> Dependencies<'service> {
         // lists the file that declares it and, along the chain of aliases, each file that declares the next name.
         for (alias, target, span) in service.codebase.class_like_alias_declarations() {
             let alias = (alias, empty_word());
+            let target = service.codebase.class_key(target.as_bytes());
             dependencies.signature.entry(alias).or_default().push((target, empty_word()));
             if service.database.get(&span.file_id).is_ok_and(|file| is_source(&file)) {
                 dependencies.declared_in.entry(alias).or_default().push(span.file_id);

@@ -39,6 +39,7 @@ use mago_analyzer::plugin::provider::ProviderMeta;
 use mago_analyzer::plugin::provider::function::FunctionTarget;
 use mago_analyzer::plugin::provider::method::MethodReturnTypeProvider;
 use mago_analyzer::plugin::provider::method::MethodTarget;
+use mago_analyzer::settings::ClassInitializer;
 use mago_analyzer::settings::Settings;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
@@ -18433,6 +18434,84 @@ fn an_intersection_or_union_reaches_each_parts_method_by_its_own_name() {
 
     assert_eq!(issues(("src/Probe/Shop/Label.sharp", sharp), &declared), Vec::<String>::new());
     assert_eq!(issues(("src/Probe/Shop/Tag.php", php), &declared), Vec::<String>::new());
+}
+
+/// Spec section 24: a plain PHP class that implements a PHP# interface has exact names, as the engine's
+/// `zend_inherit_exact_names` gives it, so it keys a plain PHP parent's `findOrFail` by that declared name. A
+/// first-class callable of it through the class is the class's `findOrFail`, as one through a plain PHP sibling is.
+#[test]
+fn a_first_class_callable_of_an_inherited_method_reaches_it_through_a_class_with_exact_names() {
+    let declared = [
+        ("src/Probe/Synced.sharp", "namespace Probe;\n\npublic interface Synced\n{\n    int? syncedId();\n}\n"),
+        (
+            "src/Probe/Base.php",
+            "<?php\n\nnamespace Probe;\n\nabstract class Base\n{\n    public static function findOrFail(int $key): static\n    {\n        return new static();\n    }\n}\n",
+        ),
+        (
+            "src/Probe/Room.php",
+            "<?php\n\nnamespace Probe;\n\nfinal class Room extends Base implements Synced\n{\n    public function syncedId(): ?int\n    {\n        return null;\n    }\n}\n",
+        ),
+        ("src/Probe/Hall.php", "<?php\n\nnamespace Probe;\n\nfinal class Hall extends Base\n{\n}\n"),
+    ];
+    let php = "<?php\n\nnamespace Probe;\n\nfinal class Rooms\n{\n    /** @return list<Room> */\n    public static function rooms(): array\n    {\n        return array_map(Room::findOrFail(...), [1, 2]);\n    }\n\n    /** @return list<Hall> */\n    public static function halls(): array\n    {\n        return array_map(Hall::findOrFail(...), [1, 2]);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Probe/Rooms.php", php), &declared), Vec::<String>::new());
+}
+
+/// Spec section 24: `class_alias()` names its target as written, which the codebase keys once it holds every class-like,
+/// so an alias of a PHP# class names it, and a plain PHP call reaches its camelCase method through the alias.
+#[test]
+fn a_class_alias_of_a_sharp_class_names_it() {
+    let declared = [
+        ("src/Probe/Box.sharp", "namespace Probe;\n\npublic class Box\n{\n    public void openLid() { }\n}\n"),
+        (
+            "src/Probe/aliases.php",
+            "<?php\n\nclass_alias(\\Probe\\Box::class, 'Probe\\Crate');\nclass_alias('Probe\\Box', 'Probe\\Chest');\n",
+        ),
+    ];
+    let php = "<?php\n\nnamespace Probe;\n\nfinal class Opener\n{\n    public static function open(Crate $crate, Chest $chest): void\n    {\n        $crate->openLid();\n        $chest->openLid();\n    }\n}\n";
+
+    assert_eq!(issues(("src/Probe/Opener.php", php), &declared), Vec::<String>::new());
+}
+
+/// Spec section 24: a configured class initializer names its method as written, and each class keys it by its own rule,
+/// so `setUp` initializes the properties of a plain PHP test that has exact names from a PHP# interface, as of one that
+/// has none.
+#[test]
+fn a_class_initializer_initializes_the_properties_of_a_class_with_exact_names() {
+    let declared = [
+        ("src/Probe/Synced.sharp", "namespace Probe;\n\npublic interface Synced\n{\n    int? syncedId();\n}\n"),
+        (
+            "src/Probe/TestCase.php",
+            "<?php\n\nnamespace Probe;\n\nabstract class TestCase\n{\n    protected function setUp(): void\n    {\n    }\n}\n",
+        ),
+    ];
+    let php = |implements: &str| {
+        format!(
+            "<?php\n\nnamespace Probe;\n\nfinal class RoomTest extends TestCase{implements}\n{{\n    private \\stdClass $room;\n\n    protected function setUp(): void\n    {{\n        $this->room = new \\stdClass();\n    }}\n\n    public function room(): \\stdClass\n    {{\n        return $this->room;\n    }}\n\n    public function syncedId(): ?int\n    {{\n        return null;\n    }}\n}}\n"
+        )
+    };
+    // An entry that names a class names it by its key: the PHP# `Synced` exactly, and the plain PHP `TestCase` in any
+    // case.
+    for initializer in ["setUp", "Probe\\Synced::setUp", "probe\\testcase::setUp"] {
+        let mut settings = Settings { check_property_initialization: true, ..Default::default() };
+        settings.class_initializers.push(ClassInitializer::parse(initializer).expect("the initializer parses"));
+
+        for implements in [" implements Synced", ""] {
+            let code: &'static str = php(implements).leak();
+            let expected: &[&str] = if initializer.contains("Synced") && implements.is_empty() {
+                &["5:13 missing-constructor"]
+            } else {
+                &[]
+            };
+
+            assert_eq!(
+                issues_with(settings.clone(), ("src/Probe/RoomTest.php", code), &declared),
+                expected,
+                "{initializer}"
+            );
+        }
+    }
 }
 
 /// Spec section 24: `&` joins at most one class with interfaces, as Swift and Java do, so two classes in one `&` are

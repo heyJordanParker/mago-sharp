@@ -823,6 +823,45 @@ fn node_hooks_see_a_sharp_call_of_a_namespace_function_as_a_call_of_that_functio
     Ok(())
 }
 
+/// A method search names each attribute as the hook writes it, and the host keys it as the codebase does, spec section
+/// 24: the PHP# `Marked` by its exact name, and the plain PHP `Tagged` in any case. So a search for either finds the
+/// method that carries it.
+#[test]
+fn a_method_search_finds_a_method_by_a_sharp_attribute_as_by_a_plain_one() -> Result<(), Box<dyn std::error::Error>> {
+    if !php_sdk_is_available() {
+        return Ok(());
+    }
+
+    // The analysis here runs without PHP's stubs, so neither class is marked `Attribute`, and each use is reported as
+    // one: a method search reads the name of each attribute a method carries, whatever class it names.
+    const MARKED: (&str, &str) = ("src/Probe/Marked.sharp", "namespace Probe;\n\npublic class Marked\n{\n}\n");
+    const TAGGED: (&str, &str) = ("src/Probe/Tagged.php", "<?php\n\nnamespace Probe;\n\nfinal class Tagged\n{\n}\n");
+    const HOLDER: (&str, &str) = (
+        "src/Probe/Holder.php",
+        "<?php\n\nnamespace Probe;\n\nfinal class Holder\n{\n    #[Marked]\n    public function markedMethod(): void\n    {\n    }\n\n    #[Tagged]\n    public function taggedMethod(): void\n    {\n        $this->markedMethod();\n    }\n}\n",
+    );
+
+    let observation = analyze_files_with_fixture(
+        &[MARKED, TAGGED, HOLDER],
+        &["MAGO_INVOCATION_CALL_KINDS", "MAGO_INVOCATION_ATTRIBUTED_METHODS"],
+    )?;
+
+    assert_eq!(
+        observation.issues.iter().map(|(code, _)| code.as_deref()).collect::<Vec<_>>(),
+        [Some("class-not-marked-as-attribute"); 2]
+    );
+    assert_eq!(
+        observation.invocations,
+        [
+            "call-kind-markedMethod-instance",
+            "attributed-Probe\\Marked-markedMethod",
+            "attributed-Probe\\Tagged-taggedMethod",
+        ]
+    );
+
+    Ok(())
+}
+
 #[test]
 fn a_hook_that_targets_static_calls_receives_a_sharp_static_call() -> Result<(), Box<dyn std::error::Error>> {
     if !php_sdk_is_available() {

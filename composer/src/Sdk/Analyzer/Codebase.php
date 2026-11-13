@@ -398,10 +398,7 @@ final class Codebase
             };
             $keys[] = match ($identifier->kind) {
                 FunctionLikeKind::Function_ => "f\0" . strtolower($identifier->name),
-                FunctionLikeKind::Method => "m\0"
-                    . strtolower($identifier->class ?? '')
-                    . "\0"
-                    . strtolower($identifier->name),
+                FunctionLikeKind::Method => "m\0" . ($identifier->class ?? '') . "\0" . $identifier->name,
                 FunctionLikeKind::Closure => "c\0" . $identifier->name,
             };
         }
@@ -499,16 +496,16 @@ final class Codebase
             if ($attribute === '') {
                 throw new InvalidArgumentException('A method search attribute name cannot be empty.');
             }
-            $attributes[strtolower($attribute)] = true;
+            $attributes[$attribute] = true;
         }
         $attributes = array_keys($attributes);
         sort($attributes);
-        // Mago matches names whatever their case, so a search names them in lowercase, and two searches that find the
-        // same methods are one search.
+        // A search names each class, method and attribute as written, and Mago keys it as the codebase does: a PHP# name
+        // exactly, and a plain PHP one in any case.
         $search = Protocol::writeMethodSearch(
-            $class === null ? null : strtolower($class),
-            $descendantsOf === null ? null : strtolower($descendantsOf),
-            strtolower($name),
+            $class,
+            $descendantsOf,
+            $name,
             $attributes,
             $fields,
             $declaredOnly,
@@ -730,7 +727,9 @@ final class Codebase
                 throw new InvalidArgumentException('Codebase metadata names cannot be empty.');
             }
             $this->reads?->record($operation, 0, $name);
-            $keys[] = $operation === Protocol::GET_CONSTANTS ? $name : strtolower($name);
+            // A function is one name in any case, and a class-like or constant the codebase keys may not be: a PHP#
+            // class-like is keyed by its exact name.
+            $keys[] = $operation === Protocol::GET_FUNCTIONS ? strtolower($name) : $name;
         }
 
         return $this->query($operation, $classLikeKind, $names, $keys, $decode);
@@ -747,11 +746,8 @@ final class Codebase
         $keys = [];
         foreach ($members as $member) {
             $this->reads?->record(Protocol::GET_CLASS_LIKES, 0, $member->class);
-            $memberName = match ($operation) {
-                Protocol::GET_METHODS, Protocol::GET_DECLARING_METHODS => strtolower($member->member),
-                default => $member->member,
-            };
-            $keys[] = strtolower($member->class) . "\0" . $memberName;
+            // As written: a PHP# class-like and its methods are keyed by their exact names.
+            $keys[] = $member->class . "\0" . $member->member;
         }
 
         return $this->query($operation, null, $members, $keys, $decode);
@@ -865,7 +861,10 @@ final class Codebase
                 Protocol::EXISTS_CONSTANT => $this->reads?->record(Protocol::GET_CONSTANTS, 0, $name),
                 default => $this->reads?->record(Protocol::GET_CLASS_LIKES, 0, $name),
             };
-            $key = $predicate === Protocol::EXISTS_CONSTANT ? $name : strtolower($name);
+            // A namespace and a function are one name in any case, and a class-like or constant may not be.
+            $key = $predicate === Protocol::EXISTS_NAMESPACE || $predicate === Protocol::EXISTS_FUNCTION
+                ? strtolower($name)
+                : $name;
             $keys[] = $key;
             if (!array_key_exists($key, $bucket)) {
                 $missingNames[] = $name;
@@ -916,8 +915,7 @@ final class Codebase
         $missingKeys = [];
         foreach ($members as $member) {
             $this->reads?->record(Protocol::GET_CLASS_LIKES, 0, $member->class);
-            $memberName = $predicate === Protocol::EXISTS_METHOD ? strtolower($member->member) : $member->member;
-            $key = strtolower($member->class) . "\0" . $memberName;
+            $key = $member->class . "\0" . $member->member;
             $keys[] = $key;
             if (!array_key_exists($key, $bucket)) {
                 $missingMembers[] = $member;
@@ -967,9 +965,7 @@ final class Codebase
         }
 
         $bucket = $this->cache->relations[$relation] ?? [];
-        $keys = [];
         $missingNames = [];
-        $missingKeys = [];
         foreach ($names as $name) {
             if ($name === '') {
                 throw new InvalidArgumentException('Codebase metadata names cannot be empty.');
@@ -979,11 +975,9 @@ final class Codebase
             $relation === Protocol::ALL_ANCESTORS
                 ? $this->reads?->record(Protocol::GET_CLASS_LIKES, 0, $name)
                 : $this->reads?->record(Protocol::GET_CLASS_LIKE_RELATIONS, $relation, $name);
-            $key = strtolower($name);
-            $keys[] = $key;
-            if (!array_key_exists($key, $bucket)) {
+            // As written: a PHP# class-like is keyed by its exact name.
+            if (!array_key_exists($name, $bucket)) {
                 $missingNames[] = $name;
-                $missingKeys[] = $key;
             }
         }
 
@@ -992,12 +986,12 @@ final class Codebase
             $payload = Protocol::writeCodebaseRelationsRequest($this->cache->generation, $relation, $missingNames);
             $response = $this->host->request($this->parentRequestId, $payload);
             $results = Protocol::readCodebaseRelationsResponse($response, $this->cache->generation, $relation);
-            if (count($results) !== count($missingKeys)) {
+            if (count($results) !== count($missingNames)) {
                 throw new ProtocolException('A codebase relation response contains the wrong result count.');
             }
 
-            foreach ($missingKeys as $index => $key) {
-                $bucket[$key] = $results[$index] ?? throw new ProtocolException(
+            foreach ($missingNames as $index => $name) {
+                $bucket[$name] = $results[$index] ?? throw new ProtocolException(
                     'A codebase relation response is misaligned.',
                 );
             }
@@ -1006,8 +1000,8 @@ final class Codebase
         }
 
         $result = [];
-        foreach ($keys as $key) {
-            $result[] = $bucket[$key] ?? [];
+        foreach ($names as $name) {
+            $result[] = $bucket[$name] ?? [];
         }
 
         return $result;

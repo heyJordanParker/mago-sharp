@@ -5,6 +5,7 @@ use mago_php_version::PHPVersion;
 use mago_word::Word;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
+use mago_word::word;
 
 /// Default maximum logical formula size during conditional analysis.
 pub const DEFAULT_FORMULA_SIZE_THRESHOLD: u16 = 512;
@@ -461,17 +462,23 @@ impl Settings {
     /// Returns `true` when `method_name` is a configured class initializer
     /// applicable to `meta` (either an unrestricted entry, or one whose class
     /// qualifier `meta` is a subclass/implementer of).
+    /// `method_name` is the key `meta` holds the method under, spec section 24.
     #[must_use]
     pub fn is_class_initializer_for(&self, meta: &ClassLikeMetadata, method_name: Word) -> bool {
-        self.class_initializers.iter().any(|init| init.method == method_name && init.applies_to(meta))
+        self.class_initializers
+            .iter()
+            .any(|init| meta.method_key(init.method.as_bytes()) == method_name && init.applies_to(meta))
     }
 
-    /// Iterator over initializer method names applicable to `meta`.
+    /// Iterator over the initializer methods applicable to `meta`, each by the key `meta` holds it under, spec section 24.
     pub fn applicable_class_initializers<'cfg>(
         &'cfg self,
         meta: &'cfg ClassLikeMetadata,
     ) -> impl Iterator<Item = Word> + 'cfg {
-        self.class_initializers.iter().filter(move |init| init.applies_to(meta)).map(|init| init.method)
+        self.class_initializers
+            .iter()
+            .filter(move |init| init.applies_to(meta))
+            .map(|init| meta.method_key(init.method.as_bytes()))
     }
 }
 
@@ -481,10 +488,10 @@ impl Settings {
 /// The optional `class` qualifier restricts the rule to a specific class hierarchy.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassInitializer {
-    /// Lowercased FQN of the class/interface this entry is scoped to. `None`
+    /// The FQN of the class/interface this entry is scoped to, as configured. `None`
     /// means the entry applies to any class that has the named method.
     pub class: Option<Word>,
-    /// Lowercased method name.
+    /// The method name, as configured, which each class keys by its own rule, spec section 24.
     pub method: Word,
 }
 
@@ -501,25 +508,25 @@ impl ClassInitializer {
                     return None;
                 }
 
-                Some(Self {
-                    class: Some(ascii_lowercase_word(class.as_bytes())),
-                    method: ascii_lowercase_word(method.as_bytes()),
-                })
+                Some(Self { class: Some(word(class.as_bytes())), method: word(method.as_bytes()) })
             }
             None => {
                 let method = raw.trim();
                 if method.is_empty() {
                     return None;
                 }
-                Some(Self { class: None, method: ascii_lowercase_word(method.as_bytes()) })
+                Some(Self { class: None, method: word(method.as_bytes()) })
             }
         }
     }
 
-    /// `true` when this entry's class qualifier (if any) covers `meta`.
+    /// `true` when this entry's class qualifier (if any) covers `meta`. The qualifier names a class-like by its key,
+    /// spec section 24: a PHP# one's exact name, or a plain PHP one's lowercase name.
     #[must_use]
     pub fn applies_to(&self, meta: &ClassLikeMetadata) -> bool {
         let Some(class) = self.class else { return true };
-        meta.name == class || meta.all_parent_classes.contains(&class) || meta.all_parent_interfaces.contains(&class)
+        [class, ascii_lowercase_word(class.as_bytes())].iter().any(|class| {
+            meta.name == *class || meta.all_parent_classes.contains(class) || meta.all_parent_interfaces.contains(class)
+        })
     }
 }

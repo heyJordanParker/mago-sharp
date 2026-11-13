@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::ttype::get_empty_string;
 use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_int_or_float;
@@ -9,7 +10,6 @@ use mago_codex::ttype::get_non_empty_string;
 use mago_codex::ttype::get_null;
 use mago_codex::ttype::get_true;
 use mago_syntax::cst::Literal;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
@@ -35,11 +35,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Literal<'arena> {
             let class_part = &value[..separator_idx];
             let method_part = &value[separator_idx + 2..];
             if !class_part.is_empty() && !method_part.is_empty() && memchr::memmem::find(method_part, b"::").is_none() {
-                let class_part = ascii_lowercase_word(class_part);
-                artifacts.symbol_references.add_reference_to_class_member(
+                artifacts.symbol_references.add_reference_for_method_call(
+                    context.codebase,
                     &block_context.scope,
-                    (class_part, context.codebase.method_key(class_part, method_part)),
-                    false,
+                    &MethodIdentifier::new(
+                        word(class_part),
+                        context.codebase.method_key(word(class_part), method_part),
+                    ),
                 );
             }
         }

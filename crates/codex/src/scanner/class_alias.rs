@@ -10,6 +10,7 @@ use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Literal;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
+use mago_word::word;
 
 use crate::scanner::Context;
 use crate::scanner::inference::infer;
@@ -65,10 +66,12 @@ where
         }
     }
 
+    // The target as written, which the codebase keys once it holds every class-like, spec section 24, and the alias
+    // in lowercase, as `class_alias()` registers a plain PHP name.
     let target = get_class_like_name(target?, context, scope, current_class, parent_class)?;
     let alias = get_class_like_name(alias?, context, scope, current_class, parent_class)?;
 
-    Some((alias, target, call.span()))
+    Some((ascii_lowercase_word(alias.as_bytes()), target, call.span()))
 }
 
 #[inline]
@@ -97,9 +100,7 @@ where
             }
 
             match access.class.unparenthesized() {
-                Expression::Identifier(identifier) => {
-                    Some(ascii_lowercase_word(context.resolved_names.get(identifier)))
-                }
+                Expression::Identifier(identifier) => Some(word(context.resolved_names.get(identifier))),
                 Expression::Self_(_) | Expression::Static(_) => current_class,
                 Expression::Parent(_) => parent_class,
                 _ => None,
@@ -115,5 +116,5 @@ where
 #[inline]
 fn normalize_class_like_name(value: &[u8]) -> Option<Word> {
     let value = value.strip_prefix(b"\\").unwrap_or(value);
-    (!value.is_empty()).then(|| ascii_lowercase_word(value))
+    (!value.is_empty()).then(|| word(value))
 }

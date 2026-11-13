@@ -1712,12 +1712,11 @@ fn read_symbol_identifier_with_kind(
             if member.is_empty() {
                 return Err(protocol("symbol reference member cannot be empty"));
             }
-            let raw_member = word(member);
-            let lowercase_member = ascii_lowercase_word(member);
-            let member = if codebase.get_method(symbol.as_bytes(), lowercase_member.as_bytes()).is_some() {
-                lowercase_member
+            // A method as its class keys it, and any other member, a property or a constant, as written.
+            let member = if codebase.get_method(symbol.as_bytes(), member).is_some() {
+                codebase.method_key(symbol, member)
             } else {
-                raw_member
+                word(member)
             };
             Ok((symbol, member))
         }
@@ -1725,11 +1724,17 @@ fn read_symbol_identifier_with_kind(
     }
 }
 
+/// The key the codebase holds the symbol a worker names as `bytes` under, spec section 24: a class-like's by
+/// [`CodebaseMetadata::class_key`], exact for a PHP# one, a function's in lowercase, and a constant's with its namespace
+/// in lowercase. A symbol the codebase holds none of is a target as written, and a source in lowercase.
 fn normalize_symbol(codebase: &CodebaseMetadata, bytes: &[u8], target: bool) -> mago_word::Word {
+    let class = codebase.class_key(bytes);
+    if codebase.symbols.contains(class) {
+        return class;
+    }
+
     let lowercase = ascii_lowercase_word(bytes);
-    if codebase.class_like_exists(lowercase.as_bytes())
-        || codebase.function_likes.contains_key(&(empty_word(), lowercase))
-    {
+    if codebase.function_likes.contains_key(&(empty_word(), lowercase)) {
         return lowercase;
     }
 
@@ -1870,6 +1875,8 @@ mod tests {
     use mago_codex::metadata::class_like::ClassLikeMetadata;
     use mago_codex::metadata::flags::MetadataFlags;
     use mago_codex::reference::ReferenceOrigin;
+    use mago_codex::reference::SymbolReferences;
+    use mago_codex::symbol::SymbolIdentifier;
     use mago_codex::ttype::atomic::TAtomic;
     use mago_codex::ttype::atomic::array::TArray;
     use mago_codex::ttype::union::TUnion;
@@ -1895,12 +1902,17 @@ mod tests {
     use super::GET_INFERRED_RETURN_TYPES;
     use super::GET_INFERRED_YIELD_KEY_TYPES;
     use super::GET_INFERRED_YIELD_VALUE_TYPES;
+    use super::GET_REFERENCES_FROM;
+    use super::GET_REFERENCES_TO;
+    use super::SYMBOL_REFERENCE_QUERY_REQUEST;
+    use super::SymbolReferenceStore;
     use super::analyzed_names;
     use super::build_node_analysis_plan;
     use super::class_like_matches_hook;
     use super::decode_lifecycle_response;
     use super::encode_after_file_analysis_request;
     use super::handle_analysis_query;
+    use super::handle_symbol_reference_query;
     use super::write_reference_origin;
     use super::write_symbol_identifier;
     use crate::artifacts::AnalysisArtifacts;
@@ -2134,6 +2146,53 @@ mod tests {
 
         assert!(!class_like_matches_hook(b"FrameworkTestCase", &hook, &codebase));
         assert!(class_like_matches_hook(b"ApplicationTest", &hook, &codebase));
+    }
+
+    /// A PHP# class whose methods name each other and a plain PHP class.
+    const BOX: (&str, &str) = (
+        "src/Probe/Box.sharp",
+        "namespace Probe;\n\npublic class Box\n{\n    public Tagged openLid() => this.tag();\n\n    public Tagged tag() => new Tagged();\n}\n",
+    );
+
+    /// A plain PHP class.
+    const TAGGED: (&str, &str) = ("src/Probe/Tagged.php", "<?php\n\nnamespace Probe;\n\nfinal class Tagged\n{\n}\n");
+
+    /// The answer to the symbol-reference query `operation` about each of `endpoints`, as a worker writes them, over the
+    /// references Mago records for `BOX`, by the codebase's keys: `openLid` calls `tag`, and `tag` returns a `Tagged`.
+    fn reference_answer(operation: u8, endpoints: &[SymbolIdentifier]) -> Vec<u8> {
+        analyzed(&[BOX, TAGGED], |analysis| {
+            let session = ExternalAnalysisSession::from_files(analysis.files.iter().cloned());
+            let mut writer = protocol::message_writer(SYMBOL_REFERENCE_QUERY_REQUEST);
+            writer.write_u64(session.generation());
+            writer.write_u8(operation);
+            writer.write_u32(endpoints.len() as u32);
+            for endpoint in endpoints {
+                write_symbol_identifier(&mut writer, *endpoint).expect("the endpoint should fit in a frame");
+            }
+            let class = analysis.codebase.class_key(b"Probe\\Box");
+            let tagged = analysis.codebase.class_key(b"Probe\\Tagged");
+            let mut references = SymbolReferences::new();
+            references.add_symbol_reference((class, word(b"openLid")), (class, word(b"tag")), false);
+            references.add_symbol_reference((class, word(b"tag")), (tagged, empty_word()), true);
+            let store = SymbolReferenceStore::new(&references);
+
+            handle_symbol_reference_query(&writer.finish(), &session, analysis.codebase, &store)
+                .expect("the symbol-reference query should succeed")
+        })
+    }
+
+    /// A worker names a symbol as written, and the host keys it as the codebase does, spec section 24: a PHP# class and
+    /// its methods by their exact names, and a plain PHP class in any case. So the references from the PHP# `Box` and
+    /// to its `tag` are found, as the ones to the plain PHP `Tagged` are by any case of its name.
+    #[test]
+    fn a_reference_query_keys_each_symbol_as_the_codebase_does() {
+        let from_box = reference_answer(GET_REFERENCES_FROM, &[(word(b"Probe\\Box"), empty_word())]);
+        let to_tag = reference_answer(GET_REFERENCES_TO, &[(word(b"Probe\\Box"), word(b"tag"))]);
+        let to_tagged = reference_answer(GET_REFERENCES_TO, &[(word(b"PROBE\\TAGGED"), empty_word())]);
+
+        assert!(names(&from_box, b"probe\\tagged"), "the references from `Box` name `Tagged`");
+        assert!(names(&to_tag, b"openLid"), "`openLid` references `tag`");
+        assert!(names(&to_tagged, b"Probe\\Box"), "`Box` references `Tagged`");
     }
 
     #[test]

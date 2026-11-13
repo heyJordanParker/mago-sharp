@@ -9,7 +9,6 @@ use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_syntax::cst::MethodPartialApplication;
 use mago_word::WordMap;
-use mago_word::ascii_lowercase_word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -43,12 +42,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for MethodPartialApplication<'arena>
             resolve_method_targets(context, block_context, artifacts, self.object, &self.method, false, self.span())?;
 
         for resolved_method in &method_resolution.resolved_methods {
-            let class_name = ascii_lowercase_word(resolved_method.method_identifier.get_class_name().as_ref());
-            let method_name = resolved_method.method_identifier.get_method_name();
-            artifacts.symbol_references.add_reference_to_class_member(
+            artifacts.symbol_references.add_reference_for_method_call(
+                context.codebase,
                 &block_context.scope,
-                (class_name, method_name),
-                false,
+                &resolved_method.method_identifier,
             );
         }
 
