@@ -197,7 +197,7 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
     let (database, _) = project_database(&orchestrator, &configuration.source.workspace)?;
 
-    let library = standard_library(root, &database).unwrap_or_default();
+    let library = standard_library(root, &database).map_err(OrchestratorError::General)?;
     let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
     server.analyze()?;
     // A file whose errors the lowering does not survive is refused, whatever panic message its lowering printed.
@@ -1717,6 +1717,39 @@ mod tests {
 
         assert!(compile_into(&configuration, &root, folder.path()).unwrap(), "the vendor edit compiles again");
         assert_ne!(std::fs::read(folder.path().join("app/Paced.sharpc")).unwrap(), paced);
+    }
+
+    /// The hosts' compile refuses a standard library of another release as `mago compile` does, with the same message,
+    /// where it once compiled against no library.
+    #[test]
+    fn the_hosts_compile_refuses_a_standard_library_of_another_release() {
+        let (_directory, root, configuration) = project();
+        let library = "vendor/heyjordanparker/php-sharp-composer";
+        write(&root, &format!("{library}/composer.json"), "{\"name\": \"heyjordanparker/php-sharp-composer\"}\n");
+        write(
+            &root,
+            &format!("{library}/library/Sharp/Math.sharp"),
+            "namespace Sharp;\n\npublic static class Math\n{\n    public static int twice(int value) => value * 2;\n}\n",
+        );
+        write(
+            &root,
+            "vendor/composer/installed.json",
+            "{\"packages\": [{\"name\": \"heyjordanparker/php-sharp-composer\", \"version\": \"v0.5.9\"}]}\n",
+        );
+        let folder = tempfile::tempdir().unwrap();
+
+        let Err(error) = compile_into(&configuration, &root, folder.path()) else {
+            panic!("the hosts' compile accepted library 0.5.9");
+        };
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Orchestrator error: This project's PHP# standard library is 0.5.9, and mago is {VERSION}. Move mago and \
+                 the standard library to the same release: require heyjordanparker/php-sharp-composer {VERSION}, or \
+                 heyjordanparker/mago-sharp 0.5.9."
+            )
+        );
+        assert!(!folder.path().join("app/Order.sharpc").exists());
     }
 
     /// Writes `bytes` to the file at `path` and sets its modification time back to `modified`, as `touch -d` does.
