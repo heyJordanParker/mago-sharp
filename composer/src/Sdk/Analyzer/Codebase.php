@@ -502,14 +502,7 @@ final class Codebase
         sort($attributes);
         // A search names each class, method and attribute as written, and Mago keys it as the codebase does: a PHP# name
         // exactly, and a plain PHP one in any case.
-        $search = Protocol::writeMethodSearch(
-            $class,
-            $descendantsOf,
-            $name,
-            $attributes,
-            $fields,
-            $declaredOnly,
-        );
+        $search = Protocol::writeMethodSearch($class, $descendantsOf, $name, $attributes, $fields, $declaredOnly);
         // A search across classes depends on every class it searched, so it records the search, whose result Mago
         // compares when the codebase changes.
         $class === null
@@ -862,9 +855,10 @@ final class Codebase
                 default => $this->reads?->record(Protocol::GET_CLASS_LIKES, 0, $name),
             };
             // A namespace and a function are one name in any case, and a class-like or constant may not be.
-            $key = $predicate === Protocol::EXISTS_NAMESPACE || $predicate === Protocol::EXISTS_FUNCTION
-                ? strtolower($name)
-                : $name;
+            $key =
+                $predicate === Protocol::EXISTS_NAMESPACE || $predicate === Protocol::EXISTS_FUNCTION
+                    ? strtolower($name)
+                    : $name;
             $keys[] = $key;
             if (!array_key_exists($key, $bucket)) {
                 $missingNames[] = $name;
