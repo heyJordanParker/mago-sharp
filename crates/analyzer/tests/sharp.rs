@@ -43,6 +43,7 @@ use mago_analyzer::settings::ClassInitializer;
 use mago_analyzer::settings::Settings;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::r#extern::extern_namespace_classes;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
 use mago_codex::ttype::TType;
@@ -254,9 +255,7 @@ fn analyze_with_references(
             })
             .map(|member| member.original_name)
     }));
-    let extern_namespaces = ExternNamespaces::new(
-        scanned.iter().flat_map(|scan| scan.extern_namespaces.iter().map(|declaration| declaration.namespace)),
-    );
+    let extern_namespaces = ExternNamespaces::new(extern_namespace_classes(&scanned.iter().collect::<Vec<_>>()));
     let mut programs = Vec::new();
     for (file, program) in parsed {
         let names =
@@ -3864,7 +3863,8 @@ fn a_catch_variable_has_the_caught_classes_as_its_type_as_in_php() {
 
 /// Spec section 23 calls a plain PHP function through its namespace: `Pdf.render(html)` after `import Vendor.Pdf;`
 /// calls a function of that namespace, and `Pdf.helper(extra)` the function `helper` the library declares in PHP's
-/// root namespace beside its classes. Each checks its arguments as its PHP twin's call does.
+/// root namespace, which `extern namespace Pdf for helper;` gives `Vendor\Pdf`. Each checks its arguments as its PHP
+/// twin's call does.
 #[test]
 fn a_plain_php_function_is_called_through_its_namespace() {
     let pdf = "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n";
@@ -3876,6 +3876,7 @@ fn a_plain_php_function_is_called_through_its_namespace() {
         ("src/Vendor/Pdf/functions.php", pdf),
         ("src/Vendor/Pdf/helpers.php", helpers),
         ("src/Vendor/Pdf/Document.php", document),
+        ("src/Demo/Externs.sharp", "namespace Demo;\n\nimport Vendor.Pdf;\n\nextern namespace Pdf for helper;\n"),
     ];
 
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &others);
@@ -3885,8 +3886,10 @@ fn a_plain_php_function_is_called_through_its_namespace() {
 }
 
 /// Laravel's `helpers.php` files and stancl/tenancy's, each a library's functions in PHP's root namespace beside its
-/// classes. Laravel keeps `collect` in `Illuminate/Collections`, beside the classes of `Illuminate\Support`.
-const ROOT_HELPERS: [(&str, &str); 6] = [
+/// classes, and the project's `extern namespace` lines that give each folder a namespace, spec section 23, one written
+/// in full and one through its import. Laravel keeps `collect` in `Illuminate/Collections`, beside the classes of
+/// `Illuminate\Support`. The first six are the libraries alone.
+const ROOT_HELPERS: [(&str, &str); 7] = [
     (
         "vendor/laravel/framework/src/Illuminate/Foundation/helpers.php",
         "<?php\n\nfunction abort(int $code, string $message = ''): never\n{\n    exit($code);\n}\n\nfunction app(): object\n{\n    return new stdClass();\n}\n\nfunction now(): int\n{\n    return time();\n}\n",
@@ -3905,15 +3908,20 @@ const ROOT_HELPERS: [(&str, &str); 6] = [
     ),
     ("vendor/stancl/tenancy/src/helpers.php", "<?php\n\nfunction tenant(): ?string\n{\n    return null;\n}\n"),
     ("vendor/stancl/tenancy/src/Tenancy.php", "<?php\n\nnamespace Stancl\\Tenancy;\n\nclass Tenancy\n{\n}\n"),
+    (
+        "app/Externs/Libraries.sharp",
+        "namespace App.Externs;\n\nimport Stancl.Tenancy;\n\nextern namespace Illuminate.Foundation for abort;\nextern namespace Illuminate.Support for collect;\nextern namespace Tenancy for tenant;\n",
+    ),
 ];
 
-/// Jordan's ruling of 10-22, spec section 23: a function a library declares outside any namespace belongs to the
-/// namespace of the library's classes in the same folder, so `Foundation.abort(…)` calls Laravel's `abort`,
-/// `Support.collect(…)` its `collect`, which sits in `Illuminate/Collections` beside `Illuminate\Support`'s classes, and
-/// `Tenancy.tenant()` stancl/tenancy's `tenant`. A function is a value through its namespace too, as `Foundation.app`.
-/// The folder's name is no namespace, so `Collections.collect` names nothing.
+/// Decision 097, spec section 23: a function a library declares outside any namespace has the namespace an
+/// `extern namespace` line gives its folder, so `Foundation.abort(…)` calls Laravel's `abort`, `Foundation.now()` the
+/// `now` beside it, `Support.collect(…)` its `collect`, and `Tenancy.tenant()` stancl/tenancy's `tenant`. A function is
+/// a value through its namespace too, as `Foundation.app`. A folder's name is no namespace, so `Collections.collect`
+/// names nothing. Without the lines, the classes beside a function give it no namespace, so each call is the error a
+/// missing function gets.
 #[test]
-fn a_function_a_library_declares_outside_any_namespace_belongs_to_the_namespace_of_its_classes() {
+fn a_function_a_library_declares_outside_any_namespace_has_the_namespace_its_extern_namespace_line_gives() {
     let controller = (
         "app/Http/CartsController.sharp",
         "namespace App.Http;\n\nimport Illuminate.Foundation;\nimport Illuminate.Support;\nimport Stancl.Tenancy;\n\npublic class CartsController\n{\n    public Any? missing() => Foundation.abort(404, \"Cart not found.\");\n    public int stamp() => Foundation.now();\n    public Any container() => Foundation.app;\n    public int counted() => Support.collect([1, 2]);\n    public string? current() => Tenancy.tenant();\n    public int wrong() => Support.collect(\"one\");\n}\n",
@@ -3935,10 +3943,23 @@ fn a_function_a_library_declares_outside_any_namespace_belongs_to_the_namespace_
             "5:29 non-existent-class-like `Collections` names no class, and no namespace this file imports. | Check the spelling of `Collections`, or import the class or the namespace whose member this names."
         ]
     );
+    let bare = (
+        "app/Http/Bare.sharp",
+        "namespace App.Http;\n\nimport Illuminate.Foundation;\n\npublic class Bare\n{\n    public Any? missing() => Foundation.abort(404, \"Cart not found.\");\n}\n",
+    );
+    assert_eq!(
+        refusals(bare, &ROOT_HELPERS[..6]),
+        [
+            "3:8 class-namespace-import `Illuminate.Foundation` holds classes only, and an import names a class or a namespace of functions: import the class, as in `import Illuminate.Foundation.Application;`. | ",
+            "7:41 non-existent-function Function `Foundation.abort` does not exist. | Check the spelling of `Foundation.abort`, or declare `function abort()` in a `.php` file of the namespace `Illuminate.Foundation`.",
+        ]
+    );
 }
 
-/// A library whose classes and functions have no namespace, as WordPress, beside one with a namespace.
-const ROOT_LIBRARIES: [(&str, &str); 4] = [
+/// A library whose classes and functions have no namespace, as WordPress, with a class in a second folder, beside one
+/// with a namespace.
+const ROOT_LIBRARIES: [(&str, &str); 5] = [
+    ("vendor/wordpress/wp-admin/class-wp-screen.php", "<?php\n\nclass WP_Screen\n{\n}\n"),
     (
         "vendor/wordpress/wp-includes/class-wp-post.php",
         "<?php\n\nclass WP_Post\n{\n    public string $post_title = '';\n}\n",
@@ -3952,22 +3973,26 @@ const ROOT_LIBRARIES: [(&str, &str); 4] = [
 ];
 
 /// Spec section 23: `extern namespace WordPress for WP_Post;` gives the folder of a plain PHP class of PHP's root
-/// namespace the namespace `WordPress`, so its functions are `WordPress.add_action`, its classes `import
-/// WordPress.WP_Post;`, and `extern WordPress.get_post` declares a function's effect. The class must be a library's, of
-/// PHP's root namespace, and a folder takes one namespace no class has, which no other folder takes.
+/// namespace the namespace `WordPress`, so its classes are `import WordPress.WP_Post;` and its functions
+/// `WordPress.add_action`, and `extern WordPress.get_post` declares a function's effect. A root class of another folder
+/// of the library, as `WP_Screen`, takes no namespace from it. The line names a library's class, function or constant
+/// of PHP's root namespace, a folder takes one namespace, which no other folder takes, and a namespace a class has is
+/// one only a folder that holds such a class takes.
 #[test]
 fn an_extern_namespace_names_a_namespace_less_library() {
     let stubs = (
         "app/Stubs/WordPress.sharp",
         "namespace App.Stubs;\n\nimport WordPress;\n\nextern namespace WordPress for WP_Post;\nextern WordPress.get_post uses Database;\n",
     );
+    let screen =
+        ("app/Blog/Screen.sharp", "namespace App.Blog;\n\nimport WordPress.WP_Screen;\n\npublic class Screen\n{\n}\n");
     let feed = (
         "app/Blog/Feed.sharp",
         "namespace App.Blog;\n\nimport WordPress;\nimport WordPress.WP_Post;\n\npublic class Feed\n{\n    public bool hook() => WordPress.add_action(\"init\", () => { });\n    public string title(WP_Post post) => post.post_title;\n    public WP_Post? first() => WordPress.get_post(1);\n    public bool bare() => add_action(\"init\", () => { });\n}\n",
     );
     let wrong = (
         "app/Stubs/Wrong.sharp",
-        "namespace App.Stubs;\n\nextern namespace Missing for No_Such_Class;\nextern namespace Clients for Acme.Client;\nextern namespace Press for WP_Post;\nextern namespace WordPress for Legacy_Widget;\nextern namespace Acme for Legacy_Widget;\nextern namespace Pages for Page;\n",
+        "namespace App.Stubs;\n\nextern namespace Missing for No_Such_Class;\nextern namespace Clients for Acme.Client;\nextern namespace Press for WP_Post;\nextern namespace WordPress for Legacy_Widget;\nextern namespace Acme for Legacy_Widget;\nextern namespace Pages for Page;\nextern namespace Press for add_action;\nextern namespace Text for strlen;\n",
     );
     let page = (
         "app/Stubs/Page.sharp",
@@ -3984,7 +4009,7 @@ fn an_extern_namespace_names_a_namespace_less_library() {
     );
     let missing = |at: &str, class: &str| {
         format!(
-            "{at} non-existent-class-like Cannot find the plain PHP class `{class}` outside any namespace. | `extern namespace` names a class of a library whose classes have no namespace, as `extern namespace WordPress for WP_Post;`."
+            "{at} non-existent-class-like Cannot find the plain PHP class, function or constant `{class}` outside any namespace. | `extern namespace` names a class, function or constant a library declares outside any namespace, as `extern namespace WordPress for WP_Post;` or `extern namespace Illuminate.Foundation for abort;`."
         )
     };
     assert_eq!(
@@ -4000,8 +4025,16 @@ fn an_extern_namespace_names_a_namespace_less_library() {
             missing("4:30", "Acme.Client"),
             "5:1 duplicate-extern The folder of `WP_Post` already takes the namespace `WordPress`. | Delete this line: a folder takes one namespace.".to_owned(),
             "6:1 duplicate-extern `WordPress` is already the namespace of the folder of `WP_Post`. | Give this library another namespace.".to_owned(),
-            "7:18 duplicate-extern `Acme` is already the namespace of `Client`, so no library's folder takes it. | Give the library a namespace no class has.".to_owned(),
+            "7:18 duplicate-extern `Acme` is already the namespace of `Client`, whose folder doesn't hold `Legacy_Widget`. | Give the library a namespace no class has, or the namespace of the classes beside it.".to_owned(),
             missing("8:28", "Page"),
+            "9:1 duplicate-extern The folder of `add_action` already takes the namespace `WordPress`. | Delete this line: a folder takes one namespace.".to_owned(),
+            missing("10:27", "strlen"),
+        ]
+    );
+    assert_eq!(
+        refusals(screen, &others(stubs)),
+        [
+            "3:8 non-existent-use-import Imported class, interface, trait, or enum `WordPress.WP_Screen` does not exist. | Ensure that the class, interface, trait, or enum `WordPress.WP_Screen` is defined in the codebase."
         ]
     );
 }
@@ -4057,9 +4090,10 @@ fn global_is_an_ordinary_name_in_a_project_s_code() {
 }
 
 /// Spec section 23 reads a plain PHP constant through its namespace, as it calls a function: `Pdf.DEFAULT_DPI` after
-/// `import Vendor.Pdf;` reads the library's, and `Pdf.VERSION` the one the library declares in PHP's root namespace
-/// beside its classes, each with its type. A bare uppercase name is the code's own constant, so a bare `VERSION` and a
-/// bare PHP constant are each the error a misspelled name gets. A `.php` file reads each.
+/// `import Vendor.Pdf;` reads the library's, and `Pdf.VERSION` the one the library declares in PHP's root namespace,
+/// which `extern namespace Pdf for VERSION;` gives `Vendor\Pdf`, each with its type. A bare uppercase name is the code's
+/// own constant, so a bare `VERSION` and a bare PHP constant are each the error a misspelled name gets. A `.php` file
+/// reads each.
 #[test]
 fn a_plain_php_constant_is_read_through_its_namespace() {
     let pdf = "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n";
@@ -4071,6 +4105,7 @@ fn a_plain_php_constant_is_read_through_its_namespace() {
         ("src/Vendor/Pdf/constants.php", pdf),
         ("src/Vendor/Pdf/version.php", version),
         ("src/Vendor/Pdf/Document.php", document),
+        ("src/Demo/Externs.sharp", "namespace Demo;\n\nimport Vendor.Pdf;\n\nextern namespace Pdf for VERSION;\n"),
     ];
 
     let undefined = |at: &str, name: &str| {
@@ -4162,8 +4197,9 @@ fn a_member_written_as_an_expression_after_a_namespace_shows_its_refusal_alone()
 }
 
 /// A message names a plain PHP function as the `.sharp` file calls it, through its namespace: `Pdf.helper` for the
-/// `helper` the library declares in PHP's root namespace beside its classes, and `Pdf.missing` for a function an
-/// imported namespace lacks, which is a missing function, not a missing method.
+/// `helper` the library declares in PHP's root namespace, which `extern namespace Pdf for helper;` gives `Vendor\Pdf`
+/// after `import Vendor.Pdf;`, and `Pdf.missing` for a function an imported namespace lacks, which is a missing
+/// function, not a missing method.
 #[test]
 fn a_message_names_a_plain_php_function_as_the_file_calls_it() {
     let pdf = "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n";
@@ -4174,6 +4210,7 @@ fn a_message_names_a_plain_php_function_as_the_file_calls_it() {
         ("src/Vendor/Pdf/functions.php", pdf),
         ("src/Vendor/Pdf/helpers.php", helpers),
         ("src/Vendor/Pdf/Document.php", document),
+        ("src/Demo/Externs.sharp", "namespace Demo;\n\nimport Vendor.Pdf;\n\nextern namespace Pdf for helper;\n"),
     ];
 
     assert_eq!(
@@ -4426,8 +4463,9 @@ fn a_template_is_a_string_as_php_interpolation_is() {
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["14:16 invalid-return-statement"]);
 }
 
-/// A call of a function an imported namespace lacks is reported as PHP reports it, and a library that declares the
-/// function in PHP's root namespace beside the namespace's classes makes the call compile, spec section 23.
+/// A call of a function an imported namespace lacks is reported as PHP reports it, spec section 23. A library that
+/// declares the function in PHP's root namespace beside the namespace's classes leaves it missing, and the
+/// `extern namespace` line that gives the function the namespace makes the call compile.
 #[test]
 fn calling_a_function_that_does_not_exist_is_reported_as_in_php() {
     let pdf = (
@@ -4450,7 +4488,13 @@ fn calling_a_function_that_does_not_exist_is_reported_as_in_php() {
     let declared =
         ("src/Vendor/Pdf/helpers.php", "<?php\n\nfunction missing(int $value): int\n{\n    return $value;\n}\n");
     let document = ("src/Vendor/Pdf/Document.php", "<?php\n\nnamespace Vendor\\Pdf;\n\nfinal class Document\n{\n}\n");
-    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[pdf, declared, document]), Vec::<String>::new());
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[pdf, declared, document]),
+        ["9:20 non-existent-function", "9:16 mixed-return-statement"]
+    );
+    let externs =
+        ("src/Demo/Externs.sharp", "namespace Demo;\n\nimport Vendor.Pdf;\n\nextern namespace Pdf for missing;\n");
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[pdf, declared, externs]), Vec::<String>::new());
 }
 
 /// A method that wraps the PHP function of its own name calls it as `global.ceil(x)`, which never reaches the method.
@@ -6740,8 +6784,8 @@ fn a_method_value_passed_to_a_collection_method_types_its_result() {
 
 /// Spec section 14.3: a method named without parentheses is a function value, whatever it is a method of: a `List`,
 /// `Map` or `Set` method that leaves the collection as it is, an extension method of the standard library or of an
-/// import, and a plain PHP function a library declares in its namespace or beside its classes. Each value has its
-/// method's function type without the receiver.
+/// import, and a plain PHP function a library declares in its namespace, or in PHP's root namespace with the namespace
+/// an `extern namespace` line gives it. Each value has its method's function type without the receiver.
 #[test]
 fn a_method_value_of_a_collection_an_extension_or_a_plain_php_function_has_its_function_type() {
     let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\nimport Vendor.Strings;\n\nclass Report\n{\n    public int run(List<int> numbers, List<int> allowed, Map<string, int> prices, Set<int> seen, List<string> names, string title)\n    {\n        List<int> kept = numbers.filter(allowed.contains);\n        List<string> priced = names.filter(prices.has);\n        List<int> met = numbers.filter(seen.contains);\n        Function<int()> size = allowed.count;\n        Function<string()> tidy = title.trim;\n        Function<string(string)> slug = title.slug;\n        List<string> capitalized = names.map(Strings.capitalize);\n        Function<int(string)> length = Strings.measure;\n        Function<int(int)> wrongList = allowed.contains;\n        Function<int()> wrongExtension = title.trim;\n        Function<string(int)> wrongImported = title.slug;\n        Function<string(string)> wrongFunction = Strings.measure;\n        const trimmed = title.trim;\n        const slugged = title.slug;\n        string wrongCall = slugged(1);\n        return kept.count() + priced.count() + met.count() + size() + Strings.measure(tidy()) + Strings.measure(slug(\"-\")) + capitalized.count() + length(\"x\") + Strings.measure(trimmed()) + Strings.measure(slugged(\"-\")) + Strings.measure(wrongCall);\n    }\n\n    public int more(List<int> numbers, List<string> names, List<int>? maybe, Iterable<int> feed, string title)\n    {\n        Function<int(int)> firstOr = numbers.firstOr;\n        Function<string(string)> wrongFirst = numbers.firstOr;\n        Function<int(int)> same = Strings.same_value;\n        Function<string(int)> wrongSame = Strings.same_value;\n        Function<Iterable<int>(int)> take = feed.take;\n        const maybeHas = maybe.contains;\n        const total = names.total;\n        title.slug = \"x\";\n        const nope = numbers.missing;\n        return firstOr(1) + same(1) + take(1).toList().count();\n    }\n}\n";
@@ -6758,6 +6802,10 @@ fn a_method_value_of_a_collection_an_extension_or_a_plain_php_function_has_its_f
         ("src/Vendor/Strings/same.php", same),
         ("src/Vendor/Strings/functions.php", strings),
         ("src/Vendor/Strings/Buffer.php", buffer),
+        (
+            "src/Demo/Externs.sharp",
+            "namespace Demo;\n\nimport Vendor.Strings;\n\nextern namespace Strings for same_value;\n",
+        ),
     ];
 
     assert_eq!(
@@ -7223,7 +7271,11 @@ fn a_function_value_crosses_plain_php_callbacks_that_declare_no_types() {
 
     assert_messages(
         ("src/Demo/Report.sharp", sharp),
-        &[("src/Lib/Callbacks.php", callbacks), ("src/Lib/helpers.php", helpers)],
+        &[
+            ("src/Lib/Callbacks.php", callbacks),
+            ("src/Lib/helpers.php", helpers),
+            ("src/Demo/Externs.sharp", "namespace Demo;\n\nextern namespace Lib for absolute;\n"),
+        ],
         &[
             "19:36 invalid-local-assignment-value: `Callbacks.named()` gives a plain PHP `callable`, which may be a function's name or an array, so it is no `Function<int(int)>`.",
             "20:38 invalid-local-assignment-value: `Callbacks.untyped()` gives a function whose types plain PHP doesn't declare, so it is no `Function<int(int)>`: hold it with `const`, and check what each call gives.",
@@ -7509,14 +7561,19 @@ fn a_plain_php_function_called_through_global_narrows_as_in_php() {
     assert_eq!(wrong, Vec::<String>::new());
 }
 
-/// A plain PHP function a library declares in PHP's root namespace beside its classes, called through the library's
-/// namespace, gets every check PHP's call of it gets, and PHP's call gets them by the name it runs, so `fresh()` in a
-/// namespace runs the root `fresh`. Each row is a body of `run`, its PHP twin, and the issue codes both report.
+/// A plain PHP function a library declares in PHP's root namespace, called through the namespace an `extern namespace`
+/// line gives it, gets every check PHP's call of it gets, and PHP's call gets them by the name it runs, so `fresh()` in
+/// a namespace runs the root `fresh`. Each row is a body of `run`, its PHP twin, and the issue codes both report.
 #[test]
 fn a_plain_php_function_called_through_its_library_s_namespace_is_checked_as_in_php() {
     const LIBRARY: &str = "<?php\n\n/** @pure */\nfunction measure(string $value): int\n{\n    return 1;\n}\n\n#[\\NoDiscard]\nfunction fresh(string $value): int\n{\n    return 1;\n}\n\nfunction record(mixed ...$values): void\n{\n}\n\n/** @experimental */\nfunction preview(string $value): void\n{\n}\n";
     const TOOLBOX: &str = "<?php\n\nnamespace Vendor\\Tools;\n\nfinal class Toolbox\n{\n}\n";
-    let others = [("src/Vendor/Tools/library.php", LIBRARY), ("src/Vendor/Tools/Toolbox.php", TOOLBOX)];
+    const EXTERNS: &str = "namespace Demo;\n\nextern namespace Vendor.Tools for measure;\n";
+    let others = [
+        ("src/Vendor/Tools/library.php", LIBRARY),
+        ("src/Vendor/Tools/Toolbox.php", TOOLBOX),
+        ("src/Demo/Externs.sharp", EXTERNS),
+    ];
     let settings =
         || Settings { find_unused_parameters: true, check_experimental: true, check_name_casing: true, ..settings() };
     let rows: [(&str, &str, &[&str]); 5] = [
@@ -8697,7 +8754,11 @@ fn a_named_argument_fills_a_plain_php_variadic_parameter_under_its_name() {
     let html = "<?php\n\nnamespace Lib;\n\nfinal class Html\n{\n    public static function tag(string $name, string ...$attributes): string\n    {\n        return $name;\n    }\n\n    public function open(string $name, string ...$attributes): string\n    {\n        return $name;\n    }\n}\n\nfinal class Element\n{\n    public function __construct(public string $name, int ...$sizes)\n    {\n    }\n}\n\n#[\\Attribute(\\Attribute::TARGET_ALL)]\nfinal class Generic\n{\n    public function __construct(string ...$types)\n    {\n    }\n}\n";
     let helpers = "<?php\n\nfunction attrs(string $name, string ...$attributes): string\n{\n    return $name;\n}\n";
     let sharp = "namespace Demo;\n\nimport Lib;\nimport Lib.Element;\nimport Lib.Generic;\nimport Lib.Html;\n\n[Generic(Item: typeof(Report))]\nclass Report\n{\n    public static string run(Html html)\n    {\n        const a = Html.tag(\"a\", href: \"/home\", title: \"Home\");\n        const b = html.open(\"a\", \"x\", href: \"/home\", attributes: \"own\");\n        const c = new Element(name: \"box\", width: 3, height: 4);\n        const d = Lib.attrs(\"a\", href: \"/home\");\n        const e = Html.tag(\"a\", href: 3, title: \"Home\", title: \"Again\");\n        return a + b + c.name + d + e;\n    }\n}\n";
-    let others = [("src/Lib/Html.php", html), ("src/Lib/helpers.php", helpers)];
+    let others = [
+        ("src/Lib/Html.php", html),
+        ("src/Lib/helpers.php", helpers),
+        ("src/Demo/Externs.sharp", "namespace Demo;\n\nextern namespace Lib for attrs;\n"),
+    ];
 
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &others),
@@ -11791,6 +11852,10 @@ fn an_import_names_a_class_or_a_namespace_of_functions_and_constants() {
         ("src/App/Shared/Schema/Entity.php", ENTITY),
         ("src/App/Shared/Schema/Column.php", COLUMN),
         ("src/App/Shared/Schema/Module.sharp", SCHEMA_MODULE),
+        (
+            "src/App/Externs.sharp",
+            "namespace App;\n\nimport Vendor.Foundation;\n\nextern namespace Foundation for abort;\nextern namespace Foundation for LARAVEL;\n",
+        ),
     ];
 
     for (import, expected) in [
@@ -25667,6 +25732,33 @@ const LETTERS: (&str, &str) = (
     "<?php\n\nnamespace Acme\\Letters;\n\nfunction shout(string $text): string\n{\n    return strtoupper($text);\n}\n\nfunction whisper(string $text): string\n{\n    return strtolower($text);\n}\n",
 );
 
+/// Spec section 23: an `extern namespace` line gives its namespace to the root classes, functions and constants of the
+/// folder of what it names, so a line that names a class answers for a function and a constant beside it, and a root
+/// name of another folder of the same library, or one of PHP's built-ins, has none.
+#[test]
+fn an_extern_namespace_line_gives_its_namespace_to_the_root_names_of_its_folder() {
+    let (codebase, _) = summarized(&[
+        (
+            "vendor/acme/blog/src/helpers.php",
+            "<?php\n\nconst BLOG_VERSION = 2;\n\nfunction blog_title(): string\n{\n    return '';\n}\n",
+        ),
+        ("vendor/acme/blog/src/class-blog-post.php", "<?php\n\nclass Blog_Post\n{\n}\n"),
+        (
+            "vendor/acme/blog/admin/class-blog-screen.php",
+            "<?php\n\nclass Blog_Screen\n{\n}\n\nfunction blog_admin(): void\n{\n}\n",
+        ),
+        ("app/Stubs/Blog.sharp", "namespace App.Stubs;\n\nextern namespace Blog for Blog_Post;\n"),
+    ]);
+    let of = |name: &str| {
+        codebase.extern_namespace_of(name.as_bytes()).map(|namespace| namespace.as_str_lossy().into_owned())
+    };
+
+    assert_eq!(
+        ["blog_title", "BLOG_VERSION", "Blog_Post", "Blog_Screen", "blog_admin", "strlen"].map(of),
+        [Some("Blog".to_owned()), Some("Blog".to_owned()), Some("Blog".to_owned()), None, None, None]
+    );
+}
+
 /// Analyzes every file of `files` against the codebase they declare together with the effect classes, and returns the
 /// codebase and the effect summaries of every body `files` declare.
 fn summarized(files: &[(&'static str, &'static str)]) -> (CodebaseMetadata, Vec<EffectSummary>) {
@@ -26758,8 +26850,9 @@ fn a_law_reading_a_getter_that_calls_a_function_with_no_extern_is_refused_and_na
 }
 
 /// Spec sections 23 and 29: an `extern` names a plain PHP function a library declares in PHP's root namespace through
-/// the namespace of the library's classes beside it, as `extern Foundation.now uses Clock;`, and the effects it lists
-/// reach each call of `Foundation.now()`. A bare `extern now;` names no function, as a misspelled name does.
+/// the namespace an `extern namespace` line gives it, as `extern Foundation.now uses Clock;` after
+/// `extern namespace Foundation for now;`, and the effects it lists reach each call of `Foundation.now()`. A bare
+/// `extern now;` names no function, as a misspelled name does.
 #[test]
 fn an_extern_declares_a_library_s_root_function_through_its_library_s_namespace() {
     let helpers = ("vendor/laravel/Foundation/helpers.php", "<?php\n\nfunction now(): int\n{\n    return time();\n}\n");
@@ -26773,7 +26866,7 @@ fn an_extern_declares_a_library_s_root_function_through_its_library_s_namespace(
     );
     let stub = (
         "app/Stubs/Foundation.sharp",
-        "namespace App.Stubs;\n\nimport Vendor.Foundation;\n\nextern Foundation.now uses Clock;\n",
+        "namespace App.Stubs;\n\nimport Vendor.Foundation;\n\nextern namespace Foundation for now;\nextern Foundation.now uses Clock;\n",
     );
     let bare = ("app/Stubs/Clock.sharp", "namespace App.Stubs;\n\nextern now uses Clock;\n");
 
@@ -31505,7 +31598,8 @@ fn an_import_outside_the_list_of_its_namespace_is_refused_at_the_import() {
     );
 }
 
-/// Spec sections 23 and 32: the namespace a library's root functions belong to is held to the list as any import is,
+/// Spec sections 23 and 32: the namespace `extern namespace` lines give a library's root functions is held to the list
+/// as any import is,
 /// so `import Illuminate.Foundation;` is refused under a list that leaves it out, and `import Illuminate.Support;`, which
 /// the list names, reaches `Support.collect`.
 #[test]

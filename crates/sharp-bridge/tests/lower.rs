@@ -334,15 +334,19 @@ const BEHAVIOR_LIBRARY: (&str, &str) = (
 );
 
 /// `Lib\Loud`, a project file with a method the inlining rule would take in the standard library: a call of a plain
-/// PHP function through its namespace, `capitalize`, which `LOUD_HELPERS` declares beside it.
+/// PHP function through its namespace, `capitalize`, which `LOUD_HELPERS` declares and `LOUD_EXTERNS` gives `Lib`.
 const LOUD: (&str, &str) = (
     "src/Lib/Loud.sharp",
     "namespace Lib;\n\nimport Lib;\n\npublic class Loud\n{\n    public static string capitalized(string text) => Lib.capitalize(text);\n}\n",
 );
 
-/// The plain PHP function `LOUD` calls, in PHP's root namespace beside `Lib\Loud`.
+/// The plain PHP function `LOUD` calls, in PHP's root namespace.
 const LOUD_HELPERS: (&str, &str) =
     ("src/Lib/helpers.php", "<?php function capitalize(string $text): string { return ucfirst($text); }");
+
+/// The `extern namespace` line that gives `capitalize` the namespace `Lib`, spec section 23.
+const LOUD_EXTERNS: (&str, &str) =
+    ("src/Lib/Externs.sharp", "namespace Lib;\n\nextern namespace Lib for capitalize;\n");
 
 /// The statements of `run`, declared with `signature` and holding `statements` in a class that imports `Sharp.Text`
 /// and `Lib.Loud`, lowered with the inline forms of `TEXT`.
@@ -351,7 +355,7 @@ fn inlined_body(signature: &str, statements: &str) -> String {
         "namespace App.Tenant;\n\nimport Lib.Loud;\nimport Sharp.Text;\n\nclass Report\n{{\n    public {signature}\n    {{\n{statements}    }}\n}}\n"
     );
 
-    Lowered::inlining(&code, &[LOUD, LOUD_HELPERS], &[TEXT]).body()
+    Lowered::inlining(&code, &[LOUD, LOUD_HELPERS, LOUD_EXTERNS], &[TEXT]).body()
 }
 
 /// A file declaring the method `run` with `body`. Its body starts on line 9.
@@ -5290,6 +5294,7 @@ fn parameters_carry_their_type_name_and_default() {
         &[
             ("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}"),
             ("src/Lib/constants.php", "<?php const LOUD = 1;"),
+            ("src/Stubs/Externs.sharp", "namespace Stubs;\n\nextern namespace Lib for LOUD;\n"),
         ],
     );
     let method = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_METHOD).expect("a method");
@@ -14050,6 +14055,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
                 "src/Lib/orders.php",
                 "<?php\n\n/** @return \\App\\Box<\\App\\Order> */\nfunction orders(): \\App\\Box\n{\n    return new \\App\\Box();\n}\n",
             ),
+            ("src/Stubs/Externs.sharp", "namespace Stubs;\n\nextern namespace Lib for orders;\n"),
         ],
     );
 
@@ -20177,6 +20183,10 @@ fn an_extension_method_or_plain_php_function_value_calls_what_it_names() {
                 "<?php\n\nfunction capitalize(string $text): string\n{\n    return ucfirst($text);\n}\n",
             ),
             ("src/Vendor/Pdf/Document.php", "<?php namespace Vendor\\Pdf; final class Document {}"),
+            (
+                "src/Stubs/Externs.sharp",
+                "namespace Stubs;\n\nimport Vendor.Pdf;\n\nextern namespace Pdf for capitalize;\n",
+            ),
         ],
     );
 
@@ -24734,6 +24744,10 @@ fn a_call_through_a_namespace_is_a_call_of_its_plain_php_function() {
                 "<?php function measure(string $text): int { return strlen($text); } function pad(string $text, int $length): string { return str_pad($text, $length); }",
             ),
             ("src/Vendor/Pdf/Document.php", "<?php namespace Vendor\\Pdf; final class Document {}"),
+            (
+                "src/Stubs/Externs.sharp",
+                "namespace Stubs;\n\nimport Vendor.Pdf;\n\nextern namespace Pdf for measure;\n",
+            ),
         ],
     );
 
@@ -24854,6 +24868,10 @@ fn a_read_through_a_namespace_is_a_read_of_its_plain_php_constant() {
             ("src/Vendor/Pdf/constants.php", "<?php namespace Vendor\\Pdf; const DEFAULT_DPI = 300;"),
             ("src/Vendor/Pdf/version.php", "<?php const PDF_VERSION = 2;"),
             ("src/Vendor/Pdf/Document.php", "<?php namespace Vendor\\Pdf; final class Document {}"),
+            (
+                "src/Stubs/Externs.sharp",
+                "namespace Stubs;\n\nimport Vendor.Pdf;\n\nextern namespace Pdf for PDF_VERSION;\n",
+            ),
         ],
     );
 
@@ -24885,6 +24903,7 @@ fn a_namespace_call_named_like_a_method_of_its_class_is_a_call_of_the_plain_php_
             &[
                 ("src/Vendor/Jobs/run.php", "<?php function run(int $extra): int { return $extra; }"),
                 ("src/Vendor/Jobs/Queue.php", "<?php namespace Vendor\\Jobs; final class Queue {}"),
+                ("src/Stubs/Externs.sharp", "namespace Stubs;\n\nimport Vendor.Jobs;\n\nextern namespace Jobs for run;\n"),
             ]
         )
         .body(),
@@ -29795,6 +29814,7 @@ fn every_construct_of_the_slice_lowers_into_nodes_of_their_kinds_child_count() {
                 "src/Lib/helpers.php",
                 "<?php const TOP = PHP_INT_MAX; function capitalize(string $text): string { return ucfirst($text); } function clean(string $text): string { return trim($text); } function measure(string $text): int { return strlen($text); } function format(string $format, mixed ...$values): string { return sprintf($format, ...$values); } function largest(int ...$values): int { return max(0, ...$values); } /** @param list<int> $values */ function total(array $values): int { return array_sum($values); } /**\n * @param list<int> $values\n * @param callable(int, int): int $step\n */\nfunction fold(array $values, callable $step, int $start): int { return array_reduce($values, $step, $start); }",
             ),
+            ("src/Lib/Externs.sharp", "namespace Lib;\n\nextern namespace Lib for capitalize;\n"),
             (
                 "src/App/Tenant/Access.php",
                 "<?php namespace App\\Tenant; #[\\Attribute] final class Access { public function __construct(string $class) {} }",
@@ -30474,7 +30494,7 @@ fn a_checker_mark_stays_out_of_the_lowered_attributes() {
 #[test]
 fn a_call_names_the_lean_function_its_method_is_marked_with() {
     let code = "namespace App;\n\nimport Lib;\n\nclass Bounds\n{\n    public int largest(int a, int b) => Math.max(a, b);\n\n    public float root(float x) => Math.sqrt(x);\n\n    public string loud(string text) => Lib.capitalize(text);\n}\n";
-    let functions = common::checked("src/App/Bounds.sharp", code, &[LOUD, LOUD_HELPERS], |checked| {
+    let functions = common::checked("src/App/Bounds.sharp", code, &[LOUD, LOUD_HELPERS, LOUD_EXTERNS], |checked| {
         Node::Program(checked.program()).filter_map(|node| match node {
             Node::Expression(expression @ Expression::Call(Call::Method(_))) => {
                 Some(checked.types().lean_function(expression).map(|function| function.to_string()))

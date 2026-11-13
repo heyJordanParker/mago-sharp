@@ -4835,11 +4835,11 @@ fn extern_declares_a_class_a_method_or_a_function_and_its_effects() {
     assert_eq!(stripe.uses.as_ref().map(|uses| source(CODE, uses)), Some("uses Http"));
 }
 
-/// `extern namespace WordPress for WP_Post;` gives the folder of a plain PHP class a namespace, spec section 23. It
-/// declares no effect, so `uses` after it, like a missing `for`, is a parse error.
+/// `extern namespace WordPress for WP_Post;` gives a plain PHP class, function or constant of PHP's root namespace a
+/// namespace, spec section 23. It declares no effect, so `uses` after it, like a missing `for`, is a parse error.
 #[test]
-fn extern_namespace_names_a_namespace_and_a_class() {
-    const CODE: &str = "namespace App.Stubs;\n\nextern namespace WordPress for WP_Post;\nextern namespace Legacy.Blog for Blog_Post;\n";
+fn extern_namespace_names_a_namespace_and_a_class_function_or_constant() {
+    const CODE: &str = "namespace App.Stubs;\n\nextern namespace WordPress for WP_Post;\nextern namespace Legacy.Blog for Blog_Post;\nextern namespace WordPress for add_action;\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "app/Stubs/WordPress.sharp", CODE);
 
@@ -4858,7 +4858,7 @@ fn extern_namespace_names_a_namespace_and_a_class() {
             (
                 declaration.namespace.as_ref().map(|keyword| source(CODE, keyword)),
                 source(CODE, &declaration.target),
-                declaration.namespaced.as_ref().map(|namespaced| source(CODE, &namespaced.class)),
+                declaration.namespaced.as_ref().map(|namespaced| source(CODE, &namespaced.name)),
                 source(CODE, declaration),
             )
         })
@@ -4868,6 +4868,7 @@ fn extern_namespace_names_a_namespace_and_a_class() {
         [
             (Some("namespace"), "WordPress", Some("WP_Post"), "extern namespace WordPress for WP_Post;"),
             (Some("namespace"), "Legacy.Blog", Some("Blog_Post"), "extern namespace Legacy.Blog for Blog_Post;"),
+            (Some("namespace"), "WordPress", Some("add_action"), "extern namespace WordPress for add_action;"),
         ]
     );
 

@@ -23,7 +23,6 @@ use crate::utils::names::imports_by_default;
 use crate::utils::names::is_hidden_php_class;
 use crate::utils::names::is_php_closure;
 use crate::utils::names::is_sharp_internal;
-use crate::utils::names::library_namespace;
 use crate::utils::names::namespace_constant;
 use crate::utils::names::namespace_function;
 use mago_bytes::BytesDisplay;
@@ -112,10 +111,10 @@ where
         Some(separator) => (Some(word(&fqn[..separator])), &fqn[separator + 1..]),
         None => (None, &*fqn),
     };
-    // The namespace PHP# code reaches the function or constant declared at `span` through: the namespace the import
-    // writes, or for one of PHP's root namespace, the namespace of the class-likes in its library's folder. One of
-    // PHP's built-ins has neither, so PHP# code names none of them.
-    let reached = |span: Span| namespace.or_else(|| library_namespace(context.codebase, span));
+    // The namespace PHP# code reaches the function or constant `last` through: the namespace the import writes, or
+    // for one of PHP's root namespace, the namespace an `extern namespace` line gives it. One of PHP's built-ins has
+    // neither, unless a line names it, which is an error of its own, so PHP# code names none of them.
+    let reached = || namespace.or_else(|| context.codebase.extern_namespace_of(last));
     let reach = |namespace: Word, form: &dyn Fn(&str) -> String| {
         let namespace = namespace.to_string().replace('\\', ".");
         let short = namespace.rsplit('.').next().unwrap_or(&namespace).to_owned();
@@ -128,12 +127,12 @@ where
         None => context.codebase.get_function(last),
     }
     .filter(|_| last.first().is_some_and(u8::is_ascii_lowercase))
-    .and_then(|function| reached(function.span));
+    .and_then(|_| reached());
     let constant = match namespace {
         Some(namespace) => namespace_constant(context.codebase, namespace, last),
         None => context.codebase.get_constant(last),
     }
-    .and_then(|constant| reached(constant.span));
+    .and_then(|_| reached());
 
     let (code, issue) = if let Some(function) = function {
         let message = reach(function, &|short| format!("call `{short}.{last_name}(…)`"));
@@ -182,15 +181,19 @@ where
 }
 
 /// Whether the namespace `namespace` holds a plain PHP function or constant directly, as `Vendor\Pdf` holds `render`,
-/// or a library declares one in PHP's root namespace beside the class-likes of `namespace`, as Laravel declares
-/// `abort()` beside `Illuminate\Foundation`'s, spec section 23.
+/// or an `extern namespace` line gives it the folder of one of PHP's root namespace, as
+/// `extern namespace Illuminate.Foundation for abort;` gives `Illuminate\Foundation` Laravel's `abort()`, spec section
+/// 23.
 pub(crate) fn holds_function_or_constant(codebase: &CodebaseMetadata, namespace: &[u8]) -> bool {
+    let given: Vec<Word> = codebase
+        .extern_namespaces
+        .iter()
+        .filter(|declaration| declaration.namespace.as_bytes().eq_ignore_ascii_case(namespace))
+        .filter_map(|declaration| codebase.extern_namespace_folder(declaration))
+        .collect();
     let in_namespace = |name: &[u8], span: Span| {
         if !name.contains(&b'\\') {
-            return codebase
-                .folder_namespaces(span)
-                .iter()
-                .any(|beside| beside.as_bytes().eq_ignore_ascii_case(namespace));
+            return codebase.folder(span.file_id).is_some_and(|folder| given.contains(&folder));
         }
 
         name.len() > namespace.len()

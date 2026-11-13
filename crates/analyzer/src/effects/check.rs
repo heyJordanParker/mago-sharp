@@ -564,8 +564,10 @@ where
     }
 }
 
-/// Spec section 23: `extern namespace WordPress for WP_Post;` names a plain PHP class of PHP's root namespace, and gives
-/// its folder a namespace no class has, which no other line gives another folder.
+/// Spec section 23: `extern namespace WordPress for WP_Post;` names a library's class, function or constant of PHP's
+/// root namespace, and gives its folder a namespace, which no other line gives another folder. A namespace a class
+/// already has is one only a folder that holds a class of it takes, as Laravel's `helpers.php` sits beside the classes
+/// of `Illuminate\Foundation`.
 fn check_extern_namespace<A>(context: &mut Context<'_, '_, A>, r#extern: &Extern<'_>, namespaced: &ExternNamespaced<'_>)
 where
     A: Arena,
@@ -577,50 +579,56 @@ where
             unreachable!("the scan of the analyzed file records each `extern namespace` it declares")
         });
     let written = String::from_utf8_lossy(r#extern.target.value());
-    let class_written = String::from_utf8_lossy(namespaced.class.value());
+    let name_written = String::from_utf8_lossy(namespaced.name.value());
 
     // A PHP# file always declares a namespace, so a class of PHP's root namespace is a plain PHP one.
-    let Some(class) = codebase.extern_namespace_class(own) else {
+    let Some(folder) = codebase.extern_namespace_folder(own) else {
         context.collector.report_with_code(
             IssueCode::NonExistentClassLike,
-            Issue::error(format!("Cannot find the plain PHP class `{class_written}` outside any namespace."))
-                .with_annotation(Annotation::primary(own.class_span))
-                .with_help("`extern namespace` names a class of a library whose classes have no namespace, as `extern namespace WordPress for WP_Post;`."),
+            Issue::error(format!(
+                "Cannot find the plain PHP class, function or constant `{name_written}` outside any namespace."
+            ))
+            .with_annotation(Annotation::primary(own.name_span))
+            .with_help("`extern namespace` names a class, function or constant a library declares outside any namespace, as `extern namespace WordPress for WP_Post;` or `extern namespace Illuminate.Foundation for abort;`."),
         );
 
         return;
     };
 
-    // A namespace a class has already names it, so giving it to a folder would make its classes PHP's root ones.
+    // A namespace a class has already names it, so a folder takes it only when it holds a class of it.
     let namespace = own.namespace.as_bytes();
-    if let Some(holder) = codebase.class_likes.values().find(|class_like| {
-        let name = class_like.original_name.as_bytes();
+    let holders: Vec<&ClassLikeMetadata> = codebase
+        .class_likes
+        .values()
+        .map(|class_like| &**class_like)
+        .filter(|class_like| {
+            let name = class_like.original_name.as_bytes();
 
-        name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(namespace))
-    }) {
+            name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(namespace))
+        })
+        .collect();
+    if let Some(holder) = holders.first()
+        && !holders.iter().any(|holder| codebase.folder(holder.span.file_id) == Some(folder))
+    {
         context.collector.report_with_code(
             IssueCode::DuplicateExtern,
             Issue::error(format!(
-                "`{written}` is already the namespace of `{}`, so no library's folder takes it.",
+                "`{written}` is already the namespace of `{}`, whose folder doesn't hold `{name_written}`.",
                 display_class_like_name(context, holder.original_name)
             ))
             .with_annotation(Annotation::primary(r#extern.target.span()))
             .with_annotation(
                 Annotation::secondary(holder.name_span.unwrap_or(holder.span)).with_message("Declared here."),
             )
-            .with_help("Give the library a namespace no class has."),
+            .with_help("Give the library a namespace no class has, or the namespace of the classes beside it."),
         );
 
         return;
     }
 
-    // The class has a folder, as `extern_namespace_class` keeps only a library's class.
-    let folder = codebase.folder(class.span.file_id);
     let earlier =
         codebase.extern_namespaces.iter().take_while(|declaration| *declaration != own).find_map(|declaration| {
-            let same_folder = codebase
-                .extern_namespace_class(declaration)
-                .is_some_and(|class| codebase.folder(class.span.file_id) == folder);
+            let same_folder = codebase.extern_namespace_folder(declaration)? == folder;
             let same_namespace = declaration.namespace.as_bytes().eq_ignore_ascii_case(namespace);
 
             (same_folder || same_namespace).then_some((declaration, same_folder))
@@ -630,12 +638,12 @@ where
             let namespace = String::from_utf8_lossy(first.namespace.as_bytes()).replace('\\', ".");
 
             (
-                format!("The folder of `{class_written}` already takes the namespace `{namespace}`."),
+                format!("The folder of `{name_written}` already takes the namespace `{namespace}`."),
                 "Delete this line: a folder takes one namespace.",
             )
         } else {
             (
-                format!("`{written}` is already the namespace of the folder of `{}`.", first.class),
+                format!("`{written}` is already the namespace of the folder of `{}`.", first.name),
                 "Give this library another namespace.",
             )
         };

@@ -1,0 +1,8 @@
+{
+    "name": "acme/string-helpers",
+    "description": "A plain PHP library of functions in PHP's root namespace, with no class.",
+    "type": "library",
+    "autoload": {
+        "files": ["functions.php"]
+    }
+}

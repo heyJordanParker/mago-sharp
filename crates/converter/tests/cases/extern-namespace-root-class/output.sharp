@@ -1,0 +1,18 @@
+namespace App;
+
+import Acme.Legacy.Legacy_Order;
+
+// A library's class in PHP's root namespace is imported through the namespace its Composer package's name gives, which
+// the line the conversion adds gives its folder (spec section 23).
+public final class Orders
+{
+    public string reference(Legacy_Order order)
+    {
+        return order.reference;
+    }
+
+    public Legacy_Order blank()
+    {
+        return new Legacy_Order();
+    }
+}

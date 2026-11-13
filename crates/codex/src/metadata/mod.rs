@@ -155,14 +155,10 @@ pub struct CodebaseMetadata {
     /// Per-patch constant metadata, keyed by FQN.
     pub patch_constants: WordMap<ConstantMetadata>,
     /// The name of each host or vendored file the scan read, its path from the workspace, or its absolute path for a
-    /// file outside the workspace, keyed by the file. Spec section 23: a function or constant a plain PHP library
-    /// declares in PHP's root namespace belongs to the namespace of the class-likes in its folder. Of two declarations
-    /// of one name, the one whose file's name sorts first keeps it, and the duplicate's error names that file.
+    /// file outside the workspace, keyed by the file. Of two declarations of one name, the one whose file's name sorts
+    /// first keeps it, and the duplicate's error names that file.
     #[cfg_attr(feature = "serde", serde(default))]
     file_names: HashMap<FileId, Word>,
-    /// The namespaces of the class-likes in each folder of `file_names`, sorted, which the populator gathers.
-    #[cfg_attr(feature = "serde", serde(default))]
-    folder_namespaces: HashMap<Word, Vec<Word>>,
     /// The files of the standard library, the PHP# Composer package, the only code that reaches PHP's root namespace
     /// through `global`, spec section 23.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -699,7 +695,7 @@ impl CodebaseMetadata {
         self.file_names.get(&file_id).copied()
     }
 
-    /// The folder of the host or vendored file `file_id`, as [`Self::folder_namespaces`] groups files.
+    /// The folder of the host or vendored file `file_id`, as `app/Shop` for `app/Shop/Cart.sharp`.
     #[inline]
     #[must_use]
     pub fn folder(&self, file_id: FileId) -> Option<Word> {
@@ -716,71 +712,50 @@ impl CodebaseMetadata {
         self.standard_library_files.contains(&file_id)
     }
 
-    /// The namespaces of the class-likes in the folder of the file that holds `span`, sorted. Spec section 23: a
-    /// function or constant a plain PHP library declares at `span`, in PHP's root namespace, belongs to each of them, as
-    /// Laravel's `abort()`, in `Illuminate/Foundation/helpers.php`, belongs to `Illuminate\Foundation`. Empty for a
-    /// file of PHP's built-ins.
+    /// The folder whose classes, functions and constants of PHP's root namespace `declaration` gives its namespace, spec
+    /// section 23: the folder of the plain PHP library's class, function or constant it names, as Laravel's
+    /// `Illuminate/Foundation` for `abort`. None when it names none, as for a class PHP# declares, a name in a
+    /// namespace, one of PHP's built-ins, which has no folder, and a name nothing has.
     #[must_use]
-    pub fn folder_namespaces(&self, span: Span) -> &[Word] {
-        self.folder(span.file_id).and_then(|folder| self.folder_namespaces.get(&folder)).map_or(&[], Vec::as_slice)
-    }
-
-    /// Whether a class-like in `folder` gives the folder's functions and constants of PHP's root namespace a namespace,
-    /// as [`Self::folder_namespaces`] answers.
-    #[must_use]
-    pub fn folder_has_namespaces(&self, folder: Word) -> bool {
-        self.folder_namespaces.contains_key(&folder)
-    }
-
-    /// The folder of `class_like` and the namespace it gives the functions and constants of that folder, as
-    /// [`Self::folder_namespaces`] answers. None for a module, which is no class, for a class-like of PHP's root
-    /// namespace, which gives its folder no namespace PHP# code imports, and for a class-like of PHP's built-ins.
-    #[must_use]
-    pub fn folder_namespace(&self, class_like: &ClassLikeMetadata) -> Option<(Word, Word)> {
-        if class_like.flags.is_module() {
+    pub fn extern_namespace_folder(&self, declaration: &ExternNamespaceMetadata) -> Option<Word> {
+        let name = declaration.name.as_bytes();
+        if name.contains(&b'\\') {
             return None;
         }
-        let name = class_like.original_name.as_bytes();
-        let separator = name.iter().rposition(|byte| *byte == b'\\')?;
+        let class = self
+            .get_class_like(name)
+            .filter(|class_like| !class_like.flags.is_sharp() && !class_like.flags.is_module())
+            .map(|class_like| class_like.span);
+        let span = class
+            .or_else(|| self.get_function(name).map(|function| function.span))
+            .or_else(|| self.get_constant(name).map(|constant| constant.span))?;
 
-        Some((self.folder(class_like.span.file_id)?, word(&name[..separator])))
+        self.folder(span.file_id)
     }
 
-    /// The class of PHP's root namespace that `declaration` names, when a plain PHP library declares it, whose folder
-    /// the declaration gives its namespace, spec section 23. None for a class PHP# declares, one in a namespace, one
-    /// of PHP's built-ins, which has no folder, and a name no class has.
+    /// The namespace an `extern namespace` line gives the library's function, constant or class `name` of PHP's root
+    /// namespace, spec section 23: the line's that names a class, function or constant of the same folder, as
+    /// `Illuminate\Foundation` for `abort` after `extern namespace Illuminate.Foundation for abort;`, and for `now`
+    /// beside it. A function's name reads first, then a constant's, then a class's. None for a name a line gives no
+    /// namespace, and for one of PHP's built-ins, which has no folder.
     #[must_use]
-    pub fn extern_namespace_class(&self, declaration: &ExternNamespaceMetadata) -> Option<&ClassLikeMetadata> {
-        self.get_class_like(declaration.class.as_bytes()).filter(|class_like| {
-            !class_like.flags.is_sharp()
-                && !class_like.flags.is_module()
-                && !class_like.original_name.as_bytes().contains(&b'\\')
-                && self.folder(class_like.span.file_id).is_some()
-        })
-    }
+    pub fn extern_namespace_of(&self, name: &[u8]) -> Option<Word> {
+        let span = self
+            .get_function(name)
+            .map(|function| function.span)
+            .or_else(|| self.get_constant(name).map(|constant| constant.span))
+            .or_else(|| {
+                self.get_class_like(name)
+                    .filter(|class_like| !class_like.flags.is_sharp() && !class_like.flags.is_module())
+                    .map(|class_like| class_like.span)
+            })
+            .filter(|_| !name.contains(&b'\\'))?;
+        let folder = self.folder(span.file_id)?;
 
-    /// Gathers the namespaces of the class-likes in each folder [`Self::folder_namespaces`] answers for, and the one
-    /// an `extern namespace` gives the folder of the plain PHP class it names. Population gathers them, and so does a
-    /// reader of the merged scan before it, as a PHP# member read's resolution does.
-    pub fn populate_folder_namespaces(&mut self) {
-        let mut folder_namespaces: HashMap<Word, Vec<Word>> = HashMap::default();
-        let extern_namespaces = self.extern_namespaces.iter().filter_map(|declaration| {
-            Some((self.folder(self.extern_namespace_class(declaration)?.span.file_id)?, declaration.namespace))
-        });
-        for (folder, namespace) in self
-            .class_likes
-            .values()
-            .filter_map(|class_like| self.folder_namespace(class_like))
-            .chain(extern_namespaces)
-        {
-            folder_namespaces.entry(folder).or_default().push(namespace);
-        }
-        for namespaces in folder_namespaces.values_mut() {
-            namespaces.sort_unstable_by_key(|namespace| namespace.as_bytes().to_ascii_lowercase());
-            namespaces.dedup_by(|namespace, other| namespace.as_bytes().eq_ignore_ascii_case(other.as_bytes()));
-        }
-
-        self.folder_namespaces = folder_namespaces;
+        self.extern_namespaces
+            .iter()
+            .find(|declaration| self.extern_namespace_folder(declaration) == Some(folder))
+            .map(|declaration| declaration.namespace)
     }
 
     /// Retrieves metadata for a class constant.

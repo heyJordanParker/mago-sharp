@@ -2951,7 +2951,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Identifier(&node.target));
                 if let Some(namespaced) = &node.namespaced {
                     f(Node::Keyword(&namespaced.r#for));
-                    f(Node::Identifier(&namespaced.class));
+                    f(Node::Identifier(&namespaced.name));
                 }
 
                 if let Some(uses) = &node.uses {

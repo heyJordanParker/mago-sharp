@@ -1,7 +1,9 @@
 //! Runs each fixture pair of `tests/cases/<construct>/` through the converter, against a project of the case's own
 //! `.php` files, analyzed as `mago convert` analyzes a project. `input.php` is the file it converts, and every other
 //! `.php` file, or `.sharp` file but `output.sharp`, is a class it reaches. The converted text must equal
-//! `output.sharp` byte for byte, or the refusals, each `line:column: reason`, the lines of `refusal.txt`.
+//! `output.sharp` byte for byte, or the refusals, each `line:column: reason`, the lines of `refusal.txt`. The
+//! `extern namespace` lines the conversion adds must equal the lines of `extern-namespaces.txt`, or be none when the
+//! case has no such file, and the PHP# checker reads the converted text with them.
 
 #![allow(
     clippy::unwrap_used,
@@ -28,6 +30,8 @@ use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings as AnalyzerSettings;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::reference::SymbolReferences;
+use mago_converter::Converted;
+use mago_converter::ExternNamespace;
 use mago_converter::Input;
 use mago_converter::Library;
 use mago_converter::convert;
@@ -90,9 +94,9 @@ fn declared(folder: &Path) -> String {
         .unwrap_or_else(|| panic!("{} declares no type", folder.display()))
 }
 
-/// The project of the case at `folder`, analyzed: its `.php` and `.sharp` files, with `converted` in place of
-/// `input.php`, under its class's `.sharp` name, when it is given.
-fn analyzed(folder: &Path, converted: Option<&str>) -> Server {
+/// The project of the case at `folder`, analyzed: its `.php` and `.sharp` files, with `converted`'s text in place of
+/// `input.php`, under its class's `.sharp` name, and a file of its `extern namespace` lines, when it is given.
+fn analyzed(folder: &Path, converted: Option<&Converted>) -> Server {
     let mut database = Database::new(DatabaseConfiguration::new(folder, vec![], vec![], vec![], vec![]));
     // The PHP# standard library gives `List`, `Map` and the rest their members, and its files are the project's own, as
     // `mago compile` loads a package's PHP# files, so its forms come from the files the compile accepts.
@@ -109,6 +113,16 @@ fn analyzed(folder: &Path, converted: Option<&str>) -> Server {
         mark_sharp_file(&mut file, folder);
         database.add(file);
     }
+    // The lines `mago convert` writes into the project's declarations file.
+    if let Some(converted) = converted.filter(|converted| !converted.extern_namespaces.is_empty()) {
+        let lines: Vec<String> = converted.extern_namespaces.iter().map(ExternNamespace::line).collect();
+        let path = folder.join("AddedExterns.sharp");
+        let contents = format!("namespace App;\n\n{}\n", lines.join("\n")).into_bytes();
+        let mut file =
+            File::new(Cow::Borrowed(b"AddedExterns.sharp"), FileType::Host, Some(path), Cow::Owned(contents));
+        mark_sharp_file(&mut file, folder);
+        database.add(file);
+    }
 
     let mut paths = Vec::new();
     files_of(folder, "php", &mut paths);
@@ -117,11 +131,11 @@ fn analyzed(folder: &Path, converted: Option<&str>) -> Server {
         let name = path.strip_prefix(folder).unwrap().to_string_lossy().into_owned();
         let contents = std::fs::read(&path).unwrap();
         let file = match (name.as_str(), converted) {
-            ("input.php", Some(text)) => {
+            ("input.php", Some(converted)) => {
                 let name = format!("{}.sharp", declared(folder));
                 let path = folder.join(&name);
                 let name = Cow::Owned(name.into_bytes());
-                let mut file = File::new(name, FileType::Host, Some(path), Cow::Owned(text.as_bytes().to_vec()));
+                let mut file = File::new(name, FileType::Host, Some(path), Cow::Owned(converted.text.clone()));
                 mark_sharp_file(&mut file, folder);
                 file
             }
@@ -142,10 +156,10 @@ fn analyzed(folder: &Path, converted: Option<&str>) -> Server {
     server
 }
 
-/// Each issue the PHP# checker finds in `text`, the conversion of the case at `folder`, as `line: level code:
+/// Each issue the PHP# checker finds in `converted`, the conversion of the case at `folder`, as `line: level code:
 /// message`, but the warnings decision 9 expects.
-fn checked(folder: &Path, text: &str) -> String {
-    let server = analyzed(folder, Some(text));
+fn checked(folder: &Path, converted: &Converted) -> String {
+    let server = analyzed(folder, Some(converted));
     let input = FileId::new(format!("{}.sharp", declared(folder)).as_bytes());
     let file = server.database().get(&input).unwrap();
 
@@ -164,11 +178,12 @@ fn checked(folder: &Path, text: &str) -> String {
         .concat()
 }
 
-/// What the converter gives for the case at `folder`: the PHP# text, or each refusal as `line:column: reason`.
-fn converted(folder: &Path) -> Result<String, String> {
+/// What the converter gives for the case at `folder`: the PHP# text and its `extern namespace` lines, or each refusal
+/// as `line:column: reason`.
+fn converted(folder: &Path) -> Result<Converted, String> {
     let mut server = analyzed(folder, None);
     let forms = server.standard_library_forms(|issues| issues).expect("the standard library lowers");
-    let library = Library::new(&forms, server.codebase());
+    let library = Library::new(&forms, server.codebase(), folder);
     let input = FileId::new(b"input.php");
     assert!(server.database().get(&input).is_ok(), "{} holds no input.php", folder.display());
     let file = server.database().get(&input).unwrap();
@@ -185,7 +200,7 @@ fn converted(folder: &Path) -> Result<String, String> {
         library: &library,
     };
 
-    convert(&input).map(|text| String::from_utf8(text).unwrap()).map_err(|refusals| {
+    convert(&input).map_err(|refusals| {
         refusals
             .iter()
             .map(|refusal| {
@@ -205,13 +220,26 @@ fn run(folder: &Path) -> Result<(), Failed> {
         _ => panic!("{} holds one of output.sharp and refusal.txt", folder.display()),
     };
     let expected = std::fs::read_to_string(&expected_file).unwrap();
-    let (actual, actual_ok) = match converted(folder) {
-        Ok(text) => (text, true),
-        Err(refusals) => (refusals, false),
+    let (actual, conversion) = match converted(folder) {
+        Ok(converted) => (String::from_utf8(converted.text.clone()).unwrap(), Some(converted)),
+        Err(refusals) => (refusals, None),
     };
+    let actual_ok = conversion.is_some();
+    if let Some(converted) = &conversion {
+        let lines = converted.extern_namespaces.iter().map(ExternNamespace::line).collect::<Vec<_>>().join("\n");
+        let expected_lines = std::fs::read_to_string(folder.join("extern-namespaces.txt")).unwrap_or_default();
+        let expected_lines = expected_lines.trim_end();
+        if lines != expected_lines {
+            return Err(format!(
+                "{} adds the extern namespace lines:\n{lines}\n--- expected, from extern-namespaces.txt:\n{expected_lines}",
+                folder.display()
+            )
+            .into());
+        }
+    }
     if actual_ok == expected_ok && actual == expected {
         // A pair holds the text the PHP# checker accepts, so a conversion that compares equal but fails it fails.
-        let issues = if actual_ok { checked(folder, &actual) } else { String::new() };
+        let issues = conversion.map(|converted| checked(folder, &converted)).unwrap_or_default();
         if issues.is_empty() {
             return Ok(());
         }

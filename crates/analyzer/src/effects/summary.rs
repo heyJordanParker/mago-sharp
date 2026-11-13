@@ -73,7 +73,6 @@ use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_function_holder;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_prelude_stub;
-use crate::utils::names::library_namespace;
 
 /// Records the summary of the method, accessor or initial value `body`, which messages name by `member`, and whose
 /// parameters are declared at `parameters`, into `artifacts`, with the summary of each lambda written in it, and with
@@ -1484,12 +1483,11 @@ where
 
 /// The plain PHP function `function` as the cause of its effects, with no class and the full name PHP# names it by,
 /// and the `extern` declaration a call of it falls under. Spec section 23 names a function a library declares in PHP's
-/// root namespace through its [library namespace](library_namespace), as `Illuminate\Foundation\now` for Laravel's
-/// `now()`, which `extern Foundation.now` declares.
+/// root namespace through the namespace an `extern namespace` line gives it, as `Illuminate\Foundation\now` for
+/// Laravel's `now()` after `extern namespace Foundation for now;`, which `extern Foundation.now` declares.
 fn function_extern(codebase: &CodebaseMetadata, function: Word) -> ((Word, Word), Option<&ExternMetadata>) {
-    let metadata = codebase.get_function(function.as_bytes());
-    let name = metadata.map_or(function, |metadata| metadata.original_name);
-    let cause = match metadata.and_then(|metadata| library_namespace(codebase, metadata.span)) {
+    let name = codebase.get_function(function.as_bytes()).map_or(function, |metadata| metadata.original_name);
+    let cause = match codebase.extern_namespace_of(name.as_bytes()) {
         Some(namespace) if !name.as_bytes().contains(&b'\\') => {
             word([namespace.as_bytes(), b"\\", name.as_bytes()].concat())
         }
@@ -1502,8 +1500,8 @@ fn function_extern(codebase: &CodebaseMetadata, function: Word) -> ((Word, Word)
 /// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a function)
 /// falls under: the member's, then the class's, then the same for each parent class, nearest first. A function in a
 /// namespace is declared as `extern Pdf.render`, which the binder reads as a class and its member, spec section 23,
-/// and so is one a library declares in PHP's root namespace, through a namespace of the class-likes in its folder, as
-/// `extern Foundation.now` declares Laravel's `now()`.
+/// and so is one a library declares in PHP's root namespace, through the namespace an `extern namespace` line gives it,
+/// as `extern Foundation.now` declares Laravel's `now()` after `extern namespace Foundation for now;`.
 pub(crate) fn extern_of(codebase: &CodebaseMetadata, class: Word, member: Word) -> Option<&ExternMetadata> {
     let declared = |key: (Word, Word)| codebase.externs.get(&key).and_then(|declarations| declarations.first());
     if class.is_empty() {
@@ -1511,10 +1509,7 @@ pub(crate) fn extern_of(codebase: &CodebaseMetadata, class: Word, member: Word) 
             let name = member.as_bytes();
             match name.iter().rposition(|byte| *byte == b'\\') {
                 Some(separator) => declared((word(&name[..separator]), word(&name[separator + 1..]))),
-                None => codebase
-                    .folder_namespaces(codebase.get_function(name)?.span)
-                    .iter()
-                    .find_map(|namespace| declared((ascii_lowercase_word(namespace.as_bytes()), member))),
+                None => declared((ascii_lowercase_word(codebase.extern_namespace_of(name)?.as_bytes()), member)),
             }
         });
     }

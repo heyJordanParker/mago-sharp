@@ -1353,7 +1353,7 @@ fn extern_workspace(stripe: &str) -> tempfile::TempDir {
     write(
         root,
         "app/Stubs/Clock.sharp",
-        "namespace App.Stubs;\n\nimport Acme.Chrono;\nimport Carbon.Carbon;\nimport Brick.Math.BigDecimal;\n\nextern Carbon.now uses Clock;\nextern Chrono.now uses Clock;\nextern BigDecimal;\n",
+        "namespace App.Stubs;\n\nimport Acme.Chrono;\nimport Carbon.Carbon;\nimport Brick.Math.BigDecimal;\n\nextern namespace Acme.Chrono for now;\nextern Carbon.now uses Clock;\nextern Chrono.now uses Clock;\nextern BigDecimal;\n",
     );
     write(root, "app/Lib/StripeClient.php", "<?php\n\nnamespace Stripe;\n\nclass StripeClient\n{\n}\n");
     write(
@@ -1499,7 +1499,8 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
 }
 
 /// Spec section 23 reads a plain PHP constant through its namespace, so `mago compile` writes a file that reads the
-/// constants a library declares in PHP's root namespace beside its classes, `Pdf.PDF_EOL` and `Pdf.PDF_ERRORS`, and a
+/// constants a library declares in PHP's root namespace, in the folder `extern namespace Vendor.Pdf for measure;`
+/// gives that namespace, `Pdf.PDF_EOL` and `Pdf.PDF_ERRORS`, and a
 /// constant of the library's namespace. A function read without a call is the function's value, spec section 14.3,
 /// which compiles. A read that reaches neither is refused with status 1, never a panic: a constant the namespace does
 /// not hold, a name that is no class and no namespace, and `global`, which names neither in PHP# code.
@@ -1518,6 +1519,7 @@ fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches
         "lib/helpers.php",
         "<?php\n\nconst PDF_EOL = \"\\n\";\n\ndefine('PDF_ERRORS', STDERR);\n\nfunction measure(string $text): int\n{\n    return strlen($text);\n}\n",
     );
+    write(root, "app/Stubs/Pdf.sharp", "namespace App.Stubs;\n\nextern namespace Vendor.Pdf for measure;\n");
     write(
         root,
         "app/Shop/Reads.sharp",

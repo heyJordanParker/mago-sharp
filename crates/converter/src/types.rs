@@ -1,8 +1,10 @@
 //! Writes an analysis type in PHP#, with the file's own names.
 //!
 //! A class is written by the name the file imports it under, by its short name in the file's own namespace, bare as a
-//! root class of `Builtins.sharp`, or by a new `import` line the conversion adds. A type PHP# can't write, as
-//! `get_sharp_type` reads it, is the reason the file is refused.
+//! root class of `Builtins.sharp`, or by a new `import` line the conversion adds. A plain PHP library's class of PHP's
+//! root namespace is imported through the namespace an `extern namespace` line gives its folder, which the conversion
+//! adds when the project has none. A type PHP# can't write, as `get_sharp_type` reads it, is the reason the file is
+//! refused.
 
 use std::collections::BTreeMap;
 
@@ -23,25 +25,85 @@ use mago_codex::ttype::atomic::scalar::string::TStringCasing;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
 use mago_names::EQUATABLE;
+use mago_span::Span;
 
+use crate::ExternNamespace;
+use crate::Library;
 use crate::library::short;
 use mago_names::STANDARD_ROOT_CLASSES;
 use mago_word::Word;
 
-/// The names a file reaches classes and library namespaces by: its namespace, its `import` lines, and the imports the
-/// conversion adds.
+/// The names a file reaches classes and library namespaces by: its namespace, its `import` lines, the imports the
+/// conversion adds, and the `extern namespace` lines it adds for the project.
 #[derive(Debug)]
-pub struct Imports {
+pub struct Imports<'input> {
+    codebase: &'input CodebaseMetadata,
+    library: &'input Library,
     namespace: String,
     /// Each name the file's imports take, lowercase, with the name as written and the full PHP name it stands for.
     taken: HashMap<String, (String, String)>,
     /// Each import the conversion adds, by the name it takes.
     added: BTreeMap<String, String>,
+    /// Each `extern namespace` line the conversion adds, one for each folder.
+    extern_namespaces: Vec<ExternNamespace>,
 }
 
-impl Imports {
-    pub fn new(namespace: &str) -> Self {
-        Self { namespace: namespace.trim_matches('\\').to_owned(), taken: HashMap::default(), added: BTreeMap::new() }
+impl<'input> Imports<'input> {
+    pub fn new(namespace: &str, codebase: &'input CodebaseMetadata, library: &'input Library) -> Self {
+        Self {
+            codebase,
+            library,
+            namespace: namespace.trim_matches('\\').to_owned(),
+            taken: HashMap::default(),
+            added: BTreeMap::new(),
+            extern_namespaces: Vec::new(),
+        }
+    }
+
+    /// The `extern namespace` lines the conversion adds, the project's lines giving none of their folders a namespace.
+    pub fn extern_namespaces(&self) -> &[ExternNamespace] {
+        &self.extern_namespaces
+    }
+
+    /// The namespace, as PHP writes it, of `name`, a plain PHP function, constant or class of PHP's root namespace
+    /// declared at `declared`: the one the project's `extern namespace` line gives its folder, or else the one the line
+    /// the conversion adds gives it (spec section 23). The reason it has none, otherwise.
+    pub fn root_namespace(&mut self, name: &str, declared: Span) -> Result<String, String> {
+        if let Some(namespace) = self.codebase.extern_namespace_of(name.as_bytes()) {
+            return Ok(namespace.as_str_lossy().into_owned());
+        }
+        let Some(folder) = self.codebase.folder(declared.file_id) else {
+            return Err(format!(
+                "`{name}` is declared in PHP's root namespace in no file of the project, so no `extern namespace` line gives it a namespace (spec section 23)"
+            ));
+        };
+        let folder_name = folder.as_str_lossy().into_owned();
+        if let Some(added) = self.extern_namespaces.iter().find(|added| added.folder == folder_name) {
+            return Ok(added.namespace.clone());
+        }
+        let Some(namespace) = self.library.folder_namespace(folder) else {
+            return Err(format!(
+                "`{name}` is declared in PHP's root namespace in `{folder_name}`, which holds no class with a namespace and is in no Composer package, so it has no namespace to be reached through (spec section 23)"
+            ));
+        };
+        self.extern_namespaces.push(ExternNamespace {
+            folder: folder_name,
+            namespace: namespace.to_owned(),
+            name: name.to_owned(),
+        });
+
+        Ok(namespace.to_owned())
+    }
+
+    /// The plain PHP library's class of PHP's root namespace that `class` names, which an `extern namespace` line
+    /// reaches, as decision 91 reaches `WP_Post`. None for a PHP# class and one of PHP's built-ins, which has no folder.
+    pub fn library_root_class(&self, class: &str) -> Option<Span> {
+        let declared = self.codebase.get_class_like(class.as_bytes())?;
+        let reached = !declared.flags.is_sharp()
+            && !declared.original_name.as_bytes().contains(&b'\\')
+            && self.codebase.folder(declared.span.file_id).is_some();
+
+        reached.then_some(declared.span)
     }
 
     /// Records that the file names `name`, a full PHP name, as `alias`, or, when PHP# reserves `alias` for a type, as
@@ -83,6 +145,10 @@ impl Imports {
             return Ok(short.to_owned());
         }
         if namespace.is_empty() {
+            if let Some(declared) = self.library_root_class(class) {
+                let namespace = self.root_namespace(class, declared)?;
+                return Ok(self.import(&format!("{namespace}\\{class}")));
+            }
             return Err(format!(
                 "`{class}` is a class of PHP's root namespace, which PHP# names only in the standard library (spec section 23)"
             ));

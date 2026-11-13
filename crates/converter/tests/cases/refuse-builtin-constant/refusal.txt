@@ -1,2 +1,2 @@
 14:16: `PHP_EOL` has no PHP# form: no standard library member reads it (decision 083)
-19:16: `shout` is declared in PHP's root namespace beside no class of its library, so it has no namespace to be reached through (spec section 23)
+19:16: `shout` is declared in PHP's root namespace in `lonely`, which holds no class with a namespace and is in no Composer package, so it has no namespace to be reached through (spec section 23)

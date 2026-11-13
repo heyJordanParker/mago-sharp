@@ -14,6 +14,7 @@ use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
 use mago_analyzer::too_wide_members;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::r#extern::extern_namespace_classes;
 use mago_codex::populator::populate_codebase;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
@@ -148,8 +149,7 @@ impl AnalysisService {
 
         // The binder counts a call of a member that changes its receiver as a write, which the populated codebase names.
         let changing_members = ChangingMembers::new(receiver_changing_members(&self.codebase));
-        let extern_namespaces =
-            ExternNamespaces::new(self.codebase.extern_namespaces.iter().map(|declaration| declaration.namespace));
+        let extern_namespaces = ExternNamespaces::new(extern_namespace_classes(&[&self.codebase]));
         let resolved_names = NameResolver::new(&arena).resolve_in(
             program,
             &NamespaceClasses::default(),

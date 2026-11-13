@@ -118,37 +118,49 @@ impl NamespaceClasses {
     }
 }
 
-/// The namespaces a project gives libraries whose classes have none, spec section 23, as
-/// `extern namespace WordPress for WP_Post;` gives `WordPress`.
+/// The namespaces a project gives libraries' classes of PHP's root namespace, spec section 23.
 ///
-/// A class named in one, as `WordPress\WP_Post`, is the class of PHP's root namespace, `WP_Post`, which the code runs.
+/// `extern namespace WordPress for WP_Post;` gives `WordPress` to the root classes in the folder of `WP_Post`. One of
+/// those classes named in its namespace, as `WordPress\WP_Post`, is the class of PHP's root namespace,
+/// `WP_Post`, which the code runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ExternNamespaces(HashSet<std::vec::Vec<u8>>);
+pub struct ExternNamespaces(HashSet<(std::vec::Vec<u8>, std::vec::Vec<u8>)>);
 
 impl ExternNamespaces {
-    /// The namespaces `names`, full names as `WordPress`. PHP compares namespaces ignoring case, and so does
-    /// [`root_class`](Self::root_class).
-    pub fn new<N>(names: impl IntoIterator<Item = N>) -> Self
+    /// The namespaces `namespaces`, full names as `WordPress`, each with the root classes it names, as `WP_Post`. PHP
+    /// compares namespaces and class names ignoring case, and so does [`root_class`](Self::root_class).
+    pub fn new<N, C>(namespaces: impl IntoIterator<Item = (N, C)>) -> Self
     where
         N: AsRef<[u8]>,
+        C: IntoIterator<Item = N>,
     {
-        Self(names.into_iter().map(|name| trim_start_byte(name.as_ref(), b'\\').to_ascii_lowercase()).collect())
+        Self(
+            namespaces
+                .into_iter()
+                .flat_map(|(namespace, classes)| {
+                    let namespace = trim_start_byte(namespace.as_ref(), b'\\').to_ascii_lowercase();
+
+                    classes.into_iter().map(move |class| (namespace.clone(), class.as_ref().to_ascii_lowercase()))
+                })
+                .collect(),
+        )
     }
 
-    /// Whether the project gives no library a namespace.
+    /// Whether the project gives no library's root class a namespace.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// The class of PHP's root namespace the full name `name` names, when it is a class directly in one of these
-    /// namespaces, as `WP_Post` for `WordPress\WP_Post`.
+    /// The class of PHP's root namespace the full name `name` names, when the class is one its namespace names, as
+    /// `WP_Post` for `WordPress\WP_Post`.
     #[must_use]
     pub fn root_class<'name>(&self, name: &'name [u8]) -> Option<&'name [u8]> {
         let name = trim_start_byte(name, b'\\');
         let separator = name.iter().rposition(|byte| *byte == b'\\')?;
+        let key = (name[..separator].to_ascii_lowercase(), name[separator + 1..].to_ascii_lowercase());
 
-        self.0.contains(&name[..separator].to_ascii_lowercase()).then(|| &name[separator + 1..])
+        self.0.contains(&key).then(|| &name[separator + 1..])
     }
 }
 

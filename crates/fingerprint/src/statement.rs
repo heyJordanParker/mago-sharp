@@ -148,7 +148,7 @@ impl Fingerprintable for Extern<'_> {
         self.namespace.fingerprint_with_hasher(hasher, resolved_names, options);
         self.target.fingerprint_with_hasher(hasher, resolved_names, options);
         if let Some(namespaced) = &self.namespaced {
-            namespaced.class.fingerprint_with_hasher(hasher, resolved_names, options);
+            namespaced.name.fingerprint_with_hasher(hasher, resolved_names, options);
         }
         self.uses.fingerprint_with_hasher(hasher, resolved_names, options);
     }

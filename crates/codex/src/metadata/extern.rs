@@ -3,6 +3,8 @@ use std::cmp::Ordering;
 use mago_span::Span;
 use mago_word::Word;
 
+use crate::metadata::CodebaseMetadata;
+
 /// A PHP# `extern` declaration, which states the effects of one plain PHP class, method or function, spec section 29.
 ///
 /// The standard library's declarations order first, then the others by their file's name and where the file declares
@@ -46,8 +48,11 @@ impl PartialOrd for ExternMetadata {
     }
 }
 
-/// A PHP# `extern namespace WordPress for WP_Post;`, which gives the folder of a library's class of PHP's root namespace
-/// a PHP# namespace, spec section 23.
+/// A PHP# `extern namespace WordPress for WP_Post;` or `extern namespace Illuminate.Foundation for abort;`, spec
+/// section 23.
+///
+/// It gives the folder of the library's class, function or constant of PHP's root namespace it names a PHP# namespace,
+/// which that folder's classes, functions and constants of PHP's root namespace take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
@@ -58,8 +63,46 @@ pub struct ExternNamespaceMetadata {
     pub span: Span,
     /// The namespace, as PHP writes it: `WordPress`.
     pub namespace: Word,
-    /// The class whose folder takes the namespace, as written: `WP_Post`.
-    pub class: Word,
-    /// Where the declaration names the class.
-    pub class_span: Span,
+    /// The class, function or constant that takes the namespace, as written: `WP_Post`, `abort`.
+    pub name: Word,
+    /// Where the declaration names it.
+    pub name_span: Span,
+}
+
+/// The classes of PHP's root namespace the `extern namespace` lines of `scans` give a namespace, spec section 23.
+///
+/// Each line gives its namespace to the library's root classes in the folder of what it names, as
+/// [`CodebaseMetadata::extern_namespace_folder`] finds it in one of `scans`, and to no other root class. A class the
+/// namespace declares itself keeps its name, so a root class of the same short name takes none. The name resolver
+/// reads `WordPress\WP_Post` as PHP's root class `WP_Post` only when `WP_Post` is one of the namespace's.
+#[must_use]
+pub fn extern_namespace_classes(scans: &[&CodebaseMetadata]) -> Vec<(Word, Vec<Word>)> {
+    scans
+        .iter()
+        .flat_map(|scan| scan.extern_namespaces.iter())
+        .filter_map(|declaration| {
+            let folder = scans.iter().find_map(|scan| scan.extern_namespace_folder(declaration))?;
+            let namespace = declaration.namespace.as_bytes();
+            let declared = |name: &[u8]| {
+                let full = [namespace, b"\\", name].concat();
+
+                scans.iter().any(|scan| scan.class_like_exists(&full))
+            };
+            let classes = scans
+                .iter()
+                .flat_map(|scan| {
+                    scan.class_likes.values().filter(move |class_like| {
+                        !class_like.flags.is_sharp()
+                            && !class_like.flags.is_module()
+                            && !class_like.original_name.as_bytes().contains(&b'\\')
+                            && scan.folder(class_like.span.file_id) == Some(folder)
+                    })
+                })
+                .map(|class_like| class_like.original_name)
+                .filter(|class| !declared(class.as_bytes()))
+                .collect();
+
+            Some((declaration.namespace, classes))
+        })
+        .collect()
 }

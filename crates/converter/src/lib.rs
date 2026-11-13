@@ -60,17 +60,47 @@ pub struct Refusal {
     pub reason: String,
 }
 
-/// The PHP# text of `input`'s file, or every construct that keeps it plain PHP.
+/// A converted file: its PHP# text, and the `extern namespace` lines it needs that the project lacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Converted {
+    pub text: Vec<u8>,
+    pub extern_namespaces: Vec<ExternNamespace>,
+}
+
+/// An `extern namespace` line a converted file needs.
+///
+/// It gives the functions, constants and classes of PHP's root namespace in one folder of a plain PHP library a
+/// namespace, by naming one of them (spec section 23, decision 91).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternNamespace {
+    /// The folder, from the workspace, as `vendor/laravel/framework/src/Illuminate/Foundation`. One line serves it.
+    pub folder: String,
+    /// The namespace, as PHP writes it: `Illuminate\Foundation`.
+    pub namespace: String,
+    /// The function, constant or class the line names, as declared: `abort`.
+    pub name: String,
+}
+
+impl ExternNamespace {
+    /// The line, with the full namespace and no import: `extern namespace Illuminate.Foundation for abort;`.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!("extern namespace {} for {};", self.namespace.replace('\\', "."), self.name)
+    }
+}
+
+/// The PHP# text of `input`'s file with the `extern namespace` lines it needs, or every construct that keeps it plain
+/// PHP.
 ///
 /// # Errors
 ///
 /// Returns each [`Refusal`] the file holds.
-pub fn convert(input: &Input<'_, '_>) -> Result<Vec<u8>, Vec<Refusal>> {
+pub fn convert(input: &Input<'_, '_>) -> Result<Converted, Vec<Refusal>> {
     let mut converter = Converter {
         input,
         source: &input.file.contents,
         edits: Edits::default(),
-        imports: Imports::new(""),
+        imports: Imports::new("", input.codebase, input.library),
         scope: NamespaceScope::global(),
         refusals: Vec::new(),
         imports_at: ImportsAt::FileStart,
@@ -96,9 +126,11 @@ pub fn convert(input: &Input<'_, '_>) -> Result<Vec<u8>, Vec<Refusal>> {
         converter.edits.insert(at, text);
     }
 
-    converter.edits.finish(converter.source).ok_or_else(|| {
+    let text = converter.edits.finish(converter.source).ok_or_else(|| {
         vec![Refusal { span: input.program.span(), reason: "two of the converter's rewrites overlap".to_owned() }]
-    })
+    })?;
+
+    Ok(Converted { text, extern_namespaces: converter.imports.extern_namespaces().to_vec() })
 }
 
 /// Where the `import` lines the conversion adds go.
@@ -155,7 +187,7 @@ struct Converter<'input, 'arena> {
     input: &'input Input<'input, 'arena>,
     source: &'input [u8],
     edits: Edits,
-    imports: Imports,
+    imports: Imports<'input>,
     /// The file's namespace and `use` lines, which a `@var` tag's names resolve against, as the analysis reads them.
     scope: NamespaceScope,
     refusals: Vec<Refusal>,
@@ -318,7 +350,7 @@ impl<'input> Converter<'input, '_> {
                     }
                     let written = String::from_utf8_lossy(name.value()).into_owned();
                     self.edits.replace(name.span(), written.replace('\\', "."));
-                    self.imports = Imports::new(&written);
+                    self.imports = Imports::new(&written, self.input.codebase, self.input.library);
                     self.scope = NamespaceScope::for_namespace(name.value());
                 }
                 self.imports_at = ImportsAt::AfterNamespace(body.terminator.span().end.offset);
@@ -342,8 +374,8 @@ impl<'input> Converter<'input, '_> {
     }
 
     /// A `use` line, as one `import` line per class it names (spec section 23). A function or a constant is reached
-    /// through its namespace, which each use imports, and a root class of `Builtins.sharp` is named bare, so their
-    /// lines go.
+    /// through its namespace, which each use imports, a root class of `Builtins.sharp` is named bare, and a library's
+    /// class of PHP's root namespace through its folder's namespace, so their lines go.
     fn use_line(&mut self, r#use: &mago_syntax::cst::Use<'_>) {
         self.scope.populate_from_use(r#use);
         let classes: Vec<(&[u8], &UseItem<'_>)> = match &r#use.items {
@@ -367,6 +399,11 @@ impl<'input> Converter<'input, '_> {
                 .as_ref()
                 .map_or_else(|| short.clone(), |alias| String::from_utf8_lossy(alias.identifier.value).into_owned());
             if Imports::is_default(&name) && alias == short {
+                continue;
+            }
+            // A library's class of PHP's root namespace is imported through its folder's namespace where the file
+            // names it, so its line goes.
+            if !name.contains('\\') && self.imports.library_root_class(&name).is_some() {
                 continue;
             }
             if !name.contains('\\') {

@@ -726,6 +726,7 @@ fn node_hooks_see_a_sharp_call_of_a_global_function_as_a_function_call_as_in_php
         "<?php\n\nfunction largest(int $a, int $b): int\n{\n    return $a > $b ? $a : $b;\n}\n",
     );
     const TALLY: (&str, &str) = ("src/Tools/Tally.php", "<?php\n\nnamespace Tools;\n\nfinal class Tally\n{\n}\n");
+    const EXTERNS: (&str, &str) = ("src/Externs.sharp", "namespace Demo;\n\nextern namespace Tools for largest;\n");
     const SHARP: (&str, &str) = (
         "src/Report.sharp",
         "namespace Demo;\n\nimport Tools;\n\nclass Report\n{\n    public static int total(Calc calc)\n    {\n        return Tools.largest(calc.add(1), 2);\n    }\n}\n",
@@ -735,7 +736,7 @@ fn node_hooks_see_a_sharp_call_of_a_global_function_as_a_function_call_as_in_php
         "<?php\n\nnamespace Demo;\n\nclass Calc\n{\n    public function add(int $value): int\n    {\n        return $value;\n    }\n}\n\nclass Report\n{\n    public static function total(Calc $calc): int\n    {\n        return largest($calc->add(1), 2);\n    }\n}\n",
     );
 
-    for files in [&[LARGEST, TALLY, CALC, SHARP][..], &[LARGEST, PHP]] {
+    for files in [&[LARGEST, TALLY, EXTERNS, CALC, SHARP][..], &[LARGEST, PHP]] {
         let functions = analyze_files_with_fixture(files, &["MAGO_INVOCATION_FUNCTION_CALL_KINDS"])?;
         let methods = analyze_files_with_fixture(files, &["MAGO_INVOCATION_CALL_KINDS"])?;
 

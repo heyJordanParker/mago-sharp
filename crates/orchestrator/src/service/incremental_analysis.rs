@@ -41,6 +41,7 @@ use mago_codex::metadata::CodebaseEntryKeys;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::r#extern::ExternMetadata;
 use mago_codex::metadata::r#extern::ExternNamespaceMetadata;
+use mago_codex::metadata::r#extern::extern_namespace_classes;
 use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::populator::populate_codebase_targeted;
@@ -565,11 +566,11 @@ impl IncrementalAnalysisService {
         self.changing_members = ChangingMembers::new(
             per_file_results.iter().flat_map(|(_, _, metadata, _, _)| receiver_changing_members(metadata)),
         );
-        // A namespace a `.sharp` file gives a library, spec section 23, changes what a class name means in every PHP#
-        // file, so each is scanned again against them.
-        self.extern_namespaces = ExternNamespaces::new(per_file_results.iter().flat_map(|(_, _, metadata, _, _)| {
-            metadata.extern_namespaces.iter().map(|declaration| declaration.namespace)
-        }));
+        // A namespace a `.sharp` file gives a library's classes, spec section 23, changes what a class name means in
+        // every PHP# file, so each is scanned again against them.
+        self.extern_namespaces = ExternNamespaces::new(extern_namespace_classes(
+            &per_file_results.iter().map(|(_, _, metadata, _, _)| metadata).collect::<Vec<_>>(),
+        ));
         let namespace_classes = &self.namespace_classes;
         let extern_namespaces = &self.extern_namespaces;
         per_file_results
@@ -1062,14 +1063,11 @@ impl IncrementalAnalysisService {
             return self.analyze();
         }
 
-        // An `extern namespace` changes what a name means in every PHP# file, spec section 23, and so does the class it
-        // names, whose folder takes the namespace.
+        // An `extern namespace` changes what a name means in every PHP# file, spec section 23, and so does each root
+        // class, function and constant of the folder it gives the namespace, which a rescanned file of that folder may
+        // declare or delete, and so does the name it names, which a rescanned file may declare anywhere.
         let extern_namespaces = |declarations: &mut dyn Iterator<Item = &ExternNamespaceMetadata>| {
-            declarations
-                .map(|declaration| {
-                    (declaration.namespace, mago_word::ascii_lowercase_word(declaration.class.as_bytes()))
-                })
-                .collect::<HashSet<_>>()
+            declarations.map(|declaration| (declaration.namespace, declaration.name)).collect::<HashSet<_>>()
         };
         let extern_namespaces_before = extern_namespaces(
             &mut self
@@ -1080,77 +1078,25 @@ impl IncrementalAnalysisService {
         );
         let extern_namespaces_after =
             extern_namespaces(&mut new_file_scans.iter().flat_map(|(_, metadata)| metadata.extern_namespaces.iter()));
-        let named_class_rescanned = self.codebase.extern_namespaces.iter().any(|declaration| {
-            self.codebase
-                .get_class_like(declaration.class.as_bytes())
-                .is_some_and(|class| rescanned.contains(&class.span.file_id))
-                || new_file_scans
-                    .iter()
-                    .any(|(_, metadata)| metadata.get_class_like(declaration.class.as_bytes()).is_some())
-        });
-
-        if extern_namespaces_before != extern_namespaces_after || named_class_rescanned {
-            return self.analyze();
-        }
-
-        // A class-like gives its folder's functions and constants of PHP's root namespace its namespace, spec section
-        // 23, so adding or deleting one beside them changes what `Foundation.abort(…)` names in every unchanged file.
-        let folder_namespaces_before: HashSet<(mago_word::Word, mago_word::Word)> = self
+        let given: HashSet<mago_word::Word> = self
             .codebase
-            .class_likes
-            .values()
-            .filter(|class_like| rescanned.contains(&class_like.span.file_id))
-            .filter_map(|class_like| self.codebase.folder_namespace(class_like))
-            .collect();
-        let folder_namespaces_after: HashSet<(mago_word::Word, mago_word::Word)> = new_file_scans
+            .extern_namespaces
             .iter()
-            .flat_map(|(_, metadata)| {
-                metadata.class_likes.values().filter_map(|class_like| metadata.folder_namespace(class_like))
-            })
+            .filter_map(|declaration| self.codebase.extern_namespace_folder(declaration))
             .collect();
-        let renamed_folders: HashSet<mago_word::Word> = folder_namespaces_before
-            .symmetric_difference(&folder_namespaces_after)
-            .map(|(folder, _)| *folder)
-            .collect();
-        let root_names_renamed = !renamed_folders.is_empty()
-            && std::iter::once(&self.codebase).chain(new_file_scans.iter().map(|(_, metadata)| metadata)).any(
-                |metadata| {
-                    metadata
-                        .function_likes
-                        .values()
-                        .filter(|function| function.kind.is_function())
-                        .map(|function| (function.original_name, function.span.file_id))
-                        .chain(metadata.constants.values().map(|constant| (constant.name, constant.span.file_id)))
-                        .any(|(name, file_id)| {
-                            !name.as_bytes().contains(&b'\\')
-                                && metadata.folder(file_id).is_some_and(|folder| renamed_folders.contains(&folder))
-                        })
-                },
-            );
+        let given_folder_rescanned = rescanned
+            .iter()
+            .any(|file_id| self.codebase.folder(*file_id).is_some_and(|folder| given.contains(&folder)))
+            || new_file_scans.iter().any(|(file_id, metadata)| {
+                metadata.folder(*file_id).is_some_and(|folder| given.contains(&folder))
+                    || self
+                        .codebase
+                        .extern_namespaces
+                        .iter()
+                        .any(|declaration| metadata.extern_namespace_folder(declaration).is_some())
+            });
 
-        if root_names_renamed {
-            return self.analyze();
-        }
-
-        // A function or constant of PHP's root namespace added or deleted beside class-likes takes their namespace, so
-        // it changes what `Foundation.abort(…)` names in every unchanged file, as a renamed folder namespace does.
-        let namespaced_root_names = |metadata: &CodebaseMetadata| -> HashSet<(mago_word::Word, mago_word::Word)> {
-            metadata
-                .function_likes
-                .values()
-                .filter(|function| function.kind.is_function())
-                .map(|function| (function.original_name, function.span.file_id))
-                .chain(metadata.constants.values().map(|constant| (constant.name, constant.span.file_id)))
-                .filter(|(name, file_id)| !name.as_bytes().contains(&b'\\') && rescanned.contains(file_id))
-                .filter_map(|(name, file_id)| Some((metadata.folder(file_id)?, name)))
-                .filter(|(folder, _)| self.codebase.folder_has_namespaces(*folder))
-                .collect()
-        };
-        let root_names_before = namespaced_root_names(&self.codebase);
-        let root_names_after: HashSet<(mago_word::Word, mago_word::Word)> =
-            new_file_scans.iter().flat_map(|(_, metadata)| namespaced_root_names(metadata)).collect();
-
-        if root_names_before != root_names_after {
+        if extern_namespaces_before != extern_namespaces_after || given_folder_rescanned {
             return self.analyze();
         }
 
@@ -2312,9 +2258,7 @@ pub(crate) fn resolve_member_reads<'files>(
         return Ok(false);
     }
 
-    let mut scan = merged_scan();
-    scan.populate_folder_namespaces();
-    let scan = Arc::new(scan);
+    let scan = Arc::new(merged_scan());
     files.into_iter().try_fold(false, |changed, file| Ok(file.resolve_member_reads(&scan)? || changed))
 }
 
@@ -4030,40 +3974,45 @@ mod tests {
         }
     }
 
-    /// Spec section 23: a library's function in PHP's root namespace belongs to the namespace of the classes beside it, so
-    /// adding or deleting the class file beside the helpers changes what a project file's `Foundation.abort(…)` names,
-    /// though neither the project file nor the helpers changed.
+    /// Spec section 23: a library's function in PHP's root namespace has the namespace an `extern namespace` line gives
+    /// it, so adding or deleting the declarations file that holds the line changes what a project file's
+    /// `Foundation.abort(…)` names, though neither the project file nor the helpers changed.
     #[test]
-    fn test_watch_a_class_added_beside_a_helpers_file_reaches_the_callers_of_its_functions() {
+    fn test_watch_an_extern_namespace_line_added_or_deleted_reaches_the_callers_of_its_function() {
         let helpers = "<?php\n\nfunction abort(int $code): int\n{\n    return $code;\n}\n";
         let application = "<?php\n\nnamespace Vendor\\Foundation;\n\nclass Application\n{\n}\n";
         let page = "namespace App;\n\nimport Vendor.Foundation;\n\npublic class Page\n{\n    public int missing() => Foundation.abort(404);\n}\n";
-        let application_id = FileId::new(b"vendor/laravel/Foundation/Application.php");
-        let mut db = make_database(vec![("src/Page.sharp", page), ("vendor/laravel/Foundation/helpers.php", helpers)]);
+        let externs = "namespace App;\n\nimport Vendor.Foundation;\n\nextern namespace Foundation for abort;\n";
+        let externs_id = FileId::new(b"src/Externs.sharp");
+        let mut db = make_database(vec![
+            ("src/Page.sharp", page),
+            ("vendor/laravel/Foundation/helpers.php", helpers),
+            ("vendor/laravel/Foundation/Application.php", application),
+        ]);
         let errors = |service: &IncrementalAnalysisService| {
             service.collect_all_issues().iter().filter(|issue| issue.level == mago_reporting::Level::Error).count()
         };
 
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
-        assert_ne!(errors(&service), 0, "no class gives the helpers a namespace");
+        assert_ne!(errors(&service), 0, "the class beside the helpers gives abort no namespace");
 
         db.add(File::new(
-            Cow::Borrowed(&b"vendor/laravel/Foundation/Application.php"[..]),
+            Cow::Borrowed(&b"src/Externs.sharp"[..]),
             FileType::Host,
             None,
-            Cow::Borrowed(application.as_bytes()),
+            Cow::Borrowed(externs.as_bytes()),
         ));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental analysis failed.");
-        assert_eq!(errors(&service), 0, "Application gives abort the namespace Vendor.Foundation");
-        assert_matches_full(&service, &db, "the class beside the helpers is added");
+        assert_eq!(errors(&service), 0, "the line gives abort the namespace Vendor.Foundation");
+        assert_matches_full(&service, &db, "the extern namespace line is added");
 
-        db.delete(application_id);
+        db.delete(externs_id);
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental analysis failed.");
-        assert_ne!(errors(&service), 0, "the helpers lose their namespace again");
-        assert_matches_full(&service, &db, "the class beside the helpers is deleted");
+        assert_ne!(errors(&service), 0, "abort loses its namespace again");
+        assert_matches_full(&service, &db, "the extern namespace line is deleted");
     }
 
     /// Spec section 11: a bound that names a type no file declares is the refused type only while the type is missing.
@@ -4182,18 +4131,22 @@ mod tests {
         );
     }
 
-    /// Spec section 23: a root function added beside classes that already exist takes their namespace, so a project
-    /// file's `Foundation.abort(…)`, refused while no `abort` existed, compiles once the helpers file declares it, and
-    /// is refused again once an edit of the helpers drops it, though the project file never changed.
+    /// Spec section 23: a root function an `extern namespace` line names takes the line's namespace once a file declares
+    /// it, so a project file's `Foundation.abort(…)`, refused while no `abort` existed, compiles once the helpers file
+    /// declares it, and is refused again once an edit of the helpers drops it, though the project file never changed.
     #[test]
-    fn test_watch_a_root_function_added_beside_classes_reaches_its_callers() {
+    fn test_watch_a_root_function_an_extern_namespace_line_names_added_or_dropped_reaches_its_callers() {
         let application = "<?php\n\nnamespace Vendor\\Foundation;\n\nclass Application\n{\n}\n";
         let helpers = "<?php\n\nfunction abort(int $code): int\n{\n    return $code;\n}\n";
         let other = "<?php\n\nfunction report(int $code): int\n{\n    return $code;\n}\n";
         let page = "namespace App;\n\nimport Vendor.Foundation;\n\npublic class Page\n{\n    public int missing() => Foundation.abort(404);\n}\n";
+        let externs = "namespace App;\n\nimport Vendor.Foundation;\n\nextern namespace Foundation for abort;\n";
         let helpers_id = FileId::new(b"vendor/laravel/Foundation/helpers.php");
-        let mut db =
-            make_database(vec![("src/Page.sharp", page), ("vendor/laravel/Foundation/Application.php", application)]);
+        let mut db = make_database(vec![
+            ("src/Page.sharp", page),
+            ("src/Externs.sharp", externs),
+            ("vendor/laravel/Foundation/Application.php", application),
+        ]);
         let errors = |service: &IncrementalAnalysisService| {
             service.collect_all_issues().iter().filter(|issue| issue.level == mago_reporting::Level::Error).count()
         };
@@ -4210,8 +4163,8 @@ mod tests {
         ));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental analysis failed.");
-        assert_eq!(errors(&service), 0, "the helpers declare abort beside Application");
-        assert_matches_full(&service, &db, "the helpers are added beside the class");
+        assert_eq!(errors(&service), 0, "the helpers declare the abort the line names");
+        assert_matches_full(&service, &db, "the helpers are added");
 
         db.update(helpers_id, Cow::Borrowed(other.as_bytes()));
         service.update_database(db.read_only());

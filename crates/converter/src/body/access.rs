@@ -99,18 +99,16 @@ impl Converter<'_, '_> {
         self.edits.replace(constant.span(), format!("Position.current().{member}"));
     }
 
-    /// `name`, a library's function or constant declared at `declared`, read through its namespace: its own, or the
-    /// namespace of the library's classes beside it when it is in PHP's root namespace (spec section 23, decision 083).
+    /// `name`, a library's function or constant declared at `declared`, read through its namespace: its own, or, in
+    /// PHP's root namespace, the one an `extern namespace` line gives its folder, which the conversion adds when the
+    /// project has none (spec section 23).
     pub(super) fn through_namespace(&mut self, span: Span, name: &str, declared: Span) -> Option<String> {
         let (namespace, member) = match name.rsplit_once('\\') {
             Some((namespace, member)) => (namespace.to_owned(), member.to_owned()),
-            None => match self.input.codebase.folder_namespaces(declared).first() {
-                Some(namespace) => (namespace.as_str_lossy().into_owned(), name.to_owned()),
-                None => {
-                    self.refuse(
-                        span,
-                        format!("`{name}` is declared in PHP's root namespace beside no class of its library, so it has no namespace to be reached through (spec section 23)"),
-                    );
+            None => match self.imports.root_namespace(name, declared) {
+                Ok(namespace) => (namespace, name.to_owned()),
+                Err(reason) => {
+                    self.refuse(span, reason);
                     return None;
                 }
             },

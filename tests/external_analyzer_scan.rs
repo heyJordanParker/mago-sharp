@@ -150,6 +150,10 @@ fn twins(pdf: &str) -> Database<'static> {
             "<?php\n\nnamespace Illuminate\\Foundation;\n\nclass Application\n{\n}\n".to_owned(),
         ),
         (
+            "lib/Foundation/Externs.sharp",
+            "namespace Illuminate.Foundation;\n\nextern namespace Illuminate.Foundation for APP_LIMIT;\n".to_owned(),
+        ),
+        (
             "lib/Status.php",
             "<?php\n\nnamespace App;\n\nenum Status: string\n{\n    case Paid = 'paid';\n}\n".to_owned(),
         ),

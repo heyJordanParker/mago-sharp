@@ -36,7 +36,6 @@ use mago_names::scope::NamespaceScope;
 use mago_names::short_name;
 use mago_span::HasPosition;
 use mago_span::HasSpan;
-use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::Binary;
@@ -1093,7 +1092,8 @@ pub(crate) fn is_prelude_stub(class: Word) -> bool {
 
 /// Produces a user-facing display string for a `FunctionLikeIdentifier`: a method reads `Order::total` in PHP and
 /// `Order.total` in a `.sharp` file, and a namespace's function `Vendor\Pdf\render` reads `Pdf.render` there, as
-/// Laravel's `abort()` of PHP's root namespace reads `Foundation.abort`, through the namespace PHP# names it by. The
+/// Laravel's `abort()` of PHP's root namespace reads `Foundation.abort`, through the namespace an `extern namespace`
+/// line gives it. The
 /// standard library calls PHP's built-ins through `global`, so one reads `global.sprintf` in its files.
 #[must_use]
 pub(crate) fn display_function_like_identifier<A>(
@@ -1117,10 +1117,7 @@ where
                     format!("global.{name}")
                 }
                 None if context.dialect.is_sharp()
-                    && let Some(namespace) = context
-                        .codebase
-                        .get_function(name.as_bytes())
-                        .and_then(|function| library_namespace(context.codebase, function.span)) =>
+                    && let Some(namespace) = context.codebase.extern_namespace_of(name.as_bytes()) =>
                 {
                     display_member(context, display_class_like_name(context, namespace), name)
                 }
@@ -1138,8 +1135,8 @@ where
 
 /// The plain PHP function `member` of the namespace `namespace`, as PHP# calls one: `Pdf.render(html)` after
 /// `import Vendor.Pdf;`, spec section 23, and Laravel's `abort()` in `Foundation.abort(404)` after
-/// `import Illuminate.Foundation;`, as [`namespace_member`] finds it. The caller reads a name that is also a class's as
-/// the class.
+/// `import Illuminate.Foundation;` and `extern namespace Foundation for abort;`, as [`namespace_member`] finds it. The
+/// caller reads a name that is also a class's as the class.
 #[must_use]
 pub(crate) fn namespace_function<'codebase>(
     codebase: &'codebase CodebaseMetadata,
@@ -1158,14 +1155,6 @@ pub(crate) fn namespace_constant<'codebase>(
     member: &[u8],
 ) -> Option<&'codebase ConstantMetadata> {
     codebase.get_constant(namespace_member(codebase, namespace, member).as_bytes())
-}
-
-/// The namespace PHP# code names the function or constant of PHP's root namespace that a library declares at `span`
-/// through, spec section 23: the first namespace of the class-likes in its folder, as `Illuminate\Foundation` for
-/// Laravel's `abort()`. None for one of PHP's built-ins, which PHP# code never names.
-#[must_use]
-pub(crate) fn library_namespace(codebase: &CodebaseMetadata, span: Span) -> Option<Word> {
-    codebase.folder_namespaces(span).first().copied()
 }
 
 /// Whether `name`, which resolves to `full_name`, names a namespace a file imports, as `Pdf` does after
@@ -1221,8 +1210,8 @@ pub(crate) fn is_member_namespace(codebase: &CodebaseMetadata, namespace: Word, 
 
 /// The plain PHP function a PHP# `Name.member(…)` calls, spec section 23: `Pdf.render(html)` after
 /// `import Vendor.Pdf;` calls the function `render` of that namespace, where no class is named `Vendor\Pdf`, and
-/// `Foundation.abort(404)` after `import Illuminate.Foundation;` Laravel's `abort()` of PHP's root namespace, as
-/// [`namespace_member`] finds it. An imported namespace names its function whether or not the function exists, so the
+/// `Foundation.abort(404)` after `import Illuminate.Foundation;` Laravel's `abort()` of PHP's root namespace, which
+/// `extern namespace Foundation for abort;` gives that namespace, as [`namespace_member`] finds it. An imported namespace names its function whether or not the function exists, so the
 /// call of a missing one is refused as a missing function. None for any other call, and for every call in a PHP file.
 #[must_use]
 pub(crate) fn namespace_function_name(
@@ -1241,9 +1230,9 @@ pub(crate) fn namespace_function_name(
 
 /// The full name PHP gives the function or constant `member` of `namespace`, which [`member_namespace`] found, as the
 /// code writes it, spec section 23: the name inside `namespace` when the namespace declares it, else the bare name of
-/// the one a plain PHP library declares in PHP's root namespace beside the class-likes of `namespace`, as `abort` for
-/// `Foundation.abort` after `import Illuminate.Foundation;`, else the name inside `namespace`, which names nothing. The
-/// empty namespace, the standard library's `global`, gives the bare name.
+/// the one of PHP's root namespace an `extern namespace` line gives `namespace`, as `abort` for `Foundation.abort`
+/// after `import Illuminate.Foundation;` and `extern namespace Foundation for abort;`, else the name inside `namespace`,
+/// which names nothing. The empty namespace, the standard library's `global`, gives the bare name.
 #[must_use]
 pub(crate) fn namespace_member(codebase: &CodebaseMetadata, namespace: Word, member: &[u8]) -> Word {
     if namespace.is_empty() {
@@ -1254,14 +1243,9 @@ pub(crate) fn namespace_member(codebase: &CodebaseMetadata, namespace: Word, mem
     if codebase.function_exists(full_name.as_bytes()) || codebase.constant_exists(full_name.as_bytes()) {
         return full_name;
     }
-    let beside_namespace = |span: Span| {
-        codebase
-            .folder_namespaces(span)
-            .iter()
-            .any(|beside| beside.as_bytes().eq_ignore_ascii_case(namespace.as_bytes()))
-    };
-    if codebase.get_function(member).is_some_and(|function| beside_namespace(function.span))
-        || codebase.get_constant(member).is_some_and(|constant| beside_namespace(constant.span))
+    if codebase
+        .extern_namespace_of(member)
+        .is_some_and(|given| given.as_bytes().eq_ignore_ascii_case(namespace.as_bytes()))
     {
         return word(member);
     }

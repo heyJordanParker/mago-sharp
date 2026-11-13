@@ -1,0 +1,1 @@
+extern namespace Acme.StringHelpers for str_shout;

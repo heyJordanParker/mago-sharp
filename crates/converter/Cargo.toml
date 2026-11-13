@@ -17,6 +17,7 @@ mago-allocator = { workspace = true }
 mago-analyzer = { workspace = true }
 mago-casing = { workspace = true }
 mago-codex = { workspace = true }
+mago-composer = { workspace = true }
 mago-database = { workspace = true }
 mago-names = { workspace = true }
 mago-phpdoc-syntax = { workspace = true }

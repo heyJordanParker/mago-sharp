@@ -5,10 +5,17 @@
 //! `value is T` (spec section 21). Every other built-in reaches PHP# only through a standard library member whose body
 //! is one call of that function with PHP's meaning, as `count()` of a `List` is `global.count(items)`: the bridge's
 //! inline forms say which function each member's body calls, and what it passes it.
+//!
+//! A plain PHP library's function, constant or class of PHP's root namespace is reached through the namespace an
+//! `extern namespace` line gives its folder (spec section 23), and the library also says which namespace that is.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::Path;
 
+use mago_casing::to_pascal_case;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::function_like::FunctionLikeKind;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
@@ -17,13 +24,17 @@ use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by_with_erased_template_arguments;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
+use mago_composer::ComposerPackage;
 use mago_sharp_bridge::InlineForms;
 use mago_sharp_bridge::PhpCall;
 use mago_sharp_bridge::PhpCallArgument;
 use mago_word::Word;
 
-/// The standard library's members whose body is one call of a PHP function, by that function, and its constants whose
-/// value is one of PHP's own, by that constant.
+/// What the converter reads of the project's libraries.
+///
+/// It holds the standard library's members whose body is one call of a PHP function, by that function, and its
+/// constants whose value is one of PHP's own, by that constant. It also holds the namespace each folder of a plain PHP
+/// library's names of PHP's root namespace takes.
 #[derive(Debug, Default)]
 pub struct Library {
     /// Each function's members, by its lowercase name, as PHP matches a function's name.
@@ -31,6 +42,9 @@ pub struct Library {
     /// The class and the name of the constant whose value is each of PHP's own constants, as `Int.MAX` is
     /// `PHP_INT_MAX`'s, by PHP's name, which PHP matches in its case.
     constants: HashMap<Vec<u8>, (Word, Word)>,
+    /// The namespace, as PHP writes it, that an `extern namespace` line the converter writes gives each folder, as
+    /// [`CodebaseMetadata::folder`] names it, that holds a function, constant or class of PHP's root namespace.
+    folder_namespaces: HashMap<Word, String>,
 }
 
 /// A standard library member whose body is one call of a PHP function.
@@ -58,8 +72,9 @@ pub enum Shape {
 impl Library {
     /// The library's members among `forms` whose body is one call of a PHP function, with their declarations from
     /// `codebase`. A member that runs on an object of its own class takes no PHP value as that object, so it is none.
+    /// Each folder's namespace is read from `codebase` and the `composer.json` files above the folder in `workspace`.
     #[must_use]
-    pub fn new(forms: &InlineForms, codebase: &CodebaseMetadata) -> Self {
+    pub fn new(forms: &InlineForms, codebase: &CodebaseMetadata, workspace: &Path) -> Self {
         let mut members: HashMap<Vec<u8>, Vec<Member>> = HashMap::new();
         for (class, member, form) in forms.iter() {
             let (Some(call), Some(declaring), Some(method)) =
@@ -97,7 +112,14 @@ impl Library {
             })
             .collect();
 
-        Self { members, constants }
+        Self { members, constants, folder_namespaces: folder_namespaces(codebase, workspace) }
+    }
+
+    /// The namespace, as PHP writes it, that the converter gives `folder`'s functions, constants and classes of PHP's
+    /// root namespace, or `None` when the folder's classes have no namespace and no Composer package names it.
+    #[must_use]
+    pub fn folder_namespace(&self, folder: Word) -> Option<&str> {
+        self.folder_namespaces.get(&folder).map(String::as_str)
     }
 
     /// The members whose body calls `function`, a PHP function's name in any case.
@@ -136,6 +158,83 @@ pub fn differs(member: &Member, function: &FunctionLikeMetadata, codebase: &Code
         }
         _ => None,
     })
+}
+
+/// The namespace each folder that holds a plain PHP function, constant or class of PHP's root namespace takes: the
+/// first, in alphabetical order, of the namespaces of the folder's classes, as Laravel's `abort()` in
+/// `Illuminate/Foundation/helpers.php` takes `Illuminate\Foundation`, or, when no class of the folder has one, the
+/// namespace of the Composer package that holds the folder.
+fn folder_namespaces(codebase: &CodebaseMetadata, workspace: &Path) -> HashMap<Word, String> {
+    let mut beside: HashMap<Word, String> = HashMap::new();
+    let mut roots: HashSet<Word> = HashSet::new();
+    for class in codebase.class_likes.values().filter(|class| !class.flags.is_module()) {
+        let Some(folder) = codebase.folder(class.span.file_id) else {
+            continue;
+        };
+        let name = class.original_name.as_str_lossy();
+        match name.rsplit_once('\\') {
+            Some((namespace, _)) => {
+                let first = beside.entry(folder).or_insert_with(|| namespace.to_owned());
+                if namespace.to_ascii_lowercase() < first.to_ascii_lowercase() {
+                    namespace.clone_into(first);
+                }
+            }
+            None if !class.flags.is_sharp() => {
+                roots.insert(folder);
+            }
+            None => {}
+        }
+    }
+    let functions = codebase
+        .function_likes
+        .values()
+        .filter(|function| function.kind == FunctionLikeKind::Function)
+        .map(|function| (function.original_name, function.span));
+    let constants = codebase.constants.values().map(|constant| (constant.name, constant.span));
+    for (name, span) in functions.chain(constants) {
+        if !name.as_bytes().contains(&b'\\')
+            && let Some(folder) = codebase.folder(span.file_id)
+        {
+            roots.insert(folder);
+        }
+    }
+
+    roots
+        .into_iter()
+        .filter_map(|folder| {
+            let namespace =
+                beside.get(&folder).cloned().or_else(|| package_namespace(workspace, &folder.as_str_lossy()))?;
+
+            Some((folder, namespace))
+        })
+        .collect()
+}
+
+/// The namespace of the Composer package whose `composer.json` is the nearest one at or above `folder`, and no higher
+/// than `workspace` for a folder in it: its name's, as `Acme\StringHelpers` for `acme/string-helpers`, or, for a
+/// `composer.json` that names no package, as a project's may not, its first PSR-4 namespace in alphabetical order.
+fn package_namespace(workspace: &Path, folder: &str) -> Option<String> {
+    let folder = workspace.join(folder);
+    let inside = folder.starts_with(workspace);
+    let contents = folder
+        .ancestors()
+        .take_while(|at| !inside || at.starts_with(workspace))
+        .find_map(|at| std::fs::read_to_string(at.join("composer.json")).ok())?;
+    let package: ComposerPackage = contents.parse().ok()?;
+    if let Some(name) = package.name {
+        let parts: Vec<String> =
+            name.0.split('/').map(|part| String::from_utf8_lossy(&to_pascal_case(part)).into_owned()).collect();
+
+        return Some(parts.join("\\"));
+    }
+
+    package
+        .autoload?
+        .psr_4
+        .into_keys()
+        .map(|prefix| prefix.trim_matches('\\').to_owned())
+        .filter(|prefix| !prefix.is_empty())
+        .min()
 }
 
 /// The last part of a full PHP name.

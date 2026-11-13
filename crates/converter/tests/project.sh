@@ -6,6 +6,7 @@ set -uo pipefail
 # that:
 # - `--dry-run` changes no file
 # - each file mago convert refuses stays plain PHP, and every other file converts
+# - src/Externs.sharp holds the one `extern namespace` line the converted files need, for acme/format's `shout()`
 # - the index holds each conversion as a rename alone, `R100`, and `git log --follow` reaches the plain PHP file
 # - `mago compile` accepts every file, the plain PHP subclasses of converted classes included
 # - `mago analyze` has no new error, and only the warnings decision 9 expects
@@ -66,6 +67,8 @@ for file in "${converted[@]}"; do
     [ ! -f "$file" ] || fail "$file is still there"
 done
 grep -q "Converted ${#converted[@]} files to PHP#, and ${#plain[@]} files stay plain PHP." ../convert || fail "the summary"
+printf 'namespace Proof;\n\nextern namespace Acme.Format for shout;\n' | diff - src/Externs.sharp ||
+    fail "src/Externs.sharp holds other lines than the one shout() needs"
 
 step git diff --cached -M --stat
 step git diff --cached -M --name-status | tee ../renames

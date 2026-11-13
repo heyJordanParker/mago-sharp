@@ -873,12 +873,13 @@ fn a_class_like_of_the_files_namespace_wins_over_a_default_one() {
     assert_eq!(resolved(&alone, CODE, "Random?", 0), b"Sharp\\Random");
 }
 
-/// Spec section 23: a class of a namespace the project gives a library, as `WordPress` by `extern namespace WordPress
-/// for WP_Post;`, is the library's class of PHP's root namespace, imported or written in full, ignoring case as PHP
-/// does. A class of any other namespace keeps its namespace, and a plain PHP file's names are PHP's own.
+/// Spec section 23: a class a project gives a namespace, as `extern namespace WordPress for WP_Post;` gives `WordPress`
+/// to the root classes of `WP_Post`'s folder, is the library's class of PHP's root namespace, imported or written in
+/// full, ignoring case as PHP does. A root class the namespace doesn't name, as one of another folder, keeps the name
+/// in the namespace, which names no class. A class of any other namespace keeps its namespace.
 #[test]
 fn a_class_of_an_extern_namespace_is_php_s_root_class() {
-    const CODE: &str = "namespace App.Blog;\n\nimport WordPress;\nimport WordPress.WP_Post;\nimport Vendor.Pdf.Renderer;\n\nclass Feed\n{\n    public bool run(WP_Post post, wordpress.WP_Query query, Renderer renderer) => true;\n}\n";
+    const CODE: &str = "namespace App.Blog;\n\nimport WordPress;\nimport WordPress.WP_Post;\nimport Vendor.Pdf.Renderer;\n\nclass Feed\n{\n    public bool run(WP_Post post, wordpress.WP_Query query, Renderer renderer, WordPress.WP_Screen screen) => true;\n}\n";
     let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
     let arena = LocalArena::new();
     let program = parse_file(&arena, &file);
@@ -886,7 +887,7 @@ fn a_class_of_an_extern_namespace_is_php_s_root_class() {
         program,
         &NamespaceClasses::default(),
         &ChangingMembers::default(),
-        &ExternNamespaces::new(["WordPress"]),
+        &ExternNamespaces::new([("WordPress", ["WP_Post", "WP_Query"])]),
     );
 
     for (needle, class) in [
@@ -894,6 +895,7 @@ fn a_class_of_an_extern_namespace_is_php_s_root_class() {
         ("WP_Post post", "WP_Post"),
         ("wordpress.WP_Query", "WP_Query"),
         ("Renderer renderer", "Vendor\\Pdf\\Renderer"),
+        ("WordPress.WP_Screen", "WordPress\\WP_Screen"),
     ] {
         assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, 0)), class, "`{needle}`");
     }

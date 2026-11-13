@@ -11,6 +11,12 @@
 //! with git's reason, and the command records each rename in the index as `git mv` does, so the index holds the rename
 //! alone, git's history follows the file through it, and the `.php` file `mago compile` later writes at the old path is
 //! never the tracked one. A file's shape and git decide before any analysis, so a run with nothing to prove runs none.
+//!
+//! A converted file that reaches a library's function, constant or class of PHP's root namespace needs an
+//! `extern namespace` line for its folder (spec section 23). The command owns one declarations file for them,
+//! `Externs.sharp` in the first PSR-4 folder, in that folder's namespace: it creates the file or adds to it, one line for
+//! each folder, sorted, and each proof holds the lines its converted files need. A run writes it before the converted
+//! files and never stages it, as it never stages a converted file's new text, so the index holds only the renames.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -31,6 +37,7 @@ use mago_allocator::LocalArena;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_composer::AutoloadPsr4value;
 use mago_composer::ComposerPackage;
+use mago_converter::Converted;
 use mago_converter::Input;
 use mago_converter::Library;
 use mago_converter::Refusal;
@@ -152,6 +159,20 @@ struct Candidate {
     path: Option<PathBuf>,
     original: Vec<u8>,
     text: Vec<u8>,
+    /// The `extern namespace` lines it needs, each folder's as the run's first file that needs one names it.
+    extern_namespaces: Vec<String>,
+}
+
+/// The project's declarations file the command owns, `Externs.sharp` in the first PSR-4 folder, in that folder's
+/// namespace, which holds the `extern namespace` lines of the converted files (spec section 23).
+struct Externs {
+    /// Its name from the workspace, as `src/Externs.sharp`.
+    name: Vec<u8>,
+    path: PathBuf,
+    /// The namespace a new file declares, as `App`.
+    namespace: String,
+    /// The text the file held when the run started, empty when it was missing.
+    held: Vec<u8>,
 }
 
 /// What one analysis and in-memory compile of the project found: each issue, and each file `mago compile` refuses,
@@ -187,6 +208,7 @@ struct Prover<'configuration> {
     root: PathBuf,
     hidden: Hidden,
     standard_library: unit::Library,
+    externs: Externs,
 }
 
 /// One analysis of the project with fresh extension hosts, as `mago analyze` runs it, with converted files in place of
@@ -205,6 +227,8 @@ struct Outcome {
     unreached: Vec<String>,
     refused: BTreeMap<Vec<u8>, Vec<String>>,
     converted: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    /// The declarations file the converted files need lines in, its text before, and its text with them.
+    externs: Option<(Vec<u8>, Vec<u8>, Vec<u8>)>,
     /// The warnings decision 9 expects.
     expected: Vec<Found>,
     /// How many proofs of the converted files ran, each a whole analysis of the project with fresh extension hosts.
@@ -302,8 +326,14 @@ impl ConvertCommand {
 
         let workspace = configuration.source.workspace.clone();
         let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.clone(), error))?;
+        // Every file that converts is under a PSR-4 folder, as `shape` keeps it, so the first one always exists.
+        let Some(externs) = psr4_roots(&workspace)?.first().map(|root| Externs::new(&workspace, root)).transpose()?
+        else {
+            outcome.report(self.dry_run, color_choice);
+            return Ok((outcome.exit_code(), outcome));
+        };
         configuration.extension_hosts = compile_for_hosts(&configuration)?.0;
-        let Some((prover, mut session)) = Prover::new(&configuration, color_choice, root)? else {
+        let Some((prover, mut session)) = Prover::new(&configuration, color_choice, root, externs)? else {
             outcome.report(self.dry_run, color_choice);
             return Ok((ExitCode::FAILURE, outcome));
         };
@@ -318,9 +348,11 @@ impl ConvertCommand {
         let database = session.server.database().read_only();
         let forms = session.server.standard_library_forms(|issues| prover.hidden.shown(issues, &database))?;
         drop(database);
-        let library = Library::new(&forms, session.server.codebase());
+        let library = Library::new(&forms, session.server.codebase(), &workspace);
 
         let mut candidates = Vec::new();
+        // One line gives a folder its namespace, so each folder's is the one the first file that needs it names.
+        let mut folder_lines: HashMap<String, String> = HashMap::new();
         for (name, held) in checked {
             // A file changed or gone since git was read holds bytes git doesn't, so it is no longer git's to undo.
             let database = session.server.database();
@@ -330,8 +362,20 @@ impl ConvertCommand {
                 continue;
             };
             match session.convert(file, &library) {
-                Ok(text) => {
-                    candidates.push(Candidate { name, path: file.path.clone(), original: file.contents.to_vec(), text })
+                Ok(Converted { text, extern_namespaces }) => {
+                    let extern_namespaces = extern_namespaces
+                        .iter()
+                        .map(|needed| {
+                            folder_lines.entry(needed.folder.clone()).or_insert_with(|| needed.line()).clone()
+                        })
+                        .collect();
+                    candidates.push(Candidate {
+                        name,
+                        path: file.path.clone(),
+                        original: file.contents.to_vec(),
+                        text,
+                        extern_namespaces,
+                    });
                 }
                 Err(reasons) => outcome.refused.entry(name).or_default().extend(reasons),
             }
@@ -345,10 +389,25 @@ impl ConvertCommand {
             .iter()
             .map(|candidate| (candidate.name.clone(), candidate.original.clone(), candidate.text.clone()))
             .collect();
+        outcome.externs =
+            prover.externs.text(&accepted).map(|(before, after)| (prover.externs.name.clone(), before, after));
 
         // A lowering that panicked is a defect of the checker, which fails the run.
         outcome.failed |= !panics.is_empty();
         if !self.dry_run && !accepted.is_empty() {
+            // The declarations file goes first, so no converted file is on disk without the lines it needs.
+            if let Some((name, _, text)) = &outcome.externs
+                && let Err(error) = write_by_rename(&prover.externs.path, text)
+            {
+                outcome.failed = true;
+                let name = display(name);
+                tracing::error!("{name} could not be written, so every file stays plain PHP: {error}");
+                outcome.converted.clear();
+                outcome.externs = None;
+                outcome.report(self.dry_run, color_choice);
+
+                return Ok((outcome.exit_code(), outcome));
+            }
             let mut written = 0;
             for candidate in &accepted {
                 if let Err(error) = write(&workspace, &candidate.name, &candidate.text) {
@@ -380,6 +439,7 @@ impl<'configuration> Prover<'configuration> {
         configuration: &'configuration Configuration,
         color_choice: ColorChoice,
         root: PathBuf,
+        externs: Externs,
     ) -> Result<Option<(Self, Session<'configuration>)>, Error> {
         let hidden = Hidden::new(configuration)?;
         let (orchestrator, database) = load(configuration, color_choice)?;
@@ -390,15 +450,27 @@ impl<'configuration> Prover<'configuration> {
                 return Ok(None);
             }
         };
-        let prover = Self { configuration, color_choice, root, hidden, standard_library };
+        let prover = Self { configuration, color_choice, root, hidden, standard_library, externs };
         let session = Session::new(orchestrator, database);
 
         Ok(Some((prover, session)))
     }
 
-    /// A session of the project with fresh extension hosts, each of `swaps` in place of its plain file.
+    /// A session of the project with fresh extension hosts, each of `swaps` in place of its plain file, and the
+    /// declarations file with the lines they need.
     fn open(&self, swaps: &[&Candidate]) -> Result<Session<'configuration>, Error> {
         let (orchestrator, mut database) = load(self.configuration, self.color_choice)?;
+        if let Some((_, text)) = self.externs.text(swaps) {
+            database.delete(FileId::new(&self.externs.name));
+            let mut externs = File::new(
+                Cow::Owned(self.externs.name.clone()),
+                FileType::Host,
+                Some(self.externs.path.clone()),
+                Cow::Owned(text),
+            );
+            mark_sharp_file(&mut externs, &self.configuration.source.workspace);
+            database.add(externs);
+        }
         for candidate in swaps {
             database.delete(FileId::new(&candidate.name));
             let mut converted = File::new(
@@ -631,9 +703,9 @@ impl<'configuration> Session<'configuration> {
             .collect()
     }
 
-    /// The PHP# text of `file`, or each construct that keeps it plain PHP, by its place. A built-in's call becomes the
-    /// member of `library` that runs it.
-    fn convert(&self, file: &File, library: &Library) -> Result<Vec<u8>, Vec<String>> {
+    /// The PHP# text of `file` with the `extern namespace` lines it needs, or each construct that keeps it plain PHP, by
+    /// its place. A built-in's call becomes the member of `library` that runs it.
+    fn convert(&self, file: &File, library: &Library) -> Result<Converted, Vec<String>> {
         let arena = LocalArena::new();
         let program = parse_file(&arena, file);
         let names = NameResolver::new(&arena).resolve(program);
@@ -786,6 +858,15 @@ impl Outcome {
                 println!("{}", formatter.fmt_patch(&diffy::create_patch(&original, &text)));
             }
         }
+        if let Some((name, before, after)) = &self.externs
+            && !self.converted.is_empty()
+        {
+            println!("{} holds the extern namespace lines of the converted files", display(name));
+            if dry_run {
+                let (before, after) = (String::from_utf8_lossy(before), String::from_utf8_lossy(after));
+                println!("{}", formatter.fmt_patch(&diffy::create_patch(&before, &after)));
+            }
+        }
         for warning in &self.expected {
             let warning = if dry_run { &warning.shown } else { &warning.written };
             tracing::info!("Expected after converting, decision 9: {warning}");
@@ -865,9 +946,9 @@ fn keys(server: &Server, issues: IssueCollection) -> Issues {
 
 /// Whether `file` is one the converter takes: one class-like, named like the file, under a PSR-4 folder of
 /// `composer.json`'s `autoload` (spec section 27). The reason it is not, otherwise.
-fn shape(file: &File, roots: &[PathBuf]) -> Result<(), String> {
+fn shape(file: &File, roots: &[(String, PathBuf)]) -> Result<(), String> {
     let name = display(&file.name);
-    if !roots.iter().any(|folder| Path::new(&name).starts_with(folder)) {
+    if !roots.iter().any(|(_, folder)| Path::new(&name).starts_with(folder)) {
         return Err("it is under no PSR-4 folder of composer.json's autoload, so it is a script or a test".to_owned());
     }
 
@@ -1066,24 +1147,80 @@ fn unreached(configuration: &Configuration, root: &Path, path: &Path) -> Result<
     })
 }
 
-/// Each PSR-4 folder of `composer.json`'s `autoload`, relative to the workspace. A test under `autoload-dev` stays
-/// out, since a test runner loads a test only from the file it lists (spec section 27).
-fn psr4_roots(workspace: &Path) -> Result<Vec<PathBuf>, Error> {
+/// Each PSR-4 folder of `composer.json`'s `autoload`, relative to the workspace, with its namespace, as `App` for
+/// `App\`, in the order of their namespaces, since `composer.json`'s map keeps no order. A test under `autoload-dev`
+/// stays out, since a test runner loads a test only from the file it lists (spec section 27).
+fn psr4_roots(workspace: &Path) -> Result<Vec<(String, PathBuf)>, Error> {
     let path = workspace.join("composer.json");
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return Ok(Vec::new());
     };
     let composer: ComposerPackage = contents.parse()?;
     let mut roots = Vec::new();
-    for (_, value) in composer.autoload.map(|autoload| autoload.psr_4).unwrap_or_default() {
+    for (namespace, value) in composer.autoload.map(|autoload| autoload.psr_4).unwrap_or_default() {
         let folders = match value {
             AutoloadPsr4value::String(folder) => vec![folder],
             AutoloadPsr4value::Array(folders) => folders,
         };
-        roots.extend(folders.iter().map(|folder| PathBuf::from(folder.trim_end_matches('/'))));
+        let namespace = namespace.trim_matches('\\');
+        roots.extend(folders.iter().map(|folder| (namespace.to_owned(), PathBuf::from(folder.trim_end_matches('/')))));
     }
+    roots.sort();
 
     Ok(roots)
+}
+
+impl Externs {
+    /// The declarations file of the PSR-4 folder `root` of the project at `workspace`, with its namespace, and the
+    /// text it holds now, which is none when it is missing.
+    fn new(workspace: &Path, (namespace, folder): &(String, PathBuf)) -> Result<Self, Error> {
+        let name = folder.join("Externs.sharp").to_string_lossy().into_owned().into_bytes();
+        let path = workspace.join(display(&name));
+        let held = match std::fs::read(&path) {
+            Ok(held) => held,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &path, error).into()),
+        };
+
+        Ok(Self { name, path, namespace: namespace.replace('\\', "."), held })
+    }
+
+    /// The text the file holds now, and its text with each line `candidates` need that it lacks, or `None` when it
+    /// holds every one. A new file declares its namespace. A line goes before the first `extern namespace` line that
+    /// sorts after it, or after the last one, so lines that are sorted stay sorted.
+    fn text(&self, candidates: &[&Candidate]) -> Option<(Vec<u8>, Vec<u8>)> {
+        let needed: BTreeSet<&str> =
+            candidates.iter().flat_map(|candidate| &candidate.extern_namespaces).map(String::as_str).collect();
+        let held = String::from_utf8_lossy(&self.held);
+        let mut lines: Vec<String> = if held.trim().is_empty() {
+            vec![format!("namespace {};", self.namespace)]
+        } else {
+            held.lines().map(str::to_owned).collect()
+        };
+        let is_extern_namespace = |line: &String| line.trim_start().starts_with("extern namespace ");
+        let mut added = false;
+        for line in needed {
+            if lines.iter().any(|held| held.trim() == line) {
+                continue;
+            }
+            let at = match lines.iter().position(|held| is_extern_namespace(held) && held.trim() > line) {
+                Some(at) => at,
+                None => match lines.iter().rposition(is_extern_namespace) {
+                    Some(last) => last + 1,
+                    None => {
+                        if lines.last().is_some_and(|last| !last.trim().is_empty()) {
+                            lines.push(String::new());
+                        }
+                        lines.len()
+                    }
+                },
+            };
+            lines.insert(at, line.to_owned());
+            added = true;
+        }
+
+        added.then(|| (self.held.clone(), format!("{}\n", lines.join("\n")).into_bytes()))
+    }
 }
 
 /// `path`, as the command line names it, relative to the workspace.
@@ -1846,6 +1983,67 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         assert!(lines[4].contains("int item") && lines[8].contains("int size()"), "{written}");
     }
 
+    /// A library's function and constant of PHP's root namespace, beside the classes of `Acme\Foundation`, a function of
+    /// a library with no class, which its Composer package's name gives `Acme\StringHelpers`, and the plain PHP class
+    /// `name`, which calls and reads them in its `run()` as `body` does.
+    fn root_names(name: &str, body: &str) -> [(String, String); 5] {
+        [
+            (
+                "Lib/Foundation/Application.php".to_owned(),
+                "<?php\n\nnamespace Acme\\Foundation;\n\nfinal class Application\n{\n}\n".to_owned(),
+            ),
+            (
+                "Lib/Foundation/helpers.php".to_owned(),
+                "<?php\n\nconst ACME_VERSION = '1.0';\n\nfunction abort(int $code): never\n{\n    throw new \\RuntimeException('Aborted.', $code);\n}\n".to_owned(),
+            ),
+            ("Lib/Strings/composer.json".to_owned(), r#"{"name": "acme/string-helpers"}"#.to_owned()),
+            (
+                "Lib/Strings/functions.php".to_owned(),
+                "<?php\n\nfunction str_shout(string $text): string\n{\n    return $text . '!';\n}\n".to_owned(),
+            ),
+            (
+                format!("Contracts/{name}.php"),
+                format!(
+                    "<?php\n\nnamespace Generated\\Contracts;\n\nfinal class {name}\n{{\n    public function run(): string\n    {{\n{body}\n    }}\n}}\n"
+                ),
+            ),
+        ]
+    }
+
+    /// The `extern namespace` lines a converted file needs go in `src/Externs.sharp`, the first PSR-4 folder's, which
+    /// the run creates in that folder's namespace: one line for each folder, naming the first of its names the file
+    /// meets. A run whose files need no line it lacks leaves the file as it is, and one that needs one more adds that
+    /// line alone, in its sorted place. Each converted file compiles with them, as its proof held them.
+    #[test]
+    fn the_extern_namespace_lines_converted_files_need_go_in_the_declarations_file_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let externs = root.join("src/Externs.sharp");
+        let run = |name: &str, body: &str| {
+            let configuration = project(&root, &root_names(name, body));
+            let path = root.join(format!("src/Contracts/{name}.php"));
+            let (exit_code, outcome) =
+                ConvertCommand { paths: vec![path], dry_run: false }.run(configuration, ColorChoice::Never).unwrap();
+            assert_eq!(exit_code, ExitCode::SUCCESS);
+            assert_eq!(outcome.converted.len(), 1, "{:#?}", outcome.refused);
+            assert!(root.join(format!("src/Contracts/{name}.sharp")).exists());
+
+            std::fs::read_to_string(&externs).unwrap()
+        };
+
+        let first = run("Pages", "        abort(404);");
+        assert_eq!(first, "namespace Generated;\n\nextern namespace Acme.Foundation for abort;\n");
+
+        let second = run("Banner", "        return ACME_VERSION;");
+        assert_eq!(second, first);
+
+        let third = run("Greeter", "        return str_shout(ACME_VERSION);");
+        assert_eq!(
+            third,
+            "namespace Generated;\n\nextern namespace Acme.Foundation for abort;\nextern namespace Acme.StringHelpers for str_shout;\n"
+        );
+    }
+
     /// A file the compile refuses once converted fails its proof with the compile's first error, and a converted file
     /// whose lowering panicked with the panic's text, a defect of the checker, whatever else the refusal names.
     #[test]
@@ -1855,6 +2053,7 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             path: None,
             original: b"<?php\n\nnamespace App;\n\nfinal class Box\n{\n}\n".to_vec(),
             text: Vec::new(),
+            extern_namespaces: Vec::new(),
         };
         let panicked = IssueCollection::from(vec![
             Issue::error("Invalid return.").with_code("invalid-return-statement"),
@@ -1905,6 +2104,7 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             path: None,
             original: b"<?php\n\nnamespace App;\n\nfinal class Box\n{\n    public function size(): int\n    {\n        return 1;\n    }\n}\n".to_vec(),
             text: Vec::new(),
+            extern_namespaces: Vec::new(),
         };
         let issue = |line: u32, members: &[&str]| {
             let key = (b"src/Box.sharp".to_vec(), Level::Error, Some("code".to_owned()), "Wrong.".to_owned(), line);
@@ -2061,7 +2261,8 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         })
         .unwrap();
 
-        let (prover, _) = Prover::new(&configuration, ColorChoice::Never, root.clone()).unwrap().unwrap();
+        let externs = Externs::new(&root, &psr4_roots(&root).unwrap()[0]).unwrap();
+        let (prover, _) = Prover::new(&configuration, ColorChoice::Never, root.clone(), externs).unwrap().unwrap();
         let session = prover.open(&[]).unwrap();
         let library: Vec<String> = session
             .server

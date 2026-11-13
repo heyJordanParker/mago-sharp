@@ -594,9 +594,6 @@ fn generic_method_name(method: &FunctionLikeMetadata) -> String {
     format!("{}<{}>", method.original_name, templates.join(", "))
 }
 
-/// Whether `child_method` and `parent_method` are both PHP# operators, spec section 19. An operator runs by the types
-/// of its operands, so a class's own replaces no other and links against none: a parent class's is refused by
-/// `check_inherited_operators`, and an interface's runs on operands of the interface, from the interface's trait.
 /// `parent_type`, a type the plain PHP `parent_method` declares, as the PHP# `child_method` that overrides it declares
 /// it: read as a call of the parent reads it, a `super.` call included, spec section 22, and written as a PHP#
 /// declaration writes that, so `array{string|null, string}` is the `List<string?>` the call gives. Any other pair keeps
@@ -614,6 +611,9 @@ fn as_sharp_declares(
     }
 }
 
+/// Whether `child_method` and `parent_method` are both PHP# operators, spec section 19. An operator runs by the types
+/// of its operands, so a class's own replaces no other and links against none: a parent class's is refused by
+/// `check_inherited_operators`, and an interface's runs on operands of the interface, from the interface's trait.
 fn are_operators(child_method: &FunctionLikeMetadata, parent_method: &FunctionLikeMetadata) -> bool {
     child_method.flags.is_operator() && parent_method.flags.is_operator()
 }

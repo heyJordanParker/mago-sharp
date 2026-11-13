@@ -13,8 +13,8 @@ where
     A: Arena,
 {
     /// Parses a PHP# `extern` declaration: `extern`, `event` when the class is an event, its target, a bare name or
-    /// `Class.member`, then an optional `uses` clause. `extern namespace WordPress for WP_Post;` gives the folder of a
-    /// library's class a namespace instead, spec section 23.
+    /// `Class.member`, then an optional `uses` clause. `extern namespace WordPress for WP_Post;` gives a library's class,
+    /// function or constant of PHP's root namespace a namespace instead, spec section 23.
     pub(crate) fn parse_extern(&mut self) -> Result<Extern<'arena>, ParseError<'arena>> {
         let r#extern = self.expect_any_keyword()?;
         let event = if self.stream.lookahead(0)?.is_some_and(|token| token.value == b"event")
@@ -30,12 +30,12 @@ where
             None
         };
         // The target is a bare name or `Class.member`. A longer one is a full name, which the analyzer refuses with the
-        // import to add, spec section 23. A namespace is the name its folder takes, dotted as any namespace.
+        // import to add, spec section 23. A namespace is dotted as any namespace.
         let target = self.parse_dotted_identifier()?;
         let (namespaced, uses) = if namespace.is_some() {
             let r#for = self.expect_keyword(T!["for"])?;
 
-            (Some(ExternNamespaced { r#for, class: self.parse_dotted_identifier()? }), None)
+            (Some(ExternNamespaced { r#for, name: self.parse_dotted_identifier()? }), None)
         } else {
             (None, self.parse_optional_uses()?)
         };

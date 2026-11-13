@@ -2644,6 +2644,10 @@ mod tests {
                 "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfinal class Document\n{\n}\n".to_string(),
             ),
             ("lib/version.php", "<?php\n\nconst APP_VERSION = 3;\n".to_string()),
+            (
+                "app/Shop/Externs.sharp",
+                "namespace App.Shop;\n\nimport Vendor.Pdf;\n\nextern namespace Pdf for APP_VERSION;\n".to_string(),
+            ),
             ("app/Shop/Report.sharp", "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Report\n{\n    public int dpi() => Pdf.DEFAULT_DPI;\n\n    public int version() => Pdf.APP_VERSION;\n}\n".to_string()),
         ]
     }

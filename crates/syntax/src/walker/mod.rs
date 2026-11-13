@@ -680,7 +680,7 @@ generate_ast_walker! {
 
         if let Some(namespaced) = &r#extern.namespaced {
             walker.walk_keyword(&namespaced.r#for, context);
-            walker.walk_identifier(&namespaced.class, context);
+            walker.walk_identifier(&namespaced.name, context);
         }
 
         if let Some(uses) = &r#extern.uses {

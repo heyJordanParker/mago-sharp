@@ -138,7 +138,6 @@ fn populate_codebase_inner(
     }
 
     populate_sealed_interfaces(codebase);
-    codebase.populate_folder_namespaces();
 
     let sorted_classes = sorter::sort_class_likes(codebase, &class_likes_to_repopulate);
     for class_name in sorted_classes {

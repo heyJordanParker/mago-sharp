@@ -1,0 +1,18 @@
+namespace App;
+
+import Acme.Foundation;
+
+// A library's function and constant in PHP's root namespace are reached through the namespace of the classes beside
+// them, which one `extern namespace` line the conversion adds gives their folder (spec section 23).
+public final class Orders
+{
+    public void missing()
+    {
+        Foundation.abort(404);
+    }
+
+    public string version()
+    {
+        return Foundation.ACME_VERSION;
+    }
+}

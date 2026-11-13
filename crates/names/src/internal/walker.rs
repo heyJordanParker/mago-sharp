@@ -709,12 +709,15 @@ where
     /// names a namespace.
     fn walk_in_extern(&mut self, r#extern: &'ast Extern<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         let target = &r#extern.target;
-        // Spec section 23: `extern namespace WordPress for WP_Post;` names a namespace as written, and a class of PHP's
-        // root namespace, which no import reaches.
+        // Spec section 23: `extern namespace WordPress for WP_Post;` names a namespace through the file's import of it,
+        // as `Foundation` after `import Illuminate.Foundation;`, or as written, and a class, function or constant of
+        // PHP's root namespace, which no import reaches. It binds as an `extern` target does.
         if let Some(namespaced) = &r#extern.namespaced {
-            self.resolved_names.insert_at(target.span(), arena_name(context, target), false);
-            self.resolved_names.insert_at(namespaced.class.span(), arena_name(context, &namespaced.class), false);
-            self.resolved_names.bind(namespaced.class.span(), Binding::Class);
+            let written = arena_name(context, target);
+            let (resolved, imported) = context.resolve(NameKind::Default, written);
+            self.resolved_names.insert_at(target.span(), if imported { resolved } else { written }, false);
+            self.resolved_names.insert_at(namespaced.name.span(), arena_name(context, &namespaced.name), false);
+            self.resolved_names.bind(namespaced.name.span(), Binding::Class);
 
             return;
         }

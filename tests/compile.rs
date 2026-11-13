@@ -5033,7 +5033,7 @@ fn each_refusal_of_code_a_law_cannot_read_says_what_to_write_instead() {
     );
     let stub = (
         "app/Stubs/Clock.sharp",
-        "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Clock;\n\nextern Clock;\nextern Lib.measure;\n",
+        "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Clock;\n\nextern namespace Lib for measure;\nextern Clock;\nextern Lib.measure;\n",
     );
     let shape = (
         "app/Shared/Shape.sharp",
