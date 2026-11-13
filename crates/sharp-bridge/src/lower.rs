@@ -4900,12 +4900,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.discarded_steps(lowered)
             }
             Statement::Return(r#return) => self.r#return(r#return),
-            // `emit e;` is `\Sharp\Internal\emit($e);`, which runs every listener of the event before it returns.
+            // `emit e;` is `\Sharp\Internal\emit($e, 'Sharp\Dispatcher');`, which hands the event to the app's binding
+            // of the interface the standard library marks the dispatcher, with every listener of the event, before it
+            // returns. A project without the standard library has no dispatcher, so it passes null.
             Statement::Emit(emit) => {
                 let line = self.line(emit);
                 let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\emit");
                 let event = self.expression(emit.value);
-                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[event]);
+                let dispatcher = match self.types.dispatcher() {
+                    Some(dispatcher) => self.string(0, line, dispatcher.as_bytes()),
+                    None => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
+                };
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[event, dispatcher]);
 
                 self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             }

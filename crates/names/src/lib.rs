@@ -71,6 +71,12 @@ pub const ACCEPTS_ANY_EFFECT: &str = "Sharp\\Internal\\AcceptsAnyEffect";
 /// as `Events.on`.
 pub const STARTS_LISTENER: &str = "Sharp\\Internal\\StartsListener";
 
+/// The mark of the interface every `emit` hands its event to, as `Dispatcher`.
+///
+/// The app's binding of the interface is its dispatcher, spec section 15. The checker, the compile command and the
+/// lowering of `emit` read the mark, so none copies the library's name.
+pub const DISPATCHES_EMITS: &str = "Sharp\\Internal\\DispatchesEmits";
+
 /// The mark of a generic method that parses a value into its type argument.
 ///
 /// The method runs the type's `parse`, as `Json.decode<T>` does, so each call's type argument gets the struct parse

@@ -31145,6 +31145,47 @@ fn only_the_apps_top_module_binds_the_dispatcher() {
     }
 }
 
+/// Spec section 15: the dispatcher is the interface the standard library marks `DispatchesEmits`, whatever its name.
+/// So two top modules that bind a marked `Relay` are each refused, and two that bind an unmarked interface named
+/// `Dispatcher` bind a service like any other.
+#[test]
+fn the_dispatcher_is_the_interface_the_standard_library_marks() {
+    let relay = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Relay.sharp",
+        "namespace Sharp;\n\nimport Sharp.Internal.DispatchesEmits;\n\n[DispatchesEmits]\npublic interface Relay\n{\n    void dispatch(Any emitted, List<Function<void(Any)>> listeners);\n}\n",
+    );
+    let dispatcher = ("app/Dispatcher.sharp", "namespace App;\n\npublic interface Dispatcher\n{\n}\n");
+    let recorder = (
+        "app/Recorder.sharp",
+        "namespace App;\n\nimport Sharp.Relay;\n\npublic class Recorder : Relay, Dispatcher\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners) { }\n}\n",
+    );
+    let module = |path: &'static str, namespace: &str, service: &str| {
+        let import = if service == "Relay" { "Sharp.Relay" } else { "App.Dispatcher" };
+
+        (
+            path,
+            leak(format!(
+                "namespace {namespace};\n\nimport App.Recorder;\nimport {import};\n\nmodule\n{{\n    singleton {service} = Recorder;\n}}\n"
+            )),
+        )
+    };
+    let others = |admin: (&'static str, &'static str)| vec![relay, dispatcher, recorder, admin];
+
+    assert_eq!(
+        refusals(module("app/Module.sharp", "App", "Relay"), &others(module("admin/Module.sharp", "Admin", "Relay"))),
+        [
+            "8:5 invalid-binding This module and `admin/Module.sharp` each bind `Relay`, and an app binds it once, in its top module. | Bind `Relay` in one module, in the namespace above both."
+        ]
+    );
+    assert_eq!(
+        refusals(
+            module("app/Module.sharp", "App", "Dispatcher"),
+            &others(module("admin/Module.sharp", "Admin", "Dispatcher"))
+        ),
+        Vec::<String>::new()
+    );
+}
+
 /// The standard library's `Dispatcher`, as `sharp/composer/` ships it.
 const DISPATCHER: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Dispatcher.sharp",

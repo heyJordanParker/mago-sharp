@@ -837,7 +837,7 @@ fn the_unit_abi_changes_with_the_kind_table_the_tokens_and_the_layouts() {
             generated_abi(
                 ZEND_AST_H,
                 ZEND_LANGUAGE_PARSER_H,
-                Some((GENERATOR, "const REVISION = 1;", "const REVISION = 2;")),
+                Some((GENERATOR, "const REVISION = 2;", "const REVISION = 3;")),
             ),
         ),
     ] {

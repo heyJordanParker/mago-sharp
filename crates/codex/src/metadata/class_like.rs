@@ -13,6 +13,7 @@ use mago_word::WordSet;
 use crate::flags::attribute::AttributeFlags;
 use crate::identifier::method::MethodIdentifier;
 use crate::issue::ScanningIssueKind;
+use crate::metadata::CodebaseMetadata;
 use crate::metadata::attribute::AttributeMetadata;
 use crate::metadata::class_like_constant::ClassLikeConstantMetadata;
 use crate::metadata::enum_case::EnumCaseMetadata;
@@ -510,6 +511,16 @@ impl ClassLikeMetadata {
     #[must_use]
     pub fn method_key(&self, name: &[u8]) -> Word {
         if self.exact_names { mago_word::word(name) } else { mago_word::ascii_lowercase_word(name) }
+    }
+
+    /// Whether an attribute of the class-like the full name `name` names marks the class-like, by `codebase`'s key,
+    /// spec section 24: a PHP# attribute only as written, and a plain PHP one in any case.
+    #[inline]
+    #[must_use]
+    pub fn has_attribute(&self, codebase: &CodebaseMetadata, name: &[u8]) -> bool {
+        let name = codebase.class_key(name);
+
+        self.attributes.iter().any(|attribute| codebase.class_key(attribute.name.as_bytes()) == name)
     }
 
     /// Adds or updates the declaring method identifier for a method name.

@@ -16,7 +16,6 @@ use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::FileReads;
 use mago_analyzer::external::Listing;
 use mago_analyzer::is_collection_member;
-use mago_codex::metadata::module::BindingMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::module::top_dispatcher_namespaces;
@@ -112,8 +111,8 @@ pub struct Listener {
     pub takes_event: bool,
 }
 
-/// The app's module whose binding of `Sharp.Dispatcher` serves the whole app, spec section 15, which `emit` reads
-/// wherever the event is emitted.
+/// The app's module whose binding of the dispatcher serves the whole app, spec section 15, which `emit` reads wherever
+/// the event is emitted.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DispatcherModule {
     /// The workspace-relative name of its file.
@@ -171,22 +170,23 @@ impl IncrementalAnalysisService {
         listeners.into_iter().map(|(_, _, listener)| listener).collect()
     }
 
-    /// The app's module whose binding of `Sharp.Dispatcher` serves the whole app, spec section 15: a module of the one
+    /// The app's module whose binding of the dispatcher serves the whole app, spec section 15: a module of the one
     /// namespace `top_dispatcher_namespaces` gives. `None` when no app module binds it, and the standard library's
     /// binding serves, and when two namespaces tie, which the analyzer refuses.
     #[must_use]
     pub fn dispatcher_module(&self) -> Option<DispatcherModule> {
-        let [namespace] = top_dispatcher_namespaces(&self.codebase.modules)[..] else {
+        let codebase = &self.codebase;
+        let [namespace] = top_dispatcher_namespaces(&codebase.modules, codebase)[..] else {
             return None;
         };
 
-        self.codebase
+        codebase
             .modules
             .iter()
             .find(|module| {
                 module.kind != ModuleKind::Test
                     && module.namespace == namespace
-                    && module.bindings.iter().any(BindingMetadata::binds_dispatcher)
+                    && module.bindings.iter().any(|binding| binding.binds_dispatcher(codebase))
             })
             .map(|module| DispatcherModule { file: module.file, namespace })
     }

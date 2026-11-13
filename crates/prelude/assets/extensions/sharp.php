@@ -341,6 +341,14 @@ final class AcceptsAnyEffect {}
 final class StartsListener {}
 
 /**
+ * Marks the standard library interface every `emit` hands its event to, as `Dispatcher` is, so the app's binding of it
+ * is its dispatcher. The checker, the compile command and the lowering of `emit` read the mark, so none copies the
+ * library's name.
+ */
+#[\Attribute(\Attribute::TARGET_CLASS)]
+final class DispatchesEmits {}
+
+/**
  * Marks a standard library generic method that parses a value into its type argument with the type's `parse`, as
  * `Json.decode<T>` does, so the checker gives each call's type argument the struct parse check.
  */

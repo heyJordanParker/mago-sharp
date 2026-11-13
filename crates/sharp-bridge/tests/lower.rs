@@ -333,6 +333,12 @@ const BEHAVIOR_LIBRARY: (&str, &str) = (
     include_str!("../../../../composer/library/Sharp/Behavior.sharp"),
 );
 
+/// The standard library's `Dispatcher`, which it marks `DispatchesEmits`, the service every `emit` hands its event to.
+const DISPATCHER_LIBRARY: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Dispatcher.sharp",
+    include_str!("../../../../composer/library/Sharp/Dispatcher.sharp"),
+);
+
 /// `Lib\Loud`, a project file with a method the inlining rule would take in the standard library: a call of a plain
 /// PHP function through its namespace, `capitalize`, which `LOUD_HELPERS` declares and `LOUD_EXTERNS` gives `Lib`.
 const LOUD: (&str, &str) = (
@@ -16371,18 +16377,20 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
 }
 
 /// ```php
-/// \Sharp\Internal\emit(new \App\OrderPaid(1));
-/// \Sharp\Internal\emit($paid);
+/// \Sharp\Internal\emit(new \App\OrderPaid(1), 'Sharp\Dispatcher');
+/// \Sharp\Internal\emit($paid, 'Sharp\Dispatcher');
 /// ```
 ///
-/// Spec section 15: `emit` raises the event its expression gives, through the one function the engine adds, which runs
-/// every listener of the event before it returns.
+/// Spec section 15: `emit` raises the event its expression gives, through the one function the engine adds, which hands
+/// it to the app's binding of the dispatcher, the interface the standard library marks `DispatchesEmits`, with every
+/// listener of the event before it returns. A project without the standard library has no dispatcher, so it passes
+/// null.
 #[test]
 fn emit_is_a_call_of_the_engine_emit() {
-    let lowered = Lowered::with(
-        "namespace App;\n\npublic class Order\n{\n    public void run(OrderPaid paid)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n    }\n}\n",
-        &[("src/OrderPaid.sharp", "namespace App;\n\npublic event OrderPaid(int orderId);\n")],
-    );
+    const ORDER: &str = "namespace App;\n\npublic class Order\n{\n    public void run(OrderPaid paid)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n    }\n}\n";
+    const ORDER_PAID: (&str, &str) =
+        ("src/OrderPaid.sharp", "namespace App;\n\npublic event OrderPaid(int orderId);\n");
+    let lowered = Lowered::with(ORDER, &[ORDER_PAID, DISPATCHER_LIBRARY]);
 
     assert_eq!(
         lowered.body(),
@@ -16395,11 +16403,33 @@ fn emit_is_a_call_of_the_engine_emit() {
                     ZVAL "App\\OrderPaid"
                     ARG_LIST
                       ZVAL 1
+                  ZVAL "Sharp\\Dispatcher"
               CALL
                 ZVAL "Sharp\\Internal\\emit"
                 ARG_LIST
                   VAR
                     ZVAL "paid"
+                  ZVAL "Sharp\\Dispatcher"
+        "#}
+    );
+    assert_eq!(
+        Lowered::with(ORDER, &[ORDER_PAID]).body(),
+        indoc! {r#"
+            STMT_LIST
+              CALL
+                ZVAL "Sharp\\Internal\\emit"
+                ARG_LIST
+                  NEW
+                    ZVAL "App\\OrderPaid"
+                    ARG_LIST
+                      ZVAL 1
+                  ZVAL null
+              CALL
+                ZVAL "Sharp\\Internal\\emit"
+                ARG_LIST
+                  VAR
+                    ZVAL "paid"
+                  ZVAL null
         "#}
     );
 }

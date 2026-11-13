@@ -105,18 +105,18 @@ pub fn service_id(r#type: &TUnion, codebase: &CodebaseMetadata) -> Word {
     word(&keyed)
 }
 
-/// The namespaces of the app's top modules that bind `Sharp.Dispatcher`, spec section 15.
+/// The namespaces of the app's top modules that bind the dispatcher, spec section 15.
 ///
 /// Of the base and environment modules outside `vendor/` that bind it, they are the namespaces with the fewest parts,
 /// in order. The standard library's module, the one module of the root namespace, is never the app's. "An app replaces
 /// the dispatcher once at startup", so one namespace is the app's dispatcher, and two are an error.
 #[must_use]
-pub fn top_dispatcher_namespaces(modules: &[ModuleMetadata]) -> Vec<Word> {
+pub fn top_dispatcher_namespaces(modules: &[ModuleMetadata], codebase: &CodebaseMetadata) -> Vec<Word> {
     let mut binding: Vec<Word> = modules
         .iter()
         .filter(|module| module.kind != ModuleKind::Test && !module.namespace.as_bytes().is_empty())
         .filter(|module| !module.file.as_bytes().starts_with(b"vendor/"))
-        .filter(|module| module.bindings.iter().any(|binding| binding.binds_dispatcher()))
+        .filter(|module| module.bindings.iter().any(|binding| binding.binds_dispatcher(codebase)))
         .map(|module| module.namespace)
         .collect();
     let parts = |namespace: &Word| namespace.as_bytes().split(|byte| *byte == b'\\').count();
@@ -129,10 +129,13 @@ pub fn top_dispatcher_namespaces(modules: &[ModuleMetadata]) -> Vec<Word> {
 }
 
 impl BindingMetadata {
-    /// Whether it binds `Sharp.Dispatcher`, the service every `emit` hands its event to.
+    /// Whether it binds the dispatcher, the service every `emit` hands its event to: the interface the standard library
+    /// marks [`DispatchesEmits`](mago_names::DISPATCHES_EMITS), as `Sharp.Dispatcher`.
     #[must_use]
-    pub fn binds_dispatcher(&self) -> bool {
-        self.service.type_union.clone().without_readonly().get_id().as_bytes() == b"Sharp\\Dispatcher"
+    pub fn binds_dispatcher(&self, codebase: &CodebaseMetadata) -> bool {
+        codebase
+            .get_class_like(self.service.type_union.clone().without_readonly().get_id().as_bytes())
+            .is_some_and(|service| service.has_attribute(codebase, mago_names::DISPATCHES_EMITS.as_bytes()))
     }
 }
 

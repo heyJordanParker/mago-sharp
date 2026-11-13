@@ -13,8 +13,9 @@ declare(strict_types=1);
  */
 
 // Raised when compiled code means something else to the engine while the kinds, the tokens and the layouts stay, as
-// when a class the lowering names moves, so the engine refuses a file an older checker compiled.
-const REVISION = 1;
+// when a class the lowering names moves, so the engine refuses a file an older checker compiled. 2: `emit` names the
+// dispatcher.
+const REVISION = 2;
 
 $path = $argv[1] ?? throw new InvalidArgumentException('Pass the path to php-src\'s `Zend/zend_ast.h`.');
 $header = file_get_contents($path);

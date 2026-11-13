@@ -168,7 +168,7 @@ impl Server {
         self.service.listeners()
     }
 
-    /// The app's module whose binding of `Sharp.Dispatcher` serves the whole app.
+    /// The app's module whose binding of the dispatcher serves the whole app.
     #[must_use]
     pub fn dispatcher_module(&self) -> Option<DispatcherModule> {
         self.service.dispatcher_module()

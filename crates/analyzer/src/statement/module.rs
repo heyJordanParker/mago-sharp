@@ -100,7 +100,7 @@ where
         } else {
             bound.push((key, binding_metadata.span));
         }
-        if binding_metadata.binds_dispatcher() {
+        if binding_metadata.binds_dispatcher(context.codebase) {
             check_app_dispatcher(context, metadata, binding_metadata);
         }
 
@@ -676,8 +676,8 @@ fn report_duplicate_binding<A>(
     );
 }
 
-/// Refuses the app's binding of `Sharp.Dispatcher` in `module` unless its module is the app's one top module that binds
-/// it, spec section 15: "An app replaces the dispatcher once at startup". A module below the top one is refused, and
+/// Refuses the app's binding of the dispatcher in `module` unless its module is the app's one top module that binds it,
+/// spec section 15: "An app replaces the dispatcher once at startup". A module below the top one is refused, and
 /// two top modules of the same depth are each refused. A test module replaces it freely, and a package's or the
 /// standard library's binding is never the app's.
 fn check_app_dispatcher<A>(context: &mut Context<'_, '_, A>, module: &ModuleMetadata, binding: &BindingMetadata)
@@ -691,31 +691,33 @@ where
         return;
     }
 
-    let top = top_dispatcher_namespaces(&context.codebase.modules);
+    let codebase = context.codebase;
+    let top = top_dispatcher_namespaces(&codebase.modules, codebase);
     if top.as_slice() == [module.namespace] {
         return;
     }
 
-    let others: Vec<(Word, Span)> = context
-        .codebase
+    let others: Vec<(Word, Span)> = codebase
         .modules
         .iter()
         .filter(|other| other.kind != ModuleKind::Test && other.namespace != module.namespace)
         .filter(|other| top.contains(&other.namespace) && !other.file.as_bytes().starts_with(b"vendor/"))
         .filter_map(|other| {
-            other.bindings.iter().find(|bound| bound.binds_dispatcher()).map(|bound| (other.file, bound.span))
+            other.bindings.iter().find(|bound| bound.binds_dispatcher(codebase)).map(|bound| (other.file, bound.span))
         })
         .collect();
     let files = others.iter().map(|(file, _)| format!("`{file}`")).collect::<Vec<_>>().join(" and ");
+    let dispatcher = display_sharp_type(context, &binding.service.type_union.clone().without_readonly());
     let (message, help) = if top.contains(&module.namespace) {
         (
-            format!("This module and {files} each bind `Dispatcher`, and an app binds it once, in its top module."),
-            "Bind `Dispatcher` in one module, in the namespace above both.",
+            format!("This module and {files} each bind `{dispatcher}`, and an app binds it once, in its top module."),
+            format!("Bind `{dispatcher}` in one module, in the namespace above both."),
         )
     } else {
         (
-            format!("Only {files} binds `Dispatcher`: an app binds it once, in its top module."),
-            "Remove this binding. The app's dispatcher serves every `emit`, and a test module replaces it in tests.",
+            format!("Only {files} binds `{dispatcher}`: an app binds it once, in its top module."),
+            "Remove this binding. The app's dispatcher serves every `emit`, and a test module replaces it in tests."
+                .to_owned(),
         )
     };
     let mut issue =
