@@ -22,6 +22,7 @@ use mago_codex::ttype::get_crossing_array;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_mixed_keyed_array;
 use mago_codex::ttype::get_php_declared_type;
+use mago_codex::ttype::get_sharp_received_type;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::template::variance::Variance;
@@ -34,6 +35,7 @@ use mago_word::word;
 
 use crate::context::Context;
 use crate::utils::names::display_sharp_type;
+use crate::utils::template::written_type;
 use mago_allocator::Arena;
 use mago_names::short_name;
 
@@ -489,6 +491,8 @@ pub fn validate_method_signature_compatibility(
         if expanded_child_return_type.is_expandable() {
             expand_union(codebase, &mut expanded_child_return_type, &expansion_options);
         }
+        expanded_parent_return_type =
+            as_sharp_declares(codebase, child_method, parent_method, expanded_parent_return_type);
 
         if !expanded_parent_return_type.has_template_types() && !expanded_child_return_type.has_template_types() {
             let mut comparison_result = ComparisonResult::for_dialect(dialect);
@@ -593,6 +597,23 @@ fn generic_method_name(method: &FunctionLikeMetadata) -> String {
 /// Whether `child_method` and `parent_method` are both PHP# operators, spec section 19. An operator runs by the types
 /// of its operands, so a class's own replaces no other and links against none: a parent class's is refused by
 /// `check_inherited_operators`, and an interface's runs on operands of the interface, from the interface's trait.
+/// `parent_type`, a type the plain PHP `parent_method` declares, as the PHP# `child_method` that overrides it declares
+/// it: read as a call of the parent reads it, a `super.` call included, spec section 22, and written as a PHP#
+/// declaration writes that, so `array{string|null, string}` is the `List<string?>` the call gives. Any other pair keeps
+/// the type as declared.
+fn as_sharp_declares(
+    codebase: &CodebaseMetadata,
+    child_method: &FunctionLikeMetadata,
+    parent_method: &FunctionLikeMetadata,
+    parent_type: TUnion,
+) -> TUnion {
+    if child_method.flags.is_sharp() && !parent_method.flags.is_sharp() {
+        written_type(&get_sharp_received_type(&parent_type), codebase)
+    } else {
+        parent_type
+    }
+}
+
 fn are_operators(child_method: &FunctionLikeMetadata, parent_method: &FunctionLikeMetadata) -> bool {
     child_method.flags.is_operator() && parent_method.flags.is_operator()
 }
@@ -631,9 +652,7 @@ fn as_lowered(codebase: &CodebaseMetadata, class: Word, method: &FunctionLikeMet
     let mut lowered = method.clone();
     for parameter in lowered.get_parameters_mut() {
         parameter.type_declaration_metadata = parameter.type_declaration_metadata.take().map(|mut declared| {
-            let takes_array = get_crossing_array(&declared.type_union, codebase)
-                .is_some_and(|array| !matches!(array, TArray::List(_)));
-            declared.type_union = with_array(get_php_declared_type(&declared.type_union, codebase), takes_array);
+            declared.type_union = lowered_parameter_type(codebase, &declared.type_union);
 
             declared
         });
@@ -661,6 +680,18 @@ fn as_lowered(codebase: &CodebaseMetadata, class: Word, method: &FunctionLikeMet
     lowered.return_type_metadata = lowered.return_type_declaration_metadata.clone();
 
     lowered
+}
+
+/// The type the bridge declares in PHP for a PHP# parameter of the type `declared`: the type the codex's
+/// `get_php_declared_type` erases it to, with `array` beside the `Sharp\Map` or `Sharp\Set` it takes, as plain PHP passes
+/// a PHP array there.
+fn lowered_parameter_type(codebase: &CodebaseMetadata, declared: &TUnion) -> TUnion {
+    let erased = get_php_declared_type(declared, codebase);
+    if get_crossing_array(declared, codebase).is_none_or(|array| matches!(array, TArray::List(_))) {
+        return erased;
+    }
+
+    TUnion::from_vec(erased.types.iter().cloned().chain(get_mixed_keyed_array().types.into_owned()).collect())
 }
 
 /// Adds to `issues` the parameter of a PHP# method that no longer links against the method it overrides or implements
@@ -696,27 +727,32 @@ pub fn validate_erased_signature_compatibility(
     }
 
     // A plain PHP parameter's `parent` is the parent of the class that declares it. No parameter is `static`, since
-    // PHP refuses one and the checker refuses a PHP# `Self` parameter.
-    let erased = |parameter: &FunctionLikeParameterMetadata, class: &ClassLikeMetadata| {
-        let mut erased = parameter
-            .type_declaration_metadata
-            .as_ref()
-            .map_or_else(get_mixed, |declared| get_php_declared_type(&declared.type_union, codebase));
-        if erased.is_expandable() {
-            expand_union(
-                codebase,
-                &mut erased,
-                &TypeExpansionOptions { self_class: Some(class.name), ..Default::default() },
-            );
-        }
+    // PHP refuses one and the checker refuses a PHP# `Self` parameter. A plain PHP method's declaration is PHP already,
+    // so its `array` stays `array`, where a PHP# `Map` erases to `Sharp\Map`.
+    let erased =
+        |parameter: &FunctionLikeParameterMetadata, class: &ClassLikeMetadata, method: &FunctionLikeMetadata| {
+            let mut erased = parameter.type_declaration_metadata.as_ref().map_or_else(get_mixed, |declared| {
+                if method.flags.is_sharp() {
+                    lowered_parameter_type(codebase, &declared.type_union)
+                } else {
+                    declared.type_union.clone()
+                }
+            });
+            if erased.is_expandable() {
+                expand_union(
+                    codebase,
+                    &mut erased,
+                    &TypeExpansionOptions { self_class: Some(class.name), ..Default::default() },
+                );
+            }
 
-        erased
-    };
+            erased
+        };
 
     issues.extend(parent_method.parameters.iter().zip(&child_method.parameters).enumerate().filter_map(
         |(parameter_index, (parent_parameter, child_parameter))| {
-            let parent_type = erased(parent_parameter, parent_class);
-            let child_type = erased(child_parameter, child_class);
+            let parent_type = erased(parent_parameter, parent_class, parent_method);
+            let child_type = erased(child_parameter, child_class, child_method);
             if union_comparator::is_contained_by(
                 codebase,
                 &parent_type,

@@ -28618,6 +28618,26 @@ const REFLECTION: [(&str, &str); 6] = [
     BUILTINS,
 ];
 
+/// Spec sections 12 and 22: a plain PHP shape whose keys are 0 to n-1, `array{string|null, string}`, is a list, so it
+/// reads as one `List<string?>` at a `super.` call and in the override's signature check, and a PHP# override that
+/// returns `List<string?>` and calls `super.` the method compiles with no issues. So does one whose parameter takes
+/// `List<string|int>` where the plain PHP method's `array` takes `array{string, int}`: PHP links that `array` against
+/// the PHP# `List`'s `array`, and no `Sharp\Map`. A `Map` parameter over a plain PHP `array` compiles as well, since
+/// the bridge declares it `Sharp\Map|array`.
+#[test]
+fn a_plain_php_list_shape_reads_as_one_list_at_a_super_call_and_in_the_override_check() {
+    let splitter = (
+        "src/Lib/Splitter.php",
+        "<?php\n\nnamespace Lib;\n\nclass Splitter\n{\n    /**\n     * @return array{string|null, string}\n     */\n    public function split(string $text): array\n    {\n        return [null, $text];\n    }\n\n    /**\n     * @param array{string, int} $pair\n     */\n    public function join(array $pair): string\n    {\n        return $pair[0];\n    }\n\n    /**\n     * @param array<int|string, mixed> $extra\n     */\n    public function merged(array $extra): int\n    {\n        return count($extra);\n    }\n}\n",
+    );
+    let halves = (
+        "src/App/Halves.sharp",
+        "namespace App;\n\nimport Lib.Splitter;\n\npublic class Halves : Splitter\n{\n    public override List<string?> split(string text) => super.split(text);\n\n    public override string join(List<string|int> pair) => \"\";\n\n    public override int merged(Map<int|string, Any?> extra) => extra.count();\n}\n",
+    );
+
+    assert_eq!(worded(halves, &[splitter]), Vec::<String>::new());
+}
+
 /// Spec section 25: a reflection boolean is named `isNullable` and `isOptional`, as the standard library names every
 /// boolean, so 0.6.10's `nullable` and `optional` name no member.
 #[test]

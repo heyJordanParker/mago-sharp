@@ -743,8 +743,9 @@ pub(crate) fn written_type_argument(union: &TUnion, codebase: &CodebaseMetadata)
 
 /// `union` with each enum case in it as its enum, each tuple as the tuple of its elements' written types, spec section
 /// 30, each other array as the `List`, `Map` or `Set` of its key and value types, the arrays inside one too, and each
-/// `array-key`, as a plain PHP template's default gives it, as `int|string`, spec section 12.
-fn written_type(union: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+/// `array-key`, as a plain PHP template's default gives it, as `int|string`, spec section 12: the type a PHP#
+/// declaration writes for it.
+pub(crate) fn written_type(union: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
     TUnion::from_vec(
         union
             .types
