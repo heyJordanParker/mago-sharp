@@ -69,7 +69,7 @@ pub struct SelfUpdateCommand {
     /// Fails if `mago.toml` has no `version` pin; add one (e.g. `version = "0.6"`) or
     /// use `--tag` explicitly.
     ///
-    /// For exact pins (`version = "0.6.9"`) this resolves to that exact release tag.
+    /// For exact pins (`version = "0.6.10"`) this resolves to that exact release tag.
     /// For non-exact pins (`version = "0"` or `version = "0.6"`) this installs the
     /// latest published release that satisfies the pin, or fails with a clear error
     /// if the latest release is on a different major/minor line.
@@ -428,14 +428,14 @@ mod tests {
         assert_eq!(newest("0.1").version, "0.1.0");
     }
 
-    const ARCHIVE_NAME: &str = "mago-0.6.9-x86_64-unknown-linux-gnu.tar.gz";
-    const SUMS_NAME: &str = "mago-0.6.9-sha256sums.txt";
+    const ARCHIVE_NAME: &str = "mago-0.6.10-x86_64-unknown-linux-gnu.tar.gz";
+    const SUMS_NAME: &str = "mago-0.6.10-sha256sums.txt";
     // The SHA-256 of `b"the archive the release built"`.
     const ARCHIVE_SHA256: &str = "316cf7459b683a544be9e8e39cb89a1746847d567e56378035c7b39428bc5bb1";
 
     fn sums() -> String {
         format!(
-            "{ARCHIVE_SHA256}  {ARCHIVE_NAME}\n0000000000000000000000000000000000000000000000000000000000000000  mago-0.6.9-wasm.tar.gz\n"
+            "{ARCHIVE_SHA256}  {ARCHIVE_NAME}\n0000000000000000000000000000000000000000000000000000000000000000  mago-0.6.10-wasm.tar.gz\n"
         )
     }
 
@@ -461,11 +461,11 @@ mod tests {
     #[test]
     fn an_archive_the_sums_file_does_not_name_is_refused() {
         let refused =
-            verify_checksum(b"the archive the release built", "mago-0.6.9-riscv64.tar.gz", &sums(), SUMS_NAME);
+            verify_checksum(b"the archive the release built", "mago-0.6.10-riscv64.tar.gz", &sums(), SUMS_NAME);
 
         assert_eq!(
             refused.map_err(|error| error.to_string()),
-            Err(format!("`{SUMS_NAME}` holds no SHA-256 for `mago-0.6.9-riscv64.tar.gz`, so it cannot be verified."))
+            Err(format!("`{SUMS_NAME}` holds no SHA-256 for `mago-0.6.10-riscv64.tar.gz`, so it cannot be verified."))
         );
     }
 }
