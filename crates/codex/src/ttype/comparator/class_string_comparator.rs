@@ -16,7 +16,9 @@ use crate::ttype::comparator::union_comparator;
 use crate::ttype::union::TUnion;
 
 /// Whether `container_class_string` holds the class string `input_scalar`: the type the input names is contained by the
-/// type the container names, so PHP#'s `Class<int>` fits `Class<int|string>`, spec section 25. Under PHP#'s rules, a
+/// type the container names, so PHP#'s `Class<int>` fits `Class<int|string>` and `Class<Object>` fits `Class<Any?>`,
+/// spec section 25. A plain PHP `class-string` fits only another `class-string`, as upstream reads it. Under PHP#'s
+/// rules, a
 /// `Class<TItem>` names the opaque type parameter `TItem`, so it holds only `Class<TItem>`, and passes as a class type
 /// its bound reaches.
 #[inline]
@@ -61,6 +63,11 @@ pub fn is_contained_by(
             Cow::Owned(TUnion::from_atomic(class_name_object(codebase, *string_value)))
         }
         TScalar::ClassLikeString(input_class_string) => match input_class_string {
+            // Under PHP#'s rules the class of any object, `Class<Object>`, fits every class value whose type holds
+            // `object`, a `Class<Any?>` included.
+            TClassLikeString::Any { .. } if atomic_comparison_result.sharp_rules => {
+                Cow::Owned(TUnion::from_atomic(TAtomic::Object(TObject::Any)))
+            }
             TClassLikeString::Any { .. } => {
                 return fake_container_type.is_single()
                     && matches!(fake_container_type.get_single(), TAtomic::Object(TObject::Any));

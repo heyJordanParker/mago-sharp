@@ -28868,6 +28868,27 @@ fn reflection_gives_each_member_fact_its_type() {
     );
 }
 
+/// Spec section 25: `Class.of(value)` of a value of type `T` is a `Class<T>`, so of an `Object` it is a `Class<Object>`,
+/// and every member of a class value, `name()` and `methods()` included, is a member of it, as of a `Class<Event>` and
+/// the `Class<TObject>` of a type parameter bounded by `Object`. The checker needs no extension host for it. A value that
+/// may hold no object, an `Any`, an `Object?` or a type parameter with no bound, is refused by `Class.of`'s bound alone.
+#[test]
+fn class_of_any_object_has_every_member_of_a_class_value() {
+    let event = ("src/Demo/Event.sharp", "namespace Demo;\n\npublic interface Event\n{\n}\n");
+    let sharp = "namespace Demo;\n\npublic class Names<TValue, TObject : Object>\n{\n    public string nameOf(Object other) => Class.of(other).name();\n\n    public List<Method> methods(Object other) => Class.of(other).methods();\n\n    public string eventName(Event happened) => Class.of(happened).name();\n\n    public string bounded(TObject value) => Class.of(value).name();\n\n    public string anyName(Any value) => Class.of(value).name();\n\n    public string maybe(Object? other) => Class.of(other).name();\n\n    public string typed(TValue value) => Class.of(value).name();\n}\n";
+    let mut files = REFLECTION.to_vec();
+    files.push(event);
+
+    assert_eq!(
+        explained(("src/Demo/Names.sharp", sharp), &files),
+        [
+            "13:50 template-constraint-violation `Any` does not satisfy the bound `Object` of type parameter `T`. Ensure the argument's type satisfies the bound.",
+            "15:52 template-constraint-violation `Object?` does not satisfy the bound `Object` of type parameter `T`. Ensure the argument's type satisfies the bound.",
+            "17:51 invalid-argument Invalid argument type for argument #1 of `Class.of`: expected `T`, but found `TValue`. Change the argument value to match `T`, or update the parameter's type declaration.",
+        ]
+    );
+}
+
 /// Spec sections 25 and 29: `Method.invoke`, `Property.get` and `Property.set` run code the caller can't see, a method's
 /// body, a `get` or a `set`, so each may have every effect. A method that implements a pure interface method can't call
 /// one, and a method with no `uses` to keep may.
