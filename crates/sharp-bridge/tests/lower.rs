@@ -16927,7 +16927,9 @@ fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks
 ///
 /// PHP has no namespace reach, so spec section 5's `internal` runs as public, and the analyzer checks who reaches it.
 /// An `internal` class takes no flag, `internal set` takes no set visibility, and `internal init` takes the
-/// `protected(set)` of every `init`, which only constructors run.
+/// `protected(set)` of every `init`, which only constructors run. An `internal` property and method carry
+/// `#[\Sharp\Internal\Internal]`, so `Class<T>.properties()` and `methods()` give them `Visibility.Internal`, spec
+/// section 25. A constant and an accessor written `internal` carry none, since reflection reads neither.
 #[test]
 fn internal_runs_as_public() {
     let lowered = Lowered::with(
@@ -16968,7 +16970,11 @@ fn internal_runs_as_public() {
                       ZVAL 0
                       null
                       null
-                  null
+                  ATTRIBUTE_LIST
+                    ATTRIBUTE_GROUP
+                      ATTRIBUTE
+                        ZVAL "Sharp\\Internal\\Internal"
+                        ARG_LIST
                 PROP_GROUP [2049]
                   ZVAL [1] "int"
                   PROP_DECL
@@ -16987,7 +16993,11 @@ fn internal_runs_as_public() {
                   SHARP_TYPE_ARGS
                     ZVAL [1] "int"
                     ZVAL "Function<int()>"
-                  null
+                  ATTRIBUTE_LIST
+                    ATTRIBUTE_GROUP
+                      ATTRIBUTE
+                        ZVAL "Sharp\\Internal\\Internal"
+                        ARG_LIST
               null
               null
         "#}

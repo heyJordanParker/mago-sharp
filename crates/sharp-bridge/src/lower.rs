@@ -909,7 +909,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.extend(self.class_metadata(self.class, self.line(class.name)));
         members.splice(0..0, self.trait_members(class.inheritance.as_ref(), class.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
-        let attributes = self.attributes(&class.attribute_lists, None, None);
+        let attributes = self.attributes(&class.attribute_lists, None, &[]);
 
         self.declaration(
             SHARP_AST_CLASS,
@@ -1013,7 +1013,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.extend(self.class_metadata(self.class, self.line(r#struct.name.span)));
         members.splice(0..0, self.trait_members(r#struct.inheritance.as_ref(), r#struct.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
-        let attributes = self.attributes(&r#struct.attribute_lists, None, None);
+        let attributes = self.attributes(&r#struct.attribute_lists, None, &[]);
         let mut interfaces = Vec::new();
         // A header trait is the `use` above, spec section 22.
         for name in r#struct.inheritance.iter().flat_map(Inheritance::names) {
@@ -2182,7 +2182,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.extend(self.class_metadata(self.class, self.line(interface.name)));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(interface.left_brace), &members);
         let header = interface.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
-        let attributes = self.attributes(&interface.attribute_lists, None, None);
+        let attributes = self.attributes(&interface.attribute_lists, None, &[]);
 
         self.declaration(
             SHARP_AST_CLASS,
@@ -2321,7 +2321,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let hooks = self.abstract_hooks(property, true);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
-        let attributes = self.attributes(&property.attribute_lists, None, None);
+        let attributes = self.attributes(&property.attribute_lists, None, &[]);
 
         self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, attributes])
     }
@@ -2358,7 +2358,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.extend(self.class_metadata(self.class, self.line(event.name)));
         let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
         let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
-        let attributes = self.attributes(&event.attribute_lists, None, None);
+        let attributes = self.attributes(&event.attribute_lists, None, &[]);
 
         self.declaration(
             SHARP_AST_CLASS,
@@ -2477,7 +2477,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.splice(0..0, self.trait_members(r#enum.inheritance.as_ref(), r#enum.left_brace));
 
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
-        let attributes = self.attributes(&r#enum.attribute_lists, None, None);
+        let attributes = self.attributes(&r#enum.attribute_lists, None, &[]);
         let header = r#enum.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
         statements.push(self.declaration(
             SHARP_AST_CLASS,
@@ -2515,7 +2515,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let marker = self.string(ZEND_NAME_FQ, line, b"Sharp\\Struct");
             let header = self.node(SHARP_AST_NAME_LIST, 0, line, &[marker]);
             let parent = self.string(ZEND_NAME_FQ, line, enum_name);
-            let attributes = self.attributes(&case.attribute_lists, None, None);
+            let attributes = self.attributes(&case.attribute_lists, None, &[]);
             let class_name = [r#enum.name.value, b"\\", name.value].concat();
 
             statements.push(self.declaration(
@@ -2641,7 +2641,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.extend(self.class_metadata(self.class, self.line(r#enum.name)));
         members.splice(0..0, self.trait_members(r#enum.inheritance.as_ref(), r#enum.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
-        let attributes = self.attributes(&r#enum.attribute_lists, None, None);
+        let attributes = self.attributes(&r#enum.attribute_lists, None, &[]);
         let header = r#enum.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
         let backing_type = r#enum.backing_type_hint.as_ref().map_or(NULL, |backing_type| self.hint(&backing_type.hint));
 
@@ -2666,7 +2666,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             EnumCaseItem::Backed(item) => self.constant_value(item.value),
             EnumCaseItem::Data(_) => unreachable!("`data_enum` lowers an enum with a case that carries data"),
         };
-        let attributes = self.attributes(&case.attribute_lists, None, None);
+        let attributes = self.attributes(&case.attribute_lists, None, &[]);
 
         self.node(SHARP_AST_ENUM_CASE, 0, line, &[name, value, NULL, attributes])
     }
@@ -2780,7 +2780,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     || self.types.class_declaration(self.class).kind != DeclarationKind::Interface)
                     && self.types.replaces_inherited_method(self.class, php_method_name(method))
             });
-        let attributes = self.attributes(&method.attribute_lists, r#override, None);
+        let internal = self.internal_attribute(&method.modifiers);
+        let attributes = self.attributes(&method.attribute_lists, r#override, internal.as_slice());
 
         self.declaration(
             SHARP_AST_METHOD,
@@ -2882,7 +2883,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         let body = self.method_body(&operator.body, true, prologue);
         let return_type = self.hint(&operator.return_type_hint.hint);
-        let attributes = self.attributes(&operator.attribute_lists, None, None);
+        let attributes = self.attributes(&operator.attribute_lists, None, &[]);
 
         self.declaration(
             SHARP_AST_METHOD,
@@ -2925,7 +2926,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let result = self.types.method_result(self.class, method.name.value);
                 let attr = if crossing { ZEND_SHARP_RESULT_CROSSES } else { 0 };
                 let return_type = self.carried_type(return_type, result, attr, self.line(start));
-                let attributes = self.attributes(&method.attribute_lists, None, None);
+                let internal = self.internal_attribute(&method.modifiers);
+                let attributes = self.attributes(&method.attribute_lists, None, internal.as_slice());
 
                 self.declaration(
                     SHARP_AST_METHOD,
@@ -2947,7 +2949,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 statements.push(self.node(SHARP_AST_RETURN, 0, line, &[value]));
                 let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
                 let return_type = self.hint(hint);
-                let attributes = self.attributes(&property.attribute_lists, None, None);
+                let internal = self.internal_attribute(&property.modifiers);
+                let attributes = self.attributes(&property.attribute_lists, None, internal.as_slice());
 
                 self.declaration(
                     SHARP_AST_METHOD,
@@ -3069,7 +3072,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements.push(self.node(SHARP_AST_RETURN, 0, end, &[object]));
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let return_type = self.string(ZEND_NAME_FQ, self.line(constructor.class), self.class);
-        let attributes = self.attributes(&constructor.attribute_lists, None, None);
+        let internal = self.internal_attribute(&constructor.modifiers);
+        let attributes = self.attributes(&constructor.attribute_lists, None, internal.as_slice());
 
         self.declaration(
             SHARP_AST_METHOD,
@@ -3456,10 +3460,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(parameter.variable.span);
         let name = self.local_name(0, line, parameter.variable.name);
         let default = parameter.default_value.as_ref().map_or(NULL, |default| self.default_value(default.value));
-        let (member_flags, hint) = if parameter.is_promoted_property() && !self.promoted_beside {
-            (self.member_flags(parameter), self.property_hint(hint, parameter.variable.name, line))
+        // PHP gives the property a parameter promotes the parameter's attributes, its `internal` mark among them.
+        let (member_flags, hint, internal) = if parameter.is_promoted_property() && !self.promoted_beside {
+            (
+                self.member_flags(parameter),
+                self.property_hint(hint, parameter.variable.name, line),
+                self.internal_attribute(&parameter.modifiers),
+            )
         } else {
-            (0, hint)
+            (0, hint, None)
         };
         let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
         // Spec section 26: a `ref` receiver is the place the call changes, which PHP passes by reference.
@@ -3468,7 +3477,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         // The property a promoted parameter declares beside it takes its `property:` and `field:` attributes.
         let lists: Vec<&AttributeList> =
             parameter.attribute_lists.iter().filter(|list| list.target.is_none() || targets_value(list)).collect();
-        let attributes = self.attributes_of(&lists, None, service);
+        let added: Vec<u32> = service.into_iter().chain(internal).collect();
+        let attributes = self.attributes_of(&lists, None, &added);
 
         self.node(
             SHARP_AST_PARAM,
@@ -3636,8 +3646,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
         let crossing = self.crossing_attribute(parameter.hint.as_ref());
+        let internal = self.internal_attribute(&parameter.modifiers);
+        let added: Vec<u32> = crossing.into_iter().chain(internal).collect();
         let lists: Vec<&AttributeList> = parameter.attribute_lists.iter().filter(|list| !targets_value(list)).collect();
-        let attributes = self.attributes_of(&lists, None, crossing);
+        let attributes = self.attributes_of(&lists, None, &added);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(parameter), &[hint, declaration, attributes])
     }
@@ -3730,7 +3742,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let access = if flags & access_flags == 0 { ZEND_ACC_PRIVATE } else { 0 };
         let flags = flags | access;
         let crossing = if stored.is_some() { None } else { self.crossing_attribute(property.hint()) };
-        let attributes = self.attributes(attribute_lists, r#override, crossing);
+        let internal = self.internal_attribute(property.modifiers());
+        let added: Vec<u32> = crossing.into_iter().chain(internal).collect();
+        let attributes = self.attributes(attribute_lists, r#override, &added);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])
     }
@@ -3858,7 +3872,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let lists: Vec<&AttributeList> =
             accessor.attribute_lists.iter().filter(|list| targets_value(list) == of_value).collect();
 
-        self.attributes_of(&lists, None, None)
+        self.attributes_of(&lists, None, &[])
     }
 
     /// The parameter list of the `set` hook of `setter`, the setter of the property `variable` written `hint`, or
@@ -4181,23 +4195,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A declaration's attributes are one `ATTRIBUTE_LIST` with an `ATTRIBUTE_GROUP` per `[...]`, as php-src's grammar
     /// builds `#[...]`, or null without attributes. Each attribute names its class by its full name. A method's or a
-    /// field's `override` adds a group of `#[\Override]`, and the group the lowering adds, `added`, comes last: a
-    /// property's [`Self::crossing_attribute`] or a parameter's [`Self::service_attribute`].
-    fn attributes(
-        &mut self,
-        lists: &Sequence<AttributeList>,
-        r#override: Option<&Modifier>,
-        added: Option<u32>,
-    ) -> u32 {
+    /// field's `override` adds a group of `#[\Override]`, and the groups the lowering adds, `added`, come last: a
+    /// property's [`Self::crossing_attribute`], a parameter's [`Self::service_attribute`] and a member's
+    /// [`Self::internal_attribute`].
+    fn attributes(&mut self, lists: &Sequence<AttributeList>, r#override: Option<&Modifier>, added: &[u32]) -> u32 {
         self.attributes_of(&lists.iter().collect::<Vec<_>>(), r#override, added)
     }
 
     /// The attributes of `lists`, some of a declaration's, as [`Self::attributes`] lowers them all.
-    fn attributes_of(&mut self, lists: &[&AttributeList], r#override: Option<&Modifier>, added: Option<u32>) -> u32 {
-        let line = match (lists.first(), r#override, added) {
+    fn attributes_of(&mut self, lists: &[&AttributeList], r#override: Option<&Modifier>, added: &[u32]) -> u32 {
+        let line = match (lists.first(), r#override, added.first()) {
             (Some(first), _, _) => self.line(first),
             (None, Some(r#override), _) => self.line(r#override),
-            (None, None, Some(added)) => self.nodes[added as usize].line,
+            (None, None, Some(&added)) => self.nodes[added as usize].line,
             (None, None, None) => return NULL,
         };
 
@@ -4220,7 +4230,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 groups.push(self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, self.line(list), &attributes));
             }
         }
-        if groups.is_empty() && r#override.is_none() && added.is_none() {
+        if groups.is_empty() && r#override.is_none() && added.is_empty() {
             return NULL;
         }
 
@@ -4230,9 +4240,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let attribute = self.node(SHARP_AST_ATTRIBUTE, 0, line, &[name, NULL]);
             groups.push(self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, line, &[attribute]));
         }
-        groups.extend(added);
+        groups.extend_from_slice(added);
 
         self.node(SHARP_AST_ATTRIBUTE_LIST, 0, line, &groups)
+    }
+
+    /// The `#[\Sharp\Internal\Internal]` group of a member written `internal`, spec section 5. PHP has no namespace
+    /// reach, so the member runs as public, and the engine reads the mark to give its `Visibility.Internal`, spec
+    /// section 25. None for any other member.
+    fn internal_attribute(&mut self, modifiers: &Sequence<Modifier>) -> Option<u32> {
+        let internal = modifiers.iter().find(|modifier| matches!(modifier, Modifier::Internal(_)))?;
+        let line = self.line(internal);
+
+        Some(self.attribute_group(line, b"Sharp\\Internal\\Internal", &[]))
     }
 
     /// The `#[\Sharp\Crossing(plan)]` group of a property written `hint` whose type holds a `Map` or a `Set`, at any
@@ -4284,7 +4304,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let value = self.constant_value(item.value);
         let element = self.node(SHARP_AST_CONST_ELEM, 0, line, &[name, value, NULL]);
         let declaration = self.node(SHARP_AST_CLASS_CONST_DECL, 0, line, &[element]);
-        let attributes = self.attributes(&constant.attribute_lists, None, None);
+        let attributes = self.attributes(&constant.attribute_lists, None, &[]);
         // A `Map` or `Set` constant holds the PHP array of its value, as `constant_value` writes it.
         let hint = match constant.hint.as_ref() {
             Some(hint) => match collection_hint(Some(hint)) {
@@ -7395,7 +7415,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 lowering.lambda_type(lambda),
             )
         });
-        let attributes = self.attributes(&arrow_function.attribute_lists, None, None);
+        let attributes = self.attributes(&arrow_function.attribute_lists, None, &[]);
         if statements.is_empty()
             && !captures_type_arguments
             && !self.names.captures(&lambda).iter().any(|(_, local)| self.names.is_written(local))
@@ -7435,7 +7455,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             )
         });
         let uses = self.closure_uses(lambda, captures_type_arguments);
-        let attributes = self.attributes(&closure.attribute_lists, None, None);
+        let attributes = self.attributes(&closure.attribute_lists, None, &[]);
 
         self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, attributes])
     }

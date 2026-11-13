@@ -472,8 +472,9 @@ function listen(string $event, \Closure $listener): \Sharp\Listening {}
  * The instance properties and fields of the class the class value `$type` names, its own first and then those it
  * inherits, in the order they are declared. The standard library's `Class<T>.properties()` makes a `Property` of each.
  *
- * @return list<list<string>> the class that declares each, its name, the class value of its type without `?`, and the
- * `?` the type ends with, or "" for a type that is not nullable.
+ * @return list<list<string>> the class that declares each, its name, the class value of its type without `?`, the `?`
+ * the type ends with, or "" for a type that is not nullable, and the access modifier that declares it: "public",
+ * "internal", "protected" or "private".
  */
 function properties(string $type): array {}
 
@@ -483,9 +484,10 @@ function properties(string $type): array {}
  * standard library's `Class<T>.methods()` makes a `Method` of each, and a `Parameter` of each of its parameters.
  *
  * @return list<list<list<string>>> for each, first the class that declares it, its name, the class value of its result
- * type without `?`, and the `?` the type ends with, or "" for a type that is not nullable, then one list per parameter:
- * its name, the class value of its type without `?`, the `?` the type ends with, and "optional" for one a call may
- * leave out, or "".
+ * type without `?`, the `?` the type ends with, or "" for a type that is not nullable, "static" for a static method or
+ * "", and the access modifier that declares it, as `properties()` gives a property's, then one list per parameter: its
+ * name, the class value of its type without `?`, the `?` the type ends with, "optional" for one a call may leave out or
+ * "", and "variadic" for the one that takes the rest of a call's arguments or "".
  */
 function methods(string $type): array {}
 

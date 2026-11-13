@@ -28551,6 +28551,105 @@ fn a_static_field_holding_a_foreign_object_is_refused() {
     );
 }
 
+/// Spec section 25: a reflection boolean is named `isNullable` and `isOptional`, as the standard library names every
+/// boolean, so 0.6.10's `nullable` and `optional` name no member.
+#[test]
+fn the_reflection_booleans_of_0_6_10_name_no_member() {
+    let library = [
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ClassMembers.sharp",
+            include_str!("../../../../composer/library/Sharp/ClassMembers.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Method.sharp",
+            include_str!("../../../../composer/library/Sharp/Method.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Parameter.sharp",
+            include_str!("../../../../composer/library/Sharp/Parameter.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Property.sharp",
+            include_str!("../../../../composer/library/Sharp/Property.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Visibility.sharp",
+            include_str!("../../../../composer/library/Sharp/Visibility.sharp"),
+        ),
+        BUILTINS,
+    ];
+    let report = (
+        "src/Report.sharp",
+        "namespace App;\n\npublic class Report\n{\n    public bool read(int depth)\n    {\n        const parameter = typeof(Report).methods()[0].parameters()[0];\n        bool nullable = parameter.nullable;\n        bool optional = parameter.optional;\n        return nullable || optional || depth > 0;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        messages(report, &library),
+        ["Property `Parameter.nullable` does not exist.", "Property `Parameter.optional` does not exist."]
+    );
+}
+
+/// Spec section 25: a `Method` gives the class that declares it, `isStatic`, `isNullable` and its `Visibility`, a
+/// `Property` its declaring class, `isNullable` and `Visibility`, and a `Parameter` `isNullable`, `isOptional`,
+/// `isVariadic` and its `defaultValue()`, so each read into an `int` is refused with its own type.
+#[test]
+fn reflection_gives_each_member_fact_its_type() {
+    let library = [
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ClassMembers.sharp",
+            include_str!("../../../../composer/library/Sharp/ClassMembers.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Method.sharp",
+            include_str!("../../../../composer/library/Sharp/Method.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Parameter.sharp",
+            include_str!("../../../../composer/library/Sharp/Parameter.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Property.sharp",
+            include_str!("../../../../composer/library/Sharp/Property.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Visibility.sharp",
+            include_str!("../../../../composer/library/Sharp/Visibility.sharp"),
+        ),
+        BUILTINS,
+    ];
+    let report = (
+        "src/Report.sharp",
+        "namespace App;\n\npublic class Report\n{\n    int code = 0;\n\n    public int read(int depth)\n    {\n        const method = typeof(Report).methods()[0];\n        const property = typeof(Report).properties()[0];\n        const parameter = method.parameters()[0];\n        int declaring = method.declaringClass;\n        int shared = method.isStatic;\n        int visibility = method.visibility;\n        int result = method.isNullable;\n        int owner = property.declaringClass;\n        int reach = property.visibility;\n        int held = property.isNullable;\n        int given = parameter.isNullable;\n        int optional = parameter.isOptional;\n        int variadic = parameter.isVariadic;\n        int fallback = parameter.defaultValue();\n        return declaring + shared + visibility + result + owner + reach + held + given + optional + variadic + fallback\n            + depth + this.code;\n    }\n}\n",
+    );
+
+    // Each refusal names the local and the type of the member read into it.
+    let between = |text: &str, start: &str, end: &str| {
+        let from = text.find(start).map(|offset| offset + start.len()).expect("the issue names it");
+        text[from..].split(end).next().unwrap_or_default().to_owned()
+    };
+    let read: Vec<String> = worded(report, &library)
+        .iter()
+        .map(|issue| format!("{}: {}", between(issue, "assignment to `", "`"), between(issue, "has type `", "`.")))
+        .collect();
+
+    assert_eq!(
+        read,
+        [
+            "declaring: Class<Object>",
+            "shared: bool",
+            "visibility: Visibility",
+            "result: bool",
+            "owner: Class<Object>",
+            "reach: Visibility",
+            "held: bool",
+            "given: bool",
+            "optional: bool",
+            "variadic: bool",
+            "fallback: Any?",
+        ]
+    );
+}
+
 /// Spec sections 23 and 24: a class-like of a file's namespace wins over the default class-like of its exact short name,
 /// so the PHP# `App\RANDOM` leaves a bare `Random` in `App` naming `Sharp\Random`.
 #[test]
