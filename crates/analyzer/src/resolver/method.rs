@@ -1169,14 +1169,15 @@ where
     };
 
     // The call's name as the class keys it: as written for a class with `exact_names`, so another case of it reaches
-    // nothing, spec section 24, and in lowercase for any other.
-    let method_name = class_metadata.method_key(method_name.as_bytes());
-    let mut method_id = MethodIdentifier::new(class_metadata.original_name, method_name);
+    // nothing, spec section 24, and in lowercase for any other. Every other class the call reaches, a parent, a
+    // required class, a mixin or another part of an intersection, keys the name as written by its own rule.
+    let method_key = class_metadata.method_key(method_name.as_bytes());
+    let mut method_id = MethodIdentifier::new(class_metadata.original_name, method_key);
     if !context.codebase.method_identifier_exists(&method_id) {
         method_id = context.codebase.get_declaring_method_identifier(&method_id);
     }
     if context.dialect.is_sharp()
-        && method_name.as_bytes().eq_ignore_ascii_case(b"toString")
+        && method_key.as_bytes().eq_ignore_ascii_case(b"toString")
         && let Some(text_method) = plain_text_method(context.codebase, class_metadata)
     {
         method_id = text_method;
@@ -1187,7 +1188,7 @@ where
             context,
             block_context.scope.get_class_like_name(),
             class_metadata.original_name.as_bytes(),
-            method_name.as_bytes(),
+            method_key.as_bytes(),
             access_span,
             Some(selector.span()),
         ) {
@@ -1207,7 +1208,7 @@ where
         }
 
         if function_like_metadata.flags.is_magic_method() {
-            let is_pseudo = class_metadata.pseudo_methods.contains(&method_name)
+            let is_pseudo = class_metadata.pseudo_methods.contains(&method_key)
                 || class_metadata.all_parent_classes.iter().any(|parent_name| {
                     context.codebase.get_class_like(parent_name.as_bytes()).is_some_and(|parent| {
                         parent.pseudo_methods.contains(&parent.method_key(method_name.as_bytes()))
@@ -1283,7 +1284,10 @@ where
                 continue;
             };
 
-            let mut required_method_id = MethodIdentifier::new(required_metadata.original_name, method_name);
+            let mut required_method_id = MethodIdentifier::new(
+                required_metadata.original_name,
+                required_metadata.method_key(method_name.as_bytes()),
+            );
             if !context.codebase.method_identifier_exists(&required_method_id) {
                 required_method_id = context.codebase.get_declaring_method_identifier(&required_method_id);
             }
@@ -1318,7 +1322,8 @@ where
                 continue;
             };
 
-            let mut mixin_method_id = MethodIdentifier::new(mixin_metadata.original_name, method_name);
+            let mixin_key = mixin_metadata.method_key(method_name.as_bytes());
+            let mut mixin_method_id = MethodIdentifier::new(mixin_metadata.original_name, mixin_key);
             if !context.codebase.method_identifier_exists(&mixin_method_id) {
                 mixin_method_id = context.codebase.get_declaring_method_identifier(&mixin_method_id);
             }
@@ -1330,7 +1335,7 @@ where
                     context,
                     block_context.scope.get_class_like_name(),
                     mixin_metadata.original_name.as_bytes(),
-                    method_name.as_bytes(),
+                    mixin_key.as_bytes(),
                     access_span,
                     Some(selector.span()),
                 ) {

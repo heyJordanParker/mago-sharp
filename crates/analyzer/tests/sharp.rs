@@ -18413,6 +18413,29 @@ fn an_intersection_takes_a_value_of_every_type_it_joins() {
     );
 }
 
+/// Spec section 24: an intersection or a union reaches each member of a part by that part's own name for it, exact for
+/// a PHP# interface and in any case for a plain PHP one, so a camelCase PHP# method is found whichever part is first,
+/// by a PHP# call or method value and by a plain PHP call or first-class callable.
+#[test]
+fn an_intersection_or_union_reaches_each_parts_method_by_its_own_name() {
+    let declared = [
+        (
+            "src/Probe/Named.php",
+            "<?php\n\nnamespace Probe;\n\ninterface Named\n{\n    public function name(): string;\n\n    public function itemCount(): int;\n}\n",
+        ),
+        (
+            "src/Probe/Priced.sharp",
+            "namespace Probe;\n\npublic interface Priced\n{\n    int priceInCents();\n\n    int itemCount();\n}\n",
+        ),
+    ];
+    let sharp = "namespace Probe.Shop;\n\nimport Probe.Named;\nimport Probe.Priced;\n\npublic class Label\n{\n    public static string first(Named & Priced item) => `${item.name()} ${item.priceInCents()} ${item.itemCount()}`;\n\n    public static string second(Priced & Named item) => `${item.name()} ${item.priceInCents()} ${item.itemCount()}`;\n\n    public static int firstValue(Named & Priced item)\n    {\n        Function<int()> price = item.priceInCents;\n        Function<string()> name = item.name;\n        return name() == \"\" ? 0 : price();\n    }\n\n    public static int secondValue(Priced & Named item)\n    {\n        Function<int()> price = item.priceInCents;\n        Function<string()> name = item.name;\n        return name() == \"\" ? 0 : price();\n    }\n\n    public static int firstUnion(Named | Priced item) => item.itemCount();\n\n    public static int secondUnion(Priced | Named item) => item.itemCount();\n}\n";
+    let php = "<?php\n\nnamespace Probe\\Shop;\n\nuse Probe\\Named;\nuse Probe\\Priced;\n\nfinal class Tag\n{\n    public static function first(Named&Priced $item): int\n    {\n        $price = $item->priceInCents(...);\n        return $item->priceInCents() + $price();\n    }\n\n    public static function second(Priced&Named $item): int\n    {\n        $price = $item->priceInCents(...);\n        return $item->priceInCents() + $price();\n    }\n}\n";
+
+    assert_eq!(issues(("src/Probe/Shop/Label.sharp", sharp), &declared), Vec::<String>::new());
+    assert_eq!(issues(("src/Probe/Shop/Tag.php", php), &declared), Vec::<String>::new());
+}
+
+/// Spec section 24: `&` joins at most one class with interfaces, as Swift and Java do, so two classes in one `&` are
 /// refused wherever the type is written: a parameter, a return type, a property, a local, a type test and a type
 /// argument. A class with interfaces, or interfaces alone, are an intersection.
 #[test]
