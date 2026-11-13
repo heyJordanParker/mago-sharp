@@ -18,9 +18,8 @@ use crate::ttype::union::TUnion;
 /// Whether `container_class_string` holds the class string `input_scalar`: the type the input names is contained by the
 /// type the container names, so PHP#'s `Class<int>` fits `Class<int|string>` and `Class<Object>` fits `Class<Any?>`,
 /// spec section 25. A plain PHP `class-string` fits only another `class-string`, as upstream reads it. Under PHP#'s
-/// rules, a
-/// `Class<TItem>` names the opaque type parameter `TItem`, so it holds only `Class<TItem>`, and passes as a class type
-/// its bound reaches.
+/// rules, a `Class<TItem>` names the opaque type parameter `TItem`, so it holds only `Class<TItem>`, and passes as a
+/// class type its bound reaches.
 #[inline]
 pub fn is_contained_by(
     codebase: &CodebaseMetadata,

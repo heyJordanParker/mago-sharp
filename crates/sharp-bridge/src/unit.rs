@@ -356,8 +356,10 @@ pub fn header(bytes: &[u8]) -> Result<Header, FormatError> {
     })
 }
 
-/// The size, modification time and hash of the file at the workspace-relative `path` under `root`, or none when no
-/// file of exactly that name is there.
+/// The size, modification time and hash of the file at `path`, or none when no file of exactly that name is there.
+///
+/// A path is under `root`, or absolute for a file outside it, as one an includes folder that is a symlink reaches, and
+/// the engine reads it the same way.
 ///
 /// A path whose last segment is [`SOURCE_LISTING`] gets the stamp of its folder's listing, which a missing folder gives
 /// empty.
