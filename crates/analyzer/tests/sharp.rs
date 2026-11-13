@@ -20402,18 +20402,20 @@ fn recorded_callees(
 /// name the call wrote, so the lowering reads the method the analysis checked the call against.
 #[test]
 fn a_call_a_magic_method_serves_records_the_magic_method_and_the_called_name() {
-    let sharp = "namespace Demo;\n\nimport Lib.Bag;\nimport Lib.Calc;\n\nclass Report\n{\n    public int run(Bag bag, int extra)\n    {\n        Calc.remember(extra);\n        return strlen(gettype(bag.untagged()));\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Bag;\nimport Lib.Calc;\n\nclass Report\n{\n    public int run(Bag bag, int extra)\n    {\n        Calc.rememberAll(extra);\n        return strlen(gettype(bag.untaggedItems()));\n    }\n}\n";
     let library = "<?php namespace Lib; final class Bag { public function __call(string $name, array $arguments): mixed { return 1; } } final class Calc { public static function __callStatic(string $name, array $arguments): mixed { return null; } }";
 
     assert_eq!(
         recorded_callees(
             ("src/Demo/Report.sharp", sharp),
             &[("src/Lib/Bag.php", library)],
-            &["bag.untagged()", "Calc.remember(extra)"]
+            &["bag.untaggedItems()", "Calc.rememberAll(extra)"]
         ),
         [
-            [r#"MagicMethod { callee: Method("Lib\\Bag", "__call"), class: "Lib\\Bag", method: "untagged" }"#],
-            [r#"MagicMethod { callee: Method("lib\\calc", "__callstatic"), class: "Lib\\Calc", method: "remember" }"#],
+            [r#"MagicMethod { callee: Method("Lib\\Bag", "__call"), class: "Lib\\Bag", method: "untaggedItems" }"#],
+            [
+                r#"MagicMethod { callee: Method("lib\\calc", "__callstatic"), class: "Lib\\Calc", method: "rememberAll" }"#
+            ],
         ]
     );
 }

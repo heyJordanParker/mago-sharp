@@ -370,8 +370,8 @@ function take_proxy(DynamicProxy $_proxy): void {}
 
 function take_facade(DynamicFacade $_facade): void {}
 
-take_proxy((new DynamicProxy())->dynamic('instance'));
-take_facade(DynamicFacade::dynamic('static'));
+take_proxy((new DynamicProxy())->dynamicCall('instance'));
+take_facade(DynamicFacade::dynamicCall('static'));
 ";
 
 /// A model whose `__call` the fixture's forwarding provider forwards to a query, whose own `__call` answers the query.
@@ -554,11 +554,11 @@ fn declined_dynamic_methods_preserve_non_documented_method_diagnostics() -> Resu
         [
             (
                 Some("non-documented-method".to_owned()),
-                "Ambiguous method call to `dynamic` on class `DynamicProxy`.".to_owned()
+                "Ambiguous method call to `dynamicCall` on class `DynamicProxy`.".to_owned()
             ),
             (
                 Some("non-documented-method".to_owned()),
-                "Ambiguous method call to `dynamic` on class `DynamicFacade`.".to_owned()
+                "Ambiguous method call to `dynamicCall` on class `DynamicFacade`.".to_owned()
             ),
         ]
     );
@@ -583,7 +583,7 @@ fn a_forwarded_call_reaches_the_magic_method_of_the_object_it_is_forwarded_to() 
         observation.issues,
         [(
             Some("non-documented-method".to_owned()),
-            "Ambiguous method call to `wherekey` on class `ForwardedQuery`.".to_owned()
+            "Ambiguous method call to `whereKey` on class `ForwardedQuery`.".to_owned()
         )]
     );
     assert_eq!(observation.invocations, ["forwarded-ForwardingModel::whereKey"]);

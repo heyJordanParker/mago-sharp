@@ -1055,8 +1055,15 @@ where
             .get_method_by_id(&magic_call_method.method_identifier)
             .expect("method metadata should exist for resolved magic call method");
 
-        let requested_identifier =
-            FunctionLikeIdentifier::Method(undocumented_method.classname, undocumented_method.method_name);
+        // A provider names the method as its class keys one: as written on a class with exact names, spec section 24,
+        // and lowercase on any other, as PHP folds it.
+        let requested_identifier = FunctionLikeIdentifier::Method(
+            undocumented_method.classname,
+            context.codebase.method_key(
+                context.codebase.class_key(undocumented_method.classname.as_bytes()),
+                undocumented_method.method_name.as_bytes(),
+            ),
+        );
         let magic_identifier = FunctionLikeIdentifier::Method(
             magic_call_method.method_identifier.get_class_name(),
             magic_call_method.method_identifier.get_method_name(),
