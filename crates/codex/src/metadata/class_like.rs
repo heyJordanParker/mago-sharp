@@ -56,9 +56,17 @@ pub struct ClassLikeMetadata {
     pub require_implements: WordSet,
     pub all_parent_classes: WordSet,
     pub used_traits: WordSet,
-    pub trait_alias_map: WordMap<Word>,
-    pub trait_visibility_map: WordMap<Visibility>,
+    /// Each alias a `use` adaptation declares, as written, with the trait its method reference names, when it names
+    /// one, and the method, as written: `T::m as x` is `x` to `(Some(T), m)`.
+    pub trait_alias_map: WordMap<(Option<Word>, Word)>,
+    /// Each visibility a `use` adaptation gives, by the alias, or by the method when it declares no alias, as written,
+    /// with the trait its method reference names, when it names one.
+    pub trait_visibility_map: WordMap<(Option<Word>, Visibility)>,
     pub trait_final_map: WordSet,
+    /// The trait methods an `insteadof` leaves out, as `(trait, method)` as written: `A::m insteadof B` leaves out
+    /// `(B, m)`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub trait_exclusions: Vec<(Word, Word)>,
     pub child_class_likes: Option<WordSet>,
     pub name_span: Option<Span>,
     pub kind: SymbolKind,
@@ -275,6 +283,7 @@ impl ClassLikeMetadata {
             trait_alias_map: WordMap::default(),
             trait_visibility_map: WordMap::default(),
             trait_final_map: WordSet::default(),
+            trait_exclusions: Vec::new(),
             name,
             original_name,
             aliases: Vec::new(),
@@ -311,7 +320,7 @@ impl ClassLikeMetadata {
     /// Returns a reference to the map of trait method aliases.
     #[inline]
     #[must_use]
-    pub fn get_trait_alias_map(&self) -> &WordMap<Word> {
+    pub fn get_trait_alias_map(&self) -> &WordMap<(Option<Word>, Word)> {
         &self.trait_alias_map
     }
 
@@ -392,26 +401,53 @@ impl ClassLikeMetadata {
         self.used_traits.extend(traits);
     }
 
-    /// Adds or updates a single trait alias. Returns the previous original name if one existed for the alias.
+    /// Adds or updates a single trait alias, of the method of the trait `trait_name` names, or of any used trait when it
+    /// names none. Returns the previous method if one existed for the alias.
     #[inline]
-    pub fn add_trait_alias(&mut self, method: Word, alias: Word) -> Option<Word> {
-        self.trait_alias_map.insert(method, alias)
+    pub fn add_trait_alias(
+        &mut self,
+        alias: Word,
+        trait_name: Option<Word>,
+        method: Word,
+    ) -> Option<(Option<Word>, Word)> {
+        self.trait_alias_map.insert(alias, (trait_name, method))
     }
 
-    /// Adds or updates a single trait visibility override. Returns the previous visibility if one existed.
+    /// Adds or updates a single trait visibility override, of the method of the trait `trait_name` names, or of any
+    /// used trait when it names none. Returns the previous override if one existed.
     #[inline]
-    pub fn add_trait_visibility(&mut self, method: Word, visibility: Visibility) -> Option<Visibility> {
-        self.trait_visibility_map.insert(method, visibility)
+    pub fn add_trait_visibility(
+        &mut self,
+        name: Word,
+        trait_name: Option<Word>,
+        visibility: Visibility,
+    ) -> Option<(Option<Word>, Visibility)> {
+        self.trait_visibility_map.insert(name, (trait_name, visibility))
     }
 
-    /// The visibility a `use` adaptation gives the method `name`. The scanner keeps each adaptation's name as written,
-    /// so this keys it by the class-like's rule, which it knows only once its hierarchy is populated, spec section 24.
+    /// Leaves the method `method` of the trait `trait_name` out of the class-like, as `insteadof` does.
+    #[inline]
+    pub fn add_trait_exclusion(&mut self, trait_name: Word, method: Word) {
+        self.trait_exclusions.push((trait_name, method));
+    }
+
+    /// The visibility a `use` adaptation gives the method `name` the class-like takes from the trait `declaring`, the
+    /// key of the class-like that declares it, as PHP gives it: none when the class-like declares the method itself, and
+    /// none from an adaptation that names another trait, as one of a method an `insteadof` leaves out. The scanner keeps
+    /// each adaptation's names as written, so this keys them by the class-like's rule, which it knows only once its
+    /// hierarchy is populated, spec section 24.
     #[must_use]
-    pub fn trait_visibility(&self, name: &[u8]) -> Option<Visibility> {
+    pub fn trait_visibility(&self, codebase: &CodebaseMetadata, name: &[u8], declaring: Word) -> Option<Visibility> {
+        if declaring == self.name {
+            return None;
+        }
+
         let key = self.method_key(name);
-        self.trait_visibility_map
-            .iter()
-            .find_map(|(written, visibility)| (self.method_key(written.as_bytes()) == key).then_some(*visibility))
+        self.trait_visibility_map.iter().find_map(|(written, (trait_name, visibility))| {
+            (self.method_key(written.as_bytes()) == key
+                && trait_name.is_none_or(|trait_name| codebase.class_key(trait_name.as_bytes()) == declaring))
+            .then_some(*visibility)
+        })
     }
 
     /// Adds a single template type definition.

@@ -82,6 +82,9 @@ use mago_syntax::cst::Struct;
 use mago_syntax::cst::SuperOf;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUse;
+use mago_syntax::cst::TraitUseAdaptation;
+use mago_syntax::cst::TraitUseMethodReference;
+use mago_syntax::cst::TraitUseSpecification;
 use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::TypeParameterList;
@@ -1498,8 +1501,27 @@ where
         self.exit_type_parameters();
     }
 
+    /// Resolves each trait a `use` names, in its list and in its adaptations: the trait of a method reference, as
+    /// `A::m as x`, and each trait an `insteadof` leaves the method out of.
     fn walk_in_trait_use(&mut self, trait_use: &'ast TraitUse<'arena>, context: &mut NameResolutionContext<'arena, A>) {
-        for trait_name in &trait_use.trait_names {
+        let mut trait_names: std::vec::Vec<&Identifier<'arena>> = trait_use.trait_names.iter().collect();
+        if let TraitUseSpecification::Concrete(specification) = &trait_use.specification {
+            for adaptation in &specification.adaptations {
+                match adaptation {
+                    TraitUseAdaptation::Precedence(precedence) => {
+                        trait_names.push(&precedence.method_reference.trait_name);
+                        trait_names.extend(precedence.trait_names.iter());
+                    }
+                    TraitUseAdaptation::Alias(alias) => {
+                        if let TraitUseMethodReference::Absolute(reference) = &alias.method_reference {
+                            trait_names.push(&reference.trait_name);
+                        }
+                    }
+                }
+            }
+        }
+
+        for trait_name in trait_names {
             let (trait_classlike, imported) = self.resolve_class(context, trait_name.value());
 
             self.resolved_names.insert_at(trait_name.span(), trait_classlike, imported);

@@ -1241,15 +1241,14 @@ impl CodebaseMetadata {
     pub fn get_method_visibility(&self, class: &[u8], method: &[u8]) -> Option<Visibility> {
         let class_meta = self.get_class_like(class)?;
         let method_key = class_meta.method_key(method);
+        let declaring = class_meta.declaring_method_ids.get(&method_key)?;
 
-        // First check if there's a trait visibility override for this method
-        if let Some(overridden_visibility) = class_meta.trait_visibility(method) {
+        // First check if there's a trait visibility override for the trait method the class takes
+        if let Some(overridden_visibility) = class_meta.trait_visibility(self, method, declaring.get_class_name()) {
             return Some(overridden_visibility);
         }
 
         // Fall back to the method's declared visibility, by the key its declaring class gives it
-        let declaring = class_meta.declaring_method_ids.get(&method_key)?;
-
         self.function_likes
             .get(&declaring.get_key())
             .and_then(|meta| meta.method_metadata.as_ref())

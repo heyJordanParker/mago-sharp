@@ -2042,6 +2042,7 @@ test_case!(inheritance_trait_abstract_must_implement);
 test_case!(inheritance_trait_alias_method);
 test_case!(inheritance_trait_alias_visibility_change);
 test_case!(inheritance_trait_conflict_insteadof);
+test_case!(trait_adaptations_resolve_as_php_does);
 test_case!(inheritance_trait_constants_php82);
 test_case!(inheritance_trait_direct_constant_access);
 test_case!(inheritance_trait_method_overridden_by_class);

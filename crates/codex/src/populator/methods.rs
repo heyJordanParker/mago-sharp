@@ -18,11 +18,16 @@ pub fn inherit_methods_from_parent(
     let parent_is_trait = parent_metadata.kind.is_trait();
 
     // An adaptation's names are as written: the method is keyed as the trait keys its own, and the alias as the class
-    // keys its own, spec section 24, so a plain class's `recordEntry as entry` meets a PHP# trait's `recordEntry`.
+    // keys its own, spec section 24, so a plain class's `recordEntry as entry` meets a PHP# trait's `recordEntry`. An
+    // alias whose method reference names a trait aliases only that trait's method, as PHP's
+    // zend_traits_copy_functions applies it.
     let reverse_alias_map: Option<HashMap<Word, Vec<Word>>> = if parent_is_trait && !metadata.trait_alias_map.is_empty()
     {
         let mut map: HashMap<Word, Vec<Word>> = HashMap::default();
-        for (original, alias) in metadata.get_trait_alias_map() {
+        for (alias, (trait_name, original)) in metadata.get_trait_alias_map() {
+            if trait_name.is_some_and(|trait_name| codebase.class_key(trait_name.as_bytes()) != parent_metadata.name) {
+                continue;
+            }
             map.entry(parent_metadata.method_key(original.as_bytes()))
                 .or_default()
                 .push(metadata.method_key(alias.as_bytes()));
@@ -30,6 +35,17 @@ pub fn inherit_methods_from_parent(
         Some(map)
     } else {
         None
+    };
+    // The keys of the trait's methods an `insteadof` leaves out, which join the class-like only under their aliases.
+    let excluded: Vec<Word> = if parent_is_trait {
+        metadata
+            .trait_exclusions
+            .iter()
+            .filter(|(trait_name, _)| codebase.class_key(trait_name.as_bytes()) == parent_metadata.name)
+            .map(|(_, method)| parent_metadata.method_key(method.as_bytes()))
+            .collect()
+    } else {
+        Vec::new()
     };
 
     // A class-like with `exact_names` keys the method a plain PHP parent keys `dothing` by its declared name, `doThing`,
@@ -55,7 +71,9 @@ pub fn inherit_methods_from_parent(
             metadata.appearing_method_ids.insert(aliased_method_name, final_appearing_id);
         };
 
-        process_name(key);
+        if !excluded.contains(method_name_lc) {
+            process_name(key);
+        }
 
         if let Some(reverse_map) = reverse_alias_map.as_ref()
             && let Some(aliases) = reverse_map.get(method_name_lc)
@@ -68,7 +86,9 @@ pub fn inherit_methods_from_parent(
 
     for (method_name_lc, declaring_method_id) in &parent_metadata.inheritable_method_ids {
         let key = child_key(*method_name_lc, declaring_method_id);
-        if !method_name_lc.eq(&word("__construct")) || parent_metadata.flags.has_consistent_constructor() {
+        let included = !excluded.contains(method_name_lc);
+        if included && (!method_name_lc.eq(&word("__construct")) || parent_metadata.flags.has_consistent_constructor())
+        {
             if parent_is_trait {
                 // A PHP# class's own method replaces a trait's body, spec section 22, so it overrides it.
                 if (metadata.flags.is_sharp() && metadata.methods.contains(&key))
@@ -119,7 +139,7 @@ pub fn inherit_methods_from_parent(
                 || metadata.kind.is_trait()
                 || is_ctor_or_clone
                 || metadata
-                    .trait_visibility(aliased_method_name.as_bytes())
+                    .trait_visibility(codebase, aliased_method_name.as_bytes(), parent_metadata.name)
                     .or_else(|| {
                         codebase.get_method_visibility(parent_metadata.name.as_bytes(), aliased_method_name.as_bytes())
                     })
@@ -130,7 +150,9 @@ pub fn inherit_methods_from_parent(
             }
         };
 
-        process_name(key, metadata);
+        if included {
+            process_name(key, metadata);
+        }
 
         if let Some(reverse_map) = reverse_alias_map.as_ref()
             && let Some(aliases) = reverse_map.get(method_name_lc)

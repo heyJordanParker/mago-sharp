@@ -519,7 +519,7 @@ pub(crate) fn declared_method_name(
 
     std::iter::once(class)
         .chain(class.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(parent.as_bytes())))
-        .flat_map(|class| class.get_trait_alias_map().values())
+        .flat_map(|class| class.get_trait_alias_map().keys())
         .copied()
         .find(|alias| class.method_key(alias.as_bytes()) == key)
         .unwrap_or(method.original_name)

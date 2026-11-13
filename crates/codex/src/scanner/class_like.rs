@@ -1769,21 +1769,32 @@ where
 
                 if let TraitUseSpecification::Concrete(specification) = &trait_use.specification {
                     for adaptation in &specification.adaptations {
+                        // The names as written: a plain PHP class gains exact names only once its hierarchy is
+                        // populated, spec section 24, so each reader keys them, a trait by the codebase's rule, its
+                        // method by the trait's and an alias by the class's.
                         match adaptation {
-                            TraitUseAdaptation::Precedence(_) => {}
+                            TraitUseAdaptation::Precedence(adaptation) => {
+                                let method_name = word(adaptation.method_reference.method_name.value);
+                                for excluded in &adaptation.trait_names {
+                                    class_like_metadata
+                                        .add_trait_exclusion(word(context.resolved_names.get(excluded)), method_name);
+                                }
+                            }
                             TraitUseAdaptation::Alias(adaptation) => {
-                                // The names as written: a plain PHP class gains exact names only once its hierarchy is
-                                // populated, spec section 24, so each reader keys them, the method by its trait's rule
-                                // and the alias by the class's.
-                                let method_name = word(match &adaptation.method_reference {
-                                    TraitUseMethodReference::Identifier(local_identifier) => local_identifier.value,
-                                    TraitUseMethodReference::Absolute(reference) => reference.method_name.value,
-                                });
+                                let (trait_name, method_name) = match &adaptation.method_reference {
+                                    TraitUseMethodReference::Identifier(local_identifier) => {
+                                        (None, word(local_identifier.value))
+                                    }
+                                    TraitUseMethodReference::Absolute(reference) => (
+                                        Some(word(context.resolved_names.get(&reference.trait_name))),
+                                        word(reference.method_name.value),
+                                    ),
+                                };
 
                                 let method_alias = adaptation.alias.as_ref().map(|alias| word(alias.value));
 
                                 if let Some(alias) = method_alias {
-                                    class_like_metadata.add_trait_alias(method_name, alias);
+                                    class_like_metadata.add_trait_alias(alias, trait_name, method_name);
                                 }
 
                                 if let Some(modifier) = &adaptation.modifier {
@@ -1805,11 +1816,11 @@ where
                                         }
                                     };
 
-                                    if let Some(method_alias) = method_alias {
-                                        class_like_metadata.add_trait_visibility(method_alias, visibility);
-                                    } else {
-                                        class_like_metadata.add_trait_visibility(method_name, visibility);
-                                    }
+                                    class_like_metadata.add_trait_visibility(
+                                        method_alias.unwrap_or(method_name),
+                                        trait_name,
+                                        visibility,
+                                    );
                                 }
                             }
                         }
