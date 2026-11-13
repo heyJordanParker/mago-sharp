@@ -841,10 +841,7 @@ fn a_method_search_finds_a_method_by_a_sharp_attribute_as_by_a_plain_one() -> Re
         "<?php\n\nnamespace Probe;\n\nfinal class Holder\n{\n    #[Marked]\n    public function markedMethod(): void\n    {\n    }\n\n    #[Tagged]\n    public function taggedMethod(): void\n    {\n        $this->markedMethod();\n    }\n}\n",
     );
 
-    let observation = analyze_files_with_fixture(
-        &[MARKED, TAGGED, HOLDER],
-        &["MAGO_INVOCATION_CALL_KINDS", "MAGO_INVOCATION_ATTRIBUTED_METHODS"],
-    )?;
+    let observation = analyze_files_with_fixture(&[MARKED, TAGGED, HOLDER], &["MAGO_INVOCATION_ATTRIBUTED_METHODS"])?;
 
     assert_eq!(
         observation.issues.iter().map(|(code, _)| code.as_deref()).collect::<Vec<_>>(),
@@ -852,11 +849,7 @@ fn a_method_search_finds_a_method_by_a_sharp_attribute_as_by_a_plain_one() -> Re
     );
     assert_eq!(
         observation.invocations,
-        [
-            "call-kind-markedMethod-instance",
-            "attributed-Probe\\Marked-markedMethod",
-            "attributed-Probe\\Tagged-taggedMethod",
-        ]
+        ["attributed-Probe\\Marked-markedMethod", "attributed-Probe\\Tagged-taggedMethod"]
     );
 
     Ok(())

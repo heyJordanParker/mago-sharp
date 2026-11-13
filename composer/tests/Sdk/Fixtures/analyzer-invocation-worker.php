@@ -867,16 +867,6 @@ final class InvocationCallKindHook implements NodeAnalysisHook
         if ($receiver !== null) {
             InvocationAudit::record('receiver-call-kind-' . self::describe($context, $receiver));
         }
-
-        // A search names an attribute as written, a PHP# one by its exact name, and the host keys it.
-        if (getenv('MAGO_INVOCATION_ATTRIBUTED_METHODS') === '1') {
-            foreach (['Probe\\Marked', 'Probe\\Tagged'] as $attribute) {
-                $methods = $context->codebase->findMethods(withAnyAttribute: [$attribute], fields: MethodFields::NAMES);
-                foreach ($methods as $method) {
-                    InvocationAudit::record('attributed-' . $attribute . '-' . $method->originalName);
-                }
-            }
-        }
     }
 
     public static function describe(NodeAnalysisContext $context, CallExpression $call): string
@@ -891,6 +881,34 @@ final class InvocationCallKindHook implements NodeAnalysisHook
         };
 
         return $name . '-' . $kind;
+    }
+}
+
+/**
+ * Searches for the methods each attribute marks at a method call, and records each method it finds. A search names an
+ * attribute as written, a PHP# one by its exact name, and the host keys it.
+ *
+ * @mago-expect lint:single-class-per-file
+ */
+final class InvocationAttributedMethodsHook implements NodeAnalysisHook
+{
+    public function getTargets(): array
+    {
+        return [NodeKind::MethodCall];
+    }
+
+    public function getRequirements(): array
+    {
+        return [];
+    }
+
+    public function analyze(NodeAnalysisContext $context): void
+    {
+        foreach (['Probe\\Marked', 'Probe\\Tagged'] as $attribute) {
+            foreach ($context->codebase->findMethods(withAnyAttribute: [$attribute]) as $method) {
+                InvocationAudit::record('attributed-' . $attribute . '-' . $method->method->member);
+            }
+        }
     }
 }
 
@@ -969,14 +987,13 @@ final class InvocationCallForwardingProvider implements CallForwardingProvider
 final class InvocationPlugin implements IssueFilterHook, Plugin
 {
     /**
-     * @param list<NodeKind> $callKindTargets the node kinds of the call-kind hook, or none to leave it out
+     * @param list<NodeAnalysisHook> $nodeAnalysisHooks the node-analysis hooks the test's switches turn on
      */
     public function __construct(
         private readonly bool $registerMethodProvider,
         private readonly bool $registerIssueFilter,
-        private readonly array $callKindTargets,
+        private readonly array $nodeAnalysisHooks,
         private readonly bool $registerMethodCallHook,
-        private readonly bool $registerBareCallHooks,
     ) {}
 
     public function getDefinition(): PluginDefinition
@@ -1003,15 +1020,11 @@ final class InvocationPlugin implements IssueFilterHook, Plugin
         if ($this->registerIssueFilter) {
             $registry->registerIssueFilterHook($this);
         }
-        if ($this->callKindTargets !== []) {
-            $registry->registerNodeAnalysisHook(new InvocationCallKindHook($this->callKindTargets));
+        foreach ($this->nodeAnalysisHooks as $hook) {
+            $registry->registerNodeAnalysisHook($hook);
         }
         if ($this->registerMethodCallHook) {
             $registry->registerMethodCallAnalysisHook(new InvocationMethodCallHook());
-        }
-        if ($this->registerBareCallHooks) {
-            $registry->registerNodeAnalysisHook(new InvocationBareCallHook(NodeKind::MethodCall));
-            $registry->registerNodeAnalysisHook(new InvocationBareCallHook(NodeKind::StaticMethodCall));
         }
     }
 
@@ -1053,8 +1066,18 @@ $callKindTargets = match (true) {
     getenv('MAGO_INVOCATION_FUNCTION_CALL_KINDS') === '1' => [NodeKind::FunctionCall],
     default => [],
 };
+$nodeAnalysisHooks = [];
+if ($callKindTargets !== []) {
+    $nodeAnalysisHooks[] = new InvocationCallKindHook($callKindTargets);
+}
+if (getenv('MAGO_INVOCATION_BARE_CALL_HOOKS') === '1') {
+    $nodeAnalysisHooks[] = new InvocationBareCallHook(NodeKind::MethodCall);
+    $nodeAnalysisHooks[] = new InvocationBareCallHook(NodeKind::StaticMethodCall);
+}
+if (getenv('MAGO_INVOCATION_ATTRIBUTED_METHODS') === '1') {
+    $nodeAnalysisHooks[] = new InvocationAttributedMethodsHook();
+}
 $registerMethodCallHook = getenv('MAGO_INVOCATION_METHOD_CALL_HOOK') === '1';
-$registerBareCallHooks = getenv('MAGO_INVOCATION_BARE_CALL_HOOKS') === '1';
 
 (new Worker(new Extension(
     identifier: 'mago/invocation-proof',
@@ -1064,9 +1087,8 @@ $registerBareCallHooks = getenv('MAGO_INVOCATION_BARE_CALL_HOOKS') === '1';
         new InvocationPlugin(
             $registerMethodProvider,
             $registerIssueFilter,
-            $callKindTargets,
+            $nodeAnalysisHooks,
             $registerMethodCallHook,
-            $registerBareCallHooks,
         ),
     ],
 )))->run();
