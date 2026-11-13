@@ -3761,34 +3761,34 @@ const RECEIPTS: &str = "namespace App.Tenant.Store;\n\npublic class Receipts\n{\
 #[test]
 fn compile_refuses_an_import_outside_the_list_of_its_namespace_at_the_import() {
     let store_module = |listed: &str| format!("namespace App.Tenant.Store;\n\nmodule\n{{\n    imports {listed};\n}}\n");
-    let listed = store_module("App.Tenant.Community, App.Shared.Schema, Illuminate.Support");
-    let misspelled = store_module("App.Tenant.Community, App.Shared.Schema, Illuminate.Suport");
-    let cyclic = store_module("App.Tenant.Community, App.Shared");
-    let schema_module = "namespace App.Shared.Schema;\n\nmodule\n{\n    imports App.Tenant.Store;\n}\n";
-    let service = "namespace App.Tenant.Store;\n\nimport App.Tenant.Community.Member;\nimport Illuminate.Support.Facades.DB;\nimport App.Shared.Ledger.Entry;\n\npublic class StoreService\n{\n    public StoreService(private Member member, private DB db, private Entry entry) { }\n}\n";
-    let refused = "app/Tenant/Store/StoreService.sharp:5:8:error - unlisted-import: `App.Tenant.Store` imports only `App.Tenant.Community`, `App.Shared.Schema` and `Illuminate.Support`.";
+    let listed = store_module("App.Shop.Loyalty, App.Shop.Records, Illuminate.Support");
+    let misspelled = store_module("App.Shop.Loyalty, App.Shop.Records, Illuminate.Suport");
+    let cyclic = store_module("App.Shared, App.Shop");
+    let records_module = "namespace App.Shop.Records;\n\nmodule\n{\n    imports App.Tenant.Store;\n}\n";
+    let service = "namespace App.Tenant.Store;\n\nimport App.Shop.Loyalty.Member;\nimport Illuminate.Support.Facades.DB;\nimport App.Shared.Ledger.Entry;\n\npublic class StoreService\n{\n    public StoreService(private Member member, private DB db, private Entry entry) { }\n}\n";
+    let refused = "app/Tenant/Store/StoreService.sharp:5:8:error - unlisted-import: `App.Tenant.Store` imports only `App.Shop.Loyalty`, `App.Shop.Records` and `Illuminate.Support`.";
     for (modules, expected) in [
         (vec![("app/Tenant/Store/Module.sharp", listed.as_str())], vec![refused.to_owned()]),
         (
             vec![("app/Tenant/Store/Module.sharp", misspelled.as_str())],
             vec![
-                "app/Tenant/Store/Module.sharp:5:54:error - non-existent-use-import: Imported namespace `Illuminate.Suport` does not exist.".to_owned(),
-                "app/Tenant/Store/StoreService.sharp:4:8:error - unlisted-import: `App.Tenant.Store` imports only `App.Tenant.Community`, `App.Shared.Schema` and `Illuminate.Suport`.".to_owned(),
-                "app/Tenant/Store/StoreService.sharp:5:8:error - unlisted-import: `App.Tenant.Store` imports only `App.Tenant.Community`, `App.Shared.Schema` and `Illuminate.Suport`.".to_owned(),
+                "app/Tenant/Store/Module.sharp:5:49:error - non-existent-use-import: Imported namespace `Illuminate.Suport` does not exist.".to_owned(),
+                "app/Tenant/Store/StoreService.sharp:4:8:error - unlisted-import: `App.Tenant.Store` imports only `App.Shop.Loyalty`, `App.Shop.Records` and `Illuminate.Suport`.".to_owned(),
+                "app/Tenant/Store/StoreService.sharp:5:8:error - unlisted-import: `App.Tenant.Store` imports only `App.Shop.Loyalty`, `App.Shop.Records` and `Illuminate.Suport`.".to_owned(),
             ],
         ),
         (
-            vec![("app/Tenant/Store/Module.sharp", cyclic.as_str()), ("app/Shared/Schema/Module.sharp", schema_module)],
+            vec![("app/Tenant/Store/Module.sharp", cyclic.as_str()), ("app/Shop/Records/Module.sharp", records_module)],
             vec![
-                "app/Shared/Schema/Module.sharp:5:13:error - import-cycle: `App.Shared.Schema` and `App.Tenant.Store` import from each other: `App.Shared.Schema` lists `App.Tenant.Store`, and `App.Tenant.Store` lists `App.Shared`.".to_owned(),
-                "app/Tenant/Store/Module.sharp:5:35:error - import-cycle: `App.Tenant.Store` and `App.Shared.Schema` import from each other: `App.Tenant.Store` lists `App.Shared`, and `App.Shared.Schema` lists `App.Tenant.Store`.".to_owned(),
-                "app/Tenant/Store/StoreService.sharp:4:8:error - unlisted-import: `App.Tenant.Store` imports only `App.Tenant.Community` and `App.Shared`.".to_owned(),
+                "app/Shop/Records/Module.sharp:5:13:error - import-cycle: `App.Shop.Records` and `App.Tenant.Store` import from each other: `App.Shop.Records` lists `App.Tenant.Store`, and `App.Tenant.Store` lists `App.Shop`.".to_owned(),
+                "app/Tenant/Store/Module.sharp:5:25:error - import-cycle: `App.Tenant.Store` and `App.Shop.Records` import from each other: `App.Tenant.Store` lists `App.Shop`, and `App.Shop.Records` lists `App.Tenant.Store`.".to_owned(),
+                "app/Tenant/Store/StoreService.sharp:4:8:error - unlisted-import: `App.Tenant.Store` imports only `App.Shared` and `App.Shop`.".to_owned(),
             ],
         ),
     ] {
         let mut files = vec![
-            ("app/Tenant/Community/Member.sharp", "namespace App.Tenant.Community;\n\npublic class Member\n{\n}\n"),
-            ("app/Shared/Schema/Table.sharp", "namespace App.Shared.Schema;\n\npublic class Table\n{\n}\n"),
+            ("app/Shop/Loyalty/Member.sharp", "namespace App.Shop.Loyalty;\n\npublic class Member\n{\n}\n"),
+            ("app/Shop/Records/Table.sharp", "namespace App.Shop.Records;\n\npublic class Table\n{\n}\n"),
             ("app/Shared/Ledger/Entry.sharp", "namespace App.Shared.Ledger;\n\npublic class Entry\n{\n}\n"),
             (
                 "vendor/laravel/framework/src/Illuminate/Support/Facades/DB.php",
@@ -4189,11 +4189,11 @@ fn compile_proves_a_law_over_map_filter_and_count() {
     );
 }
 
-/// The real app's `App.Shared.Events.Retry`, an enum whose `backoff()` gives each case's growing list of delays, of 0
-/// to 9 entries, with `law`.
+/// `App.Jobs.Retry`, an enum whose `backoff()` gives each case's growing list of delays, of 0 to 9 entries,
+/// with `law`.
 fn retry(law: &str) -> String {
     format!(
-        "namespace App.Shared.Events;\n\npublic enum Retry : string\n{{\n    case None = \"none\";\n    case Fixed = \"fixed\";\n    case Linear = \"linear\";\n    case Patient = \"patient\";\n    case Exponential = \"exponential\";\n    case ExponentialRamp = \"exponential-ramp\";\n\n    public List<int> backoff() => match (this) {{\n        Retry.None => [],\n        Retry.Fixed => [5, 5, 5],\n        Retry.Linear => [10, 20, 30],\n        Retry.Patient => [1, 2, 3, 5, 8, 13, 21, 34, 55],\n        Retry.Exponential => [1, 2, 4, 8, 16, 32, 64],\n        Retry.ExponentialRamp => [30, 60, 300, 900, 1800, 3600, 7200],\n    }};\n\n    {law}\n}}\n"
+        "namespace App.Jobs;\n\npublic enum Retry : string\n{{\n    case None = \"none\";\n    case Fixed = \"fixed\";\n    case Linear = \"linear\";\n    case Patient = \"patient\";\n    case Exponential = \"exponential\";\n    case ExponentialRamp = \"exponential-ramp\";\n\n    public List<int> backoff() => match (this) {{\n        Retry.None => [],\n        Retry.Fixed => [5, 5, 5],\n        Retry.Linear => [10, 20, 30],\n        Retry.Patient => [1, 2, 3, 5, 8, 13, 21, 34, 55],\n        Retry.Exponential => [1, 2, 4, 8, 16, 32, 64],\n        Retry.ExponentialRamp => [30, 60, 300, 900, 1800, 3600, 7200],\n    }};\n\n    {law}\n}}\n"
     )
 }
 
@@ -4203,13 +4203,13 @@ fn retry(law: &str) -> String {
 #[test]
 fn compile_proves_a_law_over_a_list_index_read() {
     let laws = "law backoffNeverShrinks(Retry retry, int index) => index < 0 || index + 1 >= retry.backoff().count() || retry.backoff()[index] <= retry.backoff()[index + 1];\n    law rampNeverShrinks(int index) => index < 0 || index + 1 >= Retry.ExponentialRamp.backoff().count() || Retry.ExponentialRamp.backoff()[index] <= Retry.ExponentialRamp.backoff()[index + 1];\n    law rampStartsAtThirty(int unused) => Retry.ExponentialRamp.backoff()[0] == 30;\n    law backoffWaits(Retry retry, int index) => retry.backoff()[index] >= 1;";
-    let directory = library_project(&[("app/Shared/Events/Retry.sharp", &retry(laws))]);
+    let directory = library_project(&[("app/Jobs/Retry.sharp", &retry(laws))]);
     let root = directory.path();
 
     let output = compile(root);
 
     assert!(output.status.success(), "{}", printed(&output));
-    assert!(compiled(root, "app/Shared/Events/Retry.sharp").exists());
+    assert!(compiled(root, "app/Jobs/Retry.sharp").exists());
 }
 
 /// A law an index read breaks, as a ramp of delays that shrinks from 30 to 20, is not proven, and the goal still to show
@@ -4220,7 +4220,7 @@ fn a_false_law_over_a_list_index_read_is_not_proven_and_a_map_key_read_is_refuse
         "law rampNeverShrinks(int index) => index < 0 || index + 1 >= Retry.ExponentialRamp.backoff().count() || Retry.ExponentialRamp.backoff()[index] <= Retry.ExponentialRamp.backoff()[index + 1];",
     )
     .replace("[30, 60, 300", "[30, 20, 300");
-    let directory = library_project(&[("app/Shared/Events/Retry.sharp", &shrinking)]);
+    let directory = library_project(&[("app/Jobs/Retry.sharp", &shrinking)]);
 
     let output = compile(directory.path());
 
@@ -4252,7 +4252,7 @@ fn a_law_without_a_body_reports_each_enum_case_it_does_not_prove() {
     for (source, cases) in
         [(ramp, vec!["Retry.ExponentialRamp"]), (linear, vec!["Retry.Linear", "Retry.ExponentialRamp"])]
     {
-        let directory = library_project(&[("app/Shared/Events/Retry.sharp", &source)]);
+        let directory = library_project(&[("app/Jobs/Retry.sharp", &source)]);
 
         let output = compile(directory.path());
 
@@ -4320,8 +4320,8 @@ fn compile_proves_a_law_whose_body_matches_an_enum_with_a_default_arm() {
     );
 }
 
-/// Checks that the real app's `backoffNeverShrinks`, with a body that matches `retry` on each case and then `last`,
-/// proves, and that over a ramp of delays that shrinks from 30 to 20 it is refused in the arm `when` names.
+/// Checks that `backoffNeverShrinks`, with a body that matches `retry` on each case and then `last`, proves, and that
+/// over a ramp of delays that shrinks from 30 to 20 it is refused in the arm `when` names.
 fn assert_backoff_split_on(last: &str, when: &str) {
     let claim =
         "index < 0 || index + 1 >= retry.backoff().count() || retry.backoff()[index] <= retry.backoff()[index + 1]";
@@ -4330,13 +4330,13 @@ fn assert_backoff_split_on(last: &str, when: &str) {
     );
     for (ramp, proven) in [("[30, 60, 300", true), ("[30, 20, 300", false)] {
         let source = retry(&law).replace("[30, 60, 300", ramp);
-        let directory = library_project(&[("app/Shared/Events/Retry.sharp", &source)]);
+        let directory = library_project(&[("app/Jobs/Retry.sharp", &source)]);
         let root = directory.path();
 
         let output = compile(root);
 
         assert_eq!(output.status.success(), proven, "{ramp}: {}", printed(&output));
-        assert_eq!(compiled(root, "app/Shared/Events/Retry.sharp").exists(), proven);
+        assert_eq!(compiled(root, "app/Jobs/Retry.sharp").exists(), proven);
         if !proven {
             assert!(
                 printed(&output).contains(&format!(

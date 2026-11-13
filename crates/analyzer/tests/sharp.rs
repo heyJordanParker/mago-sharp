@@ -11841,17 +11841,17 @@ fn an_import_names_a_class_or_a_namespace_of_functions_and_constants() {
     const PDF: &str = "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfunction render(string $html): string { return $html; }\n";
     const HELPERS: &str = "<?php\n\nconst LARAVEL = 11;\n\nfunction abort(int $code): never { exit($code); }\n";
     const APPLICATION: &str = "<?php\n\nnamespace Vendor\\Foundation;\n\nclass Application {}\n";
-    const ENTITY: &str = "<?php\n\nnamespace App\\Shared\\Schema;\n\nclass Entity {}\n";
-    const COLUMN: &str = "<?php\n\nnamespace App\\Shared\\Schema;\n\nclass Column {}\n";
-    const SCHEMA_MODULE: &str = "namespace App.Shared.Schema;\n\nmodule\n{\n}\n";
+    const ENTITY: &str = "<?php\n\nnamespace App\\Shop\\Records;\n\nclass Entity {}\n";
+    const COLUMN: &str = "<?php\n\nnamespace App\\Shop\\Records;\n\nclass Column {}\n";
+    const RECORDS_MODULE: &str = "namespace App.Shop.Records;\n\nmodule\n{\n}\n";
     let others = [
         ("src/Vendor/Pdf/Pdf.php", PDF),
         ("src/Vendor/Foundation/helpers.php", HELPERS),
         ("src/Vendor/Foundation/Application.php", APPLICATION),
         ("src/App/Shared/Money.php", MONEY),
-        ("src/App/Shared/Schema/Entity.php", ENTITY),
-        ("src/App/Shared/Schema/Column.php", COLUMN),
-        ("src/App/Shared/Schema/Module.sharp", SCHEMA_MODULE),
+        ("src/App/Shop/Records/Entity.php", ENTITY),
+        ("src/App/Shop/Records/Column.php", COLUMN),
+        ("src/App/Shop/Records/Module.sharp", RECORDS_MODULE),
         (
             "src/App/Externs.sharp",
             "namespace App;\n\nimport Vendor.Foundation;\n\nextern namespace Foundation for abort;\nextern namespace Foundation for LARAVEL;\n",
@@ -11867,9 +11867,9 @@ fn an_import_names_a_class_or_a_namespace_of_functions_and_constants() {
         ),
         ("Log", Some("non-existent-use-import Imported class, interface, trait, or enum `Log` does not exist.")),
         (
-            "App.Shared.Schema",
+            "App.Shop.Records",
             Some(
-                "class-namespace-import `App.Shared.Schema` holds classes only, and an import names a class or a namespace of functions: import the class, as in `import App.Shared.Schema.Column;` or `import App.Shared.Schema.Entity;`.",
+                "class-namespace-import `App.Shop.Records` holds classes only, and an import names a class or a namespace of functions: import the class, as in `import App.Shop.Records.Column;` or `import App.Shop.Records.Entity;`.",
             ),
         ),
         (
@@ -31903,17 +31903,17 @@ fn an_environment_or_test_module_is_checked_with_the_base_bindings_it_changes() 
     }
 }
 
-/// The module of spec section 32's `imports` example: `App.Tenant.Store` imports only from `App.Tenant.Community`,
-/// `App.Shared.Schema` and `Illuminate.Support`.
+/// The module of spec section 32's `imports` example: `App.Tenant.Store` imports only from `App.Shop.Loyalty`,
+/// `App.Shop.Records` and `Illuminate.Support`.
 const STORE_MODULE: (&str, &str) = (
     "app/Tenant/Store/Module.sharp",
-    "namespace App.Tenant.Store;\n\nmodule\n{\n    imports App.Tenant.Community, App.Shared.Schema, Illuminate.Support;\n}\n",
+    "namespace App.Tenant.Store;\n\nmodule\n{\n    imports App.Shop.Loyalty, App.Shop.Records, Illuminate.Support;\n}\n",
 );
 
 /// The classes the `imports` tests import, one in each namespace they reach.
 const LISTED_CLASSES: [(&str, &str); 7] = [
-    ("app/Tenant/Community/Member.sharp", "namespace App.Tenant.Community;\n\npublic class Member\n{\n}\n"),
-    ("app/Shared/Schema/Table.sharp", "namespace App.Shared.Schema;\n\npublic class Table\n{\n}\n"),
+    ("app/Shop/Loyalty/Member.sharp", "namespace App.Shop.Loyalty;\n\npublic class Member\n{\n}\n"),
+    ("app/Shop/Records/Table.sharp", "namespace App.Shop.Records;\n\npublic class Table\n{\n}\n"),
     (
         "app/Shared/Ledger/Entry.sharp",
         "namespace App.Shared.Ledger;\n\npublic class Entry\n{\n    public static int record() => 1;\n}\n",
@@ -31956,14 +31956,14 @@ fn an_import_outside_the_list_of_its_namespace_is_refused_at_the_import() {
     let service = importing(
         "app/Tenant/Store/StoreService.sharp",
         "App.Tenant.Store",
-        &["App.Tenant.Community.Member", "Illuminate.Support.Facades.DB", "App.Shared.Ledger.Entry"],
+        &["App.Shop.Loyalty.Member", "Illuminate.Support.Facades.DB", "App.Shared.Ledger.Entry"],
     );
     let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([STORE_MODULE]).collect();
 
     assert_eq!(
         worded(service, &others),
         [
-            "5:8 unlisted-import `App.Tenant.Store` imports only `App.Tenant.Community`, `App.Shared.Schema` and `Illuminate.Support`. | Imports `App.Shared.Ledger.Entry`. | The list is the `imports` line of app/Tenant/Store/Module.sharp."
+            "5:8 unlisted-import `App.Tenant.Store` imports only `App.Shop.Loyalty`, `App.Shop.Records` and `Illuminate.Support`. | Imports `App.Shared.Ledger.Entry`. | The list is the `imports` line of app/Tenant/Store/Module.sharp."
         ]
     );
 }
@@ -31983,7 +31983,7 @@ fn an_import_of_the_namespace_of_a_library_s_root_functions_is_held_to_the_list(
     assert_eq!(
         worded(till, &others),
         [
-            "3:8 unlisted-import `App.Tenant.Store` imports only `App.Tenant.Community`, `App.Shared.Schema` and `Illuminate.Support`. | Imports `Illuminate.Foundation`. | The list is the `imports` line of app/Tenant/Store/Module.sharp."
+            "3:8 unlisted-import `App.Tenant.Store` imports only `App.Shop.Loyalty`, `App.Shop.Records` and `Illuminate.Support`. | Imports `Illuminate.Foundation`. | The list is the `imports` line of app/Tenant/Store/Module.sharp."
         ]
     );
 }
@@ -31995,7 +31995,7 @@ fn an_import_of_the_namespace_of_a_library_s_root_functions_is_held_to_the_list(
 fn a_namespace_with_no_list_imports_from_any_namespace() {
     let tenant_module = (
         "app/Tenant/Module.sharp",
-        "namespace App.Tenant;\n\nimport App.Tenant.Community.Member;\n\nmodule\n{\n    transient Member = Member;\n}\n",
+        "namespace App.Tenant;\n\nimport App.Shop.Loyalty.Member;\n\nmodule\n{\n    transient Member = Member;\n}\n",
     );
     let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([STORE_MODULE, tenant_module]).collect();
 
@@ -32023,25 +32023,19 @@ fn a_namespace_with_no_list_imports_from_any_namespace() {
 fn an_import_passes_the_list_of_its_namespace_and_of_each_namespace_above_it() {
     let checkout_module = (
         "app/Tenant/Store/Checkout/Module.sharp",
-        "namespace App.Tenant.Store.Checkout;\n\nmodule\n{\n    imports App.Tenant.Store, App.Shared.Schema, App.Shared.Ledger;\n}\n",
+        "namespace App.Tenant.Store.Checkout;\n\nmodule\n{\n    imports App.Tenant.Store, App.Shop.Records, App.Shared.Ledger;\n}\n",
     );
     let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([STORE_MODULE, checkout_module, DISPATCHER]).collect();
-    let store =
-        "`App.Tenant.Store` imports only `App.Tenant.Community`, `App.Shared.Schema` and `Illuminate.Support`. | ";
+    let store = "`App.Tenant.Store` imports only `App.Shop.Loyalty`, `App.Shop.Records` and `Illuminate.Support`. | ";
     let checkout =
-        "`App.Tenant.Store.Checkout` imports only `App.Tenant.Store`, `App.Shared.Schema` and `App.Shared.Ledger`. | ";
+        "`App.Tenant.Store.Checkout` imports only `App.Tenant.Store`, `App.Shop.Records` and `App.Shared.Ledger`. | ";
 
     for (importer, expected) in [
         (
             importing(
                 "app/Tenant/Store/Receipts/Printer.sharp",
                 "App.Tenant.Store.Receipts",
-                &[
-                    "App.Tenant.Store.Checkout.Cart",
-                    "App.Tenant.Community.Member",
-                    "Sharp.Dispatcher",
-                    "App.Shared.Money",
-                ],
+                &["App.Tenant.Store.Checkout.Cart", "App.Shop.Loyalty.Member", "Sharp.Dispatcher", "App.Shared.Money"],
             ),
             vec![format!("6:8 unlisted-import {store}")],
         ),
@@ -32051,9 +32045,9 @@ fn an_import_passes_the_list_of_its_namespace_and_of_each_namespace_above_it() {
                 "App.Tenant.Store.Checkout",
                 &[
                     "App.Tenant.Store.Receipts.Receipt",
-                    "App.Shared.Schema.Table",
+                    "App.Shop.Records.Table",
                     "App.Shared.Ledger.Entry",
-                    "App.Tenant.Community.Member",
+                    "App.Shop.Loyalty.Member",
                     "Illuminate.Support.Facades.DB",
                 ],
             ),
@@ -32074,22 +32068,21 @@ fn an_import_passes_the_list_of_its_namespace_and_of_each_namespace_above_it() {
 fn a_full_name_in_code_counts_as_an_import() {
     let service = (
         "app/Tenant/Store/StoreService.sharp",
-        "namespace App.Tenant.Store;\n\npublic class StoreService\n{\n    public int recorded() => App.Shared.Ledger.Entry.record();\n    public void hold(App.Shared.Ledger.Entry entry, App.Tenant.Community.Member member) { }\n    public int totalled() => App.Shared.Ledger.total();\n}\n",
+        "namespace App.Tenant.Store;\n\npublic class StoreService\n{\n    public int recorded() => App.Shared.Ledger.Entry.record();\n    public void hold(App.Shared.Ledger.Entry entry, App.Shop.Loyalty.Member member) { }\n    public int totalled() => App.Shared.Ledger.total();\n}\n",
     );
     let total = (
         "app/Shared/Ledger/functions.php",
         "<?php\n\nnamespace App\\Shared\\Ledger;\n\nfunction total(): int\n{\n    return 1;\n}\n",
     );
     let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([STORE_MODULE, total]).collect();
-    let refused =
-        "`App.Tenant.Store` imports only `App.Tenant.Community`, `App.Shared.Schema` and `Illuminate.Support`. | ";
+    let refused = "`App.Tenant.Store` imports only `App.Shop.Loyalty`, `App.Shop.Records` and `Illuminate.Support`. | ";
 
     assert_eq!(
         refusals(service, &others),
         [
             format!("5:30 unlisted-import {refused}"),
             format!("6:22 unlisted-import {refused}"),
-            "6:53 non-existent-class-like Full names appear only in `import` lines: add `import App.Tenant.Community.Member;` and write `Member`. | In code, `.` is always member access, so a class is written by the short name its import brings in.".to_owned(),
+            "6:53 non-existent-class-like Full names appear only in `import` lines: add `import App.Shop.Loyalty.Member;` and write `Member`. | In code, `.` is always member access, so a class is written by the short name its import brings in.".to_owned(),
             format!("7:30 unlisted-import {refused}"),
         ]
     );
@@ -32109,7 +32102,7 @@ fn a_missing_import_is_suggested_only_when_the_list_allows_it() {
         refusals(service, &others),
         [
             "5:22 non-existent-class-like `Entry` is not imported. | `App.Shared.Ledger.Entry` is outside `App.Tenant.Store`'s list, the `imports` line of app/Tenant/Store/Module.sharp.",
-            "5:35 non-existent-class-like `Member` is not imported. | Add `import App.Tenant.Community.Member;` to the file.",
+            "5:35 non-existent-class-like `Member` is not imported. | Add `import App.Shop.Loyalty.Member;` to the file.",
         ]
     );
 }
@@ -32119,13 +32112,13 @@ fn a_missing_import_is_suggested_only_when_the_list_allows_it() {
 #[test]
 fn a_help_names_each_class_outside_the_list_once() {
     let membership = (
-        "app/Tenant/Community/Membership.sharp",
-        "namespace App.Tenant.Community;\n\nimport App.Shared.Ledger.Account;\nimport App.Shared.Ledger.Entry;\n\npublic class Membership\n{\n    public Membership(Entry first, Entry second, Account account) { }\n}\n",
+        "app/Shop/Loyalty/Membership.sharp",
+        "namespace App.Shop.Loyalty;\n\nimport App.Shared.Ledger.Account;\nimport App.Shared.Ledger.Entry;\n\npublic class Membership\n{\n    public Membership(Entry first, Entry second, Account account) { }\n}\n",
     );
     let account = ("app/Shared/Ledger/Account.sharp", "namespace App.Shared.Ledger;\n\npublic class Account\n{\n}\n");
     let shopper = (
         "app/Tenant/Store/Shopper.sharp",
-        "namespace App.Tenant.Store;\n\nimport App.Tenant.Community.Membership;\n\npublic class Shopper : Membership\n{\n    protected string label = Shopper.shout(\"x\");\n\n    public static string shout(string text) => text + \"!\";\n}\n",
+        "namespace App.Tenant.Store;\n\nimport App.Shop.Loyalty.Membership;\n\npublic class Shopper : Membership\n{\n    protected string label = Shopper.shout(\"x\");\n\n    public static string shout(string text) => text + \"!\";\n}\n",
     );
     let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([STORE_MODULE, membership, account]).collect();
 
@@ -32141,19 +32134,19 @@ fn a_help_names_each_class_outside_the_list_once() {
 /// entry the list above it leaves out allows nothing.
 #[test]
 fn a_nested_list_entry_outside_its_parent_s_list_is_refused() {
-    let tenant = ("app/Tenant/Module.sharp", "namespace App.Tenant;\n\nmodule\n{\n    imports App.Shared;\n}\n");
+    let tenant = ("app/Tenant/Module.sharp", "namespace App.Tenant;\n\nmodule\n{\n    imports App.Shop;\n}\n");
     let store = (
         "app/Tenant/Store/Module.sharp",
-        "namespace App.Tenant.Store;\n\nmodule\n{\n    imports App.Shared.Schema, App.Billing;\n}\n",
+        "namespace App.Tenant.Store;\n\nmodule\n{\n    imports App.Shop.Records, App.Billing;\n}\n",
     );
     let invoices = ("app/Billing/Invoice.sharp", "namespace App.Billing;\n\npublic class Invoice\n{\n}\n");
-    let schema = ("app/Shared/Schema/Table.sharp", "namespace App.Shared.Schema;\n\npublic class Table\n{\n}\n");
-    let files: Vec<_> = LISTED_CLASSES.iter().copied().chain([invoices, schema, tenant]).collect();
+    let records = ("app/Shop/Records/Table.sharp", "namespace App.Shop.Records;\n\npublic class Table\n{\n}\n");
+    let files: Vec<_> = LISTED_CLASSES.iter().copied().chain([invoices, records, tenant]).collect();
 
     assert_eq!(
         refusals(store, &files),
         [
-            "5:32 unlisted-import `App.Billing` is outside `App.Tenant`'s list, so this entry allows nothing. | Add `App.Billing` to `App.Tenant`'s list, or remove this entry."
+            "5:31 unlisted-import `App.Billing` is outside `App.Tenant`'s list, so this entry allows nothing. | Add `App.Billing` to `App.Tenant`'s list, or remove this entry."
         ]
     );
 }
@@ -32168,9 +32161,9 @@ fn lists_that_name_each_other_are_refused_at_each_imports_line() {
 
         (path, leak(format!("namespace {namespace};\n\nmodule\n{{\n    imports {listed};\n}}\n")))
     };
-    let store = module("App.Tenant.Store", "App.Tenant.Community, App.Shared");
-    let schema = module("App.Shared.Schema", "App.Tenant.Store");
-    let community = module("App.Tenant.Community", "App.Billing");
+    let store = module("App.Tenant.Store", "App.Shop.Loyalty, App.Shop");
+    let records = module("App.Shop.Records", "App.Tenant.Store");
+    let loyalty = module("App.Shop.Loyalty", "App.Billing");
     let billing = module("App.Billing", "App.Tenant.Store");
     let invoices = ("app/Billing/Invoice.sharp", "namespace App.Billing;\n\npublic class Invoice\n{\n}\n");
     let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([invoices]).collect();
@@ -32180,46 +32173,44 @@ fn lists_that_name_each_other_are_refused_at_each_imports_line() {
     let help = " | Remove one of these names, so the namespaces import one way.";
 
     assert_eq!(
-        refusals(store, &with(&[schema])),
+        refusals(store, &with(&[records])),
         [format!(
-            "5:35 import-cycle `App.Tenant.Store` and `App.Shared.Schema` import from each other: `App.Tenant.Store` lists `App.Shared`, and `App.Shared.Schema` lists `App.Tenant.Store`.{help}"
+            "5:31 import-cycle `App.Tenant.Store` and `App.Shop.Records` import from each other: `App.Tenant.Store` lists `App.Shop`, and `App.Shop.Records` lists `App.Tenant.Store`.{help}"
         )]
     );
     assert_eq!(
-        refusals(schema, &with(&[store])),
+        refusals(records, &with(&[store])),
         [format!(
-            "5:13 import-cycle `App.Shared.Schema` and `App.Tenant.Store` import from each other: `App.Shared.Schema` lists `App.Tenant.Store`, and `App.Tenant.Store` lists `App.Shared`.{help}"
+            "5:13 import-cycle `App.Shop.Records` and `App.Tenant.Store` import from each other: `App.Shop.Records` lists `App.Tenant.Store`, and `App.Tenant.Store` lists `App.Shop`.{help}"
         )]
     );
     assert_eq!(
-        refusals(community, &with(&[store, billing])),
+        refusals(loyalty, &with(&[store, billing])),
         [format!(
-            "5:13 import-cycle `App.Tenant.Community`, `App.Billing` and `App.Tenant.Store` import from each other: `App.Tenant.Community` lists `App.Billing`, `App.Billing` lists `App.Tenant.Store`, and `App.Tenant.Store` lists `App.Tenant.Community`.{help}"
+            "5:13 import-cycle `App.Shop.Loyalty`, `App.Billing` and `App.Tenant.Store` import from each other: `App.Shop.Loyalty` lists `App.Billing`, `App.Billing` lists `App.Tenant.Store`, and `App.Tenant.Store` lists `App.Shop.Loyalty`.{help}"
         )]
     );
-    // Neither `App.Tenant.Community` nor `App.Shared` has a list, so the chain from `App.Billing` ends at them.
+    // Neither `App.Shop.Loyalty` nor `App.Shop` has a list, so the chain from `App.Billing` ends at them.
     assert_eq!(refusals(billing, &with(&[store])), Vec::<String>::new());
 
     // A listed name below the other list's namespace leads to it too.
-    let columns = (
-        "app/Shared/Schema/Columns/Column.sharp",
-        "namespace App.Shared.Schema.Columns;\n\npublic class Column\n{\n}\n",
-    );
-    let store_to_columns = module("App.Tenant.Store", "App.Tenant.Community, App.Shared.Schema.Columns");
+    let columns =
+        ("app/Shop/Records/Columns/Column.sharp", "namespace App.Shop.Records.Columns;\n\npublic class Column\n{\n}\n");
+    let store_to_columns = module("App.Tenant.Store", "App.Shop.Loyalty, App.Shop.Records.Columns");
     assert_eq!(
-        refusals(store_to_columns, &with(&[schema, columns])),
+        refusals(store_to_columns, &with(&[records, columns])),
         [format!(
-            "5:35 import-cycle `App.Tenant.Store` and `App.Shared.Schema` import from each other: `App.Tenant.Store` lists `App.Shared.Schema.Columns`, and `App.Shared.Schema` lists `App.Tenant.Store`.{help}"
+            "5:31 import-cycle `App.Tenant.Store` and `App.Shop.Records` import from each other: `App.Tenant.Store` lists `App.Shop.Records.Columns`, and `App.Shop.Records` lists `App.Tenant.Store`.{help}"
         )]
     );
 
-    // Two chains from `App.Tenant.Store` meet at `App.Tenant.Community` before it leads back, and one cycle is refused.
-    let branching = module("App.Tenant.Store", "App.Billing, App.Shared.Schema");
-    let schema_to_community = module("App.Shared.Schema", "App.Tenant.Community");
-    let billing_to_community = module("App.Billing", "App.Tenant.Community");
-    let community_to_store = module("App.Tenant.Community", "App.Tenant.Store");
+    // Two chains from `App.Tenant.Store` meet at `App.Shop.Loyalty` before it leads back, and one cycle is refused.
+    let branching = module("App.Tenant.Store", "App.Billing, App.Shop.Records");
+    let records_to_loyalty = module("App.Shop.Records", "App.Shop.Loyalty");
+    let billing_to_loyalty = module("App.Billing", "App.Shop.Loyalty");
+    let loyalty_to_store = module("App.Shop.Loyalty", "App.Tenant.Store");
     assert_eq!(
-        codes(&issues(branching, &with(&[schema_to_community, billing_to_community, community_to_store]))),
+        codes(&issues(branching, &with(&[records_to_loyalty, billing_to_loyalty, loyalty_to_store]))),
         ["import-cycle"]
     );
 }
@@ -32230,13 +32221,13 @@ fn lists_that_name_each_other_are_refused_at_each_imports_line() {
 fn a_listed_name_that_names_no_namespace_is_an_unknown_name() {
     let module = (
         "app/Tenant/Store/Module.sharp",
-        "namespace App.Tenant.Store;\n\nmodule\n{\n    imports App.Tenant.Community, App.Shared.Ledgr;\n}\n",
+        "namespace App.Tenant.Store;\n\nmodule\n{\n    imports App.Shop.Loyalty, App.Shared.Ledgr;\n}\n",
     );
 
     assert_eq!(
         refusals(module, &LISTED_CLASSES),
         [
-            "5:35 non-existent-use-import Imported namespace `App.Shared.Ledgr` does not exist. | Ensure that the namespace `App.Shared.Ledgr` is defined in the codebase."
+            "5:31 non-existent-use-import Imported namespace `App.Shared.Ledgr` does not exist. | Ensure that the namespace `App.Shared.Ledgr` is defined in the codebase."
         ]
     );
 }

@@ -5232,7 +5232,7 @@ fn a_module_binding_is_its_lifetime_service_parameters_target_and_value() {
 /// binding and a law after it still parse, and `imports` stays a name everywhere else, as a binding's service.
 #[test]
 fn a_module_lists_the_namespaces_it_imports() {
-    const CODE: &str = "namespace App.Tenant.Store;\n\nmodule\n{\n    imports App.Tenant.Community, App.Shared.Schema, Illuminate.Support;\n    singleton imports = Imports;\n    law same(int a) => a == a;\n}\n";
+    const CODE: &str = "namespace App.Tenant.Store;\n\nmodule\n{\n    imports App.Shop.Loyalty, App.Shop.Records, Illuminate.Support;\n    singleton imports = Imports;\n    law same(int a) => a == a;\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "app/Tenant/Store/Module.sharp", CODE);
 
@@ -5248,10 +5248,10 @@ fn a_module_lists_the_namespaces_it_imports() {
     else {
         panic!("expected an imports line, a binding and a law, got {:#?}", module.members);
     };
-    assert_eq!(source(CODE, imports), "imports App.Tenant.Community, App.Shared.Schema, Illuminate.Support;");
+    assert_eq!(source(CODE, imports), "imports App.Shop.Loyalty, App.Shop.Records, Illuminate.Support;");
     assert_eq!(
         imports.namespaces.iter().map(|namespace| source(CODE, namespace)).collect::<Vec<_>>(),
-        ["App.Tenant.Community", "App.Shared.Schema", "Illuminate.Support"]
+        ["App.Shop.Loyalty", "App.Shop.Records", "Illuminate.Support"]
     );
     assert_eq!(source(CODE, &binding.service), "imports");
     assert_eq!(law.name.value, b"same");

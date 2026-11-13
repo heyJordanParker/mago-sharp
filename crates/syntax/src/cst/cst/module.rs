@@ -25,7 +25,7 @@ use crate::cst::sequence::TokenSeparatedSequence;
 /// ```csharp
 /// module
 /// {
-///     imports App.Tenant.Community, App.Shared.Schema;
+///     imports App.Shop.Loyalty, App.Shop.Records;
 ///     singleton Mailer = SmtpMailer;
 ///     law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);
 /// }
@@ -66,7 +66,7 @@ pub enum ModuleMember<'arena> {
 /// Example:
 ///
 /// ```csharp
-/// imports App.Tenant.Community, App.Shared.Schema, Illuminate.Support;
+/// imports App.Shop.Loyalty, App.Shop.Records, Illuminate.Support;
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]

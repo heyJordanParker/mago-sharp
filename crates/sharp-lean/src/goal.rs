@@ -365,7 +365,7 @@ mod tests {
     /// it: a case on its enum, and a `bool` as itself or its negation.
     #[test]
     fn a_split_s_goal_names_the_case_of_each_enum_value() {
-        let goal = r#"["split",[["retry","App.Shared.Events.Retry.ExponentialRamp"],["slow","Bool.false"]],["app","LE.le",["var","index"],["lit","1"]]]"#;
+        let goal = r#"["split",[["retry","App.Jobs.Retry.ExponentialRamp"],["slow","Bool.false"]],["app","LE.le",["var","index"],["lit","1"]]]"#;
         let (receivers, declared) = (HashMap::default(), HashSet::default());
 
         assert_eq!(
