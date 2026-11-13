@@ -446,24 +446,66 @@ fn a_member_inherited_from_a_plain_php_parent_is_not_too_wide() {
     );
 }
 
-/// Spec section 5: a member with an attribute is reached by the code that reads the attribute, through reflection,
-/// which no checker sees, so it never warns, as a `[Listen]` method or a `[Field]` property. The same members
-/// without an attribute still warn.
+/// Spec section 5: a member whose attribute's class is marked `[ReachedByReflection]` is reached by the framework that
+/// reads the attribute, through reflection, which no checker sees, so it never warns. So are a plain PHP `[Listen]`
+/// method and `[Field]` property, and a PHP# `[Route]` method. Any other attribute, as PHP's `[Deprecated]`, says
+/// nothing about who uses a member, so its property, method and constant warn as members without one do.
 #[test]
-fn a_public_member_with_an_attribute_is_not_too_wide() {
-    let listen = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_METHOD)]\nfinal class Listen\n{\n}\n";
-    let field = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_PROPERTY)]\nfinal class Field\n{\n}\n";
-    let hooks = "namespace App.Payments;\n\nimport Lib.Field;\nimport Lib.Listen;\n\npublic class Hooks\n{\n    [Field]\n    public string title { get; } = \"hooks\";\n\n    public string label { get; } = \"hooks\";\n\n    [Listen]\n    public void paid() { }\n\n    public void refunded() { }\n}\n";
+fn a_public_member_whose_attribute_a_framework_reads_by_reflection_is_not_too_wide() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ReachedByReflection.sharp",
+        include_str!("../../../../composer/library/Sharp/ReachedByReflection.sharp"),
+    );
+    let listen = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_METHOD)]\n#[\\Sharp\\ReachedByReflection]\nfinal class Listen\n{\n}\n";
+    let field = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_PROPERTY | \\Attribute::TARGET_CLASS_CONSTANT)]\n#[\\Sharp\\ReachedByReflection]\nfinal class Field\n{\n}\n";
+    let route = "namespace App.Web;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_METHOD)]\n[ReachedByReflection]\npublic class Route\n{\n}\n";
+    let hooks = "namespace App.Payments;\n\nimport App.Web.Route;\nimport Deprecated;\nimport Lib.Field;\nimport Lib.Listen;\n\npublic class Hooks\n{\n    [Field]\n    public const int LIMIT = 3;\n\n    [Deprecated]\n    public const int CAP = 4;\n\n    [Field]\n    public string title { get; } = \"hooks\";\n\n    [Deprecated]\n    public string label { get; } = \"hooks\";\n\n    [Listen]\n    public void paid() { }\n\n    [Route]\n    public void refunded() { }\n\n    [Deprecated]\n    public void voided() { }\n\n    public void settled() { }\n}\n";
 
     assert_eq!(
         too_wide(&[
+            marker,
             ("src/Lib/Listen.php", listen),
             ("src/Lib/Field.php", field),
+            ("src/App/Web/Route.sharp", route),
             ("src/App/Payments/Hooks.sharp", hooks),
         ]),
         [
-            "src/App/Payments/Hooks.sharp 11:19 `Hooks.label` is public, and nothing outside `App.Payments` uses it.",
-            "src/App/Payments/Hooks.sharp 16:17 `Hooks.refunded` is public, and nothing outside `App.Payments` uses it.",
+            "src/App/Payments/Hooks.sharp 14:22 `Hooks.CAP` is public, and nothing outside `App.Payments` uses it.",
+            "src/App/Payments/Hooks.sharp 20:19 `Hooks.label` is public, and nothing outside `App.Payments` uses it.",
+            "src/App/Payments/Hooks.sharp 29:17 `Hooks.voided` is public, and nothing outside `App.Payments` uses it.",
+            "src/App/Payments/Hooks.sharp 31:17 `Hooks.settled` is public, and nothing outside `App.Payments` uses it.",
+        ]
+    );
+}
+
+/// Spec sections 5 and 23: plain PHP calls an `[Export]` method through the global function it declares, which the
+/// checker never sees, so the method never warns. The other marks say nothing about who reaches their member, so an
+/// `[Import]` method and a `[Key]` property warn as members without them do. An `override` and an `internal` member
+/// never warn by their modifiers. The bridge writes `#[\Override]`, `#[\Sharp\Internal\Internal]` and, on a `List`
+/// property, `#[\Sharp\Crossing]` into the lowered file only, which the checker never reads, so `amounts` warns.
+#[test]
+fn an_exported_method_is_not_too_wide_and_the_other_marks_change_nothing() {
+    let export = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Interop/Export.sharp",
+        include_str!("../../../../composer/library/Sharp/Interop/Export.sharp"),
+    );
+    let import = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Interop/Import.sharp",
+        include_str!("../../../../composer/library/Sharp/Interop/Import.sharp"),
+    );
+    let key = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Key.sharp",
+        include_str!("../../../../composer/library/Sharp/Key.sharp"),
+    );
+    let base = "<?php\n\nnamespace Lib;\n\nclass Base\n{\n    public function label(): string\n    {\n        return 'base';\n    }\n}\n";
+    let pricing = "namespace App.Shop;\n\nimport Lib.Base;\nimport Sharp.Interop.Export;\nimport Sharp.Interop.Import;\n\npublic class Pricing : Base\n{\n    [Key(\"order_id\")]\n    public int id { get; } = 0;\n\n    public List<int> amounts { get; set; } = [];\n\n    internal int stock { get; set; } = 0;\n\n    [Export(\"format_price\")]\n    public static string formatPrice(int cents) => `${cents}`;\n\n    [Import(\"levenshtein\")]\n    public static int distance(string from, string to);\n\n    public override string label() => \"pricing\";\n}\n";
+
+    assert_eq!(
+        too_wide(&[export, import, key, ("src/Lib/Base.php", base), ("src/App/Shop/Pricing.sharp", pricing)]),
+        [
+            "src/App/Shop/Pricing.sharp 10:16 `Pricing.id` is public, and nothing outside `App.Shop` uses it.",
+            "src/App/Shop/Pricing.sharp 12:22 `Pricing.amounts` is public, and nothing outside `App.Shop` uses it.",
+            "src/App/Shop/Pricing.sharp 20:23 `Pricing.distance` is public, and nothing outside `App.Shop` uses it.",
         ]
     );
 }

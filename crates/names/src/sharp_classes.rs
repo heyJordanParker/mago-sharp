@@ -4,7 +4,7 @@
 
 /// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the
 /// prelude, which the engine declares. Sorted.
-pub(crate) const SHARP_CLASSES: [&str; 31] = [
+pub(crate) const SHARP_CLASSES: [&str; 32] = [
     "Sharp\\Behavior",
     "Sharp\\Bool",
     "Sharp\\Class",
@@ -31,6 +31,7 @@ pub(crate) const SHARP_CLASSES: [&str; 31] = [
     "Sharp\\Position",
     "Sharp\\Property",
     "Sharp\\Random",
+    "Sharp\\ReachedByReflection",
     "Sharp\\Result",
     "Sharp\\Scope",
     "Sharp\\Set",

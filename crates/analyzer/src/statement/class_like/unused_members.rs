@@ -21,11 +21,14 @@ use foldhash::HashSet;
 use mago_allocator::Arena;
 
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::attribute::AttributeMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferenceKind;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::symbol::SymbolIdentifier;
+use mago_names::EXPORT;
+use mago_names::REACHED_BY_REFLECTION;
 use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -660,7 +663,7 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
     for (name, property) in &class.properties {
         if class.declaring_property_ids.get(name) == Some(&class_name)
             && property.read_visibility.is_public()
-            && property.attributes.is_empty()
+            && !is_reached_by_reflection(codebase, &property.attributes)
             && !property.flags.is_internal_reach()
             && !class.overridden_property_ids.contains_key(name)
             && let Some(span) = property.name_span.or(property.span)
@@ -673,11 +676,14 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
         class.methods.iter().filter_map(|name| Some((name, codebase.function_likes.get(&(class_name, *name))?)));
     for (name, method) in methods {
         // A method the codex gives the class, such as section 10's `parse`, spans the whole class, and nobody wrote it.
-        // PHP calls a magic method itself, and `new` calls the constructor, which takes the reach of its class.
+        // PHP calls a magic method itself, and `new` calls the constructor, which takes the reach of its class. Plain
+        // PHP calls an `[Export]` method through the global function it declares, spec section 23, which the checker
+        // never sees.
         if method.span != class.span
             && class.declaring_method_ids.get(name).is_none_or(|declaring| declaring.get_class_name() == class_name)
             && method.method_metadata.as_ref().is_some_and(|metadata| metadata.visibility.is_public())
-            && method.attributes.is_empty()
+            && !is_reached_by_reflection(codebase, &method.attributes)
+            && !method.has_attribute(codebase, EXPORT.as_bytes())
             && !method.flags.is_internal_reach()
             && !name.as_bytes().starts_with(b"__")
             && !class.overridden_method_ids.contains_key(name)
@@ -692,7 +698,7 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
         if constant.span.file_id == class.span.file_id
             && class.span.contains(&constant.span)
             && constant.visibility.is_public()
-            && constant.attributes.is_empty()
+            && !is_reached_by_reflection(codebase, &constant.attributes)
             && !constant.flags.is_internal_reach()
         {
             members.push((*name, *name, constant.span));
@@ -700,4 +706,17 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
     }
 
     members
+}
+
+/// Whether one of `attributes` is of a class marked [`REACHED_BY_REFLECTION`], as a router's `[Route]`, whose framework
+/// reaches the member it marks by reflection, which the checker never sees. Any other attribute, as `[Deprecated]`, says
+/// nothing about who uses the member.
+fn is_reached_by_reflection(codebase: &CodebaseMetadata, attributes: &[AttributeMetadata]) -> bool {
+    let mark = codebase.class_key(REACHED_BY_REFLECTION.as_bytes());
+
+    attributes.iter().any(|attribute| {
+        codebase.get_class_like(attribute.name.as_bytes()).is_some_and(|class| {
+            class.attributes.iter().any(|marked| codebase.class_key(marked.name.as_bytes()) == mark)
+        })
+    })
 }

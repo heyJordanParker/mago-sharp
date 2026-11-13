@@ -49,6 +49,12 @@ pub const IMPORT: &str = "Sharp\\Interop\\Import";
 /// spec section 23, as `[Export("auth_redirect")]`.
 pub const EXPORT: &str = "Sharp\\Interop\\Export";
 
+/// The mark of an attribute class whose framework reaches the member its attribute marks by reflection.
+///
+/// Spec section 5: as .NET's `[DynamicallyAccessedMembers]` says a member is reached, so the member never warns that it
+/// is too wide.
+pub const REACHED_BY_REFLECTION: &str = "Sharp\\ReachedByReflection";
+
 /// The mark of a parameter whose argument a method writes as JSON text.
 ///
 /// The standard library marks `Json.encode`'s, so the checker refuses a `Map` key JSON can't write. The checker reads
