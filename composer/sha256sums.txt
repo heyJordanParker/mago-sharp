@@ -1,0 +1,8 @@
+6ed5dd42fd68c04402d5ee49df15c100791ff585dcd74d62c13454540e851b75  mago-0.6.10-aarch64-apple-darwin.tar.gz
+88073a9ebc57404459a1ccb23752f8dfacfb92b3546368e2ada820030675eaae  mago-0.6.10-aarch64-unknown-linux-gnu.tar.gz
+ae4b29af3fe7cec4d0a83879dfb58be68dee99b7170a52ba5c2bb39ddc9c4794  mago-0.6.10-aarch64-unknown-linux-musl.tar.gz
+3e8027bcb8e29a302d26a2527e522be693e5c63d2e1199c8dd87c3c76a2c6306  mago-0.6.10-source.tar.gz
+f80422773ec8f28ec6f0b8b33ab2402a491634bbe54b3dc5928b819ada5c0e2d  mago-0.6.10-source.zip
+37adbe23979a3d0cfeb6423d48bb3037cb1bff3ab8f32654c377a6a16511cf6f  mago-0.6.10-x86_64-apple-darwin.tar.gz
+f6a67ea5ddf23abed5cb4d7f23ff78ada05c3962f1975315e1303d89b5fb80be  mago-0.6.10-x86_64-unknown-linux-gnu.tar.gz
+d014211d689c20a75a2730cc8482a405904d7eba010cfb03661a5138563cd68a  mago-0.6.10-x86_64-unknown-linux-musl.tar.gz
