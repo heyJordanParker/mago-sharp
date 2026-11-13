@@ -15545,6 +15545,40 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
     );
 }
 
+/// Spec section 22: `override` replaces any inherited method, a trait's included, and PHP's `#[\Override]` counts only a
+/// parent class's and an interface's methods. So a method that replaces only a trait's, `label`, lowers without it,
+/// static or not, and one that replaces a parent class's, `status`, or a parent class's and a trait's, `both`, keeps it.
+#[test]
+fn an_override_of_a_trait_method_alone_has_no_override_attribute() {
+    let library = [(
+        "src/Lib/Drafts.php",
+        "<?php namespace Lib; class Base { protected function status(): string { return 'draft'; } protected function both(): string { return 'base'; } } trait Defaulted { protected function label(): string { return 'draft'; } protected static function kind(): string { return 'draft'; } protected function both(): string { return 'trait'; } }",
+    )];
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.Base;\nimport Lib.Defaulted;\n\npublic class Post : Base, Defaulted\n{\n    protected override string status() => \"published\";\n\n    protected override string label() => \"published\";\n\n    protected static override string kind() => \"published\";\n\n    protected override string both() => \"published\";\n}\n",
+        &library,
+    );
+    let attributes = |method: &str| lowered.render(lowered.child(lowered.method_named(method), 4));
+
+    assert_eq!(
+        ["status", "label", "kind", "both"].map(attributes).concat(),
+        indoc! {r#"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Override"
+                  null
+            null
+            null
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Override"
+                  null
+        "#}
+    );
+}
+
 /// ```php
 /// class Fancy implements \App\ShowsMore {
 ///     use \App\Shows\Defaults, \App\ShowsMore\Defaults {

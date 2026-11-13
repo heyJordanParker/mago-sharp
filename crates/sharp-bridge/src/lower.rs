@@ -2771,11 +2771,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         self.static_type_parameters = None;
         // A sub-interface's body that replaces its parent's default body runs as a method of its trait of default
-        // bodies, which has no parent, so only the interface's signature carries `#[\Override]`.
+        // bodies, which has no parent, so only the interface's signature carries `#[\Override]`. PHP's attribute counts
+        // only a parent class's and an interface's methods, so a method that replaces only a trait's has none.
         let r#override =
             method.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_))).filter(|_| {
-                first_statements.is_none()
-                    || self.types.class_declaration(self.class).kind != DeclarationKind::Interface
+                (first_statements.is_none()
+                    || self.types.class_declaration(self.class).kind != DeclarationKind::Interface)
+                    && self.types.replaces_inherited_method(self.class, php_method_name(method))
             });
         let attributes = self.attributes(&method.attribute_lists, r#override, None);
 
