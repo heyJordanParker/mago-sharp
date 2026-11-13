@@ -46,6 +46,8 @@ use mago_codex::populator::populate_codebase;
 use mago_codex::populator::populate_codebase_targeted;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
+use mago_codex::signature::DefSignatureNode;
+use mago_codex::signature::FileSignature;
 use mago_codex::signature_builder;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
@@ -949,13 +951,25 @@ impl IncrementalAnalysisService {
             let mut diff = CodebaseDiff::new();
             let mut old_sigs = CodebaseMetadata::new();
             let mut new_sigs = CodebaseMetadata::new();
+            // Both sides name each member by the key the last analysis's references hold it under, so a change meets
+            // every reference to what changed.
+            let keyed = |signature: &FileSignature| {
+                let mut signature = signature.clone();
+                for node in &mut signature.ast_nodes {
+                    for member in &mut node.children {
+                        member.name = member_key(&self.codebase, node.name, member);
+                    }
+                }
+
+                signature
+            };
 
             for (file_id, metadata) in &new_file_scans {
                 if let Some(old_sig) = self.codebase.get_file_signature(file_id) {
-                    old_sigs.set_file_signature(*file_id, old_sig.clone());
+                    old_sigs.set_file_signature(*file_id, keyed(old_sig));
                 }
                 if let Some(new_sig) = metadata.file_signatures.get(file_id) {
-                    new_sigs.set_file_signature(*file_id, new_sig.clone());
+                    new_sigs.set_file_signature(*file_id, keyed(new_sig));
                 }
             }
 
@@ -963,7 +977,7 @@ impl IncrementalAnalysisService {
                 if !current_file_ids.contains(&file_id)
                     && let Some(sig) = self.codebase.get_file_signature(&file_id)
                 {
-                    old_sigs.set_file_signature(file_id, sig.clone());
+                    old_sigs.set_file_signature(file_id, keyed(sig));
                 }
             }
 
@@ -1154,11 +1168,30 @@ impl IncrementalAnalysisService {
                     diff.add_keep_entry((node.name, mago_word::empty_word()));
 
                     for child in &node.children {
-                        diff.add_keep_entry((node.name, child.name));
+                        diff.add_keep_entry((node.name, member_key(&self.codebase, node.name, child)));
                     }
                 }
             }
         }
+
+        // Every symbol and member the scanned files declare, each member by the key the last analysis's references hold
+        // it under, whose references the analysis of those files records again.
+        let declared: HashSet<(mago_word::Word, mago_word::Word)> = new_file_scans
+            .iter()
+            .flat_map(|(_, metadata)| {
+                let members = metadata.file_signatures.values().flat_map(|sig| &sig.ast_nodes).flat_map(|node| {
+                    node.children.iter().map(|child| (node.name, member_key(&self.codebase, node.name, child)))
+                });
+
+                metadata
+                    .function_likes
+                    .keys()
+                    .copied()
+                    .chain(metadata.class_likes.keys().map(|name| (*name, mago_word::empty_word())))
+                    .chain(metadata.constants.keys().map(|name| (*name, mago_word::empty_word())))
+                    .chain(members)
+            })
+            .collect();
 
         let extension_reads = extension_reads(&self.file_states, &self.before_analysis_reads);
         if body_only {
@@ -1175,37 +1208,14 @@ impl IncrementalAnalysisService {
             let mut symbol_references = std::mem::take(&mut self.native_symbol_references);
             symbol_references.retain_references_from_files(&current_file_names);
 
-            let mut changed_symbols: HashSet<(mago_word::Word, mago_word::Word)> = HashSet::default();
-            let mut changed_file_names: Vec<mago_word::Word> = Vec::new();
+            // Collect file names for file-level reference cleanup
+            let changed_file_names: Vec<mago_word::Word> = new_file_scans
+                .iter()
+                .filter_map(|(file_id, _)| self.database.get(file_id).ok())
+                .map(|file| mago_word::word(&file.name))
+                .collect();
 
-            for (file_id, metadata) in &new_file_scans {
-                for &key in metadata.function_likes.keys() {
-                    changed_symbols.insert(key);
-                }
-
-                for &name in metadata.class_likes.keys() {
-                    changed_symbols.insert((name, mago_word::empty_word()));
-                }
-
-                for &name in metadata.constants.keys() {
-                    changed_symbols.insert((name, mago_word::empty_word()));
-                }
-
-                if let Some(sig) = metadata.file_signatures.values().next() {
-                    for node in &sig.ast_nodes {
-                        for child in &node.children {
-                            changed_symbols.insert((node.name, child.name));
-                        }
-                    }
-                }
-
-                // Collect file names for file-level reference cleanup
-                if let Ok(file) = self.database.get(file_id) {
-                    changed_file_names.push(mago_word::word(&file.name));
-                }
-            }
-
-            symbol_references.remove_body_references_for_symbols(&changed_symbols, &changed_file_names);
+            symbol_references.remove_body_references_for_symbols(&declared, &changed_file_names);
 
             // Collect class_like names from changed files so we exclude them from safe_symbols.
             // Changed classes had their old metadata removed and fresh (unpopulated) metadata added,
@@ -1223,7 +1233,7 @@ impl IncrementalAnalysisService {
                 &mut symbol_references,
                 safe_symbols,
                 HashSet::default(),
-                changed_symbols,
+                declared,
             );
             let SelectiveAnalysisOutput {
                 result: mut analysis_result,
@@ -1408,19 +1418,7 @@ impl IncrementalAnalysisService {
         let safe_symbol_members = std::mem::take(&mut merged_codebase.safe_symbol_members);
 
         let mut dirty_symbols: HashSet<(mago_word::Word, mago_word::Word)> = diff.get_changed().clone();
-        for (_file_id, metadata) in &new_file_scans {
-            for &key in metadata.function_likes.keys() {
-                dirty_symbols.insert(key);
-            }
-
-            for &name in metadata.class_likes.keys() {
-                dirty_symbols.insert((name, mago_word::empty_word()));
-            }
-
-            for &name in metadata.constants.keys() {
-                dirty_symbols.insert((name, mago_word::empty_word()));
-            }
-        }
+        dirty_symbols.extend(declared);
 
         let mut symbol_references = std::mem::take(&mut self.native_symbol_references);
         symbol_references.retain_references_from_files(&current_file_names);
@@ -1482,7 +1480,7 @@ impl IncrementalAnalysisService {
                     for node in &sig.ast_nodes {
                         symbols_to_unsafify.push(node.name);
                         for child in &node.children {
-                            members_to_unsafify.push((node.name, child.name));
+                            members_to_unsafify.push((node.name, member_key(&merged_codebase, node.name, child)));
                         }
                     }
                 }
@@ -1503,7 +1501,7 @@ impl IncrementalAnalysisService {
                     for node in &sig.ast_nodes {
                         symbols_to_unsafify.push(node.name);
                         for child in &node.children {
-                            members_to_unsafify.push((node.name, child.name));
+                            members_to_unsafify.push((node.name, member_key(&merged_codebase, node.name, child)));
                         }
                     }
                 }
@@ -1776,7 +1774,10 @@ impl IncrementalAnalysisService {
                     && sig.ast_nodes.iter().all(|node| {
                         let symbol_safe = node.name.is_empty() || codebase.safe_symbols.contains(&node.name);
                         let children_safe = node.children.iter().all(|child| {
-                            child.name.is_empty() || codebase.safe_symbol_members.contains(&(node.name, child.name))
+                            child.name.is_empty()
+                                || codebase
+                                    .safe_symbol_members
+                                    .contains(&(node.name, member_key(codebase, node.name, child)))
                         });
                         symbol_safe && children_safe
                     })
@@ -2396,6 +2397,13 @@ fn code_reads(file_states: &HashMap<FileId, FileState>, before_analysis: &Extens
     }
 
     reads
+}
+
+/// The key `codebase` holds `member`, a member of `class`'s signature node, under: a method's by `class`'s rule, which
+/// only population knows, as a plain class with exact names keys `syncedId`, spec section 24, and any other member's by
+/// its name. A signature names a method as declared, so the key of each change and each reference meets.
+fn member_key(codebase: &CodebaseMetadata, class: Word, member: &DefSignatureNode) -> Word {
+    if member.is_function { codebase.method_key(class, member.name.as_bytes()) } else { member.name }
 }
 
 /// Keeps the keys whose entry in the merged codebase `file_id` declared.
@@ -3966,6 +3974,62 @@ mod tests {
         service.analyze_incremental(None).expect("Incremental failed.");
         assert_eq!(missing(&service), 1);
         assert_matches_full(&service, &db, "removed member");
+    }
+
+    /// A plain class that implements a PHP# interface keys its methods by their exact names, spec section 24, so an edit
+    /// of `Room::syncedId` drops the uses its old body made, and spec section 5's too-wide warning, which reads the uses
+    /// of every file, returns as a full run reports it, whether the edit changes the body or the signature.
+    #[test]
+    fn test_watch_an_edit_of_a_method_of_a_plain_class_with_exact_names_drops_the_uses_it_made() {
+        let cart = "namespace App.Shop;\n\npublic class Cart\n{\n    public int total() => 1;\n}\n";
+        let synced = "namespace App.Web;\n\npublic interface Synced\n{\n    int? syncedId();\n}\n";
+        let room = |returns: &str, body: &str| {
+            format!(
+                "<?php\n\nnamespace App\\Web;\n\nuse App\\Shop\\Cart;\n\nfinal class Room implements Synced\n{{\n    public function __construct(private Cart $cart) {{}}\n\n    #[\\Override]\n    public function syncedId(): {returns}\n    {{\n        return {body};\n    }}\n}}\n"
+            )
+        };
+        let room_id = FileId::new(b"src/Web/Room.php");
+        // The warning runs in a project, whose files the loader marks from its composer.json.
+        let mut db = make_database(vec![]);
+        for (name, contents) in [
+            ("src/Shop/Cart.sharp", cart.to_owned()),
+            ("src/Web/Synced.sharp", synced.to_owned()),
+            ("src/Web/Room.php", room("?int", "$this->cart->total()")),
+        ] {
+            let mut file = File::new(
+                Cow::Owned(name.as_bytes().to_vec()),
+                FileType::Host,
+                None,
+                Cow::Owned(contents.into_bytes()),
+            );
+            file.is_project = true;
+            db.add(file);
+        }
+        let too_wide = |service: &IncrementalAnalysisService| {
+            service
+                .collect_all_issues()
+                .iter()
+                .filter(|issue| issue.code.as_deref() == Some("too-wide-member"))
+                .map(|issue| issue.message.clone())
+                .collect::<Vec<_>>()
+        };
+        let unused = ["`Cart.total` is public, and nothing outside `App.Shop` uses it."];
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(too_wide(&service), Vec::<String>::new());
+
+        for (returns, body, expected, context) in [
+            ("?int", "1", &unused[..], "Room.syncedId's body stops calling Cart.total"),
+            ("?int", "$this->cart->total()", &[][..], "Room.syncedId's body calls Cart.total again"),
+            ("int", "1", &unused[..], "Room.syncedId's signature changes and it stops calling Cart.total"),
+        ] {
+            db.update(room_id, Cow::Owned(room(returns, body).into_bytes()));
+            service.update_database(db.read_only());
+            service.analyze_incremental(Some(&[room_id])).expect("Incremental analysis failed.");
+            assert_eq!(too_wide(&service), expected, "{context}");
+            assert_matches_full(&service, &db, context);
+        }
     }
 
     /// Spec section 23: a library's function in PHP's root namespace belongs to the namespace of the classes beside it, so

@@ -57,8 +57,7 @@ struct SignatureBuilder<'arena> {
     sig_only_options: FingerprintOptions<'arena>,
     class_stack: Vec<DefSignatureNode>,
     ast_nodes: Vec<DefSignatureNode>,
-    /// Whether the file is a `.sharp` one, whose class-likes and methods the codebase keys by their exact names, spec
-    /// section 24.
+    /// Whether the file is a `.sharp` one, whose class-likes the codebase keys by their exact names, spec section 24.
     sharp: bool,
 }
 
@@ -82,14 +81,16 @@ impl<'arena> SignatureBuilder<'arena> {
         name: &[u8],
         is_function: bool,
         is_constant: bool,
-        is_property: bool,
+        is_member: bool,
         hash: u64,
         signature_hash: u64,
     ) -> DefSignatureNode {
         // A constant is named as the codebase keys it, with its namespace lowercased, so a reference to it names the
-        // node of the file that declares it. A class constant's name has no namespace, so it keeps its name. A `.sharp`
-        // file's class-likes and methods are keyed by their exact names, and plain PHP's by their lowercase names.
-        let atom_name = match (is_constant, is_property) {
+        // node of the file that declares it. A class constant's name has no namespace, so it keeps its name. A method
+        // or a property keeps its declared name: a method's key is its class's rule, which only population knows, spec
+        // section 24, so the incremental analysis keys it where the node meets the codebase. A `.sharp` file's
+        // class-likes are keyed by their exact names, and plain PHP's by their lowercase names.
+        let atom_name = match (is_constant, is_member) {
             (true, _) => ascii_lowercase_constant_name_word(name),
             (_, true) => word(name),
             _ if self.sharp => word(name),
@@ -197,7 +198,7 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for SignatureBuilder<'arena> {
         let hash = method.fingerprint(self.resolved_names, &self.fingerprint_options);
         let signature_hash = method.fingerprint(self.resolved_names, &self.sig_only_options);
 
-        let node = self.create_node(name, true, false, false, hash, signature_hash);
+        let node = self.create_node(name, true, false, true, hash, signature_hash);
 
         // Add method to the current class if we're inside one
         if let Some(class_node) = self.class_stack.last_mut() {
@@ -214,7 +215,7 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for SignatureBuilder<'arena> {
         let hash = operator.fingerprint(self.resolved_names, &self.fingerprint_options);
         let signature_hash = operator.fingerprint(self.resolved_names, &self.sig_only_options);
 
-        let node = self.create_node(name, true, false, false, hash, signature_hash);
+        let node = self.create_node(name, true, false, true, hash, signature_hash);
         if let Some(class_node) = self.class_stack.last_mut() {
             class_node.children.push(node);
         }
@@ -225,7 +226,7 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for SignatureBuilder<'arena> {
         let hash = named_constructor.fingerprint(self.resolved_names, &self.fingerprint_options);
         let signature_hash = named_constructor.fingerprint(self.resolved_names, &self.sig_only_options);
 
-        let node = self.create_node(named_constructor.name.value, true, false, false, hash, signature_hash);
+        let node = self.create_node(named_constructor.name.value, true, false, true, hash, signature_hash);
         if let Some(class_node) = self.class_stack.last_mut() {
             class_node.children.push(node);
         }

@@ -515,7 +515,7 @@ impl IncrementalAnalysisService {
                 };
                 declare((node.name, empty_word()), node.signature_hash);
                 for child in &node.children {
-                    declare((node.name, child.name), child.signature_hash);
+                    declare((node.name, super::member_key(&self.codebase, node.name, child)), child.signature_hash);
                 }
             }
         }
@@ -980,7 +980,7 @@ impl<'service> Dependencies<'service> {
             for node in signature.ast_nodes.iter().filter(|node| !node.name.is_empty()) {
                 dependencies.declared_in.entry((node.name, empty_word())).or_default().push(*file_id);
                 for child in node.children.iter().filter(|child| !child.name.is_empty()) {
-                    let member = (node.name, child.name);
+                    let member = (node.name, super::member_key(&service.codebase, node.name, child));
                     dependencies.declared_in.entry(member).or_default().push(*file_id);
                     dependencies.signature_members.entry(node.name).or_default().push(member);
                 }
@@ -2042,13 +2042,14 @@ mod tests {
         }
     }
 
-    fn declarations(signature: &FileSignature) -> Vec<SymbolIdentifier> {
+    fn declarations(codebase: &CodebaseMetadata, signature: &FileSignature) -> Vec<SymbolIdentifier> {
         signature
             .ast_nodes
             .iter()
             .flat_map(|node| {
-                std::iter::once((node.name, empty_word()))
-                    .chain(node.children.iter().map(|child| (node.name, child.name)))
+                std::iter::once((node.name, empty_word())).chain(
+                    node.children.iter().map(|child| (node.name, super::super::member_key(codebase, node.name, child))),
+                )
             })
             .collect()
     }
@@ -2061,8 +2062,12 @@ mod tests {
         let name = |file_id: &FileId| {
             String::from_utf8_lossy(&database.get(file_id).expect("a file exists").name).into_owned()
         };
-        let every_declaration: Vec<SymbolIdentifier> =
-            service.codebase.file_signatures.values().flat_map(declarations).collect();
+        let every_declaration: Vec<SymbolIdentifier> = service
+            .codebase
+            .file_signatures
+            .values()
+            .flat_map(|signature| declarations(&service.codebase, signature))
+            .collect();
         let files: Vec<FileId> =
             database.files().filter(|file| file.file_type != FileType::Builtin).map(|file| file.id).collect();
 
@@ -2072,8 +2077,9 @@ mod tests {
             let Some(signature) = service.codebase.get_file_signature(&edited.id) else {
                 continue;
             };
-            let diff =
-                CodebaseDiff::new().with_keep(every_declaration.iter().copied()).with_changed(declarations(signature));
+            let diff = CodebaseDiff::new()
+                .with_keep(every_declaration.iter().copied())
+                .with_changed(declarations(&service.codebase, signature));
             service.codebase.safe_symbols.clear();
             service.codebase.safe_symbol_members.clear();
             let unchanged: Vec<FileId> = files.iter().copied().filter(|file_id| *file_id != edited.id).collect();
