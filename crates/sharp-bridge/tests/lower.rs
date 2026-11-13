@@ -4250,7 +4250,9 @@ fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates()
                             STMT_LIST
                               RETURN
                                 null
-                            null
+                            SHARP_TYPE_ARGS
+                              null
+                              ZVAL "Function<void()>"
                             null
                       null
                       null
@@ -12834,6 +12836,51 @@ fn a_never_method_is_php_never() {
     );
 
     assert_eq!(member_in(&[lowered], "Report", &[0, 3]), "ZVAL [1] \"never\"\n");
+}
+
+/// ```php
+/// public function run(\ValueError $error): never
+/// {
+///     throw $error;
+/// }
+/// ```
+///
+/// Spec sections 8 and 21: a `never` method's function type, which a closure of it keeps for `is`, has the result
+/// `never`, which the engine fits within every result type.
+#[test]
+fn a_never_method_carries_a_never_result() {
+    let lowered = Lowered::new(&method_with("never run(ValueError error)", "        throw error;\n"));
+
+    assert_eq!(
+        member_in(&[lowered], "Report", &[0, 3]),
+        indoc! {r#"
+            SHARP_TYPE_ARGS
+              ZVAL [1] "never"
+              ZVAL "Function<never(ValueError)>"
+        "#}
+    );
+}
+
+/// ```php
+/// return fn () => throw $error;
+/// ```
+///
+/// Spec sections 8 and 21: a lambda that always throws never returns, so its function type's result is `never`, and
+/// `is` fits it within every function type's result, as a plain PHP `fn (): never` is.
+#[test]
+fn a_lambda_that_always_throws_carries_a_never_result() {
+    let lowered = Lowered::new(&method_with("Any? run(ValueError error)", "        return () => throw error;\n"));
+    let body = lowered.child(lowered.method_named("run"), 2);
+    let lambda = lowered.child(lowered.child(body, 0), 0);
+
+    assert_eq!(
+        lowered.render(lowered.child(lambda, 3)),
+        indoc! {r#"
+            SHARP_TYPE_ARGS
+              null
+              ZVAL "Function<never()>"
+        "#}
+    );
 }
 
 /// Spec section 9: a parameter's default is any expression. One PHP takes as a constant expression stays as written,

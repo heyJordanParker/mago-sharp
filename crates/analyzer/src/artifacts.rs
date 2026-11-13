@@ -94,6 +94,9 @@ pub struct AnalysisArtifacts {
     pub if_false_assertions: HashMap<(u32, u32), WordMap<AssertionSet>>,
     pub true_branch_only_assertions: HashMap<(u32, u32), WordMap<AssertionSet>>,
     pub inferred_return_types: Vec<Rc<TUnion>>,
+    /// Whether the body these are the artifacts of runs a `return;` with no value, so a lambda whose every path ends
+    /// returns `void` rather than `never`.
+    pub(crate) returns_without_value: bool,
     pub inferred_yield_key_types: Vec<TUnion>,
     pub inferred_yield_value_types: Vec<TUnion>,
     pub symbol_references: SymbolReferences,
@@ -193,6 +196,7 @@ impl AnalysisArtifacts {
             expression_types: HashMap::default(),
             inferred_type_arguments: HashMap::default(),
             inferred_return_types: Vec::new(),
+            returns_without_value: false,
             inferred_yield_key_types: Vec::new(),
             inferred_yield_value_types: Vec::new(),
             if_true_assertions: HashMap::default(),

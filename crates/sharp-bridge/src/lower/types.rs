@@ -808,16 +808,18 @@ impl<'analysis> Types<'analysis> {
 
     /// The type text `Function<R(P1, P2) uses E1, E2>` of the PHP# function `function`, with `parameters` and `result`,
     /// each class's type parameter as `$i` and the function's own as `#i`, and the effects it reaches, sorted. A type
-    /// it leaves out is `Any?`. `None`, so a closure of it is of no function type, when no function type can say its
-    /// type: when the effects solve finds an effect no `uses` lists, as for plain PHP no `extern` declares, or a type is
-    /// one PHP# can't write, as the `never` of a lambda that always throws.
+    /// it leaves out is `Any?`, and the result of a function that never returns, as a lambda that always throws, is
+    /// `never`, spec section 8, which the engine fits within every result type. `None`, so a closure of it is of no
+    /// function type, when no function type can say its type: when the effects solve finds an effect no `uses` lists,
+    /// as for plain PHP no `extern` declares, or a type is one PHP# can't write.
     fn function_type_text(
         &self,
         function: &FunctionLikeIdentifier,
         parameters: &[Option<&TUnion>],
         result: Option<&TUnion>,
     ) -> Option<String> {
-        if !parameters.iter().copied().chain([result]).flatten().all(is_written_in_sharp) {
+        let never = result.is_some_and(TUnion::is_never);
+        if !parameters.iter().copied().chain([result.filter(|_| !never)]).flatten().all(is_written_in_sharp) {
             return None;
         }
         let mut effects: Vec<String> = self
@@ -832,8 +834,9 @@ impl<'analysis> Types<'analysis> {
             r#type.map_or_else(|| "Any?".to_owned(), |r#type| text(r#type, self.codebase, Parameter::Index))
         };
         let parameters: Vec<String> = parameters.iter().map(|parameter| written(*parameter)).collect();
+        let result = if never { "never".to_owned() } else { written(result) };
 
-        Some(format!("Function<{}({}){}>", written(result), parameters.join(", "), uses_text(&effects)))
+        Some(format!("Function<{result}({}){}>", parameters.join(", "), uses_text(&effects)))
     }
 
     /// The metadata of a function the engine reads on a call, whose own bounds follow `class_bounds`.

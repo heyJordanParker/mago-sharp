@@ -6556,6 +6556,15 @@ fn a_lambda_reads_and_writes_the_locals_around_it_as_its_php_closure_does() {
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
 
+/// Spec section 8: a lambda whose every path ends in `return;` returns nothing, so its result is `void`, which no
+/// `Function<int()>` takes, and one whose every path throws returns `never`, which every result type takes.
+#[test]
+fn a_lambda_that_ends_in_a_bare_return_returns_void_and_one_that_always_throws_returns_never() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void run(ValueError error)\n    {\n        Function<int()> skip = () => { return; };\n        Function<int()> fail = () => { throw error; };\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:32 invalid-local-assignment-value"]);
+}
+
 #[test]
 fn a_lambda_called_with_a_wrong_argument_or_returning_a_wrong_type_is_an_error_as_in_php() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        const twice = (int a) => a * 2;\n        const label = () => \"none\";\n        twice(\"x\");\n        return label();\n    }\n}\n";
@@ -18404,7 +18413,6 @@ fn an_intersection_takes_a_value_of_every_type_it_joins() {
     );
 }
 
-/// Spec section 24: `&` joins at most one class with interfaces, as Swift and Java do, so two classes in one `&` are
 /// refused wherever the type is written: a parameter, a return type, a property, a local, a type test and a type
 /// argument. A class with interfaces, or interfaces alone, are an intersection.
 #[test]

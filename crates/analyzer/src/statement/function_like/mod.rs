@@ -219,9 +219,10 @@ where
                 ));
             }
 
+            // A body whose every path ends never returns unless one ends in `return;`, which returns nothing.
             if let Some(inferred_return_type) = inferred_return_type {
                 signature.return_type = Some(Arc::new(inferred_return_type));
-            } else if inner_has_returned {
+            } else if inner_has_returned && !inner_artifacts.returns_without_value {
                 signature.return_type = Some(Arc::new(get_never()));
             } else {
                 signature.return_type = Some(Arc::new(get_void()));
