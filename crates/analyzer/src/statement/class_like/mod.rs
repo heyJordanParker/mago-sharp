@@ -77,6 +77,7 @@ use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Trait;
+use mago_syntax::dialect::Dialect;
 use mago_syntax::token::is_sharp_keyword;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -312,10 +313,18 @@ fn report_namespace_named_as_a_plain_php_class_like<A>(
 /// Helper function to check if a child type is compatible with (contained by) a parent type.
 ///
 /// This is a convenience wrapper around `union_comparator::is_contained_by` with standard
-/// settings for inheritance checks (no null/false ignoring, not inside assertion).
+/// settings for inheritance checks (no null/false ignoring, not inside assertion), under the rules of `dialect`.
 #[inline]
-fn is_type_compatible(codebase: &CodebaseMetadata, child: &TUnion, parent: &TUnion) -> bool {
-    union_comparator::is_contained_by(codebase, child, parent, false, false, false, &mut ComparisonResult::default())
+fn is_type_compatible(codebase: &CodebaseMetadata, dialect: Dialect, child: &TUnion, parent: &TUnion) -> bool {
+    union_comparator::is_contained_by(
+        codebase,
+        child,
+        parent,
+        false,
+        false,
+        false,
+        &mut ComparisonResult::for_dialect(dialect),
+    )
 }
 
 /// Checks whether a child's property type violates the variance rules imposed by the parent.
@@ -325,17 +334,19 @@ fn is_type_compatible(codebase: &CodebaseMetadata, child: &TUnion, parent: &TUni
 /// - Otherwise, invariance is required.
 /// - Types incomparable with the parent's are invalid under any variance.
 ///
-/// Returns `true` when the declaring type is incompatible with the parent under these rules.
+/// Returns `true` when the declaring type is incompatible with the parent under these rules, compared under the rules
+/// of `dialect`.
 #[inline]
 fn is_property_type_variance_invalid(
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     declaring_type: &TUnion,
     parent_type: &TUnion,
     parent_only_get: bool,
     parent_only_set: bool,
 ) -> bool {
-    let declaring_is_subtype_of_parent = is_type_compatible(codebase, declaring_type, parent_type);
-    let parent_is_subtype_of_declaring = is_type_compatible(codebase, parent_type, declaring_type);
+    let declaring_is_subtype_of_parent = is_type_compatible(codebase, dialect, declaring_type, parent_type);
+    let parent_is_subtype_of_declaring = is_type_compatible(codebase, dialect, parent_type, declaring_type);
 
     let declaring_is_narrower = declaring_is_subtype_of_parent && !parent_is_subtype_of_declaring;
     let declaring_is_wider = parent_is_subtype_of_declaring && !declaring_is_subtype_of_parent;
@@ -1833,7 +1844,7 @@ where
             false,
             false,
             false,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         )
     {
         let returned_name = display_type(context, &returned);
@@ -3049,7 +3060,7 @@ fn check_template_parameters<'ctx, A>(
                     &TypeExpansionOptions { self_class: Some(class_like_metadata.original_name), ..Default::default() },
                 );
 
-                if is_type_compatible(context.codebase, &extended_type, &replaced_template_type) {
+                if is_type_compatible(context.codebase, context.dialect, &extended_type, &replaced_template_type) {
                     // Spec section 11: a header's union for a type parameter bounded by a class is refused, as a
                     // written one anywhere else is.
                     if let Some(parent) = &sharp_parent
@@ -3475,7 +3486,8 @@ fn check_uninhabitable_diamonds<'ctx, A>(
                 continue;
             }
 
-            let merged = get_substituted_method(method, class_like_metadata, *ancestor_name, context.codebase);
+            let merged =
+                get_substituted_method(method, class_like_metadata, *ancestor_name, context.codebase, context.dialect);
             if merged.return_type_metadata.as_ref().is_some_and(|r| r.type_union.is_never()) {
                 // PHP keeps the lowercase name Mago looks the method up by, and PHP# names it as it is declared.
                 let method_name = if context.dialect.is_sharp() { method.original_name } else { method_name };
@@ -3659,11 +3671,21 @@ fn check_abstract_method_signatures<'ctx, A>(
                 continue;
             }
 
-            let substituted_overridden_method =
-                get_substituted_method(overridden_method, class_like_metadata, declaring_class_name, context.codebase);
+            let substituted_overridden_method = get_substituted_method(
+                overridden_method,
+                class_like_metadata,
+                declaring_class_name,
+                context.codebase,
+                context.dialect,
+            );
 
-            let substituted_appearing_method =
-                get_substituted_method(appearing_method, class_like_metadata, method_fqcn, context.codebase);
+            let substituted_appearing_method = get_substituted_method(
+                appearing_method,
+                class_like_metadata,
+                method_fqcn,
+                context.codebase,
+                context.dialect,
+            );
 
             let mut issues = method_signature::validate_method_signature_compatibility(
                 context.codebase,
@@ -4102,6 +4124,7 @@ fn get_substituted_method(
     class_like_metadata: &ClassLikeMetadata,
     parent_class_name: Word,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> FunctionLikeMetadata {
     let parameterizations: Vec<&IndexMap<Word, TUnion, RandomState>> =
         match class_like_metadata.template_extended_parameter_paths.get(&parent_class_name) {
@@ -4130,7 +4153,7 @@ fn get_substituted_method(
     };
 
     for other in substituted {
-        merge_method_signature_into(&mut merged, &other, codebase);
+        merge_method_signature_into(&mut merged, &other, codebase, dialect);
     }
 
     merged
@@ -4144,6 +4167,7 @@ fn merge_method_signature_into(
     merged: &mut FunctionLikeMetadata,
     other: &FunctionLikeMetadata,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) {
     for (index, parameter) in merged.parameters.iter_mut().enumerate() {
         let Some(other_parameter) = other.parameters.get(index) else {
@@ -4158,11 +4182,12 @@ fn merge_method_signature_into(
         );
     }
 
-    meet_type_metadata(merged.return_type_metadata.as_mut(), other.return_type_metadata.as_ref(), codebase);
+    meet_type_metadata(merged.return_type_metadata.as_mut(), other.return_type_metadata.as_ref(), codebase, dialect);
     meet_type_metadata(
         merged.return_type_declaration_metadata.as_mut(),
         other.return_type_declaration_metadata.as_ref(),
         codebase,
+        dialect,
     );
 }
 
@@ -4173,10 +4198,15 @@ fn join_type_metadata(target: Option<&mut TypeMetadata>, other: Option<&TypeMeta
     }
 }
 
-fn meet_type_metadata(target: Option<&mut TypeMetadata>, other: Option<&TypeMetadata>, codebase: &CodebaseMetadata) {
+fn meet_type_metadata(
+    target: Option<&mut TypeMetadata>,
+    other: Option<&TypeMetadata>,
+    codebase: &CodebaseMetadata,
+    dialect: Dialect,
+) {
     if let (Some(target), Some(other)) = (target, other) {
         target.type_union =
-            intersect_union_types(&target.type_union, &other.type_union, codebase).unwrap_or_else(get_never);
+            intersect_union_types(&target.type_union, &other.type_union, codebase, dialect).unwrap_or_else(get_never);
     }
 }
 
@@ -4257,7 +4287,8 @@ where
             .filter_map(|member| {
                 let interface = context.codebase.get_class_like(member.get_class_name().as_bytes())?;
                 let metadata = context.codebase.get_method_by_id(&member)?;
-                let substituted = get_substituted_method(metadata, class, member.get_class_name(), context.codebase);
+                let substituted =
+                    get_substituted_method(metadata, class, member.get_class_name(), context.codebase, context.dialect);
 
                 Some((
                     interface.original_name,
@@ -4359,6 +4390,7 @@ fn check_interface_method_signatures<'ctx, A>(
             class_like_metadata,
             interface_method_id.get_class_name(),
             context.codebase,
+            context.dialect,
         );
 
         let substituted_class_method = get_substituted_method(
@@ -4366,6 +4398,7 @@ fn check_interface_method_signatures<'ctx, A>(
             class_like_metadata,
             class_method_id.get_class_name(),
             context.codebase,
+            context.dialect,
         );
 
         let mut issues = method_signature::validate_method_signature_compatibility(
@@ -5177,7 +5210,7 @@ fn report_property_type_mismatch<A>(
             context.codebase,
             &expanded_docblock,
             &expanded_native,
-            &mut ComparisonResult::default(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         )
     {
         return;
@@ -5267,7 +5300,7 @@ fn report_unfit_override<A>(
 ) where
     A: Arena,
 {
-    if is_type_compatible(context.codebase, &declaring_type.type_union, parent_type) {
+    if is_type_compatible(context.codebase, context.dialect, &declaring_type.type_union, parent_type) {
         return;
     }
 
@@ -5368,7 +5401,8 @@ fn check_class_like_properties<'ctx, A>(
         {
             // The set hook parameter type must contain the property type (contravariance)
             // i.e., any value assignable to the property type should be accepted by the hook
-            if !is_type_compatible(context.codebase, &property_type.type_union, &param_type.type_union) {
+            if !is_type_compatible(context.codebase, context.dialect, &property_type.type_union, &param_type.type_union)
+            {
                 let property_type_id = property_type.type_union.get_id();
                 let param_type_id = param_type.type_union.get_id();
                 let class_name = class_like_metadata.original_name;
@@ -5398,7 +5432,12 @@ fn check_class_like_properties<'ctx, A>(
             && let Some(native_type) = param.type_declaration_metadata.as_ref()
             && let Some(effective_type) = param.type_metadata.as_ref()
             && effective_type.from_docblock
-            && !is_type_compatible(context.codebase, &native_type.type_union, &effective_type.type_union)
+            && !is_type_compatible(
+                context.codebase,
+                context.dialect,
+                &native_type.type_union,
+                &effective_type.type_union,
+            )
         {
             let native_type_str = native_type.type_union.get_id();
             let docblock_type_str = effective_type.type_union.get_id();
@@ -5733,6 +5772,7 @@ fn check_class_like_properties<'ctx, A>(
 
                     if is_property_type_variance_invalid(
                         context.codebase,
+                        context.dialect,
                         &declaring_type.type_union,
                         &parent_type_union,
                         parent_only_get,
@@ -5763,8 +5803,10 @@ fn check_class_like_properties<'ctx, A>(
                         let erased_type = get_php_declared_type(&declaring_type.type_union, context.codebase);
                         let erased_parent_type = get_php_declared_type(&parent_type.type_union, context.codebase);
 
+                        // The engine links the erased declarations as PHP does.
                         if is_property_type_variance_invalid(
                             context.codebase,
+                            Dialect::Php,
                             &erased_type,
                             &erased_parent_type,
                             parent_only_get,
@@ -5902,6 +5944,7 @@ fn check_class_like_properties<'ctx, A>(
                 && let Some(localized_parent_type) = &localized_parent_type
                 && is_property_type_variance_invalid(
                     context.codebase,
+                    context.dialect,
                     &declaring_type.type_union,
                     localized_parent_type,
                     parent_only_get,
@@ -6150,6 +6193,7 @@ fn report_unfit_interface_property<A>(
             localize_parent_type(context.codebase, class_like_metadata, interface.name, &stated_type.type_union)
         && is_property_type_variance_invalid(
             context.codebase,
+            context.dialect,
             &given.type_union,
             &stated_type,
             !stated.hooks.contains_key(&word("set")),
@@ -6324,7 +6368,12 @@ fn check_class_like_constants<'ctx, 'arena, A>(
                     continue;
                 };
 
-                if is_type_compatible(context.codebase, &child_type.type_union, &parent_type.type_union) {
+                if is_type_compatible(
+                    context.codebase,
+                    context.dialect,
+                    &child_type.type_union,
+                    &parent_type.type_union,
+                ) {
                     continue;
                 }
                 let child_type_id = display_type(context, &child_type.type_union);
@@ -6415,7 +6464,12 @@ fn check_class_like_constants<'ctx, 'arena, A>(
 
                 if let (Some(child_type), Some(interface_type)) =
                     (&child_constant.type_declaration, &interface_constant.type_declaration)
-                    && !is_type_compatible(context.codebase, &child_type.type_union, &interface_type.type_union)
+                    && !is_type_compatible(
+                        context.codebase,
+                        context.dialect,
+                        &child_type.type_union,
+                        &interface_type.type_union,
+                    )
                 {
                     let child_type_id = display_type(context, &child_type.type_union);
                     let interface_type_id = display_type(context, &interface_type.type_union);

@@ -431,7 +431,7 @@ where
         // type, e.g. a string coerced to int). Real and dynamic (`stdClass`) properties round-trip
         // and have no distinct read type, so their written value is memoized as-is.
         let memoized_type = if has_read_clamp && let Some(readable) = &readable_type {
-            let observable = intersect_union_types(readable, &resulting_type, context.codebase)
+            let observable = intersect_union_types(readable, &resulting_type, context.codebase, context.dialect)
                 .filter(|intersection| !intersection.is_never());
 
             Rc::new(observable.unwrap_or_else(|| readable.clone()))

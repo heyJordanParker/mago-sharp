@@ -701,7 +701,7 @@ where
                 false,
                 false,
                 false,
-                &mut ComparisonResult::new(),
+                &mut ComparisonResult::for_dialect(context.dialect),
             )
         {
             let by_loop = loop_container(metadata).is_some();

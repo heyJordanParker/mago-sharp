@@ -862,7 +862,7 @@ where
             false,
             false,
             true,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         )
     {
         return existing_type;

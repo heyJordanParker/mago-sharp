@@ -26,6 +26,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::dialect::Dialect;
 
 use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
@@ -437,7 +438,7 @@ fn read_type(codebase: &CodebaseMetadata, class: &ClassLikeMetadata, constant: &
                 false,
                 false,
                 false,
-                &mut ComparisonResult { sharp_rules: class.flags.is_sharp(), ..ComparisonResult::new() },
+                &mut ComparisonResult::for_dialect(if class.flags.is_sharp() { Dialect::Sharp } else { Dialect::Php }),
             ) =>
         {
             declared

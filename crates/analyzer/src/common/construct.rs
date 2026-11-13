@@ -255,7 +255,7 @@ fn verify_construct_input_type<'arena, A>(
         }
     }
 
-    let mut comparison = ComparisonResult::new();
+    let mut comparison = ComparisonResult::for_dialect(context.dialect);
     if union_comparator::is_contained_by(
         context.codebase,
         input_type,

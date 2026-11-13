@@ -24,6 +24,7 @@ use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
+use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 
 use crate::plugin::context::InvocationInfo;
@@ -197,7 +198,8 @@ fn resolve_atomic_with_argument(
         return add_union_type(then, &otherwise, codebase, CombinerOptions::default()).types.into_owned();
     }
 
-    let mut comparison_result = ComparisonResult::new();
+    // A conditional type is written only in a plain PHP docblock, and the element is one of the PHP array's.
+    let mut comparison_result = ComparisonResult::for_dialect(Dialect::Php);
     let subject_is_contained = union_comparator::is_contained_by(
         codebase,
         &subject,

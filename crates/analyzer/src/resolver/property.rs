@@ -897,6 +897,7 @@ impl DeclaredProperty<'_> {
         if let DeclaredPropertyKind::Real { annotation: Some(annotation) } = self.kind
             && let Some(annotation_type) = annotation_type_metadata(annotation, for_write).map(|tm| &tm.type_union)
         {
+            // Only a plain PHP class writes a `@property` annotation, so both types are plain PHP declarations.
             let narrows = match self.property.type_metadata.as_ref().map(|tm| &tm.type_union) {
                 None => true,
                 Some(real_type) => {
@@ -908,7 +909,7 @@ impl DeclaredProperty<'_> {
                             false,
                             false,
                             false,
-                            &mut ComparisonResult::default(),
+                            &mut ComparisonResult::for_dialect(Dialect::Php),
                         )
                 }
             };

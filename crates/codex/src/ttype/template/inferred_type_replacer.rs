@@ -3,6 +3,7 @@ use std::sync::Arc;
 use foldhash::HashMap;
 use foldhash::HashSet;
 
+use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 
 use crate::metadata::CodebaseMetadata;
@@ -226,10 +227,12 @@ fn replace_template_parameter(
                     }
                 }
             } else {
+                // The replacement takes no dialect, so it intersects under PHP's rules.
                 for part in intersection_types {
                     let part_type = replace(&wrap_atomic(part.clone()), template_result, codebase);
                     template_type_inner =
-                        intersect_union_types(&template_type_inner, &part_type, codebase).unwrap_or_else(get_never);
+                        intersect_union_types(&template_type_inner, &part_type, codebase, Dialect::Php)
+                            .unwrap_or_else(get_never);
                 }
             }
         }

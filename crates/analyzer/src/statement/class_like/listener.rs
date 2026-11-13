@@ -292,7 +292,7 @@ where
                     false,
                     false,
                     false,
-                    &mut ComparisonResult::new(),
+                    &mut ComparisonResult::for_dialect(context.dialect),
                 )
         })
         .collect();

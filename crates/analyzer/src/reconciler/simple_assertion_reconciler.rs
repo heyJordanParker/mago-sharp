@@ -1029,7 +1029,7 @@ where
                         atomic,
                         asserted_type.get_single(),
                         false,
-                        &mut ComparisonResult::new(),
+                        &mut ComparisonResult::for_dialect(context.dialect),
                     ) {
                         acceptable_types.push(atomic.clone());
                     } else {
@@ -1108,7 +1108,7 @@ where
                         atomic,
                         asserted_type.get_single(),
                         false,
-                        &mut ComparisonResult::new(),
+                        &mut ComparisonResult::for_dialect(context.dialect),
                     )
                 {
                     acceptable_types.push(atomic.clone());
@@ -1177,7 +1177,7 @@ where
                     atomic,
                     &TAtomic::Scalar(TScalar::Bool(boolean)),
                     false,
-                    &mut ComparisonResult::new(),
+                    &mut ComparisonResult::for_dialect(context.dialect),
                 ) {
                     acceptable_types.push(atomic.clone());
                 } else {
@@ -1233,7 +1233,7 @@ where
                     atomic,
                     &TAtomic::Scalar(TScalar::Float(*float)),
                     false,
-                    &mut ComparisonResult::new(),
+                    &mut ComparisonResult::for_dialect(context.dialect),
                 ) {
                     acceptable_types.push(atomic.clone());
                 } else {
@@ -1307,7 +1307,7 @@ where
                     atomic,
                     &TAtomic::Scalar(TScalar::Integer(*integer)),
                     false,
-                    &mut ComparisonResult::new(),
+                    &mut ComparisonResult::for_dialect(context.dialect),
                 ) {
                     acceptable_types.push(atomic.clone());
                 } else {
@@ -1904,7 +1904,7 @@ fn reconcile_in_array<A>(
 where
     A: Arena,
 {
-    let intersection = intersect_union_types(typed_value, existing_var_type, context.codebase);
+    let intersection = intersect_union_types(typed_value, existing_var_type, context.codebase, context.dialect);
 
     if let Some(intersection) = intersection {
         return intersection;

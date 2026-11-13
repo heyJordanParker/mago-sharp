@@ -39,6 +39,7 @@ use mago_codex::ttype::wrap_atomic;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::Span;
+use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
@@ -298,7 +299,13 @@ pub fn reconcile_keyed_types<'ctx, A>(
             // Even when the type doesn't exist and result is never, we still need to
             // update parent array types for negated isset/key_exists to remove the key
             if key_str.ends_with(b"]") && (has_inverted_isset || has_inverted_key_exists) {
-                adjust_array_type_remove_key(key_parts, block_context, changed_var_ids, context.codebase);
+                adjust_array_type_remove_key(
+                    key_parts,
+                    block_context,
+                    changed_var_ids,
+                    context.codebase,
+                    context.dialect,
+                );
             }
 
             continue;
@@ -316,6 +323,7 @@ pub fn reconcile_keyed_types<'ctx, A>(
                     changed_var_ids,
                     &result_type,
                     context.codebase,
+                    context.dialect,
                     false,
                 );
             } else if key_str.ends_with(b"]") && (has_inverted_isset || has_inverted_key_exists) {
@@ -336,10 +344,17 @@ pub fn reconcile_keyed_types<'ctx, A>(
                         changed_var_ids,
                         &entry_type,
                         context.codebase,
+                        context.dialect,
                         true,
                     );
                 } else {
-                    adjust_array_type_remove_key(key_parts.clone(), block_context, changed_var_ids, context.codebase);
+                    adjust_array_type_remove_key(
+                        key_parts.clone(),
+                        block_context,
+                        changed_var_ids,
+                        context.codebase,
+                        context.dialect,
+                    );
                 }
             } else if memchr::memmem::find(key_str, b"->").is_some() && !is_equality {
                 adjust_object_property_type(key_parts.clone(), block_context, changed_var_ids, &result_type, context);
@@ -501,6 +516,7 @@ fn adjust_array_type(
     changed_var_ids: &mut WordSet,
     result_type: &TUnion,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     optional: bool,
 ) {
     key_parts.pop();
@@ -562,7 +578,7 @@ fn adjust_array_type(
 
                 if let Some(known_items) = known_items {
                     if let Some((existing_optional, existing_item_type)) = known_items.get(&dictkey) {
-                        match intersect_union_types(result_type, existing_item_type, codebase) {
+                        match intersect_union_types(result_type, existing_item_type, codebase, dialect) {
                             Some(intersected) if !intersected.is_never() => {
                                 known_items.insert(dictkey, (*existing_optional, intersected));
                             }
@@ -583,7 +599,7 @@ fn adjust_array_type(
                 {
                     if let Some(known_elements) = known_elements {
                         if let Some((_, existing_item_type)) = known_elements.get(&arraykey_offset) {
-                            match intersect_union_types(result_type, existing_item_type, codebase) {
+                            match intersect_union_types(result_type, existing_item_type, codebase, dialect) {
                                 Some(intersected) if !intersected.is_never() => {
                                     known_elements.insert(arraykey_offset, (false, intersected));
                                 }
@@ -642,6 +658,7 @@ fn adjust_array_type(
                 changed_var_ids,
                 &wrap_atomic(base_atomic_type.clone()),
                 codebase,
+                dialect,
                 false,
             );
         }
@@ -662,6 +679,7 @@ fn adjust_array_type_remove_key(
     context: &mut BlockContext<'_>,
     changed_var_ids: &mut WordSet,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) {
     key_parts.pop();
     let Some(array_key) = key_parts.pop() else {
@@ -733,6 +751,7 @@ fn adjust_array_type_remove_key(
                 changed_var_ids,
                 &wrap_atomic(base_atomic_type.clone()),
                 codebase,
+                dialect,
                 false,
             );
         }
@@ -802,7 +821,7 @@ fn adjust_object_property_type<A>(
         };
 
         if let Some(declared_property_type) = should_check {
-            match intersect_union_types(result_type, &declared_property_type, context.codebase) {
+            match intersect_union_types(result_type, &declared_property_type, context.codebase, context.dialect) {
                 Some(intersected) if !intersected.is_never() => {
                     compatible_types.push(base_atomic_type);
                 }

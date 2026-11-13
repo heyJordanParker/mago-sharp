@@ -753,6 +753,7 @@ pub fn validate_erased_signature_compatibility(
         |(parameter_index, (parent_parameter, child_parameter))| {
             let parent_type = erased(parent_parameter, parent_class, parent_method);
             let child_type = erased(child_parameter, child_class, child_method);
+            // The engine links the erased declarations as PHP does.
             if union_comparator::is_contained_by(
                 codebase,
                 &parent_type,
@@ -760,7 +761,7 @@ pub fn validate_erased_signature_compatibility(
                 false,
                 false,
                 false,
-                &mut ComparisonResult::new(),
+                &mut ComparisonResult::for_dialect(Dialect::Php),
             ) {
                 return None;
             }

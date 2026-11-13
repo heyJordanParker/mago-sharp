@@ -13,6 +13,7 @@ use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_mixed_iterable;
 use mago_codex::ttype::union::TUnion;
+use mago_syntax::dialect::Dialect;
 
 use crate::plugin::context::InvocationInfo;
 use crate::plugin::context::ProviderContext;
@@ -98,6 +99,7 @@ impl FunctionReturnTypeProvider for IteratorToArrayProvider {
             return Some(get_list(iterator_value_type));
         }
 
+        // A PHP array's keys are PHP's `int` or `string`.
         if !is_contained_by(
             codebase,
             &iterator_key_type,
@@ -105,7 +107,7 @@ impl FunctionReturnTypeProvider for IteratorToArrayProvider {
             false,
             false,
             false,
-            &mut ComparisonResult::default(),
+            &mut ComparisonResult::for_dialect(Dialect::Php),
         ) {
             iterator_key_type = get_arraykey();
         }

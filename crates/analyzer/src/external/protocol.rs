@@ -2589,6 +2589,8 @@ fn named_class_like(node: TypeRef<'_>) -> Option<Word> {
     }
 }
 
+/// Answers a host's `TypeComparator` under PHP's rules, Mago's native type system as the SDK documents it: the request
+/// names no file, and the SDK keeps one answer per pair of types.
 fn compare_types(
     operation: u8,
     left: &TUnion,
@@ -2604,7 +2606,7 @@ fn compare_types(
             false,
             false,
             false,
-            &mut ComparisonResult::default(),
+            &mut ComparisonResult::for_dialect(Dialect::Php),
         )),
         TYPE_COMPARISON_CAN_BE_IDENTICAL => {
             Ok(union_comparator::can_expression_types_be_identical(codebase, left, right, false, false))

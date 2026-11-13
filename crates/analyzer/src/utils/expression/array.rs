@@ -719,7 +719,7 @@ where
         get_int()
     };
 
-    let mut union_comparison_result = ComparisonResult::new();
+    let mut union_comparison_result = ComparisonResult::for_dialect(context.dialect);
     let index_type_contained_by_expected = is_contained_by(
         context.codebase,
         dim_type,
@@ -743,7 +743,7 @@ where
             true,
             false,
             false,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         );
 
     if index_type_contained_by_expected || expected_contained_by_index {
@@ -1084,7 +1084,7 @@ where
         Cow::Owned(get_never())
     };
 
-    let mut union_comparison_result = ComparisonResult::new();
+    let mut union_comparison_result = ComparisonResult::for_dialect(context.dialect);
     let index_type_contained_by_expected = is_contained_by(
         context.codebase,
         index_type,
@@ -1112,7 +1112,7 @@ where
             true,
             false,
             false,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         );
 
     if index_type_contained_by_expected || expected_contained_by_index {
@@ -1340,7 +1340,7 @@ where
             true,
             value_parameter.ignore_falsable_issues(),
             false,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         );
 
         if is_contained {
@@ -1407,7 +1407,7 @@ where
                         false,
                         false,
                         false,
-                        &mut ComparisonResult::new(),
+                        &mut ComparisonResult::for_dialect(context.dialect),
                     )
                 };
 
@@ -1591,7 +1591,7 @@ where
         return get_never();
     };
 
-    let mut union_comparison_result = ComparisonResult::new();
+    let mut union_comparison_result = ComparisonResult::for_dialect(context.dialect);
     let index_type_contained_by_expected = is_contained_by(
         context.codebase,
         index_type,
@@ -1612,7 +1612,7 @@ where
     if let Some(assign_value_type) = assign_value_type
         && !resulting_value_type.is_mixed()
     {
-        let mut value_comparison_result = ComparisonResult::new();
+        let mut value_comparison_result = ComparisonResult::for_dialect(context.dialect);
         let value_type_contained = is_contained_by(
             context.codebase,
             assign_value_type,
@@ -1682,7 +1682,7 @@ where
         false,
         false,
         false,
-        &mut ComparisonResult::new(),
+        &mut ComparisonResult::for_dialect(context.dialect),
     ) {
         *has_valid_expected_index = true;
     } else {

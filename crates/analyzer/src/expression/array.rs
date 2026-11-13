@@ -1268,7 +1268,7 @@ fn handle_variadic_array_element<'arena, A>(
                     false,
                     false,
                     false,
-                    &mut ComparisonResult::new(),
+                    &mut ComparisonResult::for_dialect(context.dialect),
                 )
             };
             let is_string_key = is_contained(&get_string());
@@ -1312,7 +1312,7 @@ fn handle_variadic_array_element<'arena, A>(
                     false,
                     false,
                     false,
-                    &mut ComparisonResult::new(),
+                    &mut ComparisonResult::for_dialect(context.dialect),
                 ) {
                     let new_prop_val =
                         combine_union_types(&v.1, &value_type, context.codebase, context.settings.combiner_options());

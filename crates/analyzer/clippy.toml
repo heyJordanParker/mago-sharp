@@ -1,0 +1,7 @@
+# Clippy reads the nearest clippy.toml only, so this file repeats sharp/mago/clippy.toml's entries.
+disallowed-methods = [
+    { path = "std::process::Command::spawn", reason = "start processes through mago_database::process, which holds SPAWNING" },
+    { path = "std::process::Command::output", reason = "start processes through mago_database::process, which holds SPAWNING" },
+    { path = "std::process::Command::status", reason = "start processes through mago_database::process, which holds SPAWNING" },
+    { path = "mago_codex::ttype::comparator::ComparisonResult::new", reason = "compare under the file's rules with ComparisonResult::for_dialect(context.dialect), or under PHP's on purpose with ComparisonResult::for_dialect(Dialect::Php)" },
+]

@@ -711,7 +711,7 @@ where
                 other_atomic,
                 constraint_atomic,
                 false,
-                &mut ComparisonResult::new(),
+                &mut ComparisonResult::for_dialect(context.dialect),
             ) {
                 return false;
             }

@@ -271,7 +271,7 @@ where
         StaticClassType::None => return None,
     };
 
-    intersect_union_types(argument_type, &receiver_type, context.codebase)
+    intersect_union_types(argument_type, &receiver_type, context.codebase, context.dialect)
 }
 
 /// Finds the parameter that corresponds to a given argument.

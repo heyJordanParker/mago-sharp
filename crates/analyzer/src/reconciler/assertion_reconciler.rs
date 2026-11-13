@@ -202,7 +202,7 @@ where
             let mut variant_compatible = true;
             for (key, (new_is_optional, new_item_type)) in known_items {
                 if let Some((is_optional, existing_item_type)) = new_known_items.get_mut(key) {
-                    match intersect_union_types(new_item_type, existing_item_type, context.codebase) {
+                    match intersect_union_types(new_item_type, existing_item_type, context.codebase, context.dialect) {
                         Some(intersected) if !intersected.is_never() => {
                             *is_optional = *new_is_optional;
                             *existing_item_type = intersected;
@@ -262,7 +262,7 @@ where
             let mut variant_compatible = true;
             for (key, (new_is_optional, new_item_type)) in known_elements {
                 if let Some((is_optional, existing_item_type)) = new_known_elements.get_mut(key) {
-                    match intersect_union_types(new_item_type, existing_item_type, context.codebase) {
+                    match intersect_union_types(new_item_type, existing_item_type, context.codebase, context.dialect) {
                         Some(intersected) if !intersected.is_never() => {
                             *is_optional = *new_is_optional;
                             *existing_item_type = intersected;
@@ -345,7 +345,9 @@ pub(crate) fn intersect_atomic_with_atomic<A>(
 where
     A: Arena,
 {
-    let mut atomic_comparison_results = ComparisonResult::new();
+    // Under PHP#'s rules a type parameter holds only itself, spec section 11, so a value narrowed to one has its type, as
+    // an `Event` tested `as T` is a `T`, and not the `Event` an unbounded `T` would take under PHP's rules.
+    let mut atomic_comparison_results = ComparisonResult::for_dialect(context.dialect);
     if atomic_comparator::is_contained_by(
         context.codebase,
         second_type,
@@ -367,7 +369,7 @@ where
         );
     }
 
-    atomic_comparison_results = ComparisonResult::new();
+    atomic_comparison_results = ComparisonResult::for_dialect(context.dialect);
     if atomic_comparator::is_contained_by(
         context.codebase,
         first_type,
@@ -436,30 +438,26 @@ where
         (TAtomic::Array(TArray::List(first_list)), TAtomic::Array(TArray::List(second_list))) => {
             return intersect_list_arrays(context, first_list, second_list);
         }
-        (TAtomic::GenericParameter(TGenericParameter { constraint, .. }), TAtomic::Object(TObject::Named(_))) => {
-            let new_as = intersect_union_with_atomic(context, constraint, second_type);
+        // A value of a type parameter and of another type is the type parameter, bounded by both, as an `int` tested
+        // `is T` is a `T` bounded by `int`.
+        (TAtomic::GenericParameter(TGenericParameter { constraint, .. }), other)
+        | (other, TAtomic::GenericParameter(TGenericParameter { constraint, .. }))
+            if !matches!(other, TAtomic::GenericParameter(_)) =>
+        {
+            let new_as = intersect_union_with_atomic(context, constraint, other);
 
             if let Some(new_as) = new_as {
-                let mut type_1_atomic = first_type.clone();
+                let mut parameter = if matches!(first_type, TAtomic::GenericParameter(_)) {
+                    first_type.clone()
+                } else {
+                    second_type.clone()
+                };
 
-                if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = &mut type_1_atomic {
+                if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = &mut parameter {
                     *Arc::make_mut(constraint) = new_as;
                 }
 
-                return Some(type_1_atomic);
-            }
-        }
-        (TAtomic::Object(TObject::Named(_)), TAtomic::GenericParameter(TGenericParameter { constraint, .. })) => {
-            let new_as = intersect_union_with_atomic(context, constraint, first_type);
-
-            if let Some(new_as) = new_as {
-                let mut type_2_atomic = second_type.clone();
-
-                if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = &mut type_2_atomic {
-                    *Arc::make_mut(constraint) = new_as;
-                }
-
-                return Some(type_2_atomic);
+                return Some(parameter);
             }
         }
         (TAtomic::Iterable(iterable), object @ TAtomic::Object(TObject::Named(named_object)))
@@ -485,7 +483,8 @@ where
 
             return Some(match array {
                 TArray::List(list) => {
-                    let narrowed_value = intersect_union_types(&list.element_type, iter_value, context.codebase)?;
+                    let narrowed_value =
+                        intersect_union_types(&list.element_type, iter_value, context.codebase, context.dialect)?;
                     let mut new_list = list.clone();
                     new_list.element_type = Arc::new(narrowed_value);
                     TAtomic::Array(TArray::List(new_list))
@@ -497,8 +496,9 @@ where
                         Some((k, v)) => (k.as_ref(), v.as_ref()),
                         None => (&default_key, &default_value),
                     };
-                    let narrowed_key = intersect_union_types(array_key, iter_key, context.codebase)?;
-                    let narrowed_value = intersect_union_types(array_value, iter_value, context.codebase)?;
+                    let narrowed_key = intersect_union_types(array_key, iter_key, context.codebase, context.dialect)?;
+                    let narrowed_value =
+                        intersect_union_types(array_value, iter_value, context.codebase, context.dialect)?;
                     let mut new_keyed = keyed.clone();
                     new_keyed.parameters = Some((Arc::new(narrowed_key), Arc::new(narrowed_value)));
                     TAtomic::Array(TArray::Keyed(new_keyed))
@@ -507,6 +507,7 @@ where
                     element_type,
                     iter_value,
                     context.codebase,
+                    context.dialect,
                 )?))),
             });
         }
@@ -1241,7 +1242,13 @@ where
                 let asserted_object =
                     TClassLikeString::literal(assertion_class_string_val).get_object_type(context.codebase);
                 if constraint.iter().any(|constraint| {
-                    is_contained_by(context.codebase, &asserted_object, constraint, true, &mut ComparisonResult::new())
+                    is_contained_by(
+                        context.codebase,
+                        &asserted_object,
+                        constraint,
+                        true,
+                        &mut ComparisonResult::for_dialect(context.dialect),
+                    )
                 }) {
                     if existing_var_type.is_single()
                         && let Some(key) = &key

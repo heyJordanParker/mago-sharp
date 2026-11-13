@@ -24,6 +24,7 @@ use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_keyed_array;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
+use mago_syntax::dialect::Dialect;
 
 use crate::plugin::context::InvocationInfo;
 use crate::plugin::context::ProviderContext;
@@ -222,6 +223,8 @@ fn narrow_atomic_to_truthy(atomic: TAtomic) -> TAtomic {
     }
 }
 
+/// Narrows the elements of the PHP array `array_filter` takes by the plain PHP assertion of its callback, under PHP's
+/// rules, since both are plain PHP's.
 pub(super) fn apply_assertion_to_narrow_type(
     original_type: TUnion,
     assertion: &Assertion,
@@ -240,7 +243,7 @@ pub(super) fn apply_assertion_to_narrow_type(
                     variant,
                     atomic,
                     false,
-                    &mut ComparisonResult::default(),
+                    &mut ComparisonResult::for_dialect(Dialect::Php),
                 );
 
                 if variant_is_subtype {
@@ -253,7 +256,7 @@ pub(super) fn apply_assertion_to_narrow_type(
                     atomic,
                     variant,
                     false,
-                    &mut ComparisonResult::default(),
+                    &mut ComparisonResult::for_dialect(Dialect::Php),
                 );
 
                 if asserted_is_subtype {
@@ -266,7 +269,13 @@ pub(super) fn apply_assertion_to_narrow_type(
         Assertion::IsNotType(atomic) => {
             let mut result = original_type.clone();
             result.types.to_mut().retain(|t| {
-                !atomic_comparator::is_contained_by(codebase, t, atomic, false, &mut ComparisonResult::default())
+                !atomic_comparator::is_contained_by(
+                    codebase,
+                    t,
+                    atomic,
+                    false,
+                    &mut ComparisonResult::for_dialect(Dialect::Php),
+                )
             });
 
             if result.types.is_empty() { original_type } else { result }

@@ -2202,7 +2202,7 @@ impl<'analysis> Types<'analysis> {
                 false,
                 false,
                 false,
-                &mut ComparisonResult::default(),
+                &mut ComparisonResult::new(),
             ))
         .then_some(root_type)
     }

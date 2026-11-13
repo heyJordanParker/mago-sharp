@@ -130,7 +130,7 @@ fn subtract_complex_type<A>(
                 assertion_type,
                 &existing_atomic,
                 true,
-                &mut ComparisonResult::new(),
+                &mut ComparisonResult::for_dialect(context.dialect),
             ) {
                 *can_be_disjunct = true;
             }
@@ -144,7 +144,7 @@ fn subtract_complex_type<A>(
             &existing_atomic,
             assertion_type,
             true,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         ) {
             *can_be_disjunct = true;
 
@@ -157,7 +157,7 @@ fn subtract_complex_type<A>(
             assertion_type,
             &existing_atomic,
             true,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         ) {
             *can_be_disjunct = true;
         }

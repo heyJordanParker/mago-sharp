@@ -385,7 +385,7 @@ where
                 root_array_type.ignore_nullable_issues(),
                 root_array_type.ignore_falsable_issues(),
                 false,
-                &mut ComparisonResult::default(),
+                &mut ComparisonResult::for_dialect(context.dialect),
             )
         {
             let new_type_str = root_array_type.get_id();

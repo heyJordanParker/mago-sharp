@@ -40,14 +40,11 @@ pub struct ComparisonResult {
     pub int_for_float: bool,
 }
 
-impl Default for ComparisonResult {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ComparisonResult {
+    /// A result whose comparison follows PHP's rules. A comparison of a file's code follows its dialect's, through
+    /// [`Self::for_dialect`].
     #[must_use]
+    #[expect(clippy::new_without_default, reason = "no default rules: each comparison names PHP's or its dialect's")]
     pub fn new() -> Self {
         Self {
             type_coerced: None,

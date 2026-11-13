@@ -20017,6 +20017,87 @@ fn a_type_test_the_value_always_passes_says_the_value_already_has_the_type() {
     );
 }
 
+/// Spec section 21: `as` converts a value to a type, or gives null, so its type is the target type made nullable, for a
+/// class, an interface, an intersection, a collection, and a type parameter with a bound and without one, whatever the
+/// value's type, its bound's type included. Only a value already of the target type never gives null, and that `as` is
+/// reported as redundant. A nullable target is refused.
+#[test]
+fn as_gives_its_target_type_or_null_for_every_target() {
+    let files = [
+        ("src/Demo/Event.sharp", "namespace Demo;\n\npublic interface Event\n{\n}\n"),
+        ("src/Demo/Named.sharp", "namespace Demo;\n\npublic interface Named\n{\n}\n"),
+        ("src/Demo/Paid.sharp", "namespace Demo;\n\npublic class Paid : Event, Named\n{\n}\n"),
+    ];
+    let typed = "namespace Demo;\n\npublic class Sweep<TDue : Event, TAny>\n{\n    public List<Any?> run(Any? x, Paid paid, List<Event> events, Event ev, Event event, Event any) => [x as Paid, x as Event, x as Event & Named, x as List<int>, x as TDue, x as TAny, paid as Paid, events.map(e => e as TDue), ev as TDue, event as Paid, any as TAny];\n}\n";
+    let (_, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sweep.sharp", typed), &files);
+    let type_of = |expression: &str| {
+        let start = typed.find(expression).unwrap() as u32;
+        artifacts.expression_types[&(start, start + expression.len() as u32)].get_id().to_string()
+    };
+    let sweep = "namespace Demo;\n\npublic class Sweep<TDue : Event>\n{\n    public List<TDue> due(List<Event> events)\n    {\n        List<TDue> found = [];\n        for (const item of events.map(e => e as TDue)) {\n            if (item != null) {\n                found.add(item);\n            }\n        }\n        return found;\n    }\n\n    public Paid? paid(Any? x) => x as Paid?;\n\n    public T? any<T>(Event value) => value as T;\n\n    public T? bounded<T : Event>(Event value) => value as T;\n}\n";
+
+    assert_eq!(
+        [
+            "x as Paid",
+            "x as Event",
+            "x as Event & Named",
+            "x as List<int>",
+            "x as TDue",
+            "x as TAny",
+            "paid as Paid",
+            "events.map(e => e as TDue)",
+            "ev as TDue",
+            "event as Paid",
+            "any as TAny"
+        ]
+        .map(type_of),
+        [
+            "Demo\\Paid|null",
+            "Demo\\Event|null",
+            "(Demo\\Event&Demo\\Named)|null",
+            "list<int>|null",
+            "('TDue.Demo\\Sweep extends Demo\\Event)|null",
+            "('TAny.Demo\\Sweep extends mixed)|null",
+            "Demo\\Paid",
+            "list<('TDue.Demo\\Sweep extends Demo\\Event)|null>",
+            "('TDue.Demo\\Sweep extends Demo\\Event)|null",
+            "Demo\\Paid|null",
+            "('TAny.Demo\\Sweep extends Demo\\Event)|null"
+        ]
+    );
+    assert_eq!(
+        explained(("src/Demo/Sweep.sharp", sweep), &files),
+        ["16:39 semantics `as` converts to a type that is not nullable or `void`. Write `as Paid`."]
+    );
+}
+
+/// Spec section 11: a type parameter holds only itself, so a value of its bound, or of any type for an unbounded one,
+/// may or may not be of it. `is` narrows the value to the type parameter, `is not` leaves it its own type, and neither
+/// test is always true or always false.
+#[test]
+fn is_and_is_not_narrow_a_value_of_the_bound_to_a_type_parameter() {
+    let event = ("src/Demo/Event.sharp", "namespace Demo;\n\npublic interface Event\n{\n}\n");
+    let sweep = "namespace Demo;\n\npublic class Sweep<TDue : Event, TAny>\n{\n    public TDue? due(Event ev)\n    {\n        if (ev is TDue) {\n            return ev;\n        }\n        return null;\n    }\n\n    public TDue? after(Event ev)\n    {\n        if (ev is not TDue) {\n            return null;\n        }\n        return ev;\n    }\n\n    public Event? other(Event ev)\n    {\n        if (ev is not TDue) {\n            return ev;\n        }\n        return null;\n    }\n\n    public TAny? any(Event ev)\n    {\n        if (ev is TAny) {\n            return ev;\n        }\n        return null;\n    }\n}\n";
+
+    assert_eq!(explained(("src/Demo/Sweep.sharp", sweep), &[event]), Vec::<String>::new());
+}
+
+/// Spec section 11: a value narrowed to a type parameter is of the type parameter, bounded by the value's own type, so
+/// an `int` tested `is T` or converted `as T`, and the `int` element of a tuple tested `is [T, string]`, read as `T`.
+/// The tuple's element is narrowed by intersecting the two element types.
+#[test]
+fn a_value_of_another_type_narrowed_to_a_type_parameter_is_of_the_type_parameter() {
+    let sweep = "namespace Demo;\n\npublic class Sweep<T>\n{\n    public T? first([int, string] pair)\n    {\n        if (pair is [T, string]) {\n            return pair[0];\n        }\n        return null;\n    }\n\n    public T? tested(int n)\n    {\n        if (n is T) {\n            return n;\n        }\n        return null;\n    }\n\n    public T? converted(int n) => n as T;\n}\n";
+    let (_, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sweep.sharp", sweep), &[]);
+    let start = sweep.find("pair[0]").unwrap() as u32;
+
+    assert_eq!(
+        artifacts.expression_types[&(start, start + 7)].get_id().to_string(),
+        "(('T.Demo\\Sweep extends int)&'T.Demo\\Sweep extends mixed)"
+    );
+    assert_eq!(explained(("src/Demo/Sweep.sharp", sweep), &[]), Vec::<String>::new());
+}
+
 /// `is` and `as` of a generic class test its type arguments while the code runs, so the value they narrow has the
 /// class's type with its type arguments.
 #[test]

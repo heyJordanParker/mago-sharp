@@ -326,7 +326,7 @@ pub fn insert_variable_from_docblock<'ctx, A>(
             false,
             false,
             false,
-            &mut ComparisonResult::default(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         );
 
         let is_sub = is_contained_by(
@@ -336,7 +336,7 @@ pub fn insert_variable_from_docblock<'ctx, A>(
             false,
             false,
             false,
-            &mut ComparisonResult::default(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         );
 
         let is_redundant = is_super
@@ -406,7 +406,7 @@ pub fn check_docblock_type_incompatibility<A>(
         false,
         false,
         false,
-        &mut ComparisonResult::default(),
+        &mut ComparisonResult::for_dialect(context.dialect),
     );
 
     let is_sub = is_contained_by(
@@ -416,7 +416,7 @@ pub fn check_docblock_type_incompatibility<A>(
         false,
         false,
         false,
-        &mut ComparisonResult::default(),
+        &mut ComparisonResult::for_dialect(context.dialect),
     );
 
     let is_redundant = is_super

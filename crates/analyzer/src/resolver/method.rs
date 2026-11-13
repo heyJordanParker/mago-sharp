@@ -1490,7 +1490,7 @@ where
             false,
             false,
             false,
-            &mut ComparisonResult::default(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         ) {
             continue;
         }

@@ -55,7 +55,7 @@ pub(crate) fn inherit_branch_context_properties<'ctx, A>(
             false,
             false,
             false,
-            &mut ComparisonResult::default(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         ) {
             destination_context.by_reference_constraints.insert(*variable, constraint.clone());
         } else {

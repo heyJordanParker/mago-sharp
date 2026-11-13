@@ -72,6 +72,7 @@ use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::RestPattern;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::TypePattern;
+use mago_syntax::dialect::Dialect;
 use mago_syntax::utils::pattern::PatternNames;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax::utils::pattern::called_functions;
@@ -1245,8 +1246,9 @@ where
     }
 }
 
-/// Whether patterns that hold every value of `held` hold every value of `declared`. An enum with data is the set of its
-/// cases, spec section 20, so `Option<int>.Some` and `Option<int>.None` together hold every `Option<int>`.
+/// Whether patterns that hold every value of `held` hold every value of `declared`, under PHP#'s rules, since only PHP#
+/// writes patterns. An enum with data is the set of its cases, spec section 20, so `Option<int>.Some` and
+/// `Option<int>.None` together hold every `Option<int>`.
 fn holds_every_value(codebase: &CodebaseMetadata, held: &TUnion, declared: &TUnion) -> bool {
     let cases: Vec<TAtomic> = declared
         .types
@@ -1278,7 +1280,7 @@ fn holds_every_value(codebase: &CodebaseMetadata, held: &TUnion, declared: &TUni
         false,
         false,
         false,
-        &mut ComparisonResult::new(),
+        &mut ComparisonResult::for_dialect(Dialect::Sharp),
     )
 }
 

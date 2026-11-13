@@ -244,7 +244,7 @@ pub fn infer_templates_from_input_and_container_types<A>(
                         argument_atomic,
                         container_atomic,
                         false,
-                        &mut ComparisonResult::default(),
+                        &mut ComparisonResult::for_dialect(context.dialect),
                     )
                 })
         })
@@ -1159,7 +1159,7 @@ pub fn infer_templates_for_method_call<'ctx, A>(
             false,
             false,
             false,
-            &mut ComparisonResult::default(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         ) {
             continue;
         }

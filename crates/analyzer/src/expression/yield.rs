@@ -89,7 +89,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for YieldValue<'arena> {
             false,
             false,
             false,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         ) {
             let (expected, found) = (display_type(context, &v), display_type(context, &value_type));
             let mut issue = Issue::error(format!("Invalid value type yielded; expected `{expected}`, but found `{found}`."))
@@ -114,7 +114,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for YieldValue<'arena> {
             false,
             false,
             false,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         ) {
             let mut issue = Issue::error(format!(
                 "Invalid key type yielded implicitly; expected `{}`, but implicit key is `{}`.",
@@ -186,7 +186,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for YieldPair<'arena> {
             false,
             false,
             false,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         ) {
             let mut issue = Issue::error(format!(
                 "Invalid value type yielded; expected `{}`, but found `{}`.",
@@ -214,7 +214,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for YieldPair<'arena> {
             false,
             false,
             false,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         ) {
             let mut issue = Issue::error(format!(
                 "Invalid key type yielded; expected `{}`, but found `{}`.",
@@ -312,7 +312,7 @@ where
                 false,
                 false,
                 false,
-                &mut ComparisonResult::new(),
+                &mut ComparisonResult::for_dialect(context.dialect),
             ) {
                 let (sent, expected) = (display_type(context, &s), display_type(context, &generator.2));
                 context.collector.report_with_code(
@@ -363,7 +363,7 @@ where
             false,
             false,
             false,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         ) {
             let (expected, found) = (display_type(context, &v), display_type(context, &value));
             let mut issue = Issue::error(format!(
@@ -390,7 +390,7 @@ where
             false,
             false,
             false,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         ) {
             let mut issue = Issue::error(format!(
                     "Invalid key type from `{form}`: current generator expects to yield keys of type `{}`, but the inner iterable yields keys of type `{}`.",

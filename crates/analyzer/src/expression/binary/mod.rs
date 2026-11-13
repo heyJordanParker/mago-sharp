@@ -150,7 +150,9 @@ where
         _ => return get_bool(),
     };
 
-    let mut comparison_result = ComparisonResult::new();
+    // Under PHP#'s rules a type parameter holds only itself, spec section 11, so a value of its bound is not always of
+    // it, and `event as TDue` can give null.
+    let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
     let is_already_subtype = union_comparator::is_contained_by(
         context.codebase,
         lhs_type,

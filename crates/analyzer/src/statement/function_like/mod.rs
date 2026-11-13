@@ -598,7 +598,7 @@ where
             false,
             false,
             false,
-            &mut ComparisonResult::default(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         );
 
         if !is_compatible {
@@ -925,7 +925,7 @@ where
                     context.codebase,
                     &effective_type,
                     &expanded_native,
-                    &mut ComparisonResult::default(),
+                    &mut ComparisonResult::for_dialect(context.dialect),
                 );
 
                 if !is_compatible {
@@ -965,13 +965,13 @@ where
                                     native_atomic,
                                     docblock_atomic,
                                     false,
-                                    &mut ComparisonResult::default(),
+                                    &mut ComparisonResult::for_dialect(context.dialect),
                                 ) || atomic_comparator::is_contained_by(
                                     context.codebase,
                                     docblock_atomic,
                                     native_atomic,
                                     false,
-                                    &mut ComparisonResult::default(),
+                                    &mut ComparisonResult::for_dialect(context.dialect),
                                 )
                             })
                         })
@@ -1036,7 +1036,7 @@ where
                     true,
                     true,
                     false,
-                    &mut ComparisonResult::default(),
+                    &mut ComparisonResult::for_dialect(context.dialect),
                 ))
         {
             if parameter_metadata.get_type_metadata().is_some()
@@ -1702,13 +1702,13 @@ fn check_return_type_metadata_width<'ctx, A>(
                     inferred_atomic,
                     declared_atomic,
                     false,
-                    &mut ComparisonResult::default(),
+                    &mut ComparisonResult::for_dialect(context.dialect),
                 ) || atomic_comparator::is_contained_by(
                     context.codebase,
                     declared_atomic,
                     inferred_atomic,
                     false,
-                    &mut ComparisonResult::default(),
+                    &mut ComparisonResult::for_dialect(context.dialect),
                 )
             })
         })
@@ -1722,7 +1722,7 @@ fn check_return_type_metadata_width<'ctx, A>(
                     inferred_atomic,
                     declared_atomic,
                     false,
-                    &mut ComparisonResult::default(),
+                    &mut ComparisonResult::for_dialect(context.dialect),
                 )
             })
         })
@@ -1953,7 +1953,7 @@ fn check_thrown_types<'ctx, A>(
                 false,
                 false,
                 false,
-                &mut ComparisonResult::default(),
+                &mut ComparisonResult::for_dialect(context.dialect),
             ) {
                 is_expected = true;
                 break;
@@ -2826,7 +2826,7 @@ where
             false,
             false,
             false,
-            &mut ComparisonResult::default(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         )
     };
     let fault = match (&refinement.refused, expanded) {

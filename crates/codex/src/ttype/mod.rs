@@ -1034,8 +1034,14 @@ fn add_union_type_inner(
     base_type
 }
 
+/// The values `type_1` and `type_2` both hold, compared under the rules of `dialect`, or None when they share none.
 #[must_use]
-pub fn intersect_union_types(type_1: &TUnion, type_2: &TUnion, codebase: &CodebaseMetadata) -> Option<TUnion> {
+pub fn intersect_union_types(
+    type_1: &TUnion,
+    type_2: &TUnion,
+    codebase: &CodebaseMetadata,
+    dialect: Dialect,
+) -> Option<TUnion> {
     if type_1 == type_2 {
         return Some(type_1.clone());
     }
@@ -1060,7 +1066,7 @@ pub fn intersect_union_types(type_1: &TUnion, type_2: &TUnion, codebase: &Codeba
     for type_1_atomic in type_1.types.iter() {
         for type_2_atomic in type_2.types.iter() {
             if let Some(intersection_atomic) =
-                intersect_atomic_types(type_1_atomic, type_2_atomic, codebase, &mut intersection_performed)
+                intersect_atomic_types(type_1_atomic, type_2_atomic, codebase, dialect, &mut intersection_performed)
             {
                 intersected_atomic_types.push(intersection_atomic);
             }
@@ -1084,7 +1090,7 @@ pub fn intersect_union_types(type_1: &TUnion, type_2: &TUnion, codebase: &Codeba
             false,
             false,
             false,
-            &mut ComparisonResult::default(),
+            &mut ComparisonResult::for_dialect(dialect),
         ) {
             combined_type = Some(type_1.clone());
         } else if union_comparator::is_contained_by(
@@ -1094,7 +1100,7 @@ pub fn intersect_union_types(type_1: &TUnion, type_2: &TUnion, codebase: &Codeba
             false,
             false,
             false,
-            &mut ComparisonResult::default(),
+            &mut ComparisonResult::for_dialect(dialect),
         ) {
             combined_type = Some(type_2.clone());
         }
@@ -1119,6 +1125,7 @@ fn intersect_atomic_types(
     type_1: &TAtomic,
     type_2: &TAtomic,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     intersection_performed: &mut bool,
 ) -> Option<TAtomic> {
     if let (TAtomic::Scalar(TScalar::Integer(t1_int)), TAtomic::Scalar(TScalar::Integer(t2_int))) = (type_1, type_2) {
@@ -1168,7 +1175,7 @@ fn intersect_atomic_types(
         false,
         false,
         false,
-        &mut ComparisonResult::default(),
+        &mut ComparisonResult::for_dialect(dialect),
     ) {
         narrower_type = Some(type_2);
         wider_type = Some(type_1);
@@ -1179,10 +1186,29 @@ fn intersect_atomic_types(
         false,
         false,
         false,
-        &mut ComparisonResult::default(),
+        &mut ComparisonResult::for_dialect(dialect),
     ) {
         narrower_type = Some(type_1);
         wider_type = Some(type_2);
+    }
+
+    // Under PHP#'s rules a type parameter holds only itself, spec section 11, so a value of it and of another type is
+    // the type parameter, bounded by both, as an `int` tested `is T` is a `T` bounded by `int`. PHP's rules read the
+    // other type as already of an unbounded `T` above.
+    if dialect.is_sharp()
+        && narrower_type.is_none()
+        && let (TAtomic::GenericParameter(parameter), other) | (other, TAtomic::GenericParameter(parameter)) =
+            (type_1, type_2)
+        && !matches!(other, TAtomic::GenericParameter(_))
+    {
+        let constraint =
+            intersect_union_types(&parameter.constraint, &TUnion::from_atomic(other.clone()), codebase, dialect)?;
+        *intersection_performed = true;
+
+        return Some(TAtomic::GenericParameter(TGenericParameter {
+            constraint: Arc::new(constraint),
+            ..parameter.clone()
+        }));
     }
 
     if let (Some(narrower), Some(wider)) = (narrower_type, wider_type) {
@@ -1209,7 +1235,7 @@ fn intersect_atomic_types(
         // A `Set` meets only another `Set`, or the plain PHP `array` it runs as.
         match (left_array, right_array) {
             (TArray::Set(left_element_type), TArray::Set(right_element_type)) => {
-                let element_type = intersect_union_types(left_element_type, right_element_type, codebase)?;
+                let element_type = intersect_union_types(left_element_type, right_element_type, codebase, dialect)?;
                 *intersection_performed = true;
                 return Some(TAtomic::Array(TArray::Set(Arc::new(element_type))));
             }
@@ -1237,8 +1263,8 @@ fn intersect_atomic_types(
         let (left_key, left_value) = get_array_parameters(left_array, codebase);
         let (right_key, right_value) = get_array_parameters(right_array, codebase);
 
-        let key = intersect_union_types(&left_key, &right_key, codebase).unwrap_or_else(get_never);
-        let value = intersect_union_types(&left_value, &right_value, codebase).unwrap_or_else(get_never);
+        let key = intersect_union_types(&left_key, &right_key, codebase, dialect).unwrap_or_else(get_never);
+        let value = intersect_union_types(&left_value, &right_value, codebase, dialect).unwrap_or_else(get_never);
 
         let is_list = left_array.is_list() || right_array.is_list();
         let non_empty = left_array.is_non_empty() || right_array.is_non_empty();

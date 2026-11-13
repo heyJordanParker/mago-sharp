@@ -35,6 +35,7 @@ use mago_syntax::cst::Argument;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Literal;
+use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
@@ -410,7 +411,7 @@ where
 
             // Spec section 12: a `Map` or a `Set` PHP# passed as its PHP array comes back as the collection the PHP
             // array plain PHP wrote there crosses into, as `ksort` gives a `Map<Status, int>` back keyed by its cases,
-            // where that collection takes what plain PHP wrote.
+            // where that collection takes what plain PHP wrote. Both types are PHP arrays, so PHP's rules compare them.
             if let Some(collection) = passed_collection
                 && is_contained_by(
                     context.codebase,
@@ -419,7 +420,7 @@ where
                     false,
                     false,
                     false,
-                    &mut ComparisonResult::new(),
+                    &mut ComparisonResult::for_dialect(Dialect::Php),
                 )
             {
                 new_type = collection;
@@ -1038,7 +1039,7 @@ where
                             && !resolved_assertion_type.has_template()
                             && !assertion_loses_template_precision
                         {
-                            let mut comparison_result = ComparisonResult::default();
+                            let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
                             let is_subtype = is_contained_by(
                                 context.codebase,
                                 asserted_type,

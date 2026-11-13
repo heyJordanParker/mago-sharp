@@ -680,7 +680,7 @@ where
 
     // Nothing is certain about a refused value, so a test of it gives either branch.
     if !subject.is_never() && !is_refused_type(&subject) {
-        let mut comparison_result = ComparisonResult::new();
+        let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
         let subject_is_contained = union_comparator::is_contained_by(
             context.codebase,
             &subject,

@@ -1447,7 +1447,7 @@ fn reconcile_not_in_array<A>(
 where
     A: Arena,
 {
-    let intersection = intersect_union_types(typed_value, existing_var_type, context.codebase);
+    let intersection = intersect_union_types(typed_value, existing_var_type, context.codebase, context.dialect);
 
     if intersection.is_some() {
         return existing_var_type.clone();

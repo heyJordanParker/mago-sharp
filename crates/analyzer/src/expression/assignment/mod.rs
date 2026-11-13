@@ -786,7 +786,7 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
                 assigned_type.ignore_nullable_issues(),
                 assigned_type.ignore_falsable_issues(),
                 false,
-                &mut ComparisonResult::default(),
+                &mut ComparisonResult::for_dialect(context.dialect),
             )
         {
             let assigned_type_str = display_type(context, &assigned_type);

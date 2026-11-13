@@ -323,7 +323,7 @@ mod tests {
                 .with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())),
         );
 
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -338,7 +338,7 @@ mod tests {
             (ArrayKey::String(word("a")), (false, get_string())),
             (ArrayKey::String(word("b")), (true, get_int())),
         ])));
-        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -353,7 +353,7 @@ mod tests {
         let container = t_keyed(
             TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
         );
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -365,7 +365,7 @@ mod tests {
         let container = t_keyed(
             TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (true, get_string()))])),
         );
-        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -377,7 +377,7 @@ mod tests {
         let container = t_keyed(
             TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
         );
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -391,7 +391,7 @@ mod tests {
         let container = t_keyed(
             TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
         );
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -401,7 +401,7 @@ mod tests {
         let input = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_string()), Arc::new(get_int())));
         // array<array-key, mixed>
         let container = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())));
-        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -411,7 +411,7 @@ mod tests {
         let input = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_string()), Arc::new(get_int())));
         // array<array-key, string>
         let container = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_string())));
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -421,7 +421,7 @@ mod tests {
         let input = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_int())));
         // array<string, int>
         let container = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_string()), Arc::new(get_int())));
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -433,7 +433,7 @@ mod tests {
         );
         // array<array-key, mixed>
         let container = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())));
-        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -445,7 +445,7 @@ mod tests {
         );
         // array<array-key, int>
         let container = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_int())));
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -462,7 +462,7 @@ mod tests {
                 .with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))]))
                 .with_parameters(Arc::new(get_arraykey()), Arc::new(get_int())),
         );
-        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -479,7 +479,7 @@ mod tests {
                 .with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))]))
                 .with_parameters(Arc::new(get_arraykey()), Arc::new(get_int())),
         );
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -491,7 +491,7 @@ mod tests {
         let container = t_keyed(
             TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
         );
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -503,7 +503,7 @@ mod tests {
         let container = t_keyed(
             TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_int()))])),
         );
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -517,7 +517,7 @@ mod tests {
         let container = t_keyed(
             TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())).with_non_empty(false),
         );
-        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -531,7 +531,7 @@ mod tests {
         let container = t_keyed(
             TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())).with_non_empty(true),
         );
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -546,7 +546,7 @@ mod tests {
             TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
         );
 
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 
     #[test]
@@ -572,6 +572,6 @@ mod tests {
 
         // This should be false, because input could have a key 'b' which would be a string,
         // but the container requires 'b' to be an int.
-        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::new());
     }
 }
