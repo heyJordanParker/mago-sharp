@@ -293,23 +293,11 @@ pub fn reconcile_keyed_types<'ctx, A>(
 
         let result_type = result_type.unwrap_or_else(get_never);
 
-        let key_parts = break_up_path_into_parts(key_str);
-
         if !did_type_exist && result_type.is_never() {
-            // Even when the type doesn't exist and result is never, we still need to
-            // update parent array types for negated isset/key_exists to remove the key
-            if key_str.ends_with(b"]") && (has_inverted_isset || has_inverted_key_exists) {
-                adjust_array_type_remove_key(
-                    key_parts,
-                    block_context,
-                    changed_var_ids,
-                    context.codebase,
-                    context.dialect,
-                );
-            }
-
             continue;
         }
+
+        let key_parts = break_up_path_into_parts(key_str);
 
         let type_changed =
             if let Some(before_adjustment) = &before_adjustment { &result_type != before_adjustment } else { true };
