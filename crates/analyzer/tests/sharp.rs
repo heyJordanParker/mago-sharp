@@ -20138,6 +20138,34 @@ fn as_gives_its_target_type_or_null_for_every_target() {
     );
 }
 
+/// Spec section 21: `as` converts a value, and only `is` narrows one, so the local an `as` converts keeps its own type
+/// after it. `n as TAny` of an `Event` is a `TAny` narrowed to `Event` where it holds and null where it doesn't, and `n`
+/// is still an `Event` below it, as it is after `m as Paid`, for an unbounded type parameter and a bounded one alike.
+#[test]
+fn as_leaves_the_local_it_converts_its_own_type() {
+    let event = ("src/Demo/Event.sharp", "namespace Demo;\n\npublic interface Event\n{\n}\n");
+    let paid = ("src/Demo/Paid.sharp", "namespace Demo;\n\npublic class Paid : Event\n{\n}\n");
+    let sweep = "namespace Demo;\n\npublic class Sweep<TAny, TDue : Event>\n{\n    public List<Any?> run(Event n, Event m, Event k)\n    {\n        const converted = n as TAny;\n        const afterAny = n;\n        const paid = m as Paid;\n        const afterPaid = m;\n        const due = k as TDue;\n        const afterDue = k;\n        return [converted, afterAny, paid, afterPaid, due, afterDue];\n    }\n}\n";
+    let (_, artifacts) =
+        analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sweep.sharp", sweep), &[event, paid]);
+    let type_of = |expression: &str| {
+        let start = sweep.find(expression).unwrap() as u32;
+        artifacts.expression_types[&(start, start + expression.len() as u32)].get_id().to_string()
+    };
+
+    assert_eq!(
+        ["n as TAny", "afterAny = n", "m as Paid", "afterPaid = m", "k as TDue", "afterDue = k"].map(type_of),
+        [
+            "('TAny.Demo\\Sweep extends Demo\\Event)|null",
+            "Demo\\Event",
+            "Demo\\Paid|null",
+            "Demo\\Event",
+            "('TDue.Demo\\Sweep extends Demo\\Event)|null",
+            "Demo\\Event",
+        ]
+    );
+}
+
 /// Spec section 11: a type parameter holds only itself, so a value of its bound, or of any type for an unbounded one,
 /// may or may not be of it. `is` narrows the value to the type parameter, `is not` leaves it its own type, and neither
 /// test is always true or always false.

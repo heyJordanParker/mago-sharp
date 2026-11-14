@@ -581,11 +581,24 @@ where
     // A `match` that tests a value that is not a local assigns the hidden variable that holds it first.
     let first_hidden = hidden.first().map(|(name, _)| word(name));
     context.hidden_variables.extend(hidden);
+    // Spec section 21: only `is` narrows, and `as` converts. The PHP of `n as T` tests the local `n` itself, and the
+    // branches of its test merge back into a union of the narrowed and the unnarrowed type, `T|Event` for a type
+    // parameter `T`, so the local keeps the type it had before the `as`.
+    let converted_local = match node {
+        Node::Expression(Expression::As(r#as)) => context
+            .get_assertion_context_from_block(block_context)
+            .get_expression_id(r#as.value)
+            .and_then(|id| block_context.locals.get(&id).cloned().map(|local| (id, local))),
+        _ => None,
+    };
     let (result, issues) = context.record(|context| match php {
         Node::Expression(expression) => expression.analyze(context, block_context, artifacts),
         Node::Statement(statement) => statement.analyze(context, block_context, artifacts),
         _ => Ok(()),
     });
+    if let Some((id, local)) = converted_local {
+        block_context.locals.insert(id, local);
+    }
     context.patterns.truncate(patterns);
     for (left_bracket, tuple) in tuples {
         artifacts.record_list_pattern_tuple(&left_bracket, Some(tuple));
