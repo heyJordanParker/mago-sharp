@@ -2,7 +2,6 @@
 21:16: `mixed` reaches a method call, which PHP# allows only from a known type: narrow it with `is`, or declare its type (spec section 24)
 26:25: `mixed` reaches a cast, which PHP# allows only from a known type: narrow it with `is`, or declare its type (spec section 24)
 31:16: `===` between `mixed` and `int(1)` has no PHP# form: PHP#'s `===` compares two objects, and an `Any?` compares an `int` with a `float` by value, so narrow the value with `is` first (spec section 19)
-36:16: a `Map` read at a key it may lack has no PHP# form: PHP warns on a missing key, and a PHP# `Map` read gives `null` and goes on, which succeeds where PHP warned, so it converts behind `??` or `isset` only (spec section 12)
 36:30: `mixed` reaches a key, which PHP# allows only from a known type: narrow it with `is`, or declare its type (spec section 24)
 41:23: `mixed` reaches a parameter of a known type, which PHP# allows only from a known type: narrow it with `is`, or declare its type (spec section 24)
 46:31: `DOMNode` is a class of PHP's root namespace, which PHP# names only in the standard library (spec section 23)

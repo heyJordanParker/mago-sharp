@@ -29,6 +29,7 @@ use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_syntax::cst::Access;
+use mago_syntax::cst::ArrayAccess;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
@@ -375,6 +376,42 @@ impl<'input> Converter<'input, '_> {
         })
     }
 
+    /// `read`, the read of the `Map` `access` names at a key it may lack, as `(sizes[name] ?? throw new
+    /// OutOfRangeException("Undefined array key \"small\""))`. PHP warns on a missing key and gives null, and PHP#
+    /// throws there instead, as a converted file may where PHP warns (spec section 12). It converts where the `Map`'s
+    /// values are never null, so `??` throws for a missing key alone, and refuses where a stored null would throw too.
+    fn key_read(&mut self, read: &Expression<'_>, access: &ArrayAccess<'_>) {
+        let values_never_null = self.type_of(access.array).is_some_and(|union| {
+            union.types.iter().all(|atomic| {
+                matches!(atomic, TAtomic::Array(TArray::Keyed(keyed))
+                    if keyed.parameters.as_ref().is_some_and(|(_, value)| !value.can_be_null()))
+            })
+        });
+        if !values_never_null {
+            return self.refuse(read.span(), MISSING_KEY);
+        }
+        if self.numeric_key(access.array, access.index) {
+            return;
+        }
+        let error = match self.imports.name_of("OutOfRangeException") {
+            Ok(error) => error,
+            Err(reason) => return self.refuse(read.span(), reason),
+        };
+        // PHP's warning, which names a literal key as PHP writes it.
+        let message = match access.index {
+            Expression::Literal(Literal::String(string)) => {
+                format!("Undefined array key \"{}\"", String::from_utf8_lossy(string.value.unwrap_or_default()))
+            }
+            Expression::Literal(Literal::Integer(integer)) => {
+                format!("Undefined array key {}", String::from_utf8_lossy(self.text(integer.span)))
+            }
+            _ => "Undefined array key".to_owned(),
+        };
+        let message = message.replace('\\', "\\\\").replace('"', "\\\"");
+        let rendered = self.render(read);
+        self.edits.replace(read.span(), format!("({rendered} ?? throw new {error}(\"{message}\"))"));
+    }
+
     /// The analysis's type of `expression`, as a refusal names it.
     fn shown(&self, expression: &Expression<'_>) -> String {
         self.type_of(expression).map_or_else(|| "no type".to_owned(), |union| union.get_id().to_string())
@@ -453,7 +490,7 @@ impl<'input> Converter<'input, '_> {
                 self.untyped(access.array, "an index");
                 self.untyped(access.index, "a key");
                 if self.is(access.array, &[Kind::Map]) {
-                    self.refuse(expression.span(), MISSING_KEY);
+                    self.key_read(expression, access);
                 }
             }
             Expression::Conditional(conditional) => {

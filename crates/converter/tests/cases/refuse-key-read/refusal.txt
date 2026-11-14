@@ -1,0 +1,2 @@
+16:24: a key of `string` has no PHP# form in a `Map` keyed by `int|string`: PHP turns a string of an integer's digits into the `int`, as `'42'` into 42, and a PHP# `Map` keeps it a string (spec section 12)
+22:16: `OutOfRangeException` is a class of PHP's root namespace, which PHP# names only in the standard library (spec section 23)

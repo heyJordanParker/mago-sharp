@@ -58,6 +58,13 @@ final class Label
         return $count;
     }
 
+    // A read of a `Map` whose values are never null, at a key it may lack.
+    /** @param array<string, int> $sizes */
+    public function sized(array $sizes): int
+    {
+        return $sizes['small'];
+    }
+
     private function exclaimed(string $title): string
     {
         return $title . '!';
