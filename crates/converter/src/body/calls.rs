@@ -134,17 +134,25 @@ impl<'input> Converter<'input, '_> {
     /// a parameter of a known type only in PHP.
     pub(crate) fn arguments(&mut self, arguments: &ArgumentList<'_>, callee: Option<&FunctionLikeMetadata>) {
         for (index, argument) in arguments.arguments.iter().enumerate() {
-            let parameter = callee.and_then(|callee| match argument {
+            // The parameter an argument fills, and PHP's number of the argument: the parameter's place for a named
+            // one, and its own place for a positional one, as each one past the `...` parameter has.
+            let filled = callee.and_then(|callee| match argument {
                 Argument::Named(argument) => {
                     let name = [b"$".as_slice(), argument.name.value].concat();
-                    callee.parameters.iter().find(|parameter| parameter.get_name().0.as_bytes() == name)
+                    callee
+                        .parameters
+                        .iter()
+                        .enumerate()
+                        .find(|(_, parameter)| parameter.get_name().0.as_bytes() == name)
                 }
                 // Each argument past the `...` parameter lands in it.
                 Argument::Positional(_) => callee
                     .parameters
                     .get(index)
-                    .or_else(|| callee.parameters.last().filter(|parameter| parameter.flags.is_variadic())),
+                    .or_else(|| callee.parameters.last().filter(|parameter| parameter.flags.is_variadic()))
+                    .map(|parameter| (index, parameter)),
             });
+            let parameter = filled.map(|(_, parameter)| parameter);
             let declared = parameter
                 .and_then(|parameter| parameter.get_type_metadata())
                 .map(|declared| &declared.type_union)
@@ -177,12 +185,8 @@ impl<'input> Converter<'input, '_> {
             let expected = (is_lambda || !declared.has_template_types()).then_some(declared);
             self.expression(value, expected);
             self.narrowed(value, declared);
-            if self.mixed(value, "a parameter of a known type") || declared.has_template_types() {
-                continue;
-            }
-            // PHP passes a value its parameter's type may not hold, and PHP# refuses it (spec section 7).
-            if let Some(passed) = self.type_of(value)
-                && !is_contained_by(
+            let wider = self.type_of(value).filter(|passed| {
+                !is_contained_by(
                     self.input.codebase,
                     passed,
                     declared,
@@ -191,7 +195,20 @@ impl<'input> Converter<'input, '_> {
                     false,
                     &mut ComparisonResult::new(),
                 )
-            {
+            });
+            // PHP checks the argument where it lands, and throws a `TypeError` for a value its parameter's type doesn't
+            // hold, as PHP# does after `as`.
+            if let (Some(passed), Some((number, parameter))) = (wider, filled) {
+                let subject = format!("Argument #{} ({})", number + 1, parameter.get_name().0.as_str_lossy());
+                if self.checked(value, passed, declared, &subject) {
+                    continue;
+                }
+            }
+            if self.mixed(value, "a parameter of a known type") || declared.has_template_types() {
+                continue;
+            }
+            // PHP passes a value its parameter's type may not hold, and PHP# refuses it (spec section 7).
+            if let Some(passed) = wider {
                 let (passed, declared) = (passed.get_id(), declared.get_id());
                 self.refuse(
                     value.span(),

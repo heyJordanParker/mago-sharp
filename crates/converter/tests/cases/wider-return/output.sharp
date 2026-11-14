@@ -1,0 +1,21 @@
+namespace App;
+
+// A returned value the analysis types wider than the method's return is checked as that type, which PHP checks where
+// the method returns and throws a `TypeError` for any other value (spec section 21).
+public final class Lookup
+{
+    public string name(Any? value)
+    {
+        return value as string ?? throw new TypeError("Return value must be of type string");
+    }
+
+    public Lookup owner(Lookup? lookup)
+    {
+        return lookup as Lookup ?? throw new TypeError("Return value must be of type App\\Lookup");
+    }
+
+    public bool enabled(bool|int flag)
+    {
+        return flag as bool ?? throw new TypeError("Return value must be of type bool");
+    }
+}

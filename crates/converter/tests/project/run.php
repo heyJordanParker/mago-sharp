@@ -126,6 +126,15 @@ $label = new Label();
 echo $label->render('shelf', 3), "\n", $label->folder(), "\n", $label->traced(), ' ', $label->kind(), "\n";
 echo $label->status(201), ' ', $label->status(404), ' ', $label->status(500), "\n";
 echo $label->size(500, false), ' ', $label->size(5, true), ' ', $label->size(20, false), ' ', $label->size(1, false), "\n";
+echo $label->titled('hey'), ' ', $label->counted(4);
+foreach ([fn () => $label->titled(5), fn () => $label->counted('4')] as $refused) {
+    try {
+        $refused();
+    } catch (\TypeError $error) {
+        echo ' ', $error::class;
+    }
+}
+echo "\n";
 
 // A PHPDoc `int` that holds `"5"`, a `string` key PHP reads as `int`, and generator keys through a PHP# parameter.
 $stock = new Stock();

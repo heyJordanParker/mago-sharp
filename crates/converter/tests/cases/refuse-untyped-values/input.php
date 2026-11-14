@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App;
 
-// A value the analysis gives `mixed` or `object` reaches a typed property, a typed return, a constructor's parameter
+// A value the analysis gives `mixed` or `object` reaches a typed property, a constructor's parameter that takes null
 // and a member only in PHP: PHP# takes it there from a known type (spec section 24).
 final class Untyped
 {
@@ -13,11 +13,6 @@ final class Untyped
     public function keep(mixed $value): void
     {
         $this->last = $value;
-    }
-
-    public function back(mixed $value): string
-    {
-        return $value;
     }
 
     public function name(object $value): string

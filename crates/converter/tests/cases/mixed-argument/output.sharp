@@ -1,0 +1,26 @@
+namespace App;
+
+// An argument of no known type is checked as its parameter's type, which PHP checks where the argument lands and
+// throws a `TypeError` for any other value (spec section 21).
+public final class Greeter
+{
+    public string greet(Any? name)
+    {
+        return this.hello(name as string ?? throw new TypeError("Argument #1 ($name) must be of type string"));
+    }
+
+    public string welcome(Any? guest, int times)
+    {
+        return this.visit(guest as Greeter ?? throw new TypeError("Argument #1 ($guest) must be of type App\\Greeter"), times);
+    }
+
+    private string hello(string name)
+    {
+        return name;
+    }
+
+    private string visit(Greeter guest, int times)
+    {
+        return 'welcome';
+    }
+}

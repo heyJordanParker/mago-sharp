@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App;
 
 // PHP lets a value of no known type reach an operation of a known type, and PHP# lets it only after `is` narrows it
-// (spec section 24).
+// (spec section 24), or `as` where PHP checks one type, which a union and a class PHP# can't name are not.
 final class Loose
 {
     /** @var array<string, int> */
@@ -36,13 +36,17 @@ final class Loose
         return $this->scores[$value];
     }
 
-    public function argument($value): string
+    public function either($value): void
     {
-        return $this->greet($value);
+        $this->number($value);
     }
 
-    public function greet(string $name): string
+    public function node($value): void
     {
-        return 'hi ' . $name;
+        (new Nodes())->append($value);
+    }
+
+    private function number(int|string $value): void
+    {
     }
 }

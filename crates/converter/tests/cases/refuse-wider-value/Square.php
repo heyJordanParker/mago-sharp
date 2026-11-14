@@ -6,7 +6,7 @@ namespace App;
 
 final class Square implements Shape
 {
-    public static function describe(Square $square): string
+    public static function describe(?Square $square): string
     {
         return 'square';
     }

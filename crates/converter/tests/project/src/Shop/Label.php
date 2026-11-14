@@ -47,6 +47,22 @@ final class Label
         };
     }
 
+    // A value of no known type, as an argument and as a return, checked as the declared type it lands in.
+    public function titled(mixed $title): string
+    {
+        return $this->exclaimed($title);
+    }
+
+    public function counted(mixed $count): int
+    {
+        return $count;
+    }
+
+    private function exclaimed(string $title): string
+    {
+        return $title . '!';
+    }
+
     // A `switch` as a `match` statement.
     public function status(int $code): string
     {

@@ -1,4 +1,3 @@
 13:9: `$values` starts as `[]`, and PHP# gives a `List` type to one the body only appends to and a `Map` type to one it only writes by key, which `$values` is not: declare its type with a `@var` tag (spec section 12)
 22:9: `$values` starts as `[]`, so the values written in it give its type, and no declaration gives the type of one of them: declare its type with a `@var` tag (decision 2)
 32:21: `$size` starts as `null`, so PHP# declares it first in the body with a type, and no declaration gives the type of `$this->guess()`, which it is assigned: declare its type with a `@var` tag (decision 2)
-35:16: `nonnull` is wider than `int`, the type the method declares it returns, which PHP returns and PHP# refuses (spec section 7)

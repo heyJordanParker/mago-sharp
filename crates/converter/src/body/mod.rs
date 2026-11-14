@@ -41,6 +41,8 @@ use mago_syntax::cst::Try;
 use mago_syntax::cst::Variable;
 
 use crate::Converter;
+use crate::types::narrowing;
+use crate::types::type_text;
 use matching::MatchPlace;
 
 /// What a value of an atomic type is to the operators PHP and PHP# share.
@@ -176,7 +178,8 @@ impl<'input> Converter<'input, '_> {
                     if let Some(returning) = &returning {
                         self.narrowed(value, returning);
                     }
-                    // PHP returns a value its declared type doesn't hold, and PHP# refuses it (spec section 7).
+                    // PHP checks a returned value its declared type may not hold, and throws a `TypeError` for one it
+                    // doesn't, as PHP# does after `as`. PHP# refuses any other such value (spec section 7).
                     if let (Some(returning), Some(returned)) = (&returning, self.type_of(value))
                         && !is_contained_by(
                             self.input.codebase,
@@ -187,6 +190,7 @@ impl<'input> Converter<'input, '_> {
                             false,
                             &mut ComparisonResult::new(),
                         )
+                        && !self.checked(value, returned, returning, "Return value")
                     {
                         let (returned, returning) = (returned.get_id(), returning.get_id());
                         self.refuse(
@@ -562,6 +566,67 @@ impl<'input> Converter<'input, '_> {
                 declared.get_id()
             ),
         );
+    }
+
+    /// Writes `value`, converted already, as `value as T ?? throw new TypeError("…")`, where the analysis types it wider
+    /// than `place`, the declared type of the parameter or the return it lands in, as `mixed` or `array|string` for a
+    /// `string`. PHP checks the value there and throws a `TypeError` for one `place` doesn't hold, and `as` gives null
+    /// for the same values (spec section 21), so the converted file throws where strict PHP does, as each converted
+    /// file is strict (spec section 27). The error says what PHP's does of `subject`, as `Argument #1 ($name)` or
+    /// `Return value`: "Argument #1 ($name) must be of type string". `passed` is the analysis's type of `value`.
+    ///
+    /// Gives whether it took the value: it writes it where `as` tests what PHP does, and refuses it where the file
+    /// can't name the type `as` tests, as a class of PHP's root namespace. `as` tests what PHP does where `place` is one
+    /// `int`, `string`, `bool`, object, enum or class with no type parameters, `passed` may hold one, as a `Shape` may
+    /// be the `Square` `place` takes, and `place` allows null only where `passed` never is, as `as` gives null for a
+    /// value it refuses.
+    pub(super) fn checked(&mut self, value: &Expression<'_>, passed: &TUnion, place: &TUnion, subject: &str) -> bool {
+        let codebase = self.input.codebase;
+        let tested = TUnion::from_vec(place.get_non_nullable_types());
+        let [atomic] = tested.types.as_ref() else {
+            return false;
+        };
+        if place.has_null() && passed.can_be_null() {
+            return false;
+        }
+        let tests = match get_sharp_type(atomic) {
+            Some(SharpType::Int | SharpType::String | SharpType::Bool | SharpType::Object | SharpType::Enum(_)) => {
+                !matches!(atomic, TAtomic::Scalar(scalar) if scalar.is_literal_value())
+            }
+            Some(SharpType::Class(name, arguments)) => {
+                arguments.is_empty()
+                    && !matches!(atomic, TAtomic::Object(TObject::Named(object)) if object.is_static)
+                    && codebase.get_class_like(name.as_bytes()).is_some_and(|class| class.template_types.is_empty())
+            }
+            _ => false,
+        };
+        let holds = |inner: &TUnion, outer: &TUnion| {
+            is_contained_by(codebase, inner, outer, false, false, false, &mut ComparisonResult::new())
+        };
+        let may_hold = passed.types.iter().any(|passed| {
+            let passed = TUnion::from_atomic(passed.clone());
+            passed.is_mixed() || holds(&passed, &tested) || holds(&tested, &passed)
+        });
+        if !tests || !may_hold || narrowing(&tested).is_some() {
+            return false;
+        }
+        // PHP names the declared type as PHP writes it, as `?App\Square`.
+        let php = format!("{}{}", if place.has_null() { "?" } else { "" }, tested.get_id());
+        let named = type_text(&tested, codebase, &mut self.imports)
+            .and_then(|tested| Ok((tested, self.imports.name_of("TypeError")?)));
+        let (tested, error) = match named {
+            Ok(named) => named,
+            Err(reason) => {
+                self.refuse(value.span(), reason);
+                return true;
+            }
+        };
+        let rendered = self.render(value);
+        let rendered = if is_primary(value) { rendered } else { format!("({rendered})") };
+        let message = format!("{subject} must be of type {php}").replace('\\', "\\\\");
+        self.edits.replace(value.span(), format!("{rendered} as {tested} ?? throw new {error}(\"{message}\")"));
+
+        true
     }
 
     /// Refuses `object`, whose member `operation` reaches, when the analysis gives it `mixed` or `object`, and gives
