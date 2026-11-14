@@ -20,6 +20,12 @@ public final class Ledger
         return this.limit(match (this.raw()) { int value2 => value2, null => null, default => throw new TypeError("Argument #1 ($value) must be of type ?int") });
     }
 
+    // PHP returns an `int` where a `float` is declared as that number.
+    public float ratio()
+    {
+        return match (this.raw()) { float value2 => value2, int value2 => (float) value2, default => throw new TypeError("Return value must be of type float") };
+    }
+
     public Entry? entry(Loggable? item)
     {
         return match (item) { Entry value2 => value2, null => null, default => throw new TypeError("Return value must be of type ?App\\Entry") };

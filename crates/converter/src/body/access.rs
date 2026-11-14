@@ -69,8 +69,21 @@ impl Converter<'_, '_> {
             }
             _ => {
                 let class = self.class.as_ref().map(|class| class.metadata.original_name.as_str_lossy().into_owned());
-                let function = self.method.as_ref().and_then(|method| method.name.as_deref());
-                let function = function.map(|name| String::from_utf8_lossy(name).into_owned());
+                // PHP names a method by its name, a property's accessor as `$total::get`, and nothing outside a
+                // function, as in a property's default.
+                let function = match &self.method {
+                    None => Some(String::new()),
+                    Some(method) => match (&method.name, &method.storage, &method.captures) {
+                        (Some(name), _, _) => Some(String::from_utf8_lossy(name).into_owned()),
+                        (None, Some(property), None) => Some(format!(
+                            "${}::{}",
+                            String::from_utf8_lossy(property),
+                            if method.returning.is_some() { "get" } else { "set" }
+                        )),
+                        _ => None,
+                    },
+                };
+                let outside = self.method.is_none();
                 let text = match constant {
                     MagicConstant::Namespace(_) => class.map(|class| {
                         class.rsplit_once('\\').map_or_else(String::new, |(namespace, _)| namespace.to_owned())
@@ -78,19 +91,15 @@ impl Converter<'_, '_> {
                     // A class file declares no trait, and PHP gives `''` outside one.
                     MagicConstant::Trait(_) => class.map(|_| String::new()),
                     MagicConstant::Function(_) => function,
+                    MagicConstant::Method(_) if outside => Some(String::new()),
                     MagicConstant::Method(_) => class.zip(function).map(|(class, method)| format!("{class}::{method}")),
                     _ => None,
                 };
                 let Some(text) = text else {
                     let shown = String::from_utf8_lossy(self.text(constant.span())).into_owned();
-                    let in_lambda = self.method.as_ref().is_some_and(|method| method.captures.is_some());
                     return self.refuse(
                         constant.span(),
-                        if in_lambda {
-                            format!("`{shown}` in a lambda gives PHP's name of the lambda, which holds the line it starts on, and the conversion moves lines")
-                        } else {
-                            format!("`{shown}` outside a method, or in a property accessor, is not converted yet")
-                        },
+                        format!("`{shown}` in a lambda gives PHP's name of the lambda, which holds the line it starts on, and the conversion moves lines"),
                     );
                 };
                 return self.edits.replace(constant.span(), format!("\"{}\"", text.replace('\\', "\\\\")));

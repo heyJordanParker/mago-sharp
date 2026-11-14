@@ -261,6 +261,10 @@ pub fn type_text(union: &TUnion, codebase: &CodebaseMetadata, imports: &mut Impo
 }
 
 fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, imports: &mut Imports) -> Result<String, String> {
+    // `never` is a whole type, which no value has, as a return, a type argument or a parameter (spec section 7).
+    if atomic.is_never() {
+        return Ok("never".to_owned());
+    }
     // `Order & Shareable` holds a value of each class (spec section 21).
     if let Some(intersected) = atomic.get_intersection_types().filter(|intersected| !intersected.is_empty()) {
         let TAtomic::Object(TObject::Named(named)) = atomic else {

@@ -1,0 +1,19 @@
+namespace App;
+
+// A public member of an application names its types. A method that declares `mixed`, or no return type, returns what
+// its body returns, which names them, and `null` where the body runs on past its last statement.
+public final class Store
+{
+    public string label()
+    {
+        return 'store';
+    }
+
+    public int? counted(bool any)
+    {
+        if (any) {
+            return 1;
+        }
+        return null;
+    }
+}

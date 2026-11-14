@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace App;
 
-// Destructuring by position, `print`, `new` of a string and generators have no form or wait, while the lambda, the
-// `match`, the `clone`, the template, the magic constant and the spreads beside them convert.
+// Destructuring by position, `print` and `new` of a string have no form or wait, while the lambda, the `match`, the
+// `clone`, the template, the magic constant, the spreads and the generator beside them convert.
 final class Later
 {
     public function run(string $name, Later $other, int $count): mixed

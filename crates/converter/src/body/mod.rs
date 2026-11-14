@@ -29,9 +29,11 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
+use mago_codex::ttype::get_int;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrayAccess;
 use mago_syntax::cst::Block;
@@ -44,6 +46,8 @@ use mago_syntax::cst::Literal;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::Try;
 use mago_syntax::cst::Variable;
+use mago_syntax::cst::Yield;
+use mago_syntax::cst::YieldValue;
 
 use crate::Converter;
 use crate::types::narrowing;
@@ -178,6 +182,10 @@ impl<'input> Converter<'input, '_> {
                     self.edits.delete(r#match.right_brace.end.offset, terminator.end.offset);
                     return self.match_expression(r#match, MatchPlace::Statement);
                 }
+                // A PHP# `yield` is a statement, which gives no value back (spec section 12).
+                if let Expression::Yield(r#yield) = expression.expression {
+                    return self.yielded(r#yield);
+                }
                 if !self.declaration(statement, expression.expression) {
                     self.expression(expression.expression, None);
                 }
@@ -212,13 +220,13 @@ impl<'input> Converter<'input, '_> {
             Statement::If(r#if) => self.if_statement(statement, r#if, false),
             Statement::Try(r#try) => self.try_statement(r#try),
             Statement::Noop(_) => {}
-            Statement::Foreach(foreach) => self.foreach(statement, foreach),
-            Statement::For(r#for) => self.for_loop(statement, r#for),
-            Statement::While(r#while) => self.while_loop(statement, r#while),
-            Statement::DoWhile(r#do) => self.do_while(r#do),
-            Statement::Break(r#break) => self.leave(r#break.level),
-            Statement::Continue(r#continue) => self.leave(r#continue.level),
-            Statement::Switch(switch) => self.switch_statement(statement, switch),
+            Statement::Foreach(foreach) => self.looped(statement, false, |this| this.foreach(statement, foreach)),
+            Statement::For(r#for) => self.looped(statement, false, |this| this.for_loop(statement, r#for)),
+            Statement::While(r#while) => self.looped(statement, false, |this| this.while_loop(statement, r#while)),
+            Statement::DoWhile(r#do) => self.looped(statement, false, |this| this.do_while(r#do)),
+            Statement::Break(r#break) => self.leave(r#break.r#break.span.end.offset, r#break.level),
+            Statement::Continue(r#continue) => self.leave(r#continue.r#continue.span.end.offset, r#continue.level),
+            Statement::Switch(switch) => self.looped(statement, true, |this| this.switch_statement(statement, switch)),
             Statement::Unset(unset) => self.unset(unset),
             Statement::Echo(_) | Statement::EchoTag(_) => self.refuse(
                 statement.span(),
@@ -259,6 +267,54 @@ impl<'input> Converter<'input, '_> {
         }
     }
 
+    /// A `yield` statement: `yield value;` as it is, and `yield from items;` as `yield ...items;` (spec section 12). A
+    /// PHP# `Iterable` gives its values alone, so a `yield` with a key, and a bare `yield`, whose value PHP gives as
+    /// null, have none.
+    fn yielded(&mut self, r#yield: &Yield<'_>) {
+        match r#yield {
+            Yield::Value(YieldValue { value: Some(value), .. }) => self.expression(value, None),
+            Yield::From(from) => {
+                self.edits.replace_range(
+                    from.r#yield.span.start.offset,
+                    from.iterator.span().start.offset,
+                    "yield ...",
+                );
+                self.expression(from.iterator, None);
+            }
+            Yield::Value(_) => self.refuse(
+                r#yield.span(),
+                "a `yield` with no value has no PHP# form: PHP yields null there, and a PHP# `yield` names the value it gives (spec section 12)",
+            ),
+            Yield::Pair(_) => self.refuse(
+                r#yield.span(),
+                "a `yield` with a key has no PHP# form: a PHP# `Iterable` gives its values alone (spec section 12)",
+            ),
+            Yield::Spread(_) => self.refuse(r#yield.span(), "`yield ...` is PHP# only"),
+        }
+    }
+
+    /// A body PHP writes between `:` and an end keyword, as `foreach (…): … endforeach;`, in braces, as PHP# writes
+    /// every body: `colon` becomes ` {`, and `end`, the keyword and its `;`, becomes `}`. `scope` is the statement
+    /// whose locals the body declares.
+    fn colon_body(&mut self, scope: Span, colon: Span, statements: &[Statement<'_>], end: Span) {
+        self.edits.replace(colon, " {");
+        self.edits.replace(end, "}");
+        self.scoped(scope, statements);
+    }
+
+    /// `statements`, whose locals belong to `scope`.
+    fn scoped(&mut self, scope: Span, statements: &[Statement<'_>]) {
+        if let Some(locals) = self.locals() {
+            locals.blocks.push(scope);
+        }
+        for statement in statements {
+            self.statement(statement);
+        }
+        if let Some(locals) = self.locals() {
+            locals.blocks.pop();
+        }
+    }
+
     /// `if`, whose condition may assign the local it tests unless the `if` follows an `else`.
     fn if_statement(&mut self, statement: &Statement<'_>, r#if: &If<'_>, follows_else: bool) {
         if follows_else {
@@ -266,12 +322,30 @@ impl<'input> Converter<'input, '_> {
         } else if !self.assigned_condition(statement, r#if) && !self.compared_assignment(statement, r#if) {
             self.condition(r#if.condition, true);
         }
-        let IfBody::Statement(body) = &r#if.body else {
-            self.refuse(
-                r#if.span(),
-                "an `if` with `:` and `endif` is not converted yet: the converter rewrites a body in braces only",
-            );
-            return;
+        let body = match &r#if.body {
+            IfBody::Statement(body) => body,
+            // `if (…): … elseif (…): … else: … endif;` in braces, as PHP# writes every body.
+            IfBody::ColonDelimited(body) => {
+                // Each branch's locals belong to it, as to a block.
+                let branch = |colon: Span, statements: &[Statement<'_>]| {
+                    statements.last().map_or(colon, |last| colon.join(last.span()))
+                };
+                self.edits.replace(body.colon, " {");
+                self.scoped(branch(body.colon, body.statements.as_slice()), body.statements.as_slice());
+                for clause in &body.else_if_clauses {
+                    self.edits.replace(clause.elseif.span, "} else if");
+                    self.chained_condition(clause.condition);
+                    self.edits.replace(clause.colon, " {");
+                    self.scoped(branch(clause.colon, clause.statements.as_slice()), clause.statements.as_slice());
+                }
+                if let Some(clause) = &body.else_clause {
+                    self.edits.replace(clause.r#else.span, "} else");
+                    self.edits.replace(clause.colon, " {");
+                    self.scoped(branch(clause.colon, clause.statements.as_slice()), clause.statements.as_slice());
+                }
+                self.edits.replace(body.endif.span.join(body.terminator.span()), "}");
+                return;
+            }
         };
         self.braced(body.statement);
         for clause in &body.else_if_clauses {
@@ -516,14 +590,17 @@ impl<'input> Converter<'input, '_> {
             Expression::PartialApplication(application) => self.method_value(expression, application),
             Expression::Match(r#match) => self.match_expression(r#match, MatchPlace::Operand),
             Expression::Clone(clone) => self.clone(expression, clone.object),
-            Expression::List(_) => self.refuse(expression.span(), "destructuring is not converted yet"),
+            Expression::List(list) => self.refuse(expression.span(), locals::unpacked(&list.elements)),
             Expression::CompositeString(string) => self.template(expression, string),
             Expression::MagicConstant(constant) => self.magic_constant(constant),
             Expression::AnonymousClass(_) => {
                 self.refuse(expression.span(), "an anonymous class has no PHP# form: no type nests in another");
             }
             Expression::Construct(_) => self.construct(expression),
-            Expression::Yield(_) => self.refuse(expression.span(), "a generator is not converted yet"),
+            Expression::Yield(_) => self.refuse(
+                expression.span(),
+                "a `yield` whose value the code reads has no PHP# form: a PHP# `yield` is a statement, which gives no value back, as PHP's `send()` does (spec section 12)",
+            ),
             _ => self.refuse(expression.span(), "this expression has no PHP# form"),
         }
     }
@@ -541,7 +618,7 @@ impl<'input> Converter<'input, '_> {
             let shown = self.shown(object);
             return self.refuse(
                 expression.span(),
-                format!("`clone` of `{shown}` is not converted yet: `with` copies a value of a known class"),
+                format!("`clone` of `{shown}` has no PHP# form: `with` copies a value of a known class, and no declaration gives this value one"),
             );
         }
         self.expression(object, None);
@@ -645,7 +722,8 @@ impl<'input> Converter<'input, '_> {
         let [atomic] = tested.types.as_ref() else {
             return natively && self.matched(value, passed, place, subject);
         };
-        if place.has_null() && passed.can_be_null() {
+        // PHP passes an `int` where a `float` is declared as that number, which `as float` refuses.
+        if place.has_null() && passed.can_be_null() || matches!(get_sharp_type(atomic), Some(SharpType::Float)) {
             return natively && self.matched(value, passed, place, subject);
         }
         let tests = match get_sharp_type(atomic) {
@@ -699,15 +777,22 @@ impl<'input> Converter<'input, '_> {
     /// analysis's type of `value`, is wider than. The `match` reads the value once, so a call in it runs once, as in
     /// PHP, and gives it back where `place` holds it, as PHP passes or returns it, and throws PHP's `TypeError` where it
     /// doesn't (spec section 21). It has an arm for each type of `place` that `passed` may hold, as PHP# refuses an arm
-    /// that never matches, and gives whether it took the value: it takes none where a type of `place` has no test.
+    /// that never matches, and gives whether it took the value: it takes none where a type of `place` has no test. A
+    /// `float` that `place` declares without `int` takes an `int` too, as `int value => (float) value`, since PHP passes
+    /// one as that number.
     fn matched(&mut self, value: &Expression<'_>, passed: &TUnion, place: &TUnion, subject: &str) -> bool {
+        let is_float = |atomic: &TAtomic| matches!(get_sharp_type(atomic), Some(SharpType::Float));
         let mut tested: Vec<&TAtomic> = place.types.iter().filter(|atomic| !atomic.is_null()).collect();
-        if !tested
-            .iter()
-            .all(|atomic| self.tests(atomic) && narrowing(&TUnion::from_atomic((*atomic).clone())).is_none())
-        {
+        if !tested.iter().all(|atomic| {
+            (self.tests(atomic) || is_float(atomic)) && narrowing(&TUnion::from_atomic((*atomic).clone())).is_none()
+        }) {
             return false;
         }
+        // PHP passes an `int` where a `float` is declared, and no `int`, as that number.
+        let int = get_int();
+        let widened = tested.iter().any(|atomic| is_float(atomic))
+            && !tested.iter().any(|atomic| matches!(get_sharp_type(atomic), Some(SharpType::Int)))
+            && self.may_hold(passed, &int.types[0]);
         // PHP names a union's classes first, then its other types in its own order, and null last, or as `?T` beside
         // one other type.
         let order = ["object", "array", "string", "int", "float", "bool", "false", "true"];
@@ -733,6 +818,9 @@ impl<'input> Converter<'input, '_> {
                     return true;
                 }
             }
+        }
+        if widened {
+            arms.push(format!("int {name} => (float) {name}"));
         }
         if arms.is_empty() {
             return false;

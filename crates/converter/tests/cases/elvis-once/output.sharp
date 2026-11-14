@@ -1,0 +1,46 @@
+namespace App;
+
+// `?:` of a call reads the call's value once, as PHP does, so the call runs once: through `match`, whose `when` is
+// PHP's truthiness of the value, and through `??` for an object, which is truthy where it is not null (spec section 21).
+public final class Header
+{
+    public string title()
+    {
+        return match (this.find()) { string value when value != "" && value != "0" => value, default => 'untitled' };
+    }
+
+    public int counted()
+    {
+        return match (this.count()) { int value when value != 0 => value, default => 1 };
+    }
+
+    public List<string> names()
+    {
+        return match (this.all()) { List<string> value when !value.isEmpty() => value, default => ['none'] };
+    }
+
+    public Header owner()
+    {
+        return this.parent() ?? this;
+    }
+
+    private string? find()
+    {
+        return null;
+    }
+
+    private int? count()
+    {
+        return null;
+    }
+
+    private List<string> all()
+    {
+        return [];
+    }
+
+    private Header? parent()
+    {
+        return null;
+    }
+}

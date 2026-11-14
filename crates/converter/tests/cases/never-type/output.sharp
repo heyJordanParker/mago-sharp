@@ -1,0 +1,16 @@
+namespace App;
+
+// `never` is a whole type, which no value has: a method's return, and a type argument, as a list that holds no
+// element (spec section 7).
+public final class Failure
+{
+    public never fail(string reason)
+    {
+        throw new RuntimeException(reason);
+    }
+
+    public List<never> none()
+    {
+        return [];
+    }
+}

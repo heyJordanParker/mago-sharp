@@ -1,0 +1,16 @@
+namespace App;
+
+// A method with `yield` returns an `Iterable` of what it yields, and `yield from` is `yield ...` (spec section 12).
+public final class Lines
+{
+    public Iterable<string> lines()
+    {
+        yield 'a';
+        yield ...this.more();
+    }
+
+    private Iterable<string> more()
+    {
+        yield 'b';
+    }
+}

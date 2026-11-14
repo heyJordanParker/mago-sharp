@@ -5,7 +5,8 @@ declare(strict_types=1);
 namespace App;
 
 // An anonymous class, `@`, `print`, `exit`, `include`, a member named by a variable, a call of a value and `?:` of a
-// call, which its PHP# test would make twice, have no PHP# form (spec sections 2, 8, 14, 21, 25 and 27).
+// call that never gives null, whose one read through `match` the checker warns on, have no PHP# form (spec sections 2,
+// 8, 14, 21, 25 and 27).
 final class Removed
 {
     public string $name = '';
@@ -23,8 +24,8 @@ final class Removed
         exit(1);
     }
 
-    private function title(): ?string
+    private function title(): string
     {
-        return null;
+        return '';
     }
 }

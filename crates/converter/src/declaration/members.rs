@@ -4,10 +4,18 @@
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
+use std::sync::Arc;
+
 use mago_codex::ttype::TType;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::iterable::TIterable;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::combine_union_types;
+use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_null;
 use mago_codex::ttype::get_php_declared_type;
 use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::union::TUnion;
@@ -42,7 +50,9 @@ use crate::Converter;
 use crate::Method;
 use crate::body::Locals;
 use crate::body::natively_checked;
+use crate::types::names_any;
 use crate::types::raw_generic;
+use crate::types::type_text;
 
 use super::NameCase;
 use super::Setters;
@@ -91,6 +101,42 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for ThisWrites {
     fn walk_in_unary_postfix(&mut self, unary: &'ast UnaryPostfix<'arena>, _: &mut ()) {
         self.written(unary.operand);
     }
+}
+
+/// The `Iterable` a method with `yield` returns, of the values `declared`, its declared return, gives: a `Generator`'s
+/// second type argument, an `iterable`'s values, or the last type argument of a `Traversable` class, and `mixed` where
+/// the declaration names none. A PHP# `Iterable` gives values alone, so the keys say nothing (spec section 12).
+fn yielded_type(declared: &TUnion) -> TUnion {
+    let values = declared.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Iterable(iterable) => Some((*iterable.value_type).clone()),
+        TAtomic::Object(TObject::Named(named)) => match named.get_type_parameters() {
+            Some([_, value, ..]) | Some([value]) => Some(value.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+
+    TUnion::from_atomic(TAtomic::Iterable(TIterable::new(
+        Arc::new(get_mixed()),
+        Arc::new(values.unwrap_or_else(get_mixed)),
+    )))
+}
+
+/// A method's head, as `override int?`, which the converter writes once its body is converted, since the values the
+/// body returns may narrow the declared return.
+struct Head {
+    span: Span,
+    /// `virtual `, `override ` or nothing.
+    opening: String,
+    /// The return type, as PHP# writes it.
+    written: String,
+    /// The return type the method declares.
+    declared: TUnion,
+    /// Whether the declared return names `Any`, `Any?` or `Object` on a public member of an application, or the
+    /// method declares none, which only the values the body returns can name.
+    untyped: bool,
+    /// Whether the method declares no return, which the analysis takes from its body.
+    inferred: bool,
 }
 
 impl Converter<'_, '_> {
@@ -598,6 +644,7 @@ impl Converter<'_, '_> {
             || has(&method.modifiers, |modifier| matches!(modifier, Modifier::Private(_) | Modifier::Protected(_)))
                 .is_none();
 
+        let mut head = None;
         if is_constructor {
             let required = if self.class.as_ref().is_some_and(|class| class.required) { "required " } else { "" };
             self.edits.replace_range(
@@ -607,32 +654,25 @@ impl Converter<'_, '_> {
             );
         } else {
             // A return the codex marks `inferred` is inherited from the parent, which is declared. A return taken from
-            // the body is the analysis's inference.
-            if declared.return_from_body.is_some() {
-                self.refuse(
-                    method.name.span,
-                    format!("`{shown}`'s return is taken from its body, which the analysis infers, and the converter writes no inferred type"),
-                );
+            // the body declares nothing, so PHP returns any value, and the method returns what its body returns.
+            let inferred = declared.return_from_body.is_some();
+            if !inferred
+                && self.narrowed_by_docblock(declared.return_type_metadata.as_ref(), "@return", method.name.span)
+            {
                 return;
             }
-            if self.narrowed_by_docblock(declared.return_type_metadata.as_ref(), "@return", method.name.span) {
-                return;
-            }
-            let returned =
-                declared.return_type_metadata.as_ref().map_or_else(get_mixed, |metadata| metadata.type_union.clone());
+            let returned = match &declared.return_type_metadata {
+                Some(metadata) if !inferred => metadata.type_union.clone(),
+                _ => get_mixed(),
+            };
+            // A method with `yield` returns an `Iterable` of what it yields (spec section 12).
+            let returned = if declared.flags.has_yield() { yielded_type(&returned) } else { returned };
             let Some(written) = self.type_text(&returned, method.name.span) else {
                 return;
             };
-            // The body converts on, so each of its own refusals is named too.
-            if is_public && self.untyped_in_application(&written) {
-                self.refuse(
-                    method.name.span,
-                    format!(
-                        "`{class_name}::{shown}` returns `{}`, and a public member of an application names its types",
-                        returned.get_id()
-                    ),
-                );
-            }
+            // A public method of an application that declares `mixed` returns what its body returns, which the body
+            // decides once it is converted.
+            let untyped = inferred || is_public && self.untyped_in_application(&written);
 
             let is_private = has(&method.modifiers, |modifier| matches!(modifier, Modifier::Private(_))).is_some();
             let is_final = has(&method.modifiers, |modifier| matches!(modifier, Modifier::Final(_)));
@@ -692,7 +732,14 @@ impl Converter<'_, '_> {
             {
                 self.edits.delete(span.start.offset, self.skip_whitespace(span.end.offset));
             }
-            self.edits.replace(function.span, format!("{opening}{written}"));
+            head = Some(Head {
+                span: function.span,
+                opening: opening.to_owned(),
+                written,
+                declared: returned,
+                untyped,
+                inferred,
+            });
             // The method's own type parameters follow its name, as `TItem first<TItem>(…)` (spec section 11).
             let Some(parameters) = self.type_parameters(&declared.template_types, &[], method.name.span) else {
                 return;
@@ -775,8 +822,12 @@ impl Converter<'_, '_> {
                 let closed = class_is_final
                     || has(&method.modifiers, |modifier| matches!(modifier, Modifier::Final(_) | Modifier::Private(_)))
                         .is_some();
-                if closed && !declared.flags.has_yield() {
-                    self.unused_null(method, block);
+                if let Some(head) = head.as_mut() {
+                    if head.untyped {
+                        head.untyped = declared.flags.has_yield() || !self.returns_known(head, gives_null);
+                    } else if closed && !declared.flags.has_yield() {
+                        self.unused_null(method, block, head);
+                    }
                 }
                 self.method = None;
                 self.renamed.clear();
@@ -784,7 +835,62 @@ impl Converter<'_, '_> {
             MethodBody::Abstract(_) => {}
             MethodBody::Expression(_) => self.refuse(method.body.span(), "an expression body is PHP# only"),
         }
+        if let Some(head) = head {
+            if head.untyped && head.inferred {
+                self.refuse(
+                    method.name.span,
+                    format!("`{shown}` declares no return, so it returns what its body returns, and a value the body returns has a type no declaration gives, which a PHP# signature names"),
+                );
+            } else if head.untyped {
+                self.refuse(
+                    method.name.span,
+                    format!(
+                        "`{class_name}::{shown}` returns `{}`, and a public member of an application names its types",
+                        head.declared.get_id()
+                    ),
+                );
+            }
+            self.edits.replace(head.span, format!("{}{}", head.opening, head.written));
+        }
         self.docblock(method.span());
+    }
+
+    /// Writes the type `head`'s method returns, in place of the `Any?` or `Object` its declaration gives, as the join of
+    /// the values its body returns, where each is of a type PHP# names and the join names no `Any` or `Object`, and
+    /// gives whether it did. The declaration holds each such value, so PHP returns each as the narrower type does. A
+    /// body that `gives_null` runs on past its last statement and returns `null` there.
+    fn returns_known(&mut self, head: &mut Head, gives_null: bool) -> bool {
+        let Some(state) = self.method.as_ref() else {
+            return false;
+        };
+        let codebase = self.input.codebase;
+        let mut joined: Option<TUnion> = gives_null.then(get_null);
+        for returned in &state.returned {
+            let Some(returned) = returned
+                .as_ref()
+                .filter(|returned| !returned.has_mixed() && !returned.has_template_types() && !returned.is_never())
+            else {
+                return false;
+            };
+            joined = Some(match joined {
+                Some(joined) => combine_union_types(&joined, returned, codebase, CombinerOptions::default()),
+                None => returned.clone(),
+            });
+        }
+        // A literal returned, as `'store'`, is a value of its general type, which a signature names.
+        let Some(mut joined) = joined else {
+            return false;
+        };
+        joined.widen_literals();
+        let Ok(written) = type_text(&joined, codebase, &mut self.imports) else {
+            return false;
+        };
+        if names_any(&written) {
+            return false;
+        }
+        head.written = written;
+
+        true
     }
 
     /// Refuses a parameter of `declared`, the method `method` declares in the class `metadata`, that takes less once
@@ -853,10 +959,10 @@ impl Converter<'_, '_> {
         self.edits.insert(block.right_brace.start.offset, format!("{opened}    return null;\n{outer}"));
     }
 
-    /// Refuses `method`, which no subclass replaces, when its declared return holds `null` and no `return` of its
-    /// `block` gives one. PHP# refuses such a `?` (spec section 14.4), where PHP keeps it, and writing the narrower type
-    /// would write what the analysis infers (decision 2), so the PHP declares it first.
-    fn unused_null(&mut self, method: &MethodDeclaration<'_>, block: &Block<'_>) {
+    /// Writes `head`'s return without `?` for `method`, which no subclass replaces, when its declared return holds
+    /// `null` and no `return` of its `block` gives one. PHP# refuses such a `?` (spec section 14.4), and every value
+    /// the method returns is of the narrower type, so PHP returns each as it does.
+    fn unused_null(&mut self, method: &MethodDeclaration<'_>, block: &Block<'_>, head: &mut Head) {
         let Some(state) = self.method.as_ref() else {
             return;
         };
@@ -894,15 +1000,8 @@ impl Converter<'_, '_> {
             return;
         }
         let bare = TUnion::from_vec(returning.types.iter().filter(|atomic| !atomic.is_null()).cloned().collect());
-        let (Some(written), Some(narrower)) =
-            (self.type_text(&returning, method.name.span), self.type_text(&bare, method.name.span))
-        else {
-            return;
-        };
-        let name = String::from_utf8_lossy(method.name.value);
-        self.refuse(
-            method.name.span,
-            format!("`{name}` declares `{written}` and never returns `null`, which PHP# refuses on a method no subclass replaces (spec section 14.4), and declaring `{narrower}` would take the analysis's inference, which the converter never writes (decision 2)"),
-        );
+        if let Some(narrower) = self.type_text(&bare, method.name.span) {
+            head.written = narrower;
+        }
     }
 }

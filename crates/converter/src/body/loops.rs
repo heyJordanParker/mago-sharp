@@ -22,6 +22,7 @@ use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::ForeachTarget;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::KeyValueArrayElement;
+use mago_syntax::cst::Literal;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::StringPart;
 use mago_syntax::cst::UnaryPrefixOperator;
@@ -34,6 +35,7 @@ use mago_syntax::walker::MutWalker;
 use super::Kind;
 use super::is_primary;
 use crate::Converter;
+use crate::Loop;
 
 /// Counts the places a body names the variable `name`, and those that are the collection of a loop over its values
 /// alone.
@@ -117,12 +119,6 @@ impl Converter<'_, '_> {
     /// `foreach ($items as $item)` as `for (const item of items)`, a `Map`'s key and value as `[key, value]`, its
     /// values alone through `values()`, and a `List`'s index through `entries()` (spec section 17).
     pub(super) fn foreach(&mut self, statement: &Statement<'_>, foreach: &Foreach<'_>) {
-        let ForeachBody::Statement(body) = &foreach.body else {
-            return self.refuse(
-                statement.span(),
-                "a `foreach` with `:` and `endforeach` is not converted yet: the converter rewrites a body in braces only",
-            );
-        };
         let (key, value) = match &foreach.target {
             ForeachTarget::Value(target) => (None, target.value),
             ForeachTarget::KeyValue(target) => (Some(target.key), target.value),
@@ -180,7 +176,9 @@ impl Converter<'_, '_> {
                 return false;
             };
             let mut reads = KeyReads { name: variable.name, named: 0, as_text: 0 };
-            reads.walk_statement(body, &mut ());
+            for statement in foreach.body.statements() {
+                reads.walk_statement(statement, &mut ());
+            }
             reads.named == reads.as_text
         };
         // A `Map` keyed by `int|string` holds each key as the PHP array gave it, and each key the body writes passes
@@ -211,7 +209,15 @@ impl Converter<'_, '_> {
         let target = if names.len() == 1 { names.join("") } else { format!("[{}]", names.join(", ")) };
         self.edits.replace(foreach.foreach.span, "for");
         self.edits.replace_range(at, foreach.right_parenthesis.start.offset, format!("{target} of {source}{suffix}"));
-        self.braced(body);
+        match &foreach.body {
+            ForeachBody::Statement(body) => self.braced(body),
+            ForeachBody::ColonDelimited(body) => self.colon_body(
+                statement.span(),
+                body.colon,
+                body.statements.as_slice(),
+                body.end_foreach.span.join(body.terminator.span()),
+            ),
+        }
     }
 
     /// Refuses `parameter`, of the declared type `union`, when it is an `iterable` the PHP# type `Iterable<V>` takes and
@@ -259,12 +265,6 @@ impl Converter<'_, '_> {
 
     /// A `for` loop, which keeps its form and declares the local its initialization assigns, scoped to the loop.
     pub(super) fn for_loop(&mut self, statement: &Statement<'_>, r#for: &For<'_>) {
-        let ForBody::Statement(body) = &r#for.body else {
-            return self.refuse(
-                statement.span(),
-                "a `for` with `:` and `endfor` is not converted yet: the converter rewrites a body in braces only",
-            );
-        };
         if r#for.initializations.iter().count() > 1 || r#for.conditions.iter().count() > 1 {
             return self.refuse(
                 statement.span(),
@@ -286,21 +286,31 @@ impl Converter<'_, '_> {
         for increment in r#for.increments.iter() {
             self.expression(increment, None);
         }
-        self.braced(body);
+        match &r#for.body {
+            ForBody::Statement(body) => self.braced(body),
+            ForBody::ColonDelimited(body) => self.colon_body(
+                statement.span(),
+                body.colon,
+                body.statements.as_slice(),
+                body.end_for.span.join(body.terminator.span()),
+            ),
+        }
         if let Some(locals) = self.locals() {
             locals.blocks.pop();
         }
     }
 
     pub(super) fn while_loop(&mut self, statement: &Statement<'_>, r#while: &While<'_>) {
-        let WhileBody::Statement(body) = &r#while.body else {
-            return self.refuse(
-                statement.span(),
-                "a `while` with `:` and `endwhile` is not converted yet: the converter rewrites a body in braces only",
-            );
-        };
         self.condition(r#while.condition, true);
-        self.braced(body);
+        match &r#while.body {
+            WhileBody::Statement(body) => self.braced(body),
+            WhileBody::ColonDelimited(body) => self.colon_body(
+                statement.span(),
+                body.colon,
+                body.statements.as_slice(),
+                body.end_while.span.join(body.terminator.span()),
+            ),
+        }
     }
 
     pub(super) fn do_while(&mut self, r#do: &DoWhile<'_>) {
@@ -308,14 +318,53 @@ impl Converter<'_, '_> {
         self.condition(r#do.condition, true);
     }
 
-    /// `break` and `continue`, which leave the innermost loop. PHP's count of loops to leave has no PHP# form: a PHP#
-    /// `break` names the loop it leaves (spec section 17).
-    pub(super) fn leave(&mut self, level: Option<&Expression<'_>>) {
-        if let Some(level) = level {
-            self.refuse(
+    /// `break` and `continue`, which leave the innermost loop. PHP's count of loops to leave, as `break 2`, is the name
+    /// of the loop it leaves in PHP#, as `break outer`, which the loop takes, as `outer: for (…)` (spec section 17).
+    /// PHP counts a `switch` as a loop, which PHP# writes as a `match`, so a count that reaches one has no name to give.
+    /// `keyword` is where `break` or `continue` ends.
+    pub(super) fn leave(&mut self, keyword: u32, level: Option<&Expression<'_>>) {
+        let Some(level) = level else {
+            return;
+        };
+        let count = match level {
+            Expression::Literal(Literal::Integer(integer)) => {
+                integer.value.and_then(|value| usize::try_from(value).ok())
+            }
+            _ => None,
+        };
+        let Some(count) = count.filter(|count| (1..=self.loops.len()).contains(count)) else {
+            return self.refuse(level.span(), "PHP leaves no loop for this count of loops");
+        };
+        if count == 1 {
+            return self.edits.delete(keyword, level.span().end.offset);
+        }
+        let index = self.loops.len() - count;
+        if self.loops[index].is_switch {
+            return self.refuse(
                 level.span(),
-                "a count of loops to leave is not converted yet: a PHP# `break` or `continue` names the loop it leaves (spec section 17)",
+                "this count of loops leaves a `switch`, which PHP counts as a loop and PHP# writes as a `match`, which no `break` or `continue` names (spec sections 17 and 21)",
             );
+        }
+        let name = match self.loops[index].name.clone() {
+            Some(name) => name,
+            None => {
+                let chosen: Vec<String> = self.loops.iter().filter_map(|named| named.name.clone()).collect();
+                let name = self.unused_name("outer", &chosen);
+                self.loops[index].name = Some(name.clone());
+                name
+            }
+        };
+        self.edits.replace(level.span(), name);
+    }
+
+    /// Converts the loop or the `switch` statement `statement` through `convert`, as the innermost one around its
+    /// body, and names it, as `outer: for (…)`, when a `break` or `continue` of its body leaves it by name.
+    pub(super) fn looped(&mut self, statement: &Statement<'_>, is_switch: bool, convert: impl FnOnce(&mut Self)) {
+        let start = statement.span().start.offset;
+        self.loops.push(Loop { is_switch, name: None });
+        convert(self);
+        if let Some(name) = self.loops.pop().and_then(|outer| outer.name) {
+            self.edits.insert(start, format!("{name}: "));
         }
     }
 

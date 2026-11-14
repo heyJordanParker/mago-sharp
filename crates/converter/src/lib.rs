@@ -116,6 +116,7 @@ pub fn convert(input: &Input<'_, '_>) -> Result<Converted, Vec<Refusal>> {
         class: None,
         method: None,
         renamed: Vec::new(),
+        loops: Vec::new(),
     };
     converter.program();
     if !converter.refusals.is_empty() {
@@ -211,6 +212,17 @@ struct Converter<'input, 'arena> {
     /// Each local and `catch` variable of the method being converted, by its PHP name, with the camel case name PHP#
     /// gives it (spec section 24). Its lambdas share it, since their captures are its variables.
     renamed: Vec<(Vec<u8>, String)>,
+    /// The loops and `switch` statements around the code being converted, the innermost last, which PHP's `break 2`
+    /// counts.
+    loops: Vec<Loop>,
+}
+
+/// A loop or a `switch` statement around the code being converted.
+struct Loop {
+    is_switch: bool,
+    /// The name a `break` or `continue` of an inner loop gave it, which goes before the statement, as `outer: for (…)`
+    /// (spec section 17).
+    name: Option<String>,
 }
 
 impl<'input> Converter<'input, '_> {

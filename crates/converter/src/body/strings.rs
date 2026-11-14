@@ -20,6 +20,30 @@ use super::is_primary;
 use super::kinds;
 use crate::Converter;
 
+/// The `float` PHP reads an integer literal past `PHP_INT_MAX` as, written as a PHP# `float` literal. PHP reads a
+/// decimal one as a float literal of its digits, and a hex, octal or binary one digit by digit, each step `value * base
+/// + digit` in a `float`, as its `zend_hex_strtod`, `zend_oct_strtod` and `zend_bin_strtod` do: two roundings, which a
+/// fused `mul_add` would make one, and so give another float for some values.
+#[allow(clippy::float_arithmetic, clippy::suboptimal_flops)]
+fn wide_integer(raw: &[u8]) -> String {
+    let digits: Vec<u8> = raw.iter().copied().filter(|byte| *byte != b'_').collect();
+    let (base, digits) = match digits.as_slice() {
+        [b'0', b'x' | b'X', rest @ ..] => (16, rest),
+        [b'0', b'b' | b'B', rest @ ..] => (2, rest),
+        [b'0', b'o' | b'O', rest @ ..] => (8, rest),
+        [b'0', rest @ ..] if !rest.is_empty() => (8, rest),
+        all => (10, all),
+    };
+    if base == 10 {
+        return format!("{}.0", String::from_utf8_lossy(digits));
+    }
+    let value = digits.iter().fold(0.0f64, |value, digit| {
+        value * f64::from(base) + f64::from(char::from(*digit).to_digit(base).unwrap_or(0))
+    });
+
+    format!("{value:?}")
+}
+
 impl Converter<'_, '_> {
     pub(super) fn literal(&mut self, literal: &Literal<'_>, expected: Option<&TUnion>) {
         match literal {
@@ -28,10 +52,13 @@ impl Converter<'_, '_> {
             Literal::Null(keyword) => self.edits.replace(keyword.span, "null"),
             // PHP turns an `int` that lands in a `float` into a `float`, and PHP# writes the `float` (spec section 24): the
             // value the literal writes, which `017` writes in octal and `0x1F` in hex.
+            // PHP reads an integer literal past `PHP_INT_MAX` as the `float` nearest its value, wherever it is.
+            Literal::Integer(integer) if integer.value.is_none_or(|value| i64::try_from(value).is_err()) => {
+                self.edits.replace(integer.span, wide_integer(integer.raw));
+            }
             Literal::Integer(integer) if expected.is_some_and(|union| kinds(union) == [Kind::Float]) => {
-                match integer.value {
-                    Some(value) => self.edits.replace(integer.span, format!("{value}.0")),
-                    None => self.refuse(integer.span, "an integer literal wider than 64 bits is not converted yet"),
+                if let Some(value) = integer.value {
+                    self.edits.replace(integer.span, format!("{value}.0"));
                 }
             }
             Literal::String(_) | Literal::Integer(_) | Literal::Float(_) => {}

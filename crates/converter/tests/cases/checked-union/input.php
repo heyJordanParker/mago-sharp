@@ -24,6 +24,12 @@ final class Ledger
         return $this->limit($this->raw());
     }
 
+    // PHP returns an `int` where a `float` is declared as that number.
+    public function ratio(): float
+    {
+        return $this->raw();
+    }
+
     public function entry(?Loggable $item): ?Entry
     {
         return $item;
