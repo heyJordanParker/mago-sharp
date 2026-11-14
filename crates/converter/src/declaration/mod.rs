@@ -175,9 +175,13 @@ fn cycles(
             let file = codebase
                 .get_class_like(source.as_bytes())
                 .and_then(|importer| codebase.file_name(importer.span.file_id))
-                .map_or_else(|| name.clone(), |file| file.as_str_lossy().rsplit('/').next().unwrap_or_default().to_owned());
+                .map_or_else(
+                    || name.clone(),
+                    |file| file.as_str_lossy().rsplit('/').next().unwrap_or_default().to_owned(),
+                );
             let imports = name_of(target).rsplit('\\').next().unwrap_or_default().to_owned();
-            let found = importers.entry(namespace.to_ascii_lowercase()).or_insert_with(|| (file.clone(), imports.clone()));
+            let found =
+                importers.entry(namespace.to_ascii_lowercase()).or_insert_with(|| (file.clone(), imports.clone()));
             if (&file, &imports) < (&found.0, &found.1) {
                 *found = (file, imports);
             }

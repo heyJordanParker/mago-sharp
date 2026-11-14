@@ -361,6 +361,18 @@ impl Converter<'_, '_> {
         // the property to a subclass's replacement.
         let shared = is_open || overrides || is_abstract || metadata.kind.is_interface();
         let setters = if shared { Setters::Namespace } else { setters };
+        if is_public && self.untyped_in_application(&written) {
+            let class = self.class.as_ref().map(|class| class.name.clone()).unwrap_or_default();
+            self.refuse(
+                variable.span,
+                format!(
+                    "`{class}::{}` is `{}`, and a public member of an application names its types",
+                    String::from_utf8_lossy(variable.name),
+                    union.get_id()
+                ),
+            );
+            return None;
+        }
         // An override keeps the name of what it replaces.
         let kind = if is_public || overrides { "property" } else { "field" };
         if !overrides && self.misnamed(&variable.name[1..], variable.span, kind, NameCase::Camel) {
@@ -579,6 +591,9 @@ impl Converter<'_, '_> {
             self.edits.insert(at, "public ");
         }
         let is_abstract = has(&method.modifiers, |modifier| matches!(modifier, Modifier::Abstract(_))).is_some();
+        let is_public = is_interface
+            || has(&method.modifiers, |modifier| matches!(modifier, Modifier::Private(_) | Modifier::Protected(_)))
+                .is_none();
 
         if is_constructor {
             let required = if self.class.as_ref().is_some_and(|class| class.required) { "required " } else { "" };
@@ -605,6 +620,16 @@ impl Converter<'_, '_> {
             let Some(written) = self.type_text(&returned, method.name.span) else {
                 return;
             };
+            // The body converts on, so each of its own refusals is named too.
+            if is_public && self.untyped_in_application(&written) {
+                self.refuse(
+                    method.name.span,
+                    format!(
+                        "`{class_name}::{shown}` returns `{}`, and a public member of an application names its types",
+                        returned.get_id()
+                    ),
+                );
+            }
 
             let is_private = has(&method.modifiers, |modifier| matches!(modifier, Modifier::Private(_))).is_some();
             let is_final = has(&method.modifiers, |modifier| matches!(modifier, Modifier::Final(_)));
@@ -685,6 +710,7 @@ impl Converter<'_, '_> {
             .iter()
             .find(|parameter| parameter.ellipsis.is_some())
             .map(|parameter| parameter.variable.name.to_vec());
+        let member = format!("{class_name}::{shown}");
         for (index, parameter) in method.parameter_list.parameters.iter().enumerate() {
             let metadata = declared.parameters.get(index).and_then(|parameter| parameter.type_metadata.as_ref());
             let tag = format!("@param {}", String::from_utf8_lossy(parameter.variable.name));
@@ -697,7 +723,11 @@ impl Converter<'_, '_> {
             {
                 continue;
             }
-            self.parameter(parameter, metadata.map(|metadata| metadata.type_union.clone()));
+            self.parameter(
+                parameter,
+                metadata.map(|metadata| metadata.type_union.clone()),
+                is_public.then_some(member.as_str()),
+            );
         }
 
         let returning = (!is_constructor).then(|| {

@@ -1,0 +1,8 @@
+namespace App.Shop;
+
+public class StoreService
+{
+    public StoreService() { }
+
+    public int count() => 1;
+}

@@ -67,7 +67,7 @@ $special = new Special('beta');
 echo $spec->label(), "\n";
 echo $special->label(), "\n";
 echo $spec->name, "\n";
-echo json_encode([$spec->sameKind($special), $special->sameKind($spec), $spec->sameKind(new \stdClass())]), "\n";
+echo json_encode([$spec->sameKind($special), $special->sameKind($spec), $spec->sameKind(new \ArrayObject())]), "\n";
 
 /** @var Box<Special> $box */
 $box = new Box($special);

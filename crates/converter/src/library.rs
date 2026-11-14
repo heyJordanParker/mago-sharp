@@ -34,7 +34,7 @@ use mago_word::Word;
 ///
 /// It holds the standard library's members whose body is one call of a PHP function, by that function, and its
 /// constants whose value is one of PHP's own, by that constant. It also holds the namespace each folder of a plain PHP
-/// library's names of PHP's root namespace takes.
+/// library's names of PHP's root namespace takes, and the folders that are a project's.
 #[derive(Debug, Default)]
 pub struct Library {
     /// Each function's members, by its lowercase name, as PHP matches a function's name.
@@ -45,6 +45,8 @@ pub struct Library {
     /// The namespace, as PHP writes it, that an `extern namespace` line the converter writes gives each folder, as
     /// [`CodebaseMetadata::folder`] names it, that holds a function, constant or class of PHP's root namespace.
     folder_namespaces: HashMap<Word, String>,
+    /// The folders, as [`CodebaseMetadata::folder`] names them, of the plain PHP classes whose package is a project.
+    project_folders: HashSet<Word>,
 }
 
 /// A standard library member whose body is one call of a PHP function.
@@ -112,7 +114,19 @@ impl Library {
             })
             .collect();
 
-        Self { members, constants, folder_namespaces: folder_namespaces(codebase, workspace) }
+        Self {
+            members,
+            constants,
+            folder_namespaces: folder_namespaces(codebase, workspace),
+            project_folders: project_folders(codebase, workspace),
+        }
+    }
+
+    /// Whether `folder`'s classes are a project's, whose `composer.json` says `"type": "project"`, so its converted
+    /// classes are an application's.
+    #[must_use]
+    pub fn is_project(&self, folder: Word) -> bool {
+        self.project_folders.contains(&folder)
     }
 
     /// The namespace, as PHP writes it, that the converter gives `folder`'s functions, constants and classes of PHP's
@@ -210,17 +224,44 @@ fn folder_namespaces(codebase: &CodebaseMetadata, workspace: &Path) -> HashMap<W
         .collect()
 }
 
-/// The namespace of the Composer package whose `composer.json` is the nearest one at or above `folder`, and no higher
-/// than `workspace` for a folder in it: its name's, as `Acme\StringHelpers` for `acme/string-helpers`, or, for a
-/// `composer.json` that names no package, as a project's may not, the first PSR-4 namespace it lists.
-fn package_namespace(workspace: &Path, folder: &str) -> Option<String> {
+/// The folders of the plain PHP classes whose Composer package is a project, whose `composer.json` says `"type":
+/// "project"`. The converted classes of such a folder are an application's, whose public members name their types.
+fn project_folders(codebase: &CodebaseMetadata, workspace: &Path) -> HashSet<Word> {
+    let folders: HashSet<Word> = codebase
+        .class_likes
+        .values()
+        .filter(|class| class.flags.is_user_defined() && !class.flags.is_sharp())
+        .filter_map(|class| codebase.folder(class.span.file_id))
+        .collect();
+
+    folders
+        .into_iter()
+        .filter(|folder| {
+            package(workspace, &folder.as_str_lossy())
+                .and_then(|package| package.r#type)
+                .is_some_and(|kind| kind.0 == "project")
+        })
+        .collect()
+}
+
+/// The Composer package whose `composer.json` is the nearest one at or above `folder`, and no higher than `workspace`
+/// for a folder in it.
+fn package(workspace: &Path, folder: &str) -> Option<ComposerPackage> {
     let folder = workspace.join(folder);
     let inside = folder.starts_with(workspace);
     let contents = folder
         .ancestors()
         .take_while(|at| !inside || at.starts_with(workspace))
         .find_map(|at| std::fs::read_to_string(at.join("composer.json")).ok())?;
-    let package: ComposerPackage = contents.parse().ok()?;
+
+    contents.parse().ok()
+}
+
+/// The namespace of the Composer package that holds `folder`: its name's, as `Acme\StringHelpers` for
+/// `acme/string-helpers`, or, for a `composer.json` that names no package, as a project's may not, the first PSR-4
+/// namespace it lists.
+fn package_namespace(workspace: &Path, folder: &str) -> Option<String> {
+    let package = package(workspace, folder)?;
     if let Some(name) = package.name {
         let parts: Vec<String> =
             name.0.split('/').map(|part| String::from_utf8_lossy(&to_pascal_case(part)).into_owned()).collect();

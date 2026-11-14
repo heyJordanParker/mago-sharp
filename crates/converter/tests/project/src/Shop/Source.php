@@ -10,5 +10,6 @@ interface Source
     /** @param array<string, int> $limits */
     public function limited(array $limits = []): int;
 
+    /** @param list<int> $options */
     public function read(array $options = []): int;
 }

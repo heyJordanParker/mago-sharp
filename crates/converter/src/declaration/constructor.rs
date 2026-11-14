@@ -1,5 +1,6 @@
 //! Parameters, promoted ones as fields or properties (spec section 9), and the properties a constructor sets.
 
+use mago_codex::ttype::TType;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
@@ -29,7 +30,14 @@ use super::accessors;
 use super::has;
 
 impl Converter<'_, '_> {
-    pub(super) fn parameter(&mut self, parameter: &FunctionLikeParameter<'_>, declared: Option<TUnion>) {
+    /// A parameter of a method, `member` when the method is public, as `Store::checkout`, which names its type, as a
+    /// promoted public property does.
+    pub(super) fn parameter(
+        &mut self,
+        parameter: &FunctionLikeParameter<'_>,
+        declared: Option<TUnion>,
+        member: Option<&str>,
+    ) {
         let name = String::from_utf8_lossy(parameter.variable.name).into_owned();
         if parameter.ampersand.is_some() {
             self.refuse(
@@ -81,6 +89,24 @@ impl Converter<'_, '_> {
         let Some(written) = self.type_text(&union, parameter.variable.span) else {
             return;
         };
+        let visibility = parameter.modifiers.iter().find(|modifier| modifier.is_read_visibility());
+        let is_public = visibility.is_none_or(|modifier| matches!(modifier, Modifier::Public(_)));
+        let shown = union.get_id();
+        let untyped = match member {
+            Some(member) => Some(format!("`{member}` takes `{shown}` as `{name}`")),
+            None if promoted && is_public => {
+                let class = self.class.as_ref().map(|class| class.name.clone()).unwrap_or_default();
+                Some(format!("`{class}::{name}` is `{shown}`"))
+            }
+            None => None,
+        };
+        if let Some(untyped) = untyped.filter(|_| self.untyped_in_application(&written)) {
+            self.refuse(
+                parameter.variable.span,
+                format!("{untyped}, and a public member of an application names its types"),
+            );
+            return;
+        }
 
         match &parameter.hint {
             Some(hint) => self.edits.replace(hint.span(), written),
@@ -102,13 +128,11 @@ impl Converter<'_, '_> {
                 self.edits.delete(readonly.start.offset, self.skip_whitespace(readonly.end.offset));
             }
             // PHP makes a promoted parameter with no visibility public, and PHP# reads one as an ordinary parameter.
-            let visibility = parameter.modifiers.iter().find(|modifier| modifier.is_read_visibility());
             if visibility.is_none()
                 && let Some(first) = parameter.modifiers.first()
             {
                 self.edits.insert(first.span().start.offset, "public ");
             }
-            let is_public = visibility.is_none_or(|modifier| matches!(modifier, Modifier::Public(_)));
             let in_readonly_class = self.class.as_ref().is_some_and(|class| class.metadata.flags.is_readonly());
             let accessors =
                 accessors(is_public, readonly.is_some() || in_readonly_class, &parameter.modifiers, setters);

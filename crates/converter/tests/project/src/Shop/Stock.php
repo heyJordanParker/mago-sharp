@@ -62,8 +62,12 @@ final class Stock
         return $joined;
     }
 
-    // A plain `array` is a `Map` keyed by `int|string`, whose keys a loop gives as PHP holds them: `5` stays an `int`.
-    /** @return list<array-key> */
+    // An `array` keyed by `array-key` is a `Map` keyed by `int|string`, whose keys a loop gives as PHP holds them: `5`
+    // stays an `int`.
+    /**
+     * @param array<array-key, string> $input
+     * @return list<array-key>
+     */
     public function given(array $input): array
     {
         $input['source'] = 'form';

@@ -1,0 +1,6 @@
+namespace App.Shop;
+
+module
+{
+    singleton StoreService = StoreService;
+}

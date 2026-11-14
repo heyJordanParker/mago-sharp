@@ -1,0 +1,1 @@
+17:16: `Translator::get` is plain PHP whose effects no declaration gives, and a PHP# enum has no effects (spec section 29)

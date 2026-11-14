@@ -1,0 +1,4 @@
+11:47: `Store::__construct` takes `object` as `$handle`, and a public member of an application names its types
+11:70: `Store::__construct` takes `mixed` as `$state`, and a public member of an application names its types
+15:21: `Store::checkoutPayload` returns `mixed`, and a public member of an application names its types
+20:32: `Store::take` takes `array<array-key, mixed>` as `$items`, and a public member of an application names its types

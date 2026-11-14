@@ -47,13 +47,13 @@ final class Label
         };
     }
 
-    // A value of no known type, as an argument and as a return, checked as the declared type it lands in.
-    public function titled(mixed $title): string
+    // A value of a wider type, as an argument and as a return, checked as the declared type it lands in.
+    public function titled(string|int $title): string
     {
         return $this->exclaimed($title);
     }
 
-    public function counted(mixed $count): int
+    public function counted(int|string $count): int
     {
         return $count;
     }
@@ -66,6 +66,7 @@ final class Label
     }
 
     // A condition of a `bool` only PHPDoc types, which reads PHP's truthiness of what it holds.
+    /** @param bool|int|float|string|list<int>|null $value */
     public function flagged(Counter $counter, mixed $value): string
     {
         if (!$counter->enabled($value)) {
@@ -75,7 +76,8 @@ final class Label
         return $counter->enabled($value) ? 'on' : 'off';
     }
 
-    // No return type, and a body that runs on past its last statement, which gives `null`.
+    // No return type but PHPDoc's, and a body that runs on past its last statement, which gives `null`.
+    /** @return string|null */
     public function noted(string $title)
     {
         $this->exclaimed($title);

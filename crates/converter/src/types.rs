@@ -401,6 +401,15 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, imports: &mut Impo
     })
 }
 
+/// Whether `written`, a type as [`type_text`] writes it, names `Any` or `Object` at any depth, as `Any?` for PHP's
+/// `mixed`, `Map<int|string, Any?>` for an `array` no PHPDoc types and `Object` for `object`.
+#[must_use]
+pub fn names_any(written: &str) -> bool {
+    written
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_' || character == '.'))
+        .any(|part| part == "Any" || part == "Object")
+}
+
 /// The first type `union` holds, as PHPDoc writes it, that narrows the PHP# type [`type_text`] writes for it, as
 /// `non-empty-string` narrows `string` and `positive-int` narrows `int`, or `None` when PHP# writes `union` whole.
 #[must_use]

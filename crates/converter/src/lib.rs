@@ -216,6 +216,17 @@ impl<'input> Converter<'input, '_> {
         self.refusals.push(Refusal { span, reason: reason.into() });
     }
 
+    /// Whether `written`, a type a public member's signature names, holds `Any`, `Any?` or `Object` in an application,
+    /// a file of a project, whose public members name their types.
+    fn untyped_in_application(&self, written: &str) -> bool {
+        types::names_any(written)
+            && self
+                .input
+                .codebase
+                .folder(self.input.file.id)
+                .is_some_and(|folder| self.input.library.is_project(folder))
+    }
+
     fn text(&self, span: Span) -> &'input [u8] {
         &self.source[span.start.offset as usize..span.end.offset as usize]
     }

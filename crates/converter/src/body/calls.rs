@@ -2,6 +2,7 @@
 //! with its type arguments (spec sections 7, 8, 11 and 21).
 
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::module::ModuleKind;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
@@ -215,7 +216,7 @@ impl<'input> Converter<'input, '_> {
                 let method = self.method_of(self.type_of(call.object), &call.method);
                 self.method_name(call.object, &call.method, method);
                 self.arguments(&call.argument_list, method);
-                self.raw_result(call.span(), method);
+                self.plain_call(call.span(), method);
             }
             Call::NullSafeMethod(call) => {
                 self.member_of(call.object, "a method call");
@@ -224,7 +225,7 @@ impl<'input> Converter<'input, '_> {
                 let method = self.method_of(self.type_of(call.object), &call.method);
                 self.method_name(call.object, &call.method, method);
                 self.arguments(&call.argument_list, method);
-                self.raw_result(call.span(), method);
+                self.plain_call(call.span(), method);
             }
             Call::StaticMethod(call) => {
                 if self.forwards_called_class(call.span(), call.class, &call.method) {
@@ -235,18 +236,33 @@ impl<'input> Converter<'input, '_> {
                 self.member(&call.method);
                 let method = self.static_method_of(call);
                 self.arguments(&call.argument_list, method);
-                self.raw_result(call.span(), method);
+                self.plain_call(call.span(), method);
             }
             Call::Function(call) => self.function_call(call),
             Call::NullSafeFunction(_) => self.refuse(call.span(), "`?.(…)` on a function has no PHP# form"),
         }
     }
 
-    /// Refuses the call at `call` of `callee`, a plain PHP function or method, whose result holds a PHP# generic class
-    /// with a type argument other than its bound, which [`raw_generic`] finds.
-    fn raw_result(&mut self, call: Span, callee: Option<&FunctionLikeMetadata>) {
-        if callee.is_none_or(|callee| callee.flags.is_sharp()) {
+    /// Refuses the call at `call` of `callee`, a plain PHP function or method, in an enum, where its effects are unknown
+    /// and an enum has none (spec section 29), and where its result holds a PHP# generic class with a type argument
+    /// other than its bound, which [`raw_generic`] finds, or an object of a class a module binds, which PHP# takes only
+    /// through a constructor or a parameter, as a container's `app(StoreService::class)` gives one (spec section 32).
+    fn plain_call(&mut self, call: Span, callee: Option<&FunctionLikeMetadata>) {
+        let Some(callee) = callee.filter(|callee| !callee.flags.is_sharp()) else {
             return;
+        };
+        // A call of this file's own code, which converts with it, or of PHP's own, whose effects the standard library
+        // declares, calls no plain PHP.
+        let in_enum = self.class.as_ref().is_some_and(|class| class.metadata.kind.is_enum());
+        let is_plain = !callee.flags.is_built_in() && callee.span.file_id != self.input.file.id;
+        if in_enum && is_plain && !callee.flags.is_pure() {
+            // The call as PHP writes it up to its arguments, as `Translator::get`.
+            let written = String::from_utf8_lossy(self.text(call)).into_owned();
+            let shown = written.split('(').next().unwrap_or(&written).trim().to_owned();
+            self.refuse(
+                call,
+                format!("`{shown}` is plain PHP whose effects no declaration gives, and a PHP# enum has no effects (spec section 29)"),
+            );
         }
         let Some(result) = self.input.artifacts.get_expression_type(&call) else {
             return;
@@ -257,6 +273,47 @@ impl<'input> Converter<'input, '_> {
                 format!("a plain PHP call that returns `{shown}` has no PHP# form: plain PHP creates a PHP# generic object without type arguments, so it is a `{raw}`, and PHP# checks it where it enters and throws (spec section 11)"),
             );
         }
+        if let Some((service, namespace)) = self.bound_service(result) {
+            self.refuse(
+                call,
+                format!("`{service}` is bound in `{namespace}`'s module, so PHP# takes it through a constructor or a parameter"),
+            );
+        }
+    }
+
+    /// The short name of the first class `result` holds an object of that a module binds as a service, and the
+    /// namespace of that module, as its classes write it. A test module binds for its tests alone.
+    fn bound_service(&self, result: &TUnion) -> Option<(String, String)> {
+        let codebase = self.input.codebase;
+        result.types.iter().find_map(|atomic| {
+            let TAtomic::Object(TObject::Named(object)) = atomic else {
+                return None;
+            };
+            let class = codebase.get_class_like(object.name.as_bytes())?;
+            let key = codebase.class_key(class.name.as_bytes());
+            let module = codebase.modules.iter().filter(|module| module.kind != ModuleKind::Test).find(|module| {
+                module.bindings.iter().any(|binding| {
+                    binding.service.type_union.types.iter().any(|service| {
+                        matches!(service, TAtomic::Object(TObject::Named(service))
+                            if codebase.class_key(service.name.as_bytes()) == key)
+                    })
+                })
+            })?;
+            let declared = class.original_name.as_str_lossy();
+            let short = declared.rsplit('\\').next().unwrap_or(&declared).to_owned();
+            // The module's namespace is lowercase, and a class of it writes the namespace's own case.
+            let namespace = codebase
+                .class_likes
+                .values()
+                .map(|other| other.original_name.as_str_lossy())
+                .find_map(|other| {
+                    let (namespace, _) = other.rsplit_once('\\')?;
+                    namespace.eq_ignore_ascii_case(&module.namespace.as_str_lossy()).then(|| namespace.to_owned())
+                })
+                .unwrap_or_else(|| module.namespace.as_str_lossy().into_owned());
+
+            Some((short, namespace))
+        })
     }
 
     /// The method a static call runs, of the class it names, or of the class being converted for `self`, `static` and
@@ -400,7 +457,7 @@ impl<'input> Converter<'input, '_> {
                 return;
             };
             self.arguments(&call.argument_list, Some(function));
-            self.raw_result(span, Some(function));
+            self.plain_call(span, Some(function));
             let list = call.argument_list.span();
             let arguments = self.edits.render(self.source, list.start.offset, list.end.offset);
             return self.edits.replace(span, format!("{callee}{arguments}"));

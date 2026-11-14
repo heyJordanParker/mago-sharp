@@ -16,7 +16,7 @@ class Spec
     }
 
     // `instanceof self` tests this class, which a subclass's object is too.
-    public function sameKind(object $other): bool
+    public function sameKind(self|\Countable $other): bool
     {
         return $other instanceof self;
     }

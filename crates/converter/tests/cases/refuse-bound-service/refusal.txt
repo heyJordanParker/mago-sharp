@@ -1,0 +1,1 @@
+16:16: `StoreService` is bound in `App\Shop`'s module, so PHP# takes it through a constructor or a parameter

@@ -52,8 +52,8 @@ final class Order
     }
 
     /**
-     * @param class-string $type
-     * @return class-string
+     * @param class-string<Spec> $type
+     * @return class-string<Spec>
      */
     public function same(string $type): string
     {
