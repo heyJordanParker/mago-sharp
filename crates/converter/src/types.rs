@@ -23,6 +23,7 @@ use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
 use mago_codex::ttype::atomic::scalar::int::TInteger;
 use mago_codex::ttype::atomic::scalar::string::TStringCasing;
 use mago_codex::ttype::get_sharp_type;
+use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_names::EQUATABLE;
 use mago_span::Span;
@@ -294,15 +295,24 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, imports: &mut Impo
         SharpType::Enum(name) => class_name(name, codebase, imports)?,
         SharpType::Class(name, arguments) => {
             let class = class_name(name, codebase, imports)?;
-            // PHP takes a generic class written alone as any of its kind, and a PHP# type names its type arguments
-            // (spec section 11).
-            let declared = codebase.get_class_like(name.as_bytes());
-            if arguments.is_empty() && declared.is_some_and(|declared| !declared.template_types.is_empty()) {
-                let shown = declared.map_or(name, |declared| declared.original_name).as_str_lossy().into_owned();
-                return Err(format!(
-                    "`{shown}` takes type arguments, which PHP leaves out here and a PHP# type names (spec section 11): give them in PHPDoc, as in `{class}<…>`"
-                ));
-            }
+            // PHP takes a generic class written alone as any object of the class, and a PHP# type names its type
+            // arguments (spec section 11). Its bounds hold every such object where each type parameter is covariant,
+            // as `out T` holds a `Box<Order>` in a `Box<Object>`, and no type arguments do otherwise.
+            let bounds: Vec<TUnion> = match codebase.get_class_like(name.as_bytes()) {
+                Some(declared) if arguments.is_empty() && !declared.template_types.is_empty() => {
+                    let covariant = (0..declared.template_types.len())
+                        .all(|index| matches!(declared.template_variance.get(index), Some(Variance::Covariant)));
+                    if !covariant {
+                        let shown = declared.original_name.as_str_lossy();
+                        return Err(format!(
+                            "`{shown}` is written without type arguments, which PHP takes as any `{class}`, and a PHP# type names them, which hold every `{class}` only where each type parameter is covariant (spec section 11)"
+                        ));
+                    }
+                    declared.template_types.values().map(|template| template.constraint.clone()).collect()
+                }
+                _ => Vec::new(),
+            };
+            let arguments = if bounds.is_empty() { arguments } else { bounds.as_slice() };
             if arguments.is_empty() {
                 class
             } else {

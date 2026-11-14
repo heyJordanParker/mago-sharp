@@ -1,0 +1,16 @@
+namespace App;
+
+// A generic class written without type arguments, which PHP takes as any object of the class, takes its bounds where
+// each type parameter is covariant, since those hold every such object (spec section 11).
+public final class Post : Model
+{
+    public Relation<Model, Model> author()
+    {
+        return this.belongsTo(typeof(User));
+    }
+
+    public string describe(Relation<Model, Model> relation)
+    {
+        return 'relation';
+    }
+}

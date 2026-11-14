@@ -1,1 +1,1 @@
-10:30: `App\Box` takes type arguments, which PHP leaves out here and a PHP# type names (spec section 11): give them in PHPDoc, as in `Box<…>`
+11:30: `App\Box` is written without type arguments, which PHP takes as any `Box`, and a PHP# type names them, which hold every `Box` only where each type parameter is covariant (spec section 11)
