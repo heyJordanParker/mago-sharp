@@ -9,8 +9,10 @@ mod class;
 mod constructor;
 mod members;
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
@@ -123,6 +125,69 @@ fn writers(
     });
 
     writers
+}
+
+/// Each namespace `class`'s code imports that imports `class`'s namespace back, by its name, with a file of it and the
+/// class of `class`'s namespace that file imports, as the project's `references` record each name a symbol's code
+/// reaches. PHP# lets no two namespaces import each other, a parent and its child included.
+fn cycles(
+    class: &ClassLikeMetadata,
+    codebase: &CodebaseMetadata,
+    references: &SymbolReferences,
+) -> BTreeMap<String, (String, String)> {
+    let declared = class.original_name.as_str_lossy();
+    let own = namespace_of(&declared);
+    if own.is_empty() {
+        return BTreeMap::new();
+    }
+    let key = codebase.class_key(class.name.as_bytes());
+    let name_of = |symbol: Word| {
+        codebase
+            .get_class_like(symbol.as_bytes())
+            .map_or_else(|| symbol.as_str_lossy().into_owned(), |class| class.original_name.as_str_lossy().into_owned())
+    };
+    let neighbours: HashSet<Word> = codebase
+        .class_likes
+        .values()
+        .filter(|other| namespace_of(&other.original_name.as_str_lossy()).eq_ignore_ascii_case(own))
+        .map(|other| codebase.class_key(other.name.as_bytes()))
+        .collect();
+    // Each namespace this class imports, and each other namespace that imports one of its neighbours, by lowercase
+    // name, as PHP matches one.
+    let mut imported: HashMap<String, String> = HashMap::new();
+    let mut importers: HashMap<String, (String, String)> = HashMap::new();
+    references.for_each_reference(|origin, (target, _), _| {
+        let ReferenceOrigin::Symbol((source, _)) = origin else {
+            return;
+        };
+        if source == key {
+            let name = name_of(target);
+            let namespace = namespace_of(&name);
+            if !namespace.is_empty() && !namespace.eq_ignore_ascii_case(own) {
+                imported.insert(namespace.to_ascii_lowercase(), namespace.to_owned());
+            }
+        } else if neighbours.contains(&target) && !neighbours.contains(&source) {
+            let name = name_of(source);
+            let namespace = namespace_of(&name);
+            if namespace.is_empty() || namespace.eq_ignore_ascii_case(own) {
+                return;
+            }
+            let file = codebase
+                .get_class_like(source.as_bytes())
+                .and_then(|importer| codebase.file_name(importer.span.file_id))
+                .map_or_else(|| name.clone(), |file| file.as_str_lossy().rsplit('/').next().unwrap_or_default().to_owned());
+            let imports = name_of(target).rsplit('\\').next().unwrap_or_default().to_owned();
+            let found = importers.entry(namespace.to_ascii_lowercase()).or_insert_with(|| (file.clone(), imports.clone()));
+            if (&file, &imports) < (&found.0, &found.1) {
+                *found = (file, imports);
+            }
+        }
+    });
+
+    imported
+        .into_iter()
+        .filter_map(|(lowercase, namespace)| importers.remove(&lowercase).map(|importer| (namespace, importer)))
+        .collect()
 }
 
 /// The namespace of `name`, a full PHP name, as `App\Shop` of `App\Shop\Checkout`, or nothing in PHP's root namespace.
@@ -264,6 +329,19 @@ impl Converter<'_, '_> {
         self.refuse(variable.span, reason);
 
         None
+    }
+
+    /// Refuses the class-like `class` at `span` for each namespace it imports that imports its own namespace back,
+    /// which the PHP# checker refuses in the converted file.
+    fn import_cycles(&mut self, class: &ClassLikeMetadata, span: Span) {
+        let cycles = cycles(class, self.input.codebase, self.input.references);
+        let own = class.original_name.as_str_lossy();
+        for (namespace, (file, imports)) in cycles {
+            self.refuse(
+                span,
+                format!("`{}` and `{namespace}` import each other ({file} imports {imports})", namespace_of(&own)),
+            );
+        }
     }
 
     /// Refuses a member whose type `metadata` comes from a PHPDoc `tag` of the file that narrows the PHP# type the

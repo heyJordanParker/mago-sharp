@@ -1387,19 +1387,19 @@ mod tests {
     /// An interface `Named{index}` whose `name()` inherits a `non-empty-string` from the PHPDoc of its plain PHP parent
     /// `Base{index}`, which PHP# writes `string`, and its plain PHP caller `Greeter{index}`, which passes the name where
     /// a `non-empty-string` goes. Once the interface converts, the caller gains an issue that points into no converted
-    /// file.
+    /// file. The parent's namespace is neither the interface's nor the caller's, so no two namespaces import each other.
     fn named(index: usize) -> [(String, String); 3] {
         [
             (
-                format!("Plain/Base{index}.php"),
+                format!("Bases/Base{index}.php"),
                 format!(
-                    "<?php\n\nnamespace Generated\\Plain;\n\ninterface Base{index}\n{{\n    /** @return non-empty-string */\n    public function name(): string;\n}}\n"
+                    "<?php\n\nnamespace Generated\\Bases;\n\ninterface Base{index}\n{{\n    /** @return non-empty-string */\n    public function name(): string;\n}}\n"
                 ),
             ),
             (
                 format!("Contracts/Named{index}.php"),
                 format!(
-                    "<?php\n\nnamespace Generated\\Contracts;\n\nuse Generated\\Plain\\Base{index};\n\ninterface Named{index} extends Base{index}\n{{\n    public function name(): string;\n}}\n"
+                    "<?php\n\nnamespace Generated\\Contracts;\n\nuse Generated\\Bases\\Base{index};\n\ninterface Named{index} extends Base{index}\n{{\n    public function name(): string;\n}}\n"
                 ),
             ),
             (

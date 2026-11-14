@@ -97,8 +97,9 @@ impl<'input> Converter<'input, '_> {
     /// The analysis's class-like `name` declares, or a refusal.
     fn declared(&mut self, name: &LocalIdentifier<'_>) -> Option<&'input ClassLikeMetadata> {
         let metadata = self.input.codebase.get_class_like(self.input.names.get(name));
-        if metadata.is_none() {
-            self.refuse(name.span, "the analysis holds no class of this name");
+        match metadata {
+            Some(metadata) => self.import_cycles(metadata, name.span),
+            None => self.refuse(name.span, "the analysis holds no class of this name"),
         }
         // A `.sharp` file is named after its type (spec section 27), and `Module.sharp` holds a folder's module.
         if name.value == b"Module" {
