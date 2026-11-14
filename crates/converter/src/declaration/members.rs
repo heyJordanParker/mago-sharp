@@ -41,6 +41,7 @@ use mago_word::word;
 use crate::Converter;
 use crate::Method;
 use crate::body::Locals;
+use crate::body::natively_checked;
 use crate::types::raw_generic;
 
 use super::NameCase;
@@ -276,6 +277,8 @@ impl Converter<'_, '_> {
         self.method = Some(Method {
             name: None,
             returning: (!is_set).then(|| union.clone()),
+            checks_return: !is_set
+                && natively_checked(declared.type_declaration_metadata.as_ref(), union, self.input.codebase),
             resolution: TypeResolutionContext::default(),
             parameters,
             variadic: None,
@@ -745,9 +748,13 @@ impl Converter<'_, '_> {
             MethodBody::Concrete(block) => {
                 let resolution = declared.type_resolution_context.clone().unwrap_or_default();
                 self.rename_locals(&parameters, |names| names.walk_block(block, &mut ()));
+                let checks_return = returning.as_ref().is_some_and(|returning| {
+                    natively_checked(declared.return_type_declaration_metadata.as_ref(), returning, self.input.codebase)
+                });
                 self.method = Some(Method {
                     name: Some(name.to_vec()),
                     returning,
+                    checks_return,
                     resolution,
                     parameters,
                     variadic,

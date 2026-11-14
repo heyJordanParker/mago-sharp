@@ -29,6 +29,7 @@ use mago_syntax::cst::StaticMethodCall;
 use mago_syntax::walker::MutWalker;
 
 use super::Kind;
+use super::natively_checked;
 use crate::Converter;
 use crate::library::type_test;
 use crate::types::raw_generic;
@@ -189,7 +190,9 @@ impl<'input> Converter<'input, '_> {
             // hold, as PHP# does after `as`.
             if let (Some(passed), Some((number, parameter))) = (wider, filled) {
                 let subject = format!("Argument #{} ({})", number + 1, parameter.get_name().0.as_str_lossy());
-                if self.checked(value, passed, declared, &subject) {
+                let natively =
+                    natively_checked(parameter.get_type_declaration_metadata(), declared, self.input.codebase);
+                if self.checked(value, passed, declared, &subject, natively) {
                     continue;
                 }
             }

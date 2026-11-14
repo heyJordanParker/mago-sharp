@@ -173,6 +173,8 @@ struct Method {
     name: Option<Vec<u8>>,
     /// The declared return, which a returned value lands in, or `None` in a constructor and a `set` accessor.
     returning: Option<TUnion>,
+    /// Whether PHP checks `returning` itself, as the code declares it without PHPDoc.
+    checks_return: bool,
     /// The type parameters a `@var` tag in the body reads, the class's and the method's.
     resolution: TypeResolutionContext,
     /// The method's parameters, by their PHP names, which are never locals.

@@ -25,6 +25,7 @@ use mago_syntax::walker::MutWalker;
 use super::Locals;
 use super::locals::Capture;
 use super::locals::Captures;
+use super::natively_checked;
 use crate::Converter;
 use crate::Method;
 use crate::declaration::NameCase;
@@ -117,11 +118,19 @@ impl Converter<'_, '_> {
             .filter(|declared| declared.return_from_body.is_none())
             .and_then(|declared| declared.return_type_metadata.as_ref())
             .map(|metadata| metadata.type_union.clone());
+        let checks_return = returning.as_ref().is_some_and(|returning| {
+            natively_checked(
+                declared.and_then(|declared| declared.return_type_declaration_metadata.as_ref()),
+                returning,
+                self.input.codebase,
+            )
+        });
         let resolution = self.method.as_ref().map(|method| method.resolution.clone()).unwrap_or_default();
         let around = self.method.take();
         self.method = Some(Method {
             name: None,
             returning: returning.clone(),
+            checks_return,
             resolution,
             parameters: parameters.parameters.iter().map(|parameter| parameter.variable.name.to_vec()).collect(),
             variadic: parameters
@@ -207,7 +216,7 @@ impl Converter<'_, '_> {
 
     /// `name`, or `name2`, `name3` and on, the first that names no variable of the file and none of `chosen`. The
     /// file names fewer variables than it has bytes, so one of the first that many numbers is free.
-    fn unused_name(&self, name: &str, chosen: &[String]) -> String {
+    pub(super) fn unused_name(&self, name: &str, chosen: &[String]) -> String {
         let taken = |candidate: &str| {
             let variable = format!("${candidate}");
             chosen.iter().any(|chosen| chosen == candidate)

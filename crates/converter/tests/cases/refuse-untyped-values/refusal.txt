@@ -1,3 +1,2 @@
 15:23: `mixed` reaches a property of a known type, which PHP# allows only from a known type, and no declaration gives this value one (spec section 24)
 20:16: `object` reaches a method call, which PHP# allows only from a known class, and no declaration gives this value one (spec section 24)
-25:28: `mixed` reaches a parameter of a known type, which PHP# allows only from a known type, and no declaration gives this value one (spec section 24)

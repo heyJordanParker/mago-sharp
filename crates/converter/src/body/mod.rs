@@ -17,6 +17,8 @@ mod strings;
 pub(crate) use locals::Captures;
 pub(crate) use locals::Locals;
 
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
@@ -73,6 +75,16 @@ enum Kind {
 /// succeeds where PHP warned or failed, and a PHP# `Map` read gives `null` and goes on where PHP warns (spec section
 /// 12).
 const MISSING_KEY: &str = "a `Map` read at a key it may lack has no PHP# form: PHP warns on a missing key, and a PHP# `Map` read gives `null` and goes on, which succeeds where PHP warned (spec section 12)";
+
+/// Whether PHP checks `place`, the declared type of a parameter or a return, where a value lands in it: `native`, the
+/// type the code declares, without PHPDoc, holds the same values. PHP checks no type only PHPDoc gives.
+pub(crate) fn natively_checked(native: Option<&TypeMetadata>, place: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    let holds = |inner: &TUnion, outer: &TUnion| {
+        is_contained_by(codebase, inner, outer, false, false, false, &mut ComparisonResult::new())
+    };
+
+    native.is_some_and(|native| holds(&native.type_union, place) && holds(place, &native.type_union))
+}
 
 /// Whether `expression` binds tighter than any operator, so text built around it, as `x.isEmpty()` or `x != 0`, needs
 /// no parentheses around it.
@@ -183,9 +195,10 @@ impl<'input> Converter<'input, '_> {
                     }
                     // PHP checks a returned value its declared type may not hold, and throws a `TypeError` for one it
                     // doesn't, as PHP# does after `as`. PHP# refuses any other such value (spec section 7).
+                    let natively = self.method.as_ref().is_some_and(|method| method.checks_return);
                     if let (Some(returning), Some(returned)) = (&returning, self.type_of(value))
                         && self.wider(returned, returning)
-                        && !self.checked(value, returned, returning, "Return value")
+                        && !self.checked(value, returned, returning, "Return value", natively)
                     {
                         let (returned, returning) = (returned.get_id(), returning.get_id());
                         self.refuse(
@@ -615,24 +628,27 @@ impl<'input> Converter<'input, '_> {
     /// parameters, or type parameter whose bound excludes null, which PHP# checks as PHPDoc gives it, `passed` may hold
     /// one, as a `Shape` may be the `Square` `place` takes, and `place` allows null only where `passed` never is, as
     /// `as` gives null for a value it refuses.
-    pub(super) fn checked(&mut self, value: &Expression<'_>, passed: &TUnion, place: &TUnion, subject: &str) -> bool {
+    ///
+    /// Where `place` is a union, or allows null where `passed` may be null, `as` can't tell a null from a value it
+    /// refuses, so [`Converter::matched`] writes the value through `match`, where `natively` says PHP checks `place`
+    /// itself. PHP never checks a type only PHPDoc gives, so there it lets through what the check would throw for.
+    pub(super) fn checked(
+        &mut self,
+        value: &Expression<'_>,
+        passed: &TUnion,
+        place: &TUnion,
+        subject: &str,
+        natively: bool,
+    ) -> bool {
         let codebase = self.input.codebase;
         let tested = TUnion::from_vec(place.get_non_nullable_types());
         let [atomic] = tested.types.as_ref() else {
-            return false;
+            return natively && self.matched(value, passed, place, subject);
         };
         if place.has_null() && passed.can_be_null() {
-            return false;
+            return natively && self.matched(value, passed, place, subject);
         }
         let tests = match get_sharp_type(atomic) {
-            Some(SharpType::Int | SharpType::String | SharpType::Bool | SharpType::Object | SharpType::Enum(_)) => {
-                !matches!(atomic, TAtomic::Scalar(scalar) if scalar.is_literal_value())
-            }
-            Some(SharpType::Class(name, arguments)) => {
-                arguments.is_empty()
-                    && !matches!(atomic, TAtomic::Object(TObject::Named(object)) if object.is_static)
-                    && codebase.get_class_like(name.as_bytes()).is_some_and(|class| class.template_types.is_empty())
-            }
             // A callee's own type parameter stands for the type its call gives it, which `T` doesn't name here.
             Some(SharpType::Parameter(parameter)) if !self.declares(parameter) => false,
             // `as T` tests a type argument while the code runs, and gives null for a null `T` as for a value that is no
@@ -650,16 +666,9 @@ impl<'input> Converter<'input, '_> {
                 return true;
             }
             Some(SharpType::Parameter(_)) => true,
-            _ => false,
+            _ => self.tests(atomic),
         };
-        let holds = |inner: &TUnion, outer: &TUnion| {
-            is_contained_by(codebase, inner, outer, false, false, false, &mut ComparisonResult::new())
-        };
-        let may_hold = passed.types.iter().any(|passed| {
-            let passed = TUnion::from_atomic(passed.clone());
-            passed.is_mixed() || holds(&passed, &tested) || holds(&tested, &passed)
-        });
-        if !tests || !may_hold || narrowing(&tested).is_some() {
+        if !tests || !self.may_hold(passed, atomic) || narrowing(&tested).is_some() {
             return false;
         }
         // PHP names the declared type as PHP writes it, as `?App\Square`, and a type parameter by its name.
@@ -683,6 +692,101 @@ impl<'input> Converter<'input, '_> {
         self.edits.replace(value.span(), format!("{rendered} as {tested} ?? throw new {error}(\"{message}\")"));
 
         true
+    }
+
+    /// Writes `value`, converted already, as `match (value) { string value => value, null => null, default => throw
+    /// new TypeError("…") }`, where `place` is a union or a nullable type PHP checks itself, which `passed`, the
+    /// analysis's type of `value`, is wider than. The `match` reads the value once, so a call in it runs once, as in
+    /// PHP, and gives it back where `place` holds it, as PHP passes or returns it, and throws PHP's `TypeError` where it
+    /// doesn't (spec section 21). It has an arm for each type of `place` that `passed` may hold, as PHP# refuses an arm
+    /// that never matches, and gives whether it took the value: it takes none where a type of `place` has no test.
+    fn matched(&mut self, value: &Expression<'_>, passed: &TUnion, place: &TUnion, subject: &str) -> bool {
+        let mut tested: Vec<&TAtomic> = place.types.iter().filter(|atomic| !atomic.is_null()).collect();
+        if !tested
+            .iter()
+            .all(|atomic| self.tests(atomic) && narrowing(&TUnion::from_atomic((*atomic).clone())).is_none())
+        {
+            return false;
+        }
+        // PHP names a union's classes first, then its other types in its own order, and null last, or as `?T` beside
+        // one other type.
+        let order = ["object", "array", "string", "int", "float", "bool", "false", "true"];
+        tested.sort_by_key(|atomic| {
+            let id = atomic.get_id();
+            order.iter().position(|name| name.as_bytes() == id.as_bytes()).map_or(0, |at| at + 1)
+        });
+        let names: Vec<String> = tested.iter().map(|atomic| atomic.get_id().to_string()).collect();
+        let php = match (place.has_null(), names.as_slice()) {
+            (true, [one]) => format!("?{one}"),
+            (true, _) => format!("{}|null", names.join("|")),
+            (false, _) => names.join("|"),
+        };
+
+        let name = self.unused_name("value", &[]);
+        let held: Vec<&TAtomic> = tested.into_iter().filter(|atomic| self.may_hold(passed, atomic)).collect();
+        let mut arms = Vec::new();
+        for atomic in held {
+            match type_text(&TUnion::from_atomic(atomic.clone()), self.input.codebase, &mut self.imports) {
+                Ok(text) => arms.push(format!("{text} {name} => {name}")),
+                Err(reason) => {
+                    self.refuse(value.span(), reason);
+                    return true;
+                }
+            }
+        }
+        if arms.is_empty() {
+            return false;
+        }
+        if place.has_null() && passed.can_be_null() {
+            arms.push("null => null".to_owned());
+        }
+        let error = match self.imports.name_of("TypeError") {
+            Ok(error) => error,
+            Err(reason) => {
+                self.refuse(value.span(), reason);
+                return true;
+            }
+        };
+        let message = format!("{subject} must be of type {php}").replace('\\', "\\\\");
+        arms.push(format!("default => throw new {error}(\"{message}\")"));
+        let rendered = self.render(value);
+        self.edits.replace(value.span(), format!("match ({rendered}) {{ {} }}", arms.join(", ")));
+
+        true
+    }
+
+    /// Whether `atomic`, one type of a declared type, has a PHP# test that tests what PHP does: an `int`, a `string`, a
+    /// `bool`, an object, an enum, or a class with no type parameters. A `float` takes an `int` in PHP, which PHP#'s
+    /// test refuses, and a literal or a type parameter has another test.
+    fn tests(&self, atomic: &TAtomic) -> bool {
+        match get_sharp_type(atomic) {
+            Some(SharpType::Int | SharpType::String | SharpType::Bool | SharpType::Object | SharpType::Enum(_)) => {
+                !matches!(atomic, TAtomic::Scalar(scalar) if scalar.is_literal_value())
+            }
+            Some(SharpType::Class(name, arguments)) => {
+                arguments.is_empty()
+                    && !matches!(atomic, TAtomic::Object(TObject::Named(object)) if object.is_static)
+                    && self
+                        .input
+                        .codebase
+                        .get_class_like(name.as_bytes())
+                        .is_some_and(|class| class.template_types.is_empty())
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a value of `passed` may be a `tested`, as `mixed` may be any, and a `Shape` the `Square` `tested` is.
+    fn may_hold(&self, passed: &TUnion, tested: &TAtomic) -> bool {
+        let codebase = self.input.codebase;
+        let tested = TUnion::from_atomic(tested.clone());
+        let holds = |inner: &TUnion, outer: &TUnion| {
+            is_contained_by(codebase, inner, outer, false, false, false, &mut ComparisonResult::new())
+        };
+        passed.types.iter().any(|passed| {
+            let passed = TUnion::from_atomic(passed.clone());
+            passed.is_mixed() || holds(&passed, &tested) || holds(&tested, &passed)
+        })
     }
 
     /// Whether the analysis types `passed` wider than `place`, the declared type of the parameter or the return it

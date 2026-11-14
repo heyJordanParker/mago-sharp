@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace App;
 
 // PHP returns, and passes, a value its declared type may not hold where `as` tests another thing than PHP checks: a
-// class value, a type the value never holds and a type that allows null. It reads a missing key as `null`, as it reads a
-// stored null. PHP# refuses each (spec sections 7, 12 and 21).
+// class value and a type the value never holds. It reads a missing key as `null`, as it reads a stored null. PHP#
+// refuses each (spec sections 7, 12 and 21).
 final class Drawing
 {
     /** @var array<string, ?int> */
@@ -21,11 +21,6 @@ final class Drawing
     public function draw(int $size): string
     {
         return $this->square($size);
-    }
-
-    public function describe(?Shape $shape): string
-    {
-        return Square::describe($shape);
     }
 
     public function size(string $name): int
