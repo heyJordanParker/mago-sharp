@@ -2764,25 +2764,29 @@ fn compile_names_the_app_module_that_binds_the_dispatcher() {
     assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => null,\n    'attributes' => [\n"));
 }
 
-/// Spec section 29: the listener table names, for each plain PHP class an `extern` line gives attributes, the file of
-/// each such line, which the engine compiles when reflection reads the class's attributes. A line without attributes
-/// names nothing.
+/// Spec section 29: the listener table names, for each plain PHP class, method and function an `extern` line gives
+/// attributes, the file of each such line, which the engine compiles when reflection reads its attributes. A class is
+/// keyed by its full name, a method as `class::method` and a function as `function()`, each in lowercase as PHP looks
+/// it up, and a function of a namespace by its full name. A line without attributes names nothing.
 #[test]
-fn compile_lists_the_files_whose_extern_lines_give_a_class_attributes() {
-    let group = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_CLASS | \\Attribute::IS_REPEATABLE)]\nfinal class Group\n{\n    public function __construct(public string $name) {}\n}\n";
-    let mailer = "<?php\n\nnamespace Lib;\n\nfinal class Mailer\n{\n}\n";
-    let first = "namespace App.Stubs;\n\nimport Lib.Group;\nimport Lib.Mailer;\n\n[Group(\"mail\")]\nextern Mailer;\nextern Group;\n\npublic class First\n{\n}\n";
+fn compile_lists_the_files_whose_extern_lines_give_a_declaration_attributes() {
+    let group = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_ALL | \\Attribute::IS_REPEATABLE)]\nfinal class Group\n{\n    public function __construct(public string $name) {}\n}\n";
+    let mailer = "<?php\n\nnamespace Lib;\n\nfinal class Mailer\n{\n    public function sendLater(): void {}\n}\n";
+    let functions = "<?php\n\nnamespace Lib;\n\nfunction sentAt(): int\n{\n    return 1;\n}\n";
+    let first = "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Group;\nimport Lib.Mailer;\n\n[Group(\"mail\")]\nextern Mailer;\nextern Group;\n[Group(\"later\")]\nextern Mailer.sendLater;\n[Group(\"time\")]\nextern Lib.sentAt;\n\npublic class First\n{\n}\n";
     let directory = lawful_project(&[
         ("vendor/acme/lib/Group.php", group),
         ("vendor/acme/lib/Mailer.php", mailer),
+        ("vendor/acme/lib/functions.php", functions),
         ("app/Stubs/First.sharp", first),
     ]);
     let root = directory.path();
 
     compile_succeeds(root);
     assert!(
-        read(root, ".sharp/listeners.php")
-            .ends_with("    'attributes' => [\n        'lib\\\\mailer' => ['app/Stubs/First.sharp'],\n    ],\n];\n"),
+        read(root, ".sharp/listeners.php").ends_with(
+            "    'attributes' => [\n        'lib\\\\mailer' => ['app/Stubs/First.sharp'],\n        'lib\\\\mailer::sendlater' => ['app/Stubs/First.sharp'],\n        'lib\\\\sentat()' => ['app/Stubs/First.sharp'],\n    ],\n];\n"
+        ),
         "{}",
         read(root, ".sharp/listeners.php")
     );

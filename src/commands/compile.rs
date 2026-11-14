@@ -1221,8 +1221,9 @@ fn listener_inputs(root: &Path, database: &impl DatabaseReader) -> Result<Vec<un
 /// order the engine runs them, of its class, its method, the events its `on` clause lists, and whether it takes the
 /// event. A full name holds no `'` and never ends in `\`, so each one is a single-quoted string as written. Its
 /// `dispatcher` is the app's module whose binding of the dispatcher serves the whole app, as its path and namespace,
-/// or `null`. Its `attributes` are, for each plain PHP class an `extern` line gives attributes, the files whose lines
-/// do, which the engine compiles when reflection reads the class's attributes, spec section 29.
+/// or `null`. Its `attributes` are, for each plain PHP class, method and function an `extern` line gives attributes,
+/// the files whose lines do, which the engine compiles when reflection reads its attributes, spec section 29. A class
+/// is keyed by its full name, a method as `class::method`, and a function as `function()`, each in lowercase.
 fn listener_table(
     inputs: &[unit::Input],
     listeners: &[&Listener],
@@ -1261,18 +1262,18 @@ fn listener_table(
         }
         None => table.extend_from_slice(b"null,\n"),
     }
-    // `externs` holds each class's lines together.
-    let mut classes: Vec<(Word, Vec<Word>)> = Vec::new();
+    // `externs` holds each declaration's lines together.
+    let mut declarations: Vec<(Word, Vec<Word>)> = Vec::new();
     for line in externs {
-        match classes.last_mut() {
-            Some((class, files)) if *class == line.class => files.push(line.file),
-            _ => classes.push((line.class, vec![line.file])),
+        match declarations.last_mut() {
+            Some((declaration, files)) if *declaration == line.declaration => files.push(line.file),
+            _ => declarations.push((line.declaration, vec![line.file])),
         }
     }
     table.extend_from_slice(b"    'attributes' => [\n");
-    for (class, files) in classes {
+    for (declaration, files) in declarations {
         table.extend_from_slice(b"        ");
-        quoted(&mut table, class.as_bytes());
+        quoted(&mut table, declaration.as_bytes());
         table.extend_from_slice(b" => [");
         for (index, file) in files.iter().enumerate() {
             if index > 0 {

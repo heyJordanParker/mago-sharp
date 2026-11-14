@@ -2550,7 +2550,13 @@ fn check_attribute_target(list: &AttributeList, context: &mut Context<'_, '_, '_
             Node::Enum(r#enum) if holds(&r#enum.attribute_lists) => Some(("an enum", &["type"])),
             Node::Struct(r#struct) if holds(&r#struct.attribute_lists) => Some(("a struct", &["type"])),
             Node::Event(event) if holds(&event.attribute_lists) => Some(("an event", &["type", "event"])),
-            Node::Extern(r#extern) if holds(&r#extern.attribute_lists) => Some(("an `extern` line", &["type"])),
+            Node::Extern(r#extern) if holds(&r#extern.attribute_lists) => Some(
+                if !r#extern.target.is_dotted() && context.names.binding(&r#extern.target) == Some(Binding::Class) {
+                    ("a class's `extern` line", &["type"])
+                } else {
+                    ("a method's or a function's `extern` line", &["method"])
+                },
+            ),
             Node::Method(method) if holds(&method.attribute_lists) => Some(("a method", &["method"])),
             Node::Operator(operator) if holds(&operator.attribute_lists) => Some(("an operator", &["method"])),
             Node::NamedConstructor(constructor) if holds(&constructor.attribute_lists) => {

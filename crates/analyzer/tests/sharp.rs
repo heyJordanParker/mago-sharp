@@ -492,11 +492,14 @@ fn a_public_member_whose_attribute_a_framework_reads_by_reflection_is_not_too_wi
     );
 }
 
-/// Spec section 29: an `extern` line takes any attribute, which the plain PHP class it declares carries as its own. So a
-/// library attribute whose source carries no mark is marked on the project's `extern` line, and a `[AsEventListener]`
-/// method never warns, as a `[Listen]` method doesn't. An `extern` line of a function has no class to give one to.
+/// Spec section 29: an `extern` line takes any attribute, which the plain PHP class, method or function it declares
+/// carries as its own. So a library attribute whose source carries no mark is marked on the project's `extern` line,
+/// and a `[AsEventListener]` method never warns, as a `[Listen]` method doesn't. A method's and a function's line check
+/// their attributes as a method's and a function's own, and a method the class only inherits takes them on the line of
+/// the class that declares it. A line of a method that doesn't exist reports that alone, and an `extern namespace`
+/// line, which declares nothing, takes no attribute.
 #[test]
-fn an_attribute_on_an_extern_line_is_the_class_s_own() {
+fn an_attribute_on_an_extern_line_is_the_declaration_s_own() {
     let marker = (
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ReachedByReflection.sharp",
         include_str!("../../../../composer/library/Sharp/ReachedByReflection.sharp"),
@@ -516,11 +519,31 @@ fn an_attribute_on_an_extern_line_is_the_class_s_own() {
     );
 
     let functions = "<?php\n\nnamespace Lib;\n\nfunction now(): int\n{\n    return 1;\n}\n";
-    let stubs = "namespace App.Stubs;\n\nimport Lib;\nimport Attribute;\n\n[Attribute]\nextern Lib.now;\n";
+    let mailer = "<?php\n\nnamespace Lib;\n\nclass Mailer\n{\n    public function send(): void\n    {\n    }\n\n    public function close(): void\n    {\n    }\n}\n";
+    let queue = "<?php\n\nnamespace Lib;\n\nclass Queue extends Mailer\n{\n}\n";
+    let group = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_ALL | \\Attribute::IS_REPEATABLE)]\nclass Group\n{\n    public function __construct(public string $name)\n    {\n    }\n}\n";
+    let only = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_CLASS)]\nclass Only\n{\n}\n";
+    let plain = [
+        ("src/Lib/functions.php", functions),
+        ("src/Lib/Mailer.php", mailer),
+        ("src/Lib/Queue.php", queue),
+        ("src/Lib/Group.php", group),
+        ("src/Lib/Only.php", only),
+    ];
+    let stubs = "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Group;\nimport Lib.Mailer;\n\n[Group(\"time\")]\nextern Lib.now;\n\n[method: Group(\"mail\")]\nextern Mailer.send;\n\n[type: Group(\"mailer\")]\nextern Mailer;\n";
+    assert_eq!(refusals(("src/App/Stubs/Stubs.sharp", stubs), &plain), Vec::<String>::new());
+
+    let stubs = "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Group;\nimport Lib.Mailer;\nimport Lib.Only;\nimport Lib.Queue;\n\n[Only]\nextern Lib.now;\n\n[Group(\"queue\")]\nextern Queue.send;\n\n[type: Group(\"mail\")]\nextern Mailer.close;\n\n[Group(\"gone\")]\nextern Mailer.resend;\n\n[Group(\"legacy\")]\nextern namespace Legacy for legacy_now;\n";
+    let mut plain = plain.to_vec();
+    plain.push(("src/legacy.php", "<?php\n\nfunction legacy_now(): int\n{\n    return 1;\n}\n"));
     assert_eq!(
-        refusals(("src/App/Stubs/Stubs.sharp", stubs), &[("src/Lib/functions.php", functions)]),
+        refusals(("src/App/Stubs/Stubs.sharp", stubs), &plain),
         [
-            "6:1 invalid-attribute-target An attribute on an `extern` line is the attribute of the class the line declares, and `Lib.now` is no class. | "
+            "15:2 semantics `type:` names no part of a method's or a function's `extern` line, whose targets are `method:`. | ",
+            "9:2 invalid-attribute-target Attribute `Only` cannot be used on a function. | Remove `[Only]` here, or add a function to the targets in the `[Attribute(…)]` of the `Only` class.",
+            "12:1 invalid-attribute-target `Queue.send` is a method of `Mailer`, so an `extern` line of `Mailer`'s method gives it attributes. | Write the attributes on `extern Mailer.send;`.",
+            "19:8 non-existent-method Method `Mailer.resend` does not exist. | ",
+            "21:1 invalid-attribute-target An `extern namespace` line gives `legacy_now` a namespace and declares nothing, so it takes no attribute. | ",
         ]
     );
 }

@@ -315,6 +315,9 @@ const ZEND_PARAM_VARIADIC: u32 = 1 << 4;
 const ZEND_PARAM_WIDENED: u32 = 1 << 6;
 const ZEND_PARENTHESIZED_CONDITIONAL: u32 = 1;
 const ZEND_BIND_REF: u32 = 1;
+const ZEND_ATTRIBUTE_TARGET_CLASS: u32 = 1 << 0;
+const ZEND_ATTRIBUTE_TARGET_FUNCTION: u32 = 1 << 1;
+const ZEND_ATTRIBUTE_TARGET_METHOD: u32 = 1 << 2;
 /// The hidden local that holds a generic method's own type arguments, which a closure in the method captures.
 const TYPE_ARGUMENTS: &[u8] = b"\0<sharp>\0types";
 /// The hidden static that keeps each type argument's own static fields of a generic class.
@@ -4206,24 +4209,34 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.attributes_of(&lists.iter().collect::<Vec<_>>(), r#override, added)
     }
 
-    /// The `SHARP_EXTERN` of an `extern` line's attributes, spec section 29: the full name of the plain PHP class the
-    /// line declares and its attributes, which the engine gives the class when reflection reads its attributes. A file
-    /// runs nothing for it. None for a line without attributes.
+    /// The `SHARP_EXTERN` of an `extern` line's attributes, spec section 29, which the engine gives the plain PHP
+    /// class, method or function the line declares when reflection reads its attributes: its attr is the declaration's
+    /// `ZEND_ATTRIBUTE_TARGET_*`, and its children the declaration's full name, `Class::method` for a method, and the
+    /// attributes. A file runs nothing for it. None for a line without attributes.
     fn extern_attributes(&mut self, r#extern: &Extern) -> Option<u32> {
-        if r#extern.namespaced.is_some()
-            || r#extern.target.is_dotted()
-            || self.names.binding(&r#extern.target) != Some(Binding::Class)
-        {
+        if r#extern.namespaced.is_some() {
             return None;
         }
+        let codebase = self.types.codebase();
+        let span = r#extern.span();
+        let declared = codebase.externs.values().flatten().find(|declaration| declaration.span == span)?;
+        let key = codebase.extern_declaration(declared)?;
+        let class = codebase.get_class_like(key.0.as_bytes()).map(|class| class.original_name.as_bytes());
+        let member = codebase.function_likes.get(&key).map(|member| member.original_name.as_bytes());
+        let (target, name) = match (class, member) {
+            (Some(class), None) => (ZEND_ATTRIBUTE_TARGET_CLASS, class.to_vec()),
+            (None, Some(function)) => (ZEND_ATTRIBUTE_TARGET_FUNCTION, function.to_vec()),
+            (Some(class), Some(method)) => (ZEND_ATTRIBUTE_TARGET_METHOD, [class, b"::", method].concat()),
+            (None, None) => unreachable!("`extern_declaration` names a declaration the codebase holds"),
+        };
         let attributes = self.attributes(&r#extern.attribute_lists, None, &[]);
         if attributes == NULL {
             return None;
         }
         let line = self.line(r#extern);
-        let class = self.string(ZEND_NAME_FQ, line, self.names.get(&r#extern.target));
+        let name = self.string(ZEND_NAME_FQ, line, &name);
 
-        Some(self.node(SHARP_AST_SHARP_EXTERN, 0, line, &[class, attributes]))
+        Some(self.node(SHARP_AST_SHARP_EXTERN, target, line, &[name, attributes]))
     }
 
     /// The attributes of `lists`, some of a declaration's, as [`Self::attributes`] lowers them all.

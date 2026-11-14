@@ -25,6 +25,7 @@ use crate::defaults_trait_name;
 use crate::diff::CodebaseDiff;
 use crate::identifier::method::MethodIdentifier;
 use crate::issue::ScanningIssueKind;
+use crate::metadata::attribute::AttributeMetadata;
 use crate::metadata::attribute::ConstantExpression;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::class_like::ParsedField;
@@ -757,6 +758,32 @@ impl CodebaseMetadata {
             .iter()
             .find(|declaration| self.extern_namespace_folder(declaration) == Some(folder))
             .map(|declaration| declaration.namespace)
+    }
+
+    /// What the `extern` line `declaration` declares, keyed as `class_likes` keys a class and `function_likes` a method
+    /// or a function, spec section 29: `(class, "")`, `(class, method)` for a method the class itself declares, or
+    /// `("", function)`. `extern Pdf.render` after `import Vendor.Pdf;` declares the function `Vendor\Pdf\render`, and
+    /// `extern Foundation.now` the `now` of PHP's root namespace that an `extern namespace` line gives
+    /// `Illuminate\Foundation`, spec section 23. None when it declares nothing that exists.
+    #[must_use]
+    pub fn extern_declaration(&self, declaration: &ExternMetadata) -> Option<(Word, Word)> {
+        let (class, member) = declaration.target;
+        let declared = |key: (Word, Word)| self.function_likes.contains_key(&key).then_some(key);
+        if class.is_empty() {
+            return declared(declaration.target);
+        }
+        if self.class_likes.contains_key(&class) {
+            return if member.is_empty() { Some(declaration.target) } else { declared(declaration.target) };
+        }
+
+        declared((empty_word(), ascii_lowercase_word(&[class.as_bytes(), b"\\", member.as_bytes()].concat()))).or_else(
+            || {
+                let namespace = self.extern_namespace_of(member.as_bytes())?;
+
+                namespace.as_bytes().eq_ignore_ascii_case(class.as_bytes()).then_some(())?;
+                declared((empty_word(), member))
+            },
+        )
     }
 
     /// Retrieves metadata for a class constant.
@@ -1665,21 +1692,29 @@ impl CodebaseMetadata {
         }
     }
 
-    /// Gives each class an `extern` line declares the attributes written before the line, as the class's own, spec
-    /// section 29. A class keeps one it holds already, and [`Self::remove_entries_by_keys`] takes away those of a file that
-    /// goes.
+    /// Gives each class, method and function an `extern` line declares the attributes written before the line, as its
+    /// own, spec section 29. A declaration keeps one it holds already, and [`Self::remove_entries_by_keys`] takes away
+    /// those of a file that goes.
     pub(crate) fn apply_extern_attributes(&mut self) {
-        for declaration in self.externs.values().flatten() {
-            let (class, member) = declaration.target;
-            if declaration.attributes.is_empty() || class.is_empty() || !member.is_empty() {
-                continue;
-            }
-            let Some(class_like) = self.class_likes.get_mut(&class) else {
+        let lines: Vec<((Word, Word), Vec<AttributeMetadata>)> = self
+            .externs
+            .values()
+            .flatten()
+            .filter(|declaration| !declaration.attributes.is_empty())
+            .filter_map(|declaration| Some((self.extern_declaration(declaration)?, declaration.attributes.clone())))
+            .collect();
+        for ((class, member), added) in lines {
+            let attributes = if member.is_empty() {
+                self.class_likes.get_mut(&class).map(|class_like| &mut class_like.attributes)
+            } else {
+                self.function_likes.get_mut(&(class, member)).map(|function_like| &mut function_like.attributes)
+            };
+            let Some(attributes) = attributes else {
                 continue;
             };
-            for attribute in &declaration.attributes {
-                if !class_like.attributes.contains(attribute) {
-                    class_like.attributes.push(attribute.clone());
+            for attribute in &added {
+                if !attributes.contains(attribute) {
+                    attributes.push(attribute.clone());
                 }
             }
         }
@@ -1990,9 +2025,12 @@ impl CodebaseMetadata {
             declarations.retain(|declaration| !removed_files.contains(&declaration.span.file_id));
         }
         self.externs.retain(|_, declarations| !declarations.is_empty());
-        // An `extern` line of a file that goes takes its attributes away from the class it declares.
+        // An `extern` line of a file that goes takes its attributes away from what it declares.
         for class_like in self.class_likes.values_mut() {
             class_like.attributes.retain(|attribute| !removed_files.contains(&attribute.span.file_id));
+        }
+        for function_like in self.function_likes.values_mut() {
+            function_like.attributes.retain(|attribute| !removed_files.contains(&attribute.span.file_id));
         }
         self.modules.retain(|module| !removed_files.contains(&module.span.file_id));
         self.extern_namespaces.retain(|declaration| !removed_files.contains(&declaration.span.file_id));

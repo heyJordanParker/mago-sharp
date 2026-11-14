@@ -28,7 +28,7 @@ pub struct ExternMetadata {
     pub effects: Vec<Word>,
     /// Whether it is an `extern event`, which marks its plain PHP class as an event, spec section 15.
     pub event: bool,
-    /// The attributes written before it, which a class it declares carries as its own, spec section 29.
+    /// The attributes written before it, which what it declares carries as its own, spec section 29.
     pub attributes: Vec<AttributeMetadata>,
 }
 

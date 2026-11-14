@@ -58,6 +58,7 @@ use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file_with_settings;
 use mago_word::Word;
 use mago_word::empty_word;
+use mago_word::word;
 
 use super::IncrementalAnalysisService;
 use crate::error::OrchestratorError;
@@ -110,16 +111,17 @@ pub struct Listener {
     pub takes_event: bool,
 }
 
-/// An `extern` line that gives a plain PHP class attributes, spec section 29, which the engine gives the class when
-/// reflection reads its attributes.
+/// An `extern` line that gives a plain PHP class, method or function attributes, spec section 29, which the engine gives
+/// it when reflection reads its attributes.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExternAttributes {
     /// The file that declares the line.
     pub file_id: FileId,
     /// The workspace-relative name of that file.
     pub file: Word,
-    /// The class's fully qualified name, in lowercase, as PHP looks a class up.
-    pub class: Word,
+    /// What the line declares, in lowercase, as PHP looks it up: a class's fully qualified name, `class::method` for
+    /// a method, and `function()` for a function.
+    pub declaration: Word,
 }
 
 /// The app's module whose binding of the dispatcher serves the whole app, spec section 15, which `emit` reads wherever
@@ -133,7 +135,8 @@ pub struct DispatcherModule {
 }
 
 impl IncrementalAnalysisService {
-    /// Every `extern` line of the last analysis that gives a class attributes, by the class, then by the file.
+    /// Every `extern` line of the last analysis that gives a class, a method or a function attributes, by what it
+    /// declares, then by the file.
     #[must_use]
     pub fn extern_attributes(&self) -> Vec<ExternAttributes> {
         let mut lines: Vec<ExternAttributes> = self
@@ -141,10 +144,20 @@ impl IncrementalAnalysisService {
             .externs
             .values()
             .flatten()
-            .filter(|line| !line.attributes.is_empty() && !line.target.0.is_empty() && line.target.1.is_empty())
-            .map(|line| ExternAttributes { file_id: line.span.file_id, file: line.file, class: line.target.0 })
+            .filter(|line| !line.attributes.is_empty())
+            .filter_map(|line| {
+                let declaration = match self.codebase.extern_declaration(line)? {
+                    (class, member) if member.is_empty() => class,
+                    (class, function) if class.is_empty() => word(format!("{function}()")),
+                    (class, method) => word(format!("{class}::{method}")),
+                };
+
+                Some(ExternAttributes { file_id: line.span.file_id, file: line.file, declaration })
+            })
             .collect();
-        lines.sort_by(|a, b| (a.class.as_bytes(), a.file.as_bytes()).cmp(&(b.class.as_bytes(), b.file.as_bytes())));
+        lines.sort_by(|a, b| {
+            (a.declaration.as_bytes(), a.file.as_bytes()).cmp(&(b.declaration.as_bytes(), b.file.as_bytes()))
+        });
 
         lines
     }

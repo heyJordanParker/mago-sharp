@@ -182,7 +182,8 @@ impl Server {
         self.service.dispatcher_module()
     }
 
-    /// Every `extern` line of the last analysis that gives a class attributes, by the class, then by the file.
+    /// Every `extern` line of the last analysis that gives a class, a method or a function attributes, by what it
+    /// declares, then by the file.
     #[must_use]
     pub fn extern_attributes(&self) -> Vec<ExternAttributes> {
         self.service.extern_attributes()

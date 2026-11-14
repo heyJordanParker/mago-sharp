@@ -13,7 +13,6 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::template::TemplateResult;
-use mago_names::binding::Binding;
 use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -96,11 +95,11 @@ where
     analyze_attributes(context, &mut block_context, artifacts, attribute_lists, AttributeTarget::ClassLike)
 }
 
-/// Analyzes the attributes written before an `extern` line, spec section 29, which the class the line declares carries
-/// as its own, so they are checked as that class's. A line that declares a function or a method has no class to give
-/// them. A class `check_extern` found missing is reported there.
-pub fn analyze_extern_attributes<'arena, A>(
-    context: &mut Context<'_, 'arena, A>,
+/// Analyzes the attributes written before an `extern` line, spec section 29, which the class, method or function the
+/// line declares carries as its own, so they are checked as its own are. A method the class only inherits takes them
+/// through its declaring class's line. A declaration `check_extern` found missing is reported there.
+pub fn analyze_extern_attributes<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
     r#extern: &Extern<'arena>,
 ) -> Result<(), AnalysisError>
@@ -110,34 +109,64 @@ where
     let Some(first) = r#extern.attribute_lists.first() else {
         return Ok(());
     };
-    let target = &r#extern.target;
-    if r#extern.namespaced.is_none()
-        && !target.is_dotted()
-        && context.resolved_names.binding(target) == Some(Binding::Class)
-    {
-        let Some(class_like_metadata) = context.codebase.get_class_like(context.resolved_names.get(target)) else {
-            return Ok(());
-        };
-
-        return analyze_class_like_attributes(
-            context,
-            artifacts,
-            r#extern.attribute_lists.as_slice(),
-            class_like_metadata,
+    if let Some(namespaced) = &r#extern.namespaced {
+        context.collector.report_with_code(
+            IssueCode::InvalidAttributeTarget,
+            Issue::error(format!(
+                "An `extern namespace` line gives `{}` a namespace and declares nothing, so it takes no attribute.",
+                BytesDisplay(namespaced.name.value())
+            ))
+            .with_annotation(Annotation::primary(first.span()).with_message("Written here.")),
         );
+
+        return Ok(());
     }
+    let codebase: &'ctx CodebaseMetadata = context.codebase;
+    let span = r#extern.span();
+    let Some(line) = codebase.externs.values().flatten().find(|declaration| declaration.span == span) else {
+        unreachable!("the scan records each `extern` line of the analyzed file")
+    };
+    let attribute_lists = r#extern.attribute_lists.as_slice();
+    let (class, member) = line.target;
+    match codebase.extern_declaration(line) {
+        Some((class, member)) if member.is_empty() => {
+            let Some(class_like_metadata) = codebase.get_class_like(class.as_bytes()) else {
+                unreachable!("`extern_declaration` names a class the codebase holds")
+            };
 
-    context.collector.report_with_code(
-        IssueCode::InvalidAttributeTarget,
-        Issue::error(format!(
-            "An attribute on an `extern` line is the attribute of the class the line declares, and `{}` is no class.",
-            BytesDisplay(target.value())
-        ))
-        .with_annotation(Annotation::primary(first.span()).with_message("Written here."))
-        .with_annotation(Annotation::secondary(target.span()).with_message("Declared here.")),
-    );
+            analyze_class_like_attributes(context, artifacts, attribute_lists, class_like_metadata)
+        }
+        Some((class, _)) => {
+            let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class, member)));
+            scope.set_class_like(codebase.get_class_like(class.as_bytes()));
+            let mut block_context = BlockContext::new(scope, context.settings.register_super_globals);
+            let target = if class.is_empty() { AttributeTarget::Function } else { AttributeTarget::Method };
 
-    Ok(())
+            analyze_attributes(context, &mut block_context, artifacts, attribute_lists, target)
+        }
+        None => {
+            if !member.is_empty()
+                && let Some(declaring_class) = codebase.get_declaring_method_class(class.as_bytes(), member.as_bytes())
+            {
+                let declaring_class = display_class_like_name(context, declaring_class);
+                context.collector.report_with_code(
+                    IssueCode::InvalidAttributeTarget,
+                    Issue::error(format!(
+                        "`{}` is a method of `{declaring_class}`, so an `extern` line of `{declaring_class}`'s method gives it attributes.",
+                        BytesDisplay(r#extern.target.value()),
+                    ))
+                    .with_help(format!(
+                        "Write the attributes on `extern {declaring_class}.{};`.",
+                        BytesDisplay(r#extern.target.last_segment())
+                    ))
+                    .with_annotation(Annotation::primary(first.span()).with_message("Written here."))
+                    .with_annotation(Annotation::secondary(r#extern.target.span()).with_message("Declared here.")),
+                );
+            }
+
+            Ok(())
+        }
+    }
 }
 
 /// Analyzes attributes, whose arguments are constant expressions.

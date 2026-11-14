@@ -35983,11 +35983,12 @@ fn a_plain_case_of_a_generic_enum_is_the_object_of_its_type_arguments() {
     );
 }
 
-/// Spec section 29: an `extern` line's attributes are the plain PHP class's own at run time, so the line lowers to a
-/// `SHARP_EXTERN` of the class's full name and its attributes, which the engine compiles when reflection reads them.
-/// A line without attributes lowers to nothing, as before.
+/// Spec section 29: an `extern` line's attributes are the plain PHP class's, method's or function's own at run time,
+/// so the line lowers to a `SHARP_EXTERN` whose attr is the declaration's `ZEND_ATTRIBUTE_TARGET_*`, of its full name,
+/// `Class::method` for a method, and its attributes, which the engine compiles when reflection reads them. A line
+/// without attributes lowers to nothing, as before.
 #[test]
-fn an_extern_line_with_attributes_lowers_to_the_class_and_its_attributes() {
+fn an_extern_line_with_attributes_lowers_to_the_declaration_and_its_attributes() {
     let listener = (
         "vendor/symfony/event-dispatcher/Attribute/AsEventListener.php",
         "<?php\n\nnamespace Symfony\\Component\\EventDispatcher\\Attribute;\n\n#[\\Attribute(\\Attribute::TARGET_CLASS | \\Attribute::TARGET_METHOD)]\nclass AsEventListener\n{\n}\n",
@@ -35996,12 +35997,18 @@ fn an_extern_line_with_attributes_lowers_to_the_class_and_its_attributes() {
         "src/Lib/Group.php",
         "<?php\n\nnamespace Lib;\n\n#[\\Attribute]\nclass Group\n{\n    public function __construct(public string $name) {}\n}\n",
     );
+    let mailer = (
+        "src/Lib/Mailer.php",
+        "<?php\n\nnamespace Lib;\n\nclass Mailer\n{\n    public function sendLater(): void {}\n}\n",
+    );
+    let functions =
+        ("src/Lib/functions.php", "<?php\n\nnamespace Lib;\n\nfunction sentAt(): int\n{\n    return 1;\n}\n");
     let files = lowered_each(
         &[(
             "src/App/Stubs/Stubs.sharp",
-            "namespace App.Stubs;\n\nimport Lib.Group;\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\n[Group(\"events\")]\nextern AsEventListener;\nextern Group;\n",
+            "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Group;\nimport Lib.Mailer;\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\n[Group(\"events\")]\nextern AsEventListener;\nextern Group;\n[Group(\"mail\")]\nextern Mailer.sendLater;\n[Group(\"time\")]\nextern Lib.sentAt;\n",
         )],
-        &[listener, group],
+        &[listener, group, mailer, functions],
     );
 
     assert_eq!(
@@ -36018,7 +36025,7 @@ fn an_extern_line_with_attributes_lowers_to_the_class_and_its_attributes() {
               NAMESPACE
                 ZVAL "App\\Stubs"
                 null
-              SHARP_EXTERN
+              SHARP_EXTERN [1]
                 ZVAL "Symfony\\Component\\EventDispatcher\\Attribute\\AsEventListener"
                 ATTRIBUTE_LIST
                   ATTRIBUTE_GROUP
@@ -36026,6 +36033,22 @@ fn an_extern_line_with_attributes_lowers_to_the_class_and_its_attributes() {
                       ZVAL "Lib\\Group"
                       ARG_LIST
                         ZVAL "events"
+              SHARP_EXTERN [4]
+                ZVAL "Lib\\Mailer::sendLater"
+                ATTRIBUTE_LIST
+                  ATTRIBUTE_GROUP
+                    ATTRIBUTE
+                      ZVAL "Lib\\Group"
+                      ARG_LIST
+                        ZVAL "mail"
+              SHARP_EXTERN [2]
+                ZVAL "Lib\\sentAt"
+                ATTRIBUTE_LIST
+                  ATTRIBUTE_GROUP
+                    ATTRIBUTE
+                      ZVAL "Lib\\Group"
+                      ARG_LIST
+                        ZVAL "time"
         "#}
     );
 }
