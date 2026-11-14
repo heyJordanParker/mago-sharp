@@ -734,8 +734,15 @@ impl<'configuration> Session<'configuration> {
         let Some((_, artifacts)) = self.server.analyze_file_with_artifacts(file.id) else {
             return Err(vec![format!("{}: the analysis holds no such file", display(&file.name))]);
         };
-        let input =
-            Input { file, program, names: &names, codebase: self.server.codebase(), artifacts: &artifacts, library };
+        let input = Input {
+            file,
+            program,
+            names: &names,
+            codebase: self.server.codebase(),
+            artifacts: &artifacts,
+            references: self.server.symbol_references(),
+            library,
+        };
 
         convert(&input).map_err(|refusals| refusals.iter().map(|refusal| place(file, refusal)).collect())
     }

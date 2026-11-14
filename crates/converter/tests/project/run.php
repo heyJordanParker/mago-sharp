@@ -21,6 +21,7 @@ use Proof\Spec;
 use Proof\Special;
 use Proof\Zoo\Bird;
 use Proof\Zoo\Cat;
+use Proof\Zoo\Keeper;
 
 require __DIR__ . '/vendor/autoload.php';
 
@@ -164,6 +165,5 @@ $bird = new Bird('tweety');
 echo $cat->describe(), "\n", $bird->describe(), "\n";
 echo Cat::counted(1), ' ', Bird::counted(3), "\n";
 echo $cat->summary(), ' ', $bird->summary(), ' ', json_encode($cat->traits()), "\n";
-$bird->sound = 'chirp';
-$bird->name = 'polly';
+(new Keeper())->rename($bird, 'chirp', 'polly');
 echo $bird->describe(), "\n";

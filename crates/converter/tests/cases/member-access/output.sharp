@@ -3,9 +3,9 @@ namespace App;
 // `->` and `::` are `.`, and `?->` is `?.` (spec section 4).
 public final class Route
 {
-    public Route? next { get; set; } = null;
+    public Route? next { get; private set; } = null;
 
-    public string name { get; set; } = 'home';
+    public string name { get; private set; } = 'home';
 
     public string? nextName()
     {

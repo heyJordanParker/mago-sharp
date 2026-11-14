@@ -4,7 +4,7 @@ namespace App;
 // conditions it is a chain of ternaries, or `if … else if … else` as a statement (spec section 21).
 public final class Shipping
 {
-    public string note { get; set; } = '';
+    public string note { get; private set; } = '';
 
     public string rate(int weight, bool express, bool abroad)
     {

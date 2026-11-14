@@ -9,13 +9,24 @@ mod class;
 mod constructor;
 mod members;
 
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
+use mago_codex::reference::ReferenceOrigin;
+use mago_codex::reference::SymbolReferenceKind;
+use mago_codex::reference::SymbolReferences;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::AttributeList;
+use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::PartialArgument;
 use mago_syntax::cst::Sequence;
+use mago_word::Word;
+use mago_word::word;
 
 use crate::Converter;
 use crate::types::narrowing;
@@ -43,16 +54,33 @@ const WRITTEN_TAGS: [&str; 16] = [
 
 /// The accessors PHP# writes after a property's name: none for a field, which is storage, `get` alone for a
 /// `readonly` one, and a `set` with the narrower visibility PHP's `private(set)` or `protected(set)` gives (spec
-/// sections 6 and 13).
-fn accessors(is_public: bool, is_readonly: bool, modifiers: &Sequence<'_, Modifier<'_>>) -> &'static str {
+/// sections 6 and 13). A `set` PHP leaves as wide as the property is `private` where `setters` says the class alone sets
+/// it, and reaches the property's namespace otherwise.
+fn accessors(
+    is_public: bool,
+    is_readonly: bool,
+    modifiers: &Sequence<'_, Modifier<'_>>,
+    setters: Setters,
+) -> &'static str {
     let set = modifiers.iter().find(|modifier| modifier.is_write_visibility());
     match (is_public, is_readonly, set) {
         (_, true, _) => " { get; }",
         (_, false, Some(Modifier::PrivateSet(_))) => " { get; private set; }",
         (_, false, Some(Modifier::ProtectedSet(_))) => " { get; protected set; }",
+        (true, false, _) if setters == Setters::Class => " { get; private set; }",
         (true, false, _) => " { get; set; }",
         (false, false, _) => "",
     }
+}
+
+/// Who sets a property of the converted class, by the writes the project's analysis records. PHP# sets a property only
+/// inside its own namespace, so code of another namespace sets none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Setters {
+    /// The class's own code alone, or no code.
+    Class,
+    /// Other code of the class's namespace too.
+    Namespace,
 }
 
 /// The case spec section 24 names a kind of declaration in, as TypeScript does.
@@ -68,6 +96,38 @@ pub(crate) enum NameCase {
 
 fn has(modifiers: &Sequence<'_, Modifier<'_>>, matches: impl Fn(&Modifier<'_>) -> bool) -> Option<Span> {
     modifiers.iter().find(|modifier| matches(modifier)).map(HasSpan::span)
+}
+
+/// The code outside `class` that sets each of its properties, by the property's name with `$`: the name of each class,
+/// function or file whose code sets it, as the project's `references` record each write.
+fn writers(
+    class: &ClassLikeMetadata,
+    codebase: &CodebaseMetadata,
+    references: &SymbolReferences,
+) -> HashMap<Word, BTreeSet<String>> {
+    let key = codebase.class_key(class.name.as_bytes());
+    let mut writers: HashMap<Word, BTreeSet<String>> = HashMap::new();
+    references.for_each_reference(|origin, (target, property), kind| {
+        if kind != SymbolReferenceKind::PropertyWrite || target != key {
+            return;
+        }
+        let writer = match origin {
+            ReferenceOrigin::Symbol((writer, _)) if writer == key => return,
+            ReferenceOrigin::Symbol((writer, _)) => codebase.get_class_like(writer.as_bytes()).map_or_else(
+                || writer.as_str_lossy().into_owned(),
+                |writer| writer.original_name.as_str_lossy().into_owned(),
+            ),
+            ReferenceOrigin::File(file) => file.as_str_lossy().into_owned(),
+        };
+        writers.entry(property).or_default().insert(writer);
+    });
+
+    writers
+}
+
+/// The namespace of `name`, a full PHP name, as `App\Shop` of `App\Shop\Checkout`, or nothing in PHP's root namespace.
+fn namespace_of(name: &str) -> &str {
+    name.rsplit_once('\\').map_or("", |(namespace, _)| namespace)
 }
 
 impl Converter<'_, '_> {
@@ -179,6 +239,31 @@ impl Converter<'_, '_> {
         );
 
         true
+    }
+
+    /// Who sets the converted class's property `variable` names, or `None` and a refusal at it where code of another
+    /// namespace sets it. A PHP# property's `set` reaches its own namespace at most, and plain PHP that sets a PHP#
+    /// property is held to it too, so such a write would stop compiling.
+    fn setters(&mut self, variable: &DirectVariable<'_>) -> Option<Setters> {
+        let Some(class) = self.class.as_ref() else {
+            return Some(Setters::Namespace);
+        };
+        let Some(writers) = class.writers.get(&word(variable.name)) else {
+            return Some(Setters::Class);
+        };
+        let declared = class.metadata.original_name.as_str_lossy();
+        let own = namespace_of(&declared);
+        let Some(outside) = writers.iter().find(|writer| !namespace_of(writer).eq_ignore_ascii_case(own)) else {
+            return Some(Setters::Namespace);
+        };
+        let reason = format!(
+            "`{}::{}` is assigned from `{outside}`, and PHP# sets a property only inside its own namespace",
+            class.name,
+            String::from_utf8_lossy(variable.name),
+        );
+        self.refuse(variable.span, reason);
+
+        None
     }
 
     /// Refuses a member whose type `metadata` comes from a PHPDoc `tag` of the file that narrows the PHP# type the

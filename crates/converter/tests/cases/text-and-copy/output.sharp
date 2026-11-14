@@ -4,7 +4,7 @@ namespace App;
 // (spec sections 10 and 18). `with` runs as PHP's `clone`, so a class's `__clone` runs on the copy.
 public class Sku
 {
-    public Sku(public string code { get; set; })
+    public Sku(public string code { get; private set; })
     {
     }
 

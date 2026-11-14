@@ -6,7 +6,7 @@ namespace App;
 [ReachedByReflection]
 public final class Action
 {
-    public Action(public string name { get; set; })
+    public Action(public string name { get; private set; })
     {
     }
 }

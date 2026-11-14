@@ -1,0 +1,19 @@
+namespace App.Shop;
+
+// A PHP# property's `set` reaches its namespace at most, and is `private` where the class alone sets the property
+// (spec section 6).
+public final class Cart
+{
+    public int count { get; private set; } = 0;
+
+    public string note { get; set; } = '';
+
+    public Cart(public string owner { get; private set; })
+    {
+    }
+
+    public void add()
+    {
+        this.count++;
+    }
+}

@@ -90,6 +90,13 @@ impl Server {
         self.service.codebase()
     }
 
+    /// The references between the symbols of the last analysis, as each property write with the member or the file
+    /// that writes it, which `mago convert` reads to find who sets a property.
+    #[must_use]
+    pub fn symbol_references(&self) -> &SymbolReferences {
+        self.service.symbol_references()
+    }
+
     /// The issues of `file_id` and what its analysis found in it, as the type of each expression, against the last
     /// analysis's codebase. `None` when the file is not in the database.
     #[must_use]

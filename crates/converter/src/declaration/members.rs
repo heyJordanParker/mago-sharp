@@ -44,6 +44,7 @@ use crate::body::Locals;
 use crate::types::raw_generic;
 
 use super::NameCase;
+use super::Setters;
 use super::accessors;
 use super::has;
 
@@ -116,13 +117,14 @@ impl Converter<'_, '_> {
 
         let mut declarations = Vec::new();
         for item in property.items.iter() {
-            let Some((head, union, has_accessors)) = self.property_head(&property.modifiers, item.variable()) else {
+            let Some((head, union, has_accessors, setters)) = self.property_head(&property.modifiers, item.variable())
+            else {
                 continue;
             };
             let Some(value) = self.initial_value(item, &union, property.hint.is_none(), is_static) else {
                 continue;
             };
-            let accessors = accessors(has_accessors, is_readonly, &property.modifiers);
+            let accessors = accessors(has_accessors, is_readonly, &property.modifiers, setters);
             // A property's accessors end it, unless an initial value follows them (spec section 6).
             let end = if accessors.is_empty() || !value.is_empty() { ";" } else { "" };
             declarations.push(format!("{attributes}{head}{accessors}{value}{end}"));
@@ -144,7 +146,7 @@ impl Converter<'_, '_> {
         let metadata = class.metadata;
         let variable = property.item.variable();
         self.attributes(&property.attribute_lists);
-        let Some((head, union, _)) = self.property_head(&property.modifiers, variable) else {
+        let Some((head, union, is_public, setters)) = self.property_head(&property.modifiers, variable) else {
             return;
         };
         let Some(declared) = metadata.properties.get(&word(variable.name)) else {
@@ -172,10 +174,12 @@ impl Converter<'_, '_> {
             .offset;
         self.edits.replace_range(start, property.item.span().end.offset, head);
 
-        // PHP's `private(set)` and `protected(set)` are the `set` accessor's own access level.
+        // PHP's `private(set)` and `protected(set)` are the `set` accessor's own access level, and one the class alone
+        // sets is `private`.
         let set_access = match property.modifiers.iter().find(|modifier| modifier.is_write_visibility()) {
             Some(Modifier::PrivateSet(_)) => "private ",
             Some(Modifier::ProtectedSet(_)) => "protected ",
+            _ if is_public && setters == Setters::Class => "private ",
             _ => "",
         };
         let hooks = &property.hook_list.hooks;
@@ -300,13 +304,13 @@ impl Converter<'_, '_> {
     }
 
     /// `public override string name`, which the declaration of the property `variable` names starts with, its type,
-    /// and whether it is a property with accessors rather than a field: a public one, or one that replaces its
-    /// parent's (spec sections 6 and 22). An interface's property takes no access modifier (spec section 5).
+    /// whether it is a property with accessors rather than a field: a public one, or one that replaces its parent's
+    /// (spec sections 6 and 22), and who sets it. An interface's property takes no access modifier (spec section 5).
     fn property_head(
         &mut self,
         modifiers: &Sequence<'_, Modifier<'_>>,
         variable: &DirectVariable<'_>,
-    ) -> Option<(String, TUnion, bool)> {
+    ) -> Option<(String, TUnion, bool, Setters)> {
         let metadata = self.class.as_ref()?.metadata;
         // A type the codex marks `inferred` here is inherited: declared in the parent, which the override rules need.
         let Some(declared) = metadata.properties.get(&word(variable.name)) else {
@@ -329,6 +333,7 @@ impl Converter<'_, '_> {
         if self.names_inherited_method(variable) {
             return None;
         }
+        let setters = self.setters(variable)?;
 
         let visibility = match modifiers.iter().find(|modifier| modifier.is_read_visibility()) {
             Some(Modifier::Protected(_)) => "protected ",
@@ -352,6 +357,10 @@ impl Converter<'_, '_> {
             && !metadata.kind.is_interface()
             && !self.class.as_ref().is_some_and(|class| class.is_final)
             && has(modifiers, |modifier| matches!(modifier, Modifier::Final(_))).is_none();
+        // A property another replaces, declares or implements keeps a `set` they share, since a `private set` closes
+        // the property to a subclass's replacement.
+        let shared = is_open || overrides || is_abstract || metadata.kind.is_interface();
+        let setters = if shared { Setters::Namespace } else { setters };
         // An override keeps the name of what it replaces.
         let kind = if is_public || overrides { "property" } else { "field" };
         if !overrides && self.misnamed(&variable.name[1..], variable.span, kind, NameCase::Camel) {
@@ -371,7 +380,7 @@ impl Converter<'_, '_> {
             opening.push_str("virtual ");
         }
 
-        Some((format!("{visibility}{opening}{written} {name}"), union, is_public || overrides))
+        Some((format!("{visibility}{opening}{written} {name}"), union, is_public || overrides, setters))
     }
 
     /// Refuses the property `variable` names, a declared or a promoted one, when the class inherits a method of its

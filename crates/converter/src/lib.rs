@@ -8,10 +8,14 @@
 //! A file converts whole or not at all. Each construct with no PHP# form yet, or none at all, is a [`Refusal`] that
 //! names its place and the construct, and the file then stays plain PHP.
 
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+
 use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::TemplateTypes;
+use mago_codex::reference::SymbolReferences;
 use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
@@ -27,6 +31,7 @@ use mago_syntax::cst::Statement;
 use mago_syntax::cst::UseItem;
 use mago_syntax::cst::UseItems;
 use mago_syntax::token::is_sharp_keyword;
+use mago_word::Word;
 
 use crate::body::Captures;
 use crate::body::Locals;
@@ -50,6 +55,8 @@ pub struct Input<'input, 'arena> {
     pub names: &'input ResolvedNames<'arena>,
     pub codebase: &'input CodebaseMetadata,
     pub artifacts: &'input AnalysisArtifacts,
+    /// The project's references between symbols, which name every member and file that sets a property.
+    pub references: &'input SymbolReferences,
     /// The standard library's members that run a PHP function, which a bare call of a built-in becomes.
     pub library: &'input Library,
 }
@@ -155,6 +162,8 @@ struct Class<'input> {
     set_by_constructor: Vec<Vec<u8>>,
     /// Whether the class's own constructor is `required`, since the class writes `new static(…)` and isn't `final`.
     required: bool,
+    /// The code outside the class that sets each of its properties, by the property's name with `$`.
+    writers: HashMap<Word, BTreeSet<String>>,
 }
 
 /// The method or the property accessor whose body is converted.

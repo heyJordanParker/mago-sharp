@@ -7,7 +7,7 @@ public final class Badge
 {
     public string label {
         get => field + '!';
-        set => field = value + '?';
+        private set => field = value + '?';
     } = 'guest';
 
     public int level {

@@ -24,6 +24,7 @@ use crate::Converter;
 use crate::types::raw_generic;
 
 use super::NameCase;
+use super::Setters;
 use super::accessors;
 use super::has;
 
@@ -49,6 +50,10 @@ impl Converter<'_, '_> {
         if promoted && self.names_inherited_method(&parameter.variable) {
             return;
         }
+        let setters = if promoted { self.setters(&parameter.variable) } else { Some(Setters::Namespace) };
+        let Some(setters) = setters else {
+            return;
+        };
         let kind = if promoted { "property" } else { "parameter" };
         if self.misnamed(&parameter.variable.name[1..], parameter.variable.span, kind, NameCase::Camel) {
             return;
@@ -105,7 +110,8 @@ impl Converter<'_, '_> {
             }
             let is_public = visibility.is_none_or(|modifier| matches!(modifier, Modifier::Public(_)));
             let in_readonly_class = self.class.as_ref().is_some_and(|class| class.metadata.flags.is_readonly());
-            let accessors = accessors(is_public, readonly.is_some() || in_readonly_class, &parameter.modifiers);
+            let accessors =
+                accessors(is_public, readonly.is_some() || in_readonly_class, &parameter.modifiers, setters);
             if !accessors.is_empty() {
                 self.edits.insert(parameter.variable.span.end.offset, accessors);
             }

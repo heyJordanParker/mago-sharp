@@ -197,6 +197,7 @@ fn converted(folder: &Path) -> Result<Converted, String> {
         names: &names,
         codebase: server.codebase(),
         artifacts: &artifacts,
+        references: server.symbol_references(),
         library: &library,
     };
 

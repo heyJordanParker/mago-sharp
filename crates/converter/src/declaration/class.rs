@@ -23,6 +23,7 @@ use super::NameCase;
 use super::constructor::required_constructor;
 use super::constructor::set_by_constructor;
 use super::has;
+use super::writers;
 
 impl<'input> Converter<'input, '_> {
     pub(crate) fn class(&mut self, class: &mago_syntax::cst::Class<'_>) {
@@ -226,7 +227,8 @@ impl<'input> Converter<'input, '_> {
     ) {
         let name = String::from_utf8_lossy(name.value).into_owned();
         let required = !is_final && required_constructor(members);
-        self.class = Some(Class { name, metadata, is_final, set_by_constructor, required });
+        let writers = writers(metadata, self.input.codebase, self.input.references);
+        self.class = Some(Class { name, metadata, is_final, set_by_constructor, required, writers });
         for member in members {
             match member {
                 ClassLikeMember::Method(method) => self.method(method),

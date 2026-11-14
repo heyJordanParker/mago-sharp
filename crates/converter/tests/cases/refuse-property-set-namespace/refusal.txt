@@ -1,0 +1,2 @@
+10:19: `Transaction::$status` is assigned from `App\Shop\Checkout`, and PHP# sets a property only inside its own namespace
+12:44: `Transaction::$total` is assigned from `App\Shop\Checkout`, and PHP# sets a property only inside its own namespace
