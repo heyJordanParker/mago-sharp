@@ -20,7 +20,7 @@ walkdir = { workspace = true, optional = true }
 foldhash = { workspace = true }
 globset = { workspace = true }
 serde = { workspace = true, features = ["rc"], optional = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true, features = ["preserve_order"] }
 rayon = { workspace = true }
 notify = { workspace = true, optional = true }
 

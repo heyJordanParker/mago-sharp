@@ -1591,6 +1591,7 @@ name = "mago-composer"
 version = "0.6.10"
 dependencies = [
  "foldhash",
+ "indexmap",
  "serde",
  "serde_json",
 ]

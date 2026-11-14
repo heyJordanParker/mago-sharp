@@ -1,4 +1,5 @@
 use foldhash::HashMap;
+use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -178,9 +179,10 @@ pub struct ComposerPackageAutoloadDev {
     #[serde(rename = "psr-0", default, skip_serializing_if = "HashMap::is_empty")]
     pub psr_0: HashMap<String, ComposerPackageAutoloadDevPsr0value>,
 
-    /// This is an object of namespaces (keys) and the PSR-4 directories they can map to (values, can be arrays of paths) by the autoloader
-    #[serde(rename = "psr-4", default, skip_serializing_if = "HashMap::is_empty")]
-    pub psr_4: HashMap<String, ComposerPackageAutoloadDevPsr4value>,
+    /// This is an object of namespaces (keys) and the PSR-4 directories they can map to (values, can be arrays of paths) by the autoloader,
+    /// in the order `composer.json` writes them
+    #[serde(rename = "psr-4", default, skip_serializing_if = "IndexMap::is_empty")]
+    pub psr_4: IndexMap<String, ComposerPackageAutoloadDevPsr4value>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -876,9 +878,10 @@ pub struct Autoload {
     #[serde(rename = "psr-0", default, skip_serializing_if = "HashMap::is_empty")]
     pub psr_0: HashMap<String, AutoloadPsr0value>,
 
-    /// This is an object of namespaces (keys) and the PSR-4 directories they can map to (values, can be arrays of paths) by the autoloader
-    #[serde(rename = "psr-4", default, skip_serializing_if = "HashMap::is_empty")]
-    pub psr_4: HashMap<String, AutoloadPsr4value>,
+    /// This is an object of namespaces (keys) and the PSR-4 directories they can map to (values, can be arrays of paths) by the autoloader,
+    /// in the order `composer.json` writes them
+    #[serde(rename = "psr-4", default, skip_serializing_if = "IndexMap::is_empty")]
+    pub psr_4: IndexMap<String, AutoloadPsr4value>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]

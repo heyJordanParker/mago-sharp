@@ -1375,6 +1375,26 @@ mod tests {
         );
     }
 
+    /// Two PSR-4 namespaces of one folder give a `.sharp` file in it the first one `composer.json` writes, as Composer's
+    /// own map keeps them, and not the first in alphabetical order.
+    #[test]
+    fn a_folder_two_psr_4_namespaces_share_takes_the_first_composer_json_writes() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(
+            &temp_dir,
+            "composer.json",
+            r#"{"autoload": {"psr-4": {"Zeta\\": "src/", "Alpha\\": "src/"}}}"#,
+        );
+        create_test_file(&temp_dir, "src/Order.sharp", "");
+
+        let mut config = create_test_config(&temp_dir, vec!["src"], vec![]);
+        config.extensions = vec![Cow::Borrowed(b"sharp")];
+        let db = DatabaseLoader::new(config).load().unwrap();
+        let namespaces: Vec<Option<FolderNamespace>> = db.files().map(|file| file.folder_namespace.clone()).collect();
+
+        assert_eq!(namespaces, [Some(FolderNamespace::Namespace("Zeta".into()))]);
+    }
+
     /// A `.sharp` file made in memory, as `mago convert` makes one before it writes it, is marked as the loader marks
     /// the same file on disk, and a `.php` file is left alone.
     #[test]

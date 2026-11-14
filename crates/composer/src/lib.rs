@@ -20,6 +20,7 @@ impl FromStr for ComposerPackage {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -39,5 +40,20 @@ mod tests {
         let name = ComposerPackage::from_str(json).map(|package| package.name.map(|name| name.0));
 
         assert_eq!(name.map_err(|error| error.to_string()), Ok(Some("acme/legacy".to_owned())));
+    }
+
+    /// `autoload`'s and `autoload-dev`'s PSR-4 roots keep the order `composer.json` writes them in, since the first root
+    /// decides where `mago convert` writes `Externs.sharp`.
+    #[test]
+    fn the_psr_4_roots_keep_the_order_composer_json_writes() {
+        let roots = ["Zoo\\", "App\\", "Mid\\", "Beta\\", "Yard\\", "Core\\", "Lib\\", "Kit\\", "Edge\\", "Dock\\"];
+        let map = r#"{"Zoo\\": "a/", "App\\": "b/", "Mid\\": "c/", "Beta\\": "d/", "Yard\\": "e/", "Core\\": "f/", "Lib\\": "g/", "Kit\\": "h/", "Edge\\": "i/", "Dock\\": "j/"}"#;
+        let json = format!(r#"{{"autoload": {{"psr-4": {map}}}, "autoload-dev": {{"psr-4": {map}}}}}"#);
+
+        let package = ComposerPackage::from_str(&json).unwrap();
+        let autoload: Vec<&str> = package.autoload.as_ref().unwrap().psr_4.keys().map(String::as_str).collect();
+        let autoload_dev: Vec<&str> = package.autoload_dev.as_ref().unwrap().psr_4.keys().map(String::as_str).collect();
+
+        assert_eq!((autoload, autoload_dev), (roots.to_vec(), roots.to_vec()));
     }
 }
