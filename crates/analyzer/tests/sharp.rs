@@ -3612,6 +3612,17 @@ fn an_override_of_a_plain_php_method_whose_return_type_fits_the_parents_docblock
     assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &others), Vec::<String>::new());
 }
 
+/// PHP# writes PHP's `$this` as `Self`, spec section 25, so a `Self` override of a plain PHP method that returns
+/// `static` natively, `@return static` or `@return $this` fits it.
+#[test]
+fn a_self_override_of_a_plain_php_method_that_returns_static_or_this_fits_it() {
+    let model = "<?php\n\nnamespace Lib;\n\nclass Model\n{\n    public function fresh(): static\n    {\n        return $this;\n    }\n\n    /** @return static */\n    public function copied()\n    {\n        return clone $this;\n    }\n\n    /** @return $this */\n    public function touched()\n    {\n        return $this;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public override Self fresh() => this;\n\n    public override Self copied() => this;\n\n    public override Self touched() => this;\n}\n";
+    let others = [("src/Lib/Model.php", model)];
+
+    assert_eq!(issues(("src/Demo/Order.sharp", sharp), &others), Vec::<String>::new());
+}
+
 /// A plain PHP subclass of a PHP# override meets the type the override's PHP declaration writes, `\Sharp\Map|array`
 /// for a `Map` plain PHP gets as its array, or the `array` of the plain PHP method the override keeps, as a subclass of
 /// any PHP# method does, and inherits no `@return` from the plain PHP class above the override. So `array` links, as

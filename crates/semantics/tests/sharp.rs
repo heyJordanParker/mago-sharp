@@ -3095,6 +3095,15 @@ fn a_double_underscore_class_with_a_constructor_reports_its_name_once() {
     assert_eq!(issues(code), ["3:7 Unexpected `__Shape__`"]);
 }
 
+/// A method written `override` keeps the name of the method it replaces, which only a plain PHP class gives a `__`
+/// name, as a library's `__sleep()`. A method of the class's own still fails at a `__` name.
+#[test]
+fn an_override_keeps_a_plain_php_parents_double_underscore_name() {
+    let code = "namespace App.Tenant;\n\nclass Order : Model\n{\n    public override List<string> __sleep() => [];\n\n    public List<string> __wakeup() => [];\n}\n";
+
+    assert_eq!(issues(code), ["7:25 Unexpected `__wakeup`"]);
+}
+
 /// A refusal skips a node's children only when its span covers them, so a method refused at its name still has its
 /// body checked.
 #[test]

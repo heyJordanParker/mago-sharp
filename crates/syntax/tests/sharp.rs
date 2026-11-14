@@ -4392,6 +4392,35 @@ fn virtual_and_override_are_method_modifiers_and_stay_names_elsewhere() {
     assert_eq!(modifiers, [vec!["Public", "Virtual"], vec!["Protected", "Override"]]);
 }
 
+/// `virtual` and `override` before a parenthesized type modify the member, whose type the group starts, as in `public
+/// override (int|string)? getKey()`, spec section 24. A `?` after the group makes the whole union nullable.
+#[test]
+fn a_modifier_before_a_parenthesized_type_modifies_the_member() {
+    const CODE: &str = "class Entry : Model\n{\n    public override (int|string)? getKey() => null;\n\n    public virtual (int|string) other() => 1;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Entry.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let methods: Vec<(Vec<String>, &str, &str)> = class_members(program)
+        .iter()
+        .map(|member| {
+            let ClassLikeMember::Method(method) = member else {
+                panic!("expected a method, got {member:#?}");
+            };
+            let returned = method.return_type_hint.as_ref().expect("a return type");
+
+            (method.modifiers.iter().map(ToString::to_string).collect(), source(CODE, &returned.hint), source(CODE, &method.name))
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            (vec!["Public".to_owned(), "Override".to_owned()], "(int|string)?", "getKey"),
+            (vec!["Public".to_owned(), "Virtual".to_owned()], "(int|string)", "other"),
+        ]
+    );
+}
+
 #[test]
 fn super_before_a_dot_is_the_parent_class() {
     const CODE: &str =

@@ -742,9 +742,10 @@ pub(crate) fn written_type_argument(union: &TUnion, codebase: &CodebaseMetadata)
 }
 
 /// `union` with each enum case in it as its enum, each tuple as the tuple of its elements' written types, spec section
-/// 30, each other array as the `List`, `Map` or `Set` of its key and value types, the arrays inside one too, and each
-/// `array-key`, as a plain PHP template's default gives it, as `int|string`, spec section 12: the type a PHP#
-/// declaration writes for it.
+/// 30, each other array as the `List`, `Map` or `Set` of its key and value types, the arrays inside one too, each
+/// `array-key`, as a plain PHP template's default gives it, as `int|string`, spec section 12, and PHP's `$this` as
+/// `Self`, which PHP# writes for it, spec section 25: the type a PHP# declaration writes for it. PHP# has no type of
+/// the receiver itself, so an override of a plain PHP method that returns `$this` returns `Self`.
 pub(crate) fn written_type(union: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
     TUnion::from_vec(
         union
@@ -771,6 +772,13 @@ pub(crate) fn written_type(union: &TUnion, codebase: &CodebaseMetadata) -> TUnio
                     })]
                 }
                 TAtomic::Object(TObject::Enum(r#enum)) => vec![TAtomic::Object(TObject::Enum(TEnum::new(r#enum.name)))],
+                TAtomic::Object(TObject::Named(named)) if named.is_this => {
+                    let mut named = named.clone();
+                    named.is_this = false;
+                    named.is_static = true;
+
+                    vec![TAtomic::Object(TObject::Named(named))]
+                }
                 atomic => vec![atomic.clone()],
             })
             .collect(),

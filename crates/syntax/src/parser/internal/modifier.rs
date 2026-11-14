@@ -47,6 +47,39 @@ where
         Ok(self.stream.lookahead(offset)?.is_some_and(|token| self.is_internal(token)))
     }
 
+    /// Whether the word here is a member's modifier and the `(` after it opens a type, as `override (int|string)?
+    /// key()` writes one, spec section 24. The group is a type when a `?`, a `|`, an `&` or the member's name follows its
+    /// `)`, which follows no call and no lambda's parameter. `ref` goes on a parameter, where the word is its name.
+    fn is_at_modifier_before_grouped_type(&self) -> Result<bool, ParseError<'arena>> {
+        let mut tokens = self.stream.peek_tokens();
+        let is_member_modifier = tokens.next().transpose()?.is_some_and(|token| {
+            matches!(
+                token.value,
+                b"virtual" | b"override" | b"required" | b"extern" | b"lazy" | b"late" | b"internal" | b"foreign"
+            )
+        });
+        if !is_member_modifier {
+            return Ok(false);
+        }
+        let mut depth: usize = 0;
+        while let Some(token) = tokens.next().transpose()? {
+            match token.kind {
+                T!["("] => depth += 1,
+                // The word is followed by no `(`.
+                _ if depth == 0 => return Ok(false),
+                T![")"] if depth == 1 => {
+                    let after = tokens.next().transpose()?.map(|token| token.kind);
+
+                    return Ok(matches!(after, Some(T!["?" | "|" | "&" | Identifier])));
+                }
+                T![")"] => depth -= 1,
+                _ => {}
+            }
+        }
+
+        Ok(false)
+    }
+
     /// Consumes a `(` and every token up to its matching `)`, and returns their span.
     fn skip_parenthesized(&mut self) -> Result<Span, ParseError<'arena>> {
         let start = self.stream.eat_span(T!["("])?;
@@ -102,9 +135,12 @@ where
                 return self.parse_optional_modifier();
             }
             // A word before `(`, `)`, `,` or `=` is a name, as a call or an untyped lambda parameter, which
-            // `parse_parameter` reads the same way.
+            // `parse_parameter` reads the same way. A member's modifier before a parenthesized type, as in `override
+            // (int|string)? key()`, is the exception.
             Some(T![Identifier])
-                if self.dialect.is_sharp() && !matches!(self.stream.peek_kind(1)?, Some(T!["(" | ")" | "," | "="])) =>
+                if self.dialect.is_sharp()
+                    && (!matches!(self.stream.peek_kind(1)?, Some(T!["(" | ")" | "," | "="]))
+                        || self.is_at_modifier_before_grouped_type()?) =>
             {
                 match self.stream.lookahead(0)?.map(|token| token.value) {
                     Some(b"virtual") => Modifier::Virtual(self.expect_any_keyword()?),

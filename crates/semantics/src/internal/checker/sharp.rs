@@ -5888,11 +5888,14 @@ fn is_magic_name(name: &[u8]) -> bool {
 }
 
 /// Reports a method whose name starts with `__`, as PHP's magic methods and `__Something__` names do, which is no PHP#
-/// syntax. The constructor, the one method without a return type, carries its class's name, which `check_class_name`
-/// reports. The analyzer warns on a method name out of camel case, since only it knows whether a parent, a plain PHP
-/// one included, gives the method its name.
+/// syntax. A method written `override` keeps the name of the method it replaces, which only a plain PHP class can give
+/// it, as `public override List<string> __sleep()` replaces a library's `__sleep()`, and the analyzer refuses an
+/// `override` that replaces nothing. The constructor, the one method without a return type, carries its class's name,
+/// which `check_class_name` reports. The analyzer warns on a method name out of camel case, since only it knows whether
+/// a parent, a plain PHP one included, gives the method its name.
 fn check_method_name(method: &Method, context: &mut Context<'_, '_, '_>) {
-    if method.return_type_hint.is_some() && method.name.value.starts_with(b"__") {
+    let overrides = method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Override(_)));
+    if method.return_type_hint.is_some() && method.name.value.starts_with(b"__") && !overrides {
         report_unexpected(method.name.span, context);
     }
 }
