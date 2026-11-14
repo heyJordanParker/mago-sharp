@@ -1148,7 +1148,8 @@ fn unreached(configuration: &Configuration, root: &Path, path: &Path) -> Result<
 }
 
 /// Each PSR-4 folder of `composer.json`'s `autoload`, relative to the workspace, with its namespace, as `App` for
-/// `App\`, in the order `composer.json` lists them. A test under `autoload-dev` stays out, since a test runner loads a test only from the file it lists (spec section 27).
+/// `App\`, in the order `composer.json` lists them. A test under `autoload-dev` stays out, since a test runner loads a
+/// test only from the file it lists (spec section 27).
 fn psr4_roots(workspace: &Path) -> Result<Vec<(String, PathBuf)>, Error> {
     let path = workspace.join("composer.json");
     let Ok(contents) = std::fs::read_to_string(&path) else {

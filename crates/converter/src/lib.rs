@@ -374,8 +374,8 @@ impl<'input> Converter<'input, '_> {
     }
 
     /// A `use` line, as one `import` line per class it names (spec section 23). A function or a constant is reached
-    /// through its namespace, which each use imports, a root class of `Builtins.sharp` is named bare, and a library's
-    /// class of PHP's root namespace through its folder's namespace, so their lines go.
+    /// through its namespace, which each use imports, and a class of PHP's root namespace by its own name where the
+    /// file names it, so their lines go.
     fn use_line(&mut self, r#use: &mago_syntax::cst::Use<'_>) {
         self.scope.populate_from_use(r#use);
         let classes: Vec<(&[u8], &UseItem<'_>)> = match &r#use.items {
@@ -401,16 +401,10 @@ impl<'input> Converter<'input, '_> {
             if Imports::is_default(&name) && alias == short {
                 continue;
             }
-            // A library's class of PHP's root namespace is imported through its folder's namespace where the file
-            // names it, so its line goes.
-            if !name.contains('\\') && self.imports.library_root_class(&name).is_some() {
-                continue;
-            }
+            // A class of PHP's root namespace is named where the file names it, by its own name, so its line goes: a
+            // root class of `Builtins.sharp` bare, a library's through its folder's namespace, and any other refuses
+            // there, as `Closure` never does where it is a function type.
             if !name.contains('\\') {
-                self.refuse(
-                    item.name.span(),
-                    format!("`{name}` is a class of PHP's root namespace, which PHP# names only in the standard library (spec section 23)"),
-                );
                 continue;
             }
             self.imports.add_use(&alias, &name);

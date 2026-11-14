@@ -1,2 +1,2 @@
-7:5: `DateTimeImmutable` is a class of PHP's root namespace, which PHP# names only in the standard library (spec section 23)
-12:21: `DateTimeImmutable` is a class of PHP's root namespace, which PHP# names only in the standard library (spec section 23)
+13:21: `DateTimeImmutable` is a class of PHP's root namespace, which PHP# names only in the standard library (spec section 23)
+20:21: `DateTimeImmutable` is a class of PHP's root namespace, which PHP# names only in the standard library (spec section 23)
