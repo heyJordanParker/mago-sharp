@@ -1441,19 +1441,20 @@ mod tests {
     }
 
     /// A caller passes a lambda that calls plain PHP to a class that stores it. Converted, that class stores a pure
-    /// function and returns a `mixed` as its type parameter, two issues of its own, so it stays plain PHP. The caller's
-    /// own issue, that the stored function can't hold its lambda, comes from that class's conversion alone, so the
-    /// caller is proven again without it and converts: two proofs.
+    /// function, and its own `touch` passes it such a lambda too, an issue of its own the proof finds, so it stays plain
+    /// PHP. The caller's own issue, that the stored function can't hold its lambda, comes from that class's conversion
+    /// alone, so the caller is proven again without it and converts: two proofs. `Store::call` gives its callback's
+    /// type, since the converter itself refuses a `mixed` returned as an unbounded type parameter, before any proof.
     #[test]
     fn a_file_whose_own_issue_comes_from_a_file_kept_plain_is_proven_again_without_it() {
         let files = [
             (
                 "Plain/Store.php".to_owned(),
-                "<?php\n\nnamespace Generated\\Plain;\n\nuse Closure;\n\nfinal class Store\n{\n    public static function call(Closure $callback): mixed\n    {\n        return $callback();\n    }\n\n    public static function touch(): void\n    {\n    }\n}\n".to_owned(),
+                "<?php\n\nnamespace Generated\\Plain;\n\nuse Closure;\n\nfinal class Store\n{\n    /**\n     * @template R\n     *\n     * @param (Closure(): R) $callback\n     *\n     * @return R\n     */\n    public static function call(Closure $callback): mixed\n    {\n        return $callback();\n    }\n\n    public static function touch(): void\n    {\n    }\n}\n".to_owned(),
             ),
             (
                 "Contracts/Transaction.php".to_owned(),
-                "<?php\n\nnamespace Generated\\Contracts;\n\nuse Closure;\nuse Generated\\Plain\\Store;\n\n/** @template T */\nfinal class Transaction\n{\n    /** @param (Closure(): T) $callback */\n    public function __construct(private Closure $callback)\n    {\n    }\n\n    /** @return T */\n    public function run(): mixed\n    {\n        return Store::call($this->callback);\n    }\n}\n".to_owned(),
+                "<?php\n\nnamespace Generated\\Contracts;\n\nuse Closure;\nuse Generated\\Plain\\Store;\n\n/** @template T */\nfinal class Transaction\n{\n    /** @param (Closure(): T) $callback */\n    public function __construct(private Closure $callback)\n    {\n    }\n\n    public function touch(): void\n    {\n        (new self(function () {\n            Store::touch();\n        }))->run();\n    }\n\n    /** @return T */\n    public function run(): mixed\n    {\n        return Store::call($this->callback);\n    }\n}\n".to_owned(),
             ),
             (
                 "Contracts/Permissions.php".to_owned(),
