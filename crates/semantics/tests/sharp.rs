@@ -2285,6 +2285,15 @@ fn a_constant_reads_no_static_member_through_a_twin_class() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 24: a PHP# class named in another case is another class, so `Report : REPORT` extends its twin and not
+/// itself.
+#[test]
+fn a_class_extending_its_twin_does_not_extend_itself() {
+    let code = "namespace App.Tenant;\n\nclass Report : REPORT\n{\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
 /// Spec section 24: a PHP# enum names its members as declared, so a method `Seconds` is no clash with a case's field
 /// `seconds`.
 #[test]

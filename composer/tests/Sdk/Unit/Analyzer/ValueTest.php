@@ -23,6 +23,9 @@ use Mago\Sdk\Exception\InvalidArgumentException;
 use Mago\Sdk\Span;
 use PHPUnit\Framework\TestCase;
 
+/**
+ * @mago-expect lint:too-many-methods
+ */
 final class ValueTest extends TestCase
 {
     public function testInvalidSpanIsRejected(): void
@@ -51,9 +54,18 @@ final class ValueTest extends TestCase
         self::assertTrue($method->equals(new FunctionLikeIdentifier(FunctionLikeKind::Method, 'RUN', 'job')));
         self::assertFalse($method->equals(new FunctionLikeIdentifier(FunctionLikeKind::Method, 'stop', 'Job')));
 
-        // A method of a class with exact names is found only as declared, and a PHP# class only by its exact name,
-        // spec section 24: `Box::total` and `Box::Total` are two methods, as the host answers each identifier's rule,
-        // and an identifier a plugin builds is compared by that rule.
+        $property = new PropertyType(Type::string(), Type::int());
+        self::assertSame('string', (string) $property->readType);
+        self::assertSame('int', (string) $property->writeType);
+    }
+
+    /**
+     * A method of a class with exact names is found only as declared, and a PHP# class only by its exact name, spec
+     * section 24: `Box::total` and `Box::Total` are two methods, as the host answers each identifier's rule, and an
+     * identifier a plugin builds is compared by that rule.
+     */
+    public function testAMethodOfAClassWithExactNamesEqualsOnlyItsDeclaredName(): void
+    {
         $total = new FunctionLikeIdentifier(FunctionLikeKind::Method, 'total', 'Demo\Box', true, true);
 
         self::assertTrue($total->equals(new FunctionLikeIdentifier(FunctionLikeKind::Method, 'total', 'Demo\Box')));
@@ -66,10 +78,20 @@ final class ValueTest extends TestCase
         $synced = new FunctionLikeIdentifier(FunctionLikeKind::Method, 'syncedId', 'Room', exactNames: true);
         self::assertTrue($synced->equals(new FunctionLikeIdentifier(FunctionLikeKind::Method, 'syncedId', 'room')));
         self::assertFalse($synced->equals(new FunctionLikeIdentifier(FunctionLikeKind::Method, 'syncedid', 'Room')));
+    }
 
-        $property = new PropertyType(Type::string(), Type::int());
-        self::assertSame('string', (string) $property->readType);
-        self::assertSame('int', (string) $property->writeType);
+    public function testOnlyAMethodCarriesItsClassRule(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        new FunctionLikeIdentifier(FunctionLikeKind::Function_, 'total', exactNames: true);
+    }
+
+    public function testAPhpSharpClassHasExactNames(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        new FunctionLikeIdentifier(FunctionLikeKind::Method, 'total', 'Demo\Box', sharp: true);
     }
 
     public function testPropertyTypeRequiresAtLeastOneAccessType(): void

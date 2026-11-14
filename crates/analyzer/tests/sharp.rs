@@ -29231,6 +29231,25 @@ fn a_reflection_call_read_or_write_may_have_every_effect() {
     );
 }
 
+/// Spec section 24: a string names a class-like by its key, so plain PHP's `'Demo\BOX'` is never the PHP# class
+/// `Demo\Box`'s name, on either side of `===`, while `'lib\words'` is the plain `Lib\Words`'s.
+#[test]
+fn a_string_in_another_case_is_never_a_sharp_class_name() {
+    let r#box = ("src/Box.sharp", "namespace Demo;\n\npublic class Box\n{\n}\n");
+    let check = (
+        "src/Check.php",
+        "<?php\n\nnamespace App;\n\nfinal class Check\n{\n    public function twin(): bool\n    {\n        return 'Demo\\BOX' === \\Demo\\Box::class;\n    }\n\n    public function swapped(): bool\n    {\n        return \\Demo\\Box::class === 'Demo\\BOX';\n    }\n\n    public function plain(): bool\n    {\n        return 'lib\\words' === \\Lib\\Words::class;\n    }\n\n    public function loose(): bool\n    {\n        return 'Demo\\BOX' == \\Demo\\Box::class;\n    }\n\n    public function looseSwapped(): bool\n    {\n        return \\Demo\\Box::class == 'Demo\\BOX';\n    }\n\n    public function plainSwapped(): bool\n    {\n        return \\Lib\\Words::class === 'lib\\words';\n    }\n}\n",
+    );
+
+    assert_eq!(
+        messages(check, &[r#box, WORDS]),
+        [
+            "Redundant `===` comparison: left-hand side is never identical to right-hand side.",
+            "Redundant `===` comparison: left-hand side is never identical to right-hand side.",
+        ]
+    );
+}
+
 /// Spec sections 23 and 24: a class-like of a file's namespace wins over the default class-like of its exact short name,
 /// so the PHP# `App\RANDOM` leaves a bare `Random` in `App` naming `Sharp\Random`.
 #[test]
