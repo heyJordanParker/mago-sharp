@@ -29889,7 +29889,7 @@ fn form_names((path, code): (&str, &str)) -> Vec<String> {
 /// `false`, a named argument, and a spread, and whose methods from `starts` on branch on a parameter with a default.
 const CALLS: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Calls.sharp",
-    "namespace Sharp;\n\npublic class Calls\n{\n    public static float remainder(float value) => global.fmod(value, 1.5);\n\n    public static string broken(string text) => global.nl2br(text, true);\n\n    public static string plain(string text) => global.nl2br(text, false);\n\n    public static string named(string text) => global.nl2br(text, use_xhtml: false);\n\n    public static string formatted(string format, List<int> values) => global.sprintf(format, ...values);\n\n    public static bool starts(string text, string prefix, bool folded = false) => folded ? global.str_starts_with(global.strtolower(text), global.strtolower(prefix)) : global.str_starts_with(text, prefix);\n\n    public static bool folds(string text, bool folded = false) => folded ? global.ctype_lower(text) : global.ctype_lower(global.strtolower(text) + text);\n\n    public static bool trues(string text, bool folded = true) => folded ? global.ctype_lower(text) : global.ctype_upper(text);\n\n    public static bool negated(string text, bool folded = false) => !folded ? global.ctype_lower(text) : global.ctype_upper(text);\n\n    public static string limited(string text, string? suffix = null) => suffix == null ? global.strtoupper(text) : global.strtoupper(text + suffix);\n\n    public static string shouted(string text, bool quiet = false)\n    {\n        if (!quiet) {\n            return global.strtoupper(text);\n        }\n        return global.strtolower(text);\n    }\n\n    public static string sized(string text, int width = 3) => width > 2 ? global.strtoupper(text) : global.strtolower(text);\n}\n",
+    "namespace Sharp;\n\npublic class Calls\n{\n    public static float remainder(float value) => global.fmod(value, 1.5);\n\n    public static string broken(string text) => global.nl2br(text, true);\n\n    public static string plain(string text) => global.nl2br(text, false);\n\n    public static string named(string text) => global.nl2br(text, use_xhtml: false);\n\n    public static string formatted(string format, List<int> values) => global.sprintf(format, ...values);\n\n    public static bool starts(string text, string prefix, bool folded = false) => folded ? global.str_starts_with(global.strtolower(text), global.strtolower(prefix)) : global.str_starts_with(text, prefix);\n\n    public static bool folds(string text, bool folded = false) => folded ? global.ctype_lower(text) : global.ctype_lower(global.strtolower(text) + text);\n\n    public static bool trues(string text, bool folded = true) => folded ? global.ctype_lower(text) : global.ctype_upper(text);\n\n    public static bool negated(string text, bool folded = false) => !folded ? global.ctype_lower(text) : global.ctype_upper(text);\n\n    public static string limited(string text, string? suffix = null) => suffix == null ? global.strtoupper(text) : global.strtoupper(text + suffix);\n\n    public static string shouted(string text, bool quiet = false)\n    {\n        if (!quiet) {\n            return global.strtoupper(text);\n        }\n        return global.strtolower(text);\n    }\n\n    public static string sized(string text, int width = 3) => width > 2 ? global.strtoupper(text) : global.strtolower(text);\n\n    public static string wrapped(string text, bool loud = false) => (loud ? global.strtoupper(text) : global.strtolower(text));\n\n    public static string spoken(string text, bool quiet = false)\n    {\n        if (quiet) {\n            return global.strtolower(text);\n        } else if (!(quiet)) {\n            return global.strtoupper(text);\n        }\n        return global.strtolower(text);\n    }\n\n    public static string muted(string text, bool quiet = false)\n    {\n        if (quiet) {\n            return global.strtolower(text);\n        }\n        return global.strtoupper(text);\n    }\n\n    public static string reversed(string text, string? suffix = null) => null == suffix ? global.strtoupper(text) : global.strtoupper(text + suffix);\n\n    public static string capped(string text, int count = 3) => count == global.PHP_INT_MAX ? global.strtoupper(text) : global.strtolower(text);\n}\n",
 );
 
 /// A form whose body is one call of a plain PHP function gives that call, which the converter compares a PHP call
@@ -29897,10 +29897,12 @@ const CALLS: (&str, &str) = (
 /// form gives no call, and a spread no form at all. `InlineForms::iter` names each form's class and member.
 ///
 /// A call that leaves out parameters whose defaults are literals takes those defaults, so it has a form of its own
-/// that folds each `?:` and `if` they decide, through `!` and `==`: the `bool` defaults of `starts`, `trues`, `negated`
-/// and `shouted`, whose block leaves one `return`, and the `null` default of `limited`. A branch that reads a slot twice,
-/// as `folds` reads `text`, gives no form, and neither does `sized`, whose `>` no default decides, nor any call that
-/// passes every argument and reads a slot in both branches.
+/// that folds each `?:` and `if` they decide, through `!`, parentheses and `==` either way round: the `bool` defaults
+/// of `starts`, `trues`, `negated`, `wrapped`, `shouted`, whose block leaves one `return`, `spoken`, whose `else if`
+/// it folds in turn, and `muted`, whose `if` it skips, and the `null` default of `limited` and `reversed`. A
+/// branch that reads a slot twice, as `folds` reads `text`, gives no form, and neither does `sized`, whose `>` no
+/// default decides, nor `capped`, which compares its default with a constant, nor any call that passes every argument
+/// and reads a slot in both branches.
 #[test]
 fn an_inline_form_gives_the_plain_php_call_its_body_makes() {
     use mago_sharp_bridge::PhpCallArgument;
@@ -29928,6 +29930,7 @@ fn an_inline_form_gives_the_plain_php_call_its_body_makes() {
         [
             ("Sharp\\Calls".to_owned(), "broken".to_owned(), Some(vec![PhpCallArgument::Slot(0), literal("true")]), 1),
             ("Sharp\\Calls".to_owned(), "limited".to_owned(), Some(vec![PhpCallArgument::Slot(0)]), 1),
+            ("Sharp\\Calls".to_owned(), "muted".to_owned(), Some(vec![PhpCallArgument::Slot(0)]), 1),
             ("Sharp\\Calls".to_owned(), "named".to_owned(), None, 1),
             ("Sharp\\Calls".to_owned(), "negated".to_owned(), Some(vec![PhpCallArgument::Slot(0)]), 1),
             ("Sharp\\Calls".to_owned(), "plain".to_owned(), Some(vec![PhpCallArgument::Slot(0), literal("false")]), 1),
@@ -29937,7 +29940,9 @@ fn an_inline_form_gives_the_plain_php_call_its_body_makes() {
                 Some(vec![PhpCallArgument::Slot(0), literal("1.5")]),
                 1
             ),
+            ("Sharp\\Calls".to_owned(), "reversed".to_owned(), Some(vec![PhpCallArgument::Slot(0)]), 1),
             ("Sharp\\Calls".to_owned(), "shouted".to_owned(), Some(vec![PhpCallArgument::Slot(0)]), 1),
+            ("Sharp\\Calls".to_owned(), "spoken".to_owned(), Some(vec![PhpCallArgument::Slot(0)]), 1),
             (
                 "Sharp\\Calls".to_owned(),
                 "starts".to_owned(),
@@ -29945,6 +29950,7 @@ fn an_inline_form_gives_the_plain_php_call_its_body_makes() {
                 2
             ),
             ("Sharp\\Calls".to_owned(), "trues".to_owned(), Some(vec![PhpCallArgument::Slot(0)]), 1),
+            ("Sharp\\Calls".to_owned(), "wrapped".to_owned(), Some(vec![PhpCallArgument::Slot(0)]), 1),
         ]
     );
 }

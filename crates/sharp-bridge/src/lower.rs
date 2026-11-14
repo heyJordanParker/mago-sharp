@@ -4212,22 +4212,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The `SHARP_EXTERN` of an `extern` line's attributes, spec section 29, which the engine gives the plain PHP
     /// class, method or function the line declares when reflection reads its attributes: its attr is the declaration's
     /// `ZEND_ATTRIBUTE_TARGET_*`, and its children the declaration's full name, `Class::method` for a method, and the
-    /// attributes. A file runs nothing for it. None for a line without attributes.
+    /// attributes. A file runs nothing for it. None for a line without attributes, and for an `extern namespace` line,
+    /// which declares nothing.
     fn extern_attributes(&mut self, r#extern: &Extern) -> Option<u32> {
-        if r#extern.namespaced.is_some() {
-            return None;
-        }
         let codebase = self.types.codebase();
         let span = r#extern.span();
         let declared = codebase.externs.values().flatten().find(|declaration| declaration.span == span)?;
         let key = codebase.extern_declaration(declared)?;
         let class = codebase.get_class_like(key.0.as_bytes()).map(|class| class.original_name.as_bytes());
-        let member = codebase.function_likes.get(&key).map(|member| member.original_name.as_bytes());
-        let (target, name) = match (class, member) {
-            (Some(class), None) => (ZEND_ATTRIBUTE_TARGET_CLASS, class.to_vec()),
-            (None, Some(function)) => (ZEND_ATTRIBUTE_TARGET_FUNCTION, function.to_vec()),
-            (Some(class), Some(method)) => (ZEND_ATTRIBUTE_TARGET_METHOD, [class, b"::", method].concat()),
-            (None, None) => unreachable!("`extern_declaration` names a declaration the codebase holds"),
+        let (target, name) = match codebase.function_likes.get(&key) {
+            None => (ZEND_ATTRIBUTE_TARGET_CLASS, class?.to_vec()),
+            Some(member) => match class {
+                Some(class) => (ZEND_ATTRIBUTE_TARGET_METHOD, [class, b"::", member.original_name.as_bytes()].concat()),
+                None => (ZEND_ATTRIBUTE_TARGET_FUNCTION, member.original_name.as_bytes().to_vec()),
+            },
         };
         let attributes = self.attributes(&r#extern.attribute_lists, None, &[]);
         if attributes == NULL {

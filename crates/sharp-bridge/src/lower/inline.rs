@@ -225,7 +225,7 @@ pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> 
                     if method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_))) =>
                 {
                     Lowering::new(&lines, checked.names(), checked.types())
-                        .method_form(name, method, None, 0)
+                        .method_form(name, method, None, &[])
                         .map(|form| (key(name, method.name.value), form))
                 }
                 _ => None,
@@ -299,17 +299,18 @@ where
     'arena: 'lowering,
     F: Fn() -> Lowering<'lowering, 'arena>,
 {
-    let defaulted = method
+    let mut defaults: Vec<(&[u8], &Expression)> = method
         .parameter_list
         .parameters
         .iter()
         .rev()
-        .take_while(|parameter| literal_default(parameter).is_some())
-        .count();
+        .map_while(|parameter| Some((parameter.variable.name, literal_default(parameter)?)))
+        .collect();
+    defaults.reverse();
 
-    (0..=defaulted)
+    (0..=defaults.len())
         .filter_map(|omitted| {
-            let form = lowering().method_form(class, method, receiver, omitted)?;
+            let form = lowering().method_form(class, method, receiver, &defaults[defaults.len() - omitted..])?;
             let name = if omitted == 0 {
                 key(class, method.name.value)
             } else {
@@ -352,46 +353,36 @@ impl Lowering<'_, '_> {
     /// The body is one expression, or, for an `extern` method, the call of its native function. A `void` method's
     /// expression body is a call, whose value no caller reads. A constructor, which declares no return type, has none.
     ///
-    /// A call that leaves out the last `omitted` parameters takes their literal defaults, so the body is what remains
-    /// once every branch they decide is folded, and the form has no slot for them.
+    /// A call that leaves out the last parameters takes their literal defaults, `defaults` by name, so the body is what
+    /// remains once every branch they decide is folded, and the form has no slot for them.
     fn method_form(
         self,
         class: &[u8],
         method: &Method,
         receiver: Option<&FunctionLikeParameter>,
-        omitted: usize,
+        defaults: &[(&[u8], &Expression)],
     ) -> Option<InlineForm> {
         let parameters: Vec<&FunctionLikeParameter> =
             receiver.into_iter().chain(&method.parameter_list.parameters).collect();
-        let kept = parameters.len() - omitted;
-        let defaults: Vec<(&[u8], &Expression)> = parameters[kept..]
-            .iter()
-            .map(|parameter| {
-                let Some(default) = literal_default(parameter) else {
-                    unreachable!("method_forms leaves out only parameters whose default is a literal");
-                };
-
-                (parameter.variable.name, default)
-            })
-            .collect();
+        let kept = parameters.len() - defaults.len();
         let is_void = method.return_type_hint.as_ref().is_some_and(|hint| matches!(hint.hint, Hint::Void(_)));
         let body = match &method.body {
             MethodBody::Expression(body) if method.returns_value() || is_void => {
-                Body::Expression(self.folded(body.expression, &defaults))
+                Body::Expression(self.folded(body.expression, defaults))
             }
             MethodBody::Concrete(block) => {
                 // The body's first statement after the fold is the `return` that runs, and no statement after it does.
                 let mut statements = Vec::new();
-                self.folded_statements(block.statements.iter(), &defaults, &mut statements)?;
+                self.folded_statements(block.statements.iter(), defaults, &mut statements);
                 match statements.first() {
                     Some(Statement::Return(Return { value: Some(value), .. })) => {
-                        Body::Expression(self.folded(value, &defaults))
+                        Body::Expression(self.folded(value, defaults))
                     }
                     _ => return None,
                 }
             }
             MethodBody::Abstract(_)
-                if omitted == 0
+                if defaults.is_empty()
                     && method.returns_value()
                     && method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_))) =>
             {
@@ -429,14 +420,13 @@ impl Lowering<'_, '_> {
     }
 
     /// Appends `statements` to `folded`, each `if` whose condition `defaults` decide replaced by the statements of the
-    /// branch it takes. None when an `if` it decides has an `elseif`.
+    /// branch it takes. PHP# has no `elseif`: its `else if` is an `else` that holds an `if`, which this folds in turn.
     fn folded_statements<'body, 'ast>(
         &self,
         statements: impl IntoIterator<Item = &'body Statement<'ast>>,
         defaults: &[(&[u8], &Expression)],
         folded: &mut Vec<&'body Statement<'ast>>,
-    ) -> Option<()>
-    where
+    ) where
         'ast: 'body,
     {
         for statement in statements {
@@ -448,19 +438,14 @@ impl Lowering<'_, '_> {
                 folded.push(statement);
                 continue;
             };
-            if !body.else_if_clauses.is_empty() {
-                return None;
-            }
             let branch =
                 if taken { Some(body.statement) } else { body.else_clause.as_ref().map(|clause| clause.statement) };
             match branch {
-                Some(Statement::Block(block)) => self.folded_statements(block.statements.iter(), defaults, folded)?,
-                Some(branch) => self.folded_statements([branch], defaults, folded)?,
+                Some(Statement::Block(block)) => self.folded_statements(block.statements.iter(), defaults, folded),
+                Some(branch) => self.folded_statements([branch], defaults, folded),
                 None => {}
             }
         }
-
-        Some(())
     }
 
     /// Whether `condition` holds when each parameter `defaults` names holds its default: a `bool` parameter itself,
@@ -487,15 +472,13 @@ impl Lowering<'_, '_> {
 
                 Some((PhpCallArgument::literal(default) == PhpCallArgument::literal(literal)) == equal)
             }
-            value => match self.default_of(value, defaults)? {
-                Expression::Literal(Literal::True(_)) => Some(true),
-                Expression::Literal(Literal::False(_)) => Some(false),
-                _ => None,
-            },
+            // A condition is a `bool`, whose literal default is `true` or `false`.
+            value => Some(matches!(self.default_of(value, defaults)?, Expression::Literal(Literal::True(_)))),
         }
     }
 
-    /// The default of the parameter `expression` reads, when `defaults` names it.
+    /// The default of the parameter `expression` reads, when `defaults` names it. A name in a method is its parameter
+    /// whenever one is named so, since no block inside redeclares a name, spec section 3.
     fn default_of<'default, 'ast>(
         &self,
         expression: &Expression,
@@ -504,9 +487,6 @@ impl Lowering<'_, '_> {
         let Expression::ConstantAccess(name) = expression else {
             return None;
         };
-        if !matches!(self.names.binding(&name.name), Some(Binding::Local(_))) {
-            return None;
-        }
 
         defaults.iter().find(|(parameter, _)| *parameter == name.name.value()).map(|(_, default)| *default)
     }

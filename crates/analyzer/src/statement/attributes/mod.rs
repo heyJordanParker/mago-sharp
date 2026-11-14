@@ -123,50 +123,49 @@ where
     }
     let codebase: &'ctx CodebaseMetadata = context.codebase;
     let span = r#extern.span();
-    let Some(line) = codebase.externs.values().flatten().find(|declaration| declaration.span == span) else {
-        unreachable!("the scan records each `extern` line of the analyzed file")
-    };
     let attribute_lists = r#extern.attribute_lists.as_slice();
-    let (class, member) = line.target;
-    match codebase.extern_declaration(line) {
-        Some((class, member)) if member.is_empty() => {
-            let Some(class_like_metadata) = codebase.get_class_like(class.as_bytes()) else {
-                unreachable!("`extern_declaration` names a class the codebase holds")
-            };
-
-            analyze_class_like_attributes(context, artifacts, attribute_lists, class_like_metadata)
-        }
-        Some((class, _)) => {
-            let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class, member)));
-            scope.set_class_like(codebase.get_class_like(class.as_bytes()));
-            let mut block_context = BlockContext::new(scope, context.settings.register_super_globals);
-            let target = if class.is_empty() { AttributeTarget::Function } else { AttributeTarget::Method };
-
-            analyze_attributes(context, &mut block_context, artifacts, attribute_lists, target)
-        }
-        None => {
-            if !member.is_empty()
-                && let Some(declaring_class) = codebase.get_declaring_method_class(class.as_bytes(), member.as_bytes())
-            {
-                let declaring_class = display_class_like_name(context, declaring_class);
-                context.collector.report_with_code(
-                    IssueCode::InvalidAttributeTarget,
-                    Issue::error(format!(
-                        "`{}` is a method of `{declaring_class}`, so an `extern` line of `{declaring_class}`'s method gives it attributes.",
-                        BytesDisplay(r#extern.target.value()),
-                    ))
-                    .with_help(format!(
-                        "Write the attributes on `extern {declaring_class}.{};`.",
-                        BytesDisplay(r#extern.target.last_segment())
-                    ))
-                    .with_annotation(Annotation::primary(first.span()).with_message("Written here."))
-                    .with_annotation(Annotation::secondary(r#extern.target.span()).with_message("Declared here.")),
-                );
+    // The scan records each `extern` line of the analyzed file once.
+    for line in codebase.externs.values().flatten().filter(|declaration| declaration.span == span) {
+        let (class, member) = line.target;
+        match codebase.extern_declaration(line) {
+            Some((class, declared)) if declared.is_empty() => {
+                codebase.get_class_like(class.as_bytes()).map_or(Ok(()), |class_like_metadata| {
+                    analyze_class_like_attributes(context, artifacts, attribute_lists, class_like_metadata)
+                })?;
             }
+            Some((class, _)) => {
+                let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class, member)));
+                scope.set_class_like(codebase.get_class_like(class.as_bytes()));
+                let mut block_context = BlockContext::new(scope, context.settings.register_super_globals);
+                let target = if class.is_empty() { AttributeTarget::Function } else { AttributeTarget::Method };
 
-            Ok(())
+                analyze_attributes(context, &mut block_context, artifacts, attribute_lists, target)?;
+            }
+            None => {
+                if !member.is_empty()
+                    && let Some(declaring_class) =
+                        codebase.get_declaring_method_class(class.as_bytes(), member.as_bytes())
+                {
+                    let declaring_class = display_class_like_name(context, declaring_class);
+                    context.collector.report_with_code(
+                        IssueCode::InvalidAttributeTarget,
+                        Issue::error(format!(
+                            "`{}` is a method of `{declaring_class}`, so an `extern` line of `{declaring_class}`'s method gives it attributes.",
+                            BytesDisplay(r#extern.target.value()),
+                        ))
+                        .with_help(format!(
+                            "Write the attributes on `extern {declaring_class}.{};`.",
+                            BytesDisplay(r#extern.target.last_segment())
+                        ))
+                        .with_annotation(Annotation::primary(first.span()).with_message("Written here."))
+                        .with_annotation(Annotation::secondary(r#extern.target.span()).with_message("Declared here.")),
+                    );
+                }
+            }
         }
     }
+
+    Ok(())
 }
 
 /// Analyzes attributes, whose arguments are constant expressions.
