@@ -44,6 +44,7 @@ use mago_analyzer::settings::Settings;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::r#extern::extern_namespace_classes;
+use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
 use mago_codex::ttype::TType;
@@ -205,6 +206,19 @@ fn analyze_with_references(
     others: &[(&'static str, &'static str)],
     library: &[(&'static str, &'static str)],
 ) -> (Vec<Issue>, AnalysisArtifacts, SymbolReferences) {
+    analyze_refined(registry, settings, analyzed, others, library, |_| {})
+}
+
+/// [`analyze_with_references`], with `refine` run on the scanned codebase before population, where an external
+/// analyzer's metadata reaches it, as the PHP SDK's metadata codec sets a flag no source sets, such as `UNCHECKED`.
+fn analyze_refined(
+    registry: &PluginRegistry,
+    settings: Settings,
+    analyzed: (&'static str, &'static str),
+    others: &[(&'static str, &'static str)],
+    library: &[(&'static str, &'static str)],
+    refine: impl FnOnce(&mut CodebaseMetadata),
+) -> (Vec<Issue>, AnalysisArtifacts, SymbolReferences) {
     let Prelude { mut database, mut metadata, mut symbol_references } = PRELUDE.clone();
 
     let file_ids: Vec<_> = std::iter::once(&analyzed)
@@ -264,6 +278,7 @@ fn analyze_with_references(
         programs.push((file, program, names));
     }
 
+    refine(&mut metadata);
     populate_on_prelude(&mut metadata, &mut symbol_references);
 
     let (file, program, names) = &programs[0];
@@ -20221,6 +20236,34 @@ fn the_analysis_records_whether_a_method_body_runs_past_its_last_statement() {
         ]
         .map(|(method, reaches)| (method.to_string(), reaches))
     );
+}
+
+/// The analysis never runs an unchecked method's body, as an external analyzer marks one through the PHP SDK, so it
+/// knows nothing about where the body ends and records no entry for it, where a checked method beside it records one.
+#[test]
+fn an_unchecked_method_records_nothing_about_its_end() {
+    let shapes = "<?php\n\nnamespace App;\n\nfinal class Shapes\n{\n    public function checked() { $x = 1; }\n\n    public function skipped() { return 1; }\n}\n";
+    let (_, artifacts, _) = analyze_refined(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/App/Shapes.php", shapes),
+        &[],
+        &EFFECT_CLASSES,
+        |codebase| {
+            for ((_, method), metadata) in &mut codebase.function_likes {
+                if method.as_bytes() == b"skipped" {
+                    metadata.flags |= MetadataFlags::UNCHECKED;
+                }
+            }
+        },
+    );
+    let reaches_end: Vec<(String, bool)> = artifacts
+        .method_reaches_end_of_body
+        .iter()
+        .map(|((_, method), reaches)| (method.to_string(), *reaches))
+        .collect();
+
+    assert_eq!(reaches_end, [("checked".to_string(), true)]);
 }
 
 /// The PHP# side of the interop matrix: a class, an abstract class, an interface with default bodies and an enum, each
