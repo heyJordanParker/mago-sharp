@@ -30,4 +30,10 @@ final class Prices
 
         return [...$all, $count];
     }
+
+    // Each argument past the first lands in the `...` parameter too.
+    public function pair(): int
+    {
+        return $this->sum(1, 2);
+    }
 }

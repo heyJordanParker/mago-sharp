@@ -20,4 +20,10 @@ public final class Prices
 
         return [...all, count];
     }
+
+    // Each argument past the first lands in the `...` parameter too.
+    public int pair()
+    {
+        return this.sum(1, 2);
+    }
 }
