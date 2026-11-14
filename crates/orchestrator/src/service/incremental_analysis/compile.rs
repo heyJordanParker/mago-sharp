@@ -22,7 +22,6 @@ use mago_codex::metadata::module::top_dispatcher_namespaces;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferences;
-use mago_codex::signature::DefSignatureNode;
 use mago_codex::symbol::SymbolIdentifier;
 use mago_codex::ttype::TType;
 use mago_database::DatabaseReader;
@@ -975,22 +974,16 @@ impl<'service> Dependencies<'service> {
 
         // A library's polyfill of a name the engine builds in never declares it, since the built-in keeps the name, so
         // its file is no input of the code that reads the name.
-        let codebase = &service.codebase;
-        let built_in = |node: &DefSignatureNode| {
-            let name = node.name.as_bytes();
-            if node.is_function {
-                codebase.get_function(name).is_some_and(|function| function.flags.is_built_in())
-            } else {
-                codebase.get_class_like(name).is_some_and(|class_like| class_like.flags.is_built_in())
-                    || codebase.get_constant(name).is_some_and(|constant| constant.flags.is_built_in())
-            }
-        };
         for (file_id, signature) in &service.codebase.file_signatures {
             if !service.database.get(file_id).is_ok_and(|file| is_source(&file)) {
                 continue;
             }
 
-            for node in signature.ast_nodes.iter().filter(|node| !node.name.is_empty() && !built_in(node)) {
+            for node in signature
+                .ast_nodes
+                .iter()
+                .filter(|node| !node.name.is_empty() && !super::is_kept_built_in(&service.codebase, node))
+            {
                 dependencies.declared_in.entry((node.name, empty_word())).or_default().push(*file_id);
                 for child in node.children.iter().filter(|child| !child.name.is_empty()) {
                     let member = (node.name, super::member_key(&service.codebase, node.name, child));
@@ -1671,6 +1664,49 @@ mod tests {
                 "lib/helpers.php"
             ]
         );
+    }
+
+    /// A library's polyfill of a function the engine builds in never stands for the function, since the codebase keeps
+    /// the built-in, so an edit of the polyfill changes no caller's result: its body, its return type changed, or its
+    /// return type dropped, which takes the polyfill's return from its body. `mago analyze --watch` analyzes the
+    /// polyfill's file alone after each, and reports what a full analysis reports.
+    #[test]
+    fn an_edit_of_a_polyfill_of_a_built_in_function_analyzes_the_polyfill_alone() {
+        let polyfill = |returned: &str, body: &str| {
+            format!(
+                "<?php\n\nif (!function_exists('str_starts_with')) {{\n    function str_starts_with(string $haystack, string $needle){returned}\n    {{\n        return {body};\n    }}\n}}\n"
+            )
+        };
+        let caller =
+            |name: &str| format!("<?php\n\nfunction {name}(): bool\n{{\n    return str_starts_with('ab', 'a');\n}}\n");
+        let files = |returned: &str, body: &str| {
+            project(&[
+                ("lib/polyfills.php", polyfill(returned, body).as_str()),
+                ("app/first.php", caller("first").as_str()),
+                ("app/second.php", caller("second").as_str()),
+            ])
+        };
+        let messages = |service: &IncrementalAnalysisService| {
+            let mut messages: Vec<String> =
+                service.collect_all_issues().iter().map(|issue| issue.message.clone()).collect();
+            messages.sort();
+
+            messages
+        };
+
+        let mut warm = analyzed(&files(": bool", "true"));
+        for (returned, body) in [(": bool", "false"), (": int", "1"), ("", "false")] {
+            let edited = files(returned, body);
+            warm.update_database(edited.read_only());
+            warm.analyze_incremental(None).expect("the warm path runs");
+
+            assert_eq!(
+                warm.analyzed_files,
+                HashSet::from_iter([FileId::new(b"lib/polyfills.php")]),
+                "the polyfill `{returned}` returning `{body}`"
+            );
+            assert_eq!(messages(&warm), messages(&analyzed(&edited)));
+        }
     }
 
     /// Spec section 22: a class's `use` names its header's traits and the `Defaults` trait of each interface with a

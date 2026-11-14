@@ -953,9 +953,11 @@ impl IncrementalAnalysisService {
             let mut old_sigs = CodebaseMetadata::new();
             let mut new_sigs = CodebaseMetadata::new();
             // Both sides name each member by the key the last analysis's references hold it under, so a change meets
-            // every reference to what changed.
+            // every reference to what changed. A polyfill of a built-in declares nothing, so a change of it changes no
+            // symbol, and the callers of the built-in stay as they are.
             let keyed = |signature: &FileSignature| {
                 let mut signature = signature.clone();
+                signature.ast_nodes.retain(|node| !is_kept_built_in(&self.codebase, node));
                 for node in &mut signature.ast_nodes {
                     for member in &mut node.children {
                         member.name = member_key(&self.codebase, node.name, member);
@@ -2346,6 +2348,19 @@ fn code_reads(file_states: &HashMap<FileId, FileState>, before_analysis: &Extens
 /// its name. A signature names a method as declared, so the key of each change and each reference meets.
 fn member_key(codebase: &CodebaseMetadata, class: Word, member: &DefSignatureNode) -> Word {
     if member.is_function { codebase.method_key(class, member.name.as_bytes()) } else { member.name }
+}
+
+/// Whether `codebase` keeps a built-in under the name of `node`, a top-level signature node, so the node is a library's
+/// polyfill of a name the engine builds in, as `if (!function_exists('str_starts_with'))` declares. The built-in keeps
+/// the name (`should_replace_metadata`), so the node declares nothing any code reads.
+fn is_kept_built_in(codebase: &CodebaseMetadata, node: &DefSignatureNode) -> bool {
+    let name = node.name.as_bytes();
+    if node.is_function {
+        codebase.get_function(name).is_some_and(|function| function.flags.is_built_in())
+    } else {
+        codebase.get_class_like(name).is_some_and(|class_like| class_like.flags.is_built_in())
+            || codebase.get_constant(name).is_some_and(|constant| constant.flags.is_built_in())
+    }
 }
 
 /// Keeps the keys whose entry in the merged codebase `file_id` declared.
