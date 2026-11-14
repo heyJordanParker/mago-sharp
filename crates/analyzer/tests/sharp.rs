@@ -15109,6 +15109,43 @@ fn a_polyfill_of_a_built_in_is_no_duplicate_definition() {
     assert_eq!(issues(polyfills, &[]), Vec::<String>::new());
 }
 
+/// An `@assert iterable<K, V>` narrows a plain PHP array to the keys and values both types hold, as an
+/// `array<array-key, int|string>` asserted `iterable<string, int>` is an `array<string, int>`.
+#[test]
+fn an_iterable_assertion_narrows_an_array_to_both_key_and_value_types() {
+    let php = "<?php\n\n/**\n * @assert iterable<string, int> $value\n */\nfunction assert_counts(mixed $value): void\n{\n}\n\n/**\n * @param array<string, int> $counts\n */\nfunction total(array $counts): int\n{\n    return array_sum($counts);\n}\n\n/**\n * @param array<array-key, int|string> $values\n */\nfunction counts(array $values): int\n{\n    assert_counts($values);\n\n    return total($values);\n}\n";
+
+    assert_eq!(issues(("src/counts.php", php), &[]), Vec::<String>::new());
+}
+
+/// A `Set` tested `is Iterable<T>` is a `Set` of the elements both types hold, spec section 21, as a `Set<int|string>`
+/// tested `is Iterable<int>` is a `Set<int>`, so only the branch the test leaves it untested in refuses it as one.
+#[test]
+fn a_set_tested_as_an_iterable_is_a_set_of_the_elements_both_hold() {
+    let sharp = "namespace Demo;\n\npublic static class Tags\n{\n    public static Set<int> numbers(Set<int|string> tags)\n    {\n        if (tags is Iterable<int>) {\n            return tags;\n        }\n\n        return tags;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["11:16 invalid-return-statement"]);
+}
+
+/// A call on an intersection of a plain PHP class with a template or an `iterable` finds the class's method, and a
+/// method none of its parts declares is missing, named on the class: the parts that are no class name none.
+#[test]
+fn a_call_on_an_intersection_with_a_template_or_an_iterable_reads_its_class() {
+    let php = "<?php\n\n/**\n * @template T of object\n *\n * @param Countable&T $counted\n */\nfunction counted(Countable $counted): int\n{\n    return $counted->count();\n}\n\n/**\n * @param Countable&iterable<int, string> $lines\n */\nfunction lines(Countable $lines): int\n{\n    $lines->size();\n\n    return $lines->count();\n}\n";
+
+    assert_eq!(issues(("src/counted.php", php), &[]), ["18:13 non-existent-method"]);
+}
+
+/// A plain PHP interface that reaches a generic interface through two type arguments that share no value, as
+/// `Box<int>` and `Box<string>`, inherits a `get()` that returns their intersection, `never`, so no class could
+/// implement it, and the interface is refused.
+#[test]
+fn a_diamond_of_two_disjoint_type_arguments_is_refused() {
+    let php = "<?php\n\n/**\n * @template T\n */\ninterface Box\n{\n    /**\n     * @return T\n     */\n    public function get(): mixed;\n}\n\n/**\n * @extends Box<int>\n */\ninterface IntBox extends Box\n{\n}\n\n/**\n * @extends Box<string>\n */\ninterface StringBox extends Box\n{\n}\n\ninterface IntAndStringBox extends IntBox, StringBox\n{\n}\n";
+
+    assert_eq!(issues(("src/Box.php", php), &[]), ["28:11 invalid-template-parameter"]);
+}
+
 /// Spec section 12 passes plain PHP a `Map` keyed by a backed enum as the array keyed by each case's backing value, a
 /// `Set` as the list of its elements, and each `Map` a `List` holds as its array. So `array_keys` and `array_map` of a
 /// `Map<Status, int>`, the same calls on a `Set<Status>`, a generic function of the project whose `iterable<T, int>`
