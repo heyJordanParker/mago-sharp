@@ -484,6 +484,10 @@ where
             artifacts.method_calls_parent_constructor.insert(method_key, true);
         }
 
+        if !method_metadata.flags.is_unchecked() {
+            artifacts.method_reaches_end_of_body.insert(method_key, !method_block_context.flags.has_returned());
+        }
+
         if let Some(parent_initializer_name) = method_block_context.calls_parent_initializer {
             artifacts.method_calls_parent_initializer.insert(method_key, parent_initializer_name);
         }

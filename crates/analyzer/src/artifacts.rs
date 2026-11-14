@@ -116,6 +116,11 @@ pub struct AnalysisArtifacts {
     pub method_initialized_properties: HashMap<(Word, Word), WordSet>,
     pub method_calls_this_methods: HashMap<(Word, Word), HashSet<Word>>,
     pub method_calls_parent_constructor: HashMap<(Word, Word), bool>,
+    /// Whether each method body the analysis ran can run past its last statement, where PHP returns `null`, keyed by
+    /// class and method: false when every path returns, throws or never ends, as the check for a missing return
+    /// decides. A plain PHP method with no return type has an entry too, and an unchecked method, or one a warm run
+    /// skipped, has none.
+    pub method_reaches_end_of_body: HashMap<(Word, Word), bool>,
     pub method_calls_parent_initializer: HashMap<(Word, Word), Word>,
     pub closure_bind_scope: Option<ClosureBindScope>,
     pub resolved_method_calls: Vec<ResolvedMethodCall>,
@@ -212,6 +217,7 @@ impl AnalysisArtifacts {
             method_initialized_properties: HashMap::default(),
             method_calls_this_methods: HashMap::default(),
             method_calls_parent_constructor: HashMap::default(),
+            method_reaches_end_of_body: HashMap::default(),
             method_calls_parent_initializer: HashMap::default(),
             closure_bind_scope: None,
             resolved_method_calls: Vec::new(),

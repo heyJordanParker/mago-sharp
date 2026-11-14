@@ -20193,6 +20193,36 @@ fn a_value_of_another_type_narrowed_to_a_type_parameter_is_of_the_type_parameter
     assert_eq!(explained(("src/Demo/Sweep.sharp", sweep), &[]), Vec::<String>::new());
 }
 
+/// The analysis records whether each method body runs past its last statement, where PHP returns `null`, as its check
+/// for a missing return decides, for a plain PHP method with no return type too: a `while`, a `switch` and a `try`
+/// whose every path returns end only by returning, and one with a path that leaves without a return runs past its end.
+#[test]
+fn the_analysis_records_whether_a_method_body_runs_past_its_last_statement() {
+    let shapes = "<?php\n\nnamespace App;\n\nfinal class Shapes\n{\n    public function loops_forever() { while (true) { return 1; } }\n\n    public function loops_while($n) { while ($n > 0) { return 1; } }\n\n    public function switches_fully($n) { switch ($n) { case 1: return 1; default: return 2; } }\n\n    public function switches_partly($n) { switch ($n) { case 1: return 1; } }\n\n    public function tries_fully() { try { return 1; } catch (\\Exception $e) { return 2; } }\n\n    public function tries_partly() { try { return 1; } catch (\\Exception $e) { } }\n\n    public function throws() { throw new \\Exception(); }\n\n    public function assigns() { $x = 1; }\n}\n";
+    let (_, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), ("src/App/Shapes.php", shapes), &[]);
+    let mut reaches_end: Vec<(String, bool)> = artifacts
+        .method_reaches_end_of_body
+        .iter()
+        .map(|((_, method), reaches)| (method.to_string(), *reaches))
+        .collect();
+    reaches_end.sort();
+
+    assert_eq!(
+        reaches_end,
+        [
+            ("assigns", true),
+            ("loops_forever", false),
+            ("loops_while", true),
+            ("switches_fully", false),
+            ("switches_partly", true),
+            ("throws", false),
+            ("tries_fully", false),
+            ("tries_partly", true),
+        ]
+        .map(|(method, reaches)| (method.to_string(), reaches))
+    );
+}
+
 /// The PHP# side of the interop matrix: a class, an abstract class, an interface with default bodies and an enum, each
 /// with `count`, `recordEntry` and the twins `total` and `Total`, as Zend/tests/sharp/InteropMatrix declares them.
 const INTEROP: [(&str, &str); 4] = [
