@@ -1,0 +1,35 @@
+namespace App;
+
+// A `switch` with a `case` on a value that is no constant, which no pattern takes, is a chain of PHP's loose `==`
+// tests. Cases with no statements of their own join the next with `||`, and `default` runs where no case holds: last,
+// it is the `else`, and before other cases, the branch where none of them holds (spec sections 19 and 21).
+public final class Limits
+{
+    public string label(int code, int limit)
+    {
+        let label = 'none';
+        if (code == limit) {
+            return 'at the limit';
+        } else if (code == 0 || code == (limit + 1)) {
+            label = 'edge';
+            if (limit > 9) {
+                label = 'past the limit';
+            }
+        } else {
+            label = 'other';
+        }
+
+        return label;
+    }
+
+    public string level(int code, int low, int high)
+    {
+        if (!(code == low || code == high)) {
+            return 'middle';
+        } else if (code == low) {
+            return 'low';
+        } else {
+            return 'high';
+        }
+    }
+}

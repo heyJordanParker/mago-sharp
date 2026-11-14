@@ -165,6 +165,8 @@ struct Class<'input> {
     required: bool,
     /// The code outside the class that sets each of its properties, by the property's name with `$`.
     writers: HashMap<Word, BTreeSet<String>>,
+    /// The name of each static field the `static` locals of its methods became so far, which no later one takes.
+    static_fields: Vec<String>,
 }
 
 /// The method or the property accessor whose body is converted.
@@ -194,6 +196,9 @@ struct Method {
     captures: Option<Captures>,
     /// The analysis's type of each value the body returns, `None` for a `return` with no value or of no known type.
     returned: Vec<Option<TUnion>>,
+    /// The declaration of each private static field the body's `static` locals become, as `private static int count =
+    /// 0;`, which goes before the member whose body this is (spec section 6).
+    static_fields: Vec<String>,
 }
 
 struct Converter<'input, 'arena> {

@@ -1,12 +1,15 @@
 //! Calls and `new`: method and static calls with their arguments, bare function calls, type tests as `is`, and `new`
 //! with its type arguments (spec sections 7, 8, 11 and 21).
 
+use std::borrow::Cow;
+
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
@@ -27,8 +30,11 @@ use mago_syntax::cst::PartialApplication;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::StaticMethodCall;
 use mago_syntax::walker::MutWalker;
+use mago_word::Word;
 
 use super::Kind;
+use super::access::HELD_CLASS;
+use super::is_primary;
 use super::natively_checked;
 use crate::Converter;
 use crate::library::type_test;
@@ -180,8 +186,12 @@ impl<'input> Converter<'input, '_> {
                 continue;
             };
             // The parameter's type decides a literal's form, as `[:]` for a `Map` and `this.name` for a function, and
-            // a lambda is held to the parameters its function type passes, whatever its type parameters.
-            let is_lambda = matches!(value, Expression::Closure(_) | Expression::ArrowFunction(_));
+            // a lambda, a built-in's value among them, is held to the parameters its function type passes, whatever
+            // its type parameters.
+            let is_lambda = matches!(
+                value,
+                Expression::Closure(_) | Expression::ArrowFunction(_) | Expression::PartialApplication(_)
+            );
             let expected = (is_lambda || !declared.has_template_types()).then_some(declared);
             self.expression(value, expected);
             self.narrowed(value, declared);
@@ -210,7 +220,8 @@ impl<'input> Converter<'input, '_> {
         }
     }
 
-    pub(super) fn call(&mut self, call: &Call<'_>) {
+    /// `call`, the call `expression` makes, whose result the code reads where `used` says so.
+    pub(super) fn call(&mut self, expression: &Expression<'_>, call: &Call<'_>, used: bool) {
         match call {
             Call::Method(call) => {
                 self.member_of(call.object, "a method call");
@@ -234,10 +245,12 @@ impl<'input> Converter<'input, '_> {
                 if self.forwards_called_class(call.span(), call.class, &call.method) {
                     return;
                 }
-                self.expression(call.class, None);
-                self.edits.replace(call.double_colon, ".");
                 self.member(&call.method);
                 let method = self.static_method_of(call);
+                if !self.static_class(call.class) {
+                    return self.reflected_call(expression, call, method, used);
+                }
+                self.edits.replace(call.double_colon, ".");
                 self.arguments(&call.argument_list, method);
                 self.plain_call(call.span(), method);
             }
@@ -319,18 +332,129 @@ impl<'input> Converter<'input, '_> {
         })
     }
 
-    /// The method a static call runs, of the class it names, or of the class being converted for `self`, `static` and
-    /// `parent`, which the analysis types as the class.
+    /// The method a static call runs: of the class it names, of the class being converted for `self` and `static`, of
+    /// its parent for `parent`, and of the class a class value or an object holds, as the analysis types it.
     pub(super) fn static_method_of(&self, call: &StaticMethodCall<'_>) -> Option<&'input FunctionLikeMetadata> {
         let ClassLikeMemberSelector::Identifier(name) = &call.method else {
             return None;
         };
+        let codebase = self.input.codebase;
         let class = match call.class {
-            Expression::Identifier(identifier) => self.input.names.get(identifier),
-            _ => self.class.as_ref()?.metadata.name.as_bytes(),
+            Expression::Identifier(identifier) => {
+                return codebase.get_declaring_method(self.input.names.get(identifier), name.value);
+            }
+            Expression::Self_(_) | Expression::Static(_) => self.class.as_ref()?.metadata.name,
+            Expression::Parent(_) => self.class.as_ref()?.metadata.direct_parent_class?,
+            class => self.held_class(class)?,
         };
 
-        self.input.codebase.get_declaring_method(class, name.value)
+        codebase.get_declaring_method(class.as_bytes(), name.value)
+    }
+
+    /// The class `class` holds at run time, as the analysis types it: the class of `class-string<Order>`, the bound of
+    /// `class-string<T>`, or the class of an `Order` object.
+    fn held_class(&self, class: &Expression<'_>) -> Option<Word> {
+        let [atomic] = self.type_of(class)?.types.as_ref() else {
+            return None;
+        };
+        let held = match atomic {
+            TAtomic::Scalar(TScalar::ClassLikeString(held)) => Cow::Owned(held.get_object_type(self.input.codebase)),
+            atomic => Cow::Borrowed(atomic),
+        };
+        let class = match held.as_ref() {
+            TAtomic::GenericParameter(parameter) => match parameter.constraint.types.as_ref() {
+                [bound] => bound,
+                _ => return None,
+            },
+            held => held,
+        };
+
+        match class {
+            TAtomic::Object(TObject::Named(named)) => Some(named.name),
+            TAtomic::Object(TObject::Enum(enumeration)) => Some(enumeration.name),
+            _ => None,
+        }
+    }
+
+    /// `$class::find(7)` of a class value held at run time as the call through reflection PHP# makes it with,
+    /// `class.methods().first(method => method.name == "find").invoke(null, [7])`, which runs the `find` of the class the
+    /// value holds as PHP's call does, the class's own before one it inherits (spec section 25). `invoke` gives `Any?`,
+    /// which [`Converter::checked`] takes into the type the analysis gives the call where the code reads it, as `used`
+    /// says. It keeps the file plain PHP for a value that may hold something other than a class value, as an object or
+    /// null, where the analysis knows no `method` the call runs, which would type its arguments and its result, and for
+    /// a named argument, since `invoke` takes a `List` of them.
+    fn reflected_call(
+        &mut self,
+        expression: &Expression<'_>,
+        call: &StaticMethodCall<'_>,
+        method: Option<&FunctionLikeMetadata>,
+        used: bool,
+    ) {
+        let ClassLikeMemberSelector::Identifier(name) = &call.method else {
+            return;
+        };
+        let shown = format!(
+            "{}::{}(…)",
+            String::from_utf8_lossy(self.text(call.class.span())),
+            String::from_utf8_lossy(name.value)
+        );
+        let held = self.shown(call.class);
+        if !self.is(call.class, &[Kind::Class]) {
+            return self.refuse(
+                call.span(),
+                format!("`{shown}` calls a static method through `{held}`, which holds no class value, and has no PHP# form: {HELD_CLASS}, which reads a class value"),
+            );
+        }
+        let Some(method) = method else {
+            return self.refuse(
+                call.span(),
+                format!("`{shown}` is a static call through a class held at run time, which PHP# makes through reflection, and the analysis finds no method `{}` of `{held}` to type it by (spec section 25)", String::from_utf8_lossy(name.value)),
+            );
+        };
+        if let Some(named) = call.argument_list.arguments.iter().find(|argument| matches!(argument, Argument::Named(_)))
+        {
+            return self.refuse(
+                named.span(),
+                format!("a named argument of `{shown}` has no PHP# form: it is a static call through a class held at run time, which PHP# makes through reflection, whose `invoke` takes its arguments as a `List` (spec section 25)"),
+            );
+        }
+        self.expression(call.class, None);
+        self.arguments(&call.argument_list, Some(method));
+        self.plain_call(call.span(), Some(method));
+        let class = self.render(call.class);
+        let class = if is_primary(call.class) { class } else { format!("({class})") };
+        let arguments: Vec<String> = call
+            .argument_list
+            .arguments
+            .iter()
+            .map(|argument| {
+                let span = argument.span();
+                self.edits.render(self.source, span.start.offset, span.end.offset)
+            })
+            .collect();
+        let found = self.unused_name("method", &[]);
+        let declared = method.original_name.as_str_lossy();
+        self.edits.replace(
+            call.span(),
+            format!(
+                "{class}.methods().first({found} => {found}.name == \"{declared}\").invoke(null, [{}])",
+                arguments.join(", ")
+            ),
+        );
+
+        let Some(result) = self.type_of(expression).filter(|_| used) else {
+            return;
+        };
+        if result.has_mixed() || result.is_void() || result.is_null() || result.is_never() {
+            return;
+        }
+        let natively = natively_checked(method.return_type_declaration_metadata.as_ref(), result, self.input.codebase);
+        if !self.checked(expression, &get_mixed(), result, "Return value", natively) {
+            self.refuse(
+                call.span(),
+                format!("`{shown}` is a static call through a class held at run time, which PHP# makes through reflection, whose `invoke` gives `Any?`, and no PHP# test gives it the `{}` the call returns (spec section 21)", result.get_id()),
+            );
+        }
     }
 
     /// Refuses `self::m()`, or its method value `self::m(...)`, at `span` in a class a subclass can extend, where `m` may

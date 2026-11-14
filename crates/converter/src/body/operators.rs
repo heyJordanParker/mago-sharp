@@ -427,7 +427,7 @@ impl Converter<'_, '_> {
                     self.edits.replace(*span, if equal { "==" } else { "!=" });
                     None
                 } else {
-                    Some(self.operands(&operator, lhs, rhs, "compares PHP's loose way, which PHP#'s `==` gives only between numbers, `bool`s, enums, or strings one of which PHP never reads as a number (spec section 19)"))
+                    Some(self.operands(&operator, lhs, rhs, LOOSE))
                 }
             }
             // PHP's `and`, `or` and `xor` bind looser than `=`, so each side keeps its own parentheses.
@@ -558,8 +558,8 @@ impl Converter<'_, '_> {
 
     /// Whether PHP's loose `==` between `lhs` and `rhs` gives what PHP#'s `==` gives: between two numbers, two `bool`s
     /// or two enums, none of them null, and between two strings when one is a literal PHP never reads as a number,
-    /// since PHP compares two numeric strings as numbers (spec section 19).
-    fn loose(&self, lhs: &Expression<'_>, rhs: &Expression<'_>) -> bool {
+    /// since PHP compares two numeric strings as numbers (spec section 19). [`LOOSE`] says why it doesn't.
+    pub(super) fn loose(&self, lhs: &Expression<'_>, rhs: &Expression<'_>) -> bool {
         let (Some(left), Some(right)) = (self.type_of(lhs), self.type_of(rhs)) else {
             return false;
         };
@@ -586,6 +586,9 @@ impl Converter<'_, '_> {
         format!("`{operator}` between `{}` and `{}` {reason}", self.shown(lhs), self.shown(rhs))
     }
 }
+
+/// Why PHP's loose `==` between two values has no PHP# form, after [`Converter::operands`] names their types.
+pub(super) const LOOSE: &str = "compares PHP's loose way, which PHP#'s `==` gives only between numbers, `bool`s, enums, or strings one of which PHP never reads as a number (spec section 19)";
 
 /// Whether PHP's `===` between values of `lhs` and `rhs` is PHP#'s `==`, `Ok(true)`, stays `===`, `Ok(false)`, or has
 /// no form. `==` gives `===`'s answer when both sides have one scalar type, both are enums, or one side is `null`.

@@ -1,6 +1,7 @@
 //! `match` and `switch` (spec section 21). A PHP arm compares the value with `===`, and a PHP# pattern takes types and
 //! constants only, so an arm's constants become patterns joined by `or`, each passing the `===` rule of section 19. A
-//! `switch` is a `match` statement with block arms.
+//! `switch` is a `match` statement with block arms, or an `if … else if` chain where a `case` is on a value that is no
+//! constant.
 
 use mago_codex::ttype::TType;
 use mago_codex::ttype::union::TUnion;
@@ -9,14 +10,17 @@ use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Break;
+use mago_syntax::cst::CompositeString;
 use mago_syntax::cst::Continue;
 use mago_syntax::cst::DoWhile;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::For;
 use mago_syntax::cst::Foreach;
 use mago_syntax::cst::Literal;
+use mago_syntax::cst::LiteralString;
 use mago_syntax::cst::Match;
 use mago_syntax::cst::MatchArm;
+use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::Switch;
 use mago_syntax::cst::SwitchBody;
@@ -29,6 +33,7 @@ use super::Kind;
 use super::builtins::runs_nothing;
 use super::is_primary;
 use super::kinds;
+use super::operators::LOOSE;
 use super::operators::identity;
 use crate::Converter;
 
@@ -44,6 +49,13 @@ impl Converter<'_, '_> {
         let subject = switch.expression;
         if self.untyped(subject, "a `switch`") {
             return;
+        }
+        let cases = match &switch.body {
+            SwitchBody::BraceDelimited(body) => &body.cases,
+            SwitchBody::ColonDelimited(body) => &body.cases,
+        };
+        if cases.iter().any(|case| matches!(case, SwitchCase::Expression(case) if !is_constant(case.expression))) {
+            return self.switch_chain(statement, subject, cases);
         }
         let (cases, end) = match &switch.body {
             SwitchBody::BraceDelimited(body) => (&body.cases, body.right_brace.start.offset),
@@ -124,6 +136,161 @@ impl Converter<'_, '_> {
         }
     }
 
+    /// A `switch` on `subject` with a `case` on a value that is no constant, which no pattern takes, as an `if … else if`
+    /// chain of PHP's loose `==` tests, `if (code == limit) { … } else if (code == 0 || code == 1) { … } else { … }`,
+    /// where each test passes [`Converter::loose`] and reading `subject` again runs nothing (spec sections 19 and 21).
+    /// PHP tests the cases in order and runs the first that holds, as the chain does, and `default` where none does: a
+    /// `default` last is the chain's `else`, and one before other cases is the branch where none of those holds, which
+    /// reads their values a second time. Cases with no statements of their own join the next with `||`. Each branch
+    /// keeps its statements in place, one level of indentation in from the `if`, and the `break` that ends one leaves.
+    fn switch_chain(
+        &mut self,
+        statement: &Statement<'_>,
+        subject: &Expression<'_>,
+        cases: &Sequence<'_, SwitchCase<'_>>,
+    ) {
+        /// A branch of the chain: the cases it tests, by place, the place of the `default` it runs too, the end of the
+        /// case that opens it, and the end of its statements.
+        struct Branch {
+            cases: Vec<usize>,
+            default: Option<usize>,
+            separator: Span,
+            end: u32,
+        }
+
+        if !runs_nothing(subject) {
+            let read = String::from_utf8_lossy(self.text(subject.span())).into_owned();
+            return self.refuse(
+                subject.span(),
+                format!("a `switch` on `{read}` with a `case` on a value that is no constant has no PHP# form: a PHP# pattern takes types and constants only, and testing each `case` with `==` reads `{read}` again, which runs code (spec section 21)"),
+            );
+        }
+        let read = self.render(subject);
+        let indentation = self.indentation(statement.span().start.offset);
+        let inner = format!("{indentation}    ");
+        let count = cases.len();
+        // Each case's test, and whether its value runs nothing, by the case's place, and none for `default`.
+        let mut tests: Vec<Option<(String, bool)>> = Vec::new();
+        let mut joined = Vec::new();
+        let mut branches = Vec::new();
+        for (index, case) in cases.iter().enumerate() {
+            let is_last = index + 1 == count;
+            let (separator, statements, default) = match case {
+                SwitchCase::Expression(case) => {
+                    let value = case.expression;
+                    if !self.loose(subject, value) {
+                        let reason = self.operands("==", subject, value, LOOSE);
+                        return self.refuse(value.span(), reason);
+                    }
+                    self.expression(value, None);
+                    let rendered = self.render(value);
+                    let operand = if is_primary(value) { rendered } else { format!("({rendered})") };
+                    tests.push(Some((format!("{read} == {operand}"), runs_nothing(value))));
+                    joined.push(index);
+                    if case.statements.is_empty() && !is_last {
+                        continue;
+                    }
+                    (&case.separator, &case.statements, None)
+                }
+                SwitchCase::Default(case) => {
+                    tests.push(None);
+                    (&case.separator, &case.statements, Some(index))
+                }
+            };
+            let separator = match separator {
+                SwitchCaseSeparator::Colon(span) | SwitchCaseSeparator::SemiColon(span) => *span,
+            };
+            let Some(kept) = self.case_body(statements.as_slice(), separator, is_last) else {
+                return;
+            };
+            self.case_statements(kept);
+            self.outdent(kept, &inner);
+            let end = kept.last().map_or(separator.end.offset, |last| last.span().end.offset);
+            branches.push(Branch { cases: std::mem::take(&mut joined), default, separator, end });
+        }
+
+        // A `default` before other cases holds where none of them does, so where it fails one of them holds, and the
+        // last branch is the chain's `else`.
+        let early_default = branches.last().is_some_and(|last| last.default.is_none())
+            && branches.iter().any(|branch| branch.default.is_some());
+        let mut opening = statement.span().start.offset;
+        for (position, branch) in branches.iter().enumerate() {
+            let mut held: Vec<&str> =
+                branch.cases.iter().filter_map(|case| tests[*case].as_ref()).map(|(test, _)| test.as_str()).collect();
+            let test = match branch.default {
+                None if early_default && position + 1 == branches.len() => None,
+                None => Some(held.join(" || ")),
+                Some(at) => {
+                    let later: Vec<&(String, bool)> = tests[at + 1..].iter().flatten().collect();
+                    let own_run = branch.cases.iter().filter_map(|case| tests[*case].as_ref()).any(|(_, read)| !read);
+                    if later.is_empty() && own_run {
+                        return self.refuse(
+                            branch.separator,
+                            "a `case` that joins a last `default` with a value that runs code has no PHP# form: the chain's `else` tests no value, and PHP runs the value before `default` runs (spec section 21)",
+                        );
+                    }
+                    if later.iter().any(|(_, read)| !read) {
+                        return self.refuse(
+                            branch.separator,
+                            "a `default` before a `case` on a value that runs code has no PHP# form: its branch holds where none of the later cases does, which reads their values again and runs their code twice (spec section 21)",
+                        );
+                    }
+                    if later.is_empty() {
+                        None
+                    } else {
+                        let none = format!(
+                            "!({})",
+                            later.iter().map(|(test, _)| test.as_str()).collect::<Vec<_>>().join(" || ")
+                        );
+                        held.push(&none);
+                        Some(held.join(" || "))
+                    }
+                }
+            };
+            let branch_opening = match (position, test) {
+                (0, Some(test)) => format!("if ({test}) {{"),
+                (_, Some(test)) => format!("\n{indentation}}} else if ({test}) {{"),
+                (_, None) => format!("\n{indentation}}} else {{"),
+            };
+            self.edits.replace_range(opening, branch.separator.end.offset, branch_opening);
+            opening = branch.end;
+        }
+        self.edits.replace_range(opening, statement.span().end.offset, format!("\n{indentation}}}"));
+    }
+
+    /// Moves each line of `kept`, a case's statements, out to `indentation`, the branch's own, by the level a `case`
+    /// adds, where no rewrite edits the line's start and no string runs over it, whose text the lines are.
+    fn outdent(&mut self, kept: &[Statement<'_>], indentation: &str) {
+        let (Some(first), Some(last)) = (kept.first(), kept.last()) else {
+            return;
+        };
+        let own = self.indentation(first.span().start.offset);
+        if !own.starts_with(indentation) || own.len() == indentation.len() {
+            return;
+        }
+        let source = self.source;
+        let width = own.len() - indentation.len();
+        let mut strings = Multiline { source, spans: Vec::new() };
+        for statement in kept {
+            strings.walk_statement(statement, &mut ());
+        }
+        let (start, end) = (first.span().start.offset as usize - own.len(), last.span().end.offset as usize);
+        let lines = std::iter::once(start).chain(
+            source[start..end].iter().enumerate().filter(|(_, byte)| **byte == b'\n').map(|(at, _)| start + at + 1),
+        );
+        for line in lines {
+            let indented =
+                line + width <= end && source[line..line + width].iter().all(|byte| matches!(byte, b' ' | b'\t'));
+            let (Ok(from), Ok(to)) = (u32::try_from(line), u32::try_from(line + width)) else {
+                continue;
+            };
+            let in_string = strings.spans.iter().any(|span| span.start.offset < from && from < span.end.offset);
+            if indented && !in_string && !self.edits.touches(from, to) {
+                self.edits.delete(from, to);
+            }
+        }
+    }
+
     /// Whether PHP's `==` between the `switch`'s `subject` and a case's constant `case` holds just where its pattern
     /// matches, by the constant's value, a literal's or a named constant's alike. `==` compares a numeric string as a
     /// number, and `null` equals each value PHP reads as `false`: `false`, `0`, `0.0` and `''` (spec section 19). The
@@ -170,9 +337,37 @@ impl Converter<'_, '_> {
         ))
     }
 
-    /// A case's `statements` as a block arm, `=> { … },`, after its `separator`. Its `break` leaves, and any other
-    /// way out of the `switch`, or into the next case, refuses. Gives whether it converted.
+    /// A case's `statements` as a block arm, `=> { … },`, after its `separator`, with [`Converter::case_body`]'s rules.
+    /// Gives whether it converted.
     fn arm(&mut self, statements: &[Statement<'_>], separator: Span, is_last: bool, indentation: &str) -> bool {
+        let Some(kept) = self.case_body(statements, separator, is_last) else {
+            return false;
+        };
+        if let (Some(Statement::Break(r#break)), true) = (statements.last(), kept.len() < statements.len()) {
+            self.delete_lines(r#break.span());
+        }
+
+        let Some(last) = kept.last() else {
+            self.edits.replace(separator, " => {},");
+            return true;
+        };
+        self.edits.replace(separator, " => {");
+        self.case_statements(kept);
+        self.edits.insert(last.span().end.offset, format!("\n{indentation}}},"));
+
+        true
+    }
+
+    /// The statements of a case, `statements`, that its branch keeps: all of them, or those before the `break` they end
+    /// in, which leaves. A case whose statements run on into the next, and a `break` or `continue` that leaves the
+    /// `switch` before the case ends, have no PHP# form, since a `match` arm and an `if` branch leave at their end, and
+    /// refuse at `separator` or at the `break` (spec section 21).
+    fn case_body<'statements, 'arena>(
+        &mut self,
+        statements: &'statements [Statement<'arena>],
+        separator: Span,
+        is_last: bool,
+    ) -> Option<&'statements [Statement<'arena>]> {
         let (kept, ends) = match statements.split_last() {
             Some((Statement::Break(Break { level: None, .. }), kept)) => (kept, true),
             Some((Statement::Return(_), _)) => (statements, true),
@@ -186,7 +381,7 @@ impl Converter<'_, '_> {
                 separator,
                 "a `case` whose statements run on into the next case has no PHP# form: a `match` arm never falls through (spec section 21)",
             );
-            return false;
+            return None;
         }
         let mut leaves = Leaves { depth: 0, span: None };
         for statement in kept {
@@ -197,30 +392,18 @@ impl Converter<'_, '_> {
                 span,
                 "a `break` or `continue` that leaves the `switch` before its case ends has no PHP# form: a `match` arm leaves at its end (spec section 21)",
             );
-            return false;
-        }
-        if let (Some(Statement::Break(r#break)), true) = (statements.last(), kept.len() < statements.len()) {
-            self.delete_lines(r#break.span());
+            return None;
         }
 
-        let Some(last) = kept.last() else {
-            self.edits.replace(separator, " => {},");
-            return true;
+        Some(kept)
+    }
+
+    /// Converts `kept`, a case's statements, whose locals belong to its branch, as to a block.
+    fn case_statements(&mut self, kept: &[Statement<'_>]) {
+        let (Some(first), Some(last)) = (kept.first(), kept.last()) else {
+            return;
         };
-        self.edits.replace(separator, " => {");
-        let span = Span::new(separator.file_id, kept[0].span().start, last.span().end);
-        if let Some(locals) = self.locals() {
-            locals.blocks.push(span);
-        }
-        for statement in kept {
-            self.statement(statement);
-        }
-        if let Some(locals) = self.locals() {
-            locals.blocks.pop();
-        }
-        self.edits.insert(last.span().end.offset, format!("\n{indentation}}},"));
-
-        true
+        self.scoped(first.span().join(last.span()), kept);
     }
     /// `match`, whose arms take blocks when it stands as a statement, as a PHP# `match` statement's do. One on an `int`
     /// with no `default` arm gains the one that throws PHP's `UnhandledMatchError`, whose message holds the `int`.
@@ -456,6 +639,30 @@ fn is_constant(condition: &Expression<'_>) -> bool {
         condition,
         Expression::Literal(_) | Expression::ConstantAccess(_) | Expression::Access(Access::ClassConstant(_))
     )
+}
+
+/// Finds the strings the walked statements hold that run over several lines, whose lines are the strings' text.
+struct Multiline<'source> {
+    source: &'source [u8],
+    spans: Vec<Span>,
+}
+
+impl Multiline<'_> {
+    fn found(&mut self, span: Span) {
+        if self.source[span.start.offset as usize..span.end.offset as usize].contains(&b'\n') {
+            self.spans.push(span);
+        }
+    }
+}
+
+impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Multiline<'_> {
+    fn walk_in_literal_string(&mut self, string: &'ast LiteralString<'arena>, _: &mut ()) {
+        self.found(string.span());
+    }
+
+    fn walk_in_composite_string(&mut self, string: &'ast CompositeString<'arena>, _: &mut ()) {
+        self.found(string.span());
+    }
 }
 
 /// Finds a `break` or `continue` that leaves the `switch` the walked statements sit in: one outside any loop, or one

@@ -35,6 +35,7 @@ use mago_syntax::cst::PlainProperty;
 use mago_syntax::cst::PropertyHook;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookConcreteBody;
+use mago_syntax::cst::PropertyHookList;
 use mago_syntax::cst::PropertyItem;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
@@ -139,6 +140,20 @@ struct Head {
     inferred: bool,
 }
 
+/// A property's hooks, declared in the class body or on a constructor's parameter, and what converting them reads.
+#[derive(Clone, Copy)]
+pub(super) struct Hooks<'list, 'arena> {
+    pub(super) list: &'list PropertyHookList<'arena>,
+    /// The property's type.
+    pub(super) union: &'list TUnion,
+    pub(super) declared: &'list PropertyMetadata,
+    /// The variable that names the property.
+    pub(super) variable: &'list DirectVariable<'arena>,
+    /// The class member the hooks belong to, before which the static fields of their `static` locals go: the property,
+    /// or the constructor whose parameter declares it.
+    pub(super) member: Span,
+}
+
 impl Converter<'_, '_> {
     /// A property, written again whole, as a field when it is private or protected storage, or a property with
     /// accessors otherwise. Two names in one declaration become one declaration each, on its own line (spec section
@@ -220,19 +235,35 @@ impl Converter<'_, '_> {
             .start
             .offset;
         self.edits.replace_range(start, property.item.span().end.offset, head);
+        let hooks = Hooks { list: &property.hook_list, union: &union, declared, variable, member: property.span() };
+        self.hook_list(&hooks, &property.modifiers, has_storage, is_public && setters == Setters::Class);
+        if !value.is_empty() {
+            self.edits.insert(property.hook_list.right_brace.end.offset, format!("{value};"));
+        }
+        self.docblock(property.span());
+    }
 
-        // PHP's `private(set)` and `protected(set)` are the `set` accessor's own access level, and one the class alone
-        // sets is `private`.
-        let set_access = match property.modifiers.iter().find(|modifier| modifier.is_write_visibility()) {
+    /// The hooks of a property, declared in the class body or on a constructor's parameter, as its accessors (spec
+    /// sections 6 and 9). A property with storage, `has_storage`, gains the accessor it declares no hook for. PHP's
+    /// `private(set)` and `protected(set)` among `modifiers` are the `set` accessor's own access level, and a public
+    /// property the class alone sets, `set_by_class`, has a `private` one.
+    pub(super) fn hook_list(
+        &mut self,
+        hooks: &Hooks<'_, '_>,
+        modifiers: &Sequence<'_, Modifier<'_>>,
+        has_storage: bool,
+        set_by_class: bool,
+    ) {
+        let set_access = match modifiers.iter().find(|modifier| modifier.is_write_visibility()) {
             Some(Modifier::PrivateSet(_)) => "private ",
             Some(Modifier::ProtectedSet(_)) => "protected ",
-            _ if is_public && setters == Setters::Class => "private ",
+            _ if set_by_class => "private ",
             _ => "",
         };
-        let hooks = &property.hook_list.hooks;
-        let has_get = hooks.iter().any(|hook| hook.name.value == b"get");
-        let has_set = hooks.iter().any(|hook| hook.name.value == b"set");
-        if has_storage && let (Some(first), Some(last)) = (hooks.first(), hooks.last()) {
+        let list = &hooks.list.hooks;
+        let has_get = list.iter().any(|hook| hook.name.value == b"get");
+        let has_set = list.iter().any(|hook| hook.name.value == b"set");
+        if has_storage && let (Some(first), Some(last)) = (list.first(), list.last()) {
             if !has_get {
                 self.edits.insert(first.span().start.offset, "get; ");
             }
@@ -241,32 +272,22 @@ impl Converter<'_, '_> {
             }
         } else if has_set && !has_get {
             self.refuse(
-                property.hook_list.left_brace,
+                hooks.list.left_brace,
                 "a property with a `set` hook, no `get` hook and no storage has no PHP# form: a PHP# property needs a `get` accessor (spec section 6)",
             );
         }
-        for hook in hooks.iter() {
+        for hook in list.iter() {
             let is_set = hook.name.value == b"set";
-            self.hook(hook, is_set, &union, declared, variable);
+            self.hook(hook, is_set, hooks);
             if is_set && !set_access.is_empty() {
                 self.edits.insert(hook.name.span.start.offset, set_access);
             }
         }
-        if !value.is_empty() {
-            self.edits.insert(property.hook_list.right_brace.end.offset, format!("{value};"));
-        }
-        self.docblock(property.span());
     }
 
-    /// A hook as an accessor, `get` or `set` by `is_set`, of the property `variable` names, whose type is `union`.
-    fn hook(
-        &mut self,
-        hook: &PropertyHook<'_>,
-        is_set: bool,
-        union: &TUnion,
-        declared: &PropertyMetadata,
-        variable: &DirectVariable<'_>,
-    ) {
+    /// A hook as an accessor, `get` or `set` by `is_set`, of the property `hooks` belongs to.
+    fn hook(&mut self, hook: &PropertyHook<'_>, is_set: bool, hooks: &Hooks<'_, '_>) {
+        let Hooks { union, declared, variable, member, .. } = *hooks;
         self.attributes(&hook.attribute_lists);
         if let Some(ampersand) = hook.ampersand {
             self.refuse(ampersand, "a `get` hook that returns by reference has no PHP# form: PHP# has no references");
@@ -333,6 +354,7 @@ impl Converter<'_, '_> {
             storage: Some(variable.name[1..].to_vec()),
             captures: None,
             returned: Vec::new(),
+            static_fields: Vec::new(),
         });
         match body {
             PropertyHookConcreteBody::Block(block) => self.block(block),
@@ -348,8 +370,31 @@ impl Converter<'_, '_> {
             }
         }
         self.declare_locals();
+        self.static_fields(member);
         self.method = None;
         self.renamed.clear();
+    }
+
+    /// Writes the private static fields the `static` locals of the body being converted became, each on its own line
+    /// before `member`, the class member whose body declares them, and before its docblock (spec section 6).
+    fn static_fields(&mut self, member: Span) {
+        let Some(fields) = self.method.as_mut().map(|method| std::mem::take(&mut method.static_fields)) else {
+            return;
+        };
+        if fields.is_empty() {
+            return;
+        }
+        let start = self.docblock_before(member).map_or(member, |(docblock, _)| docblock).start.offset;
+        let indentation = self.indentation(start);
+        // At the start of the member's line, before the indentation, where no rewrite of the member writes.
+        let line = start - u32::try_from(indentation.len()).unwrap_or(0);
+        let mut declared = String::new();
+        for field in &fields {
+            declared.push_str(&indentation);
+            declared.push_str(field);
+            declared.push_str("\n\n");
+        }
+        self.edits.insert(line, declared);
     }
 
     /// `public override string name`, which the declaration of the property `variable` names starts with, its type,
@@ -782,6 +827,7 @@ impl Converter<'_, '_> {
                 parameter,
                 metadata.map(|metadata| metadata.type_union.clone()),
                 is_public.then_some(member.as_str()),
+                method.span(),
             );
         }
 
@@ -815,12 +861,14 @@ impl Converter<'_, '_> {
                     storage: None,
                     captures: None,
                     returned: Vec::new(),
+                    static_fields: Vec::new(),
                 });
                 if is_constructor && let Some(parent) = metadata.direct_parent_class {
                     self.super_call(method, block, parent.as_bytes());
                 }
                 self.block(block);
                 self.declare_locals();
+                self.static_fields(method.span());
                 if gives_null {
                     self.returns_null(block);
                 }

@@ -1,6 +1,8 @@
-//! Member and constant access: `->` and `::` become `.`, `?->` becomes `?.` (spec section 4), and `X::class` becomes
-//! `typeof(X)` (spec section 25).
+//! Member and constant access: `->` and `::` become `.`, `?->` becomes `?.` (spec section 4), `X::class` becomes
+//! `typeof(X)`, and a static is reached through its class's name or a type parameter (spec sections 11 and 25).
 
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
@@ -12,6 +14,7 @@ use mago_syntax::cst::MagicConstant;
 use mago_syntax::cst::Variable;
 
 use super::Kind;
+use super::builtins::runs_nothing;
 use crate::Converter;
 use crate::library::short;
 
@@ -157,7 +160,9 @@ impl Converter<'_, '_> {
                 self.member(&access.property);
             }
             Access::StaticProperty(access) => {
-                self.expression(access.class, None);
+                if !self.static_class(access.class) {
+                    return self.refuse(expression.span(), self.held_static(expression));
+                }
                 self.edits.replace(access.double_colon, ".");
                 match &access.property {
                     // The name its class declares, which no renamed local of the method changes.
@@ -175,11 +180,7 @@ impl Converter<'_, '_> {
                 let ClassLikeConstantSelector::Identifier(constant) = &access.constant else {
                     return self.refuse(expression.span(), "a constant named by an expression has no PHP# form");
                 };
-                let names_class = matches!(
-                    access.class,
-                    Expression::Identifier(_) | Expression::Self_(_) | Expression::Static(_) | Expression::Parent(_)
-                );
-                if constant.value.eq_ignore_ascii_case(b"class") && !names_class {
+                if constant.value.eq_ignore_ascii_case(b"class") && !names_class(access.class) {
                     // `$order::class` is the class of an object, `Class.of(order)`, as `typeof` takes a type only
                     // (spec section 25). PHP's on `null` throws, and PHP#'s takes an object.
                     if !self.is(access.class, &[Kind::Object, Kind::Enum]) {
@@ -193,7 +194,9 @@ impl Converter<'_, '_> {
                     let object = self.render(access.class);
                     return self.edits.replace(expression.span(), format!("Class.of({object})"));
                 }
-                self.expression(access.class, None);
+                if !self.static_class(access.class) {
+                    return self.refuse(expression.span(), self.held_static(expression));
+                }
                 if constant.value.eq_ignore_ascii_case(b"class") {
                     // `X::class` is the class value `typeof(X)` (spec section 25).
                     let class = self.render(access.class);
@@ -210,4 +213,53 @@ impl Converter<'_, '_> {
             self.refuse(selector.span(), "a member named by a variable has no PHP# form (spec section 25)");
         }
     }
+
+    /// Writes `class`, which a static member is reached through, as PHP# reaches one, and gives whether it could: a
+    /// class's name, `self`, `static` and `parent` as they convert, and a value of `class-string<T>` as `T`, as
+    /// `T.find(7)`, which reaches the statics of the type argument the code runs with (spec section 11). PHP# reaches a
+    /// static through no other class held at run time.
+    pub(super) fn static_class(&mut self, class: &Expression<'_>) -> bool {
+        if names_class(class) {
+            self.expression(class, None);
+            return true;
+        }
+        let Some(parameter) = self.class_parameter(class) else {
+            return false;
+        };
+        self.edits.replace(class.span(), parameter);
+
+        true
+    }
+
+    /// The name of `T`, a type parameter of the converted class or method, where `class` is a value of
+    /// `class-string<T>` whose read runs nothing, so `T` names the class it holds.
+    fn class_parameter(&self, class: &Expression<'_>) -> Option<String> {
+        if !runs_nothing(class) {
+            return None;
+        }
+        let [TAtomic::Scalar(TScalar::ClassLikeString(held))] = self.type_of(class)?.types.as_ref() else {
+            return None;
+        };
+        let TAtomic::GenericParameter(parameter) = held.get_object_type(self.input.codebase) else {
+            return None;
+        };
+
+        self.declares(&parameter).then(|| parameter.parameter_name.as_str_lossy().into_owned())
+    }
+
+    /// Why `access`, a static property or constant reached through a class held at run time, as `$class::$count`, has
+    /// no PHP# form.
+    fn held_static(&self, access: &Expression<'_>) -> String {
+        let shown = String::from_utf8_lossy(self.text(access.span()));
+
+        format!("`{shown}` reaches a static through a class held at run time, which has no PHP# form: {HELD_CLASS}")
+    }
+}
+
+/// Why a static reached through a class held at run time has no PHP# form but a call through reflection.
+pub(super) const HELD_CLASS: &str = "PHP# reaches a static through its class's name or a type parameter, and calls a static method of a class held at run time through reflection (spec sections 11 and 25)";
+
+/// Whether `class`, which a static member is reached through, names one: a class's name, `self`, `static` or `parent`.
+pub(super) fn names_class(class: &Expression<'_>) -> bool {
+    matches!(class, Expression::Identifier(_) | Expression::Self_(_) | Expression::Static(_) | Expression::Parent(_))
 }

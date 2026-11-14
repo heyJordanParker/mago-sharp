@@ -1,5 +1,5 @@
-//! Variables, locals and assignment (spec sections 2 and 3): `$` leaves each name, and a local is declared where it is
-//! first assigned.
+//! Variables, locals and assignment (spec sections 2 and 3): `$` leaves each name, a local is declared where it is
+//! first assigned, and a `static` local is a private static field (spec section 6).
 
 use mago_allocator::LocalArena;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
@@ -11,6 +11,7 @@ use mago_codex::ttype::combine_union_types;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
+use mago_codex::ttype::get_null;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::union::populate_union_type;
 use mago_phpdoc_syntax::PHPDocParser;
@@ -33,6 +34,8 @@ use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::Static;
+use mago_syntax::cst::StaticItem;
 use mago_syntax::cst::StaticPropertyAccess;
 use mago_syntax::cst::TokenSeparatedSequence;
 use mago_syntax::cst::UnaryPrefixOperator;
@@ -64,6 +67,21 @@ pub(crate) struct Locals {
     copied: Vec<(Vec<u8>, Span)>,
     /// Each parameter the body writes.
     written_parameters: Vec<Vec<u8>>,
+    /// Each `static` local, which PHP# keeps in a private static field of the class (spec section 6).
+    statics: Vec<StaticLocal>,
+}
+
+/// A `static` local of the method, which keeps its value from one call to the next in a private static field.
+#[derive(Debug)]
+struct StaticLocal {
+    /// Its PHP name.
+    name: Vec<u8>,
+    /// The name of its field.
+    field: String,
+    /// Where the `static` statement names it.
+    at: Span,
+    /// Its initial value in PHP#, or `None` for one that starts as `[]`, whose PHP# form its type decides.
+    initial: Option<String>,
 }
 
 /// Each variable a method's body names and each parameter of a lambda in it, by their PHP names, which a local's new
@@ -266,6 +284,155 @@ impl Converter<'_, '_> {
         self.value(rhs, expected.as_ref());
 
         true
+    }
+
+    /// Each local of `statement`, a `static` statement, as a private static field, `private static int count = 0;`,
+    /// which keeps its value from one call of the method to the next as PHP's `static` local does, and which each place
+    /// the body names the local reads and writes, as `Ticker.count` (spec section 6). The field's type joins the values
+    /// written to the local, each of a type a declaration gives, or is the type its `@var` tag gives (decision 2). PHP
+    /// runs the initial value on the method's first call and PHP# on the first use of the class's statics, which give
+    /// the same value where it runs nothing. The statement leaves the body, and its docblock with it where that types the
+    /// local.
+    pub(super) fn static_locals(&mut self, statement: &Statement<'_>, r#static: &Static<'_>) {
+        let Some((class, metadata)) = self.class.as_ref().map(|class| (class.name.clone(), class.metadata)) else {
+            return;
+        };
+        let reason = if self.method.as_ref().is_some_and(|method| method.captures.is_some()) {
+            Some(
+                "a `static` local in a lambda has no PHP# form: PHP keeps one for each closure it makes, and a static field is one for the class (spec section 6)",
+            )
+        } else if !metadata.template_types.is_empty() {
+            Some(
+                "a `static` local in a generic class has no PHP# form: PHP keeps one for the method, and PHP# keeps a static field for each type argument (spec section 11)",
+            )
+        } else if metadata.kind.is_enum() {
+            Some(
+                "a `static` local in an enum has no PHP# form: an enum declares no storage, which a static field is (spec section 22)",
+            )
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            self.refuse(statement.span(), reason);
+            // The refusal covers each later read of the local, which has no declaration to point at.
+            if let Some(method) = self.method.as_mut() {
+                method.parameters.extend(r#static.items.iter().map(|item| item.variable().name.to_vec()));
+            }
+            return;
+        }
+
+        let mut tagged_any = false;
+        for item in r#static.items.iter() {
+            let variable = item.variable();
+            let name = variable.name;
+            let field = match item {
+                StaticItem::Concrete(item) if !is_constant_expression(item.value) => {
+                    let shown = String::from_utf8_lossy(self.text(item.value.span())).into_owned();
+                    self.refuse(
+                        item.value.span(),
+                        format!("the `static` local `{}` starts as `{shown}`, which runs code, and PHP runs it on the method's first call where PHP# runs a static's initial value on the first use of its class's statics (spec section 6)", String::from_utf8_lossy(name)),
+                    );
+                    None
+                }
+                _ => self.static_field(variable),
+            };
+            let Some(field) = field else {
+                // The refusal covers each later read of the local.
+                if let Some(method) = self.method.as_mut() {
+                    method.parameters.push(name.to_vec());
+                }
+                continue;
+            };
+            let tagged = self.tagged_type(statement, variable);
+            tagged_any |= tagged.is_some();
+            let Some(method) = self.method.as_mut() else {
+                return;
+            };
+            let block = method.locals.body.unwrap_or(statement.span());
+            let declaration = Declaration { at: variable.span.start.offset, block, written: None, hoistable: false };
+            method
+                .locals
+                .entries
+                .push((name.to_vec(), Local::new(variable.span, Some(declaration), false, Vec::new())));
+            self.renamed.retain(|(local, _)| local.as_slice() != name);
+            self.renamed.push((name.to_vec(), format!("{class}.{field}")));
+
+            let initial = match item {
+                // PHP gives a `static` local with no initial value `null`.
+                StaticItem::Abstract(_) => {
+                    if let Some(local) = self.current(name) {
+                        let write = Write {
+                            at: variable.span,
+                            union: Some(get_null()),
+                            source: Source::Declared,
+                            runtime: true,
+                        };
+                        local.writes.push(write);
+                    }
+                    Some("null".to_owned())
+                }
+                // `[]` says nothing of what the local holds, so the values the body writes in it give its type.
+                StaticItem::Concrete(item)
+                    if tagged.is_none() && matches!(untyped_start(item.value), Some((Start::Empty, _))) =>
+                {
+                    self.started(name, Start::Empty);
+                    None
+                }
+                StaticItem::Concrete(item) => {
+                    match &tagged {
+                        Some(tagged) => self.wrote(name, item.value, item.value, Some(tagged.clone()), Source::Tagged),
+                        None => self.wrote(
+                            name,
+                            item.value,
+                            item.value,
+                            self.type_of(item.value).cloned(),
+                            self.source(item.value),
+                        ),
+                    }
+                    self.value(item.value, tagged.as_ref());
+                    Some(self.render(item.value))
+                }
+            };
+            if let Some(method) = self.method.as_mut() {
+                method.locals.statics.push(StaticLocal { name: name.to_vec(), field, at: variable.span, initial });
+            }
+        }
+
+        let docblock = self.docblock_before(statement.span()).map(|(docblock, _)| docblock).filter(|_| tagged_any);
+        self.delete_lines(docblock.map_or(statement.span(), |docblock| docblock.join(statement.span())));
+    }
+
+    /// The name of the static field the `static` local `variable` becomes: its own in camel case, as a field's is (spec
+    /// section 24), or, where a member of the class takes that, its method's name before it, as `nextCount`, since a
+    /// PHP# class has one member of each name (spec section 14). Refuses it where members take both.
+    fn static_field(&mut self, variable: &DirectVariable<'_>) -> Option<String> {
+        let camel = |name: &[u8]| String::from_utf8_lossy(&mago_casing::to_camel_case(name)).into_owned();
+        let own = camel(&variable.name[1..]);
+        let after_method = self.method.as_ref().and_then(|method| method.name.as_deref()).map(|method| {
+            format!("{}{}", camel(method), String::from_utf8_lossy(&mago_casing::to_class_case(own.as_bytes())))
+        });
+        let class = self.class.as_mut()?;
+        let metadata = class.metadata;
+        let taken = |fields: &[String], name: &str| {
+            metadata.appearing_property_ids.contains_key(&mago_word::word(format!("${name}").as_bytes()))
+                || metadata.appearing_method_ids.contains_key(&mago_word::ascii_lowercase_word(name.as_bytes()))
+                || fields.iter().any(|field| field == name)
+        };
+        let free = std::iter::once(own.clone())
+            .chain(after_method.clone())
+            .find(|candidate| !taken(&class.static_fields, candidate));
+        if let Some(field) = &free {
+            class.static_fields.push(field.clone());
+            return free;
+        }
+        let names = after_method.map_or_else(|| format!("`{own}`"), |after| format!("`{own}` and `{after}`"));
+        let shown = String::from_utf8_lossy(variable.name).into_owned();
+        self.refuse(
+            variable.span,
+            format!("the `static` local `{shown}` is a static field in PHP#, and members of the class take {names}, where a PHP# class has one member of each name (spec section 14)"),
+        );
+
+        None
     }
 
     /// Records that a write gives the local `name` the value `value`, of type `union`, whose type comes from `source`,
@@ -494,8 +661,13 @@ impl Converter<'_, '_> {
             at: variable.span.start.offset,
             block: block.unwrap_or(statement.span()),
             written,
-            // An `if` whose condition assigns it declares it before the `if`, as its own statement.
-            hoistable: matches!(statement, Statement::Expression(_) | Statement::If(_)),
+            // An `if` whose condition assigns it declares it before the `if`, as its own statement, and so does a `for`
+            // with several initializations.
+            hoistable: match statement {
+                Statement::Expression(_) | Statement::If(_) => true,
+                Statement::For(r#for) => r#for.initializations.len() > 1,
+                _ => false,
+            },
         };
         method
             .locals
@@ -729,6 +901,8 @@ impl Converter<'_, '_> {
         let body = method.locals.body.take();
         let copied = std::mem::take(&mut method.locals.copied);
         let written_parameters = std::mem::take(&mut method.locals.written_parameters);
+        let statics = std::mem::take(&mut method.locals.statics);
+        let is_static = |name: &[u8]| statics.iter().any(|kept| kept.name == name);
         // A PHP local lives for the whole function, so one read after the block that assigns it is declared first in
         // the body of the method or lambda it belongs to, where no pass of a loop declares it again.
         // So is one that starts as `null` or `[]`, whose type the values written to it later give.
@@ -736,7 +910,7 @@ impl Converter<'_, '_> {
         // The type of each such local first assigned in the body itself, by where its declaration goes.
         let mut typed: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
         for (name, local) in &locals {
-            let Some(declaration) = &local.declaration else {
+            let Some(declaration) = local.declaration.as_ref().filter(|_| !is_static(name)) else {
                 continue;
             };
             let Some(span) = local.escapes.or(local.start.map(|_| local.first)) else {
@@ -778,8 +952,19 @@ impl Converter<'_, '_> {
             }
         }
 
+        for kept in &statics {
+            if let Some(field) = self.static_declaration(&locals, kept)
+                && let Some(method) = self.method.as_mut()
+            {
+                method.static_fields.push(field);
+            }
+        }
+
         let mut keywords: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
         for (name, local) in locals {
+            if is_static(&name) {
+                continue;
+            }
             let shown = String::from_utf8_lossy(&name);
             let Some(declaration) = local.declaration else {
                 self.refuse(
@@ -862,6 +1047,21 @@ impl Converter<'_, '_> {
             );
             return None;
         }
+        let Some(union) = self.joined(locals, name) else {
+            self.refuse(
+                span,
+                format!("`{shown}` {why}, so PHP# declares it first in the body with a type, and the analysis gives no type to a value it is assigned"),
+            );
+            return None;
+        };
+
+        Some((self.type_text(&union.as_nullable(), span)?, "null"))
+    }
+
+    /// The type of the values written to `name`, a local of `locals`, joined, with each literal widened to its scalar
+    /// type, or the type a `@var` tag on one of its assignments gives, or `None` where the analysis gives one of them no
+    /// type.
+    fn joined(&self, locals: &[(Vec<u8>, Local)], name: &[u8]) -> Option<TUnion> {
         let codebase = self.input.codebase;
         let tagged = writes(locals, name).find(|write| matches!(write.source, Source::Tagged));
         let joined = match tagged {
@@ -876,16 +1076,45 @@ impl Converter<'_, '_> {
                 })
                 .flatten(),
         };
-        let Some(mut union) = joined else {
+
+        joined.map(|mut union| {
+            union.widen_scalars();
+            union
+        })
+    }
+
+    /// The declaration of the private static field that `kept`, a `static` local of `locals`, becomes: `private static T
+    /// count = 0;`, where `T` joins the declared types of the values written to it, or is its `@var` tag's, and one that
+    /// starts as `[]` is a `List<V>` the body only appends to or a `Map<K, V>` it only writes by key (decision 2). Refuses
+    /// it otherwise.
+    fn static_declaration(&mut self, locals: &[(Vec<u8>, Local)], kept: &StaticLocal) -> Option<String> {
+        let name = kept.name.as_slice();
+        let shown = String::from_utf8_lossy(name).into_owned();
+        let Some(initial) = &kept.initial else {
+            let (written, empty) = self.filled(locals, name, kept.at)?;
+            for literal in locals.iter().filter(|(local, _)| local == name).flat_map(|(_, local)| &local.empties) {
+                self.edits.replace(*literal, empty);
+            }
+            return Some(format!("private static {written} {} = {empty};", kept.field));
+        };
+        if let Some(at) = inferred_write(locals, name, &mut Vec::new()) {
+            let value = String::from_utf8_lossy(self.text(at));
             self.refuse(
-                span,
-                format!("`{shown}` {why}, so PHP# declares it first in the body with a type, and the analysis gives no type to a value it is assigned"),
+                at,
+                format!("the `static` local `{shown}` is a static field of a type in PHP#, and no declaration gives the type of `{value}`, which it is assigned, where the converter writes only a type a declaration gives (decision 2)"),
+            );
+            return None;
+        }
+        let Some(union) = self.joined(locals, name).filter(|union| !union.is_null()) else {
+            self.refuse(
+                kept.at,
+                format!("the `static` local `{shown}` is a static field of a type in PHP#, and the analysis gives no type other than `null` to the values it is assigned"),
             );
             return None;
         };
-        union.widen_scalars();
+        let written = self.type_text(&union, kept.at)?;
 
-        Some((self.type_text(&union.as_nullable(), span)?, "null"))
+        Some(format!("private static {written} {} = {initial};", kept.field))
     }
 
     /// The declared type of `name`, a local that starts as `[]`, and the empty literal of it: `List<V>` when the body
@@ -1212,6 +1441,32 @@ fn untyped_start(value: &Expression<'_>) -> Option<(Start, Span)> {
         Expression::LegacyArray(array) if array.elements.is_empty() => Some((Start::Empty, value.span())),
         Expression::Parenthesized(parenthesized) => untyped_start(parenthesized.expression),
         _ => None,
+    }
+}
+
+/// Whether `value` is computed from constants alone, so it runs no code and gives the same value whenever it runs: a
+/// literal, a constant, a class constant, and a list, an operator or parentheses of them.
+fn is_constant_expression(value: &Expression<'_>) -> bool {
+    let elements = |elements: &TokenSeparatedSequence<'_, ArrayElement<'_>>| {
+        elements.iter().all(|element| match element {
+            ArrayElement::KeyValue(element) => {
+                is_constant_expression(element.key) && is_constant_expression(element.value)
+            }
+            ArrayElement::Value(element) => is_constant_expression(element.value),
+            _ => false,
+        })
+    };
+    match value {
+        Expression::Literal(_) | Expression::ConstantAccess(_) | Expression::Access(Access::ClassConstant(_)) => true,
+        Expression::Parenthesized(parenthesized) => is_constant_expression(parenthesized.expression),
+        Expression::UnaryPrefix(unary) => {
+            matches!(unary.operator, UnaryPrefixOperator::Negation(_) | UnaryPrefixOperator::Plus(_))
+                && is_constant_expression(unary.operand)
+        }
+        Expression::Binary(binary) => is_constant_expression(binary.lhs) && is_constant_expression(binary.rhs),
+        Expression::Array(array) => elements(&array.elements),
+        Expression::LegacyArray(array) => elements(&array.elements),
+        _ => false,
     }
 }
 

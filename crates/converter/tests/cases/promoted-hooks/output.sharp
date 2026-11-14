@@ -1,0 +1,16 @@
+namespace App;
+
+// A promoted parameter's hooks are its property's accessors, as a property's in the class body are, and its default
+// follows them. PHP runs the `set` hook on the argument, as PHP# runs `set` on it (spec sections 6 and 9).
+public final class Badge
+{
+    public Badge(
+        public string label {
+            get; private set => field = value + '!';
+        } = 'guest',
+        public int level {
+            get => field * 10; private set;
+        } = 1,
+    ) {
+    }
+}

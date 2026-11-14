@@ -23,6 +23,7 @@ use mago_syntax::cst::Sequence;
 use mago_syntax::walker::MutWalker;
 
 use super::Locals;
+use super::access::HELD_CLASS;
 use super::locals::Capture;
 use super::locals::Captures;
 use super::natively_checked;
@@ -143,6 +144,7 @@ impl Converter<'_, '_> {
             storage: None,
             captures: Some(captures),
             returned: Vec::new(),
+            static_fields: Vec::new(),
         });
         match body {
             Body::Block(block) => self.block(block),
@@ -291,8 +293,14 @@ impl Converter<'_, '_> {
     }
 
     /// `$object->name(...)`, `Class::name(...)` and `name(...)` as the method value PHP# names without parentheses,
-    /// `object.name` (spec section 14.3).
-    pub(super) fn method_value(&mut self, expression: &Expression<'_>, application: &PartialApplication<'_>) {
+    /// `object.name` (spec section 14.3), and a built-in's `name(...)` as the lambda that calls the library member that
+    /// runs it, with the parameters of `expected`, the function type the value lands in.
+    pub(super) fn method_value(
+        &mut self,
+        expression: &Expression<'_>,
+        application: &PartialApplication<'_>,
+        expected: Option<&TUnion>,
+    ) {
         if !application.is_first_class_callable() {
             return self.refuse(
                 expression.span(),
@@ -314,7 +322,13 @@ impl Converter<'_, '_> {
                 if self.forwards_called_class(expression.span(), value.class, &value.method) {
                     return;
                 }
-                self.expression(value.class, None);
+                if !self.static_class(value.class) {
+                    let shown = String::from_utf8_lossy(self.text(expression.span())).into_owned();
+                    return self.refuse(
+                        expression.span(),
+                        format!("`{shown}` names a static method of a class held at run time as a value, which has no PHP# form: {HELD_CLASS}, which gives no method value"),
+                    );
+                }
                 self.edits.replace(value.double_colon, ".");
                 self.member(&value.method);
             }
@@ -329,10 +343,7 @@ impl Converter<'_, '_> {
                 };
                 let name = function.original_name.as_str_lossy().into_owned();
                 if function.flags.is_built_in() {
-                    return self.refuse(
-                        expression.span(),
-                        format!("`{name}` is PHP's own function, which PHP# reaches through the standard library member that runs it, and the converter writes that member for a call only"),
-                    );
+                    return self.built_in_value(expression.span(), function, &name, expected);
                 }
                 let Some(text) = self.through_namespace(expression.span(), &name, function.span) else {
                     return;

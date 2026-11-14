@@ -265,21 +265,30 @@ impl Converter<'_, '_> {
 
     /// A `for` loop, which keeps its form and declares the local its initialization assigns, scoped to the loop. Several
     /// initializations, conditions and increments keep their commas, where the initializations assign locals declared
-    /// before the loop, since a PHP# `let` declares one local and ends at a comma.
+    /// before the loop. A PHP# `let` declares one local and ends at a comma, so where one of several initializations
+    /// declares a local, each runs as a statement of its own before the loop, in their order, `let last = count - 1;`,
+    /// and declares its local in the block around the loop, where PHP's lives on after it too (spec section 17).
     pub(super) fn for_loop(&mut self, statement: &Statement<'_>, r#for: &For<'_>) {
-        if let Some(locals) = self.locals() {
-            locals.blocks.push(statement.span());
-        }
         let several = r#for.initializations.len() > 1;
-        for initialization in r#for.initializations.iter() {
-            if !self.declaration(statement, initialization) {
-                self.expression(initialization, None);
-            } else if several {
-                self.refuse(
-                    initialization.span(),
-                    "a `for` that declares a local beside other initializations is not converted yet: a PHP# `let` declares one local and ends at a comma, so the declaration moves before the loop, which the converter doesn't do",
-                );
+        // A lone initialization declares its local in the loop's block, and several declare theirs in the one around it.
+        let scope = |this: &mut Self| {
+            if let Some(locals) = this.locals() {
+                locals.blocks.push(statement.span());
             }
+        };
+        if !several {
+            scope(self);
+        }
+        let mut declares = false;
+        for initialization in r#for.initializations.iter() {
+            if self.declaration(statement, initialization) {
+                declares = true;
+            } else {
+                self.expression(initialization, None);
+            }
+        }
+        if several {
+            scope(self);
         }
         for condition in r#for.conditions.iter() {
             self.condition(condition, true);
@@ -299,6 +308,31 @@ impl Converter<'_, '_> {
         if let Some(locals) = self.locals() {
             locals.blocks.pop();
         }
+        if several && declares {
+            self.initializations_before(statement, r#for);
+        }
+    }
+
+    /// Writes the initializations of `r#for` as statements of their own before it, in their order, and the loop with
+    /// none, `for (; index < last; index++)`, under the name a `break` or `continue` of its body gave it, which the loop
+    /// takes here, after its initializations.
+    fn initializations_before(&mut self, statement: &Statement<'_>, r#for: &For<'_>) {
+        let initializations: Vec<&Expression<'_>> = r#for.initializations.iter().copied().collect();
+        let (Some(first), Some(last)) = (initializations.first(), initializations.last()) else {
+            return;
+        };
+        let indentation = self.indentation(statement.span().start.offset);
+        self.edits.delete(r#for.r#for.span.start.offset, first.span().start.offset);
+        for (comma, next) in r#for.initializations.tokens.iter().zip(&initializations[1..]) {
+            self.edits.replace_range(comma.start.offset, next.span().start.offset, format!(";\n{indentation}"));
+        }
+        let name = self.loops.last_mut().and_then(|current| current.name.take());
+        let label = name.map_or_else(String::new, |name| format!("{name}: "));
+        self.edits.replace_range(
+            last.span().end.offset,
+            r#for.initializations_semicolon.end.offset,
+            format!(";\n{indentation}{label}for (;"),
+        );
     }
 
     pub(super) fn while_loop(&mut self, statement: &Statement<'_>, r#while: &While<'_>) {

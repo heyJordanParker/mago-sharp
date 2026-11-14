@@ -1,0 +1,33 @@
+namespace App;
+
+// A `static` local keeps its value from one call of its method to the next, as a private static field does in PHP#,
+// whose type joins the values written to it (spec section 6).
+public final class Ticker
+{
+    private static int count = 0;
+
+    public int next()
+    {
+        return ++Ticker.count;
+    }
+
+    private static List<string> names = [];
+
+    public List<string> seen(string name)
+    {
+        Ticker.names.add(name);
+
+        return Ticker.names;
+    }
+
+    // A member of the class takes `next`, so the field takes its method's name before its own.
+    private static int? lastNext = null;
+
+    public int? last(int value)
+    {
+        const previous = Ticker.lastNext;
+        Ticker.lastNext = value;
+
+        return match (previous) { int value2 => value2, null => null, default => throw new TypeError("Return value must be of type ?int") };
+    }
+}

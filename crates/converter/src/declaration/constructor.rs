@@ -4,6 +4,7 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Call;
@@ -15,6 +16,7 @@ use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Method as MethodDeclaration;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
+use mago_syntax::cst::PropertyHookList;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::Variable;
@@ -28,15 +30,17 @@ use super::NameCase;
 use super::Setters;
 use super::accessors;
 use super::has;
+use super::members::Hooks;
 
 impl Converter<'_, '_> {
-    /// A parameter of a method, `member` when the method is public, as `Store::checkout`, which names its type, as a
+    /// A parameter of `method`, `member` when the method is public, as `Store::checkout`, which names its type, as a
     /// promoted public property does.
     pub(super) fn parameter(
         &mut self,
         parameter: &FunctionLikeParameter<'_>,
         declared: Option<TUnion>,
         member: Option<&str>,
+        method: Span,
     ) {
         let name = String::from_utf8_lossy(parameter.variable.name).into_owned();
         if parameter.ampersand.is_some() {
@@ -46,10 +50,6 @@ impl Converter<'_, '_> {
                     "`{name}` is taken by reference, which has no PHP# form: PHP# passes every argument by value, so a write to `{name}` never reaches the caller (spec section 14.3)"
                 ),
             );
-            return;
-        }
-        if parameter.hooks.is_some() {
-            self.refuse(parameter.span(), "a parameter with property hooks is not converted yet");
             return;
         }
 
@@ -133,6 +133,9 @@ impl Converter<'_, '_> {
             {
                 self.edits.insert(first.span().start.offset, "public ");
             }
+            if let Some(list) = &parameter.hooks {
+                return self.hooked_parameter(parameter, list, &union, is_public && setters == Setters::Class, method);
+            }
             let in_readonly_class = self.class.as_ref().is_some_and(|class| class.metadata.flags.is_readonly());
             let accessors =
                 accessors(is_public, readonly.is_some() || in_readonly_class, &parameter.modifiers, setters);
@@ -144,6 +147,36 @@ impl Converter<'_, '_> {
         if let Some(default) = &parameter.default_value {
             self.expression(default.value, Some(&union));
         }
+    }
+
+    /// A promoted parameter with hooks, `list`, as a property whose accessors are its hooks, as one declared in the class
+    /// body is (spec sections 6 and 9), of the type `union`. The constructor's argument and the default are writes
+    /// through the `set` hook in PHP, as a PHP# parameter's `set` runs on them, and PHP writes the default before the
+    /// hooks, where PHP# writes it after the accessors. A public property the class alone sets, `set_by_class`, has a
+    /// `private set`, and the static fields of a hook's `static` locals go before `constructor`.
+    fn hooked_parameter(
+        &mut self,
+        parameter: &FunctionLikeParameter<'_>,
+        list: &PropertyHookList<'_>,
+        union: &TUnion,
+        set_by_class: bool,
+        constructor: Span,
+    ) {
+        let declared =
+            self.class.as_ref().and_then(|class| class.metadata.properties.get(&word(parameter.variable.name)));
+        let Some(declared) = declared else {
+            return self.refuse(parameter.variable.span, "the analysis holds no property of this name");
+        };
+        let variable = &parameter.variable;
+        let hooks = Hooks { list, union, declared, variable, member: constructor };
+        self.hook_list(&hooks, &parameter.modifiers, !declared.flags.is_virtual_property(), set_by_class);
+        let Some(default) = &parameter.default_value else {
+            return;
+        };
+        self.expression(default.value, Some(union));
+        let value = self.render(default.value);
+        self.edits.delete(variable.span.end.offset, default.value.span().end.offset);
+        self.edits.insert(list.right_brace.end.offset, format!(" = {value}"));
     }
 }
 

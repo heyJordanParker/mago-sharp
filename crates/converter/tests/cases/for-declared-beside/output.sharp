@@ -1,0 +1,35 @@
+namespace App;
+
+// A PHP# `let` declares one local and ends at a comma, so a `for` whose initialization declares a local beside others
+// runs each initialization as a statement of its own before the loop, in its order (spec section 17).
+public final class Pairs
+{
+    public int sum(int count)
+    {
+        let total = 0;
+        let index = 0;
+        let last = count - 1;
+        for (; index < last; index++, last--) {
+            total += index + last;
+        }
+
+        return total;
+    }
+
+    // The loop keeps the name a `break` of its body gives it, after the initializations.
+    public int firstNegative(List<List<int>> rows)
+    {
+        let row = 0;
+        let found = -1;
+        outer: for (; row < rows.count(); row++) {
+            for (const value of rows[row]) {
+                if (value < 0) {
+                    found = row;
+                    break outer;
+                }
+            }
+        }
+
+        return found;
+    }
+}

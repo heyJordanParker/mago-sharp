@@ -34,6 +34,14 @@ impl Edits {
         self.edits.push(TextEdit::delete(start..end));
     }
 
+    /// Whether an edit already changes the text between `start` and `end`, or inserts text there or at `start`.
+    pub fn touches(&self, start: u32, end: u32) -> bool {
+        self.edits.iter().any(|edit| {
+            (edit.range.start < end && start < edit.range.end)
+                || (edit.range.is_empty() && start <= edit.range.start && edit.range.start < end)
+        })
+    }
+
     /// The text of `source` between `start` and `end` with every edit inside it applied, which leave the list. An
     /// insert at `end` belongs to what follows, so it stays.
     pub fn render(&mut self, source: &[u8], start: u32, end: u32) -> String {

@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace App;
 
-// PHP# reaches a built-in through the standard library member that runs it, and names a method value on the class
-// or object that has the method (spec section 14.3).
+// PHP# writes a built-in's value as a lambda with the parameters of the function type it lands in, and names a method
+// value on the class or object that has the method (spec sections 14.2 and 14.3).
 final class Values
 {
     /** @param callable(string): int $rule */

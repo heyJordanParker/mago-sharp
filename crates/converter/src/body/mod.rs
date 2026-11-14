@@ -186,6 +186,10 @@ impl<'input> Converter<'input, '_> {
                 if let Expression::Yield(r#yield) = expression.expression {
                     return self.yielded(r#yield);
                 }
+                // A call's result the statement drops.
+                if let Expression::Call(call) = expression.expression {
+                    return self.call(expression.expression, call, false);
+                }
                 if !self.declaration(statement, expression.expression) {
                     self.expression(expression.expression, None);
                 }
@@ -233,16 +237,7 @@ impl<'input> Converter<'input, '_> {
                 "`echo` is removed: output goes through `Console`, which a class receives through its constructor (spec section 8)",
             ),
             Statement::Global(_) => self.refuse(statement.span(), "`global` is removed (spec section 2)"),
-            Statement::Static(r#static) => {
-                self.refuse(
-                    statement.span(),
-                    "a `static` local is not converted yet: its PHP# form is a private static field (spec section 6)",
-                );
-                // The refusal covers each later read of the local, which has no declaration to point at.
-                if let Some(method) = self.method.as_mut() {
-                    method.parameters.extend(r#static.items.iter().map(|item| item.variable().name.to_vec()));
-                }
-            }
+            Statement::Static(r#static) => self.static_locals(statement, r#static),
             Statement::Goto(_) => self.refuse(statement.span(), "`goto` has no PHP# form"),
             Statement::Label(_) => self.refuse(statement.span(), "a `goto` label has no PHP# form"),
             _ => self.refuse(statement.span(), "this statement has no PHP# form in a method"),
@@ -541,7 +536,7 @@ impl<'input> Converter<'input, '_> {
             Expression::Static(keyword) => self.edits.replace(keyword.span, "Self"),
             Expression::Parent(keyword) => self.edits.replace(keyword.span, "super"),
             Expression::Access(access) => self.access(expression, access),
-            Expression::Call(call) => self.call(call),
+            Expression::Call(call) => self.call(expression, call, true),
             Expression::Instantiation(instantiation) => self.instantiation(expression, instantiation, expected),
             Expression::Binary(binary) => self.binary(expression, binary),
             Expression::UnaryPrefix(unary) => self.unary(expression, &unary.operator, unary.operand),
@@ -587,7 +582,7 @@ impl<'input> Converter<'input, '_> {
             }
             Expression::Throw(throw) => self.expression(throw.exception, None),
             Expression::Closure(_) | Expression::ArrowFunction(_) => self.lambda(expression, expected),
-            Expression::PartialApplication(application) => self.method_value(expression, application),
+            Expression::PartialApplication(application) => self.method_value(expression, application, expected),
             Expression::Match(r#match) => self.match_expression(r#match, MatchPlace::Operand),
             Expression::Clone(clone) => self.clone(expression, clone.object),
             Expression::List(list) => self.refuse(expression.span(), locals::unpacked(&list.elements)),
