@@ -287,6 +287,37 @@ fn analyze_warns_on_a_public_member_nothing_outside_its_namespace_uses() {
     assert!(!library.contains("too-wide-member"), "{library}");
 }
 
+/// Spec section 5: a plain PHP attribute class a Composer package installs, marked `#[\Sharp\ReachedByReflection]`,
+/// says its framework reaches the member it marks, as one in the project does, so its `[Listen]` method never warns.
+#[test]
+fn analyze_skips_a_member_whose_vendored_attribute_is_reached_by_reflection() {
+    let hooks = "namespace App.Payments;\n\nimport Acme.Events.Listen;\n\npublic class Hooks\n{\n    [Listen]\n    public void paid() { }\n\n    public void settled() { }\n}\n";
+    let directory = library_workspace("namespace App;\n\nclass Page\n{\n}\n");
+    write(directory.path(), "composer.json", "{\n    \"name\": \"acme/shop\",\n    \"type\": \"project\"\n}\n");
+    write(
+        directory.path(),
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"src\", \"vendor/heyjordanparker\"]\nincludes = [\"vendor\"]\nextensions = [\"php\", \"sharp\"]\n",
+    );
+    write(
+        &directory.path().join("vendor/heyjordanparker/php-sharp-composer"),
+        "library/Sharp/ReachedByReflection.sharp",
+        include_str!("../../composer/library/Sharp/ReachedByReflection.sharp"),
+    );
+    write(directory.path(), "vendor/acme/events/composer.json", "{\n    \"name\": \"acme/events\"\n}\n");
+    write(
+        directory.path(),
+        "vendor/acme/events/src/Listen.php",
+        "<?php\n\nnamespace Acme\\Events;\n\n#[\\Attribute(\\Attribute::TARGET_METHOD)]\n#[\\Sharp\\ReachedByReflection]\nfinal class Listen\n{\n}\n",
+    );
+    write(directory.path(), "src/App/Payments/Hooks.sharp", hooks);
+
+    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(issues_in(&stdout, "src/App/Payments/Hooks.sharp"), ["10:17 too-wide-member"], "{stdout}");
+}
+
 /// A semantic error stops a PHP# file from running, so the analyzer issues its refused code causes add nothing:
 /// each refused line shows its refusal alone, and a PHP file keeps every issue.
 #[test]
