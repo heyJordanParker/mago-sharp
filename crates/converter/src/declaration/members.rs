@@ -20,8 +20,6 @@ use mago_syntax::cst::ClassLikeConstant;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::HookedProperty;
-use mago_syntax::cst::If;
-use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Method as MethodDeclaration;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
@@ -689,10 +687,14 @@ impl Converter<'_, '_> {
         let returning = (!is_constructor).then(|| {
             declared.return_type_metadata.as_ref().map_or_else(get_mixed, |metadata| metadata.type_union.clone())
         });
-        // A method PHP declares no return type for returns `null` where its body runs on past its last statement.
+        // A method PHP declares no return type for returns `null` where its body runs on past its last statement, as the
+        // analysis finds it. A method the analysis didn't check keeps its body, and its proof decides.
+        let reaches_end =
+            self.input.artifacts.method_reaches_end_of_body.get(&(metadata.name, metadata.method_key(name)));
         let gives_null = method.return_type_hint.is_none()
             && !declared.flags.has_yield()
-            && returning.as_ref().is_some_and(|returning| returning.is_mixed() || returning.has_null());
+            && returning.as_ref().is_some_and(|returning| returning.is_mixed() || returning.has_null())
+            && reaches_end == Some(&true);
         match &method.body {
             MethodBody::Concrete(block) => {
                 let resolution = declared.type_resolution_context.clone().unwrap_or_default();
@@ -786,53 +788,16 @@ impl Converter<'_, '_> {
         false
     }
 
-    /// Ends `block`, the body of a method PHP declares no return type for, with `return null;` where PHP runs on past
-    /// its last statement and gives `null`, since a PHP# method returns on every path (spec section 7).
+    /// Ends `block`, the body of a method PHP declares no return type for, which runs on past its last statement and
+    /// gives `null` there, with `return null;`, since a PHP# method returns on every path (spec section 7).
     fn returns_null(&mut self, block: &Block<'_>) {
-        match block.statements.last() {
-            Some(last) if self.runs_on(last) => {
-                let indentation = self.indentation(last.span().start.offset);
-                self.edits.insert(last.span().end.offset, format!("\n{indentation}return null;"));
-            }
-            Some(_) => {}
-            None => {
-                let outer = self.indentation(block.right_brace.start.offset);
-                let opened =
-                    if block.left_brace.end == block.right_brace.start { format!("\n{outer}") } else { String::new() };
-                self.edits.insert(block.right_brace.start.offset, format!("{opened}    return null;\n{outer}"));
-            }
+        if let Some(last) = block.statements.last() {
+            let indentation = self.indentation(last.span().start.offset);
+            return self.edits.insert(last.span().end.offset, format!("\n{indentation}return null;"));
         }
-    }
-
-    /// Whether PHP surely runs on past `statement`: an expression that is no `throw` and that the analysis doesn't type
-    /// `never`, a block whose last statement runs on, an `if` without `endif` that has no `else` or a branch that runs
-    /// on, a `try` whose block or a `catch` runs on, with a `finally` that runs on too, and a `foreach`, which an empty
-    /// iterable leaves at once. A statement of any other kind counts as one that may not, so the body keeps its end as
-    /// it is.
-    fn runs_on(&self, statement: &Statement<'_>) -> bool {
-        let last_runs_on = |block: &Block<'_>| block.statements.last().is_none_or(|last| self.runs_on(last));
-        match statement {
-            Statement::Expression(statement) => {
-                !matches!(statement.expression, Expression::Throw(_))
-                    && !self
-                        .input
-                        .artifacts
-                        .get_expression_type(statement.expression)
-                        .is_some_and(mago_codex::ttype::union::TUnion::is_never)
-            }
-            Statement::Block(block) => last_runs_on(block),
-            Statement::If(If { body: IfBody::Statement(body), .. }) => {
-                body.else_clause.as_ref().is_none_or(|clause| self.runs_on(clause.statement))
-                    || self.runs_on(body.statement)
-                    || body.else_if_clauses.iter().any(|clause| self.runs_on(clause.statement))
-            }
-            Statement::Try(r#try) => {
-                (last_runs_on(&r#try.block) || r#try.catch_clauses.iter().any(|clause| last_runs_on(&clause.block)))
-                    && r#try.finally_clause.as_ref().is_none_or(|finally| last_runs_on(&finally.block))
-            }
-            Statement::Foreach(_) => true,
-            _ => false,
-        }
+        let outer = self.indentation(block.right_brace.start.offset);
+        let opened = if block.left_brace.end == block.right_brace.start { format!("\n{outer}") } else { String::new() };
+        self.edits.insert(block.right_brace.start.offset, format!("{opened}    return null;\n{outer}"));
     }
 
     /// Refuses `method`, which no subclass replaces, when its declared return holds `null` and no `return` of its

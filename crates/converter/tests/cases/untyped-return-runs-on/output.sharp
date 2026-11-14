@@ -36,6 +36,26 @@ public final class Inviter
         return null;
     }
 
+    public Any? countdown(int count)
+    {
+        let left = count;
+        while (left > 0) {
+            left = left - 1;
+        }
+        return null;
+    }
+
+    public Any? pick(string name)
+    {
+        match (name) {
+            'a' => {
+                this.notify(name);
+            },
+            default => {},
+        }
+        return null;
+    }
+
     // A body that returns or throws on every path ends as it is.
     public Any? either(string name)
     {

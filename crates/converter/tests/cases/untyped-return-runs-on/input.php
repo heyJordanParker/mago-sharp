@@ -37,6 +37,23 @@ final class Inviter
         }
     }
 
+    public function countdown(int $count)
+    {
+        $left = $count;
+        while ($left > 0) {
+            $left = $left - 1;
+        }
+    }
+
+    public function pick(string $name)
+    {
+        switch ($name) {
+            case 'a':
+                $this->notify($name);
+                break;
+        }
+    }
+
     // A body that returns or throws on every path ends as it is.
     public function either(string $name)
     {
