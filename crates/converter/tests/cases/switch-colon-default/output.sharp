@@ -1,0 +1,18 @@
+namespace App;
+
+// Cases between `:` and `endswitch` are cases in braces, and a case that joins `default` goes, since `default` covers
+// it (spec section 21).
+public final class Sizes
+{
+    public int size(string kind)
+    {
+        match (kind) {
+            'large' => {
+                return 3;
+            },
+            default => {
+                return 1;
+            },
+        }
+    }
+}

@@ -4,20 +4,21 @@ declare(strict_types=1);
 
 namespace App;
 
-// A PHP `match` with no `default` arm throws where no arm fits, a PHP# pattern takes constants only, where `match (true)`
-// takes a guard, and each arm compares by PHP's `===` (spec sections 19 and 21).
+// A PHP `match` with no `default` arm throws a message PHP's settings shape for a value other than an `int`, an arm on
+// a value that is no constant tests the value again, which may run code, and each arm compares by PHP's `===` (spec
+// sections 19 and 21).
 final class Picker
 {
-    public function strict(int $code): string
+    public function strict(string $code): string
     {
         return match ($code) {
-            200 => 'ok',
+            'ok' => 'fine',
         };
     }
 
-    public function computed(int $code, int $limit): string
+    public function computed(int $limit): string
     {
-        return match ($code) {
+        return match ($this->code()) {
             $limit => 'at the limit',
             default => 'under',
         };
@@ -29,5 +30,10 @@ final class Picker
             200 => 'ok',
             default => 'other',
         };
+    }
+
+    private function code(): int
+    {
+        return 200;
     }
 }

@@ -122,6 +122,18 @@ impl Converter<'_, '_> {
             .into_iter()
             .collect::<Option<_>>()
             .ok_or_else(|| "reads a value this call doesn't pass".to_owned())?;
+        // A member runs the function only for a literal that decides its body as the function's meaning needs.
+        if let Some(fixed) =
+            member.fixed.iter().find(|fixed| !slots.get(fixed.slot).is_some_and(|slot| fixed.holds(slot)))
+        {
+            let position = member.call.arguments.iter().position(|passed| *passed == PhpCallArgument::Slot(fixed.slot));
+            return Err(format!(
+                "runs it only where argument {} is a literal {} `{}`",
+                position.map_or(0, |position| position + 1),
+                if fixed.equal { "equal to" } else { "other than" },
+                String::from_utf8_lossy(&fixed.literal)
+            ));
+        }
 
         for (index, (argument, parameter)) in slots.iter().zip(&method.parameters).enumerate() {
             let declared = parameter.get_type_metadata().map_or_else(get_mixed, |metadata| metadata.type_union.clone());
@@ -169,7 +181,7 @@ impl Converter<'_, '_> {
 }
 
 /// Whether reading `argument` runs nothing: a variable, a literal, a constant or a property read.
-fn runs_nothing(argument: &Expression<'_>) -> bool {
+pub(super) fn runs_nothing(argument: &Expression<'_>) -> bool {
     match argument {
         Expression::Parenthesized(parenthesized) => runs_nothing(parenthesized.expression),
         Expression::Variable(_) | Expression::Literal(_) | Expression::ConstantAccess(_) => true,

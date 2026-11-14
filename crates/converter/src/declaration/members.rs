@@ -523,10 +523,12 @@ impl Converter<'_, '_> {
             return;
         };
         let metadata = class.metadata;
+        // An interface's constant is public and writes no visibility, as its methods do (spec section 22).
         let visibility = match constant.modifiers.iter().find(|modifier| modifier.is_read_visibility()) {
-            Some(Modifier::Protected(_)) => "protected",
-            Some(Modifier::Private(_)) => "private",
-            _ => "public",
+            _ if metadata.kind.is_interface() => "",
+            Some(Modifier::Protected(_)) => "protected ",
+            Some(Modifier::Private(_)) => "private ",
+            _ => "public ",
         };
 
         self.attributes(&constant.attribute_lists);
@@ -535,7 +537,7 @@ impl Converter<'_, '_> {
         let attributes = self.edits.render(self.source, span.start.offset, start);
         // The lowering writes the type into the constant's PHP, which a subclass's constant of the name must then keep.
         let overridable = constant.hint.is_none()
-            && visibility != "private"
+            && visibility != "private "
             && !metadata.flags.is_final()
             && !metadata.kind.is_enum();
         let mut declarations = Vec::new();
@@ -569,7 +571,7 @@ impl Converter<'_, '_> {
             };
             self.expression(item.value, Some(&union));
             let value = self.render(item.value);
-            declarations.push(format!("{attributes}{visibility} const {written} {name} = {value};"));
+            declarations.push(format!("{attributes}{visibility}const {written} {name} = {value};"));
         }
 
         let indentation = self.indentation(span.start.offset);
@@ -603,7 +605,10 @@ impl Converter<'_, '_> {
         if is_text {
             self.edits.replace(method.name.span, "toString");
         } else if name.starts_with(b"__") && !is_constructor {
-            self.refuse(method.name.span, format!("the magic method `{shown}` is not converted yet"));
+            self.refuse(
+                method.name.span,
+                format!("the magic method `{shown}` has no PHP# form: a PHP# method's name never starts with `__`, which PHP keeps for its magic methods, and `__toString` alone is a PHP# method, `toString()` (spec section 18)"),
+            );
             return;
         }
         // A method that replaces another keeps the name of what it replaces.
@@ -653,8 +658,8 @@ impl Converter<'_, '_> {
                 format!("{required}{class_name}"),
             );
         } else {
-            // A return the codex marks `inferred` is inherited from the parent, which is declared. A return taken from
-            // the body declares nothing, so PHP returns any value, and the method returns what its body returns.
+            // A return the codex marks `inferred` is inherited from the parent, which is declared. A return an extension
+            // host takes from the body is the analysis's reading of it, so the method returns what its body returns.
             let inferred = declared.return_from_body.is_some();
             if !inferred
                 && self.narrowed_by_docblock(declared.return_type_metadata.as_ref(), "@return", method.name.span)
@@ -822,9 +827,11 @@ impl Converter<'_, '_> {
                 let closed = class_is_final
                     || has(&method.modifiers, |modifier| matches!(modifier, Modifier::Final(_) | Modifier::Private(_)))
                         .is_some();
+                // A return narrowed past what PHP declares holds for a closed method alone: a subclass may replace an
+                // open one with a method whose PHP return is the wider one, which PHP refuses to link (spec section 22).
                 if let Some(head) = head.as_mut() {
                     if head.untyped {
-                        head.untyped = declared.flags.has_yield() || !self.returns_known(head, gives_null);
+                        head.untyped = declared.flags.has_yield() || !closed || !self.returns_known(head, gives_null);
                     } else if closed && !declared.flags.has_yield() {
                         self.unused_null(method, block, head);
                     }
@@ -839,7 +846,7 @@ impl Converter<'_, '_> {
             if head.untyped && head.inferred {
                 self.refuse(
                     method.name.span,
-                    format!("`{shown}` declares no return, so it returns what its body returns, and a value the body returns has a type no declaration gives, which a PHP# signature names"),
+                    format!("`{shown}` takes its return from its body, as an extension host says, and a PHP# signature names one, which the values its body returns give only for a method no subclass may replace, where each has a type PHP# names (spec section 22)"),
                 );
             } else if head.untyped {
                 self.refuse(
@@ -855,7 +862,7 @@ impl Converter<'_, '_> {
         self.docblock(method.span());
     }
 
-    /// Writes the type `head`'s method returns, in place of the `Any?` or `Object` its declaration gives, as the join of
+    /// Writes the type `head`'s closed method returns, in place of the `Any?` or `Object` its declaration gives, as the join of
     /// the values its body returns, where each is of a type PHP# names and the join names no `Any` or `Object`, and
     /// gives whether it did. The declaration holds each such value, so PHP returns each as the narrower type does. A
     /// body that `gives_null` runs on past its last statement and returns `null` there.

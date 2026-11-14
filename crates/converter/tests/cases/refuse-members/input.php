@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace App;
 
 // A static needs an initial value, a constant's type must be one PHP# writes, a `set` accessor's `value` has the
-// property's type, a property needs a `get`, `__invoke` waits for the language, and a property and a method of one
-// name have no PHP# form (spec sections 6 and 14).
+// property's type, a property needs a `get`, a method's name never starts with `__`, and a property and a method of
+// one name have no PHP# form (spec sections 6, 14 and 18).
 final class Members
 {
     use Greets;

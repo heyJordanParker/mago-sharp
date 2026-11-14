@@ -19,12 +19,14 @@ use mago_codex::metadata::function_like::FunctionLikeKind;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::conditional::TConditional;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by_with_erased_template_arguments;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_composer::ComposerPackage;
+use mago_sharp_bridge::FixedArgument;
 use mago_sharp_bridge::InlineForms;
 use mago_sharp_bridge::PhpCall;
 use mago_sharp_bridge::PhpCallArgument;
@@ -60,6 +62,9 @@ pub struct Member {
     pub call: PhpCall,
     /// How many of its slots it reads in the order a call writes them, the receiver first.
     pub in_order: usize,
+    /// The literal arguments it runs `call` for only, each one that decides a condition of its body, as `replace` runs
+    /// `str_replace` for a text to replace other than `""` only.
+    pub fixed: Vec<FixedArgument>,
 }
 
 /// How a call writes a member: `Class.name(…)`, `receiver.name(…)` for an extension method, or `receiver.name` for an
@@ -99,6 +104,7 @@ impl Library {
                 shape,
                 call: call.clone(),
                 in_order: form.in_order(),
+                fixed: form.fixed().to_vec(),
             });
         }
         for found in members.values_mut() {
@@ -150,8 +156,9 @@ impl Library {
 }
 
 /// How `member` runs `function` with another meaning than PHP's, whatever the call passes: its return holds less than
-/// the function's, a conditional return counted by both branches, so a `false` failure value is no form, or it feeds a
-/// by-reference parameter of the function, but the `ref` receiver of an extension member (spec section 26).
+/// the function's, a conditional return counted by each branch the member's parameters leave open, so a `false`
+/// failure value is no form, or it feeds a by-reference parameter of the function, but the `ref` receiver of an
+/// extension member (spec section 26).
 #[must_use]
 pub fn differs(member: &Member, function: &FunctionLikeMetadata, codebase: &CodebaseMetadata) -> Option<String> {
     let method = codebase.get_method(member.class.as_bytes(), member.name.as_bytes())?;
@@ -159,7 +166,30 @@ pub fn differs(member: &Member, function: &FunctionLikeMetadata, codebase: &Code
         metadata.as_ref().map_or_else(get_mixed, |metadata| metadata.type_union.clone())
     };
     let (theirs, ours) = (returned(&function.return_type_metadata), returned(&method.return_type_metadata));
-    for branch in branches(&theirs) {
+    // A condition on a parameter the member passes one of its own takes the branch that parameter's type decides, as
+    // `str_replace`'s `($subject is string ? string : …)` does for the `string` that `replace` runs on.
+    let decided = |conditional: &TConditional| {
+        let [TAtomic::Variable(variable)] = conditional.subject.types.as_ref() else {
+            return None;
+        };
+        let position = function
+            .parameters
+            .iter()
+            .position(|parameter| parameter.get_name().0.as_bytes() == variable.as_bytes())?;
+        let PhpCallArgument::Slot(slot) = member.call.arguments.get(position)? else {
+            return None;
+        };
+        let declared = &method.parameters.get(*slot)?.get_type_metadata()?.type_union;
+
+        is_contained_by_with_erased_template_arguments(
+            codebase,
+            declared,
+            &conditional.target,
+            &mut ComparisonResult::new(),
+        )
+        .then_some(!conditional.negated)
+    };
+    for branch in branches(&theirs, &decided) {
         if !is_contained_by_with_erased_template_arguments(codebase, &branch, &ours, &mut ComparisonResult::new()) {
             return Some(format!("returns `{}`, where PHP's returns `{}`", ours.get_id(), branch.get_id()));
         }
@@ -283,13 +313,18 @@ pub fn short(name: &str) -> &str {
     name.rsplit('\\').next().unwrap_or(name)
 }
 
-/// Each type `union` may be: a conditional type's two branches, as a return of `($a is int ? int : float)` is
-/// either, and `union` itself otherwise.
-fn branches(union: &TUnion) -> Vec<TUnion> {
+/// Each type `union` may be: the branch of a conditional type that `decided` gives, true for the first, or else both,
+/// as a return of `($a is int ? int : float)` is either, and `union` itself otherwise.
+fn branches(union: &TUnion, decided: &impl Fn(&TConditional) -> Option<bool>) -> Vec<TUnion> {
     match union.types.as_ref() {
-        [TAtomic::Conditional(conditional)] => {
-            branches(&conditional.then).into_iter().chain(branches(&conditional.otherwise)).collect()
-        }
+        [TAtomic::Conditional(conditional)] => match decided(conditional) {
+            Some(true) => branches(&conditional.then, decided),
+            Some(false) => branches(&conditional.otherwise, decided),
+            None => branches(&conditional.then, decided)
+                .into_iter()
+                .chain(branches(&conditional.otherwise, decided))
+                .collect(),
+        },
         _ => vec![union.clone()],
     }
 }

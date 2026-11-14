@@ -22,6 +22,7 @@ use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Conditional;
+use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Hint;
@@ -32,12 +33,14 @@ use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Node;
+use mago_syntax::cst::Pattern;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Return;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_word::Word;
+use xxhash_rust::xxh3::Xxh3;
 
 use super::Lines;
 use super::Lowering;
@@ -94,6 +97,8 @@ pub struct InlineForm {
     key_order: Option<u32>,
     /// The plain PHP function the body calls, when the body is that one call.
     php_call: Option<PhpCall>,
+    /// The arguments the form runs for only, each a literal that decides a condition of the body.
+    fixed: Vec<FixedArgument>,
 }
 
 /// The plain PHP function a form's body is one call of, as `count` is for a `List`'s `count()`, whose body is
@@ -135,6 +140,41 @@ impl PhpCallArgument {
     }
 }
 
+/// An argument a form fixes, which a call passes as a literal that decides a condition of the method's body.
+///
+/// The form runs only for a call that passes a literal in the slot `slot` that equals `literal`, when `equal`, or one
+/// that doesn't, otherwise, as a text to replace other than `""` decides `replace`'s `old != ""`, so the form holds the
+/// branch it takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixedArgument {
+    /// The receiver first for an instance or extension member, then each parameter in declaration order.
+    pub slot: usize,
+    /// The literal, as [`PhpCallArgument::literal`] writes it.
+    pub literal: Vec<u8>,
+    pub equal: bool,
+}
+
+impl FixedArgument {
+    /// Whether `argument` is a literal the form runs for.
+    #[must_use]
+    pub fn holds(&self, argument: &Expression<'_>) -> bool {
+        matches!(argument, Expression::Literal(literal) if matches!(
+            PhpCallArgument::literal(literal),
+            PhpCallArgument::Literal(text) if (text == self.literal) == self.equal
+        ))
+    }
+}
+
+/// What a fold knows of a method's parameters: the literal default of each one a call leaves out, by name, the names
+/// of the rest, whether a comparison of one of the rest with a literal holds, and the arguments the fold fixes so, by
+/// name, as [`FixedArgument`] states them.
+struct Known<'known, 'ast> {
+    defaults: &'known [(&'known [u8], &'known Expression<'ast>)],
+    kept: Vec<&'known [u8]>,
+    holds: bool,
+    fixed: Vec<(Vec<u8>, Vec<u8>, bool)>,
+}
+
 /// The value an inline form's slot takes.
 pub(super) enum InlineReceiver<'value, 'ast> {
     /// A value the form reads where its slot is.
@@ -146,9 +186,31 @@ pub(super) enum InlineReceiver<'value, 'ast> {
 impl InlineForm {
     /// The xxh3-64 of the form's nodes, children and texts, which `Reads::inlined` stores. The root, the slots and
     /// the order follow from the nodes. The nodes carry no line, because each inlined node takes the line of its call.
+    /// The arguments the form fixes decide which calls it inlines and follow from no node, so they count too, in the
+    /// little-endian bytes the unit's own fingerprints read, which a cache written on another machine reads alike.
     #[must_use]
+    #[allow(clippy::little_endian_bytes)]
     pub fn fingerprint(&self) -> u64 {
-        form_fingerprint(&self.nodes, &self.children, &self.texts)
+        let nodes = form_fingerprint(&self.nodes, &self.children, &self.texts);
+        if self.fixed.is_empty() {
+            return nodes;
+        }
+        let mut hasher = Xxh3::new();
+        hasher.update(&nodes.to_le_bytes());
+        for fixed in &self.fixed {
+            hasher.update(&fixed.slot.to_le_bytes());
+            hasher.update(&fixed.literal.len().to_le_bytes());
+            hasher.update(&fixed.literal);
+            hasher.update(&[u8::from(fixed.equal)]);
+        }
+
+        hasher.digest()
+    }
+
+    /// The arguments the form runs for only, each a literal that decides a condition of the body.
+    #[must_use]
+    pub fn fixed(&self) -> &[FixedArgument] {
+        &self.fixed
     }
 
     /// The plain PHP function the form's body is one call of, and what it passes it.
@@ -225,7 +287,7 @@ pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> 
                     if method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_))) =>
                 {
                     Lowering::new(&lines, checked.names(), checked.types())
-                        .method_form(name, method, None, &[])
+                        .method_form(name, method, None, &[], true)
                         .map(|form| (key(name, method.name.value), form))
                 }
                 _ => None,
@@ -261,6 +323,7 @@ pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> 
                                     &[receiver],
                                     Body::Expression(property.body.expression),
                                     true,
+                                    Vec::new(),
                                 );
                                 forms.extend(
                                     form.filter(|_| public(property.variable.name))
@@ -288,7 +351,9 @@ pub(crate) fn folded_key(class: &[u8], method: &[u8], arity: usize) -> Vec<u8> {
 /// The forms of `class`'s method `method`, each with its name: the form of a call that passes every argument, and the
 /// form of each call that leaves out some of the last parameters whose default is a literal. Such a call takes those
 /// defaults, so its form folds every branch they decide, as `startsWith(prefix)` leaves out `ignoreCase` and runs
-/// `str_starts_with` alone.
+/// `str_starts_with` alone. A form folds each comparison of a parameter the call passes with a literal as it holds,
+/// or else as it fails, and runs only for a call whose literal decides it so, as `replace(" ", "-")` runs
+/// `str_replace` where `old != ""` holds.
 fn method_forms<'lowering, 'arena, F>(
     lowering: &F,
     class: &[u8],
@@ -310,7 +375,10 @@ where
 
     (0..=defaults.len())
         .filter_map(|omitted| {
-            let form = lowering().method_form(class, method, receiver, &defaults[defaults.len() - omitted..])?;
+            let defaults = &defaults[defaults.len() - omitted..];
+            let form = lowering()
+                .method_form(class, method, receiver, defaults, true)
+                .or_else(|| lowering().method_form(class, method, receiver, defaults, false))?;
             let name = if omitted == 0 {
                 key(class, method.name.value)
             } else {
@@ -320,6 +388,18 @@ where
             Some((name, form))
         })
         .collect()
+}
+
+/// The name and the literal a comparison of `lhs` with `rhs` holds, on either side.
+fn name_and_literal<'value, 'ast>(
+    lhs: &'value Expression<'ast>,
+    rhs: &'value Expression<'ast>,
+) -> Option<(&'value ConstantAccess<'ast>, &'value Literal<'ast>)> {
+    match (lhs, rhs) {
+        (Expression::ConstantAccess(name), Expression::Literal(literal))
+        | (Expression::Literal(literal), Expression::ConstantAccess(name)) => Some((name, literal)),
+        _ => None,
+    }
 }
 
 /// The default of `parameter` when it is a literal.
@@ -354,29 +434,38 @@ impl Lowering<'_, '_> {
     /// expression body is a call, whose value no caller reads. A constructor, which declares no return type, has none.
     ///
     /// A call that leaves out the last parameters takes their literal defaults, `defaults` by name, so the body is what
-    /// remains once every branch they decide is folded, and the form has no slot for them.
+    /// remains once every branch they decide is folded, and the form has no slot for them. A condition that compares
+    /// a parameter the call passes with a literal folds as it `holds`, and the form runs only for a call whose literal
+    /// argument decides it so, as [`FixedArgument`] states.
     fn method_form(
         self,
         class: &[u8],
         method: &Method,
         receiver: Option<&FunctionLikeParameter>,
         defaults: &[(&[u8], &Expression)],
+        holds: bool,
     ) -> Option<InlineForm> {
         let parameters: Vec<&FunctionLikeParameter> =
             receiver.into_iter().chain(&method.parameter_list.parameters).collect();
         let kept = parameters.len() - defaults.len();
+        let mut known = Known {
+            defaults,
+            kept: parameters[..kept].iter().map(|parameter| parameter.variable.name).collect(),
+            holds,
+            fixed: Vec::new(),
+        };
         let is_void = method.return_type_hint.as_ref().is_some_and(|hint| matches!(hint.hint, Hint::Void(_)));
         let body = match &method.body {
             MethodBody::Expression(body) if method.returns_value() || is_void => {
-                Body::Expression(self.folded(body.expression, defaults))
+                Body::Expression(self.folded(body.expression, &mut known))
             }
             MethodBody::Concrete(block) => {
                 // The body's first statement after the fold is the `return` that runs, and no statement after it does.
                 let mut statements = Vec::new();
-                self.folded_statements(block.statements.iter(), defaults, &mut statements);
+                self.folded_statements(block.statements.iter(), &mut known, &mut statements);
                 match statements.first() {
                     Some(Statement::Return(Return { value: Some(value), .. })) => {
-                        Body::Expression(self.folded(value, defaults))
+                        Body::Expression(self.folded(value, &mut known))
                     }
                     _ => return None,
                 }
@@ -391,14 +480,15 @@ impl Lowering<'_, '_> {
             _ => return None,
         };
 
-        self.form(class, method.name.value, &parameters[..kept], body, receiver.is_some())
+        let fixed = known.fixed;
+        self.form(class, method.name.value, &parameters[..kept], body, receiver.is_some(), fixed)
     }
 
-    /// `expression` with each `?:` whose condition `defaults` decide folded to the branch it takes.
+    /// `expression` with each `?:` whose condition `known` decides folded to the branch it takes.
     fn folded<'body, 'ast>(
         &self,
         mut expression: &'body Expression<'ast>,
-        defaults: &[(&[u8], &Expression)],
+        known: &mut Known,
     ) -> &'body Expression<'ast> {
         loop {
             expression = match expression {
@@ -408,7 +498,7 @@ impl Lowering<'_, '_> {
                     parenthesized.expression
                 }
                 Expression::Conditional(Conditional { condition, then: Some(then), r#else, .. }) => {
-                    match self.decided(condition, defaults) {
+                    match self.decided(condition, known) {
                         Some(true) => then,
                         Some(false) => r#else,
                         None => return expression,
@@ -419,12 +509,12 @@ impl Lowering<'_, '_> {
         }
     }
 
-    /// Appends `statements` to `folded`, each `if` whose condition `defaults` decide replaced by the statements of the
+    /// Appends `statements` to `folded`, each `if` whose condition `known` decides replaced by the statements of the
     /// branch it takes. PHP# has no `elseif`: its `else if` is an `else` that holds an `if`, which this folds in turn.
     fn folded_statements<'body, 'ast>(
         &self,
         statements: impl IntoIterator<Item = &'body Statement<'ast>>,
-        defaults: &[(&[u8], &Expression)],
+        known: &mut Known,
         folded: &mut Vec<&'body Statement<'ast>>,
     ) where
         'ast: 'body,
@@ -434,37 +524,44 @@ impl Lowering<'_, '_> {
                 folded.push(statement);
                 continue;
             };
-            let (IfBody::Statement(body), Some(taken)) = (&r#if.body, self.decided(r#if.condition, defaults)) else {
+            let IfBody::Statement(body) = &r#if.body else {
+                folded.push(statement);
+                continue;
+            };
+            let Some(taken) = self.decided(r#if.condition, known) else {
                 folded.push(statement);
                 continue;
             };
             let branch =
                 if taken { Some(body.statement) } else { body.else_clause.as_ref().map(|clause| clause.statement) };
             match branch {
-                Some(Statement::Block(block)) => self.folded_statements(block.statements.iter(), defaults, folded),
-                Some(branch) => self.folded_statements([branch], defaults, folded),
+                Some(Statement::Block(block)) => self.folded_statements(block.statements.iter(), known, folded),
+                Some(branch) => self.folded_statements([branch], known, folded),
                 None => {}
             }
         }
     }
 
-    /// Whether `condition` holds when each parameter `defaults` names holds its default: a `bool` parameter itself,
-    /// `!`, and `==`, `===`, `!=` or `!==` between a parameter and a literal. None when it reads anything else.
-    fn decided(&self, condition: &Expression, defaults: &[(&[u8], &Expression)]) -> Option<bool> {
+    /// Whether `condition` holds when each parameter `known` gives a default holds it: a `bool` parameter itself, `!`,
+    /// `==`, `===`, `!=` or `!==` between a parameter and a literal, and `is` of a type that holds no `null` on a
+    /// parameter whose default is `null`. A comparison of a parameter the call passes with a literal holds as `known`
+    /// says, and `known` fixes the call's argument to a literal that decides it so. None when it reads anything else.
+    fn decided(&self, condition: &Expression, known: &mut Known) -> Option<bool> {
         match condition {
-            Expression::Parenthesized(parenthesized) => self.decided(parenthesized.expression, defaults),
+            Expression::Parenthesized(parenthesized) => self.decided(parenthesized.expression, known),
             Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Not(_), operand }) => {
-                self.decided(operand, defaults).map(|holds| !holds)
+                self.decided(operand, known).map(|holds| !holds)
             }
             Expression::Binary(Binary { lhs, operator, rhs }) => {
                 let equal = matches!(operator, BinaryOperator::Equal(_) | BinaryOperator::Identical(_));
                 if !equal && !matches!(operator, BinaryOperator::NotEqual(_) | BinaryOperator::NotIdentical(_)) {
                     return None;
                 }
-                let (default, literal) = match (self.default_of(lhs, defaults), self.default_of(rhs, defaults)) {
+                let (default, literal) = match (self.default_of(lhs, known), self.default_of(rhs, known)) {
                     (Some(default), None) => (default, *rhs),
                     (None, Some(default)) => (default, *lhs),
-                    _ => return None,
+                    (None, None) => return self.fixed(lhs, rhs, equal, known),
+                    (Some(_), Some(_)) => return None,
                 };
                 let (Expression::Literal(default), Expression::Literal(literal)) = (default, literal) else {
                     return None;
@@ -472,28 +569,63 @@ impl Lowering<'_, '_> {
 
                 Some((PhpCallArgument::literal(default) == PhpCallArgument::literal(literal)) == equal)
             }
+            // `null` is no value of a type that holds no `null`, as `limit is int count` fails for `int? limit = null`.
+            Expression::Is(is) => match (self.default_of(is.value, known)?, is.pattern) {
+                (Expression::Literal(Literal::Null(_)), Pattern::Type(pattern))
+                    if matches!(
+                        pattern.hint,
+                        Hint::Integer(_)
+                            | Hint::String(_)
+                            | Hint::Float(_)
+                            | Hint::Bool(_)
+                            | Hint::Array(_)
+                            | Hint::Object(_)
+                    ) =>
+                {
+                    Some(false)
+                }
+                _ => None,
+            },
             // A condition is a `bool`, whose literal default is `true` or `false`.
-            value => Some(matches!(self.default_of(value, defaults)?, Expression::Literal(Literal::True(_)))),
+            value => Some(matches!(self.default_of(value, known)?, Expression::Literal(Literal::True(_)))),
         }
     }
 
-    /// The default of the parameter `expression` reads, when `defaults` names it. A name in a method is its parameter
+    /// Decides `lhs == rhs`, or `lhs != rhs` when not `equal`, where one side reads a parameter the call passes and the
+    /// other is a literal, as `known` says such a comparison does, and fixes the call's argument to a literal that
+    /// decides it so. None for any other operands.
+    fn fixed(&self, lhs: &Expression, rhs: &Expression, equal: bool, known: &mut Known) -> Option<bool> {
+        let (name, literal) = name_and_literal(lhs, rhs)?;
+        let parameter = name.name.value();
+        if !matches!(self.names.binding(&name.name), Some(Binding::Local(_))) || !known.kept.contains(&parameter) {
+            return None;
+        }
+        let PhpCallArgument::Literal(literal) = PhpCallArgument::literal(literal) else {
+            unreachable!("a literal is passed as a literal");
+        };
+        known.fixed.push((parameter.to_vec(), literal, equal == known.holds));
+
+        Some(known.holds)
+    }
+
+    /// The default of the parameter `expression` reads, when `known` gives one. A name in a method is its parameter
     /// whenever one is named so, since no block inside redeclares a name, spec section 3.
     fn default_of<'default, 'ast>(
         &self,
         expression: &Expression,
-        defaults: &[(&[u8], &'default Expression<'ast>)],
+        known: &Known<'default, 'ast>,
     ) -> Option<&'default Expression<'ast>> {
         let Expression::ConstantAccess(name) = expression else {
             return None;
         };
 
-        defaults.iter().find(|(parameter, _)| *parameter == name.name.value()).map(|(_, default)| *default)
+        known.defaults.iter().find(|(parameter, _)| *parameter == name.name.value()).map(|(_, default)| *default)
     }
 
     /// The form of `class`'s member `name`, which takes `parameters`, the receiver first for an `extension` member, and
     /// runs `body`, lowered into this empty lowering, when the inlining rule takes it: the body's steps are ones the
-    /// rule takes.
+    /// rule takes. The form runs only for a call that passes the arguments `fixed` names by parameter, as
+    /// [`FixedArgument`] states.
     fn form(
         mut self,
         class: &[u8],
@@ -501,6 +633,7 @@ impl Lowering<'_, '_> {
         parameters: &[&FunctionLikeParameter],
         body: Body,
         extension: bool,
+        fixed: Vec<(Vec<u8>, Vec<u8>, bool)>,
     ) -> Option<InlineForm> {
         // A form runs without the method's statements before its body, which make each `Map` and `Set` a parameter
         // holds the object. An extension's receiver needs none: a PHP# caller's is the object already, and the call
@@ -523,6 +656,14 @@ impl Lowering<'_, '_> {
             .into_iter()
             .chain(parameters.iter().map(|parameter| parameter.variable.name))
             .collect();
+        let fixed = fixed
+            .into_iter()
+            .map(|(parameter, literal, equal)| {
+                let slot = names.iter().position(|name| *name == parameter.as_slice())?;
+
+                Some(FixedArgument { slot, literal, equal })
+            })
+            .collect::<Option<Vec<_>>>()?;
         let (root, in_order) = match body {
             Body::Expression(expression) => {
                 let mut steps = Vec::new();
@@ -596,6 +737,7 @@ impl Lowering<'_, '_> {
             result_type,
             key_order,
             php_call,
+            fixed,
         })
     }
 
@@ -765,6 +907,13 @@ impl Lowering<'_, '_> {
             values.push(InlineReceiver::Expression(argument.value));
         }
         let form = self.types.inline_form_passing(declaration, values.len())?;
+        // A form that fixes an argument folded the branch its literal takes, which another value may not take.
+        let fixes = form.fixed.iter().all(|fixed| {
+            matches!(values.get(fixed.slot), Some(InlineReceiver::Expression(argument)) if fixed.holds(argument))
+        });
+        if !fixes {
+            return None;
+        }
         // An argument the call leaves out is the parameter's default, which the form holds when it is a literal.
         let defaults: Vec<u32> =
             form.defaults.get(values.len()..).unwrap_or_default().iter().copied().collect::<Option<_>>()?;
@@ -796,13 +945,14 @@ impl Lowering<'_, '_> {
 
     /// The member `declaration` an operation runs, as `list[i] = v` runs a `List`'s `set`, with `values` lowered
     /// already in its slots, in order, as the member's inline form on `line`. None when the member has no form, or one
-    /// that reads its slots out of order or takes what a call gives.
+    /// that reads its slots out of order, takes what a call gives, or fixes an argument, which a lowered value is not.
     pub(super) fn inlined_operation(&mut self, declaration: &Declaration, values: &[u32], line: u32) -> Option<u32> {
         let form = self.types.inline_form(declaration)?;
         if values.len() != form.slots.len()
             || form.in_order != form.slots.len()
             || form.result_type.is_some()
             || form.key_order.is_some()
+            || !form.fixed.is_empty()
         {
             return None;
         }

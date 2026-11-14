@@ -26,6 +26,8 @@ use mago_syntax::cst::While;
 use mago_syntax::walker::MutWalker;
 
 use super::Kind;
+use super::builtins::runs_nothing;
+use super::is_primary;
 use super::kinds;
 use super::operators::identity;
 use crate::Converter;
@@ -33,33 +35,53 @@ use crate::Converter;
 impl Converter<'_, '_> {
     /// `switch` as a `match` statement with block arms, when no case falls through into the next: each case's
     /// statements end in `break`, `return` or `throw`, or the `switch` ends. A case with no statements of its own joins
-    /// the next case's arm with `or`, and a `switch` without `default` gains an empty one, as PHP runs nothing where no
-    /// case fits. PHP compares a case with `==`, which a constant pattern keeps for a constant of the value's own
-    /// scalar type, but for a numeric string, which `==` compares as a number, and `null` (spec sections 19 and 21).
+    /// the next case's arm with `or`, and one that joins `default` goes, since `default` covers it. A `switch` without
+    /// `default` gains an empty one, as PHP runs nothing where no case fits. PHP compares a case with `==`, which a
+    /// constant pattern keeps for a constant of the value's own scalar type, but for a numeric string, which `==`
+    /// compares as a number, and `null` (spec sections 19 and 21). Cases between `:` and `endswitch` are cases in
+    /// braces.
     pub(super) fn switch_statement(&mut self, statement: &Statement<'_>, switch: &Switch<'_>) {
-        let SwitchBody::BraceDelimited(body) = &switch.body else {
-            return self.refuse(
-                statement.span(),
-                "a `switch` with `:` and `endswitch` is not converted yet: the converter rewrites cases in braces only",
-            );
-        };
         let subject = switch.expression;
         if self.untyped(subject, "a `switch`") {
             return;
         }
+        let (cases, end) = match &switch.body {
+            SwitchBody::BraceDelimited(body) => (&body.cases, body.right_brace.start.offset),
+            SwitchBody::ColonDelimited(body) => {
+                self.edits.replace(body.colon, " {");
+                self.edits.replace(body.end_switch.span.join(body.terminator.span()), "}");
+                (&body.cases, body.end_switch.span.start.offset)
+            }
+        };
         self.edits.replace(switch.switch.span, "match");
 
-        let count = body.cases.len();
+        let count = cases.len();
         let mut has_default = false;
         // The end of a case with no statements of its own, which joins the next case's arm.
         let mut joined: Option<u32> = None;
         // The constants of the arm being read, which become its patterns once the arm converts.
         let mut constants = Vec::new();
-        for (index, case) in body.cases.iter().enumerate() {
+        for (index, case) in cases.iter().enumerate() {
             let is_last = index + 1 == count;
             let indentation = self.indentation(case.span().start.offset);
             let (separator, statements) = match case {
                 SwitchCase::Expression(case) => {
+                    // A case with no statements that joins `default`, through more such cases, is one `default` covers.
+                    // Its value goes with it, so each value of the run is one that runs nothing.
+                    let rest = &cases.as_slice()[index + 1..];
+                    let run = rest.iter().take_while(
+                        |later| matches!(later, SwitchCase::Expression(later) if later.statements.is_empty()),
+                    );
+                    let covered = case.statements.is_empty()
+                        && runs_nothing(case.expression)
+                        && run.clone().all(
+                            |later| matches!(later, SwitchCase::Expression(later) if runs_nothing(later.expression)),
+                        )
+                        && matches!(rest.get(run.count()), Some(SwitchCase::Default(_)));
+                    if covered && let Some(next) = rest.first() {
+                        self.edits.delete(case.span().start.offset, next.span().start.offset);
+                        continue;
+                    }
                     if let Err(reason) = self.loose_case(subject, case.expression) {
                         return self.refuse(case.expression.span(), reason);
                     }
@@ -78,7 +100,7 @@ impl Converter<'_, '_> {
                     if joined.is_some() {
                         return self.refuse(
                             case.default.span,
-                            "a `case` that joins `default` is not converted yet: a PHP# `default` arm stands alone, and the converter doesn't drop the `case` it covers",
+                            "a `case` that joins `default` with a value that runs code has no PHP# form: a PHP# `default` arm stands alone, and PHP runs the value before `default` runs (spec section 21)",
                         );
                     }
                     has_default = true;
@@ -97,7 +119,7 @@ impl Converter<'_, '_> {
         }
         if !has_default {
             let indentation = self.indentation(statement.span().start.offset);
-            let line = body.right_brace.start.offset - u32::try_from(indentation.len()).unwrap_or(0);
+            let line = end - u32::try_from(indentation.len()).unwrap_or(0);
             self.edits.insert(line, format!("{indentation}    default => {{}},\n"));
         }
     }
@@ -200,27 +222,41 @@ impl Converter<'_, '_> {
 
         true
     }
-    /// `match`, whose arms take blocks when it stands as a statement, as a PHP# `match` statement's do.
+    /// `match`, whose arms take blocks when it stands as a statement, as a PHP# `match` statement's do. One on an `int`
+    /// with no `default` arm gains the one that throws PHP's `UnhandledMatchError`, whose message holds the `int`.
     pub(super) fn match_expression(&mut self, r#match: &Match<'_>, place: MatchPlace) {
         let statement = place == MatchPlace::Statement;
         let subject = r#match.expression;
-        if !r#match.arms.iter().any(MatchArm::is_default) && !self.is(subject, &[Kind::Enum]) {
+        let unhandled = !r#match.arms.iter().any(MatchArm::is_default) && !self.is(subject, &[Kind::Enum]);
+        if unhandled {
             let shown = self.shown(subject);
-            return self.refuse(
-                r#match.r#match.span,
-                format!("a `match` on `{shown}` with no `default` arm is not converted yet: PHP throws `UnhandledMatchError` where no arm fits, and a PHP# `match` on a value that is no enum has a `default` arm (spec section 21)"),
-            );
+            if !self.is(subject, &[Kind::Int]) {
+                return self.refuse(
+                    r#match.r#match.span,
+                    format!("a `match` on `{shown}` with no `default` arm has no PHP# form: PHP throws `UnhandledMatchError` where no arm fits, with a message that quotes a value other than an `int` as the `zend.exception_string_param_max_len` setting cuts it, and a PHP# `match` on a value that is no enum has a `default` arm (spec section 21)"),
+                );
+            }
+            if !runs_nothing(subject) {
+                let read = String::from_utf8_lossy(self.text(subject.span())).into_owned();
+                return self.refuse(
+                    r#match.r#match.span,
+                    format!("a `match` on `{shown}` with no `default` arm has no PHP# form: its `default` arm throws PHP's `UnhandledMatchError`, whose message reads `{read}` again, which runs code (spec section 21)"),
+                );
+            }
         }
 
         let guarded = r#match
             .arms
             .iter()
             .any(|arm| matches!(arm, MatchArm::Expression(arm) if arm.conditions.iter().any(|condition| !is_constant(condition))));
-        if guarded && matches!(subject, Expression::Literal(Literal::True(_))) {
+        if guarded {
             return self.match_true(r#match, place);
         }
 
         self.expression(subject, None);
+        if unhandled {
+            self.unhandled_arm(r#match, subject, statement);
+        }
         for arm in r#match.arms.iter() {
             let value = match arm {
                 MatchArm::Expression(arm) => {
@@ -256,13 +292,54 @@ impl Converter<'_, '_> {
         }
     }
 
+    /// Adds to `r#match`, a `match` on the `int` `subject` with no `default` arm, the one PHP runs where no arm fits,
+    /// which throws `UnhandledMatchError` with PHP's message, as `Unhandled match case 7`. It reads `subject` again, as
+    /// a block where the `match` is a `statement`, and goes on the line after the last arm, or after it on its line.
+    fn unhandled_arm(&mut self, r#match: &Match<'_>, subject: &Expression<'_>, statement: bool) {
+        let Some(last) = r#match.arms.last() else {
+            return;
+        };
+        // Rendering takes the subject's edits, so its text goes back in their place.
+        let value = self.render(subject);
+        self.edits.replace(subject.span(), value.clone());
+        let thrown = format!("throw new UnhandledMatchError(`Unhandled match case ${{{value}}}`)");
+        let arm = if statement { format!("default => {{ {thrown}; }}") } else { format!("default => {thrown}") };
+        let trailing = r#match.arms.tokens.len() == r#match.arms.len();
+        let end = last.span().end.offset;
+        let after = r#match.arms.tokens.last().filter(|_| trailing).map_or(end, |comma| comma.start.offset + 1);
+        let on_own_line = self.source[after as usize..r#match.right_brace.start.offset as usize].contains(&b'\n');
+        let comma = if trailing { "" } else { "," };
+        let text = if on_own_line {
+            format!("{comma}\n{}{arm}", self.indentation(last.span().start.offset))
+        } else {
+            format!("{comma} {arm}")
+        };
+        self.edits.insert(after, text);
+    }
+
     /// `match (true)`, which runs the arm of the first condition that is `true`, as a chain of ternaries, `a ? x : b ? y
     /// : z`, or as `if … else if … else` where it stands as a statement (spec section 21). PHP compares each condition
     /// with `true` by `===`, which holds for a `bool` just when it is `true`, and tries them in order, as the chain does.
-    /// The `match` has a `default` arm, which ends the chain. The chain takes parentheses where an operator around it
-    /// would bind tighter than `?:`, as `match (true) { … } + $extra` is `(express ? 5 : 0) + extra`.
+    /// The chain ends in the `default` arm, or in PHP's `UnhandledMatchError` for a `match` on an `int` with none. The
+    /// chain takes parentheses where an operator around it would bind tighter than `?:`, as `match (true) { … } +
+    /// $extra` is `(express ? 5 : 0) + extra`.
+    ///
+    /// A `match` on another value with an arm on a value that is no constant, which no pattern takes, is the same
+    /// chain of `==` tests, as `match ($code) { $limit => … }` is `code == limit ? … : …`, where `==` is PHP's `===`
+    /// for the two values and reading the value again runs nothing (spec section 21).
     fn match_true(&mut self, r#match: &Match<'_>, place: MatchPlace) {
         let statement = place == MatchPlace::Statement;
+        let subject = r#match.expression;
+        let compared = !matches!(subject, Expression::Literal(Literal::True(_)));
+        if compared && !runs_nothing(subject) {
+            let read = String::from_utf8_lossy(self.text(subject.span())).into_owned();
+            return self.refuse(
+                r#match.r#match.span,
+                format!("a `match` on `{read}` with an arm on a value that is no constant has no PHP# form: a PHP# pattern takes types and constants only, and testing each arm with `==` reads `{read}` again, which runs code (spec section 21)"),
+            );
+        }
+        self.expression(subject, None);
+        let subject_text = self.render(subject);
         let mut arms: Vec<(Option<String>, String)> = Vec::new();
         for arm in r#match.arms.iter() {
             let (conditions, value) = match arm {
@@ -273,6 +350,20 @@ impl Converter<'_, '_> {
                 Some(conditions) => {
                     let mut tests = Vec::new();
                     for condition in conditions.iter() {
+                        if compared {
+                            if !matches!(identity(self.type_of(subject), self.type_of(condition)), Ok(true)) {
+                                let (compared, constant) = (self.shown(subject), self.shown(condition));
+                                return self.refuse(
+                                    condition.span(),
+                                    format!("a `match` arm compares `{compared}` with `{constant}` by PHP's `===`, which PHP#'s `==` gives only between scalars of a type they share, with no `int` beside a `float`, enums, or `null` (spec sections 19 and 21)"),
+                                );
+                            }
+                            self.expression(condition, None);
+                            let rendered = self.render(condition);
+                            let operand = if is_primary(condition) { rendered } else { format!("({rendered})") };
+                            tests.push(format!("{subject_text} == {operand}"));
+                            continue;
+                        }
                         if !self.is(condition, &[Kind::Bool]) {
                             let shown = self.shown(condition);
                             return self.refuse(
@@ -295,11 +386,12 @@ impl Converter<'_, '_> {
             // A statement's arm is a statement of its own, where nothing binds around it.
             arms.push((test, if statement { rendered } else { grouped(value, rendered) }));
         }
-        let Some(default) = arms.iter().position(|(test, _)| test.is_none()) else {
-            return;
+        // The arms after `default` never run, as PHP's `default` runs only when no arm fits. A `match` with none is on an
+        // `int`, whose value PHP's message holds.
+        let otherwise = match arms.iter().position(|(test, _)| test.is_none()) {
+            Some(default) => arms.remove(default).1,
+            None => format!("throw new UnhandledMatchError(`Unhandled match case ${{{subject_text}}}`)"),
         };
-        // The arms after `default` never run, as PHP's `default` runs only when no arm fits.
-        let (_, otherwise) = arms.remove(default);
         let tested: Vec<(String, String)> =
             arms.into_iter().filter_map(|(test, value)| test.map(|test| (test, value))).collect();
         let indentation = self.indentation(r#match.span().start.offset);
@@ -322,7 +414,7 @@ impl Converter<'_, '_> {
         if !is_constant(condition) {
             return self.refuse(
                 condition.span(),
-                "a `match` arm on a value that is no constant is not converted yet: a PHP# pattern takes types and constants only (spec section 21)",
+                "a `switch` case on a value that is no constant is not converted yet: the converter writes a `switch` as a `match`, whose pattern takes types and constants only (spec section 21)",
             );
         }
         if !matches!(identity(self.type_of(subject), self.type_of(condition)), Ok(true)) {

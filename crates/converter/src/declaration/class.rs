@@ -48,20 +48,13 @@ impl<'input> Converter<'input, '_> {
             }
         }
         self.parents(metadata, None, class.extends.as_ref(), class.implements.as_ref());
-        // A plain PHP trait the class uses joins the header, after the base class and the interfaces (spec section 22).
-        let traits = self.traits(metadata, &class.members);
-        if !traits.is_empty() {
-            let last = class
-                .implements
-                .as_ref()
-                .and_then(|implements| implements.types.last())
-                .or_else(|| class.extends.as_ref().and_then(|extends| extends.types.last()));
-            let (end, opening) = match last {
-                Some(parent) => (parent.span().end.offset, ", "),
-                None => (class.name.span.end.offset, " : "),
-            };
-            self.edits.insert(end, format!("{opening}{}", traits.join(", ")));
-        }
+        let last = class
+            .implements
+            .as_ref()
+            .and_then(|implements| implements.types.last())
+            .or_else(|| class.extends.as_ref().and_then(|extends| extends.types.last()))
+            .map(|parent| parent.span().end.offset);
+        self.header_traits(metadata, &class.members, last, class.name.span.end.offset);
         self.docblock(class.span());
 
         let is_final = has(&class.modifiers, |modifier| matches!(modifier, Modifier::Final(_))).is_some();
@@ -90,6 +83,13 @@ impl<'input> Converter<'input, '_> {
         self.header(enumeration.r#enum.span.start.offset, metadata, &enumeration.name);
         let backing = enumeration.backing_type_hint.as_ref().map(|backing| backing.hint.span().end.offset);
         self.parents(metadata, backing, None, enumeration.implements.as_ref());
+        let last = enumeration
+            .implements
+            .as_ref()
+            .and_then(|implements| implements.types.last())
+            .map(|parent| parent.span().end.offset)
+            .or(backing);
+        self.header_traits(metadata, &enumeration.members, last, enumeration.name.span.end.offset);
         self.docblock(enumeration.span());
         self.members(metadata, &enumeration.name, true, Vec::new(), &enumeration.members);
     }
@@ -170,6 +170,26 @@ impl<'input> Converter<'input, '_> {
         self.edits.replace(identifier.span(), written);
     }
 
+    /// Each plain PHP trait `members` uses joins the header, after its base class, backing type and interfaces, the last
+    /// of which ends at `last`, or after the name, which ends at `name` (spec section 22).
+    fn header_traits(
+        &mut self,
+        metadata: &ClassLikeMetadata,
+        members: &Sequence<'_, ClassLikeMember<'_>>,
+        last: Option<u32>,
+        name: u32,
+    ) {
+        let traits = self.traits(metadata, members);
+        if traits.is_empty() {
+            return;
+        }
+        let (end, opening) = match last {
+            Some(end) => (end, ", "),
+            None => (name, " : "),
+        };
+        self.edits.insert(end, format!("{opening}{}", traits.join(", ")));
+    }
+
     /// Each trait `members` uses, with the type arguments `@use` gives it, as the header writes it, each `use` line
     /// leaving the body. A `use` with `insteadof` or `as` has no PHP# form.
     fn traits(&mut self, metadata: &ClassLikeMetadata, members: &Sequence<'_, ClassLikeMember<'_>>) -> Vec<String> {
@@ -235,9 +255,6 @@ impl<'input> Converter<'input, '_> {
                 ClassLikeMember::Method(method) => self.method(method),
                 ClassLikeMember::Property(Property::Plain(property)) => self.property(property),
                 ClassLikeMember::Property(Property::Hooked(property)) => self.hooked_property(property),
-                ClassLikeMember::Constant(_) if metadata.kind.is_interface() => {
-                    self.refuse(member.span(), "a constant of an interface is not converted yet");
-                }
                 ClassLikeMember::Constant(constant) => self.class_constant(constant),
                 ClassLikeMember::EnumCase(case) => {
                     let name = case.item.name();
@@ -248,11 +265,8 @@ impl<'input> Converter<'input, '_> {
                         self.expression(item.value, None);
                     }
                 }
-                // A class's traits join its header, which `traits` writes.
-                ClassLikeMember::TraitUse(_) if metadata.kind.is_class() => {}
-                ClassLikeMember::TraitUse(_) => {
-                    self.refuse(member.span(), "a trait an enum uses is not converted yet");
-                }
+                // A class's and an enum's traits join the header, which `header_traits` writes.
+                ClassLikeMember::TraitUse(_) => {}
                 _ => self.refuse(member.span(), "this member has no PHP# form"),
             }
         }

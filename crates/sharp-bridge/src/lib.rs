@@ -20,6 +20,7 @@ pub use kind::sharp_kind;
 pub use lower::checked::CheckedProgram;
 pub use lower::checked::Refusal;
 pub use lower::checked::check;
+pub use lower::inline::FixedArgument;
 pub use lower::inline::InlineForm;
 pub use lower::inline::InlineForms;
 pub use lower::inline::PhpCall;

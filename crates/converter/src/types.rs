@@ -401,7 +401,21 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, imports: &mut Impo
         SharpType::ClassValue(TClassLikeString::Any { kind: TClassLikeStringKind::Class }) => {
             "Class<Object>".to_owned()
         }
-        SharpType::ClassValue(_) => return Err(format!("the type `{}` is not converted yet", atomic.get_id())),
+        // `class-string<T>` is a `Class<T>` (spec section 25).
+        SharpType::ClassValue(TClassLikeString::Generic { parameter_name, .. }) => format!("Class<{parameter_name}>"),
+        // An enum's class value is a `Class<UnitEnum>`, which PHP# names only in the standard library, and an
+        // interface or a trait shares no type with others, as every class does `Object`.
+        SharpType::ClassValue(TClassLikeString::Any { kind }) => {
+            let (kinds, reason) = match kind {
+                TClassLikeStringKind::Enum => (
+                    "enum",
+                    "`UnitEnum`, which each is, is a class of PHP's root namespace, which PHP# names only in the standard library (spec section 23)",
+                ),
+                TClassLikeStringKind::Interface => ("interface", "no type holds every interface (spec section 25)"),
+                _ => ("trait", "no type holds every trait (spec section 25)"),
+            };
+            return Err(format!("PHP# has no type `{}`, the class value of any {kinds}: {reason}", atomic.get_id()));
+        }
     })
 }
 

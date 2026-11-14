@@ -1,0 +1,20 @@
+namespace App;
+
+// A `match` on an `int` with no `default` arm gains the one that throws PHP's `UnhandledMatchError`, whose message holds
+// the `int` (spec section 21).
+public final class Codes
+{
+    public string name(int code)
+    {
+        return match (code) {
+            1 => 'one',
+            2 => 'two',
+            default => throw new UnhandledMatchError(`Unhandled match case ${code}`)
+        };
+    }
+
+    public string short(int code)
+    {
+        return match (code) { 1 => 'one', 2 => 'two', default => throw new UnhandledMatchError(`Unhandled match case ${code}`) };
+    }
+}

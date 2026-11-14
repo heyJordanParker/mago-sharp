@@ -263,21 +263,22 @@ impl Converter<'_, '_> {
         })
     }
 
-    /// A `for` loop, which keeps its form and declares the local its initialization assigns, scoped to the loop.
+    /// A `for` loop, which keeps its form and declares the local its initialization assigns, scoped to the loop. Several
+    /// initializations, conditions and increments keep their commas, where the initializations assign locals declared
+    /// before the loop, since a PHP# `let` declares one local and ends at a comma.
     pub(super) fn for_loop(&mut self, statement: &Statement<'_>, r#for: &For<'_>) {
-        if r#for.initializations.iter().count() > 1 || r#for.conditions.iter().count() > 1 {
-            return self.refuse(
-                statement.span(),
-                "a `for` with several initializations or conditions is not converted yet: PHP#'s declares one local and takes one condition",
-            );
-        }
-
         if let Some(locals) = self.locals() {
             locals.blocks.push(statement.span());
         }
+        let several = r#for.initializations.len() > 1;
         for initialization in r#for.initializations.iter() {
             if !self.declaration(statement, initialization) {
                 self.expression(initialization, None);
+            } else if several {
+                self.refuse(
+                    initialization.span(),
+                    "a `for` that declares a local beside other initializations is not converted yet: a PHP# `let` declares one local and ends at a comma, so the declaration moves before the loop, which the converter doesn't do",
+                );
             }
         }
         for condition in r#for.conditions.iter() {
