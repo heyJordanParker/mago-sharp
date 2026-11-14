@@ -89,7 +89,8 @@ impl Converter<'_, '_> {
                     Expression::Construct(Construct::Empty(empty)) => return self.empty(expression, empty, true),
                     _ => {}
                 }
-                // `!` takes a `bool`, so PHP's `!` of another type is the test of its falsiness (spec section 21).
+                // `!` takes a `bool`, so PHP's `!` of another type is the test of its falsiness (spec section 21). `!`
+                // of a `bool` compiles to PHP's `!`, which reads any value the `bool` holds at runtime as PHP does.
                 if !self.is(operand, &[Kind::Bool]) {
                     if let Some(test) = self.truthiness(operand, true, false) {
                         self.edits.replace(expression.span(), test);
@@ -99,9 +100,6 @@ impl Converter<'_, '_> {
                 // `!is_string($x)` and `!$x instanceof A` are `x is not string` and `x is not A` (spec section 21).
                 if let Some((value, tested)) = self.test(operand) {
                     return self.edits.replace(expression.span(), format!("{value} is not {tested}"));
-                }
-                if !self.proven(operand) {
-                    return;
                 }
             }
             UnaryPrefixOperator::BitwiseNot(_) if !self.is(operand, &[Kind::Int]) => {

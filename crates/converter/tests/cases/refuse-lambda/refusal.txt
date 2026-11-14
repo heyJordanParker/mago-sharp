@@ -1,5 +1,4 @@
 14:51: `$limit` is captured by value and written after its declaration: PHP's lambda keeps the value it had, and a PHP# lambda reads the variable itself (spec section 14.2)
 16:34: `$count` is captured by value and written in the lambda: PHP keeps the write to the lambda, and a PHP# lambda writes the variable itself (spec section 14.2)
 21:9: a call of `string` has no PHP# form: PHP# calls a function value only (spec section 14.1)
-23:26: a condition of `$check(1)` has no PHP# form: no native declaration makes it the type the analysis gives it at runtime, as a framework's PHPDoc `@property` doesn't, and PHP may hold another type there, as `1` for a `bool` or `"0"` for an `int`, which PHP# reads by its type (spec section 21)
 35:50: `$base` is captured by value and written after its declaration: PHP's lambda keeps the value it had, and a PHP# lambda reads the variable itself (spec section 14.2)

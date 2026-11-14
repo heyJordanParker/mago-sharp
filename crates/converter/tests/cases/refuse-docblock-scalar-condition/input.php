@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace App;
 
-// A condition reads a scalar by its type, which a value only PHPDoc types may not hold at runtime: `1` is no `bool`
-// to PHP#, and `"0"` is no `int`. So `match (true)`, `(bool)`, `if` and `!` refuse such a value, and a local written
-// one, where PHP reads it by its own truthiness (spec section 21).
+// A condition reads a number or a string by its type, which a value only PHPDoc types may not hold at runtime:
+// `"0"` is no `int`. So `(bool)` and `if` refuse such a value, where PHP reads it by its own truthiness, and
+// `match (true)` refuses a `bool` that may hold `1`, which PHP compares with `true` by `===` (spec section 21).
 final class Status
 {
     public function label(Row $row): string
@@ -31,16 +31,9 @@ final class Status
         return 'none';
     }
 
-    public function hidden(Row $row): bool
-    {
-        $active = $row->active;
-
-        return !$active;
-    }
-
-    // A write after the test that may not hold a `bool` refuses the test, which a loop reaches again.
+    // A write after the test that may not hold an `int` refuses the test, which a loop reaches again.
     /** @param list<Row> $rows */
-    public function seen(array $rows, bool $first): int
+    public function seen(array $rows, int $first): int
     {
         $seen = $first;
         $count = 0;
@@ -48,7 +41,7 @@ final class Status
             if ($seen) {
                 $count = $count + 1;
             }
-            $seen = $row->active;
+            $seen = $row->count;
         }
 
         return $count;

@@ -135,6 +135,11 @@ foreach ([fn () => $label->titled(5), fn () => $label->counted('4')] as $refused
     }
 }
 echo "\n";
+$counter = new \Proof\Shop\Counter();
+foreach ([true, false, 1, 0, '0', '', 'abc', [], [1], null, 0.0] as $value) {
+    echo $label->flagged($counter, $value), ' ';
+}
+echo "\n";
 
 // A PHPDoc `int` that holds `"5"`, a `string` key PHP reads as `int`, and generator keys through a PHP# parameter.
 $stock = new Stock();

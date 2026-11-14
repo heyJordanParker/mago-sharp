@@ -65,6 +65,16 @@ final class Label
         return $sizes['small'];
     }
 
+    // A condition of a `bool` only PHPDoc types, which reads PHP's truthiness of what it holds.
+    public function flagged(Counter $counter, mixed $value): string
+    {
+        if (!$counter->enabled($value)) {
+            return 'off';
+        }
+
+        return $counter->enabled($value) ? 'on' : 'off';
+    }
+
     private function exclaimed(string $title): string
     {
         return $title . '!';

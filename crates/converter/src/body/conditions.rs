@@ -75,10 +75,9 @@ impl Converter<'_, '_> {
     /// A condition, which PHP# takes only as a `bool` (spec section 21). `top` says it stands alone, as an `if`'s does,
     /// so a comparison of several parts needs no parentheses.
     pub(super) fn condition(&mut self, condition: &Expression<'_>, top: bool) {
+        // A `bool` condition compiles to a test of the value itself, which reads PHP's truthiness of whatever the value
+        // holds at runtime, as `1` where only PHPDoc says `bool`, so it needs no proof of the type.
         if self.is(condition, &[Kind::Bool]) {
-            if !self.proven(condition) {
-                return;
-            }
             return self.expression(condition, None);
         }
         if let Some(test) = self.truthiness(condition, false, top) {
@@ -187,10 +186,8 @@ impl Converter<'_, '_> {
                 format!("`?:` of `{shown}` has no PHP# form: `??` covers null, and PHP's truthiness test reads the value a second time, which the converter writes only for a variable or a property (spec section 21)"),
             );
         }
+        // A `bool` tests itself, as a condition of it does.
         let (test, value) = if self.is(value, &[Kind::Bool]) {
-            if !self.proven(value) {
-                return;
-            }
             self.expression(value, None);
             let rendered = self.render(value);
             (rendered.clone(), rendered)

@@ -12,4 +12,11 @@ final class Counter
     {
         $count++;
     }
+
+    // Only PHPDoc types the result, as a framework's model types a column, so it may hold `1` or `"abc"`.
+    /** @return bool */
+    public function enabled(mixed $value)
+    {
+        return $value;
+    }
 }
