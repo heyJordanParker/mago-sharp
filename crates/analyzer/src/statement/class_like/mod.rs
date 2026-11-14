@@ -168,6 +168,12 @@ fn report_duplicate_definition<A>(
         return;
     }
 
+    // A polyfill of a class-like the engine builds in, which the built-in keeps the name from, as
+    // `should_replace_metadata` in codex says, never runs beside it, as its existence check guards it.
+    if context.codebase.get_class_like(name).is_some_and(|original| original.flags.is_built_in()) {
+        return;
+    }
+
     let name = if context.dialect.is_sharp() {
         display_class_like_name(context, word(name)).to_string()
     } else {

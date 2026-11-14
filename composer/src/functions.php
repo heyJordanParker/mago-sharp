@@ -8,8 +8,6 @@ use function function_exists;
 
 if (!function_exists('Mago\inspect')) {
     /**
-     * @mago-ignore analysis:unused-parameter
-     *
      * Inspect the type of the given value.
      *
      * This function is used for debugging purposes to output the type of a variable.
@@ -23,8 +21,6 @@ if (!function_exists('Mago\inspect')) {
 
 if (!function_exists('Mago\confirm')) {
     /**
-     * @mago-ignore analysis:unused-parameter
-     *
      * Confirms that the given value is of the specified type statically.
      *
      * This function is used to ensure that the value conforms to the expected type

@@ -15097,6 +15097,18 @@ fn a_call_of_a_built_in_function_has_its_signature_and_never_a_polyfill_s() {
     );
 }
 
+/// A library's polyfill of a function or a class the engine builds in, which the built-in keeps its name from, is no
+/// duplicate definition: its existence check guards it, so PHP never declares it beside the built-in.
+#[test]
+fn a_polyfill_of_a_built_in_is_no_duplicate_definition() {
+    let polyfills = (
+        "src/polyfills.php",
+        "<?php\n\nif (!function_exists('str_starts_with')) {\n    function str_starts_with(string $haystack, string $needle): bool\n    {\n        return strncmp($haystack, $needle, strlen($needle)) === 0;\n    }\n}\n\nif (!class_exists('ArrayObject')) {\n    class ArrayObject\n    {\n    }\n}\n",
+    );
+
+    assert_eq!(issues(polyfills, &[]), Vec::<String>::new());
+}
+
 /// Spec section 12 passes plain PHP a `Map` keyed by a backed enum as the array keyed by each case's backing value, a
 /// `Set` as the list of its elements, and each `Map` a `List` holds as its array. So `array_keys` and `array_map` of a
 /// `Map<Status, int>`, the same calls on a `Set<Status>`, a generic function of the project whose `iterable<T, int>`

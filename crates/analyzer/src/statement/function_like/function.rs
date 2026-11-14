@@ -25,7 +25,9 @@ use crate::statement::function_like::check_unused_function_template_parameters;
 use crate::statement::function_like::unused_parameter;
 use crate::utils::missing_type_hints;
 
-/// Reports a duplicate function definition issue.
+/// Reports a duplicate function definition issue, unless the function the codebase keeps is built in: then the
+/// duplicate is a polyfill, which the built-in keeps the name from, as `should_replace_metadata` in codex says, and
+/// which never runs beside it, as its existence check guards it.
 fn report_duplicate_function_definition<A>(
     context: &mut Context<'_, '_, A>,
     name: &[u8],
@@ -34,6 +36,10 @@ fn report_duplicate_function_definition<A>(
 ) where
     A: Arena,
 {
+    if context.codebase.get_function(name).is_some_and(|function| function.flags.is_built_in()) {
+        return;
+    }
+
     let name = mago_bytes::BytesDisplay(name);
     context.collector.report_with_code(
         IssueCode::DuplicateDefinition,
