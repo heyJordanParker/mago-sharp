@@ -1,0 +1,57 @@
+namespace App;
+
+// A method PHP declares no return type for returns `null` where its body runs on past its last statement, and a PHP#
+// method returns on every path, so its body ends with `return null;` there (spec section 7).
+public final class Inviter
+{
+    public Any? send(string name)
+    {
+        try {
+            this.notify(name);
+        } catch (LogicException exception) {
+            throw new RuntimeException(exception.getMessage(), 0, exception);
+        }
+        return null;
+    }
+
+    public Any? some(string name)
+    {
+        if (name == '') {
+            return 1;
+        }
+        this.notify(name);
+        return null;
+    }
+
+    public Any? nothing()
+    {
+        return null;
+    }
+
+    public Any? each(List<string> names)
+    {
+        for (const name of names) {
+            this.notify(name);
+        }
+        return null;
+    }
+
+    // A body that returns or throws on every path ends as it is.
+    public Any? either(string name)
+    {
+        if (name == '') {
+            return 1;
+        } else {
+            return 2;
+        }
+    }
+
+    public Any? fail()
+    {
+        throw new RuntimeException('no');
+    }
+
+    private void notify(string name)
+    {
+    }
+}

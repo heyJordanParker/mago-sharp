@@ -488,14 +488,15 @@ impl<'configuration> Prover<'configuration> {
 
     /// Proves `set`, indexes of `candidates`, with the ones `accepted` already holds, and adds each that keeps the
     /// project as it was to `accepted`. One proof runs for them all. A file with issues of its own stays plain PHP, and
-    /// the rest are proven again. An issue in another file sends the set to be proven in two parts, each on top of what
-    /// is accepted, until one file is left to keep plain PHP. The second part is the second half of the fewest files
-    /// one issue can come from, as [`Session::reached`] finds them, and the first part is the rest of the set. When no
-    /// file of the set can bring an issue, the parts are the set's halves. When the first part is accepted whole and
-    /// the second is one file, the proof that split them was that file on top of what is accepted, so its issues keep
-    /// the file plain PHP with no proof more. Every proof is a whole analysis with fresh hosts, so each split costs a
-    /// proof, and each stops its hosts before the parts start theirs. A proof that can't finish, as when a host's hook
-    /// makes no progress, logs its error once and keeps the files of its set plain PHP, each naming the proof.
+    /// the rest are proven again, each file whose own issues may come from one that stays among them. An issue in
+    /// another file sends the set to be proven in two parts, each on top of what is accepted, until one file is left to
+    /// keep plain PHP. The second part is the second half of the fewest files one issue can come from, as
+    /// [`Session::reached`] finds them, and the first part is the rest of the set. When no file of the set can bring an
+    /// issue, the parts are the set's halves. When the first part is accepted whole and the second is one file, the
+    /// proof that split them was that file on top of what is accepted, so its issues keep the file plain PHP with no
+    /// proof more. Every proof is a whole analysis with fresh hosts, so each split costs a proof, and each stops its
+    /// hosts before the parts start theirs. A proof that can't finish, as when a host's hook makes no progress, logs its
+    /// error once and keeps the files of its set plain PHP, each naming the proof.
     fn prove(
         &self,
         plain: &Proof,
@@ -535,18 +536,33 @@ impl<'configuration> Prover<'configuration> {
                 own.len(),
                 others.len(),
             );
-            let before = set.len();
+            let mut refused = Vec::new();
             for (name, found) in own {
                 match set.iter().position(|&index| candidates[index].name == name) {
-                    Some(position) => {
-                        set.remove(position);
-                        outcome.refused.entry(name).or_default().extend(found.into_iter().map(|found| found.shown));
-                    }
+                    Some(position) => refused.push((set[position], found)),
                     // A file proven before gains an issue only with the files this proof adds.
                     None => others.extend(found),
                 }
             }
-            if set.len() < before {
+            // A file's own issue may come from another file this proof keeps plain PHP, as a caller's does from the
+            // class it passes a lambda to, so such a file is proven again without it. When every one may, each
+            // stays plain PHP.
+            let indexes: Vec<usize> = refused.iter().map(|(index, _)| *index).collect();
+            let comes_from_another = |index: usize, found: &[Found]| {
+                let rest: Vec<usize> = indexes.iter().copied().filter(|&other| other != index).collect();
+                session.reached(found, candidates, &rest).iter().any(|reached| !reached.is_empty())
+            };
+            let again: Vec<bool> = refused.iter().map(|(index, found)| comes_from_another(*index, found)).collect();
+            let all_again = again.iter().all(|&again| again);
+            for ((index, found), again) in refused.into_iter().zip(again) {
+                if again && !all_again {
+                    continue;
+                }
+                set.retain(|&kept| kept != index);
+                let name = candidates[index].name.clone();
+                outcome.refused.entry(name).or_default().extend(found.into_iter().map(|found| found.shown));
+            }
+            if !indexes.is_empty() {
                 continue;
             }
             if others.is_empty() {
@@ -1422,6 +1438,37 @@ mod tests {
         );
         assert_eq!(outcome.converted.len(), 5);
         assert_eq!(outcome.proofs, 6);
+    }
+
+    /// A caller passes a lambda that calls plain PHP to a class that stores it. Converted, that class stores a pure
+    /// function and returns a `mixed` as its type parameter, two issues of its own, so it stays plain PHP. The caller's
+    /// own issue, that the stored function can't hold its lambda, comes from that class's conversion alone, so the
+    /// caller is proven again without it and converts: two proofs.
+    #[test]
+    fn a_file_whose_own_issue_comes_from_a_file_kept_plain_is_proven_again_without_it() {
+        let files = [
+            (
+                "Plain/Store.php".to_owned(),
+                "<?php\n\nnamespace Generated\\Plain;\n\nuse Closure;\n\nfinal class Store\n{\n    public static function call(Closure $callback): mixed\n    {\n        return $callback();\n    }\n\n    public static function touch(): void\n    {\n    }\n}\n".to_owned(),
+            ),
+            (
+                "Contracts/Transaction.php".to_owned(),
+                "<?php\n\nnamespace Generated\\Contracts;\n\nuse Closure;\nuse Generated\\Plain\\Store;\n\n/** @template T */\nfinal class Transaction\n{\n    /** @param (Closure(): T) $callback */\n    public function __construct(private Closure $callback)\n    {\n    }\n\n    /** @return T */\n    public function run(): mixed\n    {\n        return Store::call($this->callback);\n    }\n}\n".to_owned(),
+            ),
+            (
+                "Contracts/Permissions.php".to_owned(),
+                "<?php\n\nnamespace Generated\\Contracts;\n\nuse Generated\\Plain\\Store;\n\nfinal class Permissions\n{\n    public function update(): void\n    {\n        (new Transaction(function () {\n            Store::touch();\n        }))->run();\n    }\n}\n".to_owned(),
+            ),
+        ];
+
+        let (exit_code, outcome) = convert_contracts(&files);
+
+        assert_eq!(exit_code, ExitCode::SUCCESS);
+        let refused: Vec<String> = outcome.refused.keys().map(|name| display(name)).collect();
+        assert_eq!(refused, ["src/Contracts/Transaction.php"], "{:#?}", outcome.refused);
+        let converted: Vec<String> = outcome.converted.iter().map(|(name, ..)| display(name)).collect();
+        assert_eq!(converted, ["src/Contracts/Permissions.php"]);
+        assert_eq!(outcome.proofs, 2);
     }
 
     /// An extension host whose one plugin appends to the log its second argument names: `start` and the worker's

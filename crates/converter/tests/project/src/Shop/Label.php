@@ -75,6 +75,12 @@ final class Label
         return $counter->enabled($value) ? 'on' : 'off';
     }
 
+    // No return type, and a body that runs on past its last statement, which gives `null`.
+    public function noted(string $title)
+    {
+        $this->exclaimed($title);
+    }
+
     private function exclaimed(string $title): string
     {
         return $title . '!';
