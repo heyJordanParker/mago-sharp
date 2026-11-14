@@ -80,6 +80,7 @@ fn populate_codebase_inner(
     mut dirty_symbols: Option<HashSet<SymbolIdentifier>>,
 ) {
     codebase.drop_modules_named_like_plain_classes();
+    codebase.apply_extern_attributes();
     if codebase.populate_class_like_aliases() {
         safe_symbols.clear();
         safe_symbol_members.clear();

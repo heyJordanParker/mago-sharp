@@ -4,6 +4,7 @@ use mago_span::Span;
 use mago_word::Word;
 
 use crate::metadata::CodebaseMetadata;
+use crate::metadata::attribute::AttributeMetadata;
 
 /// A PHP# `extern` declaration, which states the effects of one plain PHP class, method or function, spec section 29.
 ///
@@ -27,6 +28,8 @@ pub struct ExternMetadata {
     pub effects: Vec<Word>,
     /// Whether it is an `extern event`, which marks its plain PHP class as an event, spec section 15.
     pub event: bool,
+    /// The attributes written before it, which a class it declares carries as its own, spec section 29.
+    pub attributes: Vec<AttributeMetadata>,
 }
 
 impl Ord for ExternMetadata {

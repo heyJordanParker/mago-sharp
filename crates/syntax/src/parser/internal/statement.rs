@@ -70,7 +70,7 @@ where
                     && token.value == b"extern"
                     && self.stream.peek_kind(1)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) =>
             {
-                self.parse_extern().map(Statement::Extern)
+                self.parse_extern(Sequence::empty()).map(Statement::Extern)
             }
             T![Identifier]
                 if self.dialect.is_sharp()
@@ -100,6 +100,13 @@ where
                 let maybe_after = self.stream.peek_kind(1)?;
 
                 match next.kind {
+                    T![Identifier]
+                        if self.dialect.is_sharp()
+                            && next.value == b"extern"
+                            && self.stream.peek_kind(1)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) =>
+                    {
+                        self.parse_extern(attributes).map(Statement::Extern)
+                    }
                     T!["interface" | Identifier] if self.is_at_interface()? => {
                         self.parse_interface_with_attributes(attributes).map(Statement::Interface)
                     }

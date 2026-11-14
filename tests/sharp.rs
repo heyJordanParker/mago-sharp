@@ -484,11 +484,15 @@ fn write(root: &Path, name: &str, contents: &str) {
 /// The standard library's members of `string`, with a native body, spec section 29, and the `split` `Http` calls.
 const STRING_MEMBERS: &str = include_str!("../../composer/library/Sharp/Text/StringMembers.sharp");
 
-/// The standard library's package under `root`: its `composer.json`, its members of `string`, its `Float` and `Bool`,
-/// and its effect classes.
+/// The standard library's forms of Unicode normalization, which a member of `string` takes.
+const NORMALIZATION_FORM: &str = include_str!("../../composer/library/Sharp/Text/NormalizationForm.sharp");
+
+/// The standard library's package under `root`: its `composer.json`, its members of `string` and the enum they take,
+/// its `Float` and `Bool`, and its effect classes.
 fn write_library(root: &Path) {
     write(root, "composer.json", LIBRARY_PACKAGE);
     write(root, "library/Sharp/Text/StringMembers.sharp", STRING_MEMBERS);
+    write(root, "library/Sharp/Text/NormalizationForm.sharp", NORMALIZATION_FORM);
     for (class, source) in TYPE_CLASSES {
         write(root, &format!("library/Sharp/{class}.sharp"), source);
     }
@@ -620,7 +624,7 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Compiled 35 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
+    assert!(printed.contains("Compiled 37 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
     assert!(root.join(".sharp/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
     assert!(root.join(".sharp/library/Sharp/System/Environment.sharpc").is_file(), "{printed}");
     let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();

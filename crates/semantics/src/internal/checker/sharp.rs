@@ -1068,10 +1068,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Node::FunctionLikeReturnTypeHint(_) | Node::On(_) | Node::MethodBody(_) | Node::MethodAbstractBody(_),
             Signature,
         ) => Some(Signature),
+        // An `extern` line's attributes are the only ones at file level.
         (
             Node::AttributeList(list),
             Class | Interface | Enum | Place::Event | ClassConstant | Method | Signature | FieldOrProperty | Parameter
-            | Lambda,
+            | Lambda | File,
         ) => check_attribute_target(list, context),
         (
             Node::Attribute(_)
@@ -2549,6 +2550,7 @@ fn check_attribute_target(list: &AttributeList, context: &mut Context<'_, '_, '_
             Node::Enum(r#enum) if holds(&r#enum.attribute_lists) => Some(("an enum", &["type"])),
             Node::Struct(r#struct) if holds(&r#struct.attribute_lists) => Some(("a struct", &["type"])),
             Node::Event(event) if holds(&event.attribute_lists) => Some(("an event", &["type", "event"])),
+            Node::Extern(r#extern) if holds(&r#extern.attribute_lists) => Some(("an `extern` line", &["type"])),
             Node::Method(method) if holds(&method.attribute_lists) => Some(("a method", &["method"])),
             Node::Operator(operator) if holds(&operator.attribute_lists) => Some(("an operator", &["method"])),
             Node::NamedConstructor(constructor) if holds(&constructor.attribute_lists) => {

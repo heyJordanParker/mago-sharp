@@ -2613,7 +2613,7 @@ fn listener_table(root: &Path, inputs: &[&str], rows: &str, dispatcher: &str) ->
     let inputs: String = inputs.iter().map(|path| input_row(root, path)).collect();
 
     format!(
-        "<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n    'dispatcher' => {dispatcher},\n];\n"
+        "<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n    'dispatcher' => {dispatcher},\n    'attributes' => [\n    ],\n];\n"
     )
 }
 
@@ -2746,19 +2746,46 @@ fn compile_names_the_app_module_that_binds_the_dispatcher() {
     compile_succeeds(root);
     assert!(
         read(root, ".sharp/listeners.php")
-            .ends_with("    'dispatcher' => ['app/Shop/Module.sharp', 'app\\\\shop'],\n];\n")
+            .contains("    'dispatcher' => ['app/Shop/Module.sharp', 'app\\\\shop'],\n    'attributes' => [\n")
     );
 
     write(root, "app/Module.sharp", &dispatcher_module("App"));
     let output = compile(root);
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(printed(&output).contains("Only `app/Module.sharp` binds `Dispatcher`"), "{}", printed(&output));
-    assert!(read(root, ".sharp/listeners.php").ends_with("    'dispatcher' => ['app/Module.sharp', 'app'],\n];\n"));
+    assert!(
+        read(root, ".sharp/listeners.php")
+            .contains("    'dispatcher' => ['app/Module.sharp', 'app'],\n    'attributes' => [\n")
+    );
 
     std::fs::remove_file(root.join("app/Shop/Module.sharp")).unwrap();
     std::fs::remove_file(root.join("app/Module.sharp")).unwrap();
     compile_succeeds(root);
-    assert!(read(root, ".sharp/listeners.php").ends_with("    'dispatcher' => null,\n];\n"));
+    assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => null,\n    'attributes' => [\n"));
+}
+
+/// Spec section 29: the listener table names, for each plain PHP class an `extern` line gives attributes, the file of
+/// each such line, which the engine compiles when reflection reads the class's attributes. A line without attributes
+/// names nothing.
+#[test]
+fn compile_lists_the_files_whose_extern_lines_give_a_class_attributes() {
+    let group = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_CLASS | \\Attribute::IS_REPEATABLE)]\nfinal class Group\n{\n    public function __construct(public string $name) {}\n}\n";
+    let mailer = "<?php\n\nnamespace Lib;\n\nfinal class Mailer\n{\n}\n";
+    let first = "namespace App.Stubs;\n\nimport Lib.Group;\nimport Lib.Mailer;\n\n[Group(\"mail\")]\nextern Mailer;\nextern Group;\n\npublic class First\n{\n}\n";
+    let directory = lawful_project(&[
+        ("vendor/acme/lib/Group.php", group),
+        ("vendor/acme/lib/Mailer.php", mailer),
+        ("app/Stubs/First.sharp", first),
+    ]);
+    let root = directory.path();
+
+    compile_succeeds(root);
+    assert!(
+        read(root, ".sharp/listeners.php")
+            .ends_with("    'attributes' => [\n        'lib\\\\mailer' => ['app/Stubs/First.sharp'],\n    ],\n];\n"),
+        "{}",
+        read(root, ".sharp/listeners.php")
+    );
 }
 
 /// A path the listener table quotes keeps a `'` and a `\` in its name. The PSR-4 folder that maps `App` carries both,

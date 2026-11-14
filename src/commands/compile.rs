@@ -50,6 +50,7 @@ use mago_orchestrator::Orchestrator;
 use mago_orchestrator::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
+use mago_orchestrator::service::incremental_analysis::compile::ExternAttributes;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_prelude::Prelude;
 use mago_reporting::CompiledIgnoreSet;
@@ -68,6 +69,7 @@ use mago_syntax::cst::Statement;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file;
 use mago_syntax_core::utils::is_part_of_identifier;
+use mago_word::Word;
 
 use crate::baseline::unserialize_baseline;
 use crate::commands::analyze::analyze_the_whole_workspace_without_paths;
@@ -251,10 +253,12 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     let inputs = listener_inputs(root, database)?;
     if !inputs.is_empty() {
         let listeners = server.listeners();
+        let externs = server.extern_attributes();
+        let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| accepted.contains(&line.file_id)).collect();
         let accepted: Vec<&Listener> =
             listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
         let table = folder.join(LISTENERS);
-        write(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref()))?;
+        write(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref(), &externs))?;
         written.insert(table);
     }
 
@@ -571,10 +575,12 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     let listeners = server.listeners();
     let inputs = listener_inputs(&root, database)?;
     if !inputs.is_empty() {
+        let externs = server.extern_attributes();
+        let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| accepted.contains(&line.file_id)).collect();
         let accepted: Vec<&Listener> =
             listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
         let table = compiled_folder.join(LISTENERS);
-        let bytes = listener_table(&inputs, &accepted, server.dispatcher_module().as_ref());
+        let bytes = listener_table(&inputs, &accepted, server.dispatcher_module().as_ref(), &externs);
         write_by_rename(&table, &bytes)?;
         if let Some(record) = record.as_mut() {
             record.output(&table, &bytes);
@@ -1215,8 +1221,14 @@ fn listener_inputs(root: &Path, database: &impl DatabaseReader) -> Result<Vec<un
 /// order the engine runs them, of its class, its method, the events its `on` clause lists, and whether it takes the
 /// event. A full name holds no `'` and never ends in `\`, so each one is a single-quoted string as written. Its
 /// `dispatcher` is the app's module whose binding of the dispatcher serves the whole app, as its path and namespace,
-/// or `null`.
-fn listener_table(inputs: &[unit::Input], listeners: &[&Listener], dispatcher: Option<&DispatcherModule>) -> Vec<u8> {
+/// or `null`. Its `attributes` are, for each plain PHP class an `extern` line gives attributes, the files whose lines
+/// do, which the engine compiles when reflection reads the class's attributes, spec section 29.
+fn listener_table(
+    inputs: &[unit::Input],
+    listeners: &[&Listener],
+    dispatcher: Option<&DispatcherModule>,
+    externs: &[&ExternAttributes],
+) -> Vec<u8> {
     let mut table = b"<?php\n\nreturn [\n    'inputs' => [\n".to_vec();
     for input in inputs {
         let hash: String = input.hash.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -1249,7 +1261,28 @@ fn listener_table(inputs: &[unit::Input], listeners: &[&Listener], dispatcher: O
         }
         None => table.extend_from_slice(b"null,\n"),
     }
-    table.extend_from_slice(b"];\n");
+    // `externs` holds each class's lines together.
+    let mut classes: Vec<(Word, Vec<Word>)> = Vec::new();
+    for line in externs {
+        match classes.last_mut() {
+            Some((class, files)) if *class == line.class => files.push(line.file),
+            _ => classes.push((line.class, vec![line.file])),
+        }
+    }
+    table.extend_from_slice(b"    'attributes' => [\n");
+    for (class, files) in classes {
+        table.extend_from_slice(b"        ");
+        quoted(&mut table, class.as_bytes());
+        table.extend_from_slice(b" => [");
+        for (index, file) in files.iter().enumerate() {
+            if index > 0 {
+                table.extend_from_slice(b", ");
+            }
+            quoted(&mut table, file.as_bytes());
+        }
+        table.extend_from_slice(b"],\n");
+    }
+    table.extend_from_slice(b"    ],\n];\n");
 
     table
 }

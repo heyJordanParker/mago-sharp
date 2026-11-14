@@ -166,6 +166,10 @@ pub struct AnalysisArtifacts {
     pub(crate) list_pattern_tuples: HashMap<(u32, u32), TUnion>,
     /// The full name of the plain PHP constant each PHP# read through a namespace reaches, keyed by the read's span.
     pub(crate) namespace_constants: HashMap<(u32, u32), Word>,
+    /// The type of the keys each PHP# call of a collection member orders by, what the function in the member's
+    /// parameter marked `ComparedByOrder` returns, as `sortedBy` orders by its selector's, spec section 12, keyed by the
+    /// call's span. A tuple key keeps its elements' types. Read through [`Self::get_ordered_key_type`].
+    pub(crate) ordered_key_types: HashMap<(u32, u32), TUnion>,
     /// The parameters of a PHP# method that erase to a narrower type than a parameter of a method it overrides or
     /// implements erases to, as `string value` of `Trimmed.set` against `T value` of `Behavior.set`, keyed by the
     /// span of the parameter's name. The bridge declares each with no PHP type, as Java's bridge method takes the
@@ -233,6 +237,7 @@ impl AnalysisArtifacts {
             declared_types: HashMap::default(),
             list_pattern_tuples: HashMap::default(),
             namespace_constants: HashMap::default(),
+            ordered_key_types: HashMap::default(),
             widened_parameters: HashSet::default(),
             function_values: Vec::new(),
             readonly_calls: Vec::new(),
@@ -562,6 +567,20 @@ impl AnalysisArtifacts {
     /// Records that the PHP# read at `span` reaches the plain PHP constant `constant`.
     pub(crate) fn record_namespace_constant(&mut self, span: Span, constant: Word) {
         self.namespace_constants.insert((span.start.offset, span.end.offset), constant);
+    }
+
+    /// The type of the keys the PHP# call `call` of a collection member orders by, as `sortedBy` orders by what its
+    /// selector returns, spec section 12. None for any other call.
+    pub fn get_ordered_key_type<T>(&self, call: &T) -> Option<&TUnion>
+    where
+        T: HasSpan,
+    {
+        self.ordered_key_types.get(&get_expression_range(call))
+    }
+
+    /// Records that the PHP# call at `span` orders by keys of `key_type`.
+    pub(crate) fn record_ordered_key_type(&mut self, span: Span, key_type: TUnion) {
+        self.ordered_key_types.insert((span.start.offset, span.end.offset), key_type);
     }
 
     /// Get the type of expression `expression`.

@@ -144,6 +144,9 @@ impl Fingerprintable for Extern<'_> {
         H: std::hash::Hasher,
     {
         hasher.write(b"extern");
+        for attribute_list in &self.attribute_lists {
+            attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
         self.event.fingerprint_with_hasher(hasher, resolved_names, options);
         self.namespace.fingerprint_with_hasher(hasher, resolved_names, options);
         self.target.fingerprint_with_hasher(hasher, resolved_names, options);

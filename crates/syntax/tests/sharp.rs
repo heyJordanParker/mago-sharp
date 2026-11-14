@@ -4881,6 +4881,41 @@ fn extern_namespace_names_a_namespace_and_a_class_function_or_constant() {
     }
 }
 
+/// An `extern` line takes attributes before it, as every declaration does, spec section 29, and its span starts at the
+/// first of them.
+#[test]
+fn an_extern_line_takes_attributes() {
+    const CODE: &str = "namespace App.Stubs;\n\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\n[DynamicallyAccessed]\n[Group(\"events\"), Tagged]\nextern AsEventListener;\nextern Mailer uses Mail;\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Stubs/Stubs.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+        panic!("expected a namespace, got {:#?}", program.statements);
+    };
+    let externs: Vec<(Vec<&str>, &str)> = namespace
+        .statements()
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Extern(declaration) => Some(declaration),
+            _ => None,
+        })
+        .map(|declaration| {
+            (declaration.attribute_lists.iter().map(|list| source(CODE, list)).collect(), source(CODE, declaration))
+        })
+        .collect();
+    assert_eq!(
+        externs,
+        [
+            (
+                vec!["[DynamicallyAccessed]", "[Group(\"events\"), Tagged]"],
+                "[DynamicallyAccessed]\n[Group(\"events\"), Tagged]\nextern AsEventListener;"
+            ),
+            (vec![], "extern Mailer uses Mail;"),
+        ]
+    );
+}
+
 /// `extern` declares only when a name follows it, so `extern(text)` at the start of a PHP# statement stays a call.
 #[test]
 fn extern_before_a_parenthesis_stays_a_call_in_php_sharp() {

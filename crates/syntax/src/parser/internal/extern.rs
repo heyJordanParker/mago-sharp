@@ -1,9 +1,11 @@
 use mago_allocator::prelude::*;
 
 use crate::T;
+use crate::cst::cst::AttributeList;
 use crate::cst::cst::Extern;
 use crate::cst::cst::ExternNamespaced;
 use crate::cst::cst::Uses;
+use crate::cst::sequence::Sequence;
 use crate::cst::sequence::TokenSeparatedSequence;
 use crate::error::ParseError;
 use crate::parser::Parser;
@@ -12,10 +14,13 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    /// Parses a PHP# `extern` declaration: `extern`, `event` when the class is an event, its target, a bare name or
-    /// `Class.member`, then an optional `uses` clause. `extern namespace WordPress for WP_Post;` gives a library's class,
-    /// function or constant of PHP's root namespace a namespace instead, spec section 23.
-    pub(crate) fn parse_extern(&mut self) -> Result<Extern<'arena>, ParseError<'arena>> {
+    /// Parses a PHP# `extern` declaration after its `attribute_lists`: `extern`, `event` when the class is an event, its
+    /// target, a bare name or `Class.member`, then an optional `uses` clause. `extern namespace WordPress for WP_Post;`
+    /// gives a library's class, function or constant of PHP's root namespace a namespace instead, spec section 23.
+    pub(crate) fn parse_extern(
+        &mut self,
+        attribute_lists: Sequence<'arena, AttributeList<'arena>>,
+    ) -> Result<Extern<'arena>, ParseError<'arena>> {
         let r#extern = self.expect_any_keyword()?;
         let event = if self.stream.lookahead(0)?.is_some_and(|token| token.value == b"event")
             && self.stream.peek_kind(1)? == Some(T![Identifier])
@@ -40,7 +45,16 @@ where
             (None, self.parse_optional_uses()?)
         };
 
-        Ok(Extern { r#extern, event, namespace, target, namespaced, uses, terminator: self.parse_terminator()? })
+        Ok(Extern {
+            attribute_lists,
+            r#extern,
+            event,
+            namespace,
+            target,
+            namespaced,
+            uses,
+            terminator: self.parse_terminator()?,
+        })
     }
 
     /// Parses a `uses` clause when one starts here: `uses`, which stays a name everywhere else, and its effects.

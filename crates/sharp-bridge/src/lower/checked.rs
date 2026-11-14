@@ -27,6 +27,7 @@ use super::types::Types;
 /// #         pub fn get(&self, _: &[u8]) -> Option<&InlineForm> { None }
 /// #     }
 /// #     pub fn key(_: &[u8], _: &[u8]) -> Vec<u8> { Vec::new() }
+/// #     pub fn folded_key(_: &[u8], _: &[u8], _: usize) -> Vec<u8> { Vec::new() }
 /// #     pub const TAKES_RESULT_TYPE: &[u8] = b"";
 /// #     pub const TAKES_KEY_ORDER: &[u8] = b"";
 /// #     pub const RESULT_TYPE_SLOT: &[u8] = b"";
@@ -70,6 +71,7 @@ use super::types::Types;
 /// #         pub fn get(&self, _: &[u8]) -> Option<&InlineForm> { None }
 /// #     }
 /// #     pub fn key(_: &[u8], _: &[u8]) -> Vec<u8> { Vec::new() }
+/// #     pub fn folded_key(_: &[u8], _: &[u8], _: usize) -> Vec<u8> { Vec::new() }
 /// #     pub const TAKES_RESULT_TYPE: &[u8] = b"";
 /// #     pub const TAKES_KEY_ORDER: &[u8] = b"";
 /// #     pub const RESULT_TYPE_SLOT: &[u8] = b"";

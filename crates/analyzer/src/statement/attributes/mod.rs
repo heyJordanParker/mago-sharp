@@ -3,6 +3,7 @@ use foldhash::fast::RandomState;
 use indexmap::IndexMap;
 use mago_allocator::Arena;
 
+use mago_bytes::BytesDisplay;
 use mago_codex::context::ScopeContext;
 use mago_codex::flags::attribute::AttributeFlags;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
@@ -12,12 +13,14 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::template::TemplateResult;
+use mago_names::binding::Binding;
 use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_syntax::cst::Attribute;
 use mago_syntax::cst::AttributeList;
+use mago_syntax::cst::Extern;
 use mago_word::WordMap;
 use mago_word::word;
 
@@ -91,6 +94,50 @@ where
     block_context.flags.set_inside_class_like_attribute(true);
 
     analyze_attributes(context, &mut block_context, artifacts, attribute_lists, AttributeTarget::ClassLike)
+}
+
+/// Analyzes the attributes written before an `extern` line, spec section 29, which the class the line declares carries
+/// as its own, so they are checked as that class's. A line that declares a function or a method has no class to give
+/// them. A class `check_extern` found missing is reported there.
+pub fn analyze_extern_attributes<'arena, A>(
+    context: &mut Context<'_, 'arena, A>,
+    artifacts: &mut AnalysisArtifacts,
+    r#extern: &Extern<'arena>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let Some(first) = r#extern.attribute_lists.first() else {
+        return Ok(());
+    };
+    let target = &r#extern.target;
+    if r#extern.namespaced.is_none()
+        && !target.is_dotted()
+        && context.resolved_names.binding(target) == Some(Binding::Class)
+    {
+        let Some(class_like_metadata) = context.codebase.get_class_like(context.resolved_names.get(target)) else {
+            return Ok(());
+        };
+
+        return analyze_class_like_attributes(
+            context,
+            artifacts,
+            r#extern.attribute_lists.as_slice(),
+            class_like_metadata,
+        );
+    }
+
+    context.collector.report_with_code(
+        IssueCode::InvalidAttributeTarget,
+        Issue::error(format!(
+            "An attribute on an `extern` line is the attribute of the class the line declares, and `{}` is no class.",
+            BytesDisplay(target.value())
+        ))
+        .with_annotation(Annotation::primary(first.span()).with_message("Written here."))
+        .with_annotation(Annotation::secondary(target.span()).with_message("Declared here.")),
+    );
+
+    Ok(())
 }
 
 /// Analyzes attributes, whose arguments are constant expressions.

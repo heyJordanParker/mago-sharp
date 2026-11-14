@@ -83,6 +83,7 @@ use super::inline::KEY_ORDER_SLOT;
 use super::inline::RESULT_TYPE_SLOT;
 use super::inline::TAKES_KEY_ORDER;
 use super::inline::TAKES_RESULT_TYPE;
+use super::inline::folded_key;
 use super::inline::key;
 
 /// The checker's types for one file. The lowering reads a type only through these queries, so `--assert-types` can
@@ -182,6 +183,18 @@ pub enum Equality {
     Elements,
     /// By PHP's `===`.
     Identical,
+}
+
+/// How spec section 19's `<` orders two keys a call sorts by, as the engine function's [`TAKES_KEY_ORDER`] parameter
+/// takes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum KeyOrder {
+    /// By the `operator <=>` the class-like declares, with the method's name.
+    Operator(Word, &'static [u8]),
+    /// A tuple's, element by element, each by its own order, where an element's type declares an operator.
+    Elements(Vec<KeyOrder>),
+    /// As PHP# orders a number or a string, a `null` first.
+    Plain,
 }
 
 impl<'analysis> Types<'analysis> {
@@ -1775,6 +1788,18 @@ impl<'analysis> Types<'analysis> {
         self.inline_forms.get(&key(declaration.class.as_bytes(), declaration.name.as_bytes()))
     }
 
+    /// The inline form of a call of the method `declaration` names that passes `arity` values, the receiver counted,
+    /// and leaves out the rest, which folds what their defaults decide. Else the form of a call that passes them all.
+    pub(crate) fn inline_form_passing(&self, declaration: &Declaration, arity: usize) -> Option<&'analysis InlineForm> {
+        if !matches!(declaration.kind, DeclarationKind::Method { .. } | DeclarationKind::StaticMethod) {
+            return None;
+        }
+
+        self.inline_forms
+            .get(&folded_key(declaration.class.as_bytes(), declaration.name.as_bytes(), arity))
+            .or_else(|| self.inline_form(declaration))
+    }
+
     /// The declaration of what the analysis recorded a method call runs. A method `__call` or `__callStatic` serves is
     /// public, and overridable unless the class is an enum or final, since any subclass may declare it.
     fn target_declaration(&self, target: &CallTarget) -> Declaration {
@@ -2324,18 +2349,35 @@ impl<'analysis> Types<'analysis> {
             && self.compares_identically(&lhs_element, &rhs_element)
     }
 
-    /// The class-like whose `operator <=>` the call `call`, which sorts, orders two keys by, as `<` on two values of
-    /// the key type its last type argument names chooses it, spec section 19, so a `List<Priced>` sorts by `Priced`'s
-    /// whatever classes it holds. A call sorts when it runs a form whose engine function takes [`TAKES_KEY_ORDER`].
-    /// `member` is the member the call runs, where it runs one of several. None for keys of a type that declares none,
-    /// such as strings.
-    pub(crate) fn sorting_operator(&self, call: &Expression, member: Option<&MemberCall>) -> Option<Word> {
-        let Some(key) = self.call_type_arguments_of(call, member)?.last() else {
-            unreachable!("a call that sorts takes the type of its keys as its last type argument");
-        };
-        let key = key.to_non_nullable();
+    /// How the call `call`, which sorts, orders two keys, as `<` on two values of the key type the checker found it
+    /// orders by orders them, spec sections 12 and 19, so a `List<Priced>` sorts by `Priced`'s operator whatever classes
+    /// it holds. A call sorts when it runs a form whose engine function takes [`TAKES_KEY_ORDER`]. A call of the engine
+    /// function itself, as a library body makes, orders as PHP# orders a number or a string.
+    pub(crate) fn key_order(&self, call: &Expression) -> KeyOrder {
+        self.artifacts
+            .get_ordered_key_type(call)
+            .map_or(KeyOrder::Plain, |key| self.key_order_of(&key.to_non_nullable()))
+    }
 
-        self.operator_owner(php_operator_name(&BinaryOperator::Spaceship(Span::zero()), 2)?, &[&key, &key])
+    /// How `<` orders two values of `key`: by the `operator <=>` the checker chose for it, element by element for a
+    /// tuple, as `[p.last, p.age]` is, spec section 12, or as PHP# orders a number or a string.
+    fn key_order_of(&self, key: &TUnion) -> KeyOrder {
+        if let [TAtomic::Array(TArray::List(list))] = key.types.as_ref()
+            && let Some(elements) = list.sealed_elements()
+        {
+            let orders: Vec<KeyOrder> =
+                elements.into_iter().map(|element| self.key_order_of(&element.to_non_nullable())).collect();
+
+            return if orders.iter().all(|order| matches!(order, KeyOrder::Plain)) {
+                KeyOrder::Plain
+            } else {
+                KeyOrder::Elements(orders)
+            };
+        }
+
+        php_operator_name(&BinaryOperator::Spaceship(Span::zero()), 2)
+            .and_then(|name| Some((self.operator_owner(name, &[key, key])?, name)))
+            .map_or(KeyOrder::Plain, |(owner, name)| KeyOrder::Operator(owner, name))
     }
 
     /// The method `class` declares or inherits by the name `method`, if any. A subclass overrides an instance method

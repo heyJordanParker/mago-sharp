@@ -492,6 +492,39 @@ fn a_public_member_whose_attribute_a_framework_reads_by_reflection_is_not_too_wi
     );
 }
 
+/// Spec section 29: an `extern` line takes any attribute, which the plain PHP class it declares carries as its own. So a
+/// library attribute whose source carries no mark is marked on the project's `extern` line, and a `[AsEventListener]`
+/// method never warns, as a `[Listen]` method doesn't. An `extern` line of a function has no class to give one to.
+#[test]
+fn an_attribute_on_an_extern_line_is_the_class_s_own() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ReachedByReflection.sharp",
+        include_str!("../../../../composer/library/Sharp/ReachedByReflection.sharp"),
+    );
+    let listener = "<?php\n\nnamespace Symfony\\Component\\EventDispatcher\\Attribute;\n\n#[\\Attribute(\\Attribute::TARGET_CLASS | \\Attribute::TARGET_METHOD)]\nclass AsEventListener\n{\n}\n";
+    let stubs = "namespace App.Stubs;\n\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\n[ReachedByReflection]\nextern AsEventListener;\n";
+    let hooks = "namespace App.Payments;\n\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\npublic class Hooks\n{\n    [AsEventListener]\n    public void paid() { }\n\n    public void settled() { }\n}\n";
+
+    assert_eq!(
+        too_wide(&[
+            marker,
+            ("vendor/symfony/event-dispatcher/Attribute/AsEventListener.php", listener),
+            ("src/App/Stubs/Stubs.sharp", stubs),
+            ("src/App/Payments/Hooks.sharp", hooks),
+        ]),
+        ["src/App/Payments/Hooks.sharp 10:17 `Hooks.settled` is public, and nothing outside `App.Payments` uses it."]
+    );
+
+    let functions = "<?php\n\nnamespace Lib;\n\nfunction now(): int\n{\n    return 1;\n}\n";
+    let stubs = "namespace App.Stubs;\n\nimport Lib;\nimport Attribute;\n\n[Attribute]\nextern Lib.now;\n";
+    assert_eq!(
+        refusals(("src/App/Stubs/Stubs.sharp", stubs), &[("src/Lib/functions.php", functions)]),
+        [
+            "6:1 invalid-attribute-target An attribute on an `extern` line is the attribute of the class the line declares, and `Lib.now` is no class. | "
+        ]
+    );
+}
+
 /// Spec sections 5 and 23: plain PHP calls an `[Export]` method through the global function it declares, which the
 /// checker never sees, so the method never warns. The other marks say nothing about who reaches their member, so an
 /// `[Import]` method and a `[Key]` property warn as members without them do. An `override` and an `internal` member
@@ -663,10 +696,12 @@ fn the_binder_knows_every_changing_collection_method() {
             "ListMembers.sharp.clear",
             "ListMembers.sharp.insert",
             "ListMembers.sharp.remove",
+            "ListMembers.sharp.removeAll",
             "ListMembers.sharp.removeAt",
             "ListMembers.sharp.removeFirst",
             "ListMembers.sharp.removeLast",
             "ListMembers.sharp.set",
+            "MapMembers.sharp.getOrPut",
             "MapMembers.sharp.remove",
             "MapMembers.sharp.set",
             "SetMembers.sharp.add",
@@ -6259,6 +6294,23 @@ fn sorted_by_a_number_a_string_or_a_class_declaring_operator_spaceship_still_ord
     assert_eq!(errors(("src/App/Ranking.sharp", sharp), &[MONEY_OPERATORS]), Vec::<String>::new());
 }
 
+/// Spec section 12: a `sortedBy` key that is a tuple, as `p => [p.last, p.first]` returns, orders element by element,
+/// as Rust orders tuples, so it compiles exactly when `<` compiles on each element's type, a `null` element aside. An
+/// element with no order is refused by its own type, and a `List` that is no tuple still has no order.
+#[test]
+fn sorted_by_a_tuple_key_orders_element_by_element() {
+    let person = "<?php\n\nnamespace App;\n\nfinal class Person\n{\n    public string $last = '';\n    public string $first = '';\n    public int $age = 0;\n    public ?string $nickname = null;\n    public bool $active = false;\n    public \\App\\Money $price;\n    /** @var list<string> */\n    public array $tags = [];\n}\n";
+    let sharp = "namespace App;\n\npublic class Ranking\n{\n    public List<Person> a(List<Person> people) => people.sortedBy(p => [p.last, p.first]);\n\n    public List<Person> b(List<Person> people) => people.sortedBy(p => [p.last, p.age]);\n\n    public List<Person> c(List<Person> people) => people.sortedBy(p => [p.price, p.nickname]);\n\n    public List<Person> d(List<Person> people) => people.sortedBy(p => [p.last, p.active]);\n\n    public List<Person> e(List<Person> people) => people.sortedBy(p => p.tags);\n}\n";
+
+    assert_eq!(
+        worded(("src/App/Ranking.sharp", sharp), &[MONEY_OPERATORS, ("src/App/Person.php", person)]),
+        [
+            "11:67 invalid-argument `sortedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `bool` is none of them. | This returns `bool`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
+            "13:67 invalid-argument `sortedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `List<string>` is none of them. | This returns `List<string>`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
+        ]
+    );
+}
+
 /// A key that may be one of two types that never match has no order, so `sortedBy` refuses it as `<` refuses two such
 /// values, a `null` key aside.
 #[test]
@@ -10005,12 +10057,16 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
                     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharp",
                     include_str!("../../../../composer/library/Sharp/Text/StringMembers.sharp"),
                 ),
+                (
+                    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/NormalizationForm.sharp",
+                    include_str!("../../../../composer/library/Sharp/Text/NormalizationForm.sharp"),
+                ),
             ]
         ),
         [
-            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `byteLength`, `byteSubstring`, `bytes`, `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
-            "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `clamp`, `floorDiv`, `format`, `mod`, `toByteString`, `toHex`.",
-            "7:40 non-existent-method Method `missing` does not exist on `float`. | A `float` has the methods `abs`, `ceil`, `clamp`, `floor`, `format`, `isFinite`, `round`.",
+            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `byteLength`, `byteSubstring`, `bytes`, `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `equals`, `indexOf`, `isDigit`, `isLetter`, `isLetterOrDigit`, `isLowercase`, `isUppercase`, `isWhitespace`, `lastIndexOf`, `length`, `lines`, `lowercase`, `normalized`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `titlecase`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
+            "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `checkedAdd`, `checkedMultiply`, `checkedSubtract`, `clamp`, `floorDiv`, `format`, `mod`, `saturatingAdd`, `saturatingMultiply`, `saturatingSubtract`, `toByteString`, `toCharacter`, `toHex`.",
+            "7:40 non-existent-method Method `missing` does not exist on `float`. | A `float` has the methods `abs`, `ceil`, `clamp`, `floor`, `format`, `isFinite`, `isNaN`, `round`.",
             "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
         ]
     );
@@ -13262,7 +13318,7 @@ fn a_collection_property_read_through_a_union_with_a_scalar_is_the_declared_coll
             "7:9 possible-method-access-on-null Attempting to call a method on `null`. | This expression can be `null` | Use the nullsafe operator (`?.`) if `null` is an expected value.",
             "7:26 invalid-argument Invalid argument type for argument #1 of `Set<string>.add`: expected `string`, but found `int`. | This has type `int` | Arguments to this method are incorrect | The provided type `int` is not compatible with the expected type `string`. | Change the argument value to match `string`, or update the parameter's type declaration.",
             "8:9 possible-method-access-on-null Attempting to call a method on `null`. | This expression can be `null` | Use the nullsafe operator (`?.`) if `null` is an expected value.",
-            "8:22 non-existent-method Method `get` does not exist on `Set<string>`. | This method selection is invalid | This expression has type `Set<string>` | A `Set<string>` has the methods `add`, `any`, `clear`, `contains`, `count`, `filter`, `first`, `isEmpty`, `isNotEmpty`, `map`, `remove`, `sortedBy`, `sumOf`, `toList`.",
+            "8:22 non-existent-method Method `get` does not exist on `Set<string>`. | This method selection is invalid | This expression has type `Set<string>` | A `Set<string>` has the methods `add`, `any`, `clear`, `contains`, `count`, `filter`, `first`, `firstOrNull`, `intersect`, `isEmpty`, `isNotEmpty`, `isSubsetOf`, `map`, `remove`, `sortedBy`, `subtract`, `sumOf`, `toList`, `union`.",
         ]
     );
 }
@@ -14432,7 +14488,7 @@ fn a_list_of_int_has_its_largest_and_smallest_element() {
         refusals(("src/Demo/Sizes.sharp", sharp), &[]),
         [
             "7:54 where-constraint-violation `max` needs elements of type `int`, and this is a `List<string>`. | Call it on a collection whose elements are `int`.",
-            "8:56 non-existent-method Method `max` does not exist on `Map<string, int>`. | A `Map<string, int>` has the methods `any`, `associateBy`, `count`, `filter`, `first`, `get`, `groupBy`, `has`, `isEmpty`, `isNotEmpty`, `keys`, `map`, `remove`, `set`, `sortedBy`, `sumOf`, `toList`, `values`.",
+            "8:56 non-existent-method Method `max` does not exist on `Map<string, int>`. | A `Map<string, int>` has the methods `any`, `associateBy`, `count`, `filter`, `first`, `firstOrNull`, `get`, `getOrPut`, `groupBy`, `has`, `isEmpty`, `isNotEmpty`, `keys`, `map`, `remove`, `set`, `sortedBy`, `sumOf`, `toList`, `values`.",
         ]
     );
 }
@@ -14451,11 +14507,11 @@ fn a_collection_lacking_a_method_lists_only_the_methods_its_elements_let_it_call
             .filter(|refusal| refusal.contains("non-existent-method"))
             .collect::<Vec<_>>(),
         [
-            "5:75 non-existent-method Method `missing` does not exist on `List<TItem>`. | A `List<TItem>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
-            "6:57 non-existent-method Method `missing` does not exist on `List<int>`. | A `List<int>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `contains`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOf`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `max`, `min`, `remove`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
-            "7:56 non-existent-method Method `missing` does not exist on `List<Cart>`. | A `List<Cart>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
-            "8:81 non-existent-method Method `missing` does not exist on `List<TItem>`. | A `List<TItem>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `contains`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOf`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `remove`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
-            "9:71 non-existent-method Method `missing` does not exist on `Set<TItem>`. | A `Set<TItem>` has the methods `any`, `clear`, `count`, `filter`, `first`, `isEmpty`, `isNotEmpty`, `map`, `sortedBy`, `sumOf`, `toList`.",
+            "5:75 non-existent-method Method `missing` does not exist on `List<TItem>`. | A `List<TItem>` has the methods `add`, `all`, `any`, `associateBy`, `binarySearch`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `firstOrNull`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOfFirst`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `maxBy`, `minBy`, `partition`, `partitionPoint`, `removeAll`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sortedByDescending`, `sortedWith`, `sumOf`, `toList`, `toSet`, `windowed`, `zip`.",
+            "6:57 non-existent-method Method `missing` does not exist on `List<int>`. | A `List<int>` has the methods `add`, `all`, `any`, `associateBy`, `binarySearch`, `chunked`, `clear`, `contains`, `count`, `distinct`, `entries`, `filter`, `first`, `firstOrNull`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOf`, `indexOfFirst`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `max`, `maxBy`, `min`, `minBy`, `partition`, `partitionPoint`, `remove`, `removeAll`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sortedByDescending`, `sortedWith`, `sumOf`, `toByteString`, `toList`, `toSet`, `windowed`, `zip`.",
+            "7:56 non-existent-method Method `missing` does not exist on `List<Cart>`. | A `List<Cart>` has the methods `add`, `all`, `any`, `associateBy`, `binarySearch`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `firstOrNull`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOfFirst`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `maxBy`, `minBy`, `partition`, `partitionPoint`, `removeAll`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sortedByDescending`, `sortedWith`, `sumOf`, `toList`, `toSet`, `windowed`, `zip`.",
+            "8:81 non-existent-method Method `missing` does not exist on `List<TItem>`. | A `List<TItem>` has the methods `add`, `all`, `any`, `associateBy`, `binarySearch`, `chunked`, `clear`, `contains`, `count`, `distinct`, `entries`, `filter`, `first`, `firstOrNull`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOf`, `indexOfFirst`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `maxBy`, `minBy`, `partition`, `partitionPoint`, `remove`, `removeAll`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sortedByDescending`, `sortedWith`, `sumOf`, `toList`, `toSet`, `windowed`, `zip`.",
+            "9:71 non-existent-method Method `missing` does not exist on `Set<TItem>`. | A `Set<TItem>` has the methods `any`, `clear`, `count`, `filter`, `first`, `firstOrNull`, `intersect`, `isEmpty`, `isNotEmpty`, `isSubsetOf`, `map`, `sortedBy`, `subtract`, `sumOf`, `toList`, `union`.",
         ]
     );
 }
@@ -14475,7 +14531,7 @@ fn a_marked_extension_of_an_iterable_is_listed_where_its_call_compares_no_elemen
             .collect::<Vec<_>>(),
         [
             "7:59 non-existent-method Method `missing` does not exist on `Iterable<int>`. | An `Iterable<int>` has the methods `filter`, `holds`, `map`, `take`, `toList`.",
-            "8:56 non-existent-method Method `missing` does not exist on `List<Cart>`. | A `List<Cart>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+            "8:56 non-existent-method Method `missing` does not exist on `List<Cart>`. | A `List<Cart>` has the methods `add`, `all`, `any`, `associateBy`, `binarySearch`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `firstOrNull`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOfFirst`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `maxBy`, `minBy`, `partition`, `partitionPoint`, `removeAll`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sortedByDescending`, `sortedWith`, `sumOf`, `toList`, `toSet`, `windowed`, `zip`.",
             "9:61 non-existent-method Method `missing` does not exist on `Iterable<Cart>`. | An `Iterable<Cart>` has the methods `filter`, `map`, `take`, `toList`.",
         ]
     );
@@ -14531,7 +14587,7 @@ fn a_search_of_an_iterable_reads_a_set_by_its_elements() {
         [
             format!("7:84 {refusal}"),
             format!("8:87 {refusal}"),
-            "10:67 non-existent-method Method `missing` does not exist on `Set<Money|Ticket>`. | A `Set<Money|Ticket>` has the methods `add`, `any`, `clear`, `contains`, `count`, `filter`, `first`, `isEmpty`, `isNotEmpty`, `map`, `remove`, `sortedBy`, `sumOf`, `toList`.".to_owned(),
+            "10:67 non-existent-method Method `missing` does not exist on `Set<Money|Ticket>`. | A `Set<Money|Ticket>` has the methods `add`, `any`, `clear`, `contains`, `count`, `filter`, `first`, `firstOrNull`, `intersect`, `isEmpty`, `isNotEmpty`, `isSubsetOf`, `map`, `remove`, `sortedBy`, `subtract`, `sumOf`, `toList`, `union`.".to_owned(),
         ]
     );
 }

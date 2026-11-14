@@ -668,6 +668,9 @@ generate_ast_walker! {
     }
 
     'arena Extern as r#extern => {
+        for attribute_list in &r#extern.attribute_lists {
+            walker.walk_attribute_list(attribute_list, context);
+        }
         walker.walk_keyword(&r#extern.r#extern, context);
         if let Some(event) = &r#extern.event {
             walker.walk_keyword(event, context);

@@ -108,6 +108,19 @@ impl TList {
         Some(elements.values().map(|(_, element)| element).zip(names.iter().copied()).collect())
     }
 
+    /// The type of each element of a list whose every element is known, a PHP# tuple or the shape of a list literal
+    /// such as `[p.last, p.age]`, in order, or `None` for a list that may hold others. A `sortedBy` key of such a list
+    /// orders element by element, as Rust orders tuples.
+    #[must_use]
+    pub fn sealed_elements(&self) -> Option<Vec<&TUnion>> {
+        let elements = self.known_elements.as_ref()?;
+        if !self.element_type.is_never() || self.known_count != Some(elements.len()) {
+            return None;
+        }
+
+        Some(elements.values().map(|(_, element)| element).collect())
+    }
+
     #[inline]
     #[must_use]
     pub fn new_non_empty(element_type: Arc<TUnion>) -> Self {

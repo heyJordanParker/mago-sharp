@@ -755,6 +755,7 @@ where
     parent_artifacts.tested_types.extend(std::mem::take(&mut artifacts.tested_types));
     parent_artifacts.declared_types.extend(std::mem::take(&mut artifacts.declared_types));
     parent_artifacts.namespace_constants.extend(std::mem::take(&mut artifacts.namespace_constants));
+    parent_artifacts.ordered_key_types.extend(std::mem::take(&mut artifacts.ordered_key_types));
     parent_artifacts.function_values.append(&mut artifacts.function_values);
     parent_artifacts.readonly_calls.append(&mut artifacts.readonly_calls);
     parent_artifacts.symbol_references.extend(std::mem::take(&mut artifacts.symbol_references));

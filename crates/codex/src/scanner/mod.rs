@@ -79,6 +79,7 @@ use crate::metadata::function_like::FunctionLikeKind;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::ttype::TypeMetadata;
 use crate::misc::GenericParent;
+use crate::scanner::attribute::scan_attribute_lists;
 use crate::scanner::class_alias::scan_class_like_alias;
 use crate::scanner::class_like::register_anonymous_class;
 use crate::scanner::class_like::register_class;
@@ -641,6 +642,7 @@ where
             target,
             effects,
             event: r#extern.event.is_some(),
+            attributes: scan_attribute_lists(&r#extern.attribute_lists, context, &self.scope, None),
         });
     }
 

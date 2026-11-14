@@ -783,6 +783,23 @@ function associateBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $key, #[T
 /**
  * @template K
  * @template T
+ *
+ * @param iterable<K, T> $collection
+ * @param \Closure(T): bool $predicate
+ *
+ * @return T|null the first element `$predicate` keeps, or null when it keeps none.
+ */
+function firstOrNull(array|\Sharp\Map|\Sharp\Set $collection, \Closure $predicate): mixed {}
+
+/*
+ * A function that orders by the keys `$selector` gives takes `$order` last, the bridge's: the `operator <=>` the checker
+ * chose for the key type, a list of each element's for a tuple key, which orders element by element, or null for keys
+ * PHP# orders itself, as numbers and strings. A `null` key sorts before every other key.
+ */
+
+/**
+ * @template K
+ * @template T
  * @template R
  *
  * @param iterable<K, T> $collection
@@ -790,7 +807,58 @@ function associateBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $key, #[T
  *
  * @return list<T> the elements in ascending order of what `$selector` gives, equal ones in their order.
  */
-function sortedBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $selector, #[TakesKeyOrder] ?\Closure $comparison = null): array {}
+function sortedBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $selector, #[TakesKeyOrder] \Closure|array|null $order = null): array {}
+
+/**
+ * @template K
+ * @template T
+ * @template R
+ *
+ * @param iterable<K, T> $collection
+ * @param \Closure(T): R $selector
+ *
+ * @return list<T> the elements in descending order of what `$selector` gives, equal ones in their order.
+ */
+function sortedByDescending(array|\Sharp\Map|\Sharp\Set $collection, \Closure $selector, #[TakesKeyOrder] \Closure|array|null $order = null): array {}
+
+/**
+ * @template T
+ *
+ * @param list<T> $list
+ * @param \Closure(T, T): int $comparison
+ *
+ * @return list<T> the elements in the order `$comparison` gives two of them, below 0 for the first before the second,
+ *   equal ones in their order.
+ */
+function sortedWith(array $list, \Closure $comparison): array {}
+
+/**
+ * @template K
+ * @template T
+ * @template R
+ *
+ * @param iterable<K, T> $collection
+ * @param \Closure(T): R $selector
+ *
+ * @return T the first element of the smallest key `$selector` gives.
+ *
+ * @throws \OutOfRangeException when the collection is empty.
+ */
+function minBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $selector, #[TakesKeyOrder] \Closure|array|null $order = null): mixed {}
+
+/**
+ * @template K
+ * @template T
+ * @template R
+ *
+ * @param iterable<K, T> $collection
+ * @param \Closure(T): R $selector
+ *
+ * @return T the first element of the largest key `$selector` gives.
+ *
+ * @throws \OutOfRangeException when the collection is empty.
+ */
+function maxBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $selector, #[TakesKeyOrder] \Closure|array|null $order = null): mixed {}
 
 /**
  * @return int how many entries the table holds, read in constant time.
@@ -841,6 +909,21 @@ function addKey(\Sharp\Set &$table, mixed $key): bool {}
  * @param-out C $map
  */
 function put(\Sharp\Map &$map, mixed $key, mixed $value): void {}
+
+/**
+ * The value of `$key`, or, when the map holds no equal key, what `$defaultValue` gives, inserted with `$key` first, as
+ * Kotlin's `getOrPut` does.
+ *
+ * @template C of iterable
+ * @template V
+ *
+ * @param C $map
+ * @param \Closure(): V $defaultValue
+ * @param-out C $map
+ *
+ * @return V
+ */
+function getOrPut(\Sharp\Map &$map, mixed $key, \Closure $defaultValue): mixed {}
 
 /**
  * @template K

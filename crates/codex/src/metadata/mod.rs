@@ -1665,6 +1665,26 @@ impl CodebaseMetadata {
         }
     }
 
+    /// Gives each class an `extern` line declares the attributes written before the line, as the class's own, spec
+    /// section 29. A class keeps one it holds already, and [`Self::remove_entries_by_keys`] takes away those of a file that
+    /// goes.
+    pub(crate) fn apply_extern_attributes(&mut self) {
+        for declaration in self.externs.values().flatten() {
+            let (class, member) = declaration.target;
+            if declaration.attributes.is_empty() || class.is_empty() || !member.is_empty() {
+                continue;
+            }
+            let Some(class_like) = self.class_likes.get_mut(&class) else {
+                continue;
+            };
+            for attribute in &declaration.attributes {
+                if !class_like.attributes.contains(attribute) {
+                    class_like.attributes.push(attribute.clone());
+                }
+            }
+        }
+    }
+
     /// Adds another codebase's modules, keeping them in the order [`ModuleMetadata`] sorts them, whatever order the
     /// files merge in.
     fn merge_modules(&mut self, incoming: impl IntoIterator<Item = ModuleMetadata>) {
@@ -1970,6 +1990,10 @@ impl CodebaseMetadata {
             declarations.retain(|declaration| !removed_files.contains(&declaration.span.file_id));
         }
         self.externs.retain(|_, declarations| !declarations.is_empty());
+        // An `extern` line of a file that goes takes its attributes away from the class it declares.
+        for class_like in self.class_likes.values_mut() {
+            class_like.attributes.retain(|attribute| !removed_files.contains(&attribute.span.file_id));
+        }
         self.modules.retain(|module| !removed_files.contains(&module.span.file_id));
         self.extern_namespaces.retain(|declaration| !removed_files.contains(&declaration.span.file_id));
         for members in self.extensions.values_mut() {

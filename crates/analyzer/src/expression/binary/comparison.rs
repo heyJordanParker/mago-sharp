@@ -1486,7 +1486,8 @@ pub(crate) fn report_sharp_refusal<A>(
 
 /// Reports `selector`, the function the PHP# collection member `member` orders by, as `sortedBy` does, when `<` cannot
 /// compare two keys it returns, of `key_type`, with the report `<` gives. A `null` key sorts before every other key, so
-/// only the other keys must order. Gives whether it reported the key.
+/// only the other keys must order. A tuple key, as `p => [p.last, p.age]` returns, orders element by element, as Rust
+/// orders tuples, so each element is checked as a key of its own. Gives whether it reported the key.
 pub(crate) fn check_ordered_key<A>(
     context: &mut Context<'_, '_, A>,
     member: &str,
@@ -1496,6 +1497,15 @@ pub(crate) fn check_ordered_key<A>(
 where
     A: Arena,
 {
+    if let Some(elements) = tuple_key_elements(key_type) {
+        // Every element is checked, so a key with two unordered elements reports both.
+        let mut reported = false;
+        for element in &elements {
+            reported |= check_ordered_key(context, member, selector, element);
+        }
+
+        return reported;
+    }
     let key_name = display_operand(context, key_type);
     let key_type = key_type.to_non_nullable();
     let issue = match ordering_refusal(&key_type, &key_type, context.codebase) {
@@ -1550,6 +1560,15 @@ where
     );
 
     true
+}
+
+/// The type of each element of `key_type` when it is a tuple a `sortedBy` key orders element by element, spec section
+/// 12: one list whose every element is known, as a tuple or a list literal such as `[p.last, p.age]`.
+fn tuple_key_elements(key_type: &TUnion) -> Option<Vec<TUnion>> {
+    match key_type.types.as_ref() {
+        [TAtomic::Array(TArray::List(list))] => Some(list.sealed_elements()?.into_iter().cloned().collect()),
+        _ => None,
+    }
 }
 
 /// What a PHP# search compares its value with by `==`, spec section 12, which decides the `===` test a refused search's

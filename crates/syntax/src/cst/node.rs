@@ -2941,6 +2941,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 UseType::Function(node) => Node::Keyword(node),
             }),
             Node::Extern(node) => {
+                for attribute_list in &node.attribute_lists {
+                    f(Node::AttributeList(attribute_list));
+                }
                 f(Node::Keyword(&node.r#extern));
                 if let Some(event) = &node.event {
                     f(Node::Keyword(event));

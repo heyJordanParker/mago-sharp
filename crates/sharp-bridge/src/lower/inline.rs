@@ -11,9 +11,7 @@ use std::collections::HashMap;
 use mago_analyzer::artifacts::MemberCall;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
-use mago_names::binding::php_operator_name;
 use mago_span::HasSpan;
-use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
@@ -23,9 +21,11 @@ use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Conditional;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
@@ -42,10 +42,14 @@ use mago_word::Word;
 use super::Lines;
 use super::Lowering;
 use super::NULL;
+use super::ZEND_ARRAY_SYNTAX_SHORT;
 use super::types::Declaration;
 use super::types::DeclarationKind;
+use super::types::KeyOrder;
 use super::types::receiver_classes;
 use crate::lower::checked::CheckedProgram;
+use crate::sharp_kind::SHARP_AST_ARRAY;
+use crate::sharp_kind::SHARP_AST_ARRAY_ELEM;
 use crate::sharp_kind::SHARP_AST_CALLABLE_CONVERT;
 use crate::sharp_kind::SHARP_AST_VAR;
 use crate::sharp_node;
@@ -170,12 +174,15 @@ impl InlineForms {
         self.0.get(name)
     }
 
-    /// Each form, with the class it runs on and the member it runs, as [`key`] gives them.
+    /// Each form, with the class it runs on and the member it runs, as [`key`] gives them. A member has a form for each
+    /// call that leaves out parameters, as [`folded_key`] names it.
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8], &InlineForm)> {
         self.0.iter().filter_map(|(name, form)| {
             let separator = name.windows(2).position(|pair| pair == b"::")?;
+            let member = &name[separator + 2..];
+            let member = member.iter().position(|byte| *byte == b'#').map_or(member, |arity| &member[..arity]);
 
-            Some((&name[..separator], &name[separator + 2..], form))
+            Some((&name[..separator], member, form))
         })
     }
 }
@@ -218,7 +225,7 @@ pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> 
                     if method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_))) =>
                 {
                     Lowering::new(&lines, checked.names(), checked.types())
-                        .method_form(name, method, None)
+                        .method_form(name, method, None, 0)
                         .map(|form| (key(name, method.name.value), form))
                 }
                 _ => None,
@@ -230,35 +237,38 @@ pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> 
         for member in &class.members {
             match member {
                 ClassLikeMember::Method(method) => {
-                    forms.extend(
-                        lowering()
-                            .method_form(name, method, None)
-                            .filter(|_| public(method.name.value))
-                            .map(|form| (key(name, method.name.value), form)),
-                    );
+                    let built = method_forms(&lowering, name, method, None);
+                    if !built.is_empty() && public(method.name.value) {
+                        forms.extend(built);
+                    }
                 }
                 ClassLikeMember::Extension(extension) => {
                     let [receiver] = extension.parameter_list.parameters.as_slice() else {
                         unreachable!("semantics refuses an extension without exactly one receiver");
                     };
                     for member in &extension.members {
-                        let (member, form) = match member {
+                        match member {
                             ClassLikeMember::Method(method) => {
-                                (method.name.value, lowering().method_form(name, method, Some(receiver)))
+                                let built = method_forms(&lowering, name, method, Some(receiver));
+                                if !built.is_empty() && public(method.name.value) {
+                                    forms.extend(built);
+                                }
                             }
-                            ClassLikeMember::Property(Property::Computed(property)) => (
-                                property.variable.name,
-                                lowering().form(
+                            ClassLikeMember::Property(Property::Computed(property)) => {
+                                let form = lowering().form(
                                     name,
                                     property.variable.name,
                                     &[receiver],
                                     Body::Expression(property.body.expression),
                                     true,
-                                ),
-                            ),
+                                );
+                                forms.extend(
+                                    form.filter(|_| public(property.variable.name))
+                                        .map(|form| (key(name, property.variable.name), form)),
+                                );
+                            }
                             _ => unreachable!("semantics refuses the extension member `{member}`"),
-                        };
-                        forms.extend(form.filter(|_| public(member)).map(|form| (key(name, member), form)));
+                        }
                     }
                 }
                 _ => {}
@@ -267,6 +277,57 @@ pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> 
     }
 
     forms
+}
+
+/// The name of the form of `class`'s method `method` for a call that passes `arity` values, the receiver counted, and
+/// leaves out the parameters after them, as `Sharp\Text\StringMembers::startsWith#2`. No PHP# name holds `#`.
+pub(crate) fn folded_key(class: &[u8], method: &[u8], arity: usize) -> Vec<u8> {
+    [&key(class, method), b"#".as_slice(), arity.to_string().as_bytes()].concat()
+}
+
+/// The forms of `class`'s method `method`, each with its name: the form of a call that passes every argument, and the
+/// form of each call that leaves out some of the last parameters whose default is a literal. Such a call takes those
+/// defaults, so its form folds every branch they decide, as `startsWith(prefix)` leaves out `ignoreCase` and runs
+/// `str_starts_with` alone.
+fn method_forms<'lowering, 'arena, F>(
+    lowering: &F,
+    class: &[u8],
+    method: &Method,
+    receiver: Option<&FunctionLikeParameter>,
+) -> Vec<(Vec<u8>, InlineForm)>
+where
+    'arena: 'lowering,
+    F: Fn() -> Lowering<'lowering, 'arena>,
+{
+    let defaulted = method
+        .parameter_list
+        .parameters
+        .iter()
+        .rev()
+        .take_while(|parameter| literal_default(parameter).is_some())
+        .count();
+
+    (0..=defaulted)
+        .filter_map(|omitted| {
+            let form = lowering().method_form(class, method, receiver, omitted)?;
+            let name = if omitted == 0 {
+                key(class, method.name.value)
+            } else {
+                folded_key(class, method.name.value, form.slots.len())
+            };
+
+            Some((name, form))
+        })
+        .collect()
+}
+
+/// The default of `parameter` when it is a literal.
+fn literal_default<'body, 'ast>(parameter: &'body FunctionLikeParameter<'ast>) -> Option<&'body Expression<'ast>> {
+    parameter
+        .default_value
+        .as_ref()
+        .map(|default| default.value)
+        .filter(|value| matches!(value, Expression::Literal(_)))
 }
 
 /// What a library member's body runs: one expression, or the call of an `extern` method's native function.
@@ -290,34 +351,164 @@ impl Lowering<'_, '_> {
     ///
     /// The body is one expression, or, for an `extern` method, the call of its native function. A `void` method's
     /// expression body is a call, whose value no caller reads. A constructor, which declares no return type, has none.
+    ///
+    /// A call that leaves out the last `omitted` parameters takes their literal defaults, so the body is what remains
+    /// once every branch they decide is folded, and the form has no slot for them.
     fn method_form(
         self,
         class: &[u8],
         method: &Method,
         receiver: Option<&FunctionLikeParameter>,
+        omitted: usize,
     ) -> Option<InlineForm> {
+        let parameters: Vec<&FunctionLikeParameter> =
+            receiver.into_iter().chain(&method.parameter_list.parameters).collect();
+        let kept = parameters.len() - omitted;
+        let defaults: Vec<(&[u8], &Expression)> = parameters[kept..]
+            .iter()
+            .map(|parameter| {
+                let Some(default) = literal_default(parameter) else {
+                    unreachable!("method_forms leaves out only parameters whose default is a literal");
+                };
+
+                (parameter.variable.name, default)
+            })
+            .collect();
         let is_void = method.return_type_hint.as_ref().is_some_and(|hint| matches!(hint.hint, Hint::Void(_)));
         let body = match &method.body {
-            MethodBody::Expression(body) if method.returns_value() || is_void => Body::Expression(body.expression),
+            MethodBody::Expression(body) if method.returns_value() || is_void => {
+                Body::Expression(self.folded(body.expression, &defaults))
+            }
             MethodBody::Concrete(block) => {
-                let mut statements = block.statements.iter();
-                match (statements.next(), statements.next()) {
-                    (Some(Statement::Return(Return { value: Some(value), .. })), None) => Body::Expression(value),
+                // The body's first statement after the fold is the `return` that runs, and no statement after it does.
+                let mut statements = Vec::new();
+                self.folded_statements(block.statements.iter(), &defaults, &mut statements)?;
+                match statements.first() {
+                    Some(Statement::Return(Return { value: Some(value), .. })) => {
+                        Body::Expression(self.folded(value, &defaults))
+                    }
                     _ => return None,
                 }
             }
             MethodBody::Abstract(_)
-                if method.returns_value()
+                if omitted == 0
+                    && method.returns_value()
                     && method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_))) =>
             {
                 Body::Native(method)
             }
             _ => return None,
         };
-        let parameters: Vec<&FunctionLikeParameter> =
-            receiver.into_iter().chain(&method.parameter_list.parameters).collect();
 
-        self.form(class, method.name.value, &parameters, body, receiver.is_some())
+        self.form(class, method.name.value, &parameters[..kept], body, receiver.is_some())
+    }
+
+    /// `expression` with each `?:` whose condition `defaults` decide folded to the branch it takes.
+    fn folded<'body, 'ast>(
+        &self,
+        mut expression: &'body Expression<'ast>,
+        defaults: &[(&[u8], &Expression)],
+    ) -> &'body Expression<'ast> {
+        loop {
+            expression = match expression {
+                Expression::Parenthesized(parenthesized)
+                    if matches!(parenthesized.expression, Expression::Conditional(_)) =>
+                {
+                    parenthesized.expression
+                }
+                Expression::Conditional(Conditional { condition, then: Some(then), r#else, .. }) => {
+                    match self.decided(condition, defaults) {
+                        Some(true) => then,
+                        Some(false) => r#else,
+                        None => return expression,
+                    }
+                }
+                _ => return expression,
+            };
+        }
+    }
+
+    /// Appends `statements` to `folded`, each `if` whose condition `defaults` decide replaced by the statements of the
+    /// branch it takes. None when an `if` it decides has an `elseif`.
+    fn folded_statements<'body, 'ast>(
+        &self,
+        statements: impl IntoIterator<Item = &'body Statement<'ast>>,
+        defaults: &[(&[u8], &Expression)],
+        folded: &mut Vec<&'body Statement<'ast>>,
+    ) -> Option<()>
+    where
+        'ast: 'body,
+    {
+        for statement in statements {
+            let Statement::If(r#if) = statement else {
+                folded.push(statement);
+                continue;
+            };
+            let (IfBody::Statement(body), Some(taken)) = (&r#if.body, self.decided(r#if.condition, defaults)) else {
+                folded.push(statement);
+                continue;
+            };
+            if !body.else_if_clauses.is_empty() {
+                return None;
+            }
+            let branch =
+                if taken { Some(body.statement) } else { body.else_clause.as_ref().map(|clause| clause.statement) };
+            match branch {
+                Some(Statement::Block(block)) => self.folded_statements(block.statements.iter(), defaults, folded)?,
+                Some(branch) => self.folded_statements([branch], defaults, folded)?,
+                None => {}
+            }
+        }
+
+        Some(())
+    }
+
+    /// Whether `condition` holds when each parameter `defaults` names holds its default: a `bool` parameter itself,
+    /// `!`, and `==`, `===`, `!=` or `!==` between a parameter and a literal. None when it reads anything else.
+    fn decided(&self, condition: &Expression, defaults: &[(&[u8], &Expression)]) -> Option<bool> {
+        match condition {
+            Expression::Parenthesized(parenthesized) => self.decided(parenthesized.expression, defaults),
+            Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Not(_), operand }) => {
+                self.decided(operand, defaults).map(|holds| !holds)
+            }
+            Expression::Binary(Binary { lhs, operator, rhs }) => {
+                let equal = matches!(operator, BinaryOperator::Equal(_) | BinaryOperator::Identical(_));
+                if !equal && !matches!(operator, BinaryOperator::NotEqual(_) | BinaryOperator::NotIdentical(_)) {
+                    return None;
+                }
+                let (default, literal) = match (self.default_of(lhs, defaults), self.default_of(rhs, defaults)) {
+                    (Some(default), None) => (default, *rhs),
+                    (None, Some(default)) => (default, *lhs),
+                    _ => return None,
+                };
+                let (Expression::Literal(default), Expression::Literal(literal)) = (default, literal) else {
+                    return None;
+                };
+
+                Some((PhpCallArgument::literal(default) == PhpCallArgument::literal(literal)) == equal)
+            }
+            value => match self.default_of(value, defaults)? {
+                Expression::Literal(Literal::True(_)) => Some(true),
+                Expression::Literal(Literal::False(_)) => Some(false),
+                _ => None,
+            },
+        }
+    }
+
+    /// The default of the parameter `expression` reads, when `defaults` names it.
+    fn default_of<'default, 'ast>(
+        &self,
+        expression: &Expression,
+        defaults: &[(&[u8], &'default Expression<'ast>)],
+    ) -> Option<&'default Expression<'ast>> {
+        let Expression::ConstantAccess(name) = expression else {
+            return None;
+        };
+        if !matches!(self.names.binding(&name.name), Some(Binding::Local(_))) {
+            return None;
+        }
+
+        defaults.iter().find(|(parameter, _)| *parameter == name.name.value()).map(|(_, default)| *default)
     }
 
     /// The form of `class`'s member `name`, which takes `parameters`, the receiver first for an `extension` member, and
@@ -580,7 +771,6 @@ impl Lowering<'_, '_> {
         element: Option<&TUnion>,
         member: Option<&MemberCall>,
     ) -> Option<u32> {
-        let form = self.types.inline_form(declaration)?;
         let line = self.line(call);
         let receivers = usize::from(receiver.is_some());
         let mut values: Vec<InlineReceiver> = receiver.into_iter().collect();
@@ -594,6 +784,7 @@ impl Lowering<'_, '_> {
 
             values.push(InlineReceiver::Expression(argument.value));
         }
+        let form = self.types.inline_form_passing(declaration, values.len())?;
         // An argument the call leaves out is the parameter's default, which the form holds when it is a literal.
         let defaults: Vec<u32> =
             form.defaults.get(values.len()..).unwrap_or_default().iter().copied().collect::<Option<_>>()?;
@@ -617,7 +808,7 @@ impl Lowering<'_, '_> {
             })
             .collect();
         let result_type = form.result_type.map(|_| self.result_type_argument(call, member, line));
-        let key_order = form.key_order.map(|_| self.key_order_argument(call, member, line));
+        let key_order = form.key_order.map(|_| self.key_order_argument(call, line));
         values.extend(result_type.into_iter().chain(key_order));
 
         Some(self.copied(declaration, form, &values, line))
@@ -660,18 +851,36 @@ impl Lowering<'_, '_> {
         self.type_text(line, &text)
     }
 
-    /// The `operator <=>` the checker chose for the keys `call`, or its member `member`, orders by, spec section 19, as
-    /// the engine function's [`TAKES_KEY_ORDER`] parameter takes it: its first-class callable, or null for keys of a
-    /// type that declares none.
-    pub(super) fn key_order_argument(&mut self, call: &Expression, member: Option<&MemberCall>, line: u32) -> u32 {
-        let operator = self.types.sorting_operator(call, member);
-        match operator.zip(php_operator_name(&BinaryOperator::Spaceship(Span::zero()), 2)) {
-            Some((owner, name)) => {
+    /// The `operator <=>` the checker chose for the keys `call` orders by, spec section 19, as the engine function's
+    /// [`TAKES_KEY_ORDER`] parameter takes it: its first-class callable, the list of each element's for a tuple key,
+    /// spec section 12, or null for keys of a type that declares none.
+    pub(super) fn key_order_argument(&mut self, call: &Expression, line: u32) -> u32 {
+        let order = self.types.key_order(call);
+
+        self.key_order_value(&order, line)
+    }
+
+    /// `order` as the engine function's [`TAKES_KEY_ORDER`] parameter takes it, on `line`.
+    fn key_order_value(&mut self, order: &KeyOrder, line: u32) -> u32 {
+        match order {
+            KeyOrder::Operator(owner, name) => {
                 let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
 
-                self.operator_method(line, owner, name, callable)
+                self.operator_method(line, *owner, name, callable)
             }
-            None => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
+            KeyOrder::Elements(orders) => {
+                let elements: Vec<u32> = orders
+                    .iter()
+                    .map(|order| {
+                        let value = self.key_order_value(order, line);
+
+                        self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[value, NULL])
+                    })
+                    .collect();
+
+                self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &elements)
+            }
+            KeyOrder::Plain => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
         }
     }
 

@@ -110,6 +110,18 @@ pub struct Listener {
     pub takes_event: bool,
 }
 
+/// An `extern` line that gives a plain PHP class attributes, spec section 29, which the engine gives the class when
+/// reflection reads its attributes.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExternAttributes {
+    /// The file that declares the line.
+    pub file_id: FileId,
+    /// The workspace-relative name of that file.
+    pub file: Word,
+    /// The class's fully qualified name, in lowercase, as PHP looks a class up.
+    pub class: Word,
+}
+
 /// The app's module whose binding of the dispatcher serves the whole app, spec section 15, which `emit` reads wherever
 /// the event is emitted.
 #[derive(Debug, PartialEq, Eq)]
@@ -121,6 +133,22 @@ pub struct DispatcherModule {
 }
 
 impl IncrementalAnalysisService {
+    /// Every `extern` line of the last analysis that gives a class attributes, by the class, then by the file.
+    #[must_use]
+    pub fn extern_attributes(&self) -> Vec<ExternAttributes> {
+        let mut lines: Vec<ExternAttributes> = self
+            .codebase
+            .externs
+            .values()
+            .flatten()
+            .filter(|line| !line.attributes.is_empty() && !line.target.0.is_empty() && line.target.1.is_empty())
+            .map(|line| ExternAttributes { file_id: line.span.file_id, file: line.file, class: line.target.0 })
+            .collect();
+        lines.sort_by(|a, b| (a.class.as_bytes(), a.file.as_bytes()).cmp(&(b.class.as_bytes(), b.file.as_bytes())));
+
+        lines
+    }
+
     /// Every PHP# listener of the last analysis, in the order the engine runs them: by its class's full name, then by
     /// its place in its class.
     #[must_use]

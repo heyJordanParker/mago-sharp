@@ -29886,15 +29886,21 @@ fn form_names((path, code): (&str, &str)) -> Vec<String> {
 }
 
 /// A standard library class whose methods each make one call of a plain PHP function, with a float, `true` and
-/// `false`, a named argument, and a spread.
+/// `false`, a named argument, and a spread, and whose methods from `starts` on branch on a parameter with a default.
 const CALLS: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Calls.sharp",
-    "namespace Sharp;\n\npublic class Calls\n{\n    public static float remainder(float value) => global.fmod(value, 1.5);\n\n    public static string broken(string text) => global.nl2br(text, true);\n\n    public static string plain(string text) => global.nl2br(text, false);\n\n    public static string named(string text) => global.nl2br(text, use_xhtml: false);\n\n    public static string formatted(string format, List<int> values) => global.sprintf(format, ...values);\n}\n",
+    "namespace Sharp;\n\npublic class Calls\n{\n    public static float remainder(float value) => global.fmod(value, 1.5);\n\n    public static string broken(string text) => global.nl2br(text, true);\n\n    public static string plain(string text) => global.nl2br(text, false);\n\n    public static string named(string text) => global.nl2br(text, use_xhtml: false);\n\n    public static string formatted(string format, List<int> values) => global.sprintf(format, ...values);\n\n    public static bool starts(string text, string prefix, bool folded = false) => folded ? global.str_starts_with(global.strtolower(text), global.strtolower(prefix)) : global.str_starts_with(text, prefix);\n\n    public static bool folds(string text, bool folded = false) => folded ? global.ctype_lower(text) : global.ctype_lower(global.strtolower(text) + text);\n\n    public static bool trues(string text, bool folded = true) => folded ? global.ctype_lower(text) : global.ctype_upper(text);\n\n    public static bool negated(string text, bool folded = false) => !folded ? global.ctype_lower(text) : global.ctype_upper(text);\n\n    public static string limited(string text, string? suffix = null) => suffix == null ? global.strtoupper(text) : global.strtoupper(text + suffix);\n\n    public static string shouted(string text, bool quiet = false)\n    {\n        if (!quiet) {\n            return global.strtoupper(text);\n        }\n        return global.strtolower(text);\n    }\n\n    public static string sized(string text, int width = 3) => width > 2 ? global.strtoupper(text) : global.strtolower(text);\n}\n",
 );
 
 /// A form whose body is one call of a plain PHP function gives that call, which the converter compares a PHP call
 /// with: each argument a slot, or a literal as PHP reads it. A named argument passes no plain value, so the
 /// form gives no call, and a spread no form at all. `InlineForms::iter` names each form's class and member.
+///
+/// A call that leaves out parameters whose defaults are literals takes those defaults, so it has a form of its own
+/// that folds each `?:` and `if` they decide, through `!` and `==`: the `bool` defaults of `starts`, `trues`, `negated`
+/// and `shouted`, whose block leaves one `return`, and the `null` default of `limited`. A branch that reads a slot twice,
+/// as `folds` reads `text`, gives no form, and neither does `sized`, whose `>` no default decides, nor any call that
+/// passes every argument and reads a slot in both branches.
 #[test]
 fn an_inline_form_gives_the_plain_php_call_its_body_makes() {
     use mago_sharp_bridge::PhpCallArgument;
@@ -29921,7 +29927,9 @@ fn an_inline_form_gives_the_plain_php_call_its_body_makes() {
         calls,
         [
             ("Sharp\\Calls".to_owned(), "broken".to_owned(), Some(vec![PhpCallArgument::Slot(0), literal("true")]), 1),
+            ("Sharp\\Calls".to_owned(), "limited".to_owned(), Some(vec![PhpCallArgument::Slot(0)]), 1),
             ("Sharp\\Calls".to_owned(), "named".to_owned(), None, 1),
+            ("Sharp\\Calls".to_owned(), "negated".to_owned(), Some(vec![PhpCallArgument::Slot(0)]), 1),
             ("Sharp\\Calls".to_owned(), "plain".to_owned(), Some(vec![PhpCallArgument::Slot(0), literal("false")]), 1),
             (
                 "Sharp\\Calls".to_owned(),
@@ -29929,6 +29937,14 @@ fn an_inline_form_gives_the_plain_php_call_its_body_makes() {
                 Some(vec![PhpCallArgument::Slot(0), literal("1.5")]),
                 1
             ),
+            ("Sharp\\Calls".to_owned(), "shouted".to_owned(), Some(vec![PhpCallArgument::Slot(0)]), 1),
+            (
+                "Sharp\\Calls".to_owned(),
+                "starts".to_owned(),
+                Some(vec![PhpCallArgument::Slot(0), PhpCallArgument::Slot(1)]),
+                2
+            ),
+            ("Sharp\\Calls".to_owned(), "trues".to_owned(), Some(vec![PhpCallArgument::Slot(0)]), 1),
         ]
     );
 }
@@ -31007,6 +31023,49 @@ fn an_interface_operator_runs_from_its_trait_as_the_types_of_the_operands_choose
               ZVAL "App\\Priced\\Defaults"
               ZVAL "op_Comparison@App\\Priced"
               CALLABLE_CONVERT
+        "#}
+    );
+}
+
+/// ```php
+/// return \Sharp\Internal\sortedBy($sizes, …, [\App\Size::op_Comparison(...), null]);
+/// return \Sharp\Internal\sortedBy($numbers, …, null);
+/// ```
+///
+/// Spec section 12: a `sortedBy` key that is a tuple orders element by element, as Rust orders tuples, so the engine
+/// gets the list of each element's operator `<` runs, with null for an element PHP# orders itself, and a tuple whose
+/// every element PHP# orders itself gets null.
+#[test]
+fn a_tuple_key_passes_the_engine_the_operator_of_each_element() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Size.sharp",
+                "namespace App;\n\npublic enum Size : int\n{\n    case Small = 1;\n    case Large = 3;\n\n    public static int operator <=>(Size a, Size b) => a.value <=> b.value;\n}\n",
+            ),
+            (
+                "src/App/Uses.sharp",
+                "namespace App;\n\npublic static class Uses\n{\n    public static List<Size> bySize(List<Size> sizes) => sizes.sortedBy(size => [size, size.value]);\n\n    public static List<int> byParity(List<int> numbers) => numbers.sortedBy(n => [n % 2, n]);\n}\n",
+            ),
+        ],
+        &[],
+    );
+    let member = |name: &str, path: &[u32]| member_in(&files, name, path);
+
+    assert_eq!(
+        [member("Uses", &[0, 2, 0, 0, 1, 2]), member("Uses", &[1, 2, 0, 0, 1, 2])].concat(),
+        indoc! {r#"
+            ARRAY [3]
+              ARRAY_ELEM
+                STATIC_CALL
+                  ZVAL "App\\Size"
+                  ZVAL "op_Comparison"
+                  CALLABLE_CONVERT
+                null
+              ARRAY_ELEM
+                ZVAL null
+                null
+            ZVAL null
         "#}
     );
 }
@@ -35921,5 +35980,52 @@ fn a_plain_case_of_a_generic_enum_is_the_object_of_its_type_arguments() {
               ZVAL [1] "self"
               null
         "##}
+    );
+}
+
+/// Spec section 29: an `extern` line's attributes are the plain PHP class's own at run time, so the line lowers to a
+/// `SHARP_EXTERN` of the class's full name and its attributes, which the engine compiles when reflection reads them.
+/// A line without attributes lowers to nothing, as before.
+#[test]
+fn an_extern_line_with_attributes_lowers_to_the_class_and_its_attributes() {
+    let listener = (
+        "vendor/symfony/event-dispatcher/Attribute/AsEventListener.php",
+        "<?php\n\nnamespace Symfony\\Component\\EventDispatcher\\Attribute;\n\n#[\\Attribute(\\Attribute::TARGET_CLASS | \\Attribute::TARGET_METHOD)]\nclass AsEventListener\n{\n}\n",
+    );
+    let group = (
+        "src/Lib/Group.php",
+        "<?php\n\nnamespace Lib;\n\n#[\\Attribute]\nclass Group\n{\n    public function __construct(public string $name) {}\n}\n",
+    );
+    let files = lowered_each(
+        &[(
+            "src/App/Stubs/Stubs.sharp",
+            "namespace App.Stubs;\n\nimport Lib.Group;\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\n[Group(\"events\")]\nextern AsEventListener;\nextern Group;\n",
+        )],
+        &[listener, group],
+    );
+
+    assert_eq!(
+        files[0].tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App\\Stubs"
+                null
+              SHARP_EXTERN
+                ZVAL "Symfony\\Component\\EventDispatcher\\Attribute\\AsEventListener"
+                ATTRIBUTE_LIST
+                  ATTRIBUTE_GROUP
+                    ATTRIBUTE
+                      ZVAL "Lib\\Group"
+                      ARG_LIST
+                        ZVAL "events"
+        "#}
     );
 }

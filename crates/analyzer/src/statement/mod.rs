@@ -355,7 +355,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Extern(r#extern) => {
                     crate::effects::check::check_extern(context, r#extern);
 
-                    Ok(())
+                    crate::statement::attributes::analyze_extern_attributes(context, artifacts, r#extern)
                 }
                 Statement::Module(module) => module.analyze(context, block_context, artifacts),
                 #[allow(clippy::unreachable)]

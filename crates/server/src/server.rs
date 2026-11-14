@@ -17,6 +17,7 @@ use mago_orchestrator::error::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
+use mago_orchestrator::service::incremental_analysis::compile::ExternAttributes;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
@@ -179,6 +180,12 @@ impl Server {
     #[must_use]
     pub fn dispatcher_module(&self) -> Option<DispatcherModule> {
         self.service.dispatcher_module()
+    }
+
+    /// Every `extern` line of the last analysis that gives a class attributes, by the class, then by the file.
+    #[must_use]
+    pub fn extern_attributes(&self) -> Vec<ExternAttributes> {
+        self.service.extern_attributes()
     }
 
     /// For each of `files`, the source files other than it whose signature edit makes the last analysis's warm path

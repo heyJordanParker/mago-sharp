@@ -75,6 +75,7 @@ use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extension;
+use mago_syntax::cst::Extern;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForOf;
@@ -230,6 +231,7 @@ use crate::sharp_kind::SHARP_AST_PROPERTY_HOOK;
 use crate::sharp_kind::SHARP_AST_PROPERTY_HOOK_SHORT_BODY;
 use crate::sharp_kind::SHARP_AST_RETURN;
 use crate::sharp_kind::SHARP_AST_SHARP_CLASS_METADATA;
+use crate::sharp_kind::SHARP_AST_SHARP_EXTERN;
 use crate::sharp_kind::SHARP_AST_SHARP_IS_TYPE;
 use crate::sharp_kind::SHARP_AST_SHARP_TYPE_ARGS;
 use crate::sharp_kind::SHARP_AST_SHARP_TYPE_OF;
@@ -723,9 +725,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.file_statement(statement, statements);
                 }
             }
-            // An `extern` declaration tells only the checker what plain PHP does, and a module's laws are checked and
-            // never run. A module's bindings are the table the file returns last, in `program`.
-            Statement::Use(_) | Statement::Extern(_) | Statement::Module(_) => {}
+            // An `extern` declaration tells the checker what plain PHP does, and its attributes are the class's own at
+            // run time. A module's laws are checked and never run. A module's bindings are the table the file returns
+            // last, in `program`.
+            Statement::Extern(r#extern) => statements.extend(self.extern_attributes(r#extern)),
+            Statement::Use(_) | Statement::Module(_) => {}
             Statement::Class(class) => statements.push(self.class(class)),
             Statement::Interface(interface) => {
                 statements.push(self.interface(interface));
@@ -4200,6 +4204,26 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// [`Self::internal_attribute`].
     fn attributes(&mut self, lists: &Sequence<AttributeList>, r#override: Option<&Modifier>, added: &[u32]) -> u32 {
         self.attributes_of(&lists.iter().collect::<Vec<_>>(), r#override, added)
+    }
+
+    /// The `SHARP_EXTERN` of an `extern` line's attributes, spec section 29: the full name of the plain PHP class the
+    /// line declares and its attributes, which the engine gives the class when reflection reads its attributes. A file
+    /// runs nothing for it. None for a line without attributes.
+    fn extern_attributes(&mut self, r#extern: &Extern) -> Option<u32> {
+        if r#extern.namespaced.is_some()
+            || r#extern.target.is_dotted()
+            || self.names.binding(&r#extern.target) != Some(Binding::Class)
+        {
+            return None;
+        }
+        let attributes = self.attributes(&r#extern.attribute_lists, None, &[]);
+        if attributes == NULL {
+            return None;
+        }
+        let line = self.line(r#extern);
+        let class = self.string(ZEND_NAME_FQ, line, self.names.get(&r#extern.target));
+
+        Some(self.node(SHARP_AST_SHARP_EXTERN, 0, line, &[class, attributes]))
     }
 
     /// The attributes of `lists`, some of a declaration's, as [`Self::attributes`] lowers them all.
@@ -8324,7 +8348,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     children.extend(slots.iter().map(|&slot| match slot {
                         _ if this.forming => this.variable(call.span(), slot),
                         inline::RESULT_TYPE_SLOT => this.result_type_argument(expression, None, line),
-                        _ => this.key_order_argument(expression, None, line),
+                        _ => this.key_order_argument(expression, line),
                     }));
 
                     this.node(SHARP_AST_ARG_LIST, 0, line, &children)
