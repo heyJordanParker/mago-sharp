@@ -29174,7 +29174,8 @@ fn reflection_gives_each_member_fact_its_type() {
 /// Spec section 25: `Class.of(value)` of a value of type `T` is a `Class<T>`, so of an `Object` it is a `Class<Object>`,
 /// and every member of a class value, `name()` and `methods()` included, is a member of it, as of a `Class<Event>` and
 /// the `Class<TObject>` of a type parameter bounded by `Object`. The checker needs no extension host for it. A value that
-/// may hold no object, an `Any`, an `Object?` or a type parameter with no bound, is refused by `Class.of`'s bound alone.
+/// may hold no object, an `Any`, an `Object?` or a type parameter with no bound, is refused by `Class.of`'s bound alone,
+/// which names the type that falls outside it, as C#'s CS0311 does.
 #[test]
 fn class_of_any_object_has_every_member_of_a_class_value() {
     let event = ("src/Demo/Event.sharp", "namespace Demo;\n\npublic interface Event\n{\n}\n");
@@ -29187,7 +29188,7 @@ fn class_of_any_object_has_every_member_of_a_class_value() {
         [
             "13:50 template-constraint-violation `Any` does not satisfy the bound `Object` of type parameter `T`. Ensure the argument's type satisfies the bound.",
             "15:52 template-constraint-violation `Object?` does not satisfy the bound `Object` of type parameter `T`. Ensure the argument's type satisfies the bound.",
-            "17:51 invalid-argument Invalid argument type for argument #1 of `Class.of`: expected `T`, but found `TValue`. Change the argument value to match `T`, or update the parameter's type declaration.",
+            "17:51 template-constraint-violation `TValue` does not satisfy the bound `Object` of type parameter `T`. Ensure the argument's type satisfies the bound.",
         ]
     );
 }

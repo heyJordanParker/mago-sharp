@@ -1011,10 +1011,12 @@ pub fn infer_templates_from_input_and_container_types<A>(
             // skip when:
             // - there are other generic parts (e.g., in `class-string<T>|T`) that might match
             // - the constraint is mixed (accepts anything)
-            // - the input is a generic parameter (constraint will be checked at the call site)
+            // - the input is a generic parameter (constraint will be checked at the call site). PHP# reports a type
+            //   parameter whose own bound falls outside the constraint here, as any other type, as C#'s CS0314 names
+            //   `TValue` and the bound it fails, spec section 11.
             if generic_container_parts_len == 1
                 && !expanded_constraint.is_mixed()
-                && !residual_input_type.is_generic_parameter()
+                && (context.dialect.is_sharp() || !residual_input_type.is_generic_parameter())
             {
                 violations.push(TemplateInferenceViolation {
                     template_name: *template_parameter_name,
