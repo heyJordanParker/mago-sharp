@@ -1,0 +1,14 @@
+namespace App;
+
+import Zoo;
+
+// A function in PHP's root namespace of a project folder with no class is reached through the first PSR-4 namespace
+// the project's `composer.json` lists, as it names no package, which the line the conversion adds gives its folder
+// (spec section 23).
+public final class Greeter
+{
+    public string greet(string name)
+    {
+        return Zoo.shout_all(name);
+    }
+}

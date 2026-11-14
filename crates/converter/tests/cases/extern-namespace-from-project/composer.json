@@ -1,0 +1,11 @@
+{
+    "description": "A project that names no package, with its PSR-4 roots listed out of alphabetical order.",
+    "type": "project",
+    "autoload": {
+        "psr-4": {
+            "Zoo\\": "zoo/",
+            "App\\": "app/"
+        },
+        "files": ["helpers/functions.php"]
+    }
+}

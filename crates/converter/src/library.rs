@@ -212,7 +212,7 @@ fn folder_namespaces(codebase: &CodebaseMetadata, workspace: &Path) -> HashMap<W
 
 /// The namespace of the Composer package whose `composer.json` is the nearest one at or above `folder`, and no higher
 /// than `workspace` for a folder in it: its name's, as `Acme\StringHelpers` for `acme/string-helpers`, or, for a
-/// `composer.json` that names no package, as a project's may not, its first PSR-4 namespace in alphabetical order.
+/// `composer.json` that names no package, as a project's may not, the first PSR-4 namespace it lists.
 fn package_namespace(workspace: &Path, folder: &str) -> Option<String> {
     let folder = workspace.join(folder);
     let inside = folder.starts_with(workspace);
@@ -233,8 +233,7 @@ fn package_namespace(workspace: &Path, folder: &str) -> Option<String> {
         .psr_4
         .into_keys()
         .map(|prefix| prefix.trim_matches('\\').to_owned())
-        .filter(|prefix| !prefix.is_empty())
-        .min()
+        .find(|prefix| !prefix.is_empty())
 }
 
 /// The last part of a full PHP name.

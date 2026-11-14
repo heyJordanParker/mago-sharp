@@ -1148,8 +1148,7 @@ fn unreached(configuration: &Configuration, root: &Path, path: &Path) -> Result<
 }
 
 /// Each PSR-4 folder of `composer.json`'s `autoload`, relative to the workspace, with its namespace, as `App` for
-/// `App\`, in the order of their namespaces, since `composer.json`'s map keeps no order. A test under `autoload-dev`
-/// stays out, since a test runner loads a test only from the file it lists (spec section 27).
+/// `App\`, in the order `composer.json` lists them. A test under `autoload-dev` stays out, since a test runner loads a test only from the file it lists (spec section 27).
 fn psr4_roots(workspace: &Path) -> Result<Vec<(String, PathBuf)>, Error> {
     let path = workspace.join("composer.json");
     let Ok(contents) = std::fs::read_to_string(&path) else {
@@ -1165,7 +1164,6 @@ fn psr4_roots(workspace: &Path) -> Result<Vec<(String, PathBuf)>, Error> {
         let namespace = namespace.trim_matches('\\');
         roots.extend(folders.iter().map(|folder| (namespace.to_owned(), PathBuf::from(folder.trim_end_matches('/')))));
     }
-    roots.sort();
 
     Ok(roots)
 }
@@ -2042,6 +2040,21 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             third,
             "namespace Generated;\n\nextern namespace Acme.Foundation for abort;\nextern namespace Acme.StringHelpers for str_shout;\n"
         );
+    }
+
+    /// The declarations file goes in the first PSR-4 folder `composer.json` lists, in its namespace, whatever the
+    /// order of the namespaces.
+    #[test]
+    fn the_declarations_file_goes_in_the_first_psr4_folder_composer_json_lists() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::write(root.join("composer.json"), r#"{"autoload": {"psr-4": {"Zoo\\": "zoo/", "App\\": "app/"}}}"#)
+            .unwrap();
+
+        let roots = psr4_roots(&root).unwrap();
+        assert_eq!(roots, [("Zoo".to_owned(), PathBuf::from("zoo")), ("App".to_owned(), PathBuf::from("app"))]);
+        let externs = Externs::new(&root, &roots[0]).unwrap();
+        assert_eq!((display(&externs.name), externs.namespace), ("zoo/Externs.sharp".to_owned(), "Zoo".to_owned()));
     }
 
     /// A file the compile refuses once converted fails its proof with the compile's first error, and a converted file
