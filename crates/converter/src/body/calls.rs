@@ -6,8 +6,6 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
-use mago_codex::ttype::comparator::ComparisonResult;
-use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
@@ -185,17 +183,7 @@ impl<'input> Converter<'input, '_> {
             let expected = (is_lambda || !declared.has_template_types()).then_some(declared);
             self.expression(value, expected);
             self.narrowed(value, declared);
-            let wider = self.type_of(value).filter(|passed| {
-                !is_contained_by(
-                    self.input.codebase,
-                    passed,
-                    declared,
-                    false,
-                    false,
-                    false,
-                    &mut ComparisonResult::new(),
-                )
-            });
+            let wider = self.type_of(value).filter(|passed| self.wider(passed, declared));
             // PHP checks the argument where it lands, and throws a `TypeError` for a value its parameter's type doesn't
             // hold, as PHP# does after `as`.
             if let (Some(passed), Some((number, parameter))) = (wider, filled) {

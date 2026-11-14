@@ -1,0 +1,2 @@
+23:16: `mixed` is wider than `T`, a type parameter whose bound holds null, which has no PHP# test: `as T` gives null for a null `T` as for a value that is no `T`, so `?? throw` would throw for a null, which PHP lets through (spec section 21)
+28:21: `mixed` is wider than `T`, a type parameter whose bound holds null, which has no PHP# test: `as T` gives null for a null `T` as for a value that is no `T`, so `?? throw` would throw for a null, which PHP lets through (spec section 21)

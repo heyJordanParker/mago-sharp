@@ -17,10 +17,12 @@ mod strings;
 pub(crate) use locals::Captures;
 pub(crate) use locals::Locals;
 
+use mago_codex::misc::GenericParent;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::comparator::ComparisonResult;
@@ -182,15 +184,7 @@ impl<'input> Converter<'input, '_> {
                     // PHP checks a returned value its declared type may not hold, and throws a `TypeError` for one it
                     // doesn't, as PHP# does after `as`. PHP# refuses any other such value (spec section 7).
                     if let (Some(returning), Some(returned)) = (&returning, self.type_of(value))
-                        && !is_contained_by(
-                            self.input.codebase,
-                            returned,
-                            returning,
-                            false,
-                            false,
-                            false,
-                            &mut ComparisonResult::new(),
-                        )
+                        && self.wider(returned, returning)
                         && !self.checked(value, returned, returning, "Return value")
                     {
                         let (returned, returning) = (returned.get_id(), returning.get_id());
@@ -613,10 +607,11 @@ impl<'input> Converter<'input, '_> {
     /// `Return value`: "Argument #1 ($name) must be of type string". `passed` is the analysis's type of `value`.
     ///
     /// Gives whether it took the value: it writes it where `as` tests what PHP does, and refuses it where the file
-    /// can't name the type `as` tests, as a class of PHP's root namespace. `as` tests what PHP does where `place` is one
-    /// `int`, `string`, `bool`, object, enum or class with no type parameters, `passed` may hold one, as a `Shape` may
-    /// be the `Square` `place` takes, and `place` allows null only where `passed` never is, as `as` gives null for a
-    /// value it refuses.
+    /// can't name the type `as` tests, as a class of PHP's root namespace, or a type parameter whose bound holds null.
+    /// `as` tests what PHP does where `place` is one `int`, `string`, `bool`, object, enum, class with no type
+    /// parameters, or type parameter whose bound excludes null, which PHP# checks as PHPDoc gives it, `passed` may hold
+    /// one, as a `Shape` may be the `Square` `place` takes, and `place` allows null only where `passed` never is, as
+    /// `as` gives null for a value it refuses.
     pub(super) fn checked(&mut self, value: &Expression<'_>, passed: &TUnion, place: &TUnion, subject: &str) -> bool {
         let codebase = self.input.codebase;
         let tested = TUnion::from_vec(place.get_non_nullable_types());
@@ -635,6 +630,23 @@ impl<'input> Converter<'input, '_> {
                     && !matches!(atomic, TAtomic::Object(TObject::Named(object)) if object.is_static)
                     && codebase.get_class_like(name.as_bytes()).is_some_and(|class| class.template_types.is_empty())
             }
+            // A callee's own type parameter stands for the type its call gives it, which `T` doesn't name here.
+            Some(SharpType::Parameter(parameter)) if !self.declares(parameter) => false,
+            // `as T` tests a type argument while the code runs, and gives null for a null `T` as for a value that is no
+            // `T`, so it tests what a `T` is only where `T`'s bound, which `place` holds whole, excludes null.
+            Some(SharpType::Parameter(parameter))
+                if place.types.iter().any(
+                    |atomic| matches!(atomic, TAtomic::GenericParameter(declared) if declared.constraint.can_be_null()),
+                ) =>
+            {
+                let (shown, name) = (passed.get_id(), parameter.parameter_name);
+                self.refuse(
+                    value.span(),
+                    format!("`{shown}` is wider than `{name}`, a type parameter whose bound holds null, which has no PHP# test: `as {name}` gives null for a null `{name}` as for a value that is no `{name}`, so `?? throw` would throw for a null, which PHP lets through (spec section 21)"),
+                );
+                return true;
+            }
+            Some(SharpType::Parameter(_)) => true,
             _ => false,
         };
         let holds = |inner: &TUnion, outer: &TUnion| {
@@ -647,8 +659,12 @@ impl<'input> Converter<'input, '_> {
         if !tests || !may_hold || narrowing(&tested).is_some() {
             return false;
         }
-        // PHP names the declared type as PHP writes it, as `?App\Square`.
-        let php = format!("{}{}", if place.has_null() { "?" } else { "" }, tested.get_id());
+        // PHP names the declared type as PHP writes it, as `?App\Square`, and a type parameter by its name.
+        let declared = match atomic {
+            TAtomic::GenericParameter(parameter) => parameter.parameter_name.as_str_lossy().into_owned(),
+            _ => tested.get_id().to_string(),
+        };
+        let php = format!("{}{declared}", if place.has_null() { "?" } else { "" });
         let named = type_text(&tested, codebase, &mut self.imports)
             .and_then(|tested| Ok((tested, self.imports.name_of("TypeError")?)));
         let (tested, error) = match named {
@@ -664,6 +680,33 @@ impl<'input> Converter<'input, '_> {
         self.edits.replace(value.span(), format!("{rendered} as {tested} ?? throw new {error}(\"{message}\")"));
 
         true
+    }
+
+    /// Whether the analysis types `passed` wider than `place`, the declared type of the parameter or the return it
+    /// lands in. The analysis takes a type parameter as holding each value its bound holds, as `T` holds `mixed`, where
+    /// only a `T` is one, so where `place` is a type parameter of the converted class, only a `T` lands in it, and null
+    /// where `place` allows null.
+    pub(super) fn wider(&self, passed: &TUnion, place: &TUnion) -> bool {
+        if let [TAtomic::GenericParameter(parameter)] = place.get_non_nullable_types().as_slice()
+            && self.declares(parameter)
+        {
+            return !passed.types.iter().all(|atomic| match atomic {
+                TAtomic::GenericParameter(passed) => {
+                    passed.parameter_name == parameter.parameter_name
+                        && passed.defining_entity == parameter.defining_entity
+                }
+                atomic => atomic.is_null() && place.has_null(),
+            });
+        }
+
+        !is_contained_by(self.input.codebase, passed, place, false, false, false, &mut ComparisonResult::new())
+    }
+
+    /// Whether the converted class declares `parameter`, which then means the same type wherever its methods name it,
+    /// where a callee's own, as `new Box<Spec>(…)`'s `T`, stands for the type its call gives it.
+    fn declares(&self, parameter: &TGenericParameter) -> bool {
+        matches!(parameter.defining_entity, GenericParent::ClassLike(name)
+            if self.class.as_ref().is_some_and(|class| class.metadata.name == name))
     }
 
     /// Refuses `object`, whose member `operation` reaches, when the analysis gives it `mixed` or `object`, and gives
