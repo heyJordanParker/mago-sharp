@@ -1,4 +1,4 @@
 20:9: destructuring by position has no PHP# form: a plain PHP array is no tuple, which PHP# destructures (spec sections 12 and 30)
-21:9: a `Map` read at a key it may lack has no PHP# form: PHP warns on a missing key, and a PHP# `Map` read gives `null` and goes on, which succeeds where PHP warned, so it converts behind `??` or `isset` only (spec section 12)
-22:9: a `Map` read at a key it may lack has no PHP# form: PHP warns on a missing key, and a PHP# `Map` read gives `null` and goes on, which succeeds where PHP warned, so it converts behind `??` or `isset` only (spec section 12)
-23:16: destructuring inside another expression has no PHP# form: write it as a statement of its own
+21:9: a `Map` read at a key it may lack has no PHP# form: PHP warns on a missing key, and a PHP# `Map` read gives `null` and goes on, which succeeds where PHP warned (spec section 12)
+22:9: a `Map` read at a key it may lack has no PHP# form: PHP warns on a missing key, and a PHP# `Map` read gives `null` and goes on, which succeeds where PHP warned (spec section 12)
+23:16: destructuring inside another expression has no PHP# form: PHP# unpacks in a declaration of its own, as `const [total, count] = …;` (spec section 30)

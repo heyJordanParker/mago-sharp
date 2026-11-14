@@ -72,7 +72,7 @@ enum Kind {
 /// Why a read of a `Map` at a key it may lack refuses, by an index or by destructuring. A converted file never
 /// succeeds where PHP warned or failed, and a PHP# `Map` read gives `null` and goes on where PHP warns (spec section
 /// 12).
-const MISSING_KEY: &str = "a `Map` read at a key it may lack has no PHP# form: PHP warns on a missing key, and a PHP# `Map` read gives `null` and goes on, which succeeds where PHP warned, so it converts behind `??` or `isset` only (spec section 12)";
+const MISSING_KEY: &str = "a `Map` read at a key it may lack has no PHP# form: PHP warns on a missing key, and a PHP# `Map` read gives `null` and goes on, which succeeds where PHP warned (spec section 12)";
 
 /// Whether `expression` binds tighter than any operator, so text built around it, as `x.isEmpty()` or `x != 0`, needs
 /// no parentheses around it.
@@ -254,7 +254,10 @@ impl<'input> Converter<'input, '_> {
             self.condition(r#if.condition, true);
         }
         let IfBody::Statement(body) = &r#if.body else {
-            self.refuse(r#if.span(), "an `if` with `:` and `endif` has no PHP# form: write its body in braces");
+            self.refuse(
+                r#if.span(),
+                "an `if` with `:` and `endif` is not converted yet: the converter rewrites a body in braces only",
+            );
             return;
         };
         self.braced(body.statement);
@@ -592,7 +595,7 @@ impl<'input> Converter<'input, '_> {
         self.refuse(
             value.span(),
             format!(
-                "`{shown}` reads as `{}` here, which PHP narrows it to, and PHP# reads a property by its declared type `{}`, since it may change between a test and a read (spec section 21): read it into a local first",
+                "`{shown}` reads as `{}` here, which PHP narrows it to, and PHP# reads a property by its declared type `{}`, since it may change between a test and a read (spec section 21)",
                 read.get_id(),
                 declared.get_id()
             ),
@@ -702,11 +705,20 @@ impl<'input> Converter<'input, '_> {
         !is_contained_by(self.input.codebase, passed, place, false, false, false, &mut ComparisonResult::new())
     }
 
-    /// Whether the converted class declares `parameter`, which then means the same type wherever its methods name it,
-    /// where a callee's own, as `new Box<Spec>(…)`'s `T`, stands for the type its call gives it.
+    /// Whether the converted class, or the converted method, whose lambdas share its type parameters, declares
+    /// `parameter`, which then means the same type wherever its code names it, where a callee's own, as
+    /// `new Box<Spec>(…)`'s `T`, stands for the type its call gives it.
     fn declares(&self, parameter: &TGenericParameter) -> bool {
-        matches!(parameter.defining_entity, GenericParent::ClassLike(name)
-            if self.class.as_ref().is_some_and(|class| class.metadata.name == name))
+        match parameter.defining_entity {
+            GenericParent::ClassLike(name) => self.class.as_ref().is_some_and(|class| class.metadata.name == name),
+            GenericParent::FunctionLike(_) => self
+                .method
+                .as_ref()
+                .and_then(|method| method.resolution.get_template_definition(parameter.parameter_name))
+                .is_some_and(|templates| {
+                    templates.iter().any(|template| template.defining_entity == parameter.defining_entity)
+                }),
+        }
     }
 
     /// Refuses `object`, whose member `operation` reaches, when the analysis gives it `mixed` or `object`, and gives
@@ -725,7 +737,7 @@ impl<'input> Converter<'input, '_> {
         let shown = self.shown(object);
         self.refuse(
             object.span(),
-            format!("`{shown}` reaches {operation}, which PHP# allows only from a known class: narrow it with `is`, or declare its type (spec section 24)"),
+            format!("`{shown}` reaches {operation}, which PHP# allows only from a known class, and no declaration gives this value one (spec section 24)"),
         );
 
         true
@@ -739,7 +751,7 @@ impl<'input> Converter<'input, '_> {
         let shown = self.shown(expression);
         self.refuse(
             expression.span(),
-            format!("`{shown}` reaches {operation}, which PHP# allows only from a known type: narrow it with `is`, or declare its type (spec section 24)"),
+            format!("`{shown}` reaches {operation}, which PHP# allows only from a known type, and no declaration gives this value one (spec section 24)"),
         );
 
         true

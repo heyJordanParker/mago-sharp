@@ -40,7 +40,7 @@ impl Converter<'_, '_> {
         let SwitchBody::BraceDelimited(body) = &switch.body else {
             return self.refuse(
                 statement.span(),
-                "a `switch` with `:` and `endswitch` has no PHP# form: write its cases in braces",
+                "a `switch` with `:` and `endswitch` is not converted yet: the converter rewrites cases in braces only",
             );
         };
         let subject = switch.expression;
@@ -78,7 +78,7 @@ impl Converter<'_, '_> {
                     if joined.is_some() {
                         return self.refuse(
                             case.default.span,
-                            "a `case` that joins `default` has no PHP# pattern: `default` covers it, so remove the `case`",
+                            "a `case` that joins `default` is not converted yet: a PHP# `default` arm stands alone, and the converter doesn't drop the `case` it covers",
                         );
                     }
                     has_default = true;

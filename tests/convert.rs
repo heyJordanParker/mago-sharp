@@ -78,7 +78,7 @@ fn a_repository_with_no_commit_holds_no_file() {
     let output = convert(root, &[("GIT_TRACE", "1")]);
 
     assert_eq!(output.status.code(), Some(0), "{}", printed(&output));
-    let reason = "  src/Clean.php: git holds no commit of it as it is: commit it first, so git holds its plain PHP";
+    let reason = "  src/Clean.php: git holds no commit of it as it is, so git, which undoes a conversion, can't give back its plain PHP";
     assert!(logged(&output, "WARN", reason), "{}", printed(&output));
 }
 

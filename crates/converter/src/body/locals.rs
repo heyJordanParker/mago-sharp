@@ -851,14 +851,14 @@ impl Converter<'_, '_> {
             let value = String::from_utf8_lossy(self.text(at));
             self.refuse(
                 at,
-                format!("`{shown}` {why}, so PHP# declares it first in the body with a type, and no declaration gives the type of `{value}`, which it is assigned: declare its type with a `@var` tag (decision 2)"),
+                format!("`{shown}` {why}, so PHP# declares it first in the body with a type, and no declaration gives the type of `{value}`, which it is assigned, where the converter writes only a type a declaration gives (decision 2)"),
             );
             return None;
         }
         if writes(locals, name).all(|write| write.union.as_ref().is_some_and(TUnion::is_null)) {
             self.refuse(
                 span,
-                format!("`{shown}` starts as `null` and is assigned nothing else, which says nothing of what it holds: declare its type with a `@var` tag"),
+                format!("`{shown}` starts as `null` and is assigned nothing else, which gives it no type, and PHP# declares it first in the body with one"),
             );
             return None;
         }
@@ -879,7 +879,7 @@ impl Converter<'_, '_> {
         let Some(mut union) = joined else {
             self.refuse(
                 span,
-                format!("`{shown}` {why}, so PHP# declares it first in the body with a type, and the analysis gives no type to a value it is assigned: declare its type with a `@var` tag"),
+                format!("`{shown}` {why}, so PHP# declares it first in the body with a type, and the analysis gives no type to a value it is assigned"),
             );
             return None;
         };
@@ -923,7 +923,7 @@ impl Converter<'_, '_> {
             _ => {
                 self.refuse(
                     span,
-                    format!("`{shown}` starts as `[]`, and PHP# gives a `List` type to one the body only appends to and a `Map` type to one it only writes by key, which `{shown}` is not: declare its type with a `@var` tag (spec section 12)"),
+                    format!("`{shown}` starts as `[]`, and PHP# gives a `List` type to one the body only appends to and a `Map` type to one it only writes by key, which `{shown}` is not, and no declaration gives its type (spec section 12)"),
                 );
                 return None;
             }
@@ -931,7 +931,7 @@ impl Converter<'_, '_> {
         let Some((key, value)) = filled else {
             self.refuse(
                 span,
-                format!("`{shown}` starts as `[]`, so the values written in it give its type, and no declaration gives the type of one of them: declare its type with a `@var` tag (decision 2)"),
+                format!("`{shown}` starts as `[]`, so the values written in it give its type, and no declaration gives the type of one of them, where the converter writes only a type a declaration gives (decision 2)"),
             );
             return None;
         };
@@ -975,7 +975,7 @@ impl Converter<'_, '_> {
         if let Some(elements) = destructured(lhs) {
             self.refuse(
                 expression.span(),
-                "destructuring inside another expression has no PHP# form: write it as a statement of its own",
+                "destructuring inside another expression has no PHP# form: PHP# unpacks in a declaration of its own, as `const [total, count] = …;` (spec section 30)",
             );
             return self.unassigned(elements);
         }

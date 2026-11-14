@@ -4,6 +4,6 @@
 24:28: `$name` is named before the loop, and a PHP# loop declares its own variables (spec section 17)
 38:15: `unset` of a variable or a property has no PHP# form: a PHP# value is never unset
 39:9: `echo` is removed: output goes through `Console`, which a class receives through its constructor (spec section 8)
-44:9: an `if` with `:` and `endif` has no PHP# form: write its body in braces
+44:9: an `if` with `:` and `endif` is not converted yet: the converter rewrites a body in braces only
 50:9: `goto` has no PHP# form
 51:9: a `goto` label has no PHP# form

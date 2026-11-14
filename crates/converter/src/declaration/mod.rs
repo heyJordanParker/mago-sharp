@@ -175,7 +175,7 @@ impl Converter<'_, '_> {
         let (shown, fixed) = (String::from_utf8_lossy(name), String::from_utf8_lossy(&fixed));
         self.refuse(
             span,
-            format!("the {kind} `{shown}` has no PHP# name: PHP# names a {kind} in {written}, as `{fixed}` (spec section 24)"),
+            format!("the {kind} `{shown}` has no PHP# name: PHP# names a {kind} in {written} (spec section 24), and `{fixed}` would change the name PHP code reaches it by"),
         );
 
         true

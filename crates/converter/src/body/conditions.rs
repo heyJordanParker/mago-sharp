@@ -407,7 +407,7 @@ impl Converter<'_, '_> {
                     let indexed = self.shown(access.array);
                     self.refuse(
                         place.span(),
-                        format!("`{construct}` at an index of `{indexed}` reads past a `List`'s end, which PHP gives as unset and PHP# refuses: it converts for a `Map` key"),
+                        format!("`{construct}` at an index of `{indexed}` reads past a `List`'s end, which PHP gives as unset and PHP# refuses"),
                     );
                     return true;
                 }
@@ -450,7 +450,7 @@ impl Converter<'_, '_> {
                     || metadata.type_declaration_metadata.is_none()
             });
             if !valued {
-                return Some("reads a property that may hold no value, which PHP gives as unset and PHP# reads: it converts for a property with a default or a promoted one".to_owned());
+                return Some("reads a property that may hold no value, which PHP gives as unset without an error, and PHP# reads the property itself, which has no default and is not promoted".to_owned());
             }
             let descendants = codebase.get_all_descendants(class);
             let magic = std::iter::once(class).chain(descendants.iter().map(|descendant| descendant.as_bytes())).find(

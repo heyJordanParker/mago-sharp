@@ -111,7 +111,7 @@ impl Converter<'_, '_> {
                 DocumentIndentation::Mixed(..) => {
                     return self.refuse(
                         expression.span(),
-                        "a heredoc indented with both spaces and tabs has no template form: indent it with one of them",
+                        "a heredoc indented with both spaces and tabs has no template form: PHP refuses it with \"Invalid indentation - tabs and spaces cannot be mixed\"",
                     );
                 }
             },

@@ -302,7 +302,7 @@ impl<'input> Converter<'input, '_> {
         let named = current.name.clone();
         self.refuse(
             span,
-            format!("`self::{method}` forwards the class PHP called, which late static binding in `{method}` reads, and `{named}.{method}` doesn't: it converts in a `final` class, and for a static method of this file that names neither `static` nor `parent`"),
+            format!("`self::{method}` forwards the class PHP called, which late static binding in `{method}` reads, and `{named}.{method}` doesn't, so on a subclass `{method}` would read `{named}` where PHP reads the subclass"),
         );
 
         true

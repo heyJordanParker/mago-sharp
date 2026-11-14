@@ -477,7 +477,7 @@ impl Converter<'_, '_> {
             if overridable {
                 self.refuse(
                     item.name.span,
-                    format!("the constant `{name}` has no type in PHP, and the type PHP# gives it would bind a subclass's `{name}` to a compatible one: a constant with no type converts only in a `final` class or as `private`"),
+                    format!("the constant `{name}` has no type in PHP, so a subclass may declare its own `{name}` of any type, and the type PHP# writes in the PHP it compiles to binds a subclass's `{name}` to a compatible one"),
                 );
                 continue;
             }
@@ -656,6 +656,13 @@ impl Converter<'_, '_> {
                 self.edits.delete(span.start.offset, self.skip_whitespace(span.end.offset));
             }
             self.edits.replace(function.span, format!("{opening}{written}"));
+            // The method's own type parameters follow its name, as `TItem first<TItem>(…)` (spec section 11).
+            let Some(parameters) = self.type_parameters(&declared.template_types, &[], method.name.span) else {
+                return;
+            };
+            if !parameters.is_empty() {
+                self.edits.insert(method.name.span.end.offset, parameters);
+            }
             if let Some(hint) = &method.return_type_hint {
                 self.edits.delete(method.parameter_list.right_parenthesis.end.offset, hint.span().end.offset);
             }
@@ -849,7 +856,7 @@ impl Converter<'_, '_> {
         let name = String::from_utf8_lossy(method.name.value);
         self.refuse(
             method.name.span,
-            format!("`{name}` declares `{written}` and never returns `null`, which PHP# refuses on a method no subclass replaces (spec section 14.4): declare `{narrower}`"),
+            format!("`{name}` declares `{written}` and never returns `null`, which PHP# refuses on a method no subclass replaces (spec section 14.4), and declaring `{narrower}` would take the analysis's inference, which the converter never writes (decision 2)"),
         );
     }
 }

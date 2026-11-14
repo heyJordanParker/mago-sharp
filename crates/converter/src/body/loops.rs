@@ -120,7 +120,7 @@ impl Converter<'_, '_> {
         let ForeachBody::Statement(body) = &foreach.body else {
             return self.refuse(
                 statement.span(),
-                "a `foreach` with `:` and `endforeach` has no PHP# form: write its body in braces",
+                "a `foreach` with `:` and `endforeach` is not converted yet: the converter rewrites a body in braces only",
             );
         };
         let (key, value) = match &foreach.target {
@@ -260,8 +260,10 @@ impl Converter<'_, '_> {
     /// A `for` loop, which keeps its form and declares the local its initialization assigns, scoped to the loop.
     pub(super) fn for_loop(&mut self, statement: &Statement<'_>, r#for: &For<'_>) {
         let ForBody::Statement(body) = &r#for.body else {
-            return self
-                .refuse(statement.span(), "a `for` with `:` and `endfor` has no PHP# form: write its body in braces");
+            return self.refuse(
+                statement.span(),
+                "a `for` with `:` and `endfor` is not converted yet: the converter rewrites a body in braces only",
+            );
         };
         if r#for.initializations.iter().count() > 1 || r#for.conditions.iter().count() > 1 {
             return self.refuse(
@@ -294,7 +296,7 @@ impl Converter<'_, '_> {
         let WhileBody::Statement(body) = &r#while.body else {
             return self.refuse(
                 statement.span(),
-                "a `while` with `:` and `endwhile` has no PHP# form: write its body in braces",
+                "a `while` with `:` and `endwhile` is not converted yet: the converter rewrites a body in braces only",
             );
         };
         self.condition(r#while.condition, true);

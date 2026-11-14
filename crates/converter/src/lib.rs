@@ -11,6 +11,7 @@
 use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::class_like::TemplateTypes;
 use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
@@ -428,14 +429,15 @@ impl<'input> Converter<'input, '_> {
         self.imports_at = ImportsAt::AfterImport(span.end.offset);
     }
 
-    /// The type parameter list of a class whose analysis gives it type parameters, from PHPDoc or a refinement.
-    fn type_parameters(&mut self, class: &ClassLikeMetadata, span: Span) -> Option<String> {
-        if class.template_types.is_empty() {
+    /// The type parameter list of a class or a method whose analysis gives it type parameters, `templates`, from PHPDoc
+    /// or a refinement, each with its `variance`, which only a class declares (spec section 11.1).
+    fn type_parameters(&mut self, templates: &TemplateTypes, variance: &[Variance], span: Span) -> Option<String> {
+        if templates.is_empty() {
             return Some(String::new());
         }
 
         let mut written = Vec::new();
-        for (index, (name, template)) in class.template_types.iter().enumerate() {
+        for (index, (name, template)) in templates.iter().enumerate() {
             // Spec section 11: `T`, or `T` and a capital letter. Another name would need each use renamed, those a
             // refinement reads from the class's own attributes among them.
             let named = name.as_bytes();
@@ -448,7 +450,7 @@ impl<'input> Converter<'input, '_> {
                 );
                 return None;
             }
-            let variance = match class.template_variance.get(index) {
+            let variance = match variance.get(index) {
                 Some(Variance::Covariant) => "out ",
                 Some(Variance::Contravariant) => "in ",
                 _ => "",

@@ -287,15 +287,18 @@ impl ConvertCommand {
             for file in shaped {
                 let name = PathBuf::from(display(&file.name));
                 if let Some(submodule) = committed.submodules.iter().find(|submodule| name.starts_with(submodule)) {
-                    let reason =
-                        format!("it is in the git submodule `{}`: run mago convert there", submodule.display());
+                    let reason = format!(
+                        "it is in the git submodule `{}`, whose files another repository holds, so the workspace's commit holds none of its plain PHP",
+                        submodule.display()
+                    );
                     refuse(&file.name, reason);
                 } else if committed.files.contains(&name) {
                     checked.push((file.name.to_vec(), file.contents.to_vec()));
                 } else {
                     refuse(
                         &file.name,
-                        "git holds no commit of it as it is: commit it first, so git holds its plain PHP".to_owned(),
+                        "git holds no commit of it as it is, so git, which undoes a conversion, can't give back its plain PHP"
+                            .to_owned(),
                     );
                 }
             }
@@ -357,7 +360,10 @@ impl ConvertCommand {
             // A file changed or gone since git was read holds bytes git doesn't, so it is no longer git's to undo.
             let database = session.server.database();
             let Some(file) = database.get_ref(&FileId::new(&name)).ok().filter(|file| *file.contents == *held) else {
-                let reason = format!("{}: it changed since mago convert read git: commit it first", display(&name));
+                let reason = format!(
+                    "{}: it changed since mago convert read git, so git, which undoes a conversion, can't give back its plain PHP",
+                    display(&name)
+                );
                 outcome.refused.entry(name).or_default().push(reason);
                 continue;
             };
@@ -1845,8 +1851,8 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         assert_eq!(
             refused,
             [
-                "src/Contracts/Clean1.php: git holds no commit of it as it is: commit it first, so git holds its plain PHP",
-                "src/Contracts/Clean2.php: git holds no commit of it as it is: commit it first, so git holds its plain PHP",
+                "src/Contracts/Clean1.php: git holds no commit of it as it is, so git, which undoes a conversion, can't give back its plain PHP",
+                "src/Contracts/Clean2.php: git holds no commit of it as it is, so git, which undoes a conversion, can't give back its plain PHP",
             ]
         );
         assert_eq!(outcome.converted.len(), 1);
@@ -2218,15 +2224,15 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         assert_eq!(
             refused,
             [
-                "src/Contracts/Clean0.php: it changed since mago convert read git: commit it first",
-                "src/Contracts/Clean1.php: it changed since mago convert read git: commit it first",
+                "src/Contracts/Clean0.php: it changed since mago convert read git, so git, which undoes a conversion, can't give back its plain PHP",
+                "src/Contracts/Clean1.php: it changed since mago convert read git, so git, which undoes a conversion, can't give back its plain PHP",
             ]
         );
         let converted: Vec<String> = outcome.converted.iter().map(|(name, ..)| display(name)).collect();
         assert_eq!(converted, ["src/Contracts/Clean2.php"]);
     }
 
-    /// A file in a git submodule is another repository's, so it stays plain PHP and the run names where to convert it.
+    /// A file in a git submodule is another repository's, so it stays plain PHP and the run names the submodule.
     #[test]
     fn a_file_in_a_git_submodule_names_the_submodule() {
         let directory = tempfile::tempdir().unwrap();
@@ -2255,7 +2261,9 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         let refused: Vec<String> = outcome.refused.values().flatten().cloned().collect();
         assert_eq!(
             refused,
-            ["src/Library/Contracts/Clean0.php: it is in the git submodule `src/Library`: run mago convert there"]
+            [
+                "src/Library/Contracts/Clean0.php: it is in the git submodule `src/Library`, whose files another repository holds, so the workspace's commit holds none of its plain PHP"
+            ]
         );
     }
 

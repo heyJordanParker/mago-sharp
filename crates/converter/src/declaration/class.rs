@@ -115,7 +115,7 @@ impl<'input> Converter<'input, '_> {
     /// parameters after `name`.
     fn header(&mut self, start: u32, metadata: &ClassLikeMetadata, name: &LocalIdentifier<'_>) {
         self.edits.insert(start, "public ");
-        if let Some(parameters) = self.type_parameters(metadata, name.span)
+        if let Some(parameters) = self.type_parameters(&metadata.template_types, &metadata.template_variance, name.span)
             && !parameters.is_empty()
         {
             self.edits.insert(name.span.end.offset, parameters);

@@ -614,7 +614,7 @@ pub(super) fn identity(lhs: Option<&TUnion>, rhs: Option<&TUnion>) -> Result<boo
     }
     if mixed(lhs) || mixed(rhs) {
         return Err(format!(
-            "`===` between `{}` and `{}` has no PHP# form: PHP#'s `===` compares two objects, and an `Any?` compares an `int` with a `float` by value, so narrow the value with `is` first (spec section 19)",
+            "`===` between `{}` and `{}` has no PHP# form: PHP#'s `===` compares two objects, and an `Any?` compares an `int` with a `float` by value, where PHP's `===` tells them apart (spec section 19)",
             lhs.get_id(),
             rhs.get_id()
         ));

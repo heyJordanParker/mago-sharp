@@ -1,2 +1,2 @@
-12:18: the constant `LOW` has no type in PHP, and the type PHP# gives it would bind a subclass's `LOW` to a compatible one: a constant with no type converts only in a `final` class or as `private`
-14:21: the constant `HIGH` has no type in PHP, and the type PHP# gives it would bind a subclass's `HIGH` to a compatible one: a constant with no type converts only in a `final` class or as `private`
+12:18: the constant `LOW` has no type in PHP, so a subclass may declare its own `LOW` of any type, and the type PHP# writes in the PHP it compiles to binds a subclass's `LOW` to a compatible one
+14:21: the constant `HIGH` has no type in PHP, so a subclass may declare its own `HIGH` of any type, and the type PHP# writes in the PHP it compiles to binds a subclass's `HIGH` to a compatible one

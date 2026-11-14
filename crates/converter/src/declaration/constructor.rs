@@ -34,7 +34,7 @@ impl Converter<'_, '_> {
             self.refuse(
                 parameter.span(),
                 format!(
-                    "a PHP# parameter is never taken by reference, so `{name}` can't be: return the new value instead"
+                    "`{name}` is taken by reference, which has no PHP# form: PHP# passes every argument by value, so a write to `{name}` never reaches the caller (spec section 14.3)"
                 ),
             );
             return;

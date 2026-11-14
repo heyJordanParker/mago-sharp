@@ -246,7 +246,7 @@ impl Converter<'_, '_> {
             if parameter.ampersand.is_some() {
                 self.refuse(
                     parameter.span(),
-                    format!("a PHP# parameter is never taken by reference, so `{name}` can't be: return the new value instead"),
+                    format!("`{name}` is taken by reference, which has no PHP# form: PHP# passes every argument by value, so a write to `{name}` never reaches the caller (spec section 14.3)"),
                 );
                 continue;
             }
@@ -287,7 +287,7 @@ impl Converter<'_, '_> {
         if !application.is_first_class_callable() {
             return self.refuse(
                 expression.span(),
-                "a partial application with placeholders has no PHP# form: write a lambda that calls it",
+                "a partial application with placeholders has no PHP# form: a PHP# method value names a whole method, with no argument fixed (spec section 14.3)",
             );
         }
         let arguments = application.get_argument_list().span();
