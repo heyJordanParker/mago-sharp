@@ -123,11 +123,12 @@ pub const STANDARD_ROOT_CLASSES: [&str; 69] = [
 
 /// The standard effects, spec section 29: each `foreign` class of the standard library, which a name in `uses` names
 /// whatever the file imports. Sorted.
-pub(crate) const STANDARD_EFFECTS: [&str; 10] = [
+pub(crate) const STANDARD_EFFECTS: [&str; 11] = [
     "Sharp\\Data\\Cache",
     "Sharp\\Data\\Database",
     "Sharp\\IO\\Console",
     "Sharp\\IO\\Files",
+    "Sharp\\Net\\Dns",
     "Sharp\\Net\\Http",
     "Sharp\\Net\\Mail",
     "Sharp\\Random",

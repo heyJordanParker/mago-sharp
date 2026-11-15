@@ -24418,9 +24418,22 @@ fn the_result_of_a_process_is_imported_from_its_namespace() {
 
 /// The names of the standard effects, short as a file writes them, spec section 29.
 fn sharp_effect_names() -> Vec<String> {
-    ["Database", "Http", "Files", "Console", "Process", "Clock", "Random", "Cache", "Mail", "Environment", "Events"]
-        .map(String::from)
-        .to_vec()
+    [
+        "Database",
+        "Http",
+        "Files",
+        "Console",
+        "Process",
+        "Clock",
+        "Random",
+        "Cache",
+        "Mail",
+        "Dns",
+        "Environment",
+        "Events",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 fn leak(code: String) -> &'static str {
@@ -26589,9 +26602,9 @@ fn effect_issues(files: &[(&'static str, &'static str)]) -> Vec<String> {
 }
 
 /// Spec sections 10, 20 and 29: a struct and an enum are values, so their methods, `get` bodies and operators have no
-/// effects, a data case's included. A struct method that calls a `foreign` parameter, an enum method that emits, and a
-/// struct method and a method of an enum with a data case that call plain PHP with an `extern` effect are refused,
-/// naming the member and the effect. A pure struct method, a struct method that calls plain PHP no `extern` declares,
+/// effects, a data case's included. A struct method that calls a `foreign` parameter, an `Http` or a `Dns`, an enum
+/// method that emits, and a struct method and a method of an enum with a data case that call plain PHP with an `extern`
+/// effect are refused, naming the member and the effect. A pure struct method, a struct method that calls plain PHP no `extern` declares,
 /// which has no effect a `uses` names, and a class method with the same effect, compile.
 #[test]
 fn a_struct_or_an_enum_has_no_effects() {
@@ -26602,7 +26615,7 @@ fn a_struct_or_an_enum_has_no_effects() {
     let stubs = ("src/App/Stubs/Rates.sharp", "namespace App.Stubs;\n\nimport Lib.Rates;\n\nextern Rates uses Http;\n");
     let money = (
         "src/App/Shop/Money.sharp",
-        "namespace App.Shop;\n\nimport Lib.Rates;\nimport Lib.Words;\nimport Sharp.Net.Http;\n\npublic struct Money\n{\n    public int cents { get; init; } = 0;\n\n    public int fetched(Http http) => http.get(\"https://rates\").status;\n\n    public int inEuros() => this.cents * Rates.euro();\n\n    public int doubled() => this.cents * 2;\n\n    public string label() => Words.upper(\"eur\");\n}\n",
+        "namespace App.Shop;\n\nimport Lib.Rates;\nimport Lib.Words;\nimport Sharp.Net.Dns;\nimport Sharp.Net.Http;\n\npublic struct Money\n{\n    public int cents { get; init; } = 0;\n\n    public int fetched(Http http) => http.get(\"https://rates\").status;\n\n    public int resolved(Dns dns) => dns.addresses(\"rates\").count();\n\n    public int inEuros() => this.cents * Rates.euro();\n\n    public int doubled() => this.cents * 2;\n\n    public string label() => Words.upper(\"eur\");\n}\n",
     );
     let words = (
         "src/Lib/Words.php",
@@ -26627,10 +26640,13 @@ fn a_struct_or_an_enum_has_no_effects() {
         effect_issues(&[money, status, till, state, paid, stubs, rates, words]),
         [
             format!(
-                "src/App/Shop/Money.sharp:11:38 incompatible-effects: `Money.fetched` has the effect `Http`, and a struct has no effects.{help}"
+                "src/App/Shop/Money.sharp:12:38 incompatible-effects: `Money.fetched` has the effect `Http`, and a struct has no effects.{help}"
             ),
             format!(
-                "src/App/Shop/Money.sharp:13:42 incompatible-effects: `Money.inEuros` has the effect `Http`, and a struct has no effects.{help}"
+                "src/App/Shop/Money.sharp:14:37 incompatible-effects: `Money.resolved` has the effect `Dns`, and a struct has no effects.{help}"
+            ),
+            format!(
+                "src/App/Shop/Money.sharp:16:42 incompatible-effects: `Money.inEuros` has the effect `Http`, and a struct has no effects.{help}"
             ),
             format!(
                 "src/App/Shop/Status.sharp:10:9 incompatible-effects: `Status.announce` has the effect `Events`, and an enum has no effects.{help}"
@@ -27214,7 +27230,7 @@ fn uses_none_warns_on_a_method_and_is_refused_beside_another_effect() {
                 format!("7:22 invalid-effect {beside}"),
                 format!("9:45 invalid-effect {beside}"),
                 format!("11:38 invalid-effect {beside}"),
-                "11:44 invalid-effect `Htp` is not an effect: `uses` takes Cache, Clock, Console, Database, Environment, Files, Http, Mail, Process, Random, Events or a `foreign` class. | Written here. | An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`.".to_owned(),
+                "11:44 invalid-effect `Htp` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Mail, Process, Random, Events or a `foreign` class. | Written here. | An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`.".to_owned(),
             ],
             Vec::<String>::new(),
         )
@@ -27366,7 +27382,7 @@ fn a_uses_that_names_no_effect_lists_the_effects_its_file_can_name() {
     assert_eq!(
         worded(gateway, &[payments, ledger, audit]),
         [
-            "7:32 invalid-effect `Clok` is not an effect: `uses` takes Cache, Clock, Console, Database, Environment, Files, Http, Ledger, Mail, Payments, Process, Random, Events or a `foreign` class. | Written here. | An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`."
+            "7:32 invalid-effect `Clok` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Ledger, Mail, Payments, Process, Random, Events or a `foreign` class. | Written here. | An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`."
         ]
     );
 }
@@ -28129,6 +28145,28 @@ fn a_date_member_that_can_read_the_clock_has_the_effect_clock() {
         [
             "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/PureReading.sharp:7:50 incompatible-effects: `PureReading.moved` calls `DateTimeImmutable.modify`, which has the effect `Clock`, so the pure `Reading.moved` cannot accept it.",
             "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/PureReading.sharp:9:26 incompatible-effects: `PureReading.made` reaches `Stamped.Stamped`, which calls `DateTimeImmutable.__construct` with the effect `Clock`, so the pure `Reading.made` cannot accept it.",
+        ]
+    );
+}
+
+/// Spec section 29: `Dns` replaces PHP's name lookups, so the standard library declares `gethostbyname` and the other
+/// DNS functions `uses Dns`. A call of one fits a `uses Dns`, and a `uses Http` refuses it.
+#[test]
+fn a_name_lookup_of_php_has_the_effect_dns() {
+    let lookup = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Net/Lookup.sharp",
+        "namespace Sharp.Net;\n\npublic interface Lookup\n{\n    string overHttp(string host) uses Http;\n\n    string overDns(string host) uses Dns;\n}\n",
+    );
+    let host_lookup = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Net/HostLookup.sharp",
+        "namespace Sharp.Net;\n\npublic class HostLookup : Lookup\n{\n    public string overHttp(string host) => global.gethostbyname(host);\n\n    public string overDns(string host) => global.gethostbyname(host);\n}\n",
+    );
+
+    assert_eq!(issues(host_lookup, &[lookup, BUILTINS]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[host_lookup, lookup, BUILTINS]),
+        [
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Net/HostLookup.sharp:5:44 incompatible-effects: `HostLookup.overHttp` calls `gethostbyname`, which has the effect `Dns`, so `uses Http` on `Lookup.overHttp` cannot accept it."
         ]
     );
 }

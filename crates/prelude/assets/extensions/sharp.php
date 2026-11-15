@@ -287,6 +287,17 @@ function jsonEncode(mixed $value, int $flags, int $indent): string {}
 function jsonDecode(string $json): mixed {}
 
 /**
+ * Each address the system resolver gives for `$host`, as text and once, in the order getaddrinfo gives them, the hosts
+ * file included, and throws when the resolver cannot find the host. The standard library's `Dns.addresses` resolves
+ * by it.
+ *
+ * @return list<non-empty-string>
+ *
+ * @throws \RuntimeException
+ */
+function resolve(string $host): array {}
+
+/**
  * Marks the parameter of a standard library collection member that the member compares with the collection's elements
  * by `==`, as `List.contains`'s, so the checker refuses a value whose `==` against an element is no comparison.
  */

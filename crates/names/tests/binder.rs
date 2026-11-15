@@ -769,7 +769,7 @@ fn a_bare_extern_target_that_is_not_imported_is_a_global_function() {
 /// import, and a project effect resolves through the imports.
 #[test]
 fn an_effect_name_binds_as_a_class_name() {
-    const CODE: &str = "namespace App.Stubs;\n\nimport App.Effects.Payments;\n\nextern now uses Http, Database, Files, Console, Process, Clock, Random, Cache, Mail, Environment, Events, Payments;\n";
+    const CODE: &str = "namespace App.Stubs;\n\nimport App.Effects.Payments;\n\nextern now uses Http, Database, Files, Console, Process, Clock, Random, Cache, Mail, Dns, Environment, Events, Payments;\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
@@ -783,6 +783,7 @@ fn an_effect_name_binds_as_a_class_name() {
         ("Random", "Sharp\\Random"),
         ("Cache", "Sharp\\Data\\Cache"),
         ("Mail", "Sharp\\Net\\Mail"),
+        ("Dns", "Sharp\\Net\\Dns"),
         ("Environment", "Sharp\\System\\Environment"),
         ("Events", "Sharp\\Events"),
     ] {
