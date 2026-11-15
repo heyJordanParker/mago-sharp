@@ -49,7 +49,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordan
 Windows 上的推荐方式,也是任何没有 `bash` 的系统上的不错备选。
 
 1. 打开 [发布页面](https://github.com/heyJordanParker/php-sharp/releases)。
-2. 下载对应你操作系统的归档。命名遵循 `mago-<version>-<target>.tar.gz` (Windows 上是 `.zip`)。
+2. 下载对应你操作系统的归档。命名遵循 `mago-<version>-<target>.tar.gz`。
 3. 解压归档,把二进制放到 PATH 上的某个位置。
 
 如果你保留了归档文件,可以在解压前自行校验。

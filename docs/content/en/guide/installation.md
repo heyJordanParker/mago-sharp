@@ -49,7 +49,7 @@ To opt out entirely, pass `--no-verify`. The two flags are mutually exclusive.
 The recommended path on Windows and a fine fallback on any system without `bash`.
 
 1. Open the [releases page](https://github.com/heyJordanParker/php-sharp/releases).
-2. Download the archive for your operating system. The naming follows `mago-<version>-<target>.tar.gz` (or `.zip` on Windows).
+2. Download the archive for your operating system. The naming follows `mago-<version>-<target>.tar.gz`.
 3. Extract the archive and place the binary somewhere on your PATH.
 
 If you keep the archive around, you can verify it yourself before extracting.

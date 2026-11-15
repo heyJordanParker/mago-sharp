@@ -49,7 +49,7 @@ Pour désactiver entièrement, passez `--no-verify`. Les deux drapeaux sont mutu
 La voie recommandée sur Windows et un bon repli sur tout système sans `bash`.
 
 1. Ouvrez la [page des releases](https://github.com/heyJordanParker/php-sharp/releases).
-2. Téléchargez l'archive correspondant à votre système d'exploitation. Le nom suit `mago-<version>-<target>.tar.gz` (ou `.zip` sous Windows).
+2. Téléchargez l'archive correspondant à votre système d'exploitation. Le nom suit `mago-<version>-<target>.tar.gz`.
 3. Extrayez l'archive et placez le binaire quelque part dans votre PATH.
 
 Si vous gardez l'archive, vous pouvez la vérifier vous-même avant l'extraction.
