@@ -480,9 +480,10 @@ where
         is_refused |= report_erased_type_test(context, hint);
 
         // A test of a type parameter, of a generic class with its type arguments, of a collection, of a class value, of
-        // `Any`, of `Object`, of a tuple, of a function type, of a union or of an intersection is `instanceof` a name
-        // spanning the whole type, and narrows to the type written, which the analysis records as the type the test
-        // reads. So is a test of a plain PHP trait, spec section 22, since no value is `instanceof` one.
+        // `Any`, of `Object`, of a tuple, of a function type, of a union, of an intersection or of a nullable type is
+        // `instanceof` a name spanning the whole type, and narrows to the type written, which the analysis records as
+        // the type the test reads. So is a test of a plain PHP trait, spec section 22, since no value is `instanceof`
+        // one.
         let reads_type_arguments = match hint {
             Hint::Identifier(name) => {
                 context.resolved_names.is_type_parameter(name)
@@ -494,7 +495,8 @@ where
             | Hint::Tuple(_)
             | Hint::Function(_)
             | Hint::Union(_)
-            | Hint::Intersection(_) => has_type_test(hint),
+            | Hint::Intersection(_)
+            | Hint::Nullable(_) => has_type_test(hint),
             _ => false,
         };
         if reads_type_arguments {
@@ -800,6 +802,18 @@ where
                 block_context.flags.set_has_returned(true);
             }
         }
+    }
+
+    // Spec section 32: a plain PHP call's result narrowed to a class a module binds is refused, as such a result is.
+    if let Expression::Call(call) = tested_value(node).unparenthesized() {
+        let narrowed: Vec<Word> = node
+            .filter_map(|node| match node {
+                Node::Hint(Hint::Identifier(name)) => Some(word(context.resolved_names.get(name))),
+                _ => None,
+            })
+            .into_iter()
+            .collect();
+        crate::statement::module::report_bound_from_plain_php(context, artifacts, call, &narrowed, node.span());
     }
 
     // Reading (g) of spec section 21: a pattern that can never match is an error, as C#'s CS8121 is. Its test is then

@@ -40,6 +40,7 @@ use mago_sharp_bridge::unit::SHARP_UNIT_MAGIC;
 use mago_sharp_bridge::unit::compiled_path;
 use mago_sharp_bridge::unit::encode;
 use mago_sharp_bridge::unit::header;
+use mago_sharp_bridge::unit::inputs_changed;
 use mago_sharp_bridge::unit::is_stale;
 use mago_sharp_bridge::unit::key;
 use mago_sharp_bridge::unit::sharp_input;
@@ -146,7 +147,16 @@ fn every_text_of_a_lowered_unit_is_an_offset_into_its_texts() {
 
     assert_eq!(
         resolved,
-        [&b"strict_types"[..], b"App\\Tenant", b"weekly", b"string", b"Function<string()>", b"title", b"Report"]
+        [
+            &b"strict_types"[..],
+            b"App\\Tenant",
+            b"weekly",
+            b"string",
+            b"Function<string()>",
+            b"title",
+            b"\ntitle: Function<string()>",
+            b"Report"
+        ]
     );
     assert!(lowered.nodes().iter().any(|node| node.kind == sharp_kind::SHARP_AST_ZVAL
         && node.value == sharp_value::SHARP_STRING
@@ -217,7 +227,16 @@ fn a_compiled_file_reads_back_through_the_c_layout() {
         decoded.nodes.iter().filter(|node| node.text.len != 0).map(|node| decoded.text(node.text)).collect();
     assert_eq!(
         texts,
-        [&b"strict_types"[..], b"App\\Tenant", b"weekly", b"string", b"Function<string()>", b"title", b"Report"]
+        [
+            &b"strict_types"[..],
+            b"App\\Tenant",
+            b"weekly",
+            b"string",
+            b"Function<string()>",
+            b"title",
+            b"\ntitle: Function<string()>",
+            b"Report"
+        ]
     );
     assert_eq!(decoded.children, lowered.children());
 }
@@ -514,6 +533,22 @@ fn a_compiled_file_another_checker_build_wrote_whose_sections_changed_or_that_is
     assert!(is_stale(root, &other_build).unwrap());
     assert!(is_stale(root, &damaged).unwrap());
     assert!(is_stale(root, b"not a compiled file").unwrap());
+}
+
+/// The engine checks a compiled file's inputs whichever checker build wrote it, so a file another build wrote keeps its
+/// inputs current, and one that is no compiled file has none.
+#[test]
+fn a_compiled_file_another_checker_build_wrote_keeps_its_inputs_current() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "app/Report.sharp", SOURCE);
+    let mut other_build = compiled_with_inputs(root, &["app/Report.sharp"]);
+    other_build[offset_of!(sharp_unit_header, checker)] ^= 1;
+
+    assert!(!inputs_changed(root, &other_build).unwrap());
+    assert!(inputs_changed(root, b"not a compiled file").unwrap());
+    write(root, "app/Report.sharp", &format!("{SOURCE}\n"));
+    assert!(inputs_changed(root, &other_build).unwrap());
 }
 
 fn read(name: &str, fingerprint: u64) -> Read {

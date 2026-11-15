@@ -16,6 +16,7 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Struct;
 
 use crate::analyzable::Analyzable;
@@ -112,8 +113,9 @@ where
     A: Arena,
 {
     let mut inherits = false;
-    for type_name in r#struct.inheritance.iter().flat_map(|inheritance| inheritance.types.iter()) {
-        let Some(named) = context.codebase.get_class_like(context.resolved_names.get(type_name)) else {
+    // `Iterable<T>` names no class, spec section 12, so a struct's header may hold it.
+    for type_name in r#struct.inheritance.iter().flat_map(Inheritance::names) {
+        let Some(named) = context.codebase.get_class_like(context.resolved_names.get(&type_name)) else {
             continue;
         };
 

@@ -26,15 +26,13 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
-use crate::expression::access::refuse_statics_of_no_class;
+use crate::expression::access::refuse_static_through_class_value;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::get_written_literal_type;
-use crate::expression::assignment::static_property_assignment;
+use crate::expression::is_refused_type;
 use crate::resolver::method::get_declared_type;
 use crate::resolver::property::resolve_instance_properties;
-use crate::resolver::static_property::StaticProperty;
-use crate::resolver::static_property::StaticPropertyName;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::get_property_access_expression_id;
 use crate::utils::expression::is_this;
@@ -109,30 +107,23 @@ where
     )?;
     block_context.flags.set_inside_assignment(was_inside_assignment);
 
-    // A PHP# write through a class value, `type.count = 1`, writes the static of the class the value holds, as
-    // `Class.count = 1` does, spec section 25. The class value is analyzed by now.
+    // A class value reflects, and writes no static, spec section 25. The class value is analyzed by now, and a compound
+    // write, as `type.count += 1`, refused its read first, so it reports nothing again.
     if resolution_result.class_value
         && let ClassLikeMemberSelector::Identifier(name) = &property_access.property
     {
-        if refuse_statics_of_no_class(context, artifacts, property_access.object, property_access.span()) {
-            return Ok(());
+        if !artifacts.get_expression_type(&property_access.span()).is_some_and(is_refused_type) {
+            refuse_static_through_class_value(
+                context,
+                artifacts,
+                property_access.object,
+                name,
+                "write",
+                property_access.span(),
+            );
         }
-        let written = StaticProperty {
-            class: property_access.object,
-            name: StaticPropertyName::Identifier(name),
-            span: property_access.span(),
-        };
 
-        return static_property_assignment::analyze(
-            context,
-            block_context,
-            artifacts,
-            written,
-            assigned_value_type,
-            assigned_value,
-            None,
-            true,
-        );
+        return Ok(());
     }
 
     // A property a PHP# class declares as a `List`, a `Map` or a `Set`, or a union of them, takes only a literal of a

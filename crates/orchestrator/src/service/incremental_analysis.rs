@@ -4069,11 +4069,12 @@ mod tests {
 
     /// Spec section 11: a bound that names a type no file declares is the refused type only while the type is missing.
     /// Declaring it in another file gives the unchanged file's bound back, clears the type parameters it marked as
-    /// named by a refused bound, and checks the type arguments against the bound again.
+    /// named by a refused bound, and checks the type arguments against the bound again, and a write of the bound's
+    /// get-only property against its accessors.
     #[test]
     fn test_watch_a_bound_whose_missing_type_is_declared_later_bounds_again() {
         let bounded = "namespace App;\n\npublic static class Bounded\n{\n    public static T held<T : Holder<TOther>, TOther>(T value, TOther other) => value;\n\n    public static Any? written() => Bounded.held<int, int>(1, 2);\n\n    public static void touch<TBox : Holder<int>>(readonly TBox box)\n    {\n        box.size = 1;\n    }\n}\n";
-        let holder = "namespace App;\n\npublic interface Holder<TItem>\n{\n    int size { get; set; }\n}\n";
+        let holder = "namespace App;\n\npublic interface Holder<TItem>\n{\n    int size { get; }\n}\n";
         let mut db = make_database(vec![("src/Bounded.sharp", bounded)]);
         let errors = |service: &IncrementalAnalysisService| {
             service
@@ -4114,7 +4115,7 @@ mod tests {
             errors(&service),
             [
                 "Type argument `int` does not satisfy `Bounded.held<T, TOther>`'s `T`.",
-                "touch cannot set box.size: box is readonly."
+                "`size` of `Holder` is get-only."
             ]
         );
         assert_eq!(bounds(&service), (false, false), "the bound is Holder<TOther> again");

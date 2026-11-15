@@ -173,8 +173,8 @@ pub fn called_functions(node: Node<'_, '_>) -> impl Iterator<Item = LocalIdentif
 ///
 /// A scalar type has `is_int`, `is_float`, `is_string` or `is_bool`, and a class or a type parameter has `instanceof`.
 /// `Any`, `Object`, a generic class with its type arguments, a `List`, `Map` or `Set` with its element types, a
-/// `Class<T>`, a tuple, a function type, a union of types with a test and an intersection have `instanceof` a name that
-/// spans the type.
+/// `Class<T>`, a tuple, a function type, a union of types with a test, an intersection and a nullable type have
+/// `instanceof` a name that spans the type.
 /// The analyzer records the type each stands for, and the bridge lowers that test to the engine's, which reads the type
 /// arguments the code runs with, walks a collection's or a tuple's elements, and finds the class a class value names.
 /// `php_shape` builds no PHP for a form that tests any other type, so the semantic check refuses it.
@@ -209,11 +209,12 @@ fn type_test_of<'arena>(hint: &Hint<'arena>) -> Option<TypeTest<'arena>> {
 
 /// Whether the engine's test of the type the analyzer records tests `hint`: `Any`, `Object`, a generic class or a
 /// collection with its type arguments, a `Class<T>`, whose value is the string that names a class, a tuple, a function
-/// type, a union whose every member has a test, and an intersection of classes and interfaces. A union with `null` is
-/// nullable, which no type pattern is.
+/// type, a union whose every member has a test, an intersection of classes and interfaces, and a nullable type, as
+/// `int?`, whose test takes null too, as Kotlin's and Swift's do. A union with `null` writes that type another way.
 fn is_engine_tested(hint: &Hint<'_>) -> bool {
     match hint {
         Hint::Mixed(_) | Hint::Object(_) | Hint::Generic(_) | Hint::Tuple(_) | Hint::Function(_) => true,
+        Hint::Nullable(nullable) => is_tested_member(nullable.hint),
         Hint::Union(union) => is_tested_member(union.left) && is_tested_member(union.right),
         Hint::Intersection(intersection) => is_tested_member(intersection.left) && is_tested_member(intersection.right),
         _ => false,

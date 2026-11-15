@@ -32,6 +32,7 @@ use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extension;
 use mago_syntax::cst::FunctionLikeParameter;
+use mago_syntax::cst::Indexer;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
@@ -199,6 +200,30 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Operator<'arena> {
             && matches!(self.symbol, BinaryOperator::Equal(_))
         {
             check_hash(context, class, self.operator.span);
+        }
+
+        Ok(())
+    }
+}
+
+/// A PHP# indexer analyzes each of its accessors as the `ArrayAccess` method it runs as, `offsetGet` or `offsetSet`,
+/// spec section 6. An accessor semantics refuses has none.
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Indexer<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        for accessor in &self.accessors {
+            let Some(method) = MethodParts::of_indexer_accessor(context.arena, self, accessor) else {
+                continue;
+            };
+            let member = concat_word!(b"this[] ", accessor.name.value);
+            analyze_method(&method, None, member, context, block_context, artifacts)?;
         }
 
         Ok(())
@@ -601,7 +626,7 @@ where
             span: initializer.span(),
         };
 
-        return analyze_static_method_call(context, block_context, artifacts, call, None, false);
+        return analyze_static_method_call(context, block_context, artifacts, call, None);
     }
 
     if !initializer.argument_list.arguments.is_empty() {

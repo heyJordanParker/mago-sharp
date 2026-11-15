@@ -130,6 +130,8 @@ use crate::cst::cst::Implements;
 use crate::cst::cst::Imports;
 use crate::cst::cst::IncludeConstruct;
 use crate::cst::cst::IncludeOnceConstruct;
+use crate::cst::cst::Indexer;
+use crate::cst::cst::IndexerAccessor;
 use crate::cst::cst::IndirectVariable;
 use crate::cst::cst::Inheritance;
 use crate::cst::cst::Inline;
@@ -370,6 +372,8 @@ pub enum NodeKind {
     MethodExpressionBody,
     On,
     Operator,
+    Indexer,
+    IndexerAccessor,
     Law,
     Extension,
     ConstructorInitializer,
@@ -681,6 +685,8 @@ pub enum Node<'ast, 'arena> {
     MethodExpressionBody(&'ast MethodExpressionBody<'arena>),
     On(&'ast On<'arena>),
     Operator(&'ast Operator<'arena>),
+    Indexer(&'ast Indexer<'arena>),
+    IndexerAccessor(&'ast IndexerAccessor<'arena>),
     Law(&'ast Law<'arena>),
     Extension(&'ast Extension<'arena>),
     ConstructorInitializer(&'ast ConstructorInitializer<'arena>),
@@ -1086,6 +1092,8 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::MethodExpressionBody(_) => NodeKind::MethodExpressionBody,
             Self::On(_) => NodeKind::On,
             Self::Operator(_) => NodeKind::Operator,
+            Self::Indexer(_) => NodeKind::Indexer,
+            Self::IndexerAccessor(_) => NodeKind::IndexerAccessor,
             Self::Law(_) => NodeKind::Law,
             Self::Extension(_) => NodeKind::Extension,
             Self::ConstructorInitializer(_) => NodeKind::ConstructorInitializer,
@@ -1577,6 +1585,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 ClassLikeMember::EnumCase(node) => f(Node::EnumCase(node)),
                 ClassLikeMember::Method(node) => f(Node::Method(node)),
                 ClassLikeMember::Operator(node) => f(Node::Operator(node)),
+                ClassLikeMember::Indexer(node) => f(Node::Indexer(node)),
                 ClassLikeMember::Law(node) => f(Node::Law(node)),
                 ClassLikeMember::NamedConstructor(node) => f(Node::NamedConstructor(node)),
                 ClassLikeMember::Extension(node) => f(Node::Extension(node)),
@@ -1674,6 +1683,27 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Keyword(&node.operator));
                 f(Node::BinaryOperator(&node.symbol));
                 f(Node::FunctionLikeParameterList(&node.parameter_list));
+                f(Node::MethodBody(&node.body));
+            }
+            Node::Indexer(node) => {
+                for item in node.attribute_lists.iter() {
+                    f(Node::AttributeList(item));
+                }
+                for item in node.modifiers.iter() {
+                    f(Node::Modifier(item));
+                }
+                f(Node::Hint(&node.hint));
+                f(Node::Keyword(&node.this));
+                f(Node::FunctionLikeParameterList(&node.parameter_list));
+                for item in node.accessors.iter() {
+                    f(Node::IndexerAccessor(item));
+                }
+            }
+            Node::IndexerAccessor(node) => {
+                for item in node.modifiers.iter() {
+                    f(Node::Modifier(item));
+                }
+                f(Node::LocalIdentifier(&node.name));
                 f(Node::MethodBody(&node.body));
             }
             Node::Law(node) => {
@@ -3403,6 +3433,8 @@ impl HasSpan for Node<'_, '_> {
             Self::MethodExpressionBody(node) => node.span(),
             Self::On(node) => node.span(),
             Self::Operator(node) => node.span(),
+            Self::Indexer(node) => node.span(),
+            Self::IndexerAccessor(node) => node.span(),
             Self::Law(node) => node.span(),
             Self::Extension(node) => node.span(),
             Self::ConstructorInitializer(node) => node.span(),

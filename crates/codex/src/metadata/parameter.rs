@@ -1,5 +1,6 @@
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_word::Word;
 
 use crate::metadata::CodebaseMetadata;
 use crate::metadata::attribute::AttributeMetadata;
@@ -59,6 +60,10 @@ pub struct FunctionLikeParameterMetadata {
 
     /// Flags indicating various properties of the parameter.
     pub flags: MetadataFlags,
+
+    /// The field of the caller's position a PHP# default reads, as `line` of `Position.current().line`, spec section
+    /// 27. `None` when the default takes the whole position, or is no caller's position, as `flags` says.
+    pub caller_position_field: Option<Word>,
 }
 
 /// Contains metadata associated with a single parameter within a function, method, or closure signature.
@@ -87,6 +92,7 @@ impl FunctionLikeParameterMetadata {
             out_type: None,
             closure_this_type: None,
             default_type: None,
+            caller_position_field: None,
         }
     }
 

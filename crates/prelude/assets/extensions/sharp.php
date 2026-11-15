@@ -278,6 +278,15 @@ function equals(mixed $value, mixed $other): bool {}
 function jsonEncode(mixed $value, int $flags, int $indent): string {}
 
 /**
+ * The value the JSON text `$json` holds, as `json_decode` reads it with `JSON_OBJECT_AS_ARRAY`, each object a PHP
+ * array, but an empty object an empty `Map`, which `jsonEncode` writes as `{}` again. The standard library's
+ * `Json.parse` and `Json.decode` read by it.
+ *
+ * @throws \JsonException
+ */
+function jsonDecode(string $json): mixed {}
+
+/**
  * Marks the parameter of a standard library collection member that the member compares with the collection's elements
  * by `==`, as `List.contains`'s, so the checker refuses a value whose `==` against an element is no comparison.
  */
@@ -455,12 +464,14 @@ final class Sequence implements \IteratorAggregate
 function listen(string $event, \Closure $listener): \Sharp\Listening {}
 
 /**
- * The instance properties and fields of the class the class value `$type` names, its own first and then those it
- * inherits, in the order they are declared. The standard library's `Class<T>.properties()` makes a `Property` of each.
+ * The properties and fields of the class the class value `$type` names, its statics included, its own first and then
+ * those it inherits, in the order they are declared. The standard library's `Class<T>.properties()` makes a `Property`
+ * of each.
  *
- * @return list<list<string>> the class that declares each, its name, the class value of its type without `?`, the `?`
- * the type ends with, or "" for a type that is not nullable, and the access modifier that declares it: "public",
- * "internal", "protected" or "private".
+ * @return list<list<string>> the class that declares each, its name, the class value of its type as declared, the
+ * access modifier that declares it, "public", "internal", "protected" or "private", and its words, each after a
+ * space: what writes it, "set" or "init" and the access modifier that reaches it, as "set private", none for a
+ * get-only property, then "static", "abstract", "virtual" and "override" as the declaration states them.
  */
 function properties(string $type): array {}
 
@@ -470,40 +481,188 @@ function properties(string $type): array {}
  * standard library's `Class<T>.methods()` makes a `Method` of each, and a `Parameter` of each of its parameters.
  *
  * @return list<list<list<string>>> for each, first the class that declares it, its name, the class value of its result
- * type without `?`, the `?` the type ends with, or "" for a type that is not nullable, "static" for a static method or
- * "", and the access modifier that declares it, as `properties()` gives a property's, then one list per parameter: its
- * name, the class value of its type without `?`, the `?` the type ends with, "optional" for one a call may leave out or
- * "", and "variadic" for the one that takes the rest of a call's arguments or "".
+ * type as declared, its words, "static", "abstract", "virtual" and "override" as the declaration states them, each
+ * after a space, and the access modifier that declares it, as `properties()` gives a property's, then one list per
+ * parameter: its name, the class value of its type as declared, "optional" for
+ * one a call may leave out or "", and "variadic" for the one that takes the rest of a call's arguments or "".
  */
 function methods(string $type): array {}
 
 /**
- * The class values of the type arguments of the type the class value `$type` holds, in order. The standard library's
- * `Class<T>.typeArguments()` returns them.
+ * The constructor of the class the class value `$type` names, its own or the one it inherits, as `methods()` gives a
+ * method, or null for a class that has none. The standard library's `Class<T>.constructor()` makes a `Method` of it.
+ *
+ * @return list<list<string>>|null
+ */
+function constructor(string $type): ?array {}
+
+/**
+ * The class values of the type arguments of the type the class value `$type` holds without its `?`, in order, each
+ * whole. The standard library's `Class<T>.typeArguments()` returns them.
  *
  * @return list<string>
  */
 function typeArguments(string $type): array {}
 
 /**
+ * The kind of the type the class value `$type` holds without its `?`: "Class", "Union", "Tuple", "Function" or
+ * "TypeParameter". The standard library's `Class<T>.kind()` makes a `TypeKind` of it.
+ */
+function typeKind(string $type): string {}
+
+/**
+ * Whether the type the class value `$type` holds takes null. The standard library's `Class<T>.isNullable()` returns it.
+ */
+function isNullable(string $type): bool {}
+
+/**
+ * The class value of the type the class value `$type` holds without null. The standard library's
+ * `Class<T>.nonNullable()` returns it.
+ */
+function nonNullable(string $type): string {}
+
+/**
+ * The class values the type the class value `$type` holds without its `?` is made of: a union's members, a tuple's
+ * element types, a function type's result type then its parameter types, a type parameter's bound, and none for a
+ * class. The standard library's `Class<T>` members of each kind read them.
+ *
+ * @return list<string>
+ */
+function typeParts(string $type): array {}
+
+/**
+ * The name of each element of the tuple the class value `$type` holds without its `?`, or null for one without.
+ *
+ * @return list<string|null>
+ */
+function tupleNames(string $type): array {}
+
+/**
+ * The class value of the generic type the class value `$type` holds without its type arguments, or null for a type
+ * that declares no type parameter. The standard library's `Class<T>.genericDefinition()` returns it.
+ */
+function genericDefinition(string $type): ?string {}
+
+/**
+ * The class values of the type parameters the generic type the class value `$type` holds declares. The standard
+ * library's `Class<T>.typeParameters()` returns them.
+ *
+ * @return list<string>
+ */
+function typeParameters(string $type): array {}
+
+/**
+ * The class value of the class the class `$type` names extends, with the type arguments it gives it, or null. The
+ * standard library's `Class<T>.baseType()` returns it.
+ */
+function baseType(string $type): ?string {}
+
+/**
+ * The class values of the interfaces the class `$type` names implements, each with the type arguments it gives it.
+ *
+ * @return list<string>
+ */
+function interfaces(string $type): array {}
+
+/**
+ * Whether the class `$type` names is abstract, an interface, a struct and an enum, in that order.
+ *
+ * @return list<bool>
+ */
+function classFacts(string $type): array {}
+
+/**
+ * "int" or "string" for a backed enum the class `$type` names, or null.
+ */
+function enumBackingType(string $type): ?string {}
+
+/**
+ * The class value of the generic type the class value `$type` holds with `$arguments`, class values, as its type
+ * arguments. The standard library's `Class<T>.makeGenericType()` returns it.
+ *
+ * @param list<string> $arguments
+ *
+ * @throws \InvalidArgumentException
+ */
+function makeGenericType(string $type, array $arguments): string {}
+
+/**
+ * The cases of the enum the class value `$type` names, in the order they are declared, none for a class value that
+ * names no enum. The standard library's `Class<T>.enumCases()` makes an `EnumCase` of each.
+ *
+ * @return list<\UnitEnum>
+ */
+function enumCases(string $type): array {}
+
+/**
+ * A new object of the class the class value `$type` names, with its type arguments, created by its constructor with
+ * `$arguments`, as a direct `new` from the caller's code would. The standard library's `Class<T>.createInstance()`
+ * returns it.
+ *
+ * @template T of object
+ *
+ * @param class-string<T> $type
+ * @param list<mixed> $arguments
+ *
+ * @return T
+ *
+ * @throws \InvalidArgumentException
+ */
+function createInstance(string $type, array $arguments): object {}
+
+/**
+ * A new lazy object of the class the class value `$type` names, with its type arguments, created empty with no
+ * constructor run, as `ReflectionClass::newLazyGhost` creates one: `$initialize` runs on it at its first property read
+ * or write. The standard library's `Class<T>.createLazy()` returns it.
+ *
+ * @template T of object
+ *
+ * @param class-string<T> $type
+ * @param \Closure(T): void $initialize
+ *
+ * @return T
+ *
+ * @throws \InvalidArgumentException
+ */
+function createLazy(string $type, callable $initialize): object {}
+
+/**
+ * The accessors of the property `$name` of the class the class value `$type` names, as `ReflectionProperty::getHook`
+ * gives a hook: the row of its `get` and the row of its `set`, each as `methods()` gives a method's, named `$name::get`
+ * and `$name::set`, or null for one it runs none of. The standard library's `Property.getter()` and `setter()` read
+ * them.
+ *
+ * @return array{0: list<list<string>>|null, 1: list<list<string>>|null}
+ */
+function accessors(string $type, string $name): array {}
+
+/**
  * The result of the method `$method` that `$class` declares, called on `$receiver` with `$arguments` as a direct call
- * from the caller's code would be. The standard library's `Method.invoke` returns it.
+ * from the caller's code would be, or, with a null receiver, of the static method run on the class `$readOn` names, the
+ * one its `Method` was read from. The standard library's `Method.invoke` returns it.
  *
  * @param list<mixed> $arguments
+ *
+ * @throws \InvalidArgumentException
  */
-function invoke(object $receiver, string $class, string $method, array $arguments): mixed {}
+function invoke(?object $receiver, string $class, string $method, array $arguments, string $readOn): mixed {}
 
 /**
- * The value of the property `$property` that `$class` declares, read on `$receiver` as a direct read from the caller's
- * code would be. The standard library's `Property.get` returns it.
+ * The value of the property `$property` that `$class` declares, read on `$receiver`, or of the static `$property`, as a
+ * direct read from the caller's code would be. The standard library's `Property.get` returns it.
+ *
+ * @throws \InvalidArgumentException
  */
-function read(object $receiver, string $class, string $property): mixed {}
+function read(?object $receiver, string $class, string $property): mixed {}
 
 /**
- * Writes `$value` into the property `$property` that `$class` declares on `$receiver`, as a direct write from the
- * caller's code would. The standard library's `Property.set` runs it.
+ * Writes `$value` into the property `$property` that `$class` declares on `$receiver`, or into the static `$property`,
+ * as a direct write from the caller's code would. The standard library's `Property.set` runs it, and with `$beforeLoad`
+ * `Property.setBeforeLoad`, which writes a lazy object that has not loaded without loading it.
+ *
+ * @throws \InvalidArgumentException
  */
-function write(object $receiver, string $class, string $property, mixed $value): void {}
+function write(?object $receiver, string $class, string $property, mixed $value, bool $beforeLoad = false): void {}
 
 /**
  * The listeners of `$event`, one function per listener that takes the event, as `emit` gives them to the dispatcher.

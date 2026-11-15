@@ -302,7 +302,8 @@ fn record_placed_type<A>(
 
 /// The type an empty value written to a place declared `declared` has there: PHP types `[]` and `[:]` as one empty
 /// array, and the place keeps the collection it declares, so its rules and elements stay. `[]` is the place's `List`
-/// or `Set` and `[:]` its `Map`, whichever its union names. A literal no collection there takes, which
+/// or `Set` and `[:]` its `Map`, whichever its union names, and `[]` where only an `Iterable<T>` is named its
+/// `List<T>`. A literal no collection there takes, which
 /// [`check_sharp_literal_kind`] refuses, and any other empty value keep every collection the place declares, so the
 /// place adds no second issue. `None` where `declared` holds no collection.
 pub(crate) fn get_empty_literal_type(value: Option<&Expression<'_>>, declared: &TUnion) -> Option<TUnion> {
@@ -316,7 +317,20 @@ pub(crate) fn get_empty_literal_type(value: Option<&Expression<'_>>, declared: &
         .filter(|atomic| Some(matches!(atomic, TAtomic::Array(TArray::Keyed(_)))) == is_map_literal)
         .cloned()
         .collect();
-    let types = if taken.is_empty() { collections.cloned().collect() } else { taken };
+    let mut types: Vec<TAtomic> = if taken.is_empty() { collections.cloned().collect() } else { taken };
+    // A `List` is an `Iterable`, spec section 12, so `[]` at a place that declares only `Iterable<T>` is a `List<T>`.
+    if types.is_empty() && is_map_literal == Some(false) {
+        types = declared
+            .types
+            .iter()
+            .filter_map(|atomic| match atomic {
+                TAtomic::Iterable(iterable) if iterable.get_key_type().is_mixed() => {
+                    Some(TAtomic::Array(TArray::List(TList::new(Arc::clone(&iterable.value_type)))))
+                }
+                _ => None,
+            })
+            .collect();
+    }
 
     (!types.is_empty()).then(|| TUnion::from_vec(types))
 }

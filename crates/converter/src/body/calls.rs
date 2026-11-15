@@ -31,6 +31,9 @@ use mago_syntax::cst::Statement;
 use mago_syntax::cst::StaticMethodCall;
 use mago_syntax::walker::MutWalker;
 use mago_word::Word;
+use mago_word::ascii_lowercase_word;
+use mago_word::empty_word;
+use mago_word::word;
 
 use super::Kind;
 use super::access::HELD_CLASS;
@@ -64,6 +67,14 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for CalledClass {
             (Expression::Self_(_), _) => self.names_static = true,
             _ => {}
         }
+    }
+}
+
+/// The class of an object of the type `object`, where it is one named class.
+fn object_class(object: Option<&TUnion>) -> Option<Word> {
+    match object?.types.as_ref() {
+        [TAtomic::Object(TObject::Named(class))] => Some(class.name),
+        _ => None,
     }
 }
 
@@ -230,7 +241,7 @@ impl<'input> Converter<'input, '_> {
                 let method = self.method_of(self.type_of(call.object), &call.method);
                 self.method_name(call.object, &call.method, method);
                 self.arguments(&call.argument_list, method);
-                self.plain_call(call.span(), method);
+                self.plain_call(call.span(), method, object_class(self.type_of(call.object)));
             }
             Call::NullSafeMethod(call) => {
                 self.member_of(call.object, "a method call");
@@ -239,7 +250,7 @@ impl<'input> Converter<'input, '_> {
                 let method = self.method_of(self.type_of(call.object), &call.method);
                 self.method_name(call.object, &call.method, method);
                 self.arguments(&call.argument_list, method);
-                self.plain_call(call.span(), method);
+                self.plain_call(call.span(), method, object_class(self.type_of(call.object)));
             }
             Call::StaticMethod(call) => {
                 if self.forwards_called_class(call.span(), call.class, &call.method) {
@@ -252,33 +263,34 @@ impl<'input> Converter<'input, '_> {
                 }
                 self.edits.replace(call.double_colon, ".");
                 self.arguments(&call.argument_list, method);
-                self.plain_call(call.span(), method);
+                self.plain_call(call.span(), method, self.static_call_class(call));
             }
             Call::Function(call) => self.function_call(call),
             Call::NullSafeFunction(_) => self.refuse(call.span(), "`?.(…)` on a function has no PHP# form"),
         }
     }
 
-    /// Refuses the call at `call` of `callee`, a plain PHP function or method, in an enum, where its effects are unknown
-    /// and an enum has none (spec section 29), and where its result holds a PHP# generic class with a type argument
-    /// other than its bound, which [`raw_generic`] finds, or an object of a class a module binds, which PHP# takes only
-    /// through a constructor or a parameter, as a container's `app(StoreService::class)` gives one (spec section 32).
-    fn plain_call(&mut self, call: Span, callee: Option<&FunctionLikeMetadata>) {
-        let Some(callee) = callee.filter(|callee| !callee.flags.is_sharp()) else {
+    /// Refuses the call at `call` of `callee`, a function or a method it reaches through `class`, in an enum, where it
+    /// has an effect, since an enum has none (spec section 29), and the call of a plain PHP one where its result holds a
+    /// PHP# generic class with a type argument other than its bound, which [`raw_generic`] finds, or an object of a
+    /// class a module binds, which PHP# takes only through a constructor or a parameter, as a container's
+    /// `app(StoreService::class)` gives one (spec section 32).
+    fn plain_call(&mut self, call: Span, callee: Option<&FunctionLikeMetadata>, class: Option<Word>) {
+        let Some(callee) = callee else {
             return;
         };
-        // A call of this file's own code, which converts with it, or of PHP's own, whose effects the standard library
-        // declares, calls no plain PHP.
         let in_enum = self.class.as_ref().is_some_and(|class| class.metadata.kind.is_enum());
-        let is_plain = !callee.flags.is_built_in() && callee.span.file_id != self.input.file.id;
-        if in_enum && is_plain && !callee.flags.is_pure() {
+        if in_enum && let Some(effect) = self.declared_effect(callee, class) {
             // The call as PHP writes it up to its arguments, as `Translator::get`.
             let written = String::from_utf8_lossy(self.text(call)).into_owned();
             let shown = written.split('(').next().unwrap_or(&written).trim().to_owned();
             self.refuse(
                 call,
-                format!("`{shown}` is plain PHP whose effects no declaration gives, and a PHP# enum has no effects (spec section 29)"),
+                format!("`{shown}` has the effect `{effect}`, and a PHP# enum has no effects (spec section 29)"),
             );
+        }
+        if callee.flags.is_sharp() {
+            return;
         }
         let Some(result) = self.input.artifacts.get_expression_type(&call) else {
             return;
@@ -295,6 +307,34 @@ impl<'input> Converter<'input, '_> {
                 format!("`{service}` is bound in `{namespace}`'s module, so PHP# takes it through a constructor or a parameter"),
             );
         }
+    }
+
+    /// The effect a call of `callee`, a function or a method it reaches through `class`, has as the checker reads it
+    /// (spec section 29): the effect of a `foreign` class `class` is or extends, or the first effect the `extern`
+    /// declaration the call falls under lists, as [`CodebaseMetadata::extern_of`] finds it. A call no `extern` covers
+    /// has no effect the checker names, and neither does PHP's own function, the converted file's own code or another
+    /// PHP# body, whose effects the proof's analysis reads.
+    ///
+    /// [`CodebaseMetadata::extern_of`]: mago_codex::metadata::CodebaseMetadata::extern_of
+    fn declared_effect(&self, callee: &FunctionLikeMetadata, class: Option<Word>) -> Option<Word> {
+        let codebase = self.input.codebase;
+        let class = class.and_then(|class| codebase.get_class_like(class.as_bytes()));
+        if let Some(class) = class {
+            let parents =
+                class.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(parent.as_bytes()));
+            if let Some(foreign) = std::iter::once(class).chain(parents).find(|class| class.flags.is_foreign()) {
+                return Some(foreign.original_name);
+            }
+        }
+        if callee.flags.is_sharp() || callee.flags.is_built_in() || callee.span.file_id == self.input.file.id {
+            return None;
+        }
+        let declaration = codebase.extern_of(
+            class.map_or_else(empty_word, |class| class.name),
+            ascii_lowercase_word(callee.name.as_bytes()),
+        )?;
+
+        declaration.effects.first().copied()
     }
 
     /// The short name of the first class `result` holds an object of that a module binds as a service, and the
@@ -338,17 +378,19 @@ impl<'input> Converter<'input, '_> {
         let ClassLikeMemberSelector::Identifier(name) = &call.method else {
             return None;
         };
-        let codebase = self.input.codebase;
-        let class = match call.class {
-            Expression::Identifier(identifier) => {
-                return codebase.get_declaring_method(self.input.names.get(identifier), name.value);
-            }
-            Expression::Self_(_) | Expression::Static(_) => self.class.as_ref()?.metadata.name,
-            Expression::Parent(_) => self.class.as_ref()?.metadata.direct_parent_class?,
-            class => self.held_class(class)?,
-        };
 
-        codebase.get_declaring_method(class.as_bytes(), name.value)
+        self.input.codebase.get_declaring_method(self.static_call_class(call)?.as_bytes(), name.value)
+    }
+
+    /// The class the static call `call` finds its method on: the one it names, the converted class for `self` and
+    /// `static`, its parent for `parent`, or the class a class value or an object holds.
+    fn static_call_class(&self, call: &StaticMethodCall<'_>) -> Option<Word> {
+        match call.class {
+            Expression::Identifier(identifier) => Some(word(self.input.names.get(identifier))),
+            Expression::Self_(_) | Expression::Static(_) => Some(self.class.as_ref()?.metadata.name),
+            Expression::Parent(_) => self.class.as_ref()?.metadata.direct_parent_class,
+            class => self.held_class(class),
+        }
     }
 
     /// The class `class` holds at run time, as the analysis types it: the class of `class-string<Order>`, the bound of
@@ -420,7 +462,7 @@ impl<'input> Converter<'input, '_> {
         }
         self.expression(call.class, None);
         self.arguments(&call.argument_list, Some(method));
-        self.plain_call(call.span(), Some(method));
+        self.plain_call(call.span(), Some(method), self.held_class(call.class));
         let class = self.render(call.class);
         let class = if is_primary(call.class) { class } else { format!("({class})") };
         let arguments: Vec<String> = call
@@ -584,7 +626,7 @@ impl<'input> Converter<'input, '_> {
                 return;
             };
             self.arguments(&call.argument_list, Some(function));
-            self.plain_call(span, Some(function));
+            self.plain_call(span, Some(function), None);
             let list = call.argument_list.span();
             let arguments = self.edits.render(self.source, list.start.offset, list.end.offset);
             return self.edits.replace(span, format!("{callee}{arguments}"));

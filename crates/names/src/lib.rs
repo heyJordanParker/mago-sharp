@@ -3,7 +3,9 @@ use mago_span::Span;
 
 use mago_span::HasPosition;
 use mago_span::Position;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrowFunction;
+use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
@@ -49,11 +51,12 @@ pub const IMPORT: &str = "Sharp\\Interop\\Import";
 /// spec section 23, as `[Export("auth_redirect")]`.
 pub const EXPORT: &str = "Sharp\\Interop\\Export";
 
-/// The mark of an attribute class whose framework reaches the member its attribute marks by reflection.
+/// The mark of an attribute class whose framework reaches by reflection the member its attribute marks, or each public
+/// member of the class it marks.
 ///
-/// Spec section 5: as .NET's `[DynamicallyAccessedMembers]` says a member is reached, so the member never warns that it
-/// is too wide.
-pub const REACHED_BY_REFLECTION: &str = "Sharp\\ReachedByReflection";
+/// Spec section 5: as .NET's `[DynamicallyAccessedMembers]` says a member is reached, so the member counts as used, and
+/// is never too wide.
+pub const DYNAMICALLY_ACCESSED: &str = "Sharp\\DynamicallyAccessed";
 
 /// The mark of a parameter whose argument a method writes as JSON text.
 ///
@@ -102,21 +105,18 @@ pub const EQUATABLE: &str = "Equatable";
 /// The parser reads both as `Hint::Object`, and only `Object` is PHP#.
 pub const OBJECT: &[u8] = b"Object";
 
-/// The class-likes that a bare name in a `.sharp` file names by default, spec section 23, and that a class-like of the
-/// file's namespace can win over: every class-like the standard library or the prelude declares directly in `Sharp`,
-/// then the [standard root classes](STANDARD_ROOT_CLASSES), but the [fixed one](fixed_default_class).
+/// The class-likes that a bare name in a `.sharp` file names by default, spec section 23, and that an import or a
+/// class-like of the file's namespace wins over, as in Kotlin and Java: every class-like the standard library or the
+/// prelude declares directly in `Sharp`, `Error` among them, then the [standard root classes](default_root_classes).
 pub(crate) fn default_classes() -> impl Iterator<Item = &'static str> {
-    sharp_classes::SHARP_CLASSES
-        .into_iter()
-        .chain(STANDARD_ROOT_CLASSES)
-        .filter(|class| fixed_default_class(default_short_name(class)).is_none())
+    sharp_classes::SHARP_CLASSES.into_iter().chain(default_root_classes())
 }
 
-/// The default class-like that a bare name in a `.sharp` file always names, whatever the file imports or declares or
-/// its namespace holds: `Error`, the standard library's interface of every failure, spec section 31. PHP's engine class
-/// `Error` is never named in PHP# code.
-pub(crate) fn fixed_default_class(name: &[u8]) -> Option<&'static [u8]> {
-    (name == b"Error").then_some(b"Sharp\\Error".as_slice())
+/// The [standard classes](STANDARD_ROOT_CLASSES) a bare name names by default, spec section 23.
+///
+/// Each is in PHP's root namespace. One of a namespace, as `Dom\HTMLDocument`, is named through its import.
+pub fn default_root_classes() -> impl Iterator<Item = &'static str> {
+    STANDARD_ROOT_CLASSES.into_iter().filter(|class| !class.contains('\\'))
 }
 
 /// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Math` for `Math`, and
@@ -401,13 +401,15 @@ impl<'arena> ResolvedNames<'arena> {
 
     /// Returns whether `hint` is a class bound, spec section 11.
     ///
-    /// It is `Object` alone, or a class or an interface, by name or as a generic class type, or several of them joined
-    /// with `&`. `Equatable` is a name too. A type parameter is none of them, and `Object`, which holds any object,
-    /// joins no other bound.
+    /// It is `Object`, or a class or an interface, by name or as a generic class type, or several of them joined with
+    /// `&`, as C#'s `class` constraint joins interfaces. `Equatable` is a name too. A type parameter is none of them.
     #[must_use]
     pub fn is_class_bound(&self, hint: &Hint<'_>) -> bool {
         match hint {
             Hint::Object(object) => object.value == OBJECT,
+            Hint::Intersection(intersection) => {
+                self.is_class_bound(intersection.left) && self.is_class_bound(intersection.right)
+            }
             hint => self.joins_classes(hint),
         }
     }
@@ -477,6 +479,25 @@ impl<'arena> ResolvedNames<'arena> {
         self.static_call_class(call).is_some_and(|class| self.get(&class.name).eq_ignore_ascii_case(b"Sharp\\Position"))
             && matches!(&call.method, ClassLikeMemberSelector::Identifier(method) if method.value.eq_ignore_ascii_case(b"current"))
             && call.argument_list.arguments.is_empty()
+    }
+
+    /// Returns what a parameter's `default` takes of the caller's position, spec section 27: `Some(None)` for
+    /// `Position.current()`, the whole position, and `Some(Some(field))` for one field of it, as
+    /// `Position.current().line`, as C#'s `[CallerLineNumber]` and Swift's `#line` take the line alone. `None` for any
+    /// other default, and for every default in a PHP file.
+    ///
+    /// The scanner, the checker and the engine all read this, so they never disagree on a caller's position default.
+    #[must_use]
+    pub fn caller_position_field<'ast>(&self, default: &Expression<'ast>) -> Option<Option<&'ast [u8]>> {
+        match default {
+            Expression::Call(Call::Method(call)) if self.is_current_position(call) => Some(None),
+            Expression::Access(Access::Property(PropertyAccess {
+                object: Expression::Call(Call::Method(call)),
+                property: ClassLikeMemberSelector::Identifier(field),
+                ..
+            })) if self.is_current_position(call) => Some(Some(field.value)),
+            _ => None,
+        }
     }
 
     /// Returns the class of a PHP# static property access, `Class.name`: the object of `access` when the binder bound

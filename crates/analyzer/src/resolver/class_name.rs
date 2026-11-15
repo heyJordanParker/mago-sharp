@@ -437,8 +437,8 @@ pub(crate) fn holds_no_class(class_value_type: &TUnion) -> bool {
 }
 
 /// Reports `value`, of the type `value_type` that [`holds_no_class`], where only a class's `Class` does what `does`
-/// says: "creates objects" for `new (value)()`, and "has statics" for a static member read, written or called through
-/// it. The class value of a type parameter is reported as the type parameter is where it is written as a class. The
+/// says, "creates objects" for `new (value)()`. The class value of a type parameter is reported as the type parameter
+/// is where it is written as a class. The
 /// caller types the refused expression `TAtomic::Error`, so nothing reports again on it.
 pub(crate) fn report_class_value_of_no_class<A>(
     context: &mut Context<'_, '_, A>,

@@ -173,6 +173,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
 
         if context.program.dialect.is_sharp() {
             checker::sharp::check_class_name(&interface.name, "Type", context);
+            checker::sharp::check_interface_name(&interface.name, context);
         }
     }
 

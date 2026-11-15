@@ -21,11 +21,13 @@ use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::iterable::TIterable;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::bound_is_equatable;
@@ -72,7 +74,6 @@ use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
-use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
@@ -95,7 +96,6 @@ use crate::error::AnalysisError;
 use crate::expression::binary::comparison::missing_equality;
 use crate::plugin::context::HookContext;
 use crate::resolver::class_name::report_missing_class;
-use crate::resolver::extension::class_member;
 use crate::resolver::method::untyped_implementations;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
@@ -1574,7 +1574,6 @@ where
     check_readonly_class_trait_properties(context, class_like_metadata, &trait_uses);
     if class_like_metadata.flags.is_sharp() {
         check_sharp_template_variance(context, class_like_metadata, inheritance_ast);
-        check_sharp_serializable(context, class_like_metadata);
         check_required_named_constructors(context, class_like_metadata, name_span.unwrap_or(declaration_span));
     } else {
         // A PHP# class that reaches a generic class-like twice is refused whole by `check_sharp_reached_twice`.
@@ -1751,6 +1750,9 @@ where
             ClassLikeMember::Operator(operator) => {
                 operator.analyze(context, &mut block_context, artifacts)?;
             }
+            ClassLikeMember::Indexer(indexer) => {
+                indexer.analyze(context, &mut block_context, artifacts)?;
+            }
             ClassLikeMember::Law(law) => {
                 law.analyze(context, &mut block_context, artifacts)?;
             }
@@ -1765,9 +1767,9 @@ where
     }
 
     if context.dialect.is_sharp() && class_like_metadata.flags.is_sharp() {
-        report_statics_named_like_class_members(context, members);
         report_members_named_like_inherited_members(context, class_like_metadata);
         check_sharp_elements(context, class_like_metadata);
+        check_public_types_named(context, class_like_metadata);
     }
 
     // Check trait constant overrides AFTER constants have been analyzed
@@ -1874,6 +1876,93 @@ where
     }
 }
 
+/// Spec section 5: a public member of an application names its types, as TypeScript's `noImplicitAny` and C#'s
+/// nullable public API analyzers keep `any` and `object` out of an app's API. Its property's type, each parameter's
+/// and its return type hold no `Any`, `Any?` or `Object` at any depth, while a type parameter is a named type. It runs
+/// in a project, as too wide does, since a library's callers are unknown: an interface's members count, and an
+/// `internal` or private member, an `internal` class's members and an override, which keeps its parent's types, as
+/// a plain PHP parent's `mixed` is `Any?`, are exempt.
+fn check_public_types_named<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    if !class.flags.is_project() || class.flags.is_internal_reach() {
+        return;
+    }
+
+    let codebase = context.codebase;
+    let mut signatures: Vec<(Word, &TypeMetadata)> = Vec::new();
+    for (name, property) in &class.properties {
+        if class.declaring_property_ids.get(name) == Some(&class.name)
+            && property.read_visibility.is_public()
+            && !property.flags.is_internal_reach()
+            && !class.overridden_property_ids.contains_key(name)
+            && let Some(declared) = &property.type_declaration_metadata
+        {
+            signatures.push((word(mago_bytes::trim_start_byte(name.as_bytes(), b'$')), declared));
+        }
+    }
+    for name in &class.methods {
+        let Some(method) = codebase.function_likes.get(&(class.name, *name)) else {
+            continue;
+        };
+        // A method the codex gives the class spans the whole class, and nobody wrote it. PHP fixes a magic method's
+        // types, and a promoted parameter is its property's.
+        if method.span == class.span
+            || !method.method_metadata.as_ref().is_some_and(|metadata| metadata.visibility.is_public())
+            || method.flags.is_internal_reach()
+            || (name.as_bytes().starts_with(b"__") && name.as_bytes() != b"__construct")
+            || class.overridden_method_ids.contains_key(name)
+        {
+            continue;
+        }
+
+        let parameters = method
+            .parameters
+            .iter()
+            .filter(|parameter| !parameter.flags.is_promoted_property())
+            .filter_map(|parameter| parameter.type_declaration_metadata.as_ref());
+        for declared in parameters.chain(method.return_type_declaration_metadata.as_ref()) {
+            signatures.push((method.original_name, declared));
+        }
+    }
+
+    signatures.sort_by_key(|(_, declared)| declared.span.start.offset);
+    for (member, declared) in signatures {
+        let Some(wide) = declared.type_union.types.iter().find_map(unnamed_type) else {
+            continue;
+        };
+        let wide = display_type(context, &TUnion::from_atomic(wide.clone()));
+        let written = display_type(context, &declared.type_union);
+        let named = if wide == written { format!("`{wide}`") } else { format!("`{wide}` in `{written}`") };
+        let member = display_member(context, class.original_name, member);
+
+        context.collector.report_with_code(
+            IssueCode::ImpreciseType,
+            Issue::error(format!("`{member}` is public, and a public member of an application names its types: {named}."))
+                .with_annotation(Annotation::primary(declared.span).with_message(format!("{wide} here.")))
+                .with_help("Name the type it holds, as a class, a struct, an interface or a type parameter, or make the member `internal`."),
+        );
+    }
+}
+
+/// The first `Any`, `Any?` or `Object` of `atomic` at any depth, as PHP# writes the type. A type parameter is a named
+/// type, so its bound, `Any?` when it states none, doesn't count, and `Iterable<T>` names its element type only, as
+/// its key is PHP's `mixed`.
+fn unnamed_type(atomic: &TAtomic) -> Option<&TAtomic> {
+    match atomic {
+        TAtomic::Mixed(_) | TAtomic::Object(TObject::Any) => Some(atomic),
+        TAtomic::GenericParameter(_) => None,
+        TAtomic::Iterable(iterable) if iterable.get_key_type().is_mixed() => {
+            iterable.get_value_type().types.iter().find_map(unnamed_type)
+        }
+        _ => atomic.get_child_nodes().into_iter().find_map(|node| match node {
+            TypeRef::Union(union) => union.types.iter().find_map(unnamed_type),
+            TypeRef::Atomic(child) => unnamed_type(child),
+        }),
+    }
+}
+
 /// Reports the issues recorded since `start_recording` for a plain PHP class that extends or implements a PHP# type,
 /// each error with an annotation at `class_span` that names the class, as a signature check's has. The engine links the
 /// class against the PHP# type, spec section 22, and `mago compile` refuses each error in it that names the class and a
@@ -1890,51 +1979,6 @@ where
 
         issue.with_annotation(Annotation::secondary(class_span).with_message(format!("In class `{name}`")))
     }));
-}
-
-/// Reports each static of a PHP# class-like named like a member of `Class`, spec section 25, as TypeScript's error 2699
-/// refuses a static named like a member of `Function`: `type.y` through a class value reaches a static method, a
-/// static property, a constant and an enum case alike, and `Class`'s own member wins, so the static would never run.
-/// PHP# names are case-sensitive, spec section 24, so a static `Attributes` beside `Class`'s `attributes()` is reached
-/// as written.
-fn report_statics_named_like_class_members<A>(context: &mut Context<'_, '_, A>, members: &[ClassLikeMember<'_>])
-where
-    A: Arena,
-{
-    let mut statics: Vec<(&[u8], Span)> = Vec::new();
-    for member in members {
-        match member {
-            ClassLikeMember::Method(method) if method.is_static() => {
-                statics.push((method.name.value, method.name.span));
-            }
-            ClassLikeMember::Property(property) if property.modifiers().iter().any(Modifier::is_static) => {
-                for variable in property.variables() {
-                    statics.push((variable.name.strip_prefix(b"$").unwrap_or(variable.name), variable.span));
-                }
-            }
-            ClassLikeMember::Constant(constant) => {
-                statics.extend(constant.items.iter().map(|item| (item.name.value, item.name.span)));
-            }
-            ClassLikeMember::EnumCase(enum_case) => {
-                statics.push((enum_case.item.name().value, enum_case.item.name().span));
-            }
-            _ => {}
-        }
-    }
-
-    for (name, span) in statics {
-        if class_member(context.codebase, name).is_none() {
-            continue;
-        }
-        let name = BytesDisplay(name);
-        context.collector.report_with_code(
-            IssueCode::NameAlreadyInUse,
-            Issue::error(format!(
-                "`type.{name}` on a class value reaches `Class`'s member `{name}`, never this static. Rename it."
-            ))
-            .with_annotation(Annotation::primary(span).with_message("Declared here.")),
-        );
-    }
 }
 
 /// Reports each member of the PHP# class `class` named like a member of the other kind that it inherits from a PHP#
@@ -3327,33 +3371,6 @@ fn check_sharp_template_variance<A>(
             .with_note("An `out` type parameter is only handed out, and an `in` type parameter is only taken in."),
         );
     }
-}
-
-/// Refuses a generic PHP# class that is a `Serializable`, through its header or a parent's. Its objects carry their
-/// type arguments through serialization, and `Serializable::serialize` writes a string the engine cannot add them to.
-fn check_sharp_serializable<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
-where
-    A: Arena,
-{
-    if !class_like_metadata.kind.is_class()
-        || class_like_metadata.template_types.is_empty()
-        || !context.codebase.class_implements(class_like_metadata.name.as_bytes(), b"Serializable")
-    {
-        return;
-    }
-
-    let class_name = short_name(class_like_metadata.original_name);
-    context.collector.report_with_code(
-        IssueCode::InvalidImplement,
-        Issue::error(format!(
-            "`{class_name}` has type parameters, so it cannot be a `Serializable`: `serialize` drops the type arguments its objects carry."
-        ))
-        .with_annotation(
-            Annotation::primary(class_like_metadata.name_span.unwrap_or(class_like_metadata.span))
-                .with_message(format!("`{class_name}` has type parameters")),
-        )
-        .with_help("Leave `Serializable` out: an object serialized as it is keeps its type arguments."),
-    );
 }
 
 /// Refuses a PHP# class-like that reaches one generic class-like with other type arguments through two entries of its
@@ -5328,9 +5345,9 @@ fn report_unfit_override<A>(
     );
 }
 
-/// Reports a PHP# override of a plain PHP property that has no `set`, an `init`, or a `set` at another level than the
-/// parent's, spec section 6.1. The parent's own code writes the property at any time, which a get-only or an `init`
-/// property promises no code does, and line 287 makes the override's access level the parent's.
+/// Reports a PHP# override of a plain PHP property that has no `set`, an `init`, or a `set` narrower than the parent's,
+/// spec section 6.1. The parent's own code writes the property at any time, which a get-only or an `init` property
+/// promises no code does, and an override may widen an access level but never narrow one.
 fn report_plain_php_override_set<A>(
     context: &mut Context<'_, '_, A>,
     property: &PropertyMetadata,
@@ -5354,16 +5371,18 @@ fn report_plain_php_override_set<A>(
         ))
         .with_help("Give the override `set`, as in `{ get; set; }`.")
     } else if settable(property)
-        // A read level that differs is its own error, which also fixes the set level.
-        && property.read_visibility == parent.read_visibility
-        && property.write_visibility != parent.write_visibility
+        // A narrower read level is its own error, which also fixes the set level.
+        && property.read_visibility <= parent.read_visibility
+        && property.write_visibility > parent.write_visibility
     {
         let level = parent.write_visibility;
 
         Issue::error(format!(
-            "`{parent_display}` is set at `{level}`, so its override `{child_display}` is set at `{level}` too."
+            "`{parent_display}` is set at `{level}`, so its override `{child_display}` is set at `{level}` or wider."
         ))
-        .with_help("Write `set` with no access modifier: an override keeps its parent's access level.")
+        .with_help(
+            "Write `set` with no access modifier: an override may widen its parent's access level, never narrow it.",
+        )
     } else {
         return;
     };
@@ -5614,24 +5633,6 @@ fn check_class_like_properties<'ctx, A>(
                         .with_note("The access level of an overridden property must not be more restrictive than the parent property.")
                         .with_help("Adjust the access level of the property in the child class to match or be less restrictive than the parent class."),
                     );
-            } else if context.dialect.is_sharp() && property_metadata.read_visibility < parent_property.read_visibility
-            {
-                let (visibility, parent_visibility) =
-                    (property_metadata.read_visibility, parent_property.read_visibility);
-
-                context.collector.report_with_code(
-                    IssueCode::IncompatiblePropertyAccess,
-                    Issue::error(format!(
-                        "The override `{child_display}` is `{visibility}`, but `{parent_display}` is `{parent_visibility}`."
-                    ))
-                    .with_annotation(Annotation::primary(property_span).with_message(format!("Declared `{visibility}` here.")))
-                    .with_annotation(
-                        Annotation::secondary(parent_property_span)
-                            .with_message(format!("Declared `{parent_visibility}` here.")),
-                    )
-                    .with_note("An override keeps the access level of the property it replaces.")
-                    .with_help(format!("Declare the override `{parent_visibility}`.")),
-                );
             }
 
             // Spec section 6.1: a plain PHP parent's own code writes its property, so its override has `set`, at the

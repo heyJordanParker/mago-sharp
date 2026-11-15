@@ -19,6 +19,7 @@ use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::metadata::module::Lifetime;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
+use mago_codex::metadata::module::NamespaceImportMetadata;
 use mago_codex::metadata::module::service_id;
 use mago_codex::metadata::module::top_dispatcher_namespaces;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
@@ -37,6 +38,7 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::BindingValue;
+use mago_syntax::cst::Call;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
@@ -47,6 +49,7 @@ use mago_word::empty_word;
 use mago_word::word;
 
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -64,7 +67,6 @@ use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_variable_name;
 use crate::visibility::display_namespace;
 use crate::visibility::dotted;
-use crate::visibility::is_within_namespace;
 use crate::visibility::list_refusing;
 
 /// Checks each binding of `module` where it is written, with every service its class or its expression takes, then
@@ -729,7 +731,7 @@ where
 }
 
 /// Spec section 32: checks the `imports` line of `metadata`, a folder's module. Each namespace it lists is a namespace
-/// of the project or its libraries that each list above it allows, and its list leads to no list that leads back to it.
+/// of the project or its libraries that each list above it allows.
 pub(crate) fn analyze_imports<A>(context: &mut Context<'_, '_, A>, metadata: &ModuleMetadata)
 where
     A: Arena,
@@ -755,24 +757,137 @@ where
             );
         }
     }
+}
 
-    let lists: Vec<&ModuleMetadata> = context
-        .codebase
-        .modules
-        .iter()
-        .filter(|module| module.kind == ModuleKind::Base && !module.imports.is_empty())
-        .collect();
-    let successors: Vec<Vec<usize>> = lists
-        .iter()
-        .map(|list| (0..lists.len()).filter(|other| names_list(list, lists[*other]).is_some()).collect())
-        .collect();
-    let Some(own) = lists.iter().position(|list| std::ptr::eq(*list, metadata)) else {
-        unreachable!("a module with a list is one of the codebase's modules with a list");
+/// Spec section 23: reports the import at `span` when its namespace leads back to the importing file's, directly or
+/// through other namespaces, a parent and its child among them, as Go refuses every import cycle between packages. The
+/// edges are the project's imports, which [`NamespaceImportMetadata`] records, and the namespace is the unit: the
+/// error names the namespaces of the cycle, the other file's import that closes it, and the two ways out.
+pub(crate) fn check_import_cycle<A>(context: &mut Context<'_, '_, A>, span: Span)
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let Some(own) = codebase.namespace_imports.iter().find(|import| import.span == span) else {
+        return;
     };
-    let cycle: Vec<&ModuleMetadata> = cycle_through(own, &successors).into_iter().map(|index| lists[index]).collect();
-    if !cycle.is_empty() {
-        report_import_cycle(context, &cycle);
+    let key = |namespace: &[u8]| word(namespace.to_ascii_lowercase());
+    let from = key(own.namespace.as_bytes());
+    let start = key(imported_namespace(codebase, own.name.as_bytes()));
+
+    // The shortest path of imports from the imported namespace back to the importing one.
+    let mut previous: HashMap<Word, &NamespaceImportMetadata> = HashMap::default();
+    let mut pending = VecDeque::from([start]);
+    let mut seen = HashSet::from_iter([start]);
+    while let Some(namespace) = pending.pop_front() {
+        if namespace == from {
+            break;
+        }
+        for import in codebase.namespace_imports.iter().filter(|import| key(import.namespace.as_bytes()) == namespace) {
+            let next = key(imported_namespace(codebase, import.name.as_bytes()));
+            if seen.insert(next) {
+                previous.insert(next, import);
+                pending.push_back(next);
+            }
+        }
     }
+    let Some(closing) = previous.get(&from).copied() else {
+        return;
+    };
+
+    // The namespaces of the cycle: the importing one, then each the path passes, from the imported one on.
+    let mut through = Vec::new();
+    let mut at = from;
+    while at != start {
+        let import = previous[&at];
+        through.push(word(dotted(import.namespace.as_bytes())));
+        at = key(import.namespace.as_bytes());
+    }
+    through.push(word(dotted(own.namespace.as_bytes())));
+    through.reverse();
+
+    let file = closing.file.as_bytes().rsplit(|byte| *byte == b'/').next().unwrap_or_default();
+    let name = closing.name.as_bytes().rsplit(|byte| *byte == b'\\').next().unwrap_or_default();
+    context.collector.report_with_code(
+        IssueCode::ImportCycle,
+        Issue::error(format!(
+            "{} import each other ({} imports {}). Move the code, or declare an interface in one namespace that the other implements.",
+            and_list(&through),
+            String::from_utf8_lossy(file),
+            String::from_utf8_lossy(name)
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Imported here."))
+        .with_annotation(Annotation::secondary(closing.span).with_message("Imported back here.")),
+    );
+}
+
+/// Spec section 32: refuses `call`, a plain PHP call in PHP# code, at `span` when a value of a class a module binds
+/// comes out of it: its result type names one, or `narrowed`, the classes PHP# code narrows its result to with `as`
+/// or `is`, names one. A bound class reaches code only through injection, a constructor or a method parameter, as
+/// Dagger and Angular hand a bound class only to what they build.
+pub(crate) fn report_bound_from_plain_php<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    call: &Call<'_>,
+    narrowed: &[Word],
+    span: Span,
+) where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let is_plain_php = artifacts.get_callees(call).any(|target| match target {
+        CallTarget::FunctionLike { callee, .. } | CallTarget::MagicMethod { callee, .. } => {
+            codebase.get_function_like(callee).is_some_and(|function| !function.flags.is_sharp())
+        }
+        CallTarget::Property { .. } => false,
+    });
+    if !context.dialect.is_sharp() || !is_plain_php {
+        return;
+    }
+
+    let returned = artifacts.get_expression_type(call).into_iter().flat_map(|result| {
+        result.types.iter().filter_map(|atomic| match atomic {
+            TAtomic::Object(TObject::Named(object)) => Some(object.name),
+            _ => None,
+        })
+    });
+    let Some((class, module)) = returned
+        .chain(narrowed.iter().copied())
+        .find_map(|class| Some((class, bound_module(codebase, class.as_bytes())?)))
+    else {
+        return;
+    };
+
+    let class = display_class_like_name(
+        context,
+        codebase.get_class_like(class.as_bytes()).map_or(class, |class| class.original_name),
+    );
+    let namespace = display_namespace(codebase, module);
+    context.collector.report_with_code(
+        IssueCode::InvalidBinding,
+        Issue::error(format!(
+            "`{class}` is bound in `{namespace}`'s module, so it reaches code through a constructor or a parameter."
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Reached through plain PHP here."))
+        .with_annotation(Annotation::secondary(module.span).with_message("Bound here."))
+        .with_help(format!("Take `{class}` as a constructor or method parameter, and the container passes it.")),
+    );
+}
+
+/// The base or environment module that binds the class named `class`, spec section 32.
+fn bound_module<'codebase>(codebase: &'codebase CodebaseMetadata, class: &[u8]) -> Option<&'codebase ModuleMetadata> {
+    codebase.modules.iter().filter(|module| module.kind != ModuleKind::Test).find(|module| {
+        module.bindings.iter().any(|binding| {
+            binding.service.type_union.clone().without_readonly().get_id().as_bytes().eq_ignore_ascii_case(class)
+        })
+    })
+}
+
+/// The namespace an import of `name` reaches: the namespace of the class-like, function or constant it names, or the
+/// namespace it names itself.
+fn imported_namespace<'name>(codebase: &CodebaseMetadata, name: &'name [u8]) -> &'name [u8] {
+    let parent = name.iter().rposition(|byte| *byte == b'\\').map_or(&name[..0], |separator| &name[..separator]);
+    if !codebase.class_like_exists(name) && codebase.namespace_exists(name) { name } else { parent }
 }
 
 /// Spec section 32: whether the PHP# code of the analyzed file imports `name`, the full name of a class-like, of a
@@ -795,77 +910,6 @@ where
     );
 
     false
-}
-
-/// The name `list` lists that names the namespace of `other`, another module with a list: `other`'s namespace, a
-/// namespace above it, as listing a namespace lists every namespace below it, or a namespace below it, which `other`
-/// reaches with no list. A namespace reaches the namespaces below it with no list, so a list never names a namespace
-/// above or below its own.
-fn names_list<'list>(list: &'list ModuleMetadata, other: &ModuleMetadata) -> Option<&'list (Word, Span)> {
-    let (own, namespace) = (list.namespace.as_bytes(), other.namespace.as_bytes());
-    if is_within_namespace(own, namespace) || is_within_namespace(namespace, own) {
-        return None;
-    }
-
-    list.imports.iter().find(|(listed, _)| {
-        is_within_namespace(namespace, listed.as_bytes()) || is_within_namespace(listed.as_bytes(), namespace)
-    })
-}
-
-/// The shortest cycle of `successors` from `start` back to it, each node once, starting at `start`, or nothing when
-/// none leads back to it.
-fn cycle_through(start: usize, successors: &[Vec<usize>]) -> Vec<usize> {
-    let mut previous: HashMap<usize, usize> = HashMap::default();
-    let mut pending = VecDeque::from([start]);
-    while let Some(node) = pending.pop_front() {
-        for &next in &successors[node] {
-            if next == start {
-                let mut cycle = vec![node];
-                let mut at = node;
-                while let Some(&before) = previous.get(&at) {
-                    cycle.push(before);
-                    at = before;
-                }
-                cycle.reverse();
-
-                return cycle;
-            }
-            if let std::collections::hash_map::Entry::Vacant(entry) = previous.entry(next) {
-                entry.insert(node);
-                pending.push_back(next);
-            }
-        }
-    }
-
-    Vec::new()
-}
-
-/// Reports the cycle of lists `cycle` at the name the first one lists that names the next.
-fn report_import_cycle<A>(context: &mut Context<'_, '_, A>, cycle: &[&ModuleMetadata])
-where
-    A: Arena,
-{
-    let namespaces: Vec<Word> = cycle.iter().map(|module| word(display_namespace(context.codebase, module))).collect();
-    let steps: Vec<(Word, &(Word, Span))> = cycle
-        .iter()
-        .zip(cycle.iter().cycle().skip(1))
-        .zip(&namespaces)
-        .filter_map(|((module, next), namespace)| Some((*namespace, names_list(module, next)?)))
-        .collect();
-    let lists: Vec<String> = steps
-        .iter()
-        .map(|(namespace, (listed, _))| format!("`{namespace}` lists `{}`", dotted(listed.as_bytes())))
-        .collect();
-    let (Some((_, (_, span))), Some((last, rest))) = (steps.first(), lists.split_last()) else {
-        unreachable!("a cycle holds two lists at least, each naming the next");
-    };
-    let lists = format!("{}, and {last}", rest.join(", "));
-    context.collector.report_with_code(
-        IssueCode::ImportCycle,
-        Issue::error(format!("{} import from each other: {lists}.", and_list(&namespaces)))
-            .with_annotation(Annotation::primary(*span).with_message("Listed here."))
-            .with_help("Remove one of these names, so the namespaces import one way."),
-    );
 }
 
 /// Reports that `binding` needs itself through the classes of `cycle`, at the binding `at`.

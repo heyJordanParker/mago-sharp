@@ -1600,6 +1600,46 @@ where
         class_like_metadata.set_template_variance(template_variance);
     }
 
+    // Spec section 6: a type that declares an indexer is PHP's `ArrayAccess` of its first parameter's type and its own,
+    // which its `get` and `set` run as `offsetGet` and `offsetSet`, as the scan of each registers. The bridge writes its
+    // `offsetExists` and `offsetUnset`, which plain PHP's `isset` and `unset` call, and the `offsetSet` of an indexer
+    // without `set`, which throws, so the type declares them here, and the analyzer refuses a write through the last.
+    if let Some(indexer) = members.iter().find_map(|member| match member {
+        ClassLikeMember::Indexer(indexer) => Some(indexer),
+        _ => None,
+    }) {
+        let access = word("arrayaccess");
+        let hint_type =
+            |hint| get_type_metadata_from_hint(hint, Some(original_name), &type_context, context).type_union;
+        let key = indexer
+            .parameter_list
+            .parameters
+            .first()
+            .and_then(|parameter| parameter.hint.as_ref())
+            .map_or_else(get_mixed, hint_type);
+
+        class_like_metadata.add_direct_parent_interface(access);
+        class_like_metadata.template_type_implements_count.insert(access, 2);
+        class_like_metadata.add_template_extended_offset(access, vec![key.clone(), hint_type(&indexer.hint)]);
+        if !class_like_metadata.kind.is_interface() {
+            let span = indexer.span();
+            let offset = || create_parameter("offset", key.clone(), span);
+            add_instance_method(codebase, &mut class_like_metadata, "offsetExists", vec![offset()], get_bool(), span);
+            add_instance_method(codebase, &mut class_like_metadata, "offsetUnset", vec![offset()], get_void(), span);
+            if indexer.set().is_none() {
+                let value = create_parameter("value", hint_type(&indexer.hint), span);
+                add_instance_method(
+                    codebase,
+                    &mut class_like_metadata,
+                    "offsetSet",
+                    vec![offset(), value],
+                    get_void(),
+                    span,
+                );
+            }
+        }
+    }
+
     // A header's generic type is the `@extends` or `@implements` tag of a PHP class. The header lists a class's base
     // among its interfaces until the populator links it, so a class counts its type arguments as implemented and the
     // populator moves the count with the base.
@@ -1607,10 +1647,11 @@ where
         Hint::Generic(generic) => Some(generic),
         _ => None,
     }) {
-        // Spec section 12: a class whose header names `Iterable<T>` is a `Traversable` of its `elements()`, which PHP
-        // links as `IteratorAggregate`, so every place that takes an `Iterable<T>` takes its objects. PHP# reads no
-        // key of it. The bridge writes its `getIterator()`, which the class declares here at the header.
-        if generic.is_iterable() && class_like_metadata.kind.is_class() {
+        // Spec section 12: a class or a struct whose header names `Iterable<T>` is a `Traversable` of its `elements()`,
+        // which PHP links as `IteratorAggregate`, so every place that takes an `Iterable<T>` takes its objects. PHP#
+        // reads no key of it. The bridge writes its `getIterator()`, which the class declares here at the header. An
+        // interface that names it is one too, and its classes get the `getIterator()` from its trait of default bodies.
+        if generic.is_iterable() && (class_like_metadata.kind.is_class() || class_like_metadata.kind.is_interface()) {
             let iterated = word("iteratoraggregate");
             let element = generic.type_arguments.arguments.iter().map(|element| {
                 get_type_metadata_from_hint(element, Some(original_name), &type_context, context).type_union
@@ -1620,19 +1661,9 @@ where
             class_like_metadata.template_type_implements_count.insert(iterated, 2);
             class_like_metadata
                 .add_template_extended_offset(iterated, std::iter::once(get_int()).chain(element).collect());
-
-            let mut iterator = create_static_method(
-                "getIterator",
-                generic.span(),
-                vec![],
-                get_named_object(word("Traversable"), None),
-                vec![],
-            );
-            if let Some(method) = iterator.method_metadata.as_mut() {
-                method.is_final = false;
-                method.is_static = false;
+            if !class_like_metadata.kind.is_interface() {
+                add_iterator_method(codebase, &mut class_like_metadata, generic.span());
             }
-            add_method(codebase, b"getIterator", &mut class_like_metadata, iterator);
 
             continue;
         }
@@ -2017,6 +2048,40 @@ fn add_method(
     codebase.function_likes.insert(method_id, function_like_metadata.into());
 }
 
+/// Adds to `class_like_metadata` the `public function getIterator(): \Traversable` the bridge writes for a type that
+/// names `Iterable<T>` at `span`, spec section 12: a class's and a struct's own, and the trait of an interface's.
+pub(super) fn add_iterator_method(
+    codebase: &mut CodebaseMetadata,
+    class_like_metadata: &mut ClassLikeMetadata,
+    span: Span,
+) {
+    add_instance_method(
+        codebase,
+        class_like_metadata,
+        "getIterator",
+        vec![],
+        get_named_object(word("Traversable"), None),
+        span,
+    );
+}
+
+/// Adds to `class_like_metadata` the public instance method `name` the bridge writes, which a subclass may override.
+fn add_instance_method(
+    codebase: &mut CodebaseMetadata,
+    class_like_metadata: &mut ClassLikeMetadata,
+    name: &str,
+    parameters: Vec<FunctionLikeParameterMetadata>,
+    return_type: TUnion,
+    span: Span,
+) {
+    let mut method = create_static_method(name, span, parameters, return_type, vec![]);
+    if let Some(metadata) = method.method_metadata.as_mut() {
+        metadata.is_final = false;
+        metadata.is_static = false;
+    }
+    add_method(codebase, name.as_bytes(), class_like_metadata, method);
+}
+
 /// Marks each public `init` property of a struct written without an initial value as required, spec section 10: a
 /// struct has no default value, so a creation sets every such property, a `T?` one too. Only code inside the struct
 /// sets any other property, which is reported where it is declared when nothing sets it. Its main constructor's
@@ -2176,6 +2241,7 @@ fn create_parameter(name: &str, parameter_type: TUnion, span: Span) -> FunctionL
         span,
         name_span: span,
         flags: MetadataFlags::empty(),
+        caller_position_field: None,
     }
 }
 

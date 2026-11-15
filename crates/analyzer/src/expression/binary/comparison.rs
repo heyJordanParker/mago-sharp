@@ -9,7 +9,6 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
-use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::bound_is_equatable;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_bool;
@@ -1919,8 +1918,7 @@ fn equality_refusal(
 /// Why `r#type`, a type argument a call, a value or a type gives a type parameter bounded by `Equatable`, does not
 /// satisfy it, spec section 11, or `None` when it does: "`Cart` declares no `operator ==`". A type argument of
 /// `Equatable` has `==`, as [`equality_refusal`] decides, and keys a `Map` and fills a `Set`, as [`is_key_type`]
-/// decides, so a class value, which has `==` but keys no `Map`, does not satisfy it. `span` marks where the type
-/// argument is written or fixed.
+/// decides. `span` marks where the type argument is written or fixed.
 pub(crate) fn missing_equality<A>(context: &Context<'_, '_, A>, r#type: &TUnion, span: Span) -> Option<String>
 where
     A: Arena,
@@ -1930,7 +1928,7 @@ where
     let r#type = r#type.to_non_nullable();
     let name = display_operand(context, &r#type);
     let Some(reason) = equality_refusal(&equality, &r#type, codebase, &mut Vec::new()) else {
-        return (!is_key_type(&r#type, codebase)).then(|| key_reason(context, &r#type));
+        return (!is_key_type(&r#type, codebase)).then(|| format!("`{name}` can't key a `Map`"));
     };
 
     Some(match reason {
@@ -1947,29 +1945,6 @@ where
         }
         refused => refusal_reason(context, &equality, &r#type, &r#type, refused),
     })
-}
-
-/// Why a value of `r#type`, which has `==`, keys no `Map`, spec sections 11 and 12, as "a class value with type
-/// arguments can't key a `Map`": a class value runs as its plain class name, which `Class<Box<Order>>` and
-/// `Class<Box<Invoice>>` share.
-fn key_reason<A>(context: &Context<'_, '_, A>, r#type: &TUnion) -> String
-where
-    A: Arena,
-{
-    let has_type_arguments = r#type.types.iter().any(|atomic| match atomic {
-        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
-            constraint.types.iter().any(|atomic| {
-                matches!(atomic, TAtomic::Object(TObject::Named(named)) if named.type_parameters.as_ref().is_some_and(|arguments| !arguments.is_empty()))
-            })
-        }
-        _ => false,
-    });
-
-    if has_type_arguments {
-        "a class value with type arguments can't key a `Map`".to_owned()
-    } else {
-        format!("`{}` can't key a `Map`", display_operand(context, r#type))
-    }
 }
 
 /// The type arguments a value of one of `unions` gives the generic enum `name`, as a `Result<int, PaymentError>.Ok`
@@ -2225,7 +2200,7 @@ fn report_redundant_null_comparison<'arena, A>(
         Some(pattern) => format!("`{pattern}` check"),
         None => format!("`{}` comparison", BytesDisplay(binary.operator.as_bytes())),
     };
-    let issue = context.as_null_check_error(
+    let issue = context.as_null_check_warning(
         Issue::help(format!("Redundant {check}: `{operand_type_str}` is never `null`."))
             .with_annotation(
                 Annotation::primary(operand.span())

@@ -7,6 +7,8 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::combine_union_types_rc;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
@@ -38,8 +40,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::constant_access::analyze_namespace_constant;
-use crate::resolver::class_name::holds_no_class;
-use crate::resolver::class_name::report_class_value_of_no_class;
+use crate::resolver::class_name::class_value_classes;
 use crate::resolver::class_name::report_full_class_name;
 use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::class_name::resolve_classnames_from_expression;
@@ -84,8 +85,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                 Ok(())
             }
             // `TItem.y` reads `y` on the class of the type argument the code runs with, any class `TItem`'s bound holds,
-            // and `Self.y` on the class the code is called on, spec section 25, as a class value's member is read. The
-            // resolution reports a bound that holds a type that is no class.
+            // and `Self.y` on the class the code is called on, spec sections 11 and 25. The resolution reports a bound
+            // that holds a type that is no class.
             Access::Property(
                 access @ PropertyAccess { object, property: ClassLikeMemberSelector::Identifier(name), .. },
             ) if match object {
@@ -599,9 +600,9 @@ fn record_class_type_arguments<A>(
     artifacts.inferred_type_arguments.insert(span, class_type_arguments.into_iter().chain(own).collect());
 }
 
-/// Analyzes PHP#'s `type.name` read through a class value as `Class.y` reads it on the classes the value holds: the
-/// constant or enum case, then the static method as a closure, then the static property, as PHP's `$type::name`. A
-/// class value the read analyzed to find it is one is `object_is_analyzed`, and a type parameter, `TItem.name`, is not.
+/// Analyzes PHP#'s `TItem.name` or `Self.name` as `Class.y` reads it on the classes `object` can be: the constant or
+/// enum case, then the static method as a closure, then the static property, as PHP's `$type::name`. `Self`, which is
+/// no value to analyze, is `object_is_analyzed`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn analyze_class_value_member<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -778,34 +779,48 @@ where
     Ok(())
 }
 
-/// Refuses a static member read, written or called at `span` through `object`, an analyzed PHP# class value of a type
-/// that is no class, as `t.MAX` on a `Class<int>`: only a class's `Class` has statics, spec section 25. The access is
-/// a refused value, so nothing reports again on it. Whether it was refused.
-pub(crate) fn refuse_statics_of_no_class<A>(
+/// Refuses the static `name` that the code at `span` reaches through `object`, an analyzed PHP# class value, as
+/// `type.find(7)`: a class value reflects and reaches no static, spec section 25, as `typeof` in C#, `.class` in Java
+/// and `::class` in Kotlin only reflect. A static is reached through its class's name, `Order.find(7)`, or through a
+/// type parameter, `TEntity.find(7)`, which the error names, or by the member alone for a class value of no class, as a
+/// `Class<int>`. `verb` is how the code reaches it, `"call"`, `"read"` or
+/// `"write"`. The access is a refused value, so nothing reports again on it.
+pub(crate) fn refuse_static_through_class_value<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
     object: &Expression<'_>,
+    name: &LocalIdentifier<'_>,
+    verb: &str,
     span: Span,
-) -> bool
-where
+) where
     A: Arena,
 {
-    let Some(object_type) = artifacts.get_expression_type(object).filter(|object_type| holds_no_class(object_type))
-    else {
-        return false;
-    };
+    let object_type = artifacts.get_expression_type(object);
+    let parameter = object_type.and_then(|object_type| {
+        object_type.types.iter().find_map(|atomic| match atomic {
+            TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic { parameter_name, .. })) => {
+                Some(parameter_name.to_string())
+            }
+            _ => None,
+        })
+    });
+    let class = parameter.or_else(|| {
+        object_type.and_then(class_value_classes).and_then(|classes| classes.first().map(|class| short_name(*class)))
+    });
+    let member = BytesDisplay(name.value);
+    let reached = class.map_or_else(|| format!("`{member}`"), |class| format!("`{class}.{member}`"));
+    let (first, rest) = verb.split_at(1);
 
-    let object_type = object_type.clone();
-    report_class_value_of_no_class(
-        context,
-        object,
-        &object_type,
-        "has statics",
-        "Reach a static through the class value of a class, as in `typeof(Order).defaultTag()`.",
+    context.collector.report_with_code(
+        IssueCode::InvalidClassStringExpression,
+        Issue::error(format!(
+            "A class value reflects, and {verb}s no static. {}{rest} {reached} by its class's name, or through a type \
+             parameter.",
+            first.to_ascii_uppercase()
+        ))
+        .with_annotation(Annotation::primary(object.span()).with_message("A class value here.")),
     );
     artifacts.set_expression_type(&span, TUnion::from_atomic(TAtomic::Error));
-
-    true
 }
 
 /// Whether PHP# `Class.name` reads the static method `name`: the class has no static property of that name, which the

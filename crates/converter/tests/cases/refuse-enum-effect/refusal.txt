@@ -1,1 +1,1 @@
-17:16: `Translator::get` is plain PHP whose effects no declaration gives, and a PHP# enum has no effects (spec section 29)
+18:16: `Translator::get` has the effect `Sharp\Net\Http`, and a PHP# enum has no effects (spec section 29)

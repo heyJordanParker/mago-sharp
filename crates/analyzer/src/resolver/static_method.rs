@@ -57,8 +57,6 @@ use crate::visibility::is_method_visible;
 /// 2. Resolving the `method` selector to get potential method names.
 /// 3. Finding matching methods and validating them against static access rules.
 /// 4. Reporting issues like calling a non-static method, or calling a method on an interface.
-///
-/// A PHP# class value, which the call analyzed to find it is one, is `class_is_analyzed`, so it is not analyzed again.
 pub fn resolve_static_method_targets<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -66,15 +64,13 @@ pub fn resolve_static_method_targets<'ctx, 'ast, 'arena, A>(
     class_expr: &'ast Expression<'arena>,
     method_selector: &'ast ClassLikeMemberSelector<'arena>,
     access_span: Span,
-    class_is_analyzed: bool,
 ) -> Result<MethodResolutionResult, AnalysisError>
 where
     A: Arena,
 {
     let mut result = MethodResolutionResult::default();
 
-    let class_resolutions =
-        resolve_classnames_from_expression(context, block_context, artifacts, class_expr, class_is_analyzed)?;
+    let class_resolutions = resolve_classnames_from_expression(context, block_context, artifacts, class_expr, false)?;
     if let Some(class_type) = artifacts.get_expression_type(class_expr)
         && class_type.is_nullable()
     {
@@ -170,8 +166,8 @@ where
                 return (false, None);
             };
 
-            // A PHP# call through a class value of an interface that lacks the method is refused as a missing method
-            // alone, as `TItem.make()` on a `TItem : Labeled` whose `Labeled` declares no `make`.
+            // A PHP# call through a type parameter bound by an interface that lacks the method is refused as a missing
+            // method alone, as `TItem.make()` on a `TItem : Labeled` whose `Labeled` declares no `make`.
             if !from_instance
                 && !is_relative
                 && defining_class_metadata.kind.is_interface()

@@ -208,7 +208,7 @@ pub(crate) fn record_parse<A>(
             reach(&mut parsing, class.name, Body::Method(constructor.name, word(b"__construct")), b"__construct");
         } else {
             let callee = (constructor.original_name, empty_word());
-            let declaration = extern_of(codebase, class.name, word(b"__construct"));
+            let declaration = codebase.extern_of(class.name, word(b"__construct"));
             parsing
                 .effects
                 .extend(plain_php_effects(declaration, callee).into_iter().map(|effect| (effect, span, callee)));
@@ -364,7 +364,7 @@ fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: &[u8]) ->
     } else if is_prelude_stub(declaring_class) {
         Runs::Foreign { callee, effects: Vec::new() }
     } else {
-        Runs::Foreign { callee, effects: plain_php_effects(extern_of(codebase, class, lowercase_method), callee) }
+        Runs::Foreign { callee, effects: plain_php_effects(codebase.extern_of(class, lowercase_method), callee) }
     })
 }
 
@@ -1096,7 +1096,7 @@ where
         if is_prelude_stub(declaring_class) {
             self.prelude_stub_call(metadata, span, receiver);
         } else {
-            let declaration = extern_of(codebase, class, ascii_lowercase_word(method_name.as_bytes()));
+            let declaration = codebase.extern_of(class, ascii_lowercase_word(method_name.as_bytes()));
             self.plain_php(declaration, span, cause);
             self.callbacks(arguments);
         }
@@ -1204,7 +1204,7 @@ where
             let callee = Body::Method(declaring.name, constructor);
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: roots });
         } else if !is_prelude_stub(class.name) {
-            let declaration = extern_of(codebase, class.name, constructor);
+            let declaration = codebase.extern_of(class.name, constructor);
             // Only plain PHP takes an `extern`, so a PHP# class's error names its nearest plain PHP parent.
             let named = std::iter::successors(Some(class), |class| {
                 class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
@@ -1494,44 +1494,7 @@ fn function_extern(codebase: &CodebaseMetadata, function: Word) -> ((Word, Word)
         _ => name,
     };
 
-    ((empty_word(), cause), extern_of(codebase, empty_word(), ascii_lowercase_word(function.as_bytes())))
-}
-
-/// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a function)
-/// falls under: the member's, then the class's, then the same for each parent class, nearest first. A function in a
-/// namespace is declared as `extern Pdf.render`, which the binder reads as a class and its member, spec section 23,
-/// and so is one a library declares in PHP's root namespace, through the namespace an `extern namespace` line gives it,
-/// as `extern Foundation.now` declares Laravel's `now()` after `extern namespace Foundation for now;`.
-pub(crate) fn extern_of(codebase: &CodebaseMetadata, class: Word, member: Word) -> Option<&ExternMetadata> {
-    let declared = |key: (Word, Word)| codebase.externs.get(&key).and_then(|declarations| declarations.first());
-    if class.is_empty() {
-        return declared((empty_word(), member)).or_else(|| {
-            let name = member.as_bytes();
-            match name.iter().rposition(|byte| *byte == b'\\') {
-                Some(separator) => declared((word(&name[..separator]), word(&name[separator + 1..]))),
-                None => declared((ascii_lowercase_word(codebase.extern_namespace_of(name)?.as_bytes()), member)),
-            }
-        });
-    }
-
-    // The chain goes by the class-likes' keys, spec section 24, and an `extern` names a plain PHP class in lowercase.
-    let mut current = Some(codebase.class_key(class.as_bytes()));
-    let mut remaining =
-        codebase.get_class_like(class.as_bytes()).map_or(0, |metadata| metadata.all_parent_classes.len());
-    while let Some(class) = current {
-        let named = ascii_lowercase_word(class.as_bytes());
-        if let Some(declaration) = declared((named, member)).or_else(|| declared((named, empty_word()))) {
-            return Some(declaration);
-        }
-
-        if remaining == 0 {
-            break;
-        }
-        remaining -= 1;
-        current = codebase.get_class_like(class.as_bytes()).and_then(|metadata| metadata.direct_parent_class);
-    }
-
-    None
+    ((empty_word(), cause), codebase.extern_of(empty_word(), ascii_lowercase_word(function.as_bytes())))
 }
 
 /// The effects of a call into plain PHP of the callee `cause`: the effects its declaration lists, or `Unknown` without

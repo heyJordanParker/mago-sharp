@@ -11,7 +11,7 @@
 //! and are not reported. This also covers magic methods (`__construct`, `__call`, etc.)
 //! since they all start with double underscore.
 //!
-//! [`too_wide_members`] warns, once the whole project is analyzed, on a PHP# `public`
+//! [`too_wide_members`] refuses, once the whole project is analyzed, a PHP# `public`
 //! member that nothing outside its namespace uses, which spec section 5 calls too wide.
 
 use std::cell::OnceCell;
@@ -27,8 +27,8 @@ use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferenceKind;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::symbol::SymbolIdentifier;
+use mago_names::DYNAMICALLY_ACCESSED;
 use mago_names::EXPORT;
-use mago_names::REACHED_BY_REFLECTION;
 use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -584,11 +584,12 @@ where
     });
 }
 
-/// Warns on each `public` member that nothing outside its namespace and the namespaces below it uses.
+/// Refuses each `public` member that nothing outside its namespace and the namespaces below it uses.
 ///
-/// Spec section 5 calls such a member too wide. The pass reads `references` of every file, so it runs once the whole
-/// project is analyzed, beside [`Effects::solve`](crate::effects::Effects::solve). A use from the namespace, the
-/// member's own class included, is no outside use, so a member nothing uses warns too. A use from code outside any
+/// Spec section 5 calls such a member too wide, a compile error in an application. The pass reads `references` of
+/// every file, so it runs once the whole project is analyzed, beside [`Effects::solve`](crate::effects::Effects::solve).
+/// A use from the namespace, the member's own class included, is no outside use, so a member nothing uses is refused
+/// too. A use from code outside any
 /// class or function counts as outside, because its namespace is not known here.
 ///
 /// Only a public PHP# class of a project has such members, a file whose nearest `composer.json` says `"type":
@@ -596,8 +597,8 @@ where
 /// sees. An `internal` class's members reach no further than it does (a member is never more visible than its class),
 /// interface members are exempt because they have no narrower form, and plain PHP has no `internal`. A member that
 /// overrides or implements another keeps that one's access, PHP calls a magic method itself, `new` calls the
-/// constructor, which takes its class's reach, and the code that reads a member's attribute reaches the member through
-/// reflection, which no use records, so none of them warns.
+/// constructor, which takes its class's reach, and the code that reads a member's or its class's marked attribute
+/// reaches the member through reflection, which no use records, so none of them is refused.
 #[must_use]
 pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferences) -> IssueCollection {
     // Each use of a member name: the class the code names it on, and the class or function the code is in, `None`
@@ -622,6 +623,11 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
             continue;
         }
 
+        // A marked attribute on the class says its framework reaches every public member of it.
+        if is_dynamically_accessed(codebase, &class.attributes) {
+            continue;
+        }
+
         let namespace = namespace_of(class.original_name.as_bytes());
         let is_used_outside = |member: Word| {
             member_uses.get(&member).is_some_and(|uses| {
@@ -640,7 +646,7 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
             let class_label = sharp_class_like_name(codebase, &WordMap::default(), &short_name_counts, *class_name);
             let namespace = String::from_utf8_lossy(namespace).replace('\\', ".");
             issues.push(
-                Issue::warning(format!(
+                Issue::error(format!(
                     "`{}` is public, and nothing outside `{namespace}` uses it.",
                     display_sharp_member(class_label, label)
                 ))
@@ -656,14 +662,14 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
 }
 
 /// The `public` members `class` declares that [`too_wide_members`] checks, each as its key in `references`, its name
-/// as PHP# writes it, and the span the warning points at.
+/// as PHP# writes it, and the span the error points at.
 fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLikeMetadata) -> Vec<(Word, Word, Span)> {
     let mut members = Vec::new();
 
     for (name, property) in &class.properties {
         if class.declaring_property_ids.get(name) == Some(&class_name)
             && property.read_visibility.is_public()
-            && !is_reached_by_reflection(codebase, &property.attributes)
+            && !is_dynamically_accessed(codebase, &property.attributes)
             && !property.flags.is_internal_reach()
             && !class.overridden_property_ids.contains_key(name)
             && let Some(span) = property.name_span.or(property.span)
@@ -682,7 +688,7 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
         if method.span != class.span
             && class.declaring_method_ids.get(name).is_none_or(|declaring| declaring.get_class_name() == class_name)
             && method.method_metadata.as_ref().is_some_and(|metadata| metadata.visibility.is_public())
-            && !is_reached_by_reflection(codebase, &method.attributes)
+            && !is_dynamically_accessed(codebase, &method.attributes)
             && !method.has_attribute(codebase, EXPORT.as_bytes())
             && !method.flags.is_internal_reach()
             && !name.as_bytes().starts_with(b"__")
@@ -698,7 +704,7 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
         if constant.span.file_id == class.span.file_id
             && class.span.contains(&constant.span)
             && constant.visibility.is_public()
-            && !is_reached_by_reflection(codebase, &constant.attributes)
+            && !is_dynamically_accessed(codebase, &constant.attributes)
             && !constant.flags.is_internal_reach()
         {
             members.push((*name, *name, constant.span));
@@ -708,11 +714,11 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
     members
 }
 
-/// Whether one of `attributes` is of a class marked [`REACHED_BY_REFLECTION`], as a router's `[Route]`, whose framework
-/// reaches the member it marks by reflection, which the checker never sees. Any other attribute, as `[Deprecated]`, says
-/// nothing about who uses the member.
-fn is_reached_by_reflection(codebase: &CodebaseMetadata, attributes: &[AttributeMetadata]) -> bool {
-    let mark = codebase.class_key(REACHED_BY_REFLECTION.as_bytes());
+/// Whether one of `attributes` is of a class marked [`DYNAMICALLY_ACCESSED`], as a router's `[Route]`, whose framework
+/// reaches the member it marks, or each public member of the class it marks, by reflection, which the checker never
+/// sees. Any other attribute, as `[Deprecated]`, says nothing about who uses the member.
+fn is_dynamically_accessed(codebase: &CodebaseMetadata, attributes: &[AttributeMetadata]) -> bool {
+    let mark = codebase.class_key(DYNAMICALLY_ACCESSED.as_bytes());
 
     attributes.iter().any(|attribute| {
         codebase.get_class_like(attribute.name.as_bytes()).is_some_and(|class| {

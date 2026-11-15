@@ -19,6 +19,7 @@ pub mod constant;
 pub mod constructor;
 pub mod enum_case;
 pub mod extension;
+pub mod indexer;
 pub mod inheritance;
 pub mod law;
 pub mod member;

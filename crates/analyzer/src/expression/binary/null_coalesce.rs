@@ -117,7 +117,7 @@ where
         && !reads_list_index
     {
         let lhs_type_str = display_type(context, lhs_type);
-        let issue = context.as_null_check_error(
+        let issue = context.as_null_check_warning(
             Issue::help(
                 "Redundant null coalesce: left-hand side can never be `null` or undefined."
             )

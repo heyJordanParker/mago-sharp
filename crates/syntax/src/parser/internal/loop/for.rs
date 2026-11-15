@@ -21,10 +21,6 @@ where
     pub(crate) fn parse_for(&mut self) -> Result<Statement<'arena>, ParseError<'arena>> {
         let r#for = self.expect_keyword(T!["for"])?;
         let left_parenthesis = self.stream.eat_span(T!["("])?;
-        if self.is_at_for_in_without_keyword()? {
-            return self.parse_for_in_without_keyword();
-        }
-
         let declaration = if self.is_at_loop_variable_keyword()? {
             let keyword = self.expect_any_keyword()?;
             let is_const = keyword.value.eq_ignore_ascii_case(b"const");

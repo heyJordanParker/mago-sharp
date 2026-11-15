@@ -8,7 +8,6 @@ use crate::cst::cst::ForOfTarget;
 use crate::cst::cst::ForOfUnpackTarget;
 use crate::cst::cst::ForOfVariable;
 use crate::cst::cst::Keyword;
-use crate::cst::cst::Statement;
 use crate::error::ParseError;
 use crate::parser::Parser;
 
@@ -32,33 +31,9 @@ where
         })
     }
 
-    /// Whether the `for` header after `(` is TypeScript's `for (x in y)`, which declares no loop variable.
-    pub(crate) fn is_at_for_in_without_keyword(&mut self) -> Result<bool, ParseError<'arena>> {
-        if !self.dialect.is_sharp() || self.stream.peek_kind(0)?.is_none_or(|kind| kind != T![Identifier]) {
-            return Ok(false);
-        }
-
-        Ok(self.stream.lookahead(1)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"in"))
-    }
-
-    /// Reports TypeScript's `for (x in y)` at its `in`, as `parse_of_keyword` reports `in`. The loop declares no
-    /// variable, so it parses to its body alone, and the statements after it still parse.
-    pub(crate) fn parse_for_in_without_keyword(&mut self) -> Result<Statement<'arena>, ParseError<'arena>> {
-        self.stream.consume()?;
-        let r#in = self.stream.consume()?;
-        self.errors.push(ParseError::InLoopInSharp(r#in.span_for(self.stream.file_id())));
-        self.parse_expression()?;
-        self.stream.eat_span(T![")"])?;
-
-        self.parse_statement()
-    }
-
-    /// Whether `of`, or TypeScript's `in`, comes next.
+    /// Whether `of` comes next.
     pub(crate) fn is_at_of_keyword(&mut self) -> Result<bool, ParseError<'arena>> {
-        Ok(self
-            .stream
-            .lookahead(0)?
-            .is_some_and(|token| token.kind == T![Identifier] && matches!(token.value, b"of" | b"in")))
+        Ok(self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"of"))
     }
 
     /// Parses the rest of a PHP# `for … of` loop after its loop variables.
@@ -107,7 +82,7 @@ where
         let name_follows = match self.stream.lookahead(1)? {
             Some(token) => {
                 matches!(token.kind, T![","] | T!["]"] | T!["="])
-                    || (token.kind == T![Identifier] && matches!(token.value, b"of" | b"in"))
+                    || (token.kind == T![Identifier] && token.value == b"of")
             }
             None => true,
         };
@@ -116,18 +91,13 @@ where
         Ok(ForOfVariable { hint, name: self.parse_local_identifier()? })
     }
 
-    /// Consumes `of`. TypeScript's `in` is an error that names `of`, spec section 17, and the loop still parses.
+    /// Consumes `of`.
     fn parse_of_keyword(&mut self) -> Result<Keyword<'arena>, ParseError<'arena>> {
         let token = self.stream.consume()?;
-        let keyword = Keyword { span: token.span_for(self.stream.file_id()), value: token.value };
-        if token.kind != T![Identifier] || !matches!(token.value, b"of" | b"in") {
+        if token.kind != T![Identifier] || token.value != b"of" {
             return Err(self.stream.unexpected(Some(token), &[]));
         }
 
-        if token.value == b"in" {
-            self.errors.push(ParseError::InLoopInSharp(keyword.span));
-        }
-
-        Ok(keyword)
+        Ok(Keyword { span: token.span_for(self.stream.file_id()), value: token.value })
     }
 }

@@ -130,7 +130,7 @@ fn report_rejected_nullable_parameter<'arena, A>(
                 None => format!("Declare `{name}` without null, and check for null where the value enters."),
             });
 
-    let issue = context.as_null_check_error(issue);
+    let issue = context.as_null_check_warning(issue);
 
     context.collector.propose_with_code(IssueCode::RejectedNullableParameter, issue, |edits| {
         if let Some(non_null_hint) = non_null_hint {

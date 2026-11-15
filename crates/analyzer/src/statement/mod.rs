@@ -72,7 +72,6 @@ use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::block::BlockContext;
-use crate::effects::summary::extern_of;
 use crate::error::AnalysisError;
 use crate::expression::analyze_php_shape;
 use crate::expression::assignment::analyze_assignment;
@@ -194,8 +193,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                         && let UseItems::Sequence(sequence) = &r#use.items
                     {
                         for item in &sequence.items {
-                            if !use_statement::check_sharp_import(context, &item.name) {
-                                module::check_listed_import(context, &php_name(&item.name), item.name.span());
+                            if !use_statement::check_sharp_import(context, &item.name)
+                                && module::check_listed_import(context, &php_name(&item.name), item.name.span())
+                            {
+                                module::check_import_cycle(context, item.name.span());
                             }
                             use_statement::check_internal_import(context, &item.name);
                             let imported_name = item
@@ -1051,12 +1052,10 @@ fn detect_unused_statement_expressions<'ast, 'arena, A>(
             // has the effects its `extern` declares, spec section 29, as `extern Foundation.now uses Clock;` declares.
             if !function.flags.is_pure()
                 || (context.dialect.is_sharp()
-                    && extern_of(
-                        context.codebase,
-                        empty_word(),
-                        ascii_lowercase_word(function.original_name.as_bytes()),
-                    )
-                    .is_some_and(|declaration| !declaration.effects.is_empty()))
+                    && context
+                        .codebase
+                        .extern_of(empty_word(), ascii_lowercase_word(function.original_name.as_bytes()))
+                        .is_some_and(|declaration| !declaration.effects.is_empty()))
             {
                 return;
             }

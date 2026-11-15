@@ -210,14 +210,14 @@ fn issues_in(stdout: &str, file: &str) -> Vec<String> {
         .collect()
 }
 
-/// Spec section 5: too wide is a warning, on a `public` member of a PHP# class that nothing outside its namespace and
-/// the namespaces below it uses, across every file of the project: one its own class, a class of its namespace or of
-/// one below it uses, and one nothing uses. A member used from another namespace, an interface member and its
-/// implementation, the members of an `internal` class, and plain PHP get none. The warning runs only in a project, a
-/// package whose `composer.json` says `"type": "project"`, because a library's uses are in the projects that install
-/// it, so Composer's default type, a library's, gets none.
+/// Spec section 5: too wide is a compile error in an application, on a `public` member of a PHP# class that nothing
+/// outside its namespace and the namespaces below it uses, across every file of the project: one its own class, a class
+/// of its namespace or of one below it uses, and one nothing uses. A member used from another namespace, an interface
+/// member and its implementation, the members of an `internal` class, and plain PHP get none. The check runs only in a
+/// project, a package whose `composer.json` says `"type": "project"`, because a library's uses are in the projects that
+/// install it, so Composer's default type, a library's, gets none.
 #[test]
-fn analyze_warns_on_a_public_member_nothing_outside_its_namespace_uses() {
+fn analyze_refuses_a_public_member_nothing_outside_its_namespace_uses() {
     let directory = workspace(&valid_report());
     write(directory.path(), "composer.json", "{\n    \"name\": \"acme/shop\",\n    \"type\": \"project\"\n}\n");
     let cart = "namespace App.Shop;\n\npublic class Cart : Priced\n{\n    public const int LIMIT = 3;\n\n    public const int FLOOR = 0;\n\n    public int items => 0;\n\n    public int total() => this.count();\n\n    public int count() => 1;\n\n    public int size() => 2;\n\n    public int spare() => 3;\n\n    public int price() => this.size();\n\n    public int tax() => 4;\n}\n";
@@ -269,7 +269,10 @@ fn analyze_warns_on_a_public_member_nothing_outside_its_namespace_uses() {
         ],
         "{stdout}"
     );
-    assert!(stdout.contains("`Cart.count` is public, and nothing outside `App.Shop` uses it."), "{stdout}");
+    assert!(
+        stdout.contains("src/App/Shop/Cart.sharp:13:16:error - too-wide-member: `Cart.count` is public, and nothing outside `App.Shop` uses it."),
+        "{stdout}"
+    );
     for file in [
         "src/App/Shop/Priced.sharp",
         "src/App/Shop/Till.sharp",
@@ -287,10 +290,10 @@ fn analyze_warns_on_a_public_member_nothing_outside_its_namespace_uses() {
     assert!(!library.contains("too-wide-member"), "{library}");
 }
 
-/// Spec section 5: a plain PHP attribute class a Composer package installs, marked `#[\Sharp\ReachedByReflection]`,
-/// says its framework reaches the member it marks, as one in the project does, so its `[Listen]` method never warns.
+/// Spec section 5: a plain PHP attribute class a Composer package installs, marked `#[\Sharp\DynamicallyAccessed]`,
+/// says its framework reaches the member it marks, as one in the project does, so its `[Listen]` method counts as used.
 #[test]
-fn analyze_skips_a_member_whose_vendored_attribute_is_reached_by_reflection() {
+fn analyze_skips_a_member_whose_vendored_attribute_is_dynamically_accessed() {
     let hooks = "namespace App.Payments;\n\nimport Acme.Events.Listen;\n\npublic class Hooks\n{\n    [Listen]\n    public void paid() { }\n\n    public void settled() { }\n}\n";
     let directory = library_workspace("namespace App;\n\nclass Page\n{\n}\n");
     write(directory.path(), "composer.json", "{\n    \"name\": \"acme/shop\",\n    \"type\": \"project\"\n}\n");
@@ -301,14 +304,14 @@ fn analyze_skips_a_member_whose_vendored_attribute_is_reached_by_reflection() {
     );
     write(
         &directory.path().join("vendor/heyjordanparker/php-sharp-composer"),
-        "library/Sharp/ReachedByReflection.sharp",
-        include_str!("../../composer/library/Sharp/ReachedByReflection.sharp"),
+        "library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../composer/library/Sharp/DynamicallyAccessed.sharp"),
     );
     write(directory.path(), "vendor/acme/events/composer.json", "{\n    \"name\": \"acme/events\"\n}\n");
     write(
         directory.path(),
         "vendor/acme/events/src/Listen.php",
-        "<?php\n\nnamespace Acme\\Events;\n\n#[\\Attribute(\\Attribute::TARGET_METHOD)]\n#[\\Sharp\\ReachedByReflection]\nfinal class Listen\n{\n}\n",
+        "<?php\n\nnamespace Acme\\Events;\n\n#[\\Attribute(\\Attribute::TARGET_METHOD)]\n#[\\Sharp\\DynamicallyAccessed]\nfinal class Listen\n{\n}\n",
     );
     write(directory.path(), "src/App/Payments/Hooks.sharp", hooks);
 

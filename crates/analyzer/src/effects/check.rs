@@ -68,6 +68,7 @@ use crate::effects::holding_declaration;
 use crate::effects::is_effect;
 use crate::effects::summary::parameter_index;
 use crate::resolver::extension::collection_member_kind;
+use crate::statement::class_like::r#struct::data_enum;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_function_like_identifier;
@@ -106,6 +107,52 @@ pub(crate) fn getters_never_write_this(
             .with_annotation(Annotation::primary(impurity.span))
             .with_note("A getter may have any effect, but it never changes its object.")
             .with_help("Write the change in a method, and call it before the read.")
+        })
+        .collect()
+}
+
+/// Spec sections 10, 20 and 29: a struct and an enum are values, so their methods, `get` bodies and operators have no
+/// effects, as a Swift value type's computed members are pure by convention and Rust's `Copy` values carry no I/O. A
+/// data case is its enum's. A change of state is no effect, so only an effect is refused, naming the member and the
+/// effect: "`Money.inEuros` has the effect `Http`, and a struct has no effects".
+pub(crate) fn values_have_no_effects(
+    effects: &Effects,
+    codebase: &CodebaseMetadata,
+    short_name_counts: &OnceCell<HashMap<String, u32>>,
+) -> IssueCollection {
+    effects
+        .effectful_bodies()
+        .filter_map(|(body, member, imports, impurity)| {
+            let (Body::Method(class, _) | Body::Accessor(class, _, _)) = body else {
+                return None;
+            };
+            if let Body::Accessor(_, _, accessor) = body
+                && accessor.as_bytes() != b"get"
+            {
+                return None;
+            }
+            let metadata = codebase.get_class_like(class.as_bytes())?;
+            // An enum with a case that carries data runs as a class, and each such case as its final subclass.
+            let (kind, value_class) = if metadata.flags.is_struct() {
+                ("a struct", metadata.original_name)
+            } else if metadata.kind.is_enum() {
+                ("an enum", metadata.original_name)
+            } else {
+                ("an enum", data_enum(codebase, metadata)?)
+            };
+
+            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
+            let member = display_sharp_member(class_name(value_class), member);
+            let effect = effect_name(impurity.effect.and_then(Effect::named)?);
+
+            Some(
+                Issue::error(format!("`{member}` has the effect `{effect}`, and {kind} has no effects."))
+                    .with_code(IssueCode::IncompatibleEffects.as_str())
+                    .with_annotation(Annotation::primary(impurity.span).with_message("The effect comes from here."))
+                    .with_note(format!("`{member}` {}.", impurity.describe(&class_name, &effect_name)))
+                    .with_help("Do the work in a class that takes the value, and keep the value's members pure."),
+            )
         })
         .collect()
 }
@@ -670,11 +717,12 @@ pub(crate) fn check_uses<A>(
     let mut found = UsesNames::default();
     UsesWalker.walk_program(program, &mut found);
 
-    // A method states its effects only without a body, and states none by writing no `uses`.
+    // A method states its effects only without a body, and states none by writing no `uses`, so a `uses none` on one
+    // changes nothing and warns, as Swift compiles a method's `throws(Never)`.
     for none in found.none_on_method {
         context.collector.report_with_code(
             IssueCode::InvalidEffect,
-            Issue::error("A method without `uses` is pure already, so delete `uses none`.")
+            Issue::warning("A method without `uses` is pure already, so delete `uses none`.")
                 .with_annotation(Annotation::primary(none.span).with_message("Written here.")),
         );
     }
@@ -776,8 +824,15 @@ impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker 
 
         found.read.push(uses.span());
         if method.is_abstract() {
-            for name in MethodParts::of_method(method).uses_effects() {
-                if is_none(name) { found.none_on_method.push(name) } else { found.names.push(name) }
+            let parts = MethodParts::of_method(method);
+            let effects: Vec<_> = parts.uses_effects().collect();
+            let beside = effects.len() > 1;
+            for name in effects {
+                match (is_none(name), beside) {
+                    (true, true) => found.beside_none.push(name),
+                    (true, false) => found.none_on_method.push(name),
+                    (false, _) => found.names.push(name),
+                }
             }
         }
     }

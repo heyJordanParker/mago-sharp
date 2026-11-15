@@ -125,6 +125,8 @@ use crate::cst::cst::Implements;
 use crate::cst::cst::Imports;
 use crate::cst::cst::IncludeConstruct;
 use crate::cst::cst::IncludeOnceConstruct;
+use crate::cst::cst::Indexer;
+use crate::cst::cst::IndexerAccessor;
 use crate::cst::cst::IndirectVariable;
 use crate::cst::cst::Inheritance;
 use crate::cst::cst::Inline;
@@ -1058,6 +1060,9 @@ generate_ast_walker! {
             ClassLikeMember::Operator(operator) => {
                 walker.walk_operator(operator, context);
             }
+            ClassLikeMember::Indexer(indexer) => {
+                walker.walk_indexer(indexer, context);
+            }
             ClassLikeMember::Law(law) => {
                 walker.walk_law(law, context);
             }
@@ -1572,6 +1577,32 @@ generate_ast_walker! {
         walker.walk_binary_operator(&operator.symbol, context);
         walker.walk_function_like_parameter_list(&operator.parameter_list, context);
         walker.walk_method_body(&operator.body, context);
+    }
+
+    'arena Indexer as indexer => {
+        for attribute_list in &indexer.attribute_lists {
+            walker.walk_attribute_list(attribute_list, context);
+        }
+
+        for modifier in &indexer.modifiers {
+            walker.walk_modifier(modifier, context);
+        }
+
+        walker.walk_hint(&indexer.hint, context);
+        walker.walk_keyword(&indexer.this, context);
+        walker.walk_function_like_parameter_list(&indexer.parameter_list, context);
+        for accessor in &indexer.accessors {
+            walker.walk_indexer_accessor(accessor, context);
+        }
+    }
+
+    'arena IndexerAccessor as indexer_accessor => {
+        for modifier in &indexer_accessor.modifiers {
+            walker.walk_modifier(modifier, context);
+        }
+
+        walker.walk_local_identifier(&indexer_accessor.name, context);
+        walker.walk_method_body(&indexer_accessor.body, context);
     }
 
     'arena FunctionLikeReturnTypeHint as function_like_return_type_hint => {

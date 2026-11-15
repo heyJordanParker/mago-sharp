@@ -38,6 +38,7 @@ use crate::metadata::r#extern::ExternNamespaceMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::module::ModuleMetadata;
+use crate::metadata::module::NamespaceImportMetadata;
 use crate::metadata::property::PropertyMetadata;
 use crate::metadata::shared::Shared;
 use crate::metadata::ttype::TypeMetadata;
@@ -125,6 +126,9 @@ pub struct CodebaseMetadata {
     /// Every PHP# `extern namespace`, spec section 23, sorted.
     #[cfg_attr(feature = "serde", serde(default))]
     pub extern_namespaces: Vec<ExternNamespaceMetadata>,
+    /// Every name a PHP# file of the project imports from another namespace, spec section 23, sorted.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub namespace_imports: Vec<NamespaceImportMetadata>,
     /// Map from the lowercase name of a PHP# extension member, spec section 26, to every extension member of that name:
     /// its span and the static method it runs as, in span order.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -760,6 +764,45 @@ impl CodebaseMetadata {
             .map(|declaration| declaration.namespace)
     }
 
+    /// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a function)
+    /// falls under, spec section 29: the member's, then the class's, then the same for each parent class, nearest
+    /// first. A function in a namespace is declared as `extern Pdf.render`, which the binder reads as a class and its
+    /// member, spec section 23, and so is one a library declares in PHP's root namespace, through the namespace an
+    /// `extern namespace` line gives it, as `extern Foundation.now` declares Laravel's `now()` after
+    /// `extern namespace Foundation for now;`.
+    #[must_use]
+    pub fn extern_of(&self, class: Word, member: Word) -> Option<&ExternMetadata> {
+        let declared = |key: (Word, Word)| self.externs.get(&key).and_then(|declarations| declarations.first());
+        if class.is_empty() {
+            return declared((empty_word(), member)).or_else(|| {
+                let name = member.as_bytes();
+                match name.iter().rposition(|byte| *byte == b'\\') {
+                    Some(separator) => declared((word(&name[..separator]), word(&name[separator + 1..]))),
+                    None => declared((ascii_lowercase_word(self.extern_namespace_of(name)?.as_bytes()), member)),
+                }
+            });
+        }
+
+        // The chain goes by the class-likes' keys, spec section 24, and an `extern` names a plain PHP class in lowercase.
+        let mut current = Some(self.class_key(class.as_bytes()));
+        let mut remaining =
+            self.get_class_like(class.as_bytes()).map_or(0, |metadata| metadata.all_parent_classes.len());
+        while let Some(class) = current {
+            let named = ascii_lowercase_word(class.as_bytes());
+            if let Some(declaration) = declared((named, member)).or_else(|| declared((named, empty_word()))) {
+                return Some(declaration);
+            }
+
+            if remaining == 0 {
+                break;
+            }
+            remaining -= 1;
+            current = self.get_class_like(class.as_bytes()).and_then(|metadata| metadata.direct_parent_class);
+        }
+
+        None
+    }
+
     /// What the `extern` line `declaration` declares, keyed as `class_likes` keys a class and `function_likes` a method
     /// or a function, spec section 29: `(class, "")`, `(class, method)` for a method the class itself declares, or
     /// `("", function)`. `extern Pdf.render` after `import Vendor.Pdf;` declares the function `Vendor\Pdf\render`, and
@@ -1105,9 +1148,10 @@ impl CodebaseMetadata {
         all_descendants
     }
 
-    /// Whether `class` is a PHP# class that is an `Iterable<T>` of its `elements()`, spec section 12: its header, or a
-    /// PHP# base class's, names `Iterable<T>`, which the scanner links as `IteratorAggregate<int, T>`. A PHP# class
-    /// whose plain PHP base implements PHP's `IteratorAggregate` is a `Traversable` of that base's `getIterator()`.
+    /// Whether `class` is a PHP# class or struct that is an `Iterable<T>` of its `elements()`, spec section 12: its
+    /// header, a PHP# base class's or a PHP# interface's it implements names `Iterable<T>`, which the scanner links as
+    /// `IteratorAggregate<int, T>`. A PHP# class whose plain PHP base implements PHP's `IteratorAggregate` is a
+    /// `Traversable` of that base's `getIterator()`. An interface asks its classes for `elements()`, so it is none.
     #[must_use]
     pub fn is_sharp_iterable(&self, class: &[u8]) -> bool {
         let iterated = word("iteratoraggregate");
@@ -1116,10 +1160,12 @@ impl CodebaseMetadata {
         };
         self.get_class_like(class).is_some_and(|metadata| {
             metadata.flags.is_sharp()
+                && metadata.kind.is_class()
                 && (names_iterable(metadata)
                     || metadata
                         .all_parent_classes
                         .iter()
+                        .chain(&metadata.all_parent_interfaces)
                         .filter_map(|parent| self.get_class_like(parent.as_bytes()))
                         .any(names_iterable))
         })
@@ -1547,6 +1593,7 @@ impl CodebaseMetadata {
         self.merge_externs(other.externs);
         self.merge_modules(other.modules);
         self.merge_extern_namespaces(other.extern_namespaces);
+        self.merge_namespace_imports(other.namespace_imports);
         self.merge_extensions(other.extensions);
 
         for (k, v) in other.all_class_like_descendants {
@@ -1650,6 +1697,7 @@ impl CodebaseMetadata {
         self.merge_externs(other.externs.iter().map(|(target, declarations)| (*target, declarations.clone())));
         self.merge_modules(other.modules.iter().cloned());
         self.merge_extern_namespaces(other.extern_namespaces.iter().copied());
+        self.merge_namespace_imports(other.namespace_imports.iter().copied());
         self.merge_extensions(other.extensions.iter().map(|(name, members)| (*name, members.clone())));
 
         for (k, v) in &other.all_class_like_descendants {
@@ -1729,6 +1777,12 @@ impl CodebaseMetadata {
     }
 
     /// Adds another codebase's `extern namespace` declarations, keeping them sorted, whatever order the files merge in.
+    fn merge_namespace_imports(&mut self, incoming: impl IntoIterator<Item = NamespaceImportMetadata>) {
+        self.namespace_imports.extend(incoming);
+        self.namespace_imports.sort_unstable();
+        self.namespace_imports.dedup();
+    }
+
     fn merge_extern_namespaces(&mut self, incoming: impl IntoIterator<Item = ExternNamespaceMetadata>) {
         self.extern_namespaces.extend(incoming);
         self.extern_namespaces.sort_unstable();
@@ -2034,6 +2088,7 @@ impl CodebaseMetadata {
         }
         self.modules.retain(|module| !removed_files.contains(&module.span.file_id));
         self.extern_namespaces.retain(|declaration| !removed_files.contains(&declaration.span.file_id));
+        self.namespace_imports.retain(|import| !removed_files.contains(&import.span.file_id));
         for members in self.extensions.values_mut() {
             members.retain(|(span, _)| !removed_files.contains(&span.file_id));
         }

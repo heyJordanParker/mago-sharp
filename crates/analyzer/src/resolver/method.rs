@@ -397,11 +397,12 @@ where
                 continue;
             }
 
-            // A PHP# class whose header names `Iterable<T>` is an `Iterable<T>`, so a member it doesn't declare is one of
-            // `Iterable<T>`'s lazy operations, spec section 12.
+            // Every implementation of `Iterable<T>`, a PHP# class whose header names it and a plain PHP `Traversable`, is
+            // an `Iterable<T>`, so a member it doesn't declare is one of `Iterable<T>`'s lazy operations, and its own
+            // member wins, spec section 12, as C#'s LINQ reaches every `IEnumerable`.
             if context.dialect.is_sharp()
                 && let TAtomic::Object(TObject::Named(named)) = object_atomic
-                && context.codebase.is_sharp_iterable(named.name.as_bytes())
+                && context.codebase.class_implements(named.name.as_bytes(), b"Traversable")
                 && let ClassLikeMemberSelector::Identifier(name) = selector
                 && lacks_member(context.codebase, object_atomic, name.value)
                 && let Some((_, element)) = get_iterable_parameters(object_atomic, context.codebase)

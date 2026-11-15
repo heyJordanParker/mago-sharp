@@ -1317,6 +1317,7 @@ where
                 ClassLikeMember::EnumCase(m) => m.format(f),
                 ClassLikeMember::Method(m) => m.format(f),
                 ClassLikeMember::Operator(_)
+                | ClassLikeMember::Indexer(_)
                 | ClassLikeMember::Law(_)
                 | ClassLikeMember::NamedConstructor(_)
                 | ClassLikeMember::Extension(_) => {

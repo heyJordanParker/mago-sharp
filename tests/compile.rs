@@ -10,7 +10,7 @@ use std::process::Stdio;
 use mago_database::process;
 use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::header;
-use mago_sharp_bridge::unit::is_stale;
+use mago_sharp_bridge::unit::inputs_changed;
 use mago_sharp_bridge::unit::source_hash;
 use mago_sharp_bridge::unit::stamp;
 use mago_sharp_lean::PACKAGE_FOLDER;
@@ -1710,7 +1710,7 @@ fn every_compiled_file_is_current_after_the_php_files_are_written() {
     assert!(root.join("app/Environment.php").exists() && root.join("app/Report.php").exists());
     for name in ["app/Environment.sharp", "app/Order.sharp", "app/Report.sharp", MONEY_PATH] {
         let bytes = std::fs::read(compiled(root, name)).unwrap();
-        assert!(!is_stale(&std::fs::canonicalize(root).unwrap(), &bytes).unwrap(), "{name}");
+        assert!(!inputs_changed(&std::fs::canonicalize(root).unwrap(), &bytes).unwrap(), "{name}");
     }
 }
 
@@ -1739,7 +1739,7 @@ fn a_compiled_file_goes_stale_only_when_a_file_it_reads_changes() {
         "namespace App;\n\nimport Lib.Pace;\n\npublic class Paced\n{\n    public int percent()\n    {\n        return Pace.percent();\n    }\n}\n",
     );
     let root = std::fs::canonicalize(root).unwrap();
-    let stale = |name: &str| is_stale(&root, &std::fs::read(compiled(&root, name)).unwrap()).unwrap();
+    let stale = |name: &str| inputs_changed(&root, &std::fs::read(compiled(&root, name)).unwrap()).unwrap();
 
     for alias_file in ["public/wp/aliases.php", "public/wp/rapid.php"] {
         compile_succeeds(&root);
@@ -3840,8 +3840,9 @@ fn compile_refuses_an_import_outside_the_list_of_its_namespace_at_the_import() {
     let store_module = |listed: &str| format!("namespace App.Tenant.Store;\n\nmodule\n{{\n    imports {listed};\n}}\n");
     let listed = store_module("App.Shop.Loyalty, App.Shop.Records, Illuminate.Support");
     let misspelled = store_module("App.Shop.Loyalty, App.Shop.Records, Illuminate.Suport");
-    let cyclic = store_module("App.Shared, App.Shop");
-    let records_module = "namespace App.Shop.Records;\n\nmodule\n{\n    imports App.Tenant.Store;\n}\n";
+    // `App.Shop.Loyalty` imports `StoreService` back, and no list allows or refuses a cycle.
+    let points = "namespace App.Shop.Loyalty;\n\nimport App.Tenant.Store.StoreService;\n\npublic class Points\n{\n    public Points(private StoreService store) { }\n}\n";
+    let ways_out = "Move the code, or declare an interface in one namespace that the other implements.";
     let service = "namespace App.Tenant.Store;\n\nimport App.Shop.Loyalty.Member;\nimport Illuminate.Support.Facades.DB;\nimport App.Shared.Ledger.Entry;\n\npublic class StoreService\n{\n    public StoreService(private Member member, private DB db, private Entry entry) { }\n}\n";
     let refused = "app/Tenant/Store/StoreService.sharp:5:8:error - unlisted-import: `App.Tenant.Store` imports only `App.Shop.Loyalty`, `App.Shop.Records` and `Illuminate.Support`.";
     for (modules, expected) in [
@@ -3855,11 +3856,10 @@ fn compile_refuses_an_import_outside_the_list_of_its_namespace_at_the_import() {
             ],
         ),
         (
-            vec![("app/Tenant/Store/Module.sharp", cyclic.as_str()), ("app/Shop/Records/Module.sharp", records_module)],
+            vec![("app/Shop/Loyalty/Points.sharp", points)],
             vec![
-                "app/Shop/Records/Module.sharp:5:13:error - import-cycle: `App.Shop.Records` and `App.Tenant.Store` import from each other: `App.Shop.Records` lists `App.Tenant.Store`, and `App.Tenant.Store` lists `App.Shop`.".to_owned(),
-                "app/Tenant/Store/Module.sharp:5:25:error - import-cycle: `App.Tenant.Store` and `App.Shop.Records` import from each other: `App.Tenant.Store` lists `App.Shop`, and `App.Shop.Records` lists `App.Tenant.Store`.".to_owned(),
-                "app/Tenant/Store/StoreService.sharp:4:8:error - unlisted-import: `App.Tenant.Store` imports only `App.Shared` and `App.Shop`.".to_owned(),
+                format!("app/Shop/Loyalty/Points.sharp:3:8:error - import-cycle: `App.Shop.Loyalty` and `App.Tenant.Store` import each other (StoreService.sharp imports Member). {ways_out}"),
+                format!("app/Tenant/Store/StoreService.sharp:3:8:error - import-cycle: `App.Tenant.Store` and `App.Shop.Loyalty` import each other (Points.sharp imports StoreService). {ways_out}"),
             ],
         ),
     ] {

@@ -43,8 +43,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassConstantAccess<'arena> {
 }
 
 /// Analyzes the class constant or enum case `class::constant`, which spans `span`: PHP's `Class::NAME`, or PHP#'s
-/// `Class.name` when the class has a constant or enum case by that name. A PHP# read through a class value, `type.name`,
-/// analyzed its class value to find it is one, so it is `class_is_analyzed`.
+/// `Class.name` when the class has a constant or enum case by that name. `Self.name`, whose `Self` is no value to
+/// analyze, is `class_is_analyzed`.
 pub(crate) fn analyze_class_constant_access<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,

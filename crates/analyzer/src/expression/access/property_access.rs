@@ -25,13 +25,10 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
-use crate::expression::access::analyze_class_value_member;
-use crate::expression::access::analyze_through_value;
-use crate::expression::access::refuse_statics_of_no_class;
+use crate::expression::access::refuse_static_through_class_value;
 use crate::expression::call::analyze_extension_access;
 use crate::expression::call::method_call::with_receiver_type;
 use crate::expression::is_refused_type;
-use crate::resolver::class_name::class_value_classes;
 use crate::resolver::property::resolve_instance_properties;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_property_access_expression_id;
@@ -171,26 +168,13 @@ where
         );
     }
 
-    // PHP# reads a member through a class value, `typeof(X).y` or `type.y`, as `Class.y` reads it on the class the
-    // value holds, which is PHP's `$type::y`, spec section 25.
-    if resolution_result.class_value && refuse_statics_of_no_class(context, artifacts, object, span) {
-        return Ok(());
-    }
+    // A class value reflects, and reads no static, spec section 25.
     if resolution_result.class_value
         && let ClassLikeMemberSelector::Identifier(name) = property_selector
-        && let Some(classes) = artifacts.get_expression_type(object).and_then(class_value_classes)
     {
-        return analyze_through_value(
-            context,
-            block_context,
-            artifacts,
-            object,
-            is_null_safe,
-            span,
-            |context, block_context, artifacts| {
-                analyze_class_value_member(context, block_context, artifacts, object, name, span, classes, true)
-            },
-        );
+        refuse_static_through_class_value(context, artifacts, object, name, "read", span);
+
+        return Ok(());
     }
 
     let mut resulting_expression_type = None;

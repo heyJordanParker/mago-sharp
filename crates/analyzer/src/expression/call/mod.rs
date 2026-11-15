@@ -146,6 +146,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
     {
         analyze_call(self, context, block_context, artifacts)?;
         report_void_result_used(context, block_context, artifacts, self);
+        crate::statement::module::report_bound_from_plain_php(context, artifacts, self, &[], self.span());
 
         Ok(())
     }
@@ -256,7 +257,6 @@ where
                 artifacts,
                 static_call,
                 call.type_arguments.as_ref(),
-                false,
             )
         }
         Call::Method(call) => {

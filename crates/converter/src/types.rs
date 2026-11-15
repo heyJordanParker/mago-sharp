@@ -31,7 +31,7 @@ use mago_span::Span;
 use crate::ExternNamespace;
 use crate::Library;
 use crate::library::short;
-use mago_names::STANDARD_ROOT_CLASSES;
+use mago_names::default_root_classes;
 use mago_word::Word;
 
 /// The names a file reaches classes and library namespaces by: its namespace, its `import` lines, the imports the
@@ -122,7 +122,7 @@ impl<'input> Imports<'input> {
     /// `Builtins.sharp`, as `Throwable` and `Attribute` (spec section 23), or a class declared directly in `Sharp`.
     pub fn is_default(class: &str) -> bool {
         let class = class.trim_start_matches('\\');
-        STANDARD_ROOT_CLASSES.iter().any(|root| root.eq_ignore_ascii_case(class))
+        default_root_classes().any(|root| root.eq_ignore_ascii_case(class))
             || class.rsplit_once('\\').is_some_and(|(namespace, _)| namespace == "Sharp")
     }
 

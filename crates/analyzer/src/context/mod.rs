@@ -169,15 +169,16 @@ where
         self.settings.check_throws && !self.dialect.is_sharp()
     }
 
-    /// Makes an issue about a null check or a `?` that cannot matter an error in a PHP# file, as spec section 14.4
-    /// decides. A PHP file keeps the issue as Mago reports it.
-    pub(crate) fn as_null_check_error(&self, mut issue: Issue) -> Issue {
+    /// Makes an issue about a null check or a `?` that cannot matter a warning in a PHP# file, as spec section 14.4
+    /// decides, as C#, Kotlin and Swift warn on one. A PHP file keeps the issue as Mago reports it.
+    pub(crate) fn as_null_check_warning(&self, mut issue: Issue) -> Issue {
         if !self.dialect.is_sharp() {
             return issue;
         }
 
-        issue.level = Level::Error;
-        issue.with_note("In PHP# a type holds null only when written with `?`, so a `?` or a null check that cannot matter is an error.")
+        issue.level = Level::Warning;
+        issue
+            .with_note("In PHP# a type holds null only when written with `?`, so this `?` or null check cannot matter.")
     }
 
     /// Reports a PHP# condition, or an operand of `&&`, `||` or `!`, whose type is not `bool`. Spec section 21 makes each

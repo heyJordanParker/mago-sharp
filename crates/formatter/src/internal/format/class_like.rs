@@ -183,6 +183,7 @@ where
                     ClassLikeMember::EnumCase(_) => ClassLikeMemberKind::EnumCase,
                     ClassLikeMember::Method(_) => ClassLikeMemberKind::Method,
                     ClassLikeMember::Operator(_)
+                    | ClassLikeMember::Indexer(_)
                     | ClassLikeMember::Law(_)
                     | ClassLikeMember::NamedConstructor(_)
                     | ClassLikeMember::Extension(_) => {

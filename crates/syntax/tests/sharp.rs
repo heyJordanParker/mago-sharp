@@ -2853,33 +2853,22 @@ fn a_dollar_catch_variable_fails_as_a_typo_does() {
     assert_eq!(spans, ["$failure"]);
 }
 
-/// Spec section 17: `for (x in y)` is PHP#'s own loop with TypeScript's word, so it is an error that names `of`, at the
-/// `in`, and the loop still parses.
+/// Spec section 17: `for (x in y)` is no PHP# syntax, so it fails as a typo does, at the first token PHP#'s grammar
+/// can't take, with no error that names a replacement (Jordan's ruling of 10-18).
 #[test]
-fn for_in_is_an_error_that_names_of() {
-    const CODE: &str =
-        "class Report\n{\n    void run()\n    {\n        for (const line in lines) {\n        }\n    }\n}\n";
-    let arena = LocalArena::new();
-    let program = parse(&arena, "src/Report.sharp", CODE);
+fn for_in_fails_as_a_typo_does() {
+    for (code, unexpected) in [
+        ("class Report\n{\n    void run()\n    {\n        for (const line in lines) {\n        }\n    }\n}\n", "lines"),
+        ("class Report\n{\n    void run()\n    {\n        for (line in lines) {\n        }\n    }\n}\n", "in"),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
 
-    let errors: Vec<(String, &str)> =
-        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
-    assert_eq!(errors, [("A loop over a collection takes `of`, as in `for (const line of lines)`.".to_owned(), "in")]);
-    assert!(matches!(method_body(program).first(), Some(Statement::ForOf(_))), "{:#?}", method_body(program));
-}
-
-/// TypeScript's `for (x in y)` declares no loop variable, and it is the same error that names `of`, at the `in`, while
-/// the statements after it still parse.
-#[test]
-fn for_in_without_const_names_of_and_the_statements_after_it_parse() {
-    const CODE: &str = "class Report\n{\n    void run()\n    {\n        for (line in lines) {\n            const kept = 1;\n        }\n        const after = 2;\n    }\n}\n";
-    let arena = LocalArena::new();
-    let program = parse(&arena, "src/Report.sharp", CODE);
-
-    let errors: Vec<(String, &str)> =
-        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
-    assert_eq!(errors, [("A loop over a collection takes `of`, as in `for (const line of lines)`.".to_owned(), "in")]);
-    assert_eq!(method_body(program).len(), 2, "{:#?}", method_body(program));
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
+        assert_eq!(errors.first().map(|(_, at)| *at), Some(unexpected), "{errors:?}");
+        assert!(errors.iter().all(|(message, _)| !message.contains("`of`")), "{errors:?}");
+    }
 }
 
 /// `foreach` fails as a typo does, once, at its keyword, with a braced body and with PHP's colon-delimited one.
@@ -4409,7 +4398,11 @@ fn a_modifier_before_a_parenthesized_type_modifies_the_member() {
             };
             let returned = method.return_type_hint.as_ref().expect("a return type");
 
-            (method.modifiers.iter().map(ToString::to_string).collect(), source(CODE, &returned.hint), source(CODE, &method.name))
+            (
+                method.modifiers.iter().map(ToString::to_string).collect(),
+                source(CODE, &returned.hint),
+                source(CODE, &method.name),
+            )
         })
         .collect();
     assert_eq!(

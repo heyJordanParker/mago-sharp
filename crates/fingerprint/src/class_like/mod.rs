@@ -21,6 +21,7 @@ use mago_syntax::cst::Extends;
 use mago_syntax::cst::Extension;
 use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Implements;
+use mago_syntax::cst::Indexer;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Law;
@@ -153,6 +154,9 @@ impl Fingerprintable for ClassLikeMember<'_> {
             }
             ClassLikeMember::Operator(operator) => {
                 operator.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+            ClassLikeMember::Indexer(indexer) => {
+                indexer.fingerprint_with_hasher(hasher, resolved_names, options);
             }
             ClassLikeMember::Law(law) => {
                 law.fingerprint_with_hasher(hasher, resolved_names, options);
@@ -768,6 +772,33 @@ impl Fingerprintable for Operator<'_> {
 
         if !options.signature_only {
             self.body.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
+impl Fingerprintable for Indexer<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "indexer".hash(hasher);
+        for attribute_list in &self.attribute_lists {
+            attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        crate::modifier::fingerprint_modifiers(self.modifiers.iter(), hasher, resolved_names, options);
+        self.hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        for accessor in &self.accessors {
+            crate::modifier::fingerprint_modifiers(accessor.modifiers.iter(), hasher, resolved_names, options);
+            accessor.name.value.hash(hasher);
+            if !options.signature_only {
+                accessor.body.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
         }
     }
 }

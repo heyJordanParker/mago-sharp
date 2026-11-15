@@ -127,7 +127,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for CompositeString<'arena> {
 
             let casted_part_type = if context.dialect.is_sharp() && part_type.is_bool() {
                 bool_text(&part_type)
-            } else if shows_its_text {
+            } else if shows_its_text || (context.dialect.is_sharp() && part_type.types.iter().any(TAtomic::is_bool)) {
+                // A union that holds a `bool` shows it as `true` or `false`, beside the text of its other types.
                 get_string()
             } else {
                 cast_type_to_string(
@@ -249,9 +250,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for CompositeString<'arena> {
 }
 
 /// Whether a PHP# template shows a value of `part_type`: an `int`, a `float`, a `string` or a `bool`, literal and
-/// narrowed types included, as spec section 18 states.
+/// narrowed types included, or a union of them, as `int|string`, as spec section 18 states.
 fn is_shown(part_type: &TUnion) -> bool {
-    part_type.is_int() || part_type.is_float() || part_type.is_string() || part_type.is_bool()
+    !part_type.types.is_empty()
+        && part_type
+            .types
+            .iter()
+            .all(|atomic| atomic.is_int() || atomic.is_float() || atomic.is_string() || atomic.is_bool())
 }
 
 /// Whether each type `part_type` holds is a class, an interface or an enum that declares `toString()`, itself or

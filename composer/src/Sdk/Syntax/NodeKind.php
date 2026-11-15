@@ -73,6 +73,8 @@ enum NodeKind: string
     case MethodExpressionBody = 'MethodExpressionBody';
     case On = 'On';
     case Operator = 'Operator';
+    case Indexer = 'Indexer';
+    case IndexerAccessor = 'IndexerAccessor';
     case Law = 'Law';
     case Extension = 'Extension';
     case ConstructorInitializer = 'ConstructorInitializer';

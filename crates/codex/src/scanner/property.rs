@@ -117,7 +117,8 @@ where
     );
 
     if let Some(hook_list) = &parameter.hooks {
-        scan_hooks(hook_list, &mut property_metadata, class_like_metadata, type_context, context, scope);
+        let has_behaviors = parameter.behaviors.is_some();
+        scan_hooks(hook_list, has_behaviors, &mut property_metadata, class_like_metadata, type_context, context, scope);
     }
 
     let mut used_parameter_type_from_docblock = false;
@@ -380,7 +381,16 @@ where
                 );
             }
 
-            scan_hooks(&hooked_property.hook_list, &mut metadata, class_like_metadata, type_context, context, scope);
+            let has_behaviors = hooked_property.behaviors.is_some();
+            scan_hooks(
+                &hooked_property.hook_list,
+                has_behaviors,
+                &mut metadata,
+                class_like_metadata,
+                type_context,
+                context,
+                scope,
+            );
 
             if matches!(verdict.type_override, Some(TypeOverride::Untyped)) {
                 metadata.type_declaration_metadata = None;
@@ -461,7 +471,10 @@ where
 }
 
 /// The flags of a PHP# member's `internal` reach, spec section 5: `INTERNAL` when the member is `internal`, and
-/// `INTERNAL_SET` when its `set` or `init` is. The member runs as PHP's `public`, so its visibility is `public`.
+/// `INTERNAL_SET` when its `set` or `init` is. A `set` reaches its namespace at most, spec section 6.1, so a `set` with
+/// no access modifier of a `public` or `protected` property is `internal` too, unless it overrides a plain PHP parent's,
+/// which the populator reads, and an `init` keeps the property's level. The member runs as PHP's `public`, so its
+/// visibility is `public`.
 fn sharp_internal_flags(
     modifiers: &Sequence<'_, Modifier<'_>>,
     accessors: Option<&PropertyHookList<'_>>,
@@ -470,7 +483,11 @@ fn sharp_internal_flags(
     if modifiers.contains_internal() {
         flags |= MetadataFlags::INTERNAL_REACH;
     }
-    if accessors.and_then(PropertyHookList::setter).is_some_and(|setter| setter.modifiers.contains_internal()) {
+    let is_internal_set = |setter: &PropertyHook<'_>| {
+        setter.modifiers.contains_internal()
+            || (setter.name.value == b"set" && setter.modifiers.is_empty() && !modifiers.contains_private())
+    };
+    if accessors.and_then(PropertyHookList::setter).is_some_and(is_internal_set) {
         flags |= MetadataFlags::INTERNAL_SET;
     }
 
@@ -513,11 +530,13 @@ fn is_sharp_init(accessors: &PropertyHookList) -> bool {
 }
 
 /// Scans a property's hooks and whether it is virtual. A PHP# auto accessor is storage, as an auto-property's is, so
-/// only the accessors that [run as hooks](PropertyHook::runs_as_hook) are hooks. A PHP# property is virtual when no accessor is auto and no body
-/// uses `field`, as the engine lowers it, and a PHP one when no hook reaches `$this->name`. A PHP# interface property
-/// and an abstract one run as PHP's, so their accessors are abstract hooks.
+/// only the accessors that [run as hooks](PropertyHook::runs_as_hook) are hooks, and every accessor of a property
+/// that `has_behaviors`, whose behaviors run around its storage, spec section 6.4. A PHP# property is virtual when no
+/// accessor is auto and no body uses `field`, as the engine lowers it, and a PHP one when no hook reaches
+/// `$this->name`. A PHP# interface property and an abstract one run as PHP's, so their accessors are abstract hooks.
 fn scan_hooks<'arena, A>(
     hook_list: &'arena PropertyHookList<'arena>,
+    has_behaviors: bool,
     property: &mut PropertyMetadata,
     class_like_metadata: &mut ClassLikeMetadata,
     type_context: &TypeResolutionContext,
@@ -529,7 +548,7 @@ fn scan_hooks<'arena, A>(
     let is_sharp =
         context.program.dialect.is_sharp() && !class_like_metadata.kind.is_interface() && !property.flags.is_abstract();
     for hook in &hook_list.hooks {
-        if is_sharp && !hook.runs_as_hook() {
+        if is_sharp && !has_behaviors && !hook.runs_as_hook() {
             continue;
         }
 

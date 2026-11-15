@@ -496,18 +496,25 @@ where
     let DeclaredProperty { declaring_class: declaring_class_metadata, property: property_metadata, kind } = *resolution;
     let property_name = property_metadata.name.0;
 
-    // A property whose `set` alone is `internal` is named by its accessor, as `Order.total.set`.
     let flags = property_metadata.flags;
     if !check_internal_reach(
         context,
         declaring_class_metadata,
-        Some(flags.is_internal_reach() || flags.is_internal_set()),
-        |context| {
-            let property = display_member(context, declaring_class_metadata.original_name, property_name);
-            if flags.is_internal_set() && !flags.is_internal_reach() { format!("{property}.set") } else { property }
-        },
+        Some(flags.is_internal_reach()),
+        |context| display_member(context, declaring_class_metadata.original_name, property_name),
         member_span.unwrap_or(access_span),
     ) {
+        return false;
+    }
+
+    if flags.is_internal_set() && !reaches_set(context, declaring_class_metadata) {
+        report_set_outside_namespace(
+            context,
+            declaring_class_metadata,
+            property_name,
+            member_span.unwrap_or(access_span),
+        );
+
         return false;
     }
 
@@ -663,6 +670,47 @@ where
     }
 
     is_visible
+}
+
+/// Spec section 6.1: whether the analyzed code writes a property of `class`, a PHP# class, whose `set` reaches its
+/// namespace at most. Code of the namespace or one below it writes it, PHP# or plain PHP, since plain PHP that uses
+/// PHP# code follows PHP#'s rules.
+fn reaches_set<A>(context: &Context<'_, '_, A>, class: &ClassLikeMetadata) -> bool
+where
+    A: Arena,
+{
+    !class.flags.is_sharp()
+        || is_within_namespace(
+            context.scope.namespace_name().unwrap_or_default(),
+            namespace_of(class.original_name.as_bytes()),
+        )
+}
+
+/// Reports a write at `span`, from outside its namespace, to the property `property_name` of `class`, named as it
+/// reads: "`Transaction.status` is set only inside `App.Shop.Payments`".
+fn report_set_outside_namespace<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    property_name: Word,
+    span: Span,
+) where
+    A: Arena,
+{
+    let property = display_member(context, class.original_name, property_name);
+    let namespace = dotted(namespace_of(class.original_name.as_bytes()));
+
+    context.collector.report_with_code(
+        IssueCode::InternalAccess,
+        Issue::error(format!("`{property}` is set only inside `{namespace}`."))
+            .with_annotation(Annotation::primary(span).with_message("Written here."))
+            .with_note(
+                "A property's `set` reaches its own namespace at most, so code outside it never changes its state.",
+            )
+            .with_help(format!(
+                "Write it in a method of `{}`, and call that method here.",
+                display_class_like_name(context, class.original_name)
+            )),
+    );
 }
 
 /// Reports a write at `span` to a PHP# property stated get-only with `{ get; }`, named as it reads: `orderId` of

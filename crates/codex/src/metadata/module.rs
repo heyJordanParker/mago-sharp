@@ -31,6 +31,29 @@ pub struct ModuleMetadata {
     pub bindings: Vec<BindingMetadata>,
 }
 
+/// One name a PHP# file of the project imports from another namespace, spec section 23: an edge of the graph in which
+/// no two namespaces import each other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub struct NamespaceImportMetadata {
+    /// The name of the file that imports it.
+    pub file: Word,
+    /// Where the file's import names it.
+    pub span: Span,
+    /// The file's namespace, as PHP writes it: `App\Shop`.
+    pub namespace: Word,
+    /// The name it imports, as PHP writes it: a class-like's, a namespace's or a function's or constant's full name.
+    pub name: Word,
+}
+
+impl NamespaceImportMetadata {
+    #[must_use]
+    pub fn new(file: Word, span: Span, namespace: Word, name: Word) -> Self {
+        Self { file, span, namespace, name }
+    }
+}
+
 /// Which set of services a module belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

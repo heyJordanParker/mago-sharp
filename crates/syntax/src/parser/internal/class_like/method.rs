@@ -3,10 +3,13 @@ use crate::cst::cst::AttributeList;
 use crate::cst::cst::BinaryOperator;
 use crate::cst::cst::ClassLikeMember;
 use crate::cst::cst::ConstructorInitializer;
+use crate::cst::cst::FunctionLikeParameterList;
 use crate::cst::cst::FunctionLikeReturnTypeHint;
 use crate::cst::cst::GenericHint;
 use crate::cst::cst::Hint;
 use crate::cst::cst::Identifier;
+use crate::cst::cst::Indexer;
+use crate::cst::cst::IndexerAccessor;
 use crate::cst::cst::Keyword;
 use crate::cst::cst::Method;
 use crate::cst::cst::MethodAbstractBody;
@@ -143,6 +146,39 @@ where
                 uses: None,
                 initializer: self.parse_optional_constructor_initializer()?,
                 body: self.parse_method_body()?,
+            }));
+        }
+        // Spec section 6: an indexer, `public Line this[int index] { get => …; set => …; }`, as C#'s.
+        if self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"this")
+            && self.stream.peek_kind(1)? == Some(T!["["])
+        {
+            self.refuse_required(&modifiers);
+            let this = self.expect_any_keyword()?;
+            let parameters =
+                self.parse_comma_separated_sequence(T!["["], T!["]"], Self::parse_function_like_parameter)?;
+            let left_brace = self.stream.eat_span(T!["{"])?;
+            let mut accessors = self.new_vec();
+            while !matches!(self.stream.peek_kind(0)?, None | Some(T!["}"])) {
+                accessors.push(IndexerAccessor {
+                    modifiers: self.parse_modifier_sequence()?,
+                    name: self.parse_local_identifier()?,
+                    body: self.parse_method_body()?,
+                });
+            }
+
+            return Ok(ClassLikeMember::Indexer(Indexer {
+                attribute_lists: attributes,
+                modifiers,
+                hint,
+                this,
+                parameter_list: FunctionLikeParameterList {
+                    left_parenthesis: parameters.open,
+                    parameters: parameters.sequence,
+                    right_parenthesis: parameters.close,
+                },
+                left_brace,
+                accessors: Sequence::new(accessors),
+                right_brace: self.stream.eat_span(T!["}"])?,
             }));
         }
         if self.is_at_operator_keyword()? {

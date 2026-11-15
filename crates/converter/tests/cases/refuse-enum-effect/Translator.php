@@ -11,7 +11,6 @@ final class Translator
         return $key;
     }
 
-    /** @pure */
     public static function upper(string $text): string
     {
         return strtoupper($text);

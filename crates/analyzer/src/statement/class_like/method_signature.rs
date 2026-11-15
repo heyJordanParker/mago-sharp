@@ -379,12 +379,15 @@ pub fn validate_method_signature_compatibility(
         }
     }
 
+    // Spec section 6: a PHP# indexer names its parameters, as C#'s does, and runs as `ArrayAccess`, which code reaches
+    // only through `[…]`, never with a named argument.
+    let is_indexer = dialect.is_sharp() && parent_class_name.as_bytes().eq_ignore_ascii_case(b"ArrayAccess");
     for (index, parent_param) in parent_method.parameters.iter().enumerate() {
         let Some(child_param) = child_method.parameters.get(index) else {
             continue;
         };
 
-        if !is_vendored && parent_param.name != child_param.name {
+        if !is_vendored && !is_indexer && parent_param.name != child_param.name {
             issues.push(SignatureCompatibilityIssue::ParameterNameMismatch {
                 parameter_index: index,
                 child_name: child_param.name.0,

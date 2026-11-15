@@ -86,13 +86,26 @@ array_push($classes, ...array_map(static fn(string $class): string => "Sharp\\{$
 $builtins = read("{$library}/Sharp/Internal/Builtins.sharp");
 $imports = [];
 preg_match_all('/^import ([\w.]+)(?: as (\w+))?;$/m', $builtins, $imports, PREG_SET_ORDER);
+// Each imported class by the name `Builtins.sharp` gives it, its alias or its short name, to its full name.
 $imported = [];
 foreach ($imports as $import) {
-    $imported[] = $import[2] ?? basename(str_replace('.', '/', $import[1] ?? ''));
+    $imported[$import[2] ?? basename(str_replace('.', '/', $import[1] ?? ''))] = str_replace('.', '\\', $import[1] ?? '');
 }
 $externs = [];
 preg_match_all('/^extern (\w+);$/m', $builtins, $externs);
-$roots = array_values(array_diff($externs[1], $imported));
+$declared = [];
+preg_match_all('/^extern (\w+)[.; ]/m', $builtins, $declared);
+$declared = array_flip($declared[1]);
+// Each root class `Builtins.sharp` declares with no import, by its name, and each class of a namespace it imports and
+// declares nothing of, as `Dom\HTMLDocument`, by its full name, which a `.sharp` file names through its import. A
+// class it imports and declares, as `DateTimeImmutable` and `Random\RandomException`, takes the effects its lines give,
+// and stays out.
+$roots = array_values(array_diff($externs[1], array_keys($imported)));
+foreach ($imported as $name => $class) {
+    if (str_contains($class, '\\') && !isset($declared[$name])) {
+        $roots[] = $class;
+    }
+}
 
 $effects = [];
 $marked = ['EffectOfEmit' => [], 'PropertyBehavior' => []];
@@ -142,7 +155,7 @@ echo
     rust(
         'pub',
         'STANDARD_ROOT_CLASSES',
-        "/// The PHP root classes a bare name in a `.sharp` file names by default, spec section 23.\n///\n/// `Builtins.sharp` declares each: the exception classes, `Throwable`, `Attribute` and the interfaces a PHP# class\n/// implements for a plain PHP library. Sorted.",
+        "/// The PHP built-in classes a `.sharp` file names, spec section 23: each root one by a bare name by default, and each\n/// of a namespace, as `Dom\\HTMLDocument`, through its import.\n///\n/// `Builtins.sharp` declares each: the exception classes, `Throwable`, `Attribute`, the interfaces a PHP# class\n/// implements for a plain PHP library, and the HTML DOM a page reads. Sorted.",
         $roots,
     );
 echo "\n";

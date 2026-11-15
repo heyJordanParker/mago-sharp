@@ -57,7 +57,6 @@ use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
-use mago_codex::visibility::Visibility;
 use mago_names::TypeParametersNamed;
 use mago_names::binding::php_variable_name;
 use mago_names::display_sharp_member;
@@ -481,8 +480,8 @@ pub fn expect_type<A>(
     }
 }
 
-/// Whether `expression` takes the declared type its value goes into: a lambda, a call, a member read, or `??`, `?:`,
-/// `match` and a collection literal, which give it to their sides, arms and elements.
+/// Whether `expression` takes the declared type its value goes into: a lambda, a call, a `new`, a member read, or
+/// `??`, `?:`, `match` and a collection literal, which give it to their sides, arms and elements.
 pub fn takes_declared_type(expression: &Expression<'_>) -> bool {
     matches!(
         expression.unparenthesized(),
@@ -490,6 +489,7 @@ pub fn takes_declared_type(expression: &Expression<'_>) -> bool {
             | Expression::Closure(_)
             | Expression::Array(_)
             | Expression::Call(_)
+            | Expression::Instantiation(_)
             | Expression::Conditional(_)
             | Expression::Match(_)
             | Expression::PatternMatch(_)
@@ -1595,10 +1595,9 @@ fn check_return_type_width<'ctx, A>(
 ) where
     A: Arena,
 {
-    // Spec section 14.4 makes a `?` on a PHP# method that never returns null an error, so a PHP# file checks the
-    // `null` branch even when the setting is off.
-    let null_branch_only = !context.settings.find_overly_wide_return_types;
-    if null_branch_only && !context.dialect.is_sharp() {
+    // Spec section 14.4: a `?` on a PHP# method that never returns null compiles, as in Kotlin and C#, so a PHP# file
+    // checks the width only as a PHP file does.
+    if !context.settings.find_overly_wide_return_types {
         return;
     }
 
@@ -1613,22 +1612,12 @@ fn check_return_type_width<'ctx, A>(
         return;
     };
 
-    // A PHP# method keeps a `?` a subclass's override may need. A PHP method keeps Mago's rule, which skips the
-    // override itself.
-    let keeps_declared_type = if context.dialect.is_sharp() {
-        function_like_metadata
-            .method_metadata
-            .as_ref()
-            .is_some_and(|method| !method.is_final && method.visibility != Visibility::Private)
-            && block_context.scope.get_class_like().is_some_and(|class_like| !class_like.flags.is_final())
-    } else {
-        function_like_metadata.kind.is_method()
-            && block_context.scope.get_class_like_name().is_some_and(|class_name| {
-                context.codebase.method_is_overriding(class_name.as_bytes(), function_like_metadata.name.as_bytes())
-            })
-    };
-
-    if keeps_declared_type {
+    // A method keeps the type of the method it overrides.
+    if function_like_metadata.kind.is_method()
+        && block_context.scope.get_class_like_name().is_some_and(|class_name| {
+            context.codebase.method_is_overriding(class_name.as_bytes(), function_like_metadata.name.as_bytes())
+        })
+    {
         return;
     }
 
@@ -1644,14 +1633,7 @@ fn check_return_type_width<'ctx, A>(
         return;
     }
 
-    check_return_type_metadata_width(
-        context,
-        block_context,
-        artifacts,
-        function_like_metadata,
-        return_type_metadata,
-        null_branch_only,
-    );
+    check_return_type_metadata_width(context, block_context, artifacts, function_like_metadata, return_type_metadata);
 
     // The effective (docblock) type and the native hint are separate declarations
     // with separate source spans, so each overly-wide one needs its own fix. When
@@ -1667,7 +1649,6 @@ fn check_return_type_width<'ctx, A>(
             artifacts,
             function_like_metadata,
             native_return_type_metadata,
-            null_branch_only,
         );
     }
 }
@@ -1678,7 +1659,6 @@ fn check_return_type_metadata_width<'ctx, A>(
     artifacts: &mut AnalysisArtifacts,
     function_like_metadata: &'ctx FunctionLikeMetadata,
     return_type_metadata: &TypeMetadata,
-    null_branch_only: bool,
 ) where
     A: Arena,
 {
@@ -1737,7 +1717,6 @@ fn check_return_type_metadata_width<'ctx, A>(
         .types
         .iter()
         .filter(|declared_atomic| !any_inferred_matches(declared_atomic))
-        .filter(|declared_atomic| !null_branch_only || declared_atomic.is_null())
         .collect::<Vec<_>>();
     if unused_atomics.is_empty() {
         return;
@@ -1772,10 +1751,6 @@ fn check_return_type_metadata_width<'ctx, A>(
     } else {
         issue.with_help(format!("Remove `{unused_list}` from the return type, or add a branch that returns it."))
     };
-
-    if unused_atomics.iter().any(|unused_atomic| unused_atomic.is_null()) {
-        issue = context.as_null_check_error(issue);
-    }
 
     context.collector.propose_with_code(IssueCode::OverlyWideReturnType, issue, |edits| {
         if let Some(narrowed_type_text) = narrowed_type_text {
@@ -2914,7 +2889,7 @@ pub(crate) fn collection_key_error(
         ("A `Map`'s key", format!("`{key_id}` keys this `Map`."), "Key the `Map` by")
     };
     let rule = format!(
-        "{rule} is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`"
+        "{rule} is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`"
     );
     if let Some(parameter) = unequatable_parameter(key_type, codebase) {
         return Issue::error(format!(
@@ -2927,7 +2902,7 @@ pub(crate) fn collection_key_error(
     Issue::error(format!("{rule}, and `{key_id}` is none of them."))
         .with_annotation(Annotation::primary(span).with_message(held))
         .with_help(format!(
-            "{fix} an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`."
+            "{fix} an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`."
         ))
 }
 

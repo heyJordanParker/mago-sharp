@@ -289,6 +289,15 @@ fn union_from_hint(
 
                 return joined;
             }
+            // `Object` joins a bound as the object each class and interface it joins already is, as C#'s `class`
+            // constraint beside an interface does.
+            let is_object = |side: &TUnion| matches!(side.types.as_ref(), [TAtomic::Object(TObject::Any)]);
+            if is_object(&right) {
+                return left;
+            }
+            if is_object(&left) {
+                return right;
+            }
 
             union_from_intersection(left, right)
         }

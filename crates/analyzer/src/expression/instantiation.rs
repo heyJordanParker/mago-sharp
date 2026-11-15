@@ -14,12 +14,14 @@ use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_object;
+use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
@@ -73,12 +75,14 @@ use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::resolver::class_name::type_parameter_of_no_class;
 use crate::statement::class_like::requiring_class;
 use crate::statement::function_like::get_this_type;
+use crate::statement::function_like::known_type_or_error;
 use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_member;
 use crate::utils::names::display_type;
 use crate::utils::template::get_generic_parameter_for_offset;
+use crate::utils::template::written_type_argument;
 use crate::visibility::check_method_visibility;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
@@ -729,8 +733,12 @@ where
     let mut constructor_span = None;
 
     let mut template_result = TemplateResult::new(IndexMap::with_hasher(RandomState::default()), HashMap::default());
-
-    let mut is_refused = false;
+    // Spec section 11: a `new` that writes no type arguments takes them from its arguments, or else from the declared
+    // type its object goes into, as a generic method call does. The `new` takes that type, so its constructor's call,
+    // which has the `new`'s span, never fixes the class's type arguments from it a second time.
+    let declared_type = context.dialect.is_sharp().then(|| {
+        artifacts.expected_type.take_if(|(span, _)| *span == instantiation_span).map(|(_, declared)| declared)
+    });
     let written_type_parameters = match type_arguments {
         Some(type_arguments) => seed_type_arguments(
             context,
@@ -763,11 +771,7 @@ where
 
             Some(class_value_type_arguments)
         }
-        None => {
-            is_refused = report_missing_type_arguments(context, metadata, class_expression_span);
-
-            None
-        }
+        None => None,
     };
 
     let is_spl_object_storage = metadata.original_name.as_bytes().eq_ignore_ascii_case(b"splobjectstorage");
@@ -869,9 +873,19 @@ where
     };
 
     if binds_type_arguments {
+        let declared_type_arguments = declared_type.flatten().and_then(|declared| {
+            let (name, type_arguments) = match declared.types.as_ref() {
+                [TAtomic::Object(TObject::Named(object))] => (object.name, object.type_parameters.as_ref()),
+                [TAtomic::Reference(TReference::Symbol { name, parameters, .. })] => (*name, parameters.as_ref()),
+                _ => return None,
+            };
+            (context.codebase.class_key(name.as_bytes()) == metadata.name).then(|| type_arguments.cloned()).flatten()
+        });
+        let mut unfixed = vec![];
+        let mut unwritable = vec![];
         let mut resolved_template_types = vec![];
         let mut recorded_type_arguments = vec![];
-        for (offset, (template_name, _)) in metadata.template_types.iter().enumerate() {
+        for (offset, (template_name, template)) in metadata.template_types.iter().enumerate() {
             let mut is_bound = true;
             let mut template_type = if let Some(lower_bounds) =
                 template_result.get_lower_bounds_for_class_like(*template_name, metadata.name)
@@ -903,8 +917,13 @@ where
                     &metadata.template_extended_parameters,
                     &found_generic_parameters,
                 )
+            } else if let Some(declared) = declared_type_arguments.as_ref().and_then(|declared| declared.get(offset)) {
+                declared.clone()
             } else {
                 is_bound = false;
+                if context.dialect.is_sharp() && written_type_parameters.is_none() && template.default.is_none() {
+                    unfixed.push(*template_name);
+                }
 
                 if is_spl_object_storage { get_never() } else { wrap_atomic(TAtomic::Placeholder) }
             };
@@ -913,11 +932,24 @@ where
             if matches!(variance, Variance::Invariant) {
                 template_type.widen_scalars();
             }
+            // The engine carries an inferred type argument as its PHP# text, so one only a PHP docblock writes, as
+            // `scalar`, is refused, as a generic method call refuses it.
+            if is_bound && context.dialect.is_sharp() && written_type_parameters.is_none() {
+                let written = written_type_argument(&template_type, context.codebase);
+                if !is_written_in_sharp(&written) && !is_refused_type(&known_type_or_error(written.clone())) {
+                    unwritable.push((*template_name, written));
+                }
+            }
 
             recorded_type_arguments.push(is_bound.then(|| template_type.clone()));
             resolved_template_types.push(template_type);
         }
 
+        if !unfixed.is_empty() || !unwritable.is_empty() {
+            report_unfixed_type_arguments(context, metadata, &unfixed, &unwritable, instantiation_span);
+
+            return Ok(wrap_atomic(TAtomic::Error));
+        }
         if !resolved_template_types.is_empty() {
             artifacts.record_type_arguments(instantiation_span, recorded_type_arguments.into_iter(), context.codebase);
             type_parameters = Some(resolved_template_types);
@@ -1021,11 +1053,6 @@ where
         return Ok(refused_instantiation(context));
     }
 
-    // A refused `new Box(…)` reports nothing again where its object goes.
-    if is_refused {
-        return Ok(wrap_atomic(TAtomic::Error));
-    }
-
     if written_type_parameters.is_some() {
         type_parameters = written_type_parameters;
     }
@@ -1064,9 +1091,52 @@ where
     if context.dialect.is_sharp() { TUnion::from_atomic(TAtomic::Error) } else { get_never() }
 }
 
+/// Reports the type parameters of `class` a PHP# `new` at `span` writes no type argument for, spec section 11: those
+/// neither its arguments nor the declared type its object goes into fix, `unfixed`, as C#'s CS0411 refuses a call it
+/// can't infer, and those a plain PHP value fixes as a type PHP# can't write, `unwritable`, which the engine can't
+/// carry.
+fn report_unfixed_type_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    unfixed: &[Word],
+    unwritable: &[(Word, TUnion)],
+    span: Span,
+) where
+    A: Arena,
+{
+    let class_name = short_name(class.original_name);
+    let parameters = class.template_types.keys().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+    let help = format!("Write the type arguments, as in `new {class_name}<{parameters}>(…)`.");
+    if !unfixed.is_empty() {
+        let names = unfixed.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ");
+        let arguments = if unfixed.len() == 1 { "argument" } else { "arguments" };
+        context.collector.report_with_code(
+            IssueCode::MissingTemplateParameter,
+            Issue::error(format!("Nothing fixes the type {arguments} {names} of `new {class_name}`."))
+                .with_annotation(Annotation::primary(span).with_message("Created here."))
+                .with_note(
+                    "`new` takes its type arguments from its arguments, or from the declared type its object goes into.",
+                )
+                .with_help(format!("{help} Or give the object a declared type.")),
+        );
+    }
+    for (name, written) in unwritable {
+        context.collector.report_with_code(
+            IssueCode::MissingTemplateParameter,
+            Issue::error(format!(
+                "The type argument `{name}` of `new {class_name}` would be `{}`, which PHP# can't write.",
+                written.get_id()
+            ))
+            .with_annotation(Annotation::primary(span).with_message("Created here."))
+            .with_note("A PHP docblock type has no PHP# spelling, and the engine carries a type argument as one.")
+            .with_help(help.clone()),
+        );
+    }
+}
+
 /// Reports `class`, a generic class of PHP# or of plain PHP's `@template`, written at `span` in a PHP# file without the
-/// type arguments of its type parameters that have no default, as a type, after `new` or before a static member of a
-/// PHP# class, which spec section 11 refuses, as C# does (CS0305), with the type parameters to write. Each type
+/// type arguments of its type parameters that have no default, as a type or before a static member of a PHP# class,
+/// which spec section 11 refuses, as C# does (CS0305), with the type parameters to write. Each type
 /// argument of a PHP# class has its own static members, so a bare `Counter.count` names none of them. Returns whether
 /// it refused it, so the caller gives the refused type no type the next check would report again.
 pub(crate) fn report_missing_type_arguments<A>(
@@ -1092,7 +1162,7 @@ where
         IssueCode::MissingTemplateParameter,
         Issue::error(format!("`{class_name}` needs its {arguments}."))
             .with_annotation(Annotation::primary(span).with_message(format!("`{class_name}` has type parameters")))
-            .with_note("A type, `new` and a static member name the type arguments of a generic class.")
+            .with_note("A type and a static member name the type arguments of a generic class.")
             .with_help(format!("{help}: `{class_name}<{parameters}>`.")),
     );
 

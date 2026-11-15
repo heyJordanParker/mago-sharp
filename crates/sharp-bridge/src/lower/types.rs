@@ -22,6 +22,7 @@ use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::module::dispatcher;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
+use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
@@ -52,6 +53,7 @@ use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::takes_array;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
+use mago_codex::visibility::Visibility;
 use mago_database::file::File;
 use mago_names::IMPORT;
 use mago_names::LEAN_FUNCTION;
@@ -484,6 +486,63 @@ impl<'analysis> Types<'analysis> {
         )
     }
 
+    /// What reflection reads of the fully qualified class name `class` when it is a PHP# class-like, spec section 25:
+    /// a first line of its type parameters' names joined by `, `, then a line per property and method it declares,
+    /// `$tags set private: List<string>` and `first virtual: Function<$0?(List<$0>, int)>`, a property with what writes
+    /// it as [`setter_text`] spells it, then `virtual` for a member a subclass may replace and `override` for one named
+    /// in `overrides`, the names, a property's without `$`, of the members the declaration writes `override` on, and
+    /// each type as [`Parameter::Declared`] writes it. A type a declaration leaves out is `Any?`, and so is a plain PHP
+    /// type a member takes over that PHP# can't write. A member of an enum or a final class is never `virtual`, and a
+    /// hidden method, as `#statics`, has no line.
+    pub(crate) fn declared(&self, class: &[u8], overrides: &[&[u8]]) -> Option<String> {
+        let metadata = self.codebase.get_class_like(class).filter(|metadata| metadata.flags.is_sharp())?;
+
+        let written = |r#type: Option<&TypeMetadata>| match r#type {
+            Some(r#type) if is_written_in_sharp(&r#type.type_union) => {
+                text(&r#type.type_union, self.codebase, Parameter::Declared)
+            }
+            _ => "Any?".to_owned(),
+        };
+        let overridden = |name: &[u8]| overrides.iter().any(|written| written.eq_ignore_ascii_case(name));
+        // No subclass replaces a member of an enum or a final class, a struct's and an event's among them.
+        let sealed = self.codebase.is_enum_or_final_class(class);
+        let names: Vec<String> = metadata.template_types.keys().map(ToString::to_string).collect();
+        let mut lines = vec![names.join(", ")];
+        for property in metadata.properties.values() {
+            // A closed PHP# property is final in the codex, spec section 22, and a private one is never inherited.
+            let open = !sealed && !property.flags.is_final() && property.read_visibility != Visibility::Private;
+            lines.push(format!(
+                "{}{}{}{}: {}",
+                property.name.0,
+                setter_text(property),
+                if open { " virtual" } else { "" },
+                if overridden(&property.name.0.as_bytes()[1..]) { " override" } else { "" },
+                written(property.type_metadata.as_ref())
+            ));
+        }
+        // Reflection never reads a hidden method, as `#statics`, so it has no line.
+        let methods = metadata.methods.iter().filter(|method| !method.as_bytes().contains(&b'#'));
+        for method in methods.filter_map(|method| self.codebase.get_method(class, method.as_bytes())) {
+            let parameters: Vec<String> =
+                method.parameters.iter().map(|parameter| written(parameter.type_metadata.as_ref())).collect();
+            // A closed PHP# method is final in the codex, as a private one and a constructor are never replaced.
+            let open = !sealed
+                && method.method_metadata.as_ref().is_some_and(|declared| {
+                    !declared.is_final && !declared.is_constructor && declared.visibility != Visibility::Private
+                });
+            lines.push(format!(
+                "{}{}{}: Function<{}({})>",
+                method.original_name,
+                if open { " virtual" } else { "" },
+                if overridden(method.original_name.as_bytes()) { " override" } else { "" },
+                written(method.return_type_metadata.as_ref()),
+                parameters.join(", ")
+            ));
+        }
+
+        Some(lines.join("\n"))
+    }
+
     /// The type arguments the header of the fully qualified class name `class` gives each generic parent and
     /// interface, as a type text list of those classes with their type arguments, each type parameter of `class`
     /// written as `$` and its index, and sorted by their text: `App.PaginatedList<App.Order>` for
@@ -824,9 +883,11 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The type text of `result`, each class's type parameter as `$i` and the function's own as `#i`, or `None` when it
-    /// is missing or PHP# can't write it.
+    /// is missing, `never`, which no call returns, or PHP# can't write it.
     fn result_text(&self, result: Option<&TUnion>) -> Option<String> {
-        result.filter(|result| is_written_in_sharp(result)).map(|result| text(result, self.codebase, Parameter::Index))
+        result
+            .filter(|result| !result.is_never() && is_written_in_sharp(result))
+            .map(|result| text(result, self.codebase, Parameter::Index))
     }
 
     /// The type text `Function<R(P1, P2) uses E1, E2>` of the PHP# function `function`, with `parameters` and `result`,
@@ -841,8 +902,7 @@ impl<'analysis> Types<'analysis> {
         parameters: &[Option<&TUnion>],
         result: Option<&TUnion>,
     ) -> Option<String> {
-        let never = result.is_some_and(TUnion::is_never);
-        if !parameters.iter().copied().chain([result.filter(|_| !never)]).flatten().all(is_written_in_sharp) {
+        if !parameters.iter().copied().chain([result]).flatten().all(is_written_in_sharp) {
             return None;
         }
         let mut effects: Vec<String> = self
@@ -857,9 +917,8 @@ impl<'analysis> Types<'analysis> {
             r#type.map_or_else(|| "Any?".to_owned(), |r#type| text(r#type, self.codebase, Parameter::Index))
         };
         let parameters: Vec<String> = parameters.iter().map(|parameter| written(*parameter)).collect();
-        let result = if never { "never".to_owned() } else { written(result) };
 
-        Some(format!("Function<{result}({}){}>", parameters.join(", "), uses_text(&effects)))
+        Some(format!("Function<{}({}){}>", written(result), parameters.join(", "), uses_text(&effects)))
     }
 
     /// The metadata of a function the engine reads on a call, whose own bounds follow `class_bounds`.
@@ -2176,6 +2235,19 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
+    /// Whether the parameter named at `span` of a method of `class` is variadic in the codebase, as the parameter an
+    /// override writes as the `List` a parent's variadic one arrives as is, spec section 7.
+    pub(crate) fn is_variadic_parameter(&self, class: &[u8], span: Span) -> bool {
+        self.codebase.get_class_like(class).is_some_and(|class_like| {
+            class_like
+                .methods
+                .iter()
+                .filter_map(|method| self.codebase.function_likes.get(&(class_like.name, *method)))
+                .flat_map(|method| &method.parameters)
+                .any(|parameter| parameter.name_span == span && parameter.flags.is_variadic())
+        })
+    }
+
     /// Whether the static property `property` of `class` runs accessors: a computed one, or one with an accessor body or
     /// an observer. PHP has no hooks on a static, so its class holds them as the hidden static methods `name#get` and
     /// `name#set`, which every read and write of it calls.
@@ -2659,6 +2731,9 @@ enum Parameter {
     Index,
     /// A class's as [`Parameter::Index`] writes it, and a method's as its bound, which a call from plain PHP gives it.
     Bound,
+    /// As reflection reads a declaration, spec section 25: a class's as [`Parameter::Index`] writes it, a method's as
+    /// its name and its bound, `TOther : App.Mark`, and a tuple's elements with their names, `[string method, int count]`.
+    Declared,
 }
 
 /// `r#type` in the one PHP# spelling the engine parses, the type text of php-sharp's decision 72.
@@ -2831,7 +2906,7 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
     let parameter_text =
         |name: Word, defining_entity: GenericParent, bound: &dyn Fn() -> String| match (parameter, defining_entity) {
             (Parameter::Any, _) => "Any?".to_owned(),
-            (Parameter::Index | Parameter::Bound, GenericParent::ClassLike(class)) => {
+            (Parameter::Index | Parameter::Bound | Parameter::Declared, GenericParent::ClassLike(class)) => {
                 let index = codebase
                     .get_class_like(class.as_bytes())
                     .and_then(|class| class.template_types.get_index_of(&name))
@@ -2848,8 +2923,21 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
                 format!("#{index}")
             }
             (Parameter::Bound, GenericParent::FunctionLike(_)) => bound(),
+            (Parameter::Declared, GenericParent::FunctionLike(_)) => format!("{name} : {}", bound()),
         };
 
+    // Spec section 7: `never` is a whole type, which the engine's type text names as PHP# writes it.
+    if atomic.is_never() {
+        return "never".to_owned();
+    }
+    // Reflection reads `Self` as the class of the class value it reads the declaration on, spec section 25, as PHP binds
+    // `static`, so an inherited member's `Self` is the subclass.
+    if matches!(parameter, Parameter::Declared)
+        && let TAtomic::Object(TObject::Named(object)) = atomic
+        && object.is_static
+    {
+        return "Self".to_owned();
+    }
     let Some(sharp_type) = get_sharp_type(atomic) else {
         unreachable!("the analyzer refuses a type PHP# can't write, not `{}`", atomic.get_id())
     };
@@ -2861,6 +2949,14 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
         SharpType::String => "string".to_owned(),
         SharpType::Void => "void".to_owned(),
         SharpType::Object => "Object".to_owned(),
+        // A collection written without type arguments, as `Class<List>` names it, resolves to the engine's class of it,
+        // and its text is the built-in type alone, which takes the collection with any type arguments, spec section 25.
+        SharpType::Class(name, arguments)
+            if let Some(collection) = raw_collection(name)
+                && arguments.iter().all(TUnion::from_unspecified_template) =>
+        {
+            collection.to_owned()
+        }
         SharpType::Enum(name) | SharpType::Class(name, []) => class_text(name, codebase),
         // A generic class written without type arguments, as `Class<Box>` names it, gets the ones the analysis fills in
         // from its bounds, and its text is the class alone, which takes the class with any type arguments.
@@ -2872,7 +2968,21 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
         SharpType::Set(element_type) => format!("Set<{}>", type_text(element_type)),
         SharpType::Map(key, value) => format!("Map<{}>", list(&mut [key, value].into_iter())),
         SharpType::Iterable(value) => format!("Iterable<{}>", type_text(value)),
-        // A tuple's element names are the checker's, so the engine reads only its element types.
+        // A tuple's element names are the checker's, so the engine reads only its element types, but where reflection
+        // reads them.
+        SharpType::Tuple(tuple) if matches!(parameter, Parameter::Declared) => {
+            let elements: Vec<String> = tuple
+                .tuple_elements()
+                .into_iter()
+                .flatten()
+                .map(|(element, name)| match name {
+                    Some(name) => format!("{} {name}", type_text(element)),
+                    None => type_text(element),
+                })
+                .collect();
+
+            format!("[{}]", elements.join(", "))
+        }
         SharpType::Tuple(tuple) => {
             format!("[{}]", list(&mut tuple.tuple_elements().into_iter().flatten().map(|(element, _)| element)))
         }
@@ -2884,7 +2994,10 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
                 TClassLikeString::Literal { value } => class_text(*value, codebase),
                 TClassLikeString::OfType { constraint, .. } => text(constraint, codebase, parameter),
                 TClassLikeString::Generic { parameter_name, defining_entity, constraint, .. } => {
-                    parameter_text(*parameter_name, *defining_entity, &|| atomic_text(constraint, codebase, parameter))
+                    // Through the union's text, which writes an unbounded constraint, `mixed`, as `Any?`.
+                    parameter_text(*parameter_name, *defining_entity, &|| {
+                        text(&TUnion::from_atomic(constraint.as_ref().clone()), codebase, parameter)
+                    })
                 }
                 TClassLikeString::Any { .. } => "Object".to_owned(),
             };
@@ -2913,6 +3026,38 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
 /// The `uses` of a function type text, ` uses E1, E2`, for `effects`, which are sorted, or nothing for none.
 fn uses_text(effects: &[String]) -> String {
     if effects.is_empty() { String::new() } else { format!(" uses {}", effects.join(", ")) }
+}
+
+/// What writes `property`, as reflection reads it, spec section 25: ` set` or ` init` and the access modifier that
+/// reaches it, ` set private` or ` init protected`, and nothing for a get-only property, which has neither.
+fn setter_text(property: &PropertyMetadata) -> String {
+    let get_only = property.flags.is_readonly()
+        || (property.flags.is_virtual_property() && !property.hooks.contains_key(&Word::from("set")));
+    if get_only && !property.flags.is_init() {
+        return String::new();
+    }
+    let accessor = if property.flags.is_init() { "init" } else { "set" };
+    let reach = if property.flags.is_internal_set()
+        || (property.flags.is_internal_reach() && property.write_visibility == property.read_visibility)
+    {
+        "internal"
+    } else {
+        match property.write_visibility {
+            Visibility::Public => "public",
+            Visibility::Protected => "protected",
+            Visibility::Private => "private",
+        }
+    };
+
+    format!(" {accessor} {reach}")
+}
+
+/// The built-in collection type whose engine class is `name`: `List` for `Sharp\List`, `Map` for `Sharp\Map` and `Set`
+/// for `Sharp\Set`, spec section 12. None for any other class.
+fn raw_collection(name: Word) -> Option<&'static str> {
+    ["List", "Map", "Set"].into_iter().find(|collection| {
+        name.as_bytes().strip_prefix(b"Sharp\\").is_some_and(|short| short.eq_ignore_ascii_case(collection.as_bytes()))
+    })
 }
 
 /// The full dotted name of the class `name`, as it is declared.

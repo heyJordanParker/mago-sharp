@@ -6,11 +6,14 @@ use mago_span::Span;
 use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::ComputedProperty;
+use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Extension;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::FunctionLikeReturnTypeHint;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::Indexer;
+use mago_syntax::cst::IndexerAccessor;
 use mago_syntax::cst::Keyword;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Method;
@@ -223,6 +226,69 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             uses: None,
             body: &operator.body,
             returns_value: true,
+            returns_by_reference: false,
+        })
+    }
+
+    /// The parts of an indexer's `get` or `set`, spec section 6, as the `ArrayAccess` method it runs as: `offsetGet`,
+    /// which takes the indexer's parameters and returns its type, or `offsetSet`, which takes them and then `value`, of
+    /// the indexer's type, and returns nothing. Semantics refuses an accessor of any other name, which has none.
+    #[must_use]
+    pub fn of_indexer_accessor<A>(
+        arena: &'arena A,
+        indexer: &'ast Indexer<'arena>,
+        accessor: &'ast IndexerAccessor<'arena>,
+    ) -> Option<Self>
+    where
+        A: Arena,
+        'arena: 'ast,
+    {
+        let span = accessor.name.span;
+        let (name, parameter_list, return_type): (
+            &'static [u8],
+            &'ast FunctionLikeParameterList<'arena>,
+            Hint<'arena>,
+        ) = match accessor.name.value {
+            b"get" => (b"offsetGet", &indexer.parameter_list, indexer.hint.clone()),
+            b"set" => {
+                let value = FunctionLikeParameter {
+                    attribute_lists: Sequence::empty(),
+                    modifiers: Sequence::empty(),
+                    hint: Some(indexer.hint.clone()),
+                    ampersand: None,
+                    ellipsis: None,
+                    variable: DirectVariable { span, name: b"value" },
+                    default_value: None,
+                    hooks: None,
+                    behaviors: None,
+                };
+                let own = &indexer.parameter_list;
+                let parameters = arena.alloc_slice_fill_iter(own.parameters.iter().cloned().chain([value]));
+                let list: &'arena FunctionLikeParameterList<'arena> = arena.alloc(FunctionLikeParameterList {
+                    left_parenthesis: own.left_parenthesis,
+                    parameters: TokenSeparatedSequence::from_slices(parameters, own.parameters.tokens),
+                    right_parenthesis: own.right_parenthesis,
+                });
+
+                (b"offsetSet", list, Hint::Void(LocalIdentifier { span, value: b"void" }))
+            }
+            _ => return None,
+        };
+
+        Some(Self {
+            name,
+            name_span: span,
+            span: accessor.span(),
+            attribute_lists: &indexer.attribute_lists,
+            modifiers: &indexer.modifiers,
+            type_parameters: None,
+            parameter_list,
+            return_type_hint: Some(arena.alloc(FunctionLikeReturnTypeHint { colon: None, hint: return_type })),
+            readonly: None,
+            on: None,
+            uses: None,
+            body: &accessor.body,
+            returns_value: name == b"offsetGet",
             returns_by_reference: false,
         })
     }

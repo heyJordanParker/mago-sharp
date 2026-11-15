@@ -469,18 +469,30 @@ pub fn compiled_path(root: &Path, source: &Path) -> Result<Option<PathBuf>, Data
 
 /// Returns `true` when the compiled file `bytes` cannot stand for its source any more.
 ///
-/// That is when it is no compiled file this bridge reads, another checker build wrote it, or one of its inputs under
-/// `root` differs from its stamp. An input differs when its size or hash changed, when it is gone, or when a file
-/// appeared where it was absent.
+/// That is when another checker build wrote it, or its [inputs changed](inputs_changed).
 ///
 /// # Errors
 ///
 /// Returns the error of reading an input.
 pub fn is_stale(root: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
-    let Ok(header) = header(bytes) else {
+    if header(bytes).is_ok_and(|header| header.checker != BUILD_ID.to_be_bytes()) {
         return Ok(true);
-    };
-    if header.checker != BUILD_ID.to_be_bytes() {
+    }
+
+    inputs_changed(root, bytes)
+}
+
+/// Returns `true` when the compiled file `bytes` is no compiled file this bridge reads, or one of its inputs changed.
+///
+/// An input under `root` changed when it differs from its stamp, as the engine checks a compiled file's inputs before
+/// it runs one, whichever checker build wrote it: when its size or hash changed, when it is gone, or when a file
+/// appeared where it was absent.
+///
+/// # Errors
+///
+/// Returns the error of reading an input.
+pub fn inputs_changed(root: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
+    if header(bytes).is_err() {
         return Ok(true);
     }
 

@@ -943,17 +943,17 @@ fn the_default_class_likes_are_generated_from_the_standard_library_and_the_prelu
     );
 }
 
-/// Spec section 31: a bare `Error` in a `.sharp` file always names the standard library's interface, whatever the file
-/// declares or its namespace holds, while `Result` names the standard library's enum unless a class-like of the file's
-/// namespace wins over it, as the other default classes do. A case written through `Result` resolves under the enum.
+/// Spec sections 23 and 31: a bare `Error` and a bare `Result` in a `.sharp` file name the standard library's
+/// interface and enum unless a class-like of the file's namespace wins over them, as every default class is shadowed,
+/// as in Kotlin and Java. A case written through `Result` resolves under the enum.
 #[test]
-fn error_always_names_the_standard_interface_and_result_is_a_default_class() {
+fn error_and_result_are_default_classes_a_namespace_class_shadows() {
     let namespace_classes = NamespaceClasses::new([("App\\Error", true), ("Shop\\Result", true)]);
 
     for (code, error, result) in [
         (
             "namespace App;\n\nclass Paths\n{\n    public Result<int, Error> run(Error e) => Result.Err(e);\n}\n",
-            "Sharp\\Error",
+            "App\\Error",
             "Sharp\\Result",
         ),
         (

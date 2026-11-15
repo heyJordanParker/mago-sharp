@@ -1574,7 +1574,7 @@ where
     }
 
     // TODO: we should analyze calls to `offsetSet` and `offsetGet` here.
-    let Some((_array_access_classes, expected_key_type, mut resulting_value_type)) =
+    let Some((array_access_classes, expected_key_type, mut resulting_value_type)) =
         get_array_access_classes(context, named_object)
     else {
         context.collector.report_with_code(
@@ -1590,6 +1590,29 @@ where
 
         return get_never();
     };
+
+    // Spec section 6: a PHP# indexer without `set` is read-only, as C#'s is. Its `offsetSet` is the one the bridge
+    // writes, which throws, so no source declares it.
+    if assign_value_type.is_some()
+        && array_access_classes.iter().any(|class| {
+            class.flags.is_sharp()
+                && context
+                    .codebase
+                    .get_method(class.name.as_bytes(), b"offsetSet")
+                    .is_some_and(|method| !method.flags.is_user_defined())
+        })
+    {
+        let name = display_atomic(context, named_object);
+        context.collector.report_with_code(
+            IssueCode::InvalidArrayAccess,
+            Issue::error(format!("`{name}`'s indexer has no `set`, so a `{name}` is read by index, never written."))
+                .with_annotation(Annotation::primary(span).with_message("Written here."))
+                .with_help(format!("Declare a `set` in `{name}`'s indexer, or write through one of its methods.")),
+        );
+        *has_valid_expected_index = true;
+
+        return get_never();
+    }
 
     let mut union_comparison_result = ComparisonResult::for_dialect(context.dialect);
     let index_type_contained_by_expected = is_contained_by(

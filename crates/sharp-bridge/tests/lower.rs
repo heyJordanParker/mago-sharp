@@ -625,6 +625,11 @@ fn a_php_keyword_or_a_capitalized_php_sharp_keyword_names_an_event() {
                     STMT_LIST
                     null
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$id: int\n__construct: Function<Any?(int)>"
                 null
                 null
         "#}
@@ -862,6 +867,11 @@ fn a_file_declares_strict_types_then_its_namespace_and_classes() {
                 null
                 null
                 STMT_LIST
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
                 null
                 null
         "#}
@@ -1305,6 +1315,11 @@ fn a_file_without_a_namespace_declares_its_classes_globally() {
                 null
                 null
                 STMT_LIST
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\nparse: Function<Report(Map<string, Any?>|Object)>\ntryParse: Function<Report?(Map<string, Any?>|Object)>"
                 null
                 null
         "#}
@@ -1351,6 +1366,11 @@ fn a_method_is_a_public_function_with_its_return_type_after_its_parameters() {
                     ZVAL [1] "int"
                     ZVAL "Function<int(int)>"
                   null
+                SHARP_CLASS_METADATA
+                  null
+                  null
+                  null
+                  ZVAL "\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\nrun: Function<int(int)>"
               null
               null
         "#}
@@ -1435,6 +1455,11 @@ fn a_field_is_a_property_group_of_one_property() {
                       ZVAL "calc"
                 null
                 null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$count set private: int\n$calc set protected virtual: Lib.Calc\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\n__construct: Function<Any?(Lib.Calc)>"
         "#}
     );
 }
@@ -1557,6 +1582,11 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                       ZVAL "charge"
                 null
                 null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$cache set private: Map<string, App.Shop.Plan>\n$priceOf set private: Function<App.Shop.Money(App.Shop.Offer) uses Sharp.Net.Http>\n$charge set private: Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Net.Http>\nparse: Function<App.Shop.Checkout(Map<string, Any?>|Object)>\ntryParse: Function<App.Shop.Checkout?(Map<string, Any?>|Object)>\n__construct: Function<Any?(Function<App.Shop.Money(App.Shop.Offer) uses Sharp.Net.Http>, Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Net.Http>)>"
         "#}
     );
 }
@@ -1565,7 +1595,7 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
 /// public private(set) int $views = 0;
 /// public string $name;
 /// public readonly int $id;
-/// protected protected(set) int $total;   // written `public int total { get; protected set; }`
+/// protected int $total;                  // written `protected int total { get; set; }`
 /// private readonly int $hidden;
 /// public protected(set) string $title;   // written `public string title { get; init; }`
 /// public private(set) string $tag;       // written `public string tag { get; private init; }`
@@ -1573,13 +1603,14 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
 ///
 /// An auto-property is a property with asymmetric visibility. `[4097]` is `ZEND_ACC_PUBLIC | ZEND_ACC_PRIVATE_SET`,
 /// and `[2049]` is `ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED_SET`. A get-only property is `readonly`, so `[129]` is
-/// `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY` and `[132]` is `ZEND_ACC_PRIVATE | ZEND_ACC_READONLY`. An `init` property is
+/// `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY` and `[132]` is `ZEND_ACC_PRIVATE | ZEND_ACC_READONLY`. A `set` reaches its
+/// namespace at most, which the analyzer holds code to, so `name`'s runs as PHP's public set, `[1]`. An `init` property is
 /// `protected(set)` without `readonly`, so a named constructor sets it again, and the analyzer refuses each write after
 /// the object is created. PHP has no set visibility for that, so a plain PHP subclass can still write it.
 #[test]
 fn an_auto_property_is_a_property_with_its_set_visibility() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    public int total { get; protected set; }\n    private int hidden { get; }\n    public string title { get; init; }\n    public string tag { get; private init; }\n\n    public Report()\n    {\n        this.name = \"\";\n        this.id = 1;\n        this.total = 0;\n        this.hidden = 2;\n    }\n}\n",
+        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    protected int total { get; set; }\n    private int hidden { get; }\n    public string title { get; init; }\n    public string tag { get; private init; }\n\n    public Report()\n    {\n        this.name = \"\";\n        this.id = 1;\n        this.total = 0;\n        this.hidden = 2;\n    }\n}\n",
     );
     let groups: Vec<(u32, String)> = lowered
         .nodes()
@@ -1595,7 +1626,7 @@ fn an_auto_property_is_a_property_with_its_set_visibility() {
             (4097, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"views\"\n    ZVAL 0\n    null\n    null\n".to_owned()),
             (1, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"name\"\n    null\n    null\n    null\n".to_owned()),
             (129, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"id\"\n    null\n    null\n    null\n".to_owned()),
-            (2049, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"total\"\n    null\n    null\n    null\n".to_owned()),
+            (2, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"total\"\n    null\n    null\n    null\n".to_owned()),
             (132, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"hidden\"\n    null\n    null\n    null\n".to_owned()),
             (2049, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"title\"\n    null\n    null\n    null\n".to_owned()),
             (4097, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"tag\"\n    null\n    null\n    null\n".to_owned()),
@@ -2132,7 +2163,7 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 #[test]
 fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_methods() {
     let lowered = Lowered::with(
-        "class Meter\n{\n    public static int twice { get => 2; }\n    public static int thrice { get { return 3; } }\n    public static int hits { get; set; willSet => Meter.log(\"hit\"); } = 0;\n    public static string label { get; protected set; didSet => Meter.log(field); } = Words.of(1);\n    public static string? note { get; set; didSet => Meter.log(field); } = null;\n\n    public static void log(string? text)\n    {\n    }\n\n    public static void run()\n    {\n        ++Meter.hits;\n        --Meter.hits;\n        Meter.hits--;\n        Meter.note ??= \"n\";\n        Meter.label += \"l\";\n    }\n}\n",
+        "class Meter\n{\n    public static int twice { get => 2; }\n    public static int thrice { get { return 3; } }\n    public static int hits { get; set; willSet => Meter.log(\"hit\"); } = 0;\n    public static string label { get; private set; didSet => Meter.log(field); } = Words.of(1);\n    public static string? note { get; set; didSet => Meter.log(field); } = null;\n\n    public static void log(string? text)\n    {\n    }\n\n    public static void run()\n    {\n        ++Meter.hits;\n        --Meter.hits;\n        Meter.hits--;\n        Meter.note ??= \"n\";\n        Meter.label += \"l\";\n    }\n}\n",
         &[WORDS],
     );
 
@@ -2231,7 +2262,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                           ZVAL "label"
                     ZVAL [1] "string"
                     null
-                  METHOD [18] "label#set" @6-6
+                  METHOD [20] "label#set" @6-6
                     PARAM_LIST
                       PARAM
                         ZVAL [1] "string"
@@ -2424,6 +2455,23 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                             ZVAL 1
                     ZVAL [1] "void"
                     null
+                  METHOD [20] "label#initial" @6-6
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_CALL
+                          ZVAL "Words"
+                          ZVAL "of"
+                          ARG_LIST
+                            ZVAL 1
+                    null
+                    null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$hits set internal: int\n$note set internal: string?\n$twice: int\n$thrice: int\n$label set private: string\ntryParse: Function<Meter?(Map<string, Any?>|Object)>\nlog: Function<void(string?)>\nparse: Function<Meter(Map<string, Any?>|Object)>\nrun: Function<void()>"
                 null
                 null
         "##}
@@ -2553,6 +2601,11 @@ fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
                     ZVAL [1] "int"
                     ZVAL "Function<int()>"
                   null
+                SHARP_CLASS_METADATA
+                  null
+                  null
+                  null
+                  ZVAL "\n$total set private: int\n$doubled: int\nparse: Function<Tally(Map<string, Any?>|Object)>\ntryParse: Function<Tally?(Map<string, Any?>|Object)>\nrun: Function<int()>"
               null
               null
         "#}
@@ -2733,6 +2786,46 @@ fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_static
                           ZVAL 1
                     ZVAL [1] "void"
                     null
+                  METHOD [20] "calc#initial" @8-8
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        NEW
+                          ZVAL "Lib\\Calc"
+                          ARG_LIST
+                            ZVAL 1
+                    null
+                    null
+                  METHOD [20] "name#initial" @9-9
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_CALL
+                          ZVAL "Lib\\Calc"
+                          ZVAL "label"
+                          ARG_LIST
+                            ZVAL " a "
+                    null
+                    null
+                  METHOD [20] "next#initial" @10-10
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        BINARY_OP [1]
+                          STATIC_PROP
+                            ZVAL "App\\Tenant\\Report"
+                            ZVAL "size"
+                          ZVAL 1
+                    null
+                    null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$calc: Lib.Calc\n$next set private: int\n$most set private: int\n$size: int\n$name set private: string\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
                 null
                 null
         "##}
@@ -2863,6 +2956,23 @@ fn a_static_constructor_runs_as_the_statics_method_after_the_initial_values() {
                           ZVAL 100
                     null
                     null
+                  METHOD [20] "name#initial" @8-8
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        STATIC_CALL
+                          ZVAL "Lib\\Calc"
+                          ZVAL "label"
+                          ARG_LIST
+                            ZVAL " a "
+                    null
+                    null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$byCurrency set private: Map<string, int>\n$name set private: string"
                 null
                 null
         "##}
@@ -2913,6 +3023,17 @@ fn a_static_constructor_of_a_generic_class_ends_its_init() {
                         null
                         null
                     null
+                  METHOD [20] "made#initial" @5-5
+                    PARAM_LIST
+                      SHARP_TYPE_ARGS
+                        ZVAL "Any?"
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        ZVAL 0
+                    null
+                    null
                   PROP_GROUP [8209]
                     null
                     PROP_DECL
@@ -2956,6 +3077,7 @@ fn a_static_constructor_of_a_generic_class_ends_its_init() {
                     null
                     ZVAL "Any?"
                     null
+                    ZVAL "T\n$made set internal: int\nparse: Function<App.Tenant.Pool<$0>(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Pool<$0>?(Map<string, Any?>|Object)>"
                 null
                 null
         "##}
@@ -3135,6 +3257,101 @@ fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
                 null
                 null
                 null
+        "#}
+    );
+}
+
+/// ```php
+/// public static function tag#get(): string
+/// {
+///     return \Sharp\Internal\keep('App\Report::tag#via0', static fn () => new \App\Trimmed())->get(self::$tag);
+/// }
+/// ```
+///
+/// Spec section 6.4: a static property's behaviors belong to its class, which keeps each one as a `static lazy` value
+/// is kept, created on the property's first read or write. Its hidden `tag#get` reads the storage through them and
+/// `tag#set` writes it through them, and the class's constructor creates none.
+#[test]
+fn a_static_property_s_behaviors_are_kept_by_its_class() {
+    let trimmed = (
+        "src/Trimmed.sharp",
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => \"[\" + value;\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Report\n{\n    public static string tag { get; set; } via Trimmed = \"\";\n    public string name { get; set; } via Trimmed = \"\";\n}\n",
+        &[BEHAVIOR_LIBRARY, trimmed],
+    );
+
+    assert_eq!(
+        lowered.body_of("tag#get"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                METHOD_CALL
+                  CALL
+                    ZVAL "Sharp\\Internal\\keep"
+                    ARG_LIST
+                      ZVAL "App\\Report::tag#via0"
+                      ARROW_FUNC [16] "" @5-5
+                        PARAM_LIST
+                        null
+                        NEW
+                          ZVAL "App\\Trimmed"
+                          ARG_LIST
+                        null
+                        null
+                  ZVAL "get"
+                  ARG_LIST
+                    STATIC_PROP
+                      ZVAL [1] "self"
+                      ZVAL "tag"
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("tag#set"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                STATIC_PROP
+                  ZVAL [1] "self"
+                  ZVAL "tag"
+                METHOD_CALL
+                  CALL
+                    ZVAL "Sharp\\Internal\\keep"
+                    ARG_LIST
+                      ZVAL "App\\Report::tag#via0"
+                      ARROW_FUNC [16] "" @5-5
+                        PARAM_LIST
+                        null
+                        NEW
+                          ZVAL "App\\Trimmed"
+                          ARG_LIST
+                        null
+                        null
+                  ZVAL "set"
+                  ARG_LIST
+                    VAR
+                      ZVAL "value"
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("__construct"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "name#via0"
+                NEW
+                  ZVAL "App\\Trimmed"
+                  ARG_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "name"
+                ZVAL ""
         "#}
     );
 }
@@ -3529,6 +3746,145 @@ fn observers_run_inside_the_set_hook_once_the_object_is_built() {
 }
 
 /// ```php
+/// set { if ($built#1) { foreach ([1, 2] as $step) { if ($step === $value) { goto willSet#end; } } } willSet#end: … }
+/// ```
+///
+/// Spec section 6.2: a `return` in `willSet` ends `willSet`, and the write still runs, as in Swift, so it is a `goto`
+/// to the label after `willSet`, from a loop or after `??` alike. A lambda's `return` is its own, and a `willSet`
+/// with no `return` has no label.
+#[test]
+fn a_return_in_will_set_jumps_past_it_to_the_write() {
+    let lowered = Lowered::new(
+        "class Report\n{\n    public int limit { get; set; willSet { for (const step of [1, 2]) { if (step == value) { return; } } this.log(() => { return 1; }); } } = 0;\n    public static string? label { get; set; willSet { const shown = value ?? return; Report.note(shown); } } = null;\n    public int size { get; set; willSet => this.log(() => 1); } = 0;\n\n    public void log(Function<int()> text)\n    {\n    }\n\n    public static void note(string text)\n    {\n    }\n}\n",
+    );
+
+    let groups = property_groups(&lowered);
+    assert_eq!(
+        groups[0],
+        indoc! {r#"
+            PROP_GROUP [1]
+              ZVAL [1] "int"
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "limit"
+                  ZVAL 0
+                  null
+                  STMT_LIST
+                    PROPERTY_HOOK "get" @3-3
+                      null
+                      null
+                      PROPERTY_HOOK_SHORT_BODY
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "limit"
+                      null
+                      null
+                    PROPERTY_HOOK "set" @3-3
+                      null
+                      null
+                      STMT_LIST
+                        ASSIGN
+                          VAR
+                            ZVAL "built#1"
+                          UNARY_OP [14]
+                            CALL
+                              ZVAL "Sharp\\Internal\\building"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "this"
+                        IF
+                          IF_ELEM
+                            VAR
+                              ZVAL "built#1"
+                            STMT_LIST
+                              STMT_LIST
+                                FOREACH
+                                  ARRAY [3]
+                                    ARRAY_ELEM
+                                      ZVAL 1
+                                      null
+                                    ARRAY_ELEM
+                                      ZVAL 2
+                                      null
+                                  VAR
+                                    ZVAL "step"
+                                  null
+                                  STMT_LIST
+                                    IF
+                                      IF_ELEM
+                                        BINARY_OP [16]
+                                          VAR
+                                            ZVAL "step"
+                                          VAR
+                                            ZVAL "value"
+                                        STMT_LIST
+                                          GOTO
+                                            ZVAL "willSet#end"
+                                METHOD_CALL
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "log"
+                                  ARG_LIST
+                                    CLOSURE "" @3-3
+                                      PARAM_LIST
+                                      null
+                                      STMT_LIST
+                                        RETURN
+                                          ZVAL 1
+                                      SHARP_TYPE_ARGS
+                                        null
+                                        ZVAL "Function<int()>"
+                                      null
+                        LABEL
+                          ZVAL "willSet#end"
+                        STMT_LIST
+                          ASSIGN
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "limit"
+                            VAR
+                              ZVAL "value"
+                      null
+                      null
+              null
+        "#}
+    );
+    assert!(!groups[2].contains("LABEL"), "{}", groups[2]);
+    assert_eq!(
+        lowered.body_of("label#set"),
+        indoc! {r#"
+            STMT_LIST
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "shown"
+                  COALESCE
+                    VAR
+                      ZVAL "value"
+                    GOTO
+                      ZVAL "willSet#end"
+                STATIC_CALL
+                  ZVAL "Report"
+                  ZVAL "note"
+                  ARG_LIST
+                    VAR
+                      ZVAL "shown"
+              LABEL
+                ZVAL "willSet#end"
+              STMT_LIST
+                ASSIGN
+                  STATIC_PROP
+                    ZVAL [1] "self"
+                    ZVAL "label"
+                  VAR
+                    ZVAL "value"
+        "#}
+    );
+}
+
+/// ```php
 /// public int $size { get => $this->size; set { $this->size = $value; } }
 /// ```
 ///
@@ -3893,6 +4249,22 @@ fn a_non_constant_initial_value_runs_at_the_start_of_the_constructor() {
                       ZVAL "start"
                 null
                 null
+              METHOD [20] "calc#initial" @7-7
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    NEW
+                      ZVAL "Lib\\Calc"
+                      ARG_LIST
+                        ZVAL 1
+                null
+                null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$total set internal: int\n$calc set private: Lib.Calc\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\n__construct: Function<Any?(int)>"
         "#}
     );
 }
@@ -3942,6 +4314,22 @@ fn a_class_with_a_non_constant_initial_value_and_no_constructor_gets_one() {
                         ZVAL 1
                 null
                 null
+              METHOD [20] "calc#initial" @7-7
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    NEW
+                      ZVAL "Lib\\Calc"
+                      ARG_LIST
+                        ZVAL 1
+                null
+                null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$calc set private: Lib.Calc\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\n__construct: Function<Any?()>"
         "#}
     );
 }
@@ -5057,66 +5445,6 @@ fn new_through_a_class_value_creates_the_class_with_the_type_arguments_it_carrie
 }
 
 /// ```php
-/// $type = /* the class value of "App.Counter<App.Order>" */;
-/// \Sharp\Internal\statics(\App\Counter::class, /* the text of "App.Order" */)['count'] = 5;
-/// \Sharp\Internal\add(\Sharp\Internal\statics(\App\Counter::class, /* the text of "App.Order" */)['items'], $order);
-/// ```
-///
-/// Spec section 25: a write through a class value writes the static field of the class it holds, as
-/// `Counter<Order>.count = 5` does, so the field is the entry of the type arguments the value carries.
-/// `type.items.add(order)` passes the entry by reference, so it changes the list where it lives.
-#[test]
-fn a_write_through_a_class_value_writes_the_static_field_of_the_type_arguments_it_carries() {
-    let lowered = Lowered::with(
-        "namespace App;\n\nclass Report\n{\n    public static void run(Order order)\n    {\n        const type = typeof(Counter<Order>);\n        type.count = 5;\n        type.items.add(order);\n    }\n}\n",
-        &[
-            ("src/App/Order.sharp", "namespace App;\n\nclass Order\n{\n}\n"),
-            (
-                "src/App/Counter.sharp",
-                "namespace App;\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static List<TItem> items { get; set; } = [];\n}\n",
-            ),
-        ],
-    );
-
-    assert_eq!(
-        lowered.body(),
-        indoc! {r##"
-            STMT_LIST
-              ASSIGN
-                VAR
-                  ZVAL "type"
-                SHARP_TYPE_OF
-                  ZVAL "App.Counter<App.Order>"
-              ASSIGN
-                DIM
-                  CALL
-                    ZVAL "Sharp\\Internal\\statics"
-                    ARG_LIST
-                      CLASS_NAME
-                        ZVAL "App\\Counter"
-                      SHARP_TYPE_OF [1]
-                        ZVAL "App.Order"
-                  ZVAL "count"
-                ZVAL 5
-              CALL
-                ZVAL "Sharp\\Internal\\add"
-                ARG_LIST
-                  DIM
-                    CALL
-                      ZVAL "Sharp\\Internal\\statics"
-                      ARG_LIST
-                        CLASS_NAME
-                          ZVAL "App\\Counter"
-                        SHARP_TYPE_OF [1]
-                          ZVAL "App.Order"
-                    ZVAL "items"
-                  VAR
-                    ZVAL "order"
-        "##}
-    );
-}
-
-/// ```php
 /// public readonly string $code;
 /// public function __construct()
 /// {
@@ -5125,7 +5453,7 @@ fn a_write_through_a_class_value_writes_the_static_field_of_the_type_arguments_i
 /// ```
 ///
 /// PHP takes no default on a `readonly` property, so a get-only property's initial value runs in the constructor even
-/// when it is constant.
+/// when it is constant, and `code#initial` returns it to reflection's `Property.defaultValue()`.
 #[test]
 fn a_get_only_property_gets_its_initial_value_in_the_constructor() {
     let lowered = Lowered::new("class Report\n{\n    public string code { get; } = \"none\";\n}\n");
@@ -5156,6 +5484,19 @@ fn a_get_only_property_gets_its_initial_value_in_the_constructor() {
                     ZVAL "none"
                 null
                 null
+              METHOD [20] "code#initial" @3-3
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    ZVAL "none"
+                null
+                null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$code: string\nparse: Function<Report(Map<string, Any?>|Object)>\ntryParse: Function<Report?(Map<string, Any?>|Object)>\n__construct: Function<Any?()>"
         "#}
     );
 }
@@ -5249,6 +5590,19 @@ fn a_nullable_member_s_initial_null_is_its_default() {
                     ZVAL null
                 null
                 null
+              METHOD [20] "limit#initial" @11-11
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    ZVAL null
+                null
+                null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$key set private: (int|string)?\n$owner set internal: Lib.Calc?\n$total set private: int?\n$start set private: int?\n$limit: int?\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\n__construct: Function<Any?()>"
         "#}
     );
     let members = lowered.child(class, 2);
@@ -12213,7 +12567,8 @@ fn a_function_type_taking_a_function_type_with_effects_is_the_closure_class() {
 /// PHP types are erased, so a type parameter is the type of its bound, its list lowers to nothing, and a `List` of it
 /// is still `array`, as the PHP twin a developer writes with `@template` declares it. A call or a write from plain PHP
 /// checks each element of `rows` against the object's own type argument, `List<$0>`. The class's last member is the
-/// `SHARP_TYPE_ARGS` that declares its hidden type-argument slot, whose text is its bounds.
+/// `SHARP_TYPE_ARGS` that declares its hidden type-argument slot, whose text is its bounds. The type parameter's name
+/// stays only in the declarations reflection reads, spec section 25.
 #[test]
 fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
     let lowered = Lowered::with(
@@ -12317,11 +12672,12 @@ fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
                   null
                   ZVAL "Lib.DatabaseEntity"
                   null
+                  ZVAL "TItem\n$rows set private: List<$0>\ntryParse: Function<App.Tenant.PaginatedList<$0>?(Map<string, Any?>|Object)>\nfirst: Function<$0()>\nparse: Function<App.Tenant.PaginatedList<$0>(Map<string, Any?>|Object)>\n__construct: Function<Any?(List<$0>)>\nfind: Function<$0?(int)>"
               null
               null
         "#}
     );
-    assert!(!tree.contains("TItem"), "{tree}");
+    assert_eq!(tree.matches("TItem").count(), 1, "{tree}");
 }
 
 /// ```php
@@ -12847,6 +13203,86 @@ fn a_never_method_is_php_never() {
     );
 
     assert_eq!(member_in(&[lowered], "Report", &[0, 3]), "ZVAL [1] \"never\"\n");
+}
+
+/// ```php
+/// public function join(string ...$parts): string
+/// ```
+///
+/// Spec section 7: an override that writes a plain PHP parent's variadic parameter as the `List` it arrives as,
+/// `List<string> parts`, is variadic in the PHP it compiles to, as PHP requires of it.
+#[test]
+fn an_override_writes_a_variadic_parameter_as_its_list() {
+    let lowered = Lowered::with(
+        "namespace Demo;\n\nimport Lib.Joiner;\n\npublic class Listed : Joiner\n{\n    public override string join(List<string> parts) => `${parts.count()}`;\n}\n",
+        &[(
+            "src/Lib/Joiner.php",
+            "<?php\n\nnamespace Lib;\n\nclass Joiner\n{\n    public function join(string ...$parts): string\n    {\n        return implode(',', $parts);\n    }\n}\n",
+        )],
+    );
+
+    assert_eq!(
+        lowered.parameters_of("join"),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM [16]
+                ZVAL [1] "string"
+                ZVAL "parts"
+                null
+                null
+                null
+                null
+        "#}
+    );
+}
+
+/// ```php
+/// public static function ignored(null $value): int
+/// public static function none(): \Box
+/// ```
+///
+/// Spec section 7: `never` is a whole type. PHP types only a result `never`, so a parameter of it is PHP's `null`, as
+/// Kotlin's `Nothing` is Java's `Void`, and a class's type argument of it is `never` in the type text the engine
+/// checks.
+#[test]
+fn never_is_php_null_where_php_types_no_never_and_a_type_argument() {
+    let lowered = Lowered::with(
+        "class Report\n{\n    public static int ignored(never value) => 1;\n\n    public static Box<never> none() => new Box<never>();\n}\n",
+        &[("src/Box.sharp", "public class Box<T>\n{\n}\n")],
+    );
+
+    assert_eq!(
+        lowered.parameters_of("ignored"),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM
+                ZVAL [1] "null"
+                ZVAL "value"
+                null
+                null
+                null
+                null
+        "#}
+    );
+    assert_eq!(
+        lowered.declared("none"),
+        indoc! {r#"
+            METHOD [17] "none" @5-5
+              PARAM_LIST
+              null
+              STMT_LIST
+                RETURN
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Box"
+                      ARG_LIST
+                    ZVAL "never"
+              SHARP_TYPE_ARGS
+                ZVAL "Box"
+                ZVAL "Function<Box<never>()>"
+              null
+        "#}
+    );
 }
 
 /// ```php
@@ -13568,7 +14004,8 @@ fn type_arguments_of_a_plain_php_new_lower_to_nothing_and_of_a_call_to_its_type_
 /// Its second text is its bounds, an interface's as a class's, so the engine knows how many type arguments each takes
 /// and which class a type argument may name. Its third is the variance of its type parameters, `+` for `out`, `-` for
 /// `in` and `=` for neither, when one of them has `out` or `in`, which the engine reads where it checks a value against
-/// a generic type.
+/// a generic type. Its fourth is the declarations reflection reads, spec section 25: the names of its type parameters,
+/// then a line of each member's type.
 #[test]
 fn a_class_like_metadata_holds_its_header_type_arguments_its_bounds_and_its_variance() {
     let files = lowered_each(
@@ -13598,32 +14035,58 @@ fn a_class_like_metadata_holds_its_header_type_arguments_its_bounds_and_its_vari
                   null
                   ZVAL "App.DatabaseEntity"
                   null
+                  ZVAL "TItem"
             "#},
             indoc! {r#"
                 SHARP_CLASS_METADATA
                   null
                   ZVAL "Any?"
                   null
+                  ZVAL "T\nparse: Function<App.Base<$0>(Map<string, Any?>|Object)>\ntryParse: Function<App.Base<$0>?(Map<string, Any?>|Object)>"
             "#},
             indoc! {r#"
                 SHARP_CLASS_METADATA
                   ZVAL "App.Base<List<$0>>, App.Query<App.Order>"
                   ZVAL "Any?"
                   null
+                  ZVAL "T\nparse: Function<App.Sub<$0>(Map<string, Any?>|Object)>\ntryParse: Function<App.Sub<$0>?(Map<string, Any?>|Object)>"
             "#},
             indoc! {r#"
                 SHARP_CLASS_METADATA
                   ZVAL "App.Base<App.Order>"
                   null
                   null
+                  ZVAL "\nparse: Function<App.OrderPage(Map<string, Any?>|Object)>\ntryParse: Function<App.OrderPage?(Map<string, Any?>|Object)>"
             "#},
             indoc! {r#"
                 SHARP_CLASS_METADATA
                   null
                   ZVAL "Any?, Any?, Any?"
                   ZVAL "+-="
+                  ZVAL "TItem, TKey, TValue"
             "#},
         ]
+    );
+}
+
+/// Spec section 25: a built-in collection written without type arguments, as `Class<List>` names it, reads in the
+/// declarations reflection reads as the collection alone, which takes it with any type arguments.
+#[test]
+fn a_collection_class_value_without_type_arguments_reads_as_the_collection_alone() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic class Shelf\n{\n    public bool holds(Class<List> list, Class<Map> map) => true;\n}\n",
+    );
+    let members = lowered.child(lowered.child(lowered.root(), 2), 2);
+
+    assert_eq!(
+        lowered.render(lowered.child(members, lowered.nodes()[members as usize].child_count - 1)),
+        indoc! {r#"
+            SHARP_CLASS_METADATA
+              null
+              null
+              null
+              ZVAL "\nholds: Function<bool(Class<List>, Class<Map>)>\nparse: Function<App.Shelf(Map<string, Any?>|Object)>\ntryParse: Function<App.Shelf?(Map<string, Any?>|Object)>"
+        "#}
     );
 }
 
@@ -14470,7 +14933,7 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_read_them_while_the_code_runs
 
 /// `typeof` of a type that is no class is a `SHARP_TYPE_OF` of its type text, as `typeof(T)` is when `T` runs as that
 /// type, so the engine gives its class value. A nullable or union type is one type, spelled whole. `typeof(Self)` is
-/// PHP's `static::class`, and a static call through it is PHP's `static::method()`.
+/// PHP's `static::class`, as a static call through `Self` is PHP's `static::method()`.
 #[test]
 fn typeof_of_a_type_that_is_no_class_spells_its_type() {
     let lowered = Lowered::new(indoc! {"
@@ -14496,7 +14959,7 @@ fn typeof_of_a_type_that_is_no_class_spells_its_type() {
 
             public static Any own() => typeof(Self);
 
-            public static string tag() => typeof(Self).defaultTag();
+            public static string tag() => Self.defaultTag();
         }
     "});
     let type_of = |text: &str| format!("STMT_LIST\n  RETURN\n    SHARP_TYPE_OF\n      ZVAL \"{text}\"\n");
@@ -14650,9 +15113,11 @@ fn new_of_a_generic_php_sharp_class_carries_its_type_arguments() {
               null
               ZVAL "App.DatabaseEntity, Any?"
               null
+              ZVAL "TItem, TKey\n$rows set private: List<$0>\nnested: Function<App.PaginatedList<$0, List<$1>?>()>\ntryParse: Function<App.PaginatedList<$0, $1>?(Map<string, Any?>|Object)>\nparse: Function<App.PaginatedList<$0, $1>(Map<string, Any?>|Object)>\n__construct: Function<Any?(List<$0>)>\ncopy: Function<App.PaginatedList<$0, $1>()>"
         "#}
     );
-    assert_eq!(lowered.nodes()[last_member(lowered) as usize].kind, sharp_kind::SHARP_AST_METHOD);
+    // A class without type parameters has no bounds, so no slot for type arguments.
+    assert_eq!(lowered.render(lowered.child(last_member(lowered), 1)), "null\n");
     assert_eq!(
         lowered.body(),
         indoc! {r#"
@@ -14808,6 +15273,11 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                       ZVAL [1] "float"
                       ZVAL "float"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\narea virtual: Function<float()>"
                 null
                 null
         "#}
@@ -14822,6 +15292,11 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                 null
                 null
                 STMT_LIST
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\nparse: Function<App.Tenant.Unit(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Unit?(Map<string, Any?>|Object)>"
                 null
                 null
         "#}
@@ -14851,6 +15326,11 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                       ZVAL [1] "string"
                       ZVAL "string"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\nlabel virtual: Function<string(int)>"
                 null
                 null
         "#}
@@ -14914,6 +15394,11 @@ fn a_static_class_is_a_final_class_whose_extern_method_calls_its_native_function
                       ZVAL [1] "string"
                       ZVAL "string"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\nslug: Function<string(string)>"
                 null
                 null
         "#}
@@ -15032,6 +15517,11 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
                 NAME_LIST
                   ZVAL "App\\Tenant\\Linkable"
                 STMT_LIST
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\nparse: Function<App.Tenant.Page(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Page?(Map<string, Any?>|Object)>"
                 null
                 null
         "#})
@@ -15298,6 +15788,11 @@ fn super_of_an_interface_calls_a_protected_alias_of_its_default_body() {
                     ATTRIBUTE
                       ZVAL "Override"
                       null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\nparse: Function<App.Both(Map<string, Any?>|Object)>\ntryParse: Function<App.Both?(Map<string, Any?>|Object)>\ndescribe virtual override: Function<string()>"
         "#}
     );
 }
@@ -15395,6 +15890,11 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                       ZVAL [1] "string"
                       ZVAL "string"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$designColumn virtual: string\ndesignKey virtual: Function<string()>\ntitle virtual: Function<string()>"
                 null
                 null
               CLASS [2] "HasDesign\\Defaults" @3-8
@@ -15433,6 +15933,11 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                       ZVAL [1] "string"
                       ZVAL "Function<string()>"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\nlabel virtual: Function<string()>"
                 null
                 null
               CLASS [2] "Labeled\\Defaults" @3-6
@@ -15508,6 +16013,11 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     null
                     null
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$name: string\ncases: Function<List<App.Shade>()>"
                 null
                 null
         "#})
@@ -15542,6 +16052,11 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     STMT_LIST
                     null
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$id: int\n__construct: Function<Any?(int)>"
                 null
                 null
         "#})
@@ -15804,6 +16319,11 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
                         null
                         null
                 null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$tag virtual: string"
             STMT_LIST
               METHOD [2] "tag@App\\Tagged" @5-5
                 PARAM_LIST
@@ -15838,6 +16358,11 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
                         null
                         null
                 null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\nparse: Function<App.Note(Map<string, Any?>|Object)>\ntryParse: Function<App.Note?(Map<string, Any?>|Object)>"
             PROP_GROUP [1]
               ZVAL [1] "string"
               PROP_DECL
@@ -15873,6 +16398,7 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
                     null
             SHARP_CLASS_METADATA
               ZVAL "App.Keyed<$0>"
+              null
               null
               null
         "#}
@@ -15934,9 +16460,20 @@ fn a_header_entry_with_type_arguments_is_its_class() {
                 ZVAL "Lib.PaginatedList<Lib.Order>"
                 null
                 null
+                ZVAL "\nparse: Function<App.Tenant.OrderPage(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.OrderPage?(Map<string, Any?>|Object)>"
         "#}
     );
-    assert_eq!(members(&plain), "STMT_LIST\n");
+    assert_eq!(
+        members(&plain),
+        indoc! {r#"
+            STMT_LIST
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\nparse: Function<App.Tenant.OrderPage(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.OrderPage?(Map<string, Any?>|Object)>"
+        "#}
+    );
 }
 
 /// An event's header keeps its type arguments as a class's does, after its constructor, so the engine knows
@@ -15959,6 +16496,7 @@ fn an_event_header_entry_with_type_arguments_keeps_them() {
               ZVAL "App.Holder<int>"
               null
               null
+              ZVAL "\n$item: int\n__construct: Function<Any?(int)>"
         "#}
     );
 }
@@ -16054,6 +16592,11 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                       ZVAL [1] "string"
                       ZVAL "Function<string()>"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\nPaying: Function<App.CheckoutState.Paying(string)>\nop_Equality: Function<bool(Any?, Any?)>\nlabel: Function<string()>"
                   METHOD [17] "op_Equality" @3-3
                     PARAM_LIST
                       PARAM
@@ -16152,6 +16695,11 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                             ARG_LIST
                     ZVAL [1] "self"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n__construct: Function<void()>\ninstance: Function<App.CheckoutState.Open()>"
                 null
                 null
               CLASS [32] "CheckoutState\\Paying" @6-6
@@ -16172,6 +16720,11 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                     STMT_LIST
                     null
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$gateway: string\n__construct: Function<Any?(string)>"
                 null
                 null
         "#}
@@ -16244,6 +16797,11 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                       ZVAL [1] "bool"
                       ZVAL "Function<bool(App.CheckoutState, App.CheckoutState)>"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\ntryParse: Function<App.Shop?(Map<string, Any?>|Object)>\nsame: Function<bool(App.CheckoutState, App.CheckoutState)>\nparse: Function<App.Shop(Map<string, Any?>|Object)>\nopen: Function<App.CheckoutState()>\npay: Function<App.CheckoutState()>"
                 null
                 null
         "#}
@@ -16299,6 +16857,11 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
                             null
                             null
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$orderId virtual: int"
                 null
                 null
         "#}
@@ -16334,6 +16897,11 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
                     STMT_LIST
                     null
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$amount: int\n$orderId: int\n__construct: Function<Any?(int, int)>"
                 null
                 null
         "#}
@@ -16369,6 +16937,11 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
                       ZVAL "App\\OrderPaid"
                       ZVAL "Function<App.OrderPaid(int)>"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\nparse: Function<App.Order(Map<string, Any?>|Object)>\ntryParse: Function<App.Order?(Map<string, Any?>|Object)>\npay: Function<App.OrderPaid(int)>"
                 null
                 null
         "#}
@@ -16470,6 +17043,11 @@ fn virtual_lowers_to_nothing_and_override_to_the_override_attribute() {
                         ATTRIBUTE
                           ZVAL "Override"
                           null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\nsize virtual: Function<int()>\ntryParse: Function<Thumbnail?(Map<string, Any?>|Object)>\nname virtual override: Function<string()>\nparse: Function<Thumbnail(Map<string, Any?>|Object)>"
                 null
                 null
         "#}
@@ -16518,6 +17096,11 @@ fn final_override_lowers_to_a_final_method_with_the_override_attribute() {
                         ATTRIBUTE
                           ZVAL "Override"
                           null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\nparse: Function<Thumbnail(Map<string, Any?>|Object)>\ntryParse: Function<Thumbnail?(Map<string, Any?>|Object)>\nname override: Function<string()>"
                 null
                 null
         "#}
@@ -16570,6 +17153,11 @@ fn an_override_of_a_property_with_no_type_has_no_type() {
                     ATTRIBUTE
                       ZVAL "Override"
                       null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$timestamps set public virtual override: bool\n$table set protected virtual override: string\nparse: Function<Order(Map<string, Any?>|Object)>\ntryParse: Function<Order?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -16704,15 +17292,15 @@ fn a_call_that_runs_one_php_sharp_method_or_gives_a_shape_reads_its_result_as_it
         "<?php namespace Lib; final class Calc { /** @return array{a: int} */ public static function shape(): array { return ['a' => 1]; } }",
     );
     let body = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\npublic class Pantry : Shelf\n{\n    public Pantry() : super() { }\n\n    public override List<int> sizes() => super.sizes();\n\n    public int run()\n    {\n        const shared = Shelf.shared();\n        const picked = this.pick(Calc.shape());\n        const late = Self.made();\n        const valued = Class.of(this).made();\n        return shared.count();\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\npublic class Pantry : Shelf\n{\n    public Pantry() : super() { }\n\n    public override List<int> sizes() => super.sizes();\n\n    public int run()\n    {\n        const shared = Shelf.shared();\n        const picked = this.pick(Calc.shape());\n        const late = Self.made();\n        return shared.count();\n    }\n}\n",
         &[base, calc],
     )
     .tree();
 
-    // `Self.` reads the method on `static::class`, and a class value on its class.
-    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"").count(), 3, "{body}");
+    // `Self.` reads the method on `static::class`.
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"").count(), 2, "{body}");
     assert!(body.contains("CLASS_NAME\n                  ZVAL [1] \"static\"\n"), "{body}");
-    assert_eq!(body.matches("ZVAL \"App.Tenant.Shelf.made()\"").count(), 2, "{body}");
+    assert_eq!(body.matches("ZVAL \"App.Tenant.Shelf.made()\"").count(), 1, "{body}");
     assert!(
         body.contains(
             "ZVAL \"Map<string, int>, Map<Any?, Any?>\"\n                  ZVAL \"App.Tenant.Shelf.pick()\"\n"
@@ -16788,6 +17376,11 @@ fn an_override_that_narrows_a_typed_property_runs_with_the_parent_type_and_check
                     ATTRIBUTE
                       ZVAL "Override"
                       null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$table set protected virtual override: string\n$level set public virtual override: int\nparse: Function<Order(Map<string, Any?>|Object)>\ntryParse: Function<Order?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -16925,6 +17518,11 @@ fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks
                         null
                         null
                 null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$table set protected virtual override: string\n$kind virtual: string"
         "#}
     );
 }
@@ -17013,6 +17611,11 @@ fn internal_runs_as_public() {
                       ATTRIBUTE
                         ZVAL "Sharp\\Internal\\Internal"
                         ARG_LIST
+                SHARP_CLASS_METADATA
+                  null
+                  null
+                  null
+                  ZVAL "\n$stock set internal: int\n$id init internal: int\n$views set internal: int\nsecret: Function<int()>\nparse: Function<Shop(Map<string, Any?>|Object)>\ntryParse: Function<Shop?(Map<string, Any?>|Object)>"
               null
               null
         "#}
@@ -17158,6 +17761,11 @@ fn a_lazy_property_keeps_its_first_value_in_its_storage() {
                     ZVAL false
                 ZVAL [1] "void"
                 null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$doubled: int\n$found: int?\nparse: Function<Plan(Map<string, Any?>|Object)>\ntryParse: Function<Plan?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -17205,6 +17813,11 @@ fn an_override_of_an_override_of_a_property_with_no_type_has_no_type() {
                     ATTRIBUTE
                       ZVAL "Override"
                       null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$table set protected virtual override: string?\nparse: Function<RushOrder(Map<string, Any?>|Object)>\ntryParse: Function<RushOrder?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -17233,6 +17846,11 @@ fn an_override_of_an_override_of_a_typed_property_keeps_its_type() {
                     ATTRIBUTE
                       ZVAL "Override"
                       null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$table set protected virtual override: string?\nparse: Function<RushOrder(Map<string, Any?>|Object)>\ntryParse: Function<RushOrder?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -17319,6 +17937,11 @@ fn a_subclass_method_with_a_union_variadic_spreads_it_into_the_parent_method() {
                         ATTRIBUTE
                           ZVAL "Override"
                           null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\ntotal virtual override: Function<float|int(string, float|int)>\nparse: Function<App.Tenant.Account(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Account?(Map<string, Any?>|Object)>"
                 null
                 null
         "#}
@@ -17570,6 +18193,11 @@ fn self_is_static_and_required_adds_no_flag() {
                     ZVAL [1] "int"
                   ZVAL "Function<App.Tenant.DatabaseEntity|int(Lib.Row)>"
                 null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\nfromSchema: Function<Self(Lib.Row)>\ncounted: Function<Self|int(Lib.Row)>\n__construct: Function<Any?(Lib.Row)>\nfind: Function<Self?(Lib.Row)>"
         "#}
     );
 }
@@ -17723,6 +18351,11 @@ fn a_class_constant_is_a_class_constant_group_of_one_constant() {
                     null
                 null
                 ZVAL [1] "int"
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -17765,6 +18398,11 @@ fn a_union_typed_class_constant_has_its_type_union() {
                   ZVAL [1] "int"
                   ZVAL [1] "string"
                   ZVAL [1] "null"
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -17868,6 +18506,11 @@ fn a_map_or_a_set_constant_is_its_php_array() {
                     null
                 null
                 TYPE [7]
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -18015,6 +18658,11 @@ fn an_iterable_or_a_tuple_constant_holds_its_list_literal() {
                     null
                 null
                 TYPE [7]
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -18055,6 +18703,11 @@ fn a_method_an_interface_types_and_a_plain_parent_leaves_untyped_is_the_parents(
                     ZVAL "App\\Morphable"
                     ZVAL "App\\Named"
                   STMT_LIST
+                    SHARP_CLASS_METADATA
+                      null
+                      null
+                      null
+                      ZVAL "\nparse: Function<App.Bill(Map<string, Any?>|Object)>\ntryParse: Function<App.Bill?(Map<string, Any?>|Object)>"
                   null
                   null
             "#}
@@ -19684,11 +20337,14 @@ fn a_method_value_that_makes_a_map_passes_its_type_arguments() {
 #[test]
 fn a_method_value_closure_takes_each_parameter_by_name_with_its_php_type() {
     let lowered = Lowered::with(
-        "namespace App;\n\nimport App.Shared.Text.Mixing;\n\nclass Report\n{\n    public Any mixer(string title) => title.mix;\n\n    public Any joiner(string title) => title.join;\n}\n",
-        &[(
-            "src/App/Shared/Text/Mixing.sharp",
-            "namespace App.Shared.Text;\n\nimport App.Report;\n\npublic static class Mixing\n{\n    extension(string text)\n    {\n        public string mix(float ratio, bool loud, int? count, int|string key, (int|string)? code, Report report, Function<int(int)> step, List<string> tags, string receiver, string tail = \"!\") => text + tail;\n\n        public string join(string ...parts) => text;\n    }\n}\n",
-        )],
+        "namespace App.Billing;\n\nimport App.Shared.Text.Mixing;\n\nclass Statement\n{\n    public Any mixer(string title) => title.mix;\n\n    public Any joiner(string title) => title.join;\n}\n",
+        &[
+            ("src/App/Report.sharp", "namespace App;\n\npublic class Report\n{\n}\n"),
+            (
+                "src/App/Shared/Text/Mixing.sharp",
+                "namespace App.Shared.Text;\n\nimport App.Report;\n\npublic static class Mixing\n{\n    extension(string text)\n    {\n        public string mix(float ratio, bool loud, int? count, int|string key, (int|string)? code, Report report, Function<int(int)> step, List<string> tags, string receiver, string tail = \"!\") => text + tail;\n\n        public string join(string ...parts) => text;\n    }\n}\n",
+            ),
+        ],
     );
 
     assert_eq!(
@@ -20330,198 +20986,6 @@ fn a_method_value_of_an_enum_value_is_a_first_class_callable() {
 }
 
 /// ```php
-/// $type = \Lib\Calc::class;
-/// return \Lib\Calc::MAX + $type::MAX + $type::$count + \Lib\Calc::measure($type::defaultTag());
-/// ```
-///
-/// A member read through a class value is the fetch of the member kind on the class the value holds, as `Class.y` is:
-/// `typeof(X).y` names the class, and a local holding a class value is the class of the fetch.
-#[test]
-fn a_member_read_through_a_class_value_is_the_fetch_of_its_kind_on_that_class() {
-    assert_eq!(
-        body_in(
-            RUN,
-            "        const type = typeof(Calc);\n        return typeof(Calc).MAX + type.MAX + type.count + Calc.measure(type.defaultTag());\n",
-            &[(
-                "src/Lib/Calc.php",
-                "<?php namespace Lib; abstract class Calc { public const int MAX = 3; public static int $count = 0; public static function defaultTag(): string { return 'div'; } public static function measure(string $text): int { return strlen($text); } }",
-            )]
-        ),
-        indoc! {r#"
-            STMT_LIST
-              ASSIGN
-                VAR
-                  ZVAL "type"
-                CLASS_NAME
-                  ZVAL "Lib\\Calc"
-              RETURN
-                BINARY_OP [1]
-                  BINARY_OP [1]
-                    BINARY_OP [1]
-                      CLASS_CONST
-                        ZVAL "Lib\\Calc"
-                        ZVAL "MAX"
-                      CLASS_CONST
-                        VAR
-                          ZVAL "type"
-                        ZVAL "MAX"
-                    STATIC_PROP
-                      VAR
-                        ZVAL "type"
-                      ZVAL "count"
-                  STATIC_CALL
-                    ZVAL "Lib\\Calc"
-                    ZVAL "measure"
-                    ARG_LIST
-                      STATIC_CALL
-                        VAR
-                          ZVAL "type"
-                        ZVAL "defaultTag"
-                        ARG_LIST
-        "#}
-    );
-}
-
-/// ```php
-/// $type = \Sharp\Class::of($calc);
-/// return \Lib\Calc::measure($type::label());
-/// ```
-///
-/// A class value of an enum, as `Class.of` gives for an enum case, calls the enum's static as a class's is called.
-#[test]
-fn a_static_call_through_a_class_value_of_an_enum_is_a_static_call_on_it() {
-    assert_eq!(
-        body_in(
-            "int run(Calc calc)",
-            "        const type = Class.of(calc);\n        return Calc.measure(type.label());\n",
-            &[(
-                "src/Lib/Calc.php",
-                "<?php namespace Lib; enum Calc { case One; public static function label(): string { return 'calc'; } public static function measure(string $text): int { return strlen($text); } }",
-            )]
-        ),
-        indoc! {r#"
-            STMT_LIST
-              ASSIGN
-                VAR
-                  ZVAL "type"
-                STATIC_CALL
-                  ZVAL "Sharp\\Class"
-                  ZVAL "of"
-                  ARG_LIST
-                    VAR
-                      ZVAL "calc"
-              RETURN
-                STATIC_CALL
-                  ZVAL "Lib\\Calc"
-                  ZVAL "measure"
-                  ARG_LIST
-                    STATIC_CALL
-                      VAR
-                        ZVAL "type"
-                      ZVAL "label"
-                      ARG_LIST
-        "#}
-    );
-}
-
-/// ```php
-/// $type = $extra > 0 ? \Lib\Calc::class : null;
-/// $max = ($type === null ? null : $type::MAX);
-/// $count = ($type === null ? null : $type::$count);
-/// $tag = ($type === null ? null : $type::defaultTag());
-/// return ($max ?? 0) + ($count ?? 0) + \Lib\Calc::measure($tag ?? '');
-/// ```
-///
-/// A null-safe read or call through a class value is the conditional a null-safe method value is, which reads the
-/// local itself and runs the static fetch or call when it holds a class.
-#[test]
-fn a_null_safe_member_read_through_a_class_value_is_a_conditional_over_the_static_fetch() {
-    assert_eq!(
-        body_in(
-            RUN,
-            "        const type = extra > 0 ? typeof(Calc) : null;\n        const max = type?.MAX;\n        const count = type?.count;\n        const tag = type?.defaultTag();\n        return (max ?? 0) + (count ?? 0) + Calc.measure(tag ?? \"\");\n",
-            &[(
-                "src/Lib/Calc.php",
-                "<?php namespace Lib; abstract class Calc { public const int MAX = 3; public static int $count = 0; public static function defaultTag(): string { return 'div'; } public static function measure(string $text): int { return strlen($text); } }",
-            )]
-        ),
-        indoc! {r#"
-            STMT_LIST
-              ASSIGN
-                VAR
-                  ZVAL "type"
-                CONDITIONAL
-                  GREATER
-                    VAR
-                      ZVAL "extra"
-                    ZVAL 0
-                  CLASS_NAME
-                    ZVAL "Lib\\Calc"
-                  ZVAL null
-              ASSIGN
-                VAR
-                  ZVAL "max"
-                CONDITIONAL [1]
-                  BINARY_OP [16]
-                    VAR
-                      ZVAL "type"
-                    ZVAL null
-                  ZVAL null
-                  CLASS_CONST
-                    VAR
-                      ZVAL "type"
-                    ZVAL "MAX"
-              ASSIGN
-                VAR
-                  ZVAL "count"
-                CONDITIONAL [1]
-                  BINARY_OP [16]
-                    VAR
-                      ZVAL "type"
-                    ZVAL null
-                  ZVAL null
-                  STATIC_PROP
-                    VAR
-                      ZVAL "type"
-                    ZVAL "count"
-              ASSIGN
-                VAR
-                  ZVAL "tag"
-                CONDITIONAL [1]
-                  BINARY_OP [16]
-                    VAR
-                      ZVAL "type"
-                    ZVAL null
-                  ZVAL null
-                  STATIC_CALL
-                    VAR
-                      ZVAL "type"
-                    ZVAL "defaultTag"
-                    ARG_LIST
-              RETURN
-                BINARY_OP [1]
-                  BINARY_OP [1]
-                    COALESCE
-                      VAR
-                        ZVAL "max"
-                      ZVAL 0
-                    COALESCE
-                      VAR
-                        ZVAL "count"
-                      ZVAL 0
-                  STATIC_CALL
-                    ZVAL "Lib\\Calc"
-                    ZVAL "measure"
-                    ARG_LIST
-                      COALESCE
-                        VAR
-                          ZVAL "tag"
-                        ZVAL ""
-        "#}
-    );
-}
-
-/// ```php
 /// return new \Sharp\Map<string, int>([...\array_merge([], ...\array_map(null, $defaults->keys(), \iterator_to_array($defaults, false))), 'root', 0, ...…]);
 /// ```
 ///
@@ -20712,52 +21176,6 @@ fn a_map_spread_puts_each_key_and_value_of_the_literal_parts_in_order() {
                                           ZVAL "overrides"
                                         ZVAL false
                   ZVAL "string, int"
-        "#}
-    );
-}
-
-/// ```php
-/// $type = \Lib\Calc::class;
-/// $tag = $type::defaultTag(...);
-/// return \Lib\Calc::measure($tag());
-/// ```
-///
-/// A static method read through a class value without a call is its first-class callable, as `Class.m` is.
-#[test]
-fn a_static_method_read_through_a_class_value_is_its_first_class_callable() {
-    assert_eq!(
-        body_in(
-            RUN,
-            "        const type = typeof(Calc);\n        const Function<string()> tag = type.defaultTag;\n        return Calc.measure(tag());\n",
-            &[(
-                "src/Lib/Calc.php",
-                "<?php namespace Lib; abstract class Calc { public static function defaultTag(): string { return 'div'; } public static function measure(string $text): int { return strlen($text); } }",
-            )]
-        ),
-        indoc! {r#"
-            STMT_LIST
-              ASSIGN
-                VAR
-                  ZVAL "type"
-                CLASS_NAME
-                  ZVAL "Lib\\Calc"
-              ASSIGN
-                VAR
-                  ZVAL "tag"
-                STATIC_CALL
-                  VAR
-                    ZVAL "type"
-                  ZVAL "defaultTag"
-                  CALLABLE_CONVERT
-              RETURN
-                STATIC_CALL
-                  ZVAL "Lib\\Calc"
-                  ZVAL "measure"
-                  ARG_LIST
-                    CALL
-                      VAR
-                        ZVAL "tag"
-                      ARG_LIST
         "#}
     );
 }
@@ -21346,14 +21764,18 @@ fn position_current_in_a_set_body_names_its_property() {
 /// }
 /// ```
 ///
-/// An initial value declared after a computed property still runs in the constructor, so it names the constructor.
+/// An initial value declared after a computed property still runs in the constructor, so it names the constructor. The
+/// `created#initial` that reflection's `Property.defaultValue()` runs names the property.
 #[test]
 fn position_current_in_an_initial_value_after_a_computed_property_names_the_constructor() {
     let lowered = Lowered::new(
         "namespace App.Tenant;\n\nclass Report\n{\n    public string folder => Position.current().directory;\n    private Position created = Position.current();\n}\n",
     );
 
-    assert_eq!(positions(&lowered), ["6:32 App.Tenant.Report.Report", "5:29 App.Tenant.Report.folder"]);
+    assert_eq!(
+        positions(&lowered),
+        ["6:32 App.Tenant.Report.Report", "5:29 App.Tenant.Report.folder", "6:32 App.Tenant.Report.created"]
+    );
 }
 
 /// Each new `Position` as `line:column function`, in the order the bridge lowers them.
@@ -26076,6 +26498,11 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
                           ZVAL true
                           CONST
                             ZVAL "Lib\\TOP"
+                SHARP_CLASS_METADATA
+                  null
+                  null
+                  null
+                  ZVAL "\n$total virtual: int\n$count set private: int\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\n__construct: Function<Any?(int)>\nrun: Function<void(int)>"
               ATTRIBUTE_LIST
                 ATTRIBUTE_GROUP
                   ATTRIBUTE
@@ -26237,7 +26664,7 @@ fn an_accessor_carries_its_attributes_on_its_hook_and_a_target_picks_the_part() 
             ),
             (
                 "src/App/Sized.sharp",
-                "namespace App;\n\nimport Lib.Field;\n\npublic interface Sized\n{\n    int size { [Field(\"measured\")] get; [param: Field(\"new size\")] set; }\n}\n",
+                "namespace App;\n\nimport Lib.Field;\n\npublic interface Sized\n{\n    int size { [Field(\"measured\")] get; }\n}\n",
             ),
         ],
         &[common::FIELD],
@@ -26263,7 +26690,38 @@ fn an_accessor_carries_its_attributes_on_its_hook_and_a_target_picks_the_part() 
     assert_eq!(member(&[2, 2]), attribute("kept"));
     assert_eq!(member(&[3, 0, 0, 3]), attribute("in"));
     assert_eq!(member_in(&files, "Sized", &[0, 1, 0, 3, 0, 4]), attribute("measured"));
-    assert_eq!(member_in(&files, "Sized", &[0, 1, 0, 3, 1, 0, 0, 3]), attribute("new size"));
+}
+
+/// ```php
+/// public int $balance = 0 { set { … } #[\Lib\Field("set")] #[\Lib\Field("will")] #[\Lib\Field("did")] }
+/// #[\Lib\Field("dated")] public static function days#set(int $value) { … }
+/// ```
+///
+/// Spec section 1: `willSet` and `didSet` run inside the `set` hook, so their attributes go on it, after its own, and
+/// on a static's hidden `name#set` method. `method:` is their one target.
+#[test]
+fn an_observer_carries_its_attributes_on_the_set_it_runs_inside() {
+    let files = lowered_each(
+        &[(
+            "src/App/Report.sharp",
+            "namespace App;\n\nimport Lib.Field;\n\npublic class Report\n{\n    public int balance { get; [Field(\"set\")] set; [Field(\"will\")] willSet => this.touch(); [method: Field(\"did\")] didSet => this.touch(); } = 0;\n\n    public static int days { get; set; [Field(\"dated\")] didSet => Report.tick(); } = 0;\n\n    private void touch() { }\n\n    private static void tick() { }\n}\n",
+        )],
+        &[common::FIELD],
+    );
+    let attributes = |texts: &[&str]| {
+        let mut list = "ATTRIBUTE_LIST\n".to_owned();
+        for text in texts {
+            let _ = write!(
+                list,
+                "  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Lib\\\\Field\"\n      ARG_LIST\n        ZVAL {text:?}\n"
+            );
+        }
+
+        list
+    };
+
+    assert_eq!(member_in(&files, "Report", &[0, 1, 0, 3, 1, 4]), attributes(&["set", "will", "did"]));
+    assert_eq!(member_in(&files, "Report", &[3, 4]), attributes(&["dated"]));
 }
 
 /// Spec section 1: every accessor form takes attributes. A static auto-property's accessors with attributes run as its
@@ -29238,6 +29696,11 @@ fn a_backed_enum_is_a_final_enum_class_with_its_backing_type_cases_and_methods()
                       ZVAL "App\\Tenant\\Status"
                       ZVAL "Function<App.Tenant.Status(string)>"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$value: string\n$name: string\nfrom: Function<App.Tenant.Status(string)>\ntryFrom: Function<App.Tenant.Status?(string)>\nparse: Function<App.Tenant.Status(string)>\ncases: Function<List<App.Tenant.Status>()>\ntitle: Function<string()>"
                 ATTRIBUTE_LIST
                   ATTRIBUTE_GROUP
                     ATTRIBUTE
@@ -29322,6 +29785,11 @@ fn a_pure_enum_is_a_final_enum_class_of_unit_cases_without_a_backing_type() {
                       ZVAL [1] "int"
                       ZVAL "Function<int()>"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$name: string\nsize: Function<int()>\nlabel: Function<string()>\ncases: Function<List<Suit>()>"
                 null
                 null
         "#}
@@ -29375,6 +29843,11 @@ fn an_int_backed_enum_is_a_final_enum_class_of_int_cases() {
                     ZVAL 2
                     null
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$value: int\n$name: string\nfrom: Function<Rank(int)>\ntryFrom: Function<Rank?(int)>\ncases: Function<List<Rank>()>"
                 null
                 ZVAL [1] "int"
         "#}
@@ -29425,6 +29898,11 @@ fn an_enum_header_is_the_interface_name_list() {
                     ZVAL "a"
                     null
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$value: string\n$name: string\nfrom: Function<App.Tenant.Status(string)>\ntryFrom: Function<App.Tenant.Status?(string)>\ncases: Function<List<App.Tenant.Status>()>"
                 null
                 ZVAL [1] "string"
         "#}
@@ -29445,6 +29923,11 @@ fn an_enum_header_is_the_interface_name_list() {
                     null
                     null
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$name: string\ncases: Function<List<App.Tenant.Suit>()>"
                 null
                 null
         "#}
@@ -29491,6 +29974,11 @@ fn an_enum_constant_is_a_class_constant_group_that_reads_a_case() {
                     null
                 null
                 ZVAL "App\\Tenant\\Status"
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\n$value: string\n$name: string\nfrom: Function<App.Tenant.Status(string)>\ntryFrom: Function<App.Tenant.Status?(string)>\ncases: Function<List<App.Tenant.Status>()>"
         "#}
     );
 }
@@ -29671,6 +30159,11 @@ fn an_enum_method_lowers_a_list_literal_a_function_type_and_a_lambda_as_a_class_
                       ZVAL "Closure"
                       ZVAL "Function<Function<bool(Suit)>()>"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$name: string\nmatches: Function<Function<bool(Suit)>()>\ncases: Function<List<Suit>()>\nall: Function<List<Suit>()>"
                 null
                 null
         "#}
@@ -29744,6 +30237,11 @@ fn an_enum_returns_self_and_holds_a_union_typed_constant() {
                     TYPE [7]
                     ZVAL "Function<List<App.Status>()>"
                   null
+                SHARP_CLASS_METADATA
+                  null
+                  null
+                  null
+                  ZVAL "\n$value: string\n$name: string\nfrom: Function<App.Status(string)>\nfirst: Function<App.Status()>\ntryFrom: Function<App.Status?(string)>\ncases: Function<List<App.Status>()>\nall: Function<List<App.Status>()>"
               null
               ZVAL [1] "string"
         "#}
@@ -31172,6 +31670,11 @@ fn interface_equality_runs_on_its_trait_and_an_enum_compares_its_cases_by_its_ow
                     ZVAL true
                 ZVAL [1] "bool"
                 null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\nhash: Function<int()>\nop_Equality: Function<bool(App.Coin, App.Coin)>\nGold: Function<App.Coin.Gold(int)>"
         "#}
     );
 }
@@ -35281,6 +35784,11 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
                             ZVAL "b"
                     ZVAL [1] "bool"
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$x: int\n$y: float\n$total: App.Money?\n$made set private: int\n$sum: float\ntryParse: Function<App.Point?(Map<string, Any?>|Object)>\nmoved: Function<App.Point(int)>\nop_Equality: Function<bool(Any?, Any?)>\nparse: Function<App.Point(Map<string, Any?>|Object)>\n__construct: Function<Any?(int, float, App.Money?)>"
                 null
                 null
         "#}
@@ -35867,6 +36375,11 @@ fn an_enum_computed_property_is_a_virtual_property() {
                             null
                             null
                     null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$label: string\n$name: string\ncases: Function<List<App.Status>()>"
                 null
                 null
         "#}

@@ -4,14 +4,17 @@
 
 /// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the
 /// prelude, which the engine declares. Sorted.
-pub(crate) const SHARP_CLASSES: [&str; 32] = [
+pub(crate) const SHARP_CLASSES: [&str; 37] = [
     "Sharp\\Behavior",
     "Sharp\\Bool",
     "Sharp\\Class",
     "Sharp\\ClassMembers",
+    "Sharp\\Constructor",
     "Sharp\\Container",
     "Sharp\\ContainerError",
     "Sharp\\Dispatcher",
+    "Sharp\\DynamicallyAccessed",
+    "Sharp\\EnumCase",
     "Sharp\\Error",
     "Sharp\\Events",
     "Sharp\\Float",
@@ -31,19 +34,22 @@ pub(crate) const SHARP_CLASSES: [&str; 32] = [
     "Sharp\\Position",
     "Sharp\\Property",
     "Sharp\\Random",
-    "Sharp\\ReachedByReflection",
     "Sharp\\Result",
     "Sharp\\Scope",
     "Sharp\\Set",
     "Sharp\\SetMembers",
+    "Sharp\\TupleElement",
+    "Sharp\\TypeKind",
     "Sharp\\Visibility",
+    "Sharp\\WeakMap",
 ];
 
-/// The PHP root classes a bare name in a `.sharp` file names by default, spec section 23.
+/// The PHP built-in classes a `.sharp` file names, spec section 23: each root one by a bare name by default, and each
+/// of a namespace, as `Dom\HTMLDocument`, through its import.
 ///
-/// `Builtins.sharp` declares each: the exception classes, `Throwable`, `Attribute` and the interfaces a PHP# class
-/// implements for a plain PHP library. Sorted.
-pub const STANDARD_ROOT_CLASSES: [&str; 51] = [
+/// `Builtins.sharp` declares each: the exception classes, `Throwable`, `Attribute`, the interfaces a PHP# class
+/// implements for a plain PHP library, and the HTML DOM a page reads. Sorted.
+pub const STANDARD_ROOT_CLASSES: [&str; 69] = [
     "ArgumentCountError",
     "ArithmeticError",
     "AssertionError",
@@ -63,6 +69,24 @@ pub const STANDARD_ROOT_CLASSES: [&str; 51] = [
     "DateObjectError",
     "DateRangeError",
     "DivisionByZeroError",
+    "Dom\\AdjacentPosition",
+    "Dom\\Attr",
+    "Dom\\CharacterData",
+    "Dom\\ChildNode",
+    "Dom\\Comment",
+    "Dom\\Document",
+    "Dom\\DocumentFragment",
+    "Dom\\DocumentType",
+    "Dom\\Element",
+    "Dom\\HTMLCollection",
+    "Dom\\HTMLDocument",
+    "Dom\\HTMLElement",
+    "Dom\\NamedNodeMap",
+    "Dom\\Node",
+    "Dom\\NodeList",
+    "Dom\\ParentNode",
+    "Dom\\Text",
+    "Dom\\TokenList",
     "DomainException",
     "ErrorException",
     "Exception",

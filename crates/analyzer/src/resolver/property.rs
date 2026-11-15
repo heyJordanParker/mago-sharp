@@ -2111,7 +2111,7 @@ pub(crate) fn check_redundant_nullsafe<'arena, A>(
 
     let object_type_str = display_type(context, object_type);
 
-    let issue = context.as_null_check_error(
+    let issue = context.as_null_check_warning(
         Issue::help(format!("Redundant nullsafe operator (`{nullsafe}`) used on an expression that is never `null`."))
             .with_annotation(
                 Annotation::primary(operator_span).with_message(format!("Nullsafe operator `{nullsafe}` is unnecessary here")),
@@ -2685,24 +2685,9 @@ pub(super) fn report_non_documented_property<A>(
         return;
     }
 
-    // Spec section 14.3: in PHP#, a property `__get` serves with no `@property` line to type it is `Any?`. A write of
-    // any value to a property of unknown type is safe, so only a read warns.
+    // Spec section 14.3: in PHP#, a property `__get` serves with no `@property` line to type it is `Any?`, read and
+    // written with no warning, as C#'s `dynamic` and TypeScript's `any` are.
     if context.dialect.is_sharp() {
-        if for_assignment {
-            return;
-        }
-        let access = quoted_source(context, obj_span.join(selector_span));
-        let name = trim_start_byte(property_name.as_bytes(), b'$');
-        let name = String::from_utf8_lossy(name);
-        context.collector.report_with_code(
-            IssueCode::NonDocumentedProperty,
-            Issue::warning(format!("The type of `{access}` is unknown, so the read is `Any?`."))
-                .with_annotation(Annotation::primary(selector_span).with_message("Read here."))
-                .with_help(format!(
-                    "State its type with `as`, as in `string? {name} = {access} as string;`, or with `is`, as in `if ({access} is string {name})`."
-                )),
-        );
-
         return;
     }
 

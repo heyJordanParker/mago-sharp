@@ -165,7 +165,7 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
         ("public event Paired<TKey, TValue>(TKey key, TValue value);", vec![]),
         (
             "public event Named<Item>(Item item);",
-            vec!["3:20 A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`."],
+            vec!["3:20 Type parameter name `Item` should be `T`, or `T` and a capital letter, as in `TItem`."],
         ),
     ] {
         let code = leak(format!("namespace App.Shop;\n\n{declaration}\n"));
@@ -414,9 +414,7 @@ fn a_sharp_file_is_named_like_its_type() {
     // A type named like its file in lowercase gets the capital letter error, which renames the type.
     assert_eq!(
         issues_in("app/Shop/invoice.sharp", "namespace App.Shop;\n\npublic class invoice\n{\n}\n"),
-        [
-            "3:14 `invoice` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
-        ]
+        ["3:14 `invoice` must start with a capital letter: PHP# capitalizes every type except the built-in ones."]
     );
 
     // The type named like the file is the file's own wherever it sits, so each other type moves.
@@ -2169,7 +2167,8 @@ fn internal_is_an_access_modifier() {
 }
 
 /// An accessor's access modifier reaches strictly less than its property's, as in C#. `internal` reaches a namespace
-/// and `protected` the subclasses, so neither is narrower than the other.
+/// and `protected` the subclasses, so neither is narrower than the other. A `set` reaches its namespace at most, spec
+/// section 6.1, so `protected set` and `public set` are errors under any property.
 #[test]
 fn an_internal_accessor_is_narrower_only_than_a_public_property() {
     let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public int a { get; internal set; } = 0;\n    internal int b { get; private set; } = 0;\n    internal int c { get; protected set; } = 0;\n    protected int d { get; internal set; } = 0;\n    internal int e { get; internal set; } = 0;\n    internal int f { get; public set; } = 0;\n}\n";
@@ -2177,7 +2176,15 @@ fn an_internal_accessor_is_narrower_only_than_a_public_property() {
         format!("{line}:{column} The `{setter}` accessor of a PHP# property must be narrower than the property.")
     };
 
-    assert_eq!(issues(code), [error(7, 27, "set"), error(8, 28, "set"), error(9, 27, "set"), error(10, 27, "set")]);
+    assert_eq!(
+        issues(code),
+        [
+            "7:27 A `set` reaches its own namespace at most, so `c` takes no `protected`.".to_owned(),
+            error(8, 28, "set"),
+            error(9, 27, "set"),
+            "10:27 A `set` reaches its own namespace at most, so `f` takes no `public`.".to_owned(),
+        ]
+    );
 }
 
 /// Spec section 22: an interface method is public and takes no modifier but `override`, which a sub-interface's body
@@ -2232,18 +2239,22 @@ fn an_interface_property_takes_no_initial_value_and_no_accessor_body() {
 }
 
 /// An interface states a property its classes give, `{ get; }` as `OrderEvent` states the `orderId` its events give,
-/// spec section 15, or `{ get; set; }`, spec section 6.1. An interface member is always public, spec section 5, so an
-/// access modifier on an accessor is the error an access modifier on any interface member is. An accessor body is an
-/// error that writes the computed property, whose expression is the default body, spec section 22.
+/// spec section 15, or `{ get; init; }`, spec section 6.1. A `set` reaches its own namespace at most, and an interface's
+/// members are public, so an interface property's `set` is an error, spec section 22. An interface member is always
+/// public, spec section 5, so an access modifier on an accessor is the error an access modifier on any interface member
+/// is. An accessor body is an error that writes the computed property, whose expression is the default body.
 #[test]
-fn an_interface_property_is_get_only_settable_or_init() {
+fn an_interface_property_is_get_only_or_init() {
     let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n    string tag { get; private set; }\n    string code { protected get; set; }\n    string kind { get; set; init; }\n    string state { get; init; }\n    string note { init; get; }\n    string slug { get; get; }\n    string size { init; }\n    string seal { get; private init; }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "6:20 An interface property's default body is an expression: write `string label => …;`.",
+            "7:25 An interface property states `get` or `init`, since a `set` reaches its own namespace at most, so `title` takes no `set`.",
+            "8:31 An interface property states `get` or `init`, since a `set` reaches its own namespace at most, so `tag` takes no `set`.",
             "8:23 An interface member is always public, so it takes no access modifier.",
+            "9:34 An interface property states `get` or `init`, since a `set` reaches its own namespace at most, so `code` takes no `set`.",
             "9:19 An interface member is always public, so it takes no access modifier.",
             "10:29 A PHP# property is written by `set` or by `init`, not both.",
             "13:24 A PHP# property declares each accessor once.",
@@ -2508,9 +2519,7 @@ fn a_type_takes_any_capitalized_word_but_a_reserved_type_name() {
 
     assert_eq!(
         issues(lowercase),
-        [
-            "3:7 `internal` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
-        ]
+        ["3:7 `internal` must start with a capital letter: PHP# capitalizes every type except the built-in ones."]
     );
 }
 
@@ -2573,7 +2582,7 @@ fn int_float_and_bool_outside_the_sharp_namespace_are_reserved() {
     assert_eq!(
         issues("namespace sharp;\n\npublic static class Int\n{\n    public static int one() => 1;\n}\n"),
         [
-            "1:11 `sharp` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones.",
+            "1:11 Namespace name `sharp` should be in Pascal case.",
             "3:21 Cannot use `Int` as a class name: it is reserved.",
         ]
     );
@@ -2725,8 +2734,7 @@ fn a_clashing_import_is_helped_with_the_import_renamed() {
 /// a type with type arguments. So a class, an interface, an enum and an event start with a capital letter.
 #[test]
 fn a_class_interface_or_enum_name_starts_with_a_capital_letter() {
-    let rule =
-        "must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones.";
+    let rule = "must start with a capital letter: PHP# capitalizes every type except the built-in ones.";
 
     for (lowercase, capitalized, at) in [
         ("class box\n{\n}\n", "class Box\n{\n}\n", "3:7 `box`"),
@@ -2810,9 +2818,7 @@ fn a_type_name_that_starts_with_an_underscore_is_an_error() {
 
     assert_eq!(
         issues(code),
-        [
-            "3:7 `_Box` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
-        ]
+        ["3:7 `_Box` must start with a capital letter: PHP# capitalizes every type except the built-in ones."]
     );
 }
 
@@ -2824,67 +2830,87 @@ fn an_import_alias_starts_with_a_capital_letter() {
 
     assert_eq!(
         issues(lowercase),
-        [
-            "3:19 `box` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
-        ]
+        ["3:19 `box` must start with a capital letter: PHP# capitalizes every type except the built-in ones."]
     );
     assert_eq!(issues(capitalized), Vec::<String>::new());
 }
 
-/// PHP# capitalizes every namespace as it does every type, so each part of a `namespace` line starts with a capital
-/// letter, and the error names the part.
+/// Spec section 6: an indexer is a property that takes parameters, with C#'s rules: a class's gives each accessor a
+/// body, an interface's none, a struct's has no `set`, and it takes one parameter, PHP's `ArrayAccess` offset, `get`,
+/// `set` or both once, no `static`, and no accessor modifier but a class's `private set`.
 #[test]
-fn a_namespace_part_starts_with_a_capital_letter() {
-    let lowercase = "namespace App.store;\n\nclass Report\n{\n}\n";
-    let capitalized = "namespace App.Store.Orders;\n\nclass Report\n{\n}\n";
+fn an_indexer_follows_csharp_rules() {
+    let class = "namespace App.Tenant;\n\npublic class Cart\n{\n    private List<int> lines = [];\n\n    public int this[int index]\n    {\n        get => this.lines[index];\n        private set => this.lines[index] = value;\n    }\n}\n";
+    let interface = "namespace App.Tenant;\n\npublic interface Rows\n{\n    int this[int index] { get; }\n}\n";
+    let r#struct = "namespace App.Tenant;\n\npublic struct Pair\n{\n    public int this[int index]\n    {\n        get => index;\n        set => index;\n    }\n}\n";
+    let refused = "namespace App.Tenant;\n\npublic class Cart\n{\n    public static int this[]\n    {\n        get;\n        get => 1;\n        fetch => 2;\n        public set => 3;\n    }\n}\n";
+    let interface_body =
+        "namespace App.Tenant;\n\npublic interface Rows\n{\n    int this[int index] { get => index; }\n}\n";
 
+    assert_eq!(issues(class), Vec::<String>::new());
+    assert_eq!(issues(interface), Vec::<String>::new());
+    assert_eq!(issues(r#struct), ["8:9 A struct never changes, so its indexer has no `set`."]);
     assert_eq!(
-        issues(lowercase),
+        issues(refused),
         [
-            "1:15 `store` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
+            "5:27 An indexer takes one parameter, as in `this[int index]`.",
+            "5:12 An indexer is never `static`: it reads and writes an object, as `cart[0]`.",
+            "7:9 A class's indexer gives `get` a body, as in `get => this.lines[index];`.",
+            "8:9 This indexer declares `get` twice.",
+            "9:9 An indexer declares only `get` and `set`, and `fetch` is neither.",
+            "10:9 An indexer's accessor takes no `public`: only a class's `set` takes `private`.",
         ]
     );
-    assert_eq!(issues(capitalized), Vec::<String>::new());
+    assert_eq!(issues(interface_body), ["5:27 An interface's indexer declares `get` with no body, as in `get;`."]);
 }
 
-/// The first part of a namespace is checked as every other part is, and so is a namespace of one part.
+/// Spec section 19: an interface named with C#'s `I` prefix or an `Interface` suffix is a naming warning, as a name
+/// out of its case is, and a name that only starts with `I`, as `Invoice`, or is only `Interface`, gets none.
 #[test]
-fn a_lowercase_first_namespace_part_is_an_error() {
-    assert_eq!(
-        issues("namespace app.Store;\n\nclass Report\n{\n}\n"),
-        [
-            "1:11 `app` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
-        ]
-    );
-    assert_eq!(
-        issues("namespace app;\n\nclass Report\n{\n}\n"),
-        [
-            "1:11 `app` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
-        ]
-    );
+fn an_interface_named_with_an_i_prefix_or_an_interface_suffix_is_a_warning() {
+    for (name, expected) in [
+        ("IComparable", vec!["3:11 Interface name `IComparable` should have no `I` prefix and no `Interface` suffix."]),
+        (
+            "ComparableInterface",
+            vec!["3:11 Interface name `ComparableInterface` should have no `I` prefix and no `Interface` suffix."],
+        ),
+        ("Invoice", vec![]),
+        ("IO", vec![]),
+        ("Comparable", vec![]),
+    ] {
+        let code = leak(format!("namespace App.Tenant;\n\ninterface {name}\n{{\n}}\n"));
+
+        assert_eq!(issues(code), expected, "{name}");
+        assert!(check_in_type_file(code).iter().all(|issue| issue.level == mago_reporting::Level::Warning), "{name}");
+    }
+
+    let helped = check_in_type_file("namespace App.Tenant;\n\ninterface IComparable\n{\n}\n");
+    assert_eq!(helped[0].help.as_deref(), Some("Rename it `Comparable`."));
 }
 
-/// Each lowercase part of a namespace is its own error, at that part.
+/// Spec section 23: a namespace part out of Pascal case is a warning at that part, as every declared name's casing
+/// is, as Rust warns: the first part, a namespace of one part, a part that starts with `_`, and each such part on its
+/// own.
 #[test]
-fn each_lowercase_namespace_part_is_its_own_error() {
-    let rule =
-        "must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones.";
+fn a_namespace_part_out_of_pascal_case_is_a_warning() {
+    for (code, expected) in [
+        ("namespace App.store;", vec!["1:15 Namespace name `store` should be in Pascal case."]),
+        ("namespace app;", vec!["1:11 Namespace name `app` should be in Pascal case."]),
+        ("namespace App._Store;", vec!["1:15 Namespace name `_Store` should be in Pascal case."]),
+        (
+            "namespace app.Store.orders;",
+            vec![
+                "1:11 Namespace name `app` should be in Pascal case.",
+                "1:21 Namespace name `orders` should be in Pascal case.",
+            ],
+        ),
+        ("namespace App.Store.Orders;", vec![]),
+    ] {
+        let code = leak(format!("{code}\n\nclass Report\n{{\n}}\n"));
 
-    assert_eq!(
-        issues("namespace app.Store.orders;\n\nclass Report\n{\n}\n"),
-        [format!("1:11 `app` {rule}"), format!("1:21 `orders` {rule}")]
-    );
-}
-
-/// A namespace part that starts with `_` is not capitalized, as a type name that starts with `_` is not.
-#[test]
-fn a_namespace_part_that_starts_with_an_underscore_is_an_error() {
-    assert_eq!(
-        issues("namespace App._Store;\n\nclass Report\n{\n}\n"),
-        [
-            "1:15 `_Store` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
-        ]
-    );
+        assert_eq!(issues(code), expected, "{code}");
+        assert!(check_in_type_file(code).iter().all(|issue| issue.level == mago_reporting::Level::Warning), "{code}");
+    }
 }
 
 /// An import names a namespace another file declares, and plain PHP vendor namespaces are often lowercase, so an
@@ -3141,7 +3167,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             "8:35 Unexpected `__LINE__`",
             "8:45 Unexpected `&`",
             "8:54 Unexpected `__LINE__`",
-            "14:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "14:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
             "14:18 Unexpected `callable`",
             "15:9 Unexpected `echo`",
         ]
@@ -3221,7 +3247,7 @@ fn a_map_key_is_refused_once() {
     let code = leak(method(
         "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<Any, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<Any?, int> counts = [:];\n        Map<Pair<int, string>, int> pairs = [:];\n        Map<List<Pair<int, string>>, int> paths = [:];\n        return 1;\n",
     ));
-    let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.";
+    let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.";
 
     assert_eq!(
         issues(code),
@@ -3332,14 +3358,15 @@ fn attributes_on_an_interface_its_property_an_event_a_constant_and_a_lambda_are_
 }
 
 /// Spec section 1: an attribute target names a part of its declaration, as C# allows, and PHP holds each part but a
-/// return value. An accessor takes attributes, and an observer, which runs inside `set`, takes none.
+/// return value. An accessor takes attributes, and so does an observer, whose go on the `set` it runs inside, so
+/// `method:` is its one target.
 #[test]
 fn an_attribute_target_names_a_part_of_its_declaration_and_an_accessor_takes_attributes() {
     let code = "namespace App.Tenant;\n\n[type: Note]\npublic class Report\n{\n    [field: Note]\n    public const int MAX = 3;\n\n    [field: Note]\n    private int seen = 0;\n\n    [property: Note]\n    [field: Note]\n    public int count { [method: Note] get; [param: Note] [Note] set; } = 0;\n\n    public int size { [Note] get => 1; }\n\n    public Report([property: Note] [param: Note] public int id { get; }) { }\n\n    [method: Note]\n    public int run([param: Note] int extra) => extra;\n}\n";
     assert_eq!(issues(code), Vec::<String>::new());
 
     for code in [
-        "namespace App.Tenant;\n\npublic interface Sized\n{\n    int size { [Note] get; [param: Note] set; }\n}\n",
+        "namespace App.Tenant;\n\npublic interface Sized\n{\n    int size { [Note] get; [param: Note] init; }\n}\n",
         "namespace App.Tenant;\n\n[type: Note]\npublic enum Mode\n{\n    [field: Note]\n    case Read;\n\n    [property: Note]\n    public string label => \"read\";\n}\n",
         "namespace App.Tenant;\n\n[type: Note]\npublic struct Size { }\n",
         "namespace App.Tenant;\n\n[type: Note]\npublic event Paid(int orderId);\n",
@@ -3349,11 +3376,12 @@ fn an_attribute_target_names_a_part_of_its_declaration_and_an_accessor_takes_att
         "namespace App.Tenant;\n\npublic class Artifact\n{\n    public Artifact(public string name { get; }) { }\n\n    [method: Note]\n    public Artifact.fromName([param: Note] string name) : this(name) { }\n}\n",
         "namespace App.Tenant;\n\n[event: Note]\npublic event Settled([param: Note] int orderId, [property: Note] [field: Note] int amount);\n",
         "namespace App.Tenant;\n\npublic enum Payment\n{\n    case Paid([param: Note] [property: Note] string transactionId);\n\n    case Open;\n}\n",
+        "namespace App.Tenant;\n\npublic class Ledger\n{\n    public int balance { get; set; [Note] willSet => this.touch(); [method: Note] didSet => this.touch(); } = 0;\n\n    public static int days { get; set; [Note] didSet => Ledger.tick(); } = 0;\n\n    private void touch() { }\n\n    private static void tick() { }\n}\n",
     ] {
         assert_eq!(issues(code), Vec::<String>::new(), "{code}");
     }
 
-    let code = "namespace App.Tenant;\n\n[method: Note]\npublic class Report\n{\n    [return: Note]\n    public int run() => 1;\n\n    [field: Note]\n    public int size { get => 1; }\n\n    public int count { get; [return: Note] set; didSet => this.run(); } = 0;\n\n    public int total { get; set; [Note] willSet => this.run(); } = 0;\n\n    public int scale([property: Note] int extra) => extra;\n\n    [module: Note]\n    public int one() => 1;\n}\n";
+    let code = "namespace App.Tenant;\n\n[method: Note]\npublic class Report\n{\n    [return: Note]\n    public int run() => 1;\n\n    [field: Note]\n    public int size { get => 1; }\n\n    public int count { get; [return: Note] set; didSet => this.run(); } = 0;\n\n    public int total { get; set; [param: Note] willSet => this.run(); } = 0;\n\n    public int scale([property: Note] int extra) => extra;\n\n    [module: Note]\n    public int one() => 1;\n}\n";
     assert_eq!(
         issues(code),
         [
@@ -3361,7 +3389,7 @@ fn an_attribute_target_names_a_part_of_its_declaration_and_an_accessor_takes_att
             "6:6 Unexpected `return`",
             "9:6 `field:` names no part of a property without storage, whose targets are `property:`.",
             "12:30 Unexpected `return`",
-            "14:34 `willSet` runs inside the `set` accessor, so it has no place of its own for an attribute.",
+            "14:35 `param:` names no part of an observer, whose targets are `method:`.",
             "16:23 `property:` names no part of a parameter, whose targets are `param:`.",
             "18:6 `module:` names no part of a method, whose targets are `method:`.",
         ]
@@ -3845,7 +3873,7 @@ fn an_extension_block_type_parameter_appears_in_its_receiver() {
         ),
         (
             "extension<K>(List<K> items)",
-            vec!["5:15 A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`."],
+            vec!["5:15 Type parameter name `K` should be `T`, or `T` and a capital letter, as in `TItem`."],
         ),
     ] {
         let code = format!(
@@ -3862,35 +3890,31 @@ fn an_extension_block_type_parameter_appears_in_its_receiver() {
     );
 }
 
-/// A class value's members are `Class`'s own and the statics of the class it holds, spec section 25, so only the
-/// standard library, under `Sharp`, declares an extension of `Class`, nullable or not, and a class value of another
-/// type is any other receiver's member, as `List<Class<Order>>` is.
+/// Any code extends `Class`, nullable or not, as C# and Kotlin let any code extend their class value types, spec
+/// section 25, and `Class`'s own members still win.
 #[test]
-fn only_the_standard_library_extends_class() {
-    let refusal = "An extension can't add members to `Class`: a class value's members are `Class`'s own and the statics of the class it holds.";
-    for (namespace, receiver, expected) in [
-        ("App.Shared", "extension<T>(Class<T> type)", vec![format!("5:18 {refusal}")]),
-        ("App.Shared", "extension(Class<Order> type)", vec![format!("5:15 {refusal}")]),
-        ("App.Shared", "extension<T>(Class<T>? type)", vec![format!("5:18 {refusal}")]),
-        ("App.Shared", "extension<T>(List<Class<T>> types)", vec![]),
-        ("Sharp", "extension<T>(Class<T> type)", vec![]),
-        ("Sharp.Data", "extension<T>(Class<T> type)", vec![]),
+fn any_code_extends_class() {
+    for (namespace, receiver) in [
+        ("App.Shared", "extension<T>(Class<T> type)"),
+        ("App.Shared", "extension(Class<Order> type)"),
+        ("App.Shared", "extension<T>(Class<T>? type)"),
+        ("App.Shared", "extension<T>(List<Class<T>> types)"),
+        ("Sharp", "extension<T>(Class<T> type)"),
     ] {
         let code = format!(
             "namespace {namespace};\n\npublic static class Classes\n{{\n    {receiver}\n    {{\n        public string describe() => \"\";\n    }}\n}}\n"
         );
 
-        assert_eq!(issues(code.leak()), expected, "`{namespace}`: `{receiver}`");
+        assert_eq!(issues(code.leak()), Vec::<String>::new(), "`{namespace}`: `{receiver}`");
     }
 }
 
-/// A member that changes the collection it is called on takes its receiver by `ref`, as C# 14 allows, spec section 26.
-/// Only the standard library, under `Sharp`, declares one: other code returns the changed copy, spec section 12.
+/// A member that changes the collection it is called on takes its receiver by `ref`, as C# 14 lets any code, spec
+/// section 26. Only the receiver takes `ref`.
 #[test]
-fn only_the_standard_library_takes_a_receiver_by_ref() {
-    let refusal = "Only the standard library declares a method that changes the collection it is called on: return the changed copy instead, as in `lines = Cart.withShipping(lines, shipping);`.";
+fn any_code_takes_a_receiver_by_ref() {
     for (namespace, receiver, expected) in [
-        ("App.Shared", "extension<T>(ref List<T> list)", vec![format!("5:18 {refusal}")]),
+        ("App.Shared", "extension<T>(ref List<T> list)", vec![]),
         ("Sharp", "extension<T>(ref List<T> list)", vec![]),
         ("Sharp.Data", "extension<T>(ref List<T> list)", vec![]),
         (
@@ -4230,7 +4254,7 @@ fn fields_outside_the_slice_are_an_error() {
 
 #[test]
 fn a_nullable_field_or_auto_property_is_in_the_slice_with_or_without_an_initial_value() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int? total;\n    protected Calc? owner;\n    private (int|string)? key;\n    private int? start = 1;\n    public Calc? helper { get; set; }\n    public int? count { get; private set; }\n    public (int|string)? code { get; protected set; } = 2;\n    public int? limit { get; } = null;\n    public string? label { get; } = \"none\";\n\n    public Report(public int? id { get; }, private int? flag, public (int|string)? tag { get; })\n    {\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int? total;\n    protected Calc? owner;\n    private (int|string)? key;\n    private int? start = 1;\n    public Calc? helper { get; set; }\n    public int? count { get; private set; }\n    public (int|string)? code { get; set; } = 2;\n    public int? limit { get; } = null;\n    public string? label { get; } = \"none\";\n\n    public Report(public int? id { get; }, private int? flag, public (int|string)? tag { get; })\n    {\n    }\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
@@ -4422,7 +4446,7 @@ fn a_union_typed_class_constant_follows_the_union_rules() {
 
 #[test]
 fn an_auto_property_has_get_an_optional_narrower_set_or_init_and_an_optional_constant_initial_value() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; } = \"none\";\n    public float rate { get; protected set; }\n    protected int total { get; private set; }\n    public int id { get; }\n    private int hidden { get; set; }\n    public string title { get; init; } = \"\";\n    public string label { get; private init; } = \"\";\n    public string slug { get; init => field = strtolower(value); } = \"\";\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; } = \"none\";\n    public float rate { get; internal set; }\n    protected int total { get; private set; }\n    public int id { get; }\n    private int hidden { get; set; }\n    public string title { get; init; } = \"\";\n    public string label { get; protected init; } = \"\";\n    public string slug { get; init => field = strtolower(value); } = \"\";\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
@@ -4434,9 +4458,9 @@ fn an_auto_property_breaking_the_accessor_rules_is_an_error() {
     assert_eq!(
         issues(code),
         [
-            "5:25 The `set` accessor of a PHP# property must be narrower than the property.",
+            "5:25 A `set` reaches its own namespace at most, so `a` takes no `public`.",
             "6:26 The `set` accessor of a PHP# property must be narrower than the property.",
-            "7:28 The `set` accessor of a PHP# property must be narrower than the property.",
+            "7:28 A `set` reaches its own namespace at most, so `c` takes no `public`.",
             "8:16 A PHP# property needs a `get` accessor.",
             "9:25 A PHP# property declares each accessor once.",
             "10:28 The `init` accessor of a PHP# property must be narrower than the property.",
@@ -4533,25 +4557,25 @@ fn an_access_level_on_get_is_an_error_naming_a_method_that_reads_it() {
     );
 }
 
-/// Spec section 6.4: `via` goes on an instance auto-property with `get; set;`, whose storage its behaviors run around,
-/// so it is an error beside an accessor body, and on a get-only, static or interface property. A constructor
-/// parameter takes none, which the parser reports, as section 9 limits it to access levels and attributes.
+/// Spec section 6.4: `via` goes on an auto-property with `get; set;`, an instance or a static one, whose storage its
+/// behaviors run around, so it is an error beside an accessor body, and on a get-only or interface property. A
+/// constructor parameter takes none, which the parser reports, as section 9 limits it to access levels and attributes.
 #[test]
-fn via_goes_on_an_instance_auto_property_with_get_and_set() {
-    let code = "namespace App.Tenant;\n\nimport App.Trimmed;\nimport App.Tracked;\n\npublic class Report\n{\n    public string name { get; set; } via Trimmed = \"\";\n    public string title { get; set; } via Trimmed, Tracked = \"\";\n    public string? note { get; set; } via Trimmed;\n    public string code { get; set => field = value; } via Trimmed = \"\";\n    public static string label { get; set; } via Trimmed = \"\";\n    public string tag { get; } via Trimmed = \"\";\n}\n";
-    let interface = "namespace App.Tenant;\n\nimport App.Trimmed;\n\npublic interface Named\n{\n    string name { get; set; } via Trimmed;\n}\n";
+fn via_goes_on_an_auto_property_with_get_and_set() {
+    let code = "namespace App.Tenant;\n\nimport App.Trimmed;\nimport App.Tracked;\n\npublic class Report\n{\n    public string name { get; set; } via Trimmed = \"\";\n    public string title { get; set; } via Trimmed, Tracked = \"\";\n    public string? note { get; set; } via Trimmed;\n    public string code { get; set => field = value; } via Trimmed = \"\";\n    public static string label { get; set; } via Trimmed = \"\";\n    public string tag { get; } via Trimmed = \"\";\n    public static string kind { get; } via Trimmed = \"\";\n}\n";
+    let interface = "namespace App.Tenant;\n\nimport App.Trimmed;\n\npublic interface Named\n{\n    string name { get; init; } via Trimmed;\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "11:55 `via` goes on an auto-property with `get; set;`: its behaviors run around the storage.",
-            "12:46 A static property takes no `via`: each object keeps its own behaviors.",
             "13:32 `via` goes on an auto-property with `get; set;`: its behaviors run around the storage.",
+            "14:40 `via` goes on an auto-property with `get; set;`: its behaviors run around the storage.",
         ]
     );
     assert_eq!(
         issues(interface),
-        ["7:31 A property without storage takes no `via`: the class that stores the property names its behaviors."]
+        ["7:32 A property without storage takes no `via`: the class that stores the property names its behaviors."]
     );
 
     // Each behavior names a class, with its type arguments when it is generic, and never another type.
@@ -4566,12 +4590,13 @@ fn via_goes_on_an_instance_auto_property_with_get_and_set() {
 }
 
 /// Spec section 6.2: `willSet` and `didSet` each take a body and need `set`, as they run inside it on each write.
-/// `willSet` cannot change or stop the write, so it neither writes `value` nor returns, and a `set` body cannot return
-/// before `didSet`, nor `didSet` return a value. `field` in `willSet` reads the value the write replaces. A member
-/// declared on a constructor parameter takes observers too, as section 9 says.
+/// `willSet` cannot change the write, so it never writes `value`. A `return` in it ends `willSet`, as in Swift, so it
+/// returns no value and never leaves a `finally` block. A `set` body cannot return before `didSet`, nor `didSet` return
+/// a value. `field` in `willSet` reads the value the write replaces. A member declared on a constructor parameter takes
+/// observers too, as section 9 says.
 #[test]
 fn observers_take_a_body_beside_set_and_cannot_change_or_stop_the_write() {
-    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public string name { get; set; willSet => this.log(value); didSet { this.log(field); } } = \"\";\n    public int count { get; set { if (value < 0) { return; } field = value; } didSet => this.log(\"count\"); } = 0;\n    public int total { get; willSet => this.log(\"total\"); } = 0;\n    public int size { get; init; didSet => this.log(\"size\"); }\n    public int rank { get; set; willSet { value = 2; value++; return; } } = 0;\n    public int level { get; set; willSet => this.log(field); didSet; } = 0;\n    public int depth { get; set; didSet { return 1; } } = 0;\n\n    public Report(public string title { get; set; didSet => this.log(value); }) { }\n\n    private void log(Any? text) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public string name { get; set; willSet => this.log(value); didSet { this.log(field); } } = \"\";\n    public int count { get; set { if (value < 0) { return; } field = value; } didSet => this.log(\"count\"); } = 0;\n    public int total { get; willSet => this.log(\"total\"); } = 0;\n    public int size { get; init; didSet => this.log(\"size\"); }\n    public int rank { get; set; willSet { value = 2; value++; return; } } = 0;\n    public int level { get; set; willSet => this.log(field); didSet; } = 0;\n    public int depth { get; set; didSet { return 1; } } = 0;\n    public int width { get; set; willSet { return 1; } } = 0;\n    public int height { get; set; willSet { try { this.log(1); } finally { return; } } } = 0;\n    public int span { get; set; willSet { const f = () => { try { return 1; } finally { return 2; } }; if (f() > 1) { return; } this.log(f()); } } = 0;\n\n    public Report(public string title { get; set; didSet => this.log(value); }) { }\n\n    private void log(Any? text) { }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -4579,11 +4604,12 @@ fn observers_take_a_body_beside_set_and_cannot_change_or_stop_the_write() {
             "6:52 A `set` accessor beside `didSet` cannot return: `didSet` runs after it.",
             "7:29 `willSet` needs a `set` accessor: it runs on each write through `set`.",
             "8:34 `didSet` needs a `set` accessor: it runs on each write through `set`.",
-            "9:63 `willSet` cannot return: the write runs after it.",
             "9:43 `willSet` cannot change `value`: the write after it stores `value` as written.",
             "9:54 `willSet` cannot change `value`: the write after it stores `value` as written.",
             "10:62 `didSet` needs a body, as in `didSet => this.log(field);`.",
             "11:50 `didSet` must not return a value.",
+            "12:51 `willSet` must not return a value.",
+            "13:76 `return` in `willSet` cannot leave a `finally` block.",
         ]
     );
 }
@@ -4986,12 +5012,12 @@ fn a_type_written_in_another_case_names_its_spelling_and_a_php_type_fails_as_a_t
         );
     }
 
-    // Spec section 7: `never` is a method's return type, and a type PHP# doesn't have anywhere else, each refused once.
+    // Spec section 7: `never` is a whole type, which no value has, wherever a type goes: a parameter, a local, a
+    // property, a field and a type argument, as Swift's `Never`, Kotlin's `Nothing` and TypeScript's `never` are.
     let never = leak(method("        never local = extra;\n        return 1;\n").replace("int extra", "never extra"));
-    assert_eq!(
-        issues(never),
-        ["5:20 PHP# has no `never` type outside a return type.", "7:9 PHP# has no `never` type outside a return type."]
-    );
+    assert_eq!(issues(never), Vec::<String>::new());
+    let spelled = leak(method("        return 1;\n").replace("int extra", "Never extra"));
+    assert_eq!(issues(spelled), ["5:20 PHP# writes the type `never`."]);
     let returned = leak(method("        throw new Error();\n").replace("public int run", "public never run"));
     assert_eq!(issues(returned), Vec::<String>::new());
     let signature = "namespace App.Tenant;\n\ninterface Stops\n{\n    never stop();\n}\n";
@@ -5000,24 +5026,12 @@ fn a_type_written_in_another_case_names_its_spelling_and_a_php_type_fails_as_a_t
     let union = leak(method("        throw new Error();\n").replace("public int run", "public int|never run"));
     assert_eq!(issues(nullable), ["5:12 Type `never` cannot be nullable."]);
     assert_eq!(issues(union), ["5:16 Type `never` cannot be part of a union."]);
-    let property = "namespace App.Tenant;\n\nclass Report\n{\n    public never value { get; set; }\n    private List<never> items = [];\n}\n";
-    assert_eq!(
-        issues(property),
-        [
-            "5:12 PHP# has no `never` type outside a return type.",
-            "6:18 PHP# has no `never` type outside a return type."
-        ]
-    );
-    // `never` is a type only as the whole return type, so not as a return type's type argument, nested or not.
+    let property = "namespace App.Tenant;\n\nclass Report\n{\n    public never? value { get; set; } = null;\n    private List<never> items = [];\n}\n";
+    assert_eq!(issues(property), ["5:12 Type `never` cannot be nullable."]);
+    // A type argument of `never`, nested or not, in a return type too, as in `Result<int, never>`. A union still holds
+    // no `never`.
     let arguments = "namespace App.Tenant;\n\ninterface Stops\n{\n    List<never> listed();\n\n    Map<string, List<never>> mapped();\n\n    List<int|never> joined();\n\n    List<Self> own();\n}\n";
-    assert_eq!(
-        issues(arguments),
-        [
-            "5:10 PHP# has no `never` type outside a return type.",
-            "7:22 PHP# has no `never` type outside a return type.",
-            "9:14 Type `never` cannot be part of a union."
-        ]
-    );
+    assert_eq!(issues(arguments), ["9:14 Type `never` cannot be part of a union."]);
 }
 
 #[test]
@@ -5179,7 +5193,7 @@ fn an_interface_method_takes_and_returns_list_and_map_types() {
     assert_eq!(
         issues(code),
         [
-            "5:9 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`."
+            "5:9 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`."
         ]
     );
 }
@@ -5270,9 +5284,9 @@ fn a_set_element_takes_what_a_map_key_takes() {
     assert_eq!(
         issues(code),
         [
-            "3:104 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
-            "3:116 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
-            "3:158 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "3:104 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "3:116 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "3:158 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
         ]
     );
 }
@@ -5287,8 +5301,8 @@ fn a_map_key_without_equality_by_its_kind_is_an_error() {
     assert_eq!(
         issues(code),
         [
-            "3:187 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
-            "3:210 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "3:187 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "3:210 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
         ]
     );
 }
@@ -5553,12 +5567,13 @@ fn nameof_names_a_property_in_a_body_an_initial_value_and_an_attribute() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// A member of `typeof(X)` or of a local holding a class value is a static member of the class it holds, as `X.y` is,
-/// so the analyzer checks that the class has it. `Class`'s own members, such as `attributes`, come with the library.
+/// A member of `typeof(X)` or of a local holding a class value is one of `Class`'s own members, such as `attributes`,
+/// which come with the library, so the analyzer checks it, and refuses a static of the class it holds, spec section
+/// 25.
 #[test]
 fn a_member_of_a_class_value_is_in_the_slice() {
     let code = leak(method(
-        "        const type = typeof(Order);\n        const max = typeof(Order).MAX + type.MAX;\n        type.attributes();\n        return extra;\n",
+        "        const type = typeof(Order);\n        const named = typeof(Order).name() + type.name();\n        type.attributes();\n        return extra;\n",
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
@@ -5699,24 +5714,26 @@ fn position_current_as_a_parameter_default_is_the_callers_position() {
     assert_eq!(issues(lambda), Vec::<String>::new());
 }
 
-/// The parameter takes the whole position, so a default computed from `Position.current()`, one part of it or a value
-/// built from one, is an error that names the whole form.
+/// The parameter takes the whole position or one field of it, as C#'s `[CallerLineNumber]` and Swift's `#line` take
+/// the line alone, so a default that reads one field compiles, and one computed from the position, or from a field of
+/// it, is an error that names both forms.
 #[test]
-fn a_default_computed_from_position_current_is_an_error() {
+fn a_default_reads_one_field_of_position_current_and_one_computed_from_it_is_an_error() {
     let code = "namespace App;\n\nclass Reports\n{\n    public static void logSlow(string message, int line = Position.current().line)\n    {\n    }\n}\n";
     let next = leak(code.replace("Position.current().line", "Position.current().line + 1"));
     let shouted = leak(code.replace("Position.current().line", "Position.current().file.toUpper()"));
     let nullable =
         leak(code.replace("int line = Position.current().line", "Position? line = Position.current() ?? null"));
+    let refusal = "Take the caller's position or one field of it: `Position caller = Position.current()` or `int line = Position.current().line`.";
 
-    assert_eq!(issues(code), ["5:59 Take the whole position: `Position caller = Position.current()`."]);
-    assert_eq!(issues(next), ["5:59 Take the whole position: `Position caller = Position.current()`."]);
-    assert_eq!(issues(shouted), ["5:59 Take the whole position: `Position caller = Position.current()`."]);
-    assert_eq!(issues(nullable), ["5:65 Take the whole position: `Position caller = Position.current()`."]);
+    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(next), [format!("5:59 {refusal}")]);
+    assert_eq!(issues(shouted), [format!("5:59 {refusal}")]);
+    assert_eq!(issues(nullable), [format!("5:65 {refusal}")]);
     assert_eq!(
-        check_in_type_file(code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
+        check_in_type_file(next).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
         [[
-            "As a default, `Position.current()` gives the caller's position, and the parameter takes all of it, as one value."
+            "As a default, `Position.current()` gives the caller's position, and the parameter takes all of it or one of its fields, as one value."
         ]]
     );
 }
@@ -5912,40 +5929,48 @@ fn the_generics_examples_of_the_spec_are_in_the_slice() {
 }
 
 /// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11, a struct's too.
+/// It is a naming convention, so another name is a warning, as Rust warns on a name out of its case.
 #[test]
-fn a_type_parameter_whose_name_does_not_start_with_t_and_an_uppercase_letter_is_an_error() {
+fn a_type_parameter_whose_name_does_not_start_with_t_and_an_uppercase_letter_is_a_warning() {
     let code = "namespace App.Tenant;\n\npublic class Box<Item, T, TKey, Tkey, T1, TK>\n{\n    public void run<Value>() { }\n}\n";
     let r#struct = "namespace App.Tenant;\n\npublic struct Pair<Item, out TOther>\n{\n}\n";
-    let refusal = "A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.";
+    let warning =
+        |name: &str| format!("Type parameter name `{name}` should be `T`, or `T` and a capital letter, as in `TItem`.");
 
     assert_eq!(
         issues(code),
-        [format!("3:18 {refusal}"), format!("3:33 {refusal}"), format!("3:39 {refusal}"), format!("5:21 {refusal}")]
+        [
+            format!("3:18 {}", warning("Item")),
+            format!("3:33 {}", warning("Tkey")),
+            format!("3:39 {}", warning("T1")),
+            format!("5:21 {}", warning("Value"))
+        ]
     );
-    assert_eq!(issues(r#struct), [format!("3:20 {refusal}")]);
+    assert_eq!(issues(r#struct), [format!("3:20 {}", warning("Item"))]);
+    assert!(check_in_type_file(code).iter().all(|issue| issue.level == mago_reporting::Level::Warning));
 }
 
-/// A type parameter is a type, so it starts with a capital letter as every PHP# type does: the rule that names it `T`
-/// or `T` and a capital letter refuses a lowercase one wherever a list declares it, once.
+/// A type parameter is a type, so it starts with a capital letter as every PHP# type does, which the parser reads: a
+/// lowercase one is refused wherever a list declares it, once.
 #[test]
 fn a_type_parameter_starts_with_a_capital_letter() {
-    let refusal = "A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.";
+    let refusal = "must start with a capital letter: PHP# capitalizes every type except the built-in ones.";
 
     for (lowercase, capitalized, at) in [
         (
             "class Box<t>\n{\n    public void run<item>() { }\n}\n",
             "class Box<T>\n{\n    public void run<TItem>() { }\n}\n",
-            vec!["3:11", "5:21"],
+            vec!["3:11 `t`", "5:21 `item`"],
         ),
         (
             "interface Source<t>\n{\n    void next<value>();\n}\n",
             "interface Source<T>\n{\n    void next<TValue>();\n}\n",
-            vec!["3:18", "5:15"],
+            vec!["3:18 `t`", "5:15 `value`"],
         ),
         (
             "enum Status\n{\n    case Open;\n\n    public void run<item>() { }\n}\n",
             "enum Status\n{\n    case Open;\n\n    public void run<TItem>() { }\n}\n",
-            vec!["7:21"],
+            vec!["7:21 `item`"],
         ),
     ] {
         let lowercase = leak(format!("namespace App.Tenant;\n\n{lowercase}"));
@@ -5990,9 +6015,9 @@ fn in_or_out_is_an_error_only_on_a_method_type_parameter() {
 
 /// A bound is `Object`, a class or an interface, a generic class type, several classes and interfaces joined with
 /// `&`, or another type parameter, spec section 11. `Object` holds any object, as C#'s `where T : class` and
-/// TypeScript's `T extends object` do, and joins no other bound, as mago's own check of an intersection says. A type
-/// parameter stands alone too, as Java's `<U extends T>` does. A union of classes names `&`, which joins several
-/// bounds.
+/// TypeScript's `T extends object` do, and joins classes and interfaces with `&`, as C#'s `where T : class,
+/// IShareable` does. A type parameter stands alone, as Java's `<U extends T>` does. A union of classes names `&`, which
+/// joins several bounds.
 #[test]
 fn a_bound_that_is_not_object_a_class_an_interface_a_generic_class_type_or_a_type_parameter_is_an_error() {
     let code = "namespace App.Tenant;\n\npublic class Box<TA : DatabaseEntity, TB : Comparable<TB>, TC : DatabaseEntity & Shareable, TM : Object>\n{\n    public void a<TD : int>() { }\n    public void b<TE : Any>() { }\n    public void c<TF : Order?>() { }\n    public void d<TG : Order|Line>() { }\n    public void e<TH : List<int>>() { }\n    public void f<TI : Map<string, int>>() { }\n    public void g<TJ : Class<Order>>() { }\n    public void h<TK : TA>() { }\n    public void i<TL : Order & TA>() { }\n    public void j<TN : object>() { }\n    public void k<TO : Object & Shareable>() { }\n    public void l<TP : Object?>() { }\n    public void m<TQ : Object>(TQ value) { }\n}\n";
@@ -6000,12 +6025,10 @@ fn a_bound_that_is_not_object_a_class_an_interface_a_generic_class_type_or_a_typ
     assert_eq!(
         issues(code),
         (5..=16)
-            .filter(|line| *line != 12)
+            .filter(|line| *line != 12 && *line != 15)
             .map(|line| match line {
                 8 => "8:24 A bound can't be a union: join several bounds with `&`.".to_owned(),
                 13 => "13:24 A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`."
-                    .to_owned(),
-                15 => "15:24 `Object` is a bound alone, as in `<TValue : Object>`: it joins no other bound with `&`."
                     .to_owned(),
                 line => format!(
                     "{line}:24 A bound is `Object`, `Equatable`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
@@ -6078,7 +6101,7 @@ fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_tak
     assert_eq!(
         issues(code),
         [
-            "6:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "6:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
             "9:27 A type argument cannot be `void`: `void` is only a return type.",
             "18:43 A type argument cannot be `void`: `void` is only a return type.",
             "19:28 A type parameter takes no type arguments: write `TItem`.",
@@ -6215,8 +6238,8 @@ fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union()
         [
             "5:13 A type parameter takes no type arguments: write `TItem`.",
             "6:13 A type parameter takes no type arguments: write `TItem`.",
-            "7:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
-            "8:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "7:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "8:17 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
             "9:23 A type argument cannot be `void`: `void` is only a return type.",
             "10:23 A type argument cannot be `void`: `void` is only a return type.",
             "11:24 A type argument cannot be `void`: `void` is only a return type.",
@@ -6293,15 +6316,16 @@ fn an_enum_declares_type_parameters_without_a_backing_type() {
     }
 }
 
-/// Spec section 31: `Error` is PHP#'s interface of every failure, so no import names it, nor gives a name `Error`. An
-/// import renames another library's `Error`.
+/// Spec section 31: no import names PHP's engine class `Error`, and another library's `Error`, imported as it is or
+/// under another name, shadows the standard library's as every default name is shadowed, as in Kotlin and Java.
 #[test]
-fn no_import_names_error() {
-    let refused = ["3:8 `Error` is PHP#'s interface of every failure, so no import names it."];
+fn an_import_shadows_error_but_never_names_the_engine_class() {
+    let refused =
+        ["3:8 PHP's engine class `Error` is a bug, which PHP# catches as `Throwable`, so no import names it."];
     for (import, expected) in [
         ("import Error;", refused.as_slice()),
-        ("import Vendor.Payments.Error;", refused.as_slice()),
-        ("import Vendor.Payments.Failure as Error;", refused.as_slice()),
+        ("import Vendor.Payments.Error;", [].as_slice()),
+        ("import Vendor.Payments.Failure as Error;", [].as_slice()),
         ("import Vendor.Payments.Error as VendorError;", [].as_slice()),
     ] {
         let code: &'static str = format!("namespace App.Tenant;\n\n{import}\n\nclass Report\n{{\n}}\n").leak();
@@ -6597,10 +6621,11 @@ fn a_second_default_arm_or_a_block_arm_in_a_match_that_gives_a_value_is_an_error
     );
 }
 
-/// A union with `null` is a nullable type written another way, so `is int|null` and `as int|null` are the errors of
-/// `is int?` and `as int?`.
+/// Spec section 21: a nullable type pattern, as `is int?`, matches an `int` or null, as Kotlin's and Swift's do, and
+/// a union with `null` writes it as every type does, with `?`. `as` to a nullable type is an error, since `as int`
+/// already gives null.
 #[test]
-fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
+fn a_nullable_type_pattern_matches_null_and_as_to_a_nullable_type_is_an_error() {
     let code = leak(method(
         "        const a = extra is int? n;\n        const b = extra as int?;\n        const c = extra as Map<string, float>?;\n        const d = extra as void;\n        const e = extra is int|null n;\n        const f = extra as int|string|null;\n        return extra;\n",
     ));
@@ -6608,25 +6633,15 @@ fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
     assert_eq!(
         issues(code),
         [
-            "7:28 A type pattern is never nullable: null never matches a type.",
             "8:28 `as` converts to a type that is not nullable or `void`.",
             "9:28 `as` converts to a type that is not nullable or `void`.",
             "10:28 `as` converts to a type that is not nullable or `void`.",
-            "11:28 A type pattern is never nullable: null never matches a type.",
+            "11:32 A type that holds null is written `int?`.",
             "12:28 `as` converts to a type that is not nullable or `void`.",
         ]
     );
     let helps: Vec<_> = check_in_type_file(code).into_iter().filter_map(|issue| issue.help).collect();
-    assert_eq!(
-        helps,
-        [
-            "Test for null with `x == null`, or join both with `or`, as in `x is int or null`.",
-            "Write `as int`.",
-            "Write `as Map<string, float>`.",
-            "Test for null with `x == null`, or join both with `or`, as in `x is int or null`.",
-            "Write `as int|string`.",
-        ]
-    );
+    assert_eq!(helps, ["Write `as int`.", "Write `as Map<string, float>`.", "Write `as int|string`."]);
     // A note names the type the code writes, never a placeholder such as `T`.
     let notes: Vec<_> = check_in_type_file(code)
         .into_iter()
@@ -6690,14 +6705,6 @@ fn a_tuple_a_class_value_and_object_are_tested_like_any_type() {
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
-}
-
-#[test]
-fn a_nullable_type_pattern_names_the_null_check_to_write() {
-    let code = leak(method("        const a = extra is int? n;\n        return extra;\n"));
-
-    let help: Vec<_> = check_in_type_file(code).into_iter().filter_map(|issue| issue.help).collect();
-    assert_eq!(help, ["Test for null with `x == null`, or join both with `or`, as in `x is int or null`."]);
 }
 
 #[test]
@@ -6774,21 +6781,15 @@ fn not_before_is_is_an_error_that_writes_is_not() {
     assert_eq!(issues(code), ["7:13 Write `extra is not int`: `!` applies to `extra` before `is` tests it."]);
 }
 
-/// Decision 045: `not` beside `or` reads two ways, and `not` beside `and` reads the way it binds.
+/// Spec section 21: `not` binds tighter than `or` and `and`, as in C#, so it reads by precedence beside either, with
+/// no parentheses required.
 #[test]
-fn not_beside_or_in_a_pattern_needs_parentheses_and_not_beside_and_does_not() {
+fn not_beside_or_or_and_in_a_pattern_reads_by_precedence() {
     let code = leak(method(
         "        const a = extra is not Paid or Refunded;\n        const b = extra is Paid or not Refunded;\n        const c = match (extra) {\n            not Paid or Refunded => 1,\n            default => 0,\n        };\n        const d = extra is not (Paid or Refunded);\n        const e = extra is (not Paid) or Refunded;\n        const f = extra is not null and not \"\";\n        return extra;\n",
     ));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:28 Write `not (Paid or Refunded)`, or `(not Paid) or Refunded`.",
-            "8:28 Write `not (Paid or Refunded)`, or `Paid or (not Refunded)`.",
-            "10:13 Write `not (Paid or Refunded)`, or `(not Paid) or Refunded`.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
@@ -6918,37 +6919,24 @@ fn an_enum_returns_self_holds_union_constants_and_refuses_new_self() {
     assert_eq!(issues(code), ["14:34 An enum has no constructor: its cases are its only values."]);
 }
 
-/// A type is one collection, as in C#, Java, Kotlin and Swift, so a union of two collections is refused, and the
-/// refusal names the two parameters or the enum to write. Every function type runs as `\Closure`, so a union of two
-/// is one type written twice.
+/// Spec section 24: `List`, `Map` and `Set` share a union as every other type does, as in TypeScript. Every function
+/// type runs as `\Closure`, so a union of two is one type written twice.
 #[test]
-fn a_union_of_two_collections_or_of_two_function_types_is_refused() {
+fn a_union_of_two_collections_compiles_and_one_of_two_function_types_is_refused() {
     let code = leak(method("        return 1;\n").replace(
         "int extra",
         "List<int>|Map<string, int> items, Function<int()>|Function<string()> make, List<int>|string fine",
     ));
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:30 A type can't be both a `List<int>` and a `Map<string, int>`.",
-            "5:70 Duplicate type `Function<string()>` is redundant."
-        ]
-    );
-    assert_eq!(
-        check_in_type_file(code)[0].help.as_deref(),
-        Some(
-            "Take the `List<int>` and the `Map<string, int>` as two parameters, or as an enum with one case that holds each."
-        )
-    );
+    assert_eq!(issues(code), ["5:70 Duplicate type `Function<string()>` is redundant."]);
 }
 
 /// Spec section 11: type arguments reach the running program, so two generic classes, or one class with other type
-/// arguments, compile. A type written twice is refused, and so are two of `List`, `Map` and `Set`, as a type is one
-/// collection, and a collection beside an `Iterable` of its element type, which adds nothing to it, while a collection
-/// beside another generic class compiles.
+/// arguments, compile, and so do two of `List`, `Map` and `Set`. A type written twice is refused, and so is a
+/// collection beside an `Iterable` of its element type, which adds nothing to it, while a collection beside another
+/// generic class compiles.
 #[test]
-fn a_union_refuses_a_type_written_twice_two_collections_and_a_collection_beside_its_iterable() {
+fn a_union_refuses_a_type_written_twice_and_a_collection_beside_its_iterable() {
     let code = leak(method("        return 1;\n").replace(
         "int extra",
         "Box<Order>|Pair<Order> a, Box<int>|Box<string> b, Box<Order>|Box<Order> c, List<int>|Map<string, int> d, List<int>|Set<int> e, Iterable<int>|List<int> f, Iterable<int>|Map<string, int> g, Set<int>|Iterable<int> h, Iterable<string>|List<int> i, Iterable<string>|Map<string, int> j, Order|Entity k, List<Order>|Box<Order> l",
@@ -6958,8 +6946,6 @@ fn a_union_refuses_a_type_written_twice_two_collections_and_a_collection_beside_
         issues(code),
         [
             "5:81 Duplicate type `Box<Order>` is redundant.",
-            "5:105 A type can't be both a `List<int>` and a `Map<string, int>`.",
-            "5:135 A type can't be both a `List<int>` and a `Set<int>`.",
             "5:161 `List<int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
             "5:188 `Map<string, int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
             "5:217 `Set<int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",

@@ -54,6 +54,18 @@ pub(crate) enum Effect {
     Emit,
 }
 
+impl Effect {
+    /// The effect as a `uses` names it, by full class name: a foreign or carried effect's class, and `Sharp\Events`
+    /// for an `emit`. `None` for a plain PHP call that no `extern` declares, which no `uses` names.
+    pub(crate) fn named(self) -> Option<Word> {
+        match self {
+            Effect::Foreign(effect) | Effect::Carried { effect, .. } => Some(effect),
+            Effect::Emit => Some(events()),
+            Effect::Unknown(_) => None,
+        }
+    }
+}
+
 /// The state a body changes, named by the root of the place it writes. The same roots name the values a call passes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Changed {
@@ -513,9 +525,7 @@ impl Effects {
         let mut effects = Vec::new();
         for (item, _) in &self.solved[*self.index.get(&body)?] {
             let effect = match item {
-                Item::Effect(Effect::Foreign(effect) | Effect::Carried { effect, .. }) => *effect,
-                Item::Effect(Effect::Emit) => events(),
-                Item::Effect(Effect::Unknown(_)) => return None,
+                Item::Effect(effect) => effect.named()?,
                 Item::Changed(_) => continue,
             };
             if !effects.contains(&effect) {
@@ -536,6 +546,7 @@ impl Effects {
         issues.extend(check::function_values_must_fit_their_types(self, codebase, &short_name_counts));
         issues.extend(check::implementations_must_fit_their_declarations(self, codebase, &short_name_counts));
         issues.extend(check::readonly_values_call_readonly_methods(self, codebase, &short_name_counts));
+        issues.extend(check::values_have_no_effects(self, codebase, &short_name_counts));
 
         issues
     }
@@ -702,6 +713,16 @@ impl Effects {
     /// Each body that is impure, and why, as [`Self::bodies_with`] gives them.
     fn impure_bodies(&self) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
         self.bodies_with(Self::body_impurity)
+    }
+
+    /// Each body that has an effect a `uses` names, and the first call that leads to one, as [`Self::bodies_with`] gives
+    /// them, without the scope. A change of state is no effect, and a plain PHP call no `extern` declares has none
+    /// that a `uses` names.
+    fn effectful_bodies(&self) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, Impurity)> + '_ {
+        self.bodies_with(|effects, body| {
+            effects.first_item(body, |item| matches!(item, Item::Effect(effect) if effect.named().is_some()))
+        })
+        .map(|(body, member, imports, _, impurity)| (body, member, imports, impurity))
     }
 
     /// Each body that changes the object it runs on, and the write that leads to it, as [`Self::bodies_with`] gives

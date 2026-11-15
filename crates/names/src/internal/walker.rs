@@ -45,6 +45,8 @@ use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Imports;
+use mago_syntax::cst::Indexer;
+use mago_syntax::cst::IndexerAccessor;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Is;
@@ -111,7 +113,6 @@ use crate::binding::BindingError;
 use crate::binding::Local;
 use crate::binding::LocalKind;
 use crate::default_class;
-use crate::fixed_default_class;
 use crate::internal::context::NameResolutionContext;
 use crate::internal::locals::LocalScopes;
 use crate::kind::NameKind;
@@ -431,11 +432,6 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
     where
         A: Arena,
     {
-        if self.sharp
-            && let Some(class) = fixed_default_class(name)
-        {
-            return ((class, false), None);
-        }
         // A case type of a default enum, as `Result.Err`, names the case class under the enum's class, spec sections
         // 20 and 31.
         if self.sharp
@@ -1008,6 +1004,35 @@ where
         if self.sharp {
             self.locals.exit_method();
         }
+    }
+
+    /// A PHP# indexer runs as the `ArrayAccess` methods of its class, spec section 6, so its parameters are the locals
+    /// each accessor sees, and its `set` declares `value`, the incoming value, as a property's `set` does.
+    fn walk_in_indexer(&mut self, _indexer: &'ast Indexer<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        self.locals.enter_method();
+    }
+
+    fn walk_out_indexer(&mut self, _indexer: &'ast Indexer<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        self.locals.exit_method();
+    }
+
+    fn walk_in_indexer_accessor(
+        &mut self,
+        accessor: &'ast IndexerAccessor<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.enter_block();
+        if accessor.name.value == b"set" {
+            self.locals.declare(b"value", Local { declaration: accessor.name.span, kind: LocalKind::Parameter });
+        }
+    }
+
+    fn walk_out_indexer_accessor(
+        &mut self,
+        _accessor: &'ast IndexerAccessor<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.exit_block();
     }
 
     fn walk_in_property_hook_list(

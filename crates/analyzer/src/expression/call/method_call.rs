@@ -43,8 +43,7 @@ use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_static_write;
 use crate::error::AnalysisError;
 use crate::expression::access::analyze_rest_of_chain;
-use crate::expression::access::analyze_through_value;
-use crate::expression::access::refuse_statics_of_no_class;
+use crate::expression::access::refuse_static_through_class_value;
 use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
@@ -56,7 +55,6 @@ use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
 use crate::expression::call::report_comparisons;
-use crate::expression::call::static_method_call::analyze_static_method_call;
 use crate::expression::call::with_null_safe_null;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
@@ -76,7 +74,6 @@ use crate::invocation::template_result::populate_template_result_from_invocation
 use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
-use crate::plugin::hook::StaticCall;
 use crate::resolver::extension::own_member_classes;
 use crate::resolver::method::CalledProperty;
 use crate::resolver::method::UndocumentedMethod;
@@ -373,25 +370,14 @@ where
         );
     }
 
-    // PHP# calls a static method through a class value, `type.m()`, as PHP's `$type::m()`, spec section 25.
-    if method_resolution.class_value {
+    // A class value reflects, and calls no static, spec section 25.
+    if method_resolution.class_value
+        && let ClassLikeMemberSelector::Identifier(name) = selector
+    {
         context.collector.extend(receiver_issues);
-        if refuse_statics_of_no_class(context, artifacts, object, span) {
-            return argument_list.analyze(context, block_context, artifacts);
-        }
-        let call = StaticCall { class: object, method: selector, argument_list, span };
+        refuse_static_through_class_value(context, artifacts, object, name, "call", span);
 
-        return analyze_through_value(
-            context,
-            block_context,
-            artifacts,
-            object,
-            is_null_safe,
-            span,
-            |context, block_context, artifacts| {
-                analyze_static_method_call(context, block_context, artifacts, call, type_arguments, true)
-            },
-        );
+        return argument_list.analyze(context, block_context, artifacts);
     }
 
     // Each kind of collection among the receiver's parts runs the standard library's member of that kind, analyzed on

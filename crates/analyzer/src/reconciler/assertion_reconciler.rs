@@ -420,11 +420,15 @@ where
         (TAtomic::Object(TObject::Named(first_object)), TAtomic::Object(TObject::Named(second_object))) => {
             let first_object_name = first_object.get_name();
             let second_object_name = second_object.get_name();
+            // A subclass of an open class may implement an interface, and in PHP# use a plain PHP trait, which spec
+            // section 22 makes a type the engine tests by the class's traits.
+            let is_implemented = |name: Word| {
+                context.codebase.interface_exists(name.as_bytes())
+                    || (context.dialect.is_sharp() && context.codebase.trait_exists(name.as_bytes()))
+            };
 
-            if (context.codebase.interface_exists(first_object_name.as_bytes())
-                && context.codebase.is_inheritable(second_object_name.as_bytes()))
-                || (context.codebase.interface_exists(second_object_name.as_bytes())
-                    && context.codebase.is_inheritable(first_object_name.as_bytes()))
+            if (is_implemented(first_object_name) && context.codebase.is_inheritable(second_object_name.as_bytes()))
+                || (is_implemented(second_object_name) && context.codebase.is_inheritable(first_object_name.as_bytes()))
             {
                 let mut first_type = first_type.clone();
                 first_type.add_intersection_type(second_type.clone());

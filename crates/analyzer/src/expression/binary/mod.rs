@@ -179,6 +179,15 @@ where
         return get_false();
     }
 
+    // Spec section 22: in PHP# a plain PHP trait is a type, which the engine tests by the traits of the class and its
+    // parents, so a value of an open class may be one, through a subclass that uses the trait.
+    let is_trait = |atomic: &TAtomic| matches!(atomic, TAtomic::Object(TObject::Named(named)) if context.codebase.trait_exists(named.name.as_bytes()));
+    let is_open_class = |atomic: &TAtomic| matches!(atomic, TAtomic::Object(TObject::Named(named)) if context.codebase.is_inheritable(named.name.as_bytes()));
+    if context.dialect.is_sharp() && target_type.types.iter().all(is_trait) && lhs_type.types.iter().any(is_open_class)
+    {
+        return get_bool();
+    }
+
     if !union_comparator::can_expression_types_be_identical(context.codebase, lhs_type, &target_type, true, false) {
         get_false()
     } else {

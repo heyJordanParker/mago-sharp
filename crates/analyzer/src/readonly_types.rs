@@ -16,9 +16,9 @@ use crate::utils::quoted_source;
 
 /// Spec section 13: `readonly` holds only types PHP# checks, and only a value something can change. So each `readonly`
 /// before a type of a PHP# program that reaches a plain PHP class, at its top or in a type argument, is an error, and
-/// one before a type that holds no PHP# object changes nothing: an enum, its cases that carry data included, a struct,
-/// a function type, and a collection of those, which is copied as a struct is. The semantics checks refuse `readonly` before a keyword type before any class
-/// is known.
+/// one before a type that holds no PHP# object changes nothing, so it warns: an enum, its cases that carry data
+/// included, a struct, a function type, and a collection of those, which is copied as a struct is. The semantics checks
+/// warn on `readonly` before a keyword type before any class is known.
 pub(crate) fn check_readonly_types<A>(context: &mut Context<'_, '_, A>, program: &Program<'_>)
 where
     A: Arena,
@@ -46,18 +46,21 @@ where
                 context,
                 readonly,
                 *name,
-                format!("`readonly` holds only types PHP# checks, and `{class}` is a plain PHP class: write `{fix}`."),
+                Issue::error(format!(
+                    "`readonly` holds only types PHP# checks, and `{class}` is a plain PHP class: write `{fix}`."
+                )),
             );
         }
+        // A `readonly` that changes nothing warns, as Rust's `unused_mut` does.
         if plain.is_empty() && !changes && names_a_type {
             report(
                 context,
                 readonly,
                 readonly.hint.span(),
-                format!(
+                Issue::warning(format!(
                     "{} `{fix}` never changes, so `readonly` changes nothing: write `{fix}`.",
                     sentence_article(&fix)
-                ),
+                )),
             );
         }
     }
@@ -110,13 +113,13 @@ where
     }
 }
 
-fn report<A>(context: &mut Context<'_, '_, A>, readonly: &ReadonlyHint<'_>, span: Span, message: String)
+fn report<A>(context: &mut Context<'_, '_, A>, readonly: &ReadonlyHint<'_>, span: Span, issue: Issue)
 where
     A: Arena,
 {
     context.collector.report_with_code(
         IssueCode::IncompatibleReadonlyModifier,
-        Issue::error(message)
+        issue
             .with_annotation(Annotation::primary(readonly.readonly.span).with_message("Written here."))
             .with_annotation(Annotation::secondary(span)),
     );

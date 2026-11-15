@@ -162,9 +162,22 @@ where
         .iter()
         .filter_map(|(_, method)| Some((*method, codebase.get_method_by_id(method)?)))
         .filter(|(method, metadata)| {
-            (!is_class_value || is_class_member(metadata)) && fits(context, receiver, method.get_class_name(), metadata)
+            (!is_class_value || is_class_value_member(metadata))
+                && fits(context, receiver, method.get_class_name(), metadata)
         })
         .collect();
+    // Spec section 25: `Class`'s own members, which fit only a class value, win over any other extension of `Class`,
+    // and one the file doesn't import reaches no class value, which reaches no static either.
+    let fitting = if fitting.iter().any(|(method, metadata)| is_class_member(method.get_class_name(), metadata)) {
+        fitting.into_iter().filter(|(method, metadata)| is_class_member(method.get_class_name(), metadata)).collect()
+    } else if is_class_value {
+        fitting
+            .into_iter()
+            .filter(|(method, _)| is_imported_or_in_namespace(context, method.get_class_name()))
+            .collect()
+    } else {
+        fitting
+    };
     // A collection's member is the kind's own, which wins over any other extension, as a real member does. An empty
     // array fits every kind, and is a `List`, the most specific, as an empty literal is.
     let fitting = if fitting.iter().any(|(method, metadata)| is_collection_member(method.get_class_name(), metadata)) {
@@ -270,7 +283,7 @@ where
                 .filter_map(|(_, method)| Some((*method, codebase.get_method_by_id(method)?)))
                 .filter(|(method, metadata)| {
                     metadata.flags.contains(flag)
-                        && (!is_class_value || is_class_member(metadata))
+                        && (!is_class_value || is_class_value_member(metadata))
                         && (is_imported_or_in_namespace(context, method.get_class_name())
                             || is_imported_by_default(context, method.get_class_name(), metadata))
                 })
@@ -478,16 +491,20 @@ where
     // A `List`, a `Map` and a `Set` are each their own kind, spec section 12, where plain PHP takes a list as an array of
     // any key and any of them as an iterable, so an extension of one kind fits no other, and a type parameter is the
     // kind of its bound. The standard library's members of an `Iterable` belong to a value typed `Iterable`, which is a
-    // kind of its own for them alone, so one fits no value of another type, a plain PHP object's class included, and a
-    // user's extension of an `Iterable` fits every value a loop reads. A PHP# class whose header names `Iterable<T>` is
-    // one, so it has them. An empty array is no kind yet.
+    // kind of its own for them alone, so one fits no `List`, `Map` or `Set`, which have their own, and a user's
+    // extension of an `Iterable` fits every value a loop reads. Every implementation of `Iterable<T>` is one, as C#'s
+    // LINQ and Kotlin's sequence operations reach every `IEnumerable` and `Iterable`: a PHP# class whose header names
+    // `Iterable<T>` and a plain PHP class that is a `Traversable`, so it has them wherever it declares no member of the
+    // name, and its own member wins. An empty array is no kind yet.
     fn kinds(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Vec<CollectionKind> {
         match atomic {
             TAtomic::Array(array) if array.is_empty() => vec![],
             TAtomic::GenericParameter(parameter) => {
                 parameter.constraint.types.iter().flat_map(|atomic| kinds(atomic, codebase)).collect()
             }
-            TAtomic::Object(TObject::Named(named)) if codebase.is_sharp_iterable(named.name.as_bytes()) => {
+            TAtomic::Object(TObject::Named(named))
+                if codebase.class_implements(named.name.as_bytes(), b"Traversable") =>
+            {
                 vec![CollectionKind::Iterable]
             }
             _ => CollectionKind::of(atomic).into_iter().collect(),
@@ -762,24 +779,18 @@ fn is_standard_library_member_on(
             .is_some_and(|receiver| receiver.type_union.types.iter().all(kind))
 }
 
-/// Whether the extension member `metadata` is a member of `Class`, spec section 25: its receiver is a class value, as
-/// `attributes` of the standard library's `Sharp.ClassMembers`, which semantics lets no other file declare. A call or
-/// read of it through a class value reaches it, not a static of the class the value holds.
-pub(crate) fn is_class_member(metadata: &FunctionLikeMetadata) -> bool {
+/// Whether the extension member `metadata` extends `Class`, spec section 25: its receiver is a class value.
+fn is_class_value_member(metadata: &FunctionLikeMetadata) -> bool {
     metadata.parameters.first().and_then(|receiver| receiver.get_type_metadata()).is_some_and(|receiver| {
         receiver.type_union.types.iter().all(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
     })
 }
 
-/// The member of `Class` named `name`, compared ignoring case, as PHP compares method names, when there is one.
-pub(crate) fn class_member<'codebase>(
-    codebase: &'codebase CodebaseMetadata,
-    name: &[u8],
-) -> Option<&'codebase FunctionLikeMetadata> {
-    codebase
-        .extensions
-        .get(&word(name))?
-        .iter()
-        .filter_map(|(_, method)| codebase.get_method_by_id(method))
-        .find(|metadata| is_class_member(metadata))
+/// Whether the extension member `metadata` of the static class `class` is a member of `Class` itself, spec section
+/// 25: the standard library's, as `attributes` of `Sharp.ClassMembers`. A call or read of it through a class value
+/// reaches it, never another code's extension of `Class`.
+fn is_class_member(class: Word, metadata: &FunctionLikeMetadata) -> bool {
+    is_standard_library_member_on(class, metadata, |atomic| {
+        matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_)))
+    })
 }

@@ -525,6 +525,47 @@ where
         return true;
     }
 
+    // A PHP# `Map` runs as PHP's array, so it fits a plain PHP array shape whose keys are all optional, as a Map may
+    // hold any of them, when each key is one of the Map's and its value fits each of the shape's. A key the shape
+    // requires is one a `Map` never promises, so the error names it.
+    if context.dialect.is_sharp()
+        && let ([TAtomic::Array(TArray::Keyed(map))], [TAtomic::Array(TArray::Keyed(shape))]) =
+            (input_type.types.as_ref(), parameter_type.types.as_ref())
+        && let (Some((key_type, value_type)), None) = (&map.parameters, &map.known_items)
+        && let (Some(shape), None) = (&shape.known_items, &shape.parameters)
+    {
+        let required: Vec<Word> = shape
+            .iter()
+            .filter(|(_, (is_optional, _))| !is_optional)
+            .map(|(key, _)| word(key.to_string().trim_matches(['\'', '"'])))
+            .collect();
+        if required.is_empty() {
+            let fits = shape.iter().all(|(key, (_, shape_value))| {
+                let mut comparison = ComparisonResult::for_dialect(context.dialect);
+                is_contained_by(context.codebase, &key.to_union(), key_type, false, false, false, &mut comparison)
+                    && is_contained_by(context.codebase, value_type, shape_value, false, false, false, &mut comparison)
+            });
+            if fits {
+                return true;
+            }
+        } else {
+            let target_name = invocation_target.guess_name(context);
+            let input = display_value_type(context, input_type, parameter_type);
+            let keys = if required.len() == 1 { "key" } else { "keys" };
+            context.collector.report_with_code(
+                IssueCode::PossiblyInvalidArgument,
+                Issue::error(format!(
+                    "{argument_subject} of `{target_name}` is a `{input}`, and the array shape it takes requires the {keys} {}, which a `Map` never promises.",
+                    and_list(&required)
+                ))
+                .with_annotation(Annotation::primary(input_expression.span()).with_message("Passed here."))
+                .with_help("Pass a value whose type names each required key, or make the key optional in the shape."),
+            );
+
+            return false;
+        }
+    }
+
     if let Some(value) = int_refused_for_float(&union_comparison_result, artifacts, input_expression) {
         report_int_for_float(context, IssueCode::InvalidArgument, value, parameter_type);
 
@@ -672,6 +713,21 @@ where
             .with_annotation(call_site)
             .with_note("A `literal-string` keeps the values the code runs on out of the string, as SQL that runs as written.")
             .with_help("Write the string as a literal or a constant, and pass each value it holds separately, as a query's bindings for its `?` placeholders take them.");
+
+            (IssueCode::PossiblyInvalidArgument, issue)
+        } else if types_can_be_identical
+            && is_sharp
+            && parameter_type_str == input_type_str
+            && parameter_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(array) if array.is_non_empty()))
+        {
+            // PHP# writes no non-empty collection type, so both types read the same, and the message says what differs.
+            let issue = Issue::error(format!(
+                "{argument_subject} of {target_kind_str} `{target_name_str}` takes a non-empty `{parameter_type_str}`, and `{}` may be empty.",
+                quoted_source(context, input_expression.span())
+            ))
+            .with_annotation(Annotation::primary(input_expression.span()).with_message("This may be empty."))
+            .with_annotation(call_site)
+            .with_help("Test that it is not empty first, as with `isNotEmpty()`, and pass it where the test holds.");
 
             (IssueCode::PossiblyInvalidArgument, issue)
         } else if types_can_be_identical {

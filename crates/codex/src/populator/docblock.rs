@@ -10,6 +10,8 @@ use crate::metadata::CodebaseMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::ttype::TypeMetadata;
 use crate::misc::GenericParent;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::array::TArray;
 use crate::ttype::comparator::ComparisonResult;
 use crate::ttype::comparator::union_comparator;
 use crate::ttype::template::TemplateResult;
@@ -285,11 +287,49 @@ fn collect_inheritance_work(
     }
 }
 
+/// Spec section 7: a PHP# override of a method whose last parameter is variadic may write that parameter as the
+/// `List` it arrives as, `List<string> parts` for `string ...$parts`, as a C# override leaves out `params`. It is
+/// still the variadic parameter, so it takes the list's element type and is variadic, as calls, the body and the PHP
+/// the override compiles to read it. `inheritance_work` holds each override and its parent's method, parents first.
+fn inherit_variadic_parameters(codebase: &mut CodebaseMetadata, inheritance_work: &[(Word, Word, Word, Word)]) {
+    for (class_name, method_name, parent_class, parent_method) in inheritance_work {
+        let Some(index) = codebase
+            .function_likes
+            .get(&(*parent_class, *parent_method))
+            .and_then(|parent| parent.parameters.iter().position(|parameter| parameter.flags.is_variadic()))
+        else {
+            continue;
+        };
+        let Some(child) = codebase.function_likes.get_mut(&(*class_name, *method_name)) else {
+            continue;
+        };
+        if !child.flags.is_sharp() || child.parameters.len() != index + 1 {
+            continue;
+        }
+        let parameter = &mut child.parameters[index];
+        let Some(element) = parameter.type_declaration_metadata.as_ref().and_then(|declared| {
+            match declared.type_union.types.as_ref() {
+                [TAtomic::Array(TArray::List(list))] if list.known_elements.is_none() => {
+                    Some(TypeMetadata { type_union: (*list.element_type).clone(), ..declared.clone() })
+                }
+                _ => None,
+            }
+        }) else {
+            continue;
+        };
+
+        parameter.flags |= MetadataFlags::VARIADIC;
+        parameter.type_metadata = Some(element.clone());
+        parameter.type_declaration_metadata = Some(element);
+    }
+}
+
 /// Sorts and applies docblock inheritance work items.
 fn apply_inheritance_work(codebase: &mut CodebaseMetadata, mut inheritance_work: Vec<(Word, Word, Word, Word)>) {
     inheritance_work.sort_by_key(|(class_name, _, _, _)| {
         codebase.class_likes.get(class_name).map_or(0, |m| m.all_parent_classes.len() + m.all_parent_interfaces.len())
     });
+    inherit_variadic_parameters(codebase, &inheritance_work);
 
     for (class_name, method_name, parent_class, parent_method) in inheritance_work {
         let child_method_id = (class_name, method_name);

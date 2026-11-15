@@ -117,9 +117,6 @@ pub enum ParseError<'arena> {
     /// A PHP# lambda with attributes and a parameter without parentheses, as in `[Pure] n => n * 2`, from the first
     /// attribute list to the parameter. Spec section 1: a lambda with attributes puts its parameters in parentheses.
     UnparenthesizedAttributedLambdaInSharp(Span),
-    /// TypeScript's `in` written in a PHP# loop, as in `for (const line in lines)`, at the `in`. Spec section 17: the
-    /// loop over a collection takes `of`, which closes the TypeScript trap where `in` loops over keys.
-    InLoopInSharp(Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -163,8 +160,7 @@ impl HasFileId for ParseError<'_> {
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span)
-            | ParseError::UnparenthesizedAttributedLambdaInSharp(span)
-            | ParseError::InLoopInSharp(span) => span.file_id,
+            | ParseError::UnparenthesizedAttributedLambdaInSharp(span) => span.file_id,
         }
     }
 }
@@ -212,8 +208,7 @@ impl HasSpan for ParseError<'_> {
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span)
-            | ParseError::UnparenthesizedAttributedLambdaInSharp(span)
-            | ParseError::InLoopInSharp(span) => *span,
+            | ParseError::UnparenthesizedAttributedLambdaInSharp(span) => *span,
         }
     }
 }
@@ -339,9 +334,6 @@ impl std::fmt::Display for ParseError<'_> {
             ParseError::UnparenthesizedAttributedLambdaInSharp(_) => {
                 "A lambda with attributes puts its parameters in parentheses, as in `[Pure] (n) => n * 2`.".to_string()
             }
-            ParseError::InLoopInSharp(_) => {
-                "A loop over a collection takes `of`, as in `for (const line of lines)`.".to_string()
-            }
         };
 
         write!(f, "{message}")
@@ -421,8 +413,7 @@ impl From<&ParseError<'_>> for Issue {
             | ParseError::NestedTypeInSharp(..)
             | ParseError::StructHeaderTypeInSharp(..)
             | ParseError::MiscasedKeywordInSharp(..)
-            | ParseError::UnparenthesizedAttributedLambdaInSharp(..)
-            | ParseError::InLoopInSharp(..) => Issue::error(error.to_string())
+            | ParseError::UnparenthesizedAttributedLambdaInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             // A generic class's static method takes the class's type arguments, so its help declares none of its own.

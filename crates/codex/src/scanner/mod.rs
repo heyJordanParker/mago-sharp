@@ -32,6 +32,9 @@ use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
+use mago_syntax::cst::Indexer;
+use mago_syntax::cst::IndexerAccessor;
+use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Method;
@@ -40,11 +43,13 @@ use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
+use mago_syntax::cst::Node;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Return;
 use mago_syntax::cst::Sequence;
+use mago_syntax::cst::Statement;
 use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::Trivia;
@@ -77,10 +82,12 @@ use crate::metadata::r#extern::ExternNamespaceMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
 use crate::metadata::function_like::FunctionLikeMetadata;
+use crate::metadata::module::NamespaceImportMetadata;
 use crate::metadata::ttype::TypeMetadata;
 use crate::misc::GenericParent;
 use crate::scanner::attribute::scan_attribute_lists;
 use crate::scanner::class_alias::scan_class_like_alias;
+use crate::scanner::class_like::add_iterator_method;
 use crate::scanner::class_like::register_anonymous_class;
 use crate::scanner::class_like::register_class;
 use crate::scanner::class_like::register_enum;
@@ -161,9 +168,48 @@ where
     let mut scanner = Scanner::new();
 
     scanner.walk_program(program, &mut context);
+    scanner.codebase.namespace_imports = namespace_imports(file, program);
     scanner.codebase.add_file(file);
 
     scanner.codebase
+}
+
+/// Spec section 23: each name a PHP# file of the project imports from another namespace, an edge of the graph in which
+/// no two namespaces import each other. Code writes no full name, which the analyzer refuses, so imports are the only
+/// edges. A library's files and the standard library's never reach the project's code, so they add no edge, and
+/// neither does a name of the standard library, which reaches no other code.
+fn namespace_imports(file: &File, program: &Program<'_>) -> Vec<NamespaceImportMetadata> {
+    if !program.dialect.is_sharp() || file.is_standard_library || file.file_type.is_vendored() {
+        return Vec::new();
+    }
+    let Some(namespace) = program.statements.iter().find_map(|statement| match statement {
+        Statement::Namespace(Namespace { name: Some(name), .. }) => Some(php_name(name)),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+
+    let file_name = word(&file.name);
+    let namespace = word(namespace.as_ref());
+    // A name of another namespace than the file's, which the standard library does not hold.
+    let is_edge = |name: &[u8]| {
+        let target = name.iter().rposition(|byte| *byte == b'\\').map_or(&name[..0], |separator| &name[..separator]);
+
+        !name.starts_with(b"Sharp\\") && !target.eq_ignore_ascii_case(namespace.as_bytes())
+    };
+    let mut imports: Vec<NamespaceImportMetadata> = Node::Program(program)
+        .filter_map(|node| match node {
+            Node::UseItem(item) => Some((item.name.span(), php_name(&item.name).into_owned())),
+            _ => None,
+        })
+        .into_iter()
+        .filter(|(_, name)| is_edge(name))
+        .map(|(span, name)| NamespaceImportMetadata::new(file_name, span, namespace, word(&name)))
+        .collect();
+    imports.sort_unstable();
+    imports.dedup();
+
+    imports
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +223,8 @@ struct Context<'ctx, 'arena, A> {
     pub php_version: PHPVersion,
     /// The PHP# extension whose members the walk is in, spec section 26.
     pub extension: Option<&'arena Extension<'arena>>,
+    /// The PHP# indexer whose accessors the walk is in, spec section 6.
+    pub indexer: Option<&'arena Indexer<'arena>>,
 }
 
 impl<'ctx, 'arena, A> Context<'ctx, 'arena, A>
@@ -190,7 +238,7 @@ where
         resolved_names: &'arena ResolvedNames<'arena>,
         php_version: PHPVersion,
     ) -> Self {
-        Self { arena, file, program, resolved_names, php_version, extension: None }
+        Self { arena, file, program, resolved_names, php_version, extension: None, indexer: None }
     }
 
     pub fn get_docblock(&self, node: impl HasSpan) -> Option<&'arena Trivia<'arena>> {
@@ -532,6 +580,12 @@ impl Scanner {
             defaults.add_declaring_method_id(method_name, method_identifier);
             defaults.inheritable_method_ids.insert(method_name, method_identifier);
             self.codebase.function_likes.insert((name, method_name), body);
+        }
+
+        // Spec section 12: an interface that names `Iterable<T>` gives each class the `getIterator()` the bridge writes,
+        // which reads its `elements()`, as a class that names it declares one at its header.
+        if let Some(iterable) = interface.inheritance.as_ref().and_then(Inheritance::iterable) {
+            add_iterator_method(&mut self.codebase, &mut defaults, iterable.span());
         }
 
         // A computed property's default body runs as a method of the trait too, which the analysis never calls.
@@ -1144,6 +1198,42 @@ where
     #[inline]
     fn walk_out_operator(&mut self, _operator: &'arena Operator<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
         self.template_constraints.pop().expect("Expected template stack to be non-empty");
+    }
+
+    /// A PHP# indexer's `get` and `set` register as the `ArrayAccess` methods they run as, `offsetGet` and `offsetSet`,
+    /// spec section 6, so a subclass inherits them and `cart[0]` reaches them. An accessor semantics refuses registers
+    /// as none.
+    #[inline]
+    fn walk_in_indexer_accessor(
+        &mut self,
+        accessor: &'arena IndexerAccessor<'arena>,
+        context: &mut Context<'ctx, 'arena, A>,
+    ) {
+        let parts =
+            context.indexer.and_then(|indexer| MethodParts::of_indexer_accessor(context.arena, indexer, accessor));
+        match parts {
+            Some(parts) => self.register_method(&parts, context),
+            None => self.template_constraints.push(vec![]),
+        }
+    }
+
+    #[inline]
+    fn walk_out_indexer_accessor(
+        &mut self,
+        _accessor: &'arena IndexerAccessor<'arena>,
+        _context: &mut Context<'ctx, 'arena, A>,
+    ) {
+        self.template_constraints.pop().expect("Expected template stack to be non-empty");
+    }
+
+    #[inline]
+    fn walk_in_indexer(&mut self, indexer: &'arena Indexer<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        context.indexer = Some(indexer);
+    }
+
+    #[inline]
+    fn walk_out_indexer(&mut self, _indexer: &'arena Indexer<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        context.indexer = None;
     }
 
     /// A PHP# named constructor registers as the public static method it runs as, spec section 9.1, which returns an

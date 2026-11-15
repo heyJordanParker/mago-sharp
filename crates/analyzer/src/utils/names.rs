@@ -30,6 +30,7 @@ use mago_names::EQUATABLE;
 use mago_names::ResolvedNames;
 use mago_names::STANDARD_ROOT_CLASSES;
 use mago_names::binding::sharp_operator_symbol;
+use mago_names::default_root_classes;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
@@ -311,7 +312,7 @@ pub(crate) fn imports_by_default(scope: &NamespaceScope, name: Word) -> bool {
 
     !imported
         && (name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(b"Sharp"))
-            || STANDARD_ROOT_CLASSES.iter().any(|class| class.as_bytes().eq_ignore_ascii_case(name)))
+            || default_root_classes().any(|class| class.as_bytes().eq_ignore_ascii_case(name)))
 }
 
 /// Whether the namespace `namespace` is `Sharp` or one under it, the standard library's (spec section 23), compared
@@ -323,8 +324,9 @@ pub(crate) fn is_sharp_namespace(namespace: &[u8]) -> bool {
 
 /// Whether the class-like `name` is one PHP builds in that the `.sharp` file `context` analyzes cannot name, decision
 /// 83: PHP is reached only through the standard library, so outside the standard library's own files only the class-likes
-/// of `Sharp` and the standard root classes a bare name names are reached. The file then names it as it names a class
-/// no code declares.
+/// of `Sharp` and the [standard classes](STANDARD_ROOT_CLASSES) the standard library names are reached, a root one by
+/// its bare name and one of a namespace, as `Dom\HTMLDocument`, through its import. The file then names it as it names
+/// a class no code declares.
 pub(crate) fn is_hidden_php_class<A>(context: &Context<'_, '_, A>, name: &[u8]) -> bool
 where
     A: Arena,

@@ -785,9 +785,10 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                     context,
                 );
             }
-            // Only a PHP# file declares an operator, a law, a named constructor or an extension, and `check_slice`
-            // decides each in an interface.
+            // Only a PHP# file declares an operator, an indexer, a law, a named constructor or an extension, and
+            // `check_slice` decides each in an interface.
             ClassLikeMember::Operator(_)
+            | ClassLikeMember::Indexer(_)
             | ClassLikeMember::Law(_)
             | ClassLikeMember::NamedConstructor(_)
             | ClassLikeMember::Extension(_) => {}

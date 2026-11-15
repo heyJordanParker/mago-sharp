@@ -1490,8 +1490,8 @@ pub fn get_backing_key_type<'key>(
 /// and an enum case, which section 19 gives `==` with no code, a struct, a `List`, `Set` or `Map` of them, and a class
 /// that declares or inherits `operator ==`, which the checker requires `hash()` beside, and a type parameter bounded by
 /// `Equatable` or by one of them. An intersection keys one when any of its members does,
-/// since each of its values is a value of every member. A class value keys none: it compares by its whole type, type
-/// arguments included, and runs as its plain class name, which `Class<Box<Order>>` and `Class<Box<Invoice>>` share.
+/// since each of its values is a value of every member. A class value keys one too, through the `==` and the hash of
+/// its whole type, type arguments included, as C#, Java and Kotlin key a map by a type.
 #[must_use]
 pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
     let is_key_object = |member: &TAtomic| match member {
@@ -1517,6 +1517,7 @@ pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
                 | TScalar::Float(_)
                 | TScalar::String(_)
                 | TScalar::Bool(_)
+                | TScalar::ClassLikeString(_)
         ),
         TAtomic::Object(_) => {
             std::iter::once(atomic).chain(atomic.get_intersection_types().unwrap_or_default()).any(is_key_object)
@@ -2231,10 +2232,17 @@ pub fn get_sharp_type(atomic: &TAtomic) -> Option<SharpType<'_>> {
 /// Whether PHP# can write `union`, each member, each type it intersects and each type inside them, as
 /// [`get_sharp_type`] reads them.
 ///
-/// `mixed` is `Any?`. A class named before the codebase resolves it, as a declaration's type is when an extension host
-/// refines it, is a class PHP# writes by its name.
+/// `mixed` is `Any?`. `never` is a whole type, spec section 7, so it is written as the whole type and as a class's type
+/// argument, as in `Result<int, never>`, but not as a collection's element, which in a plain PHP shape, as
+/// `array{0: int, 1: int}`, stands for no further element. A class named before the codebase resolves it, as a
+/// declaration's type is when an extension host refines it, is a class PHP# writes by its name.
 #[must_use]
 pub fn is_written_in_sharp(union: &TUnion) -> bool {
+    union.is_never() || is_written_in_sharp_inside(union)
+}
+
+/// [`is_written_in_sharp`] of a type that is no whole type and no class's type argument, so never `never`.
+fn is_written_in_sharp_inside(union: &TUnion) -> bool {
     union.types.iter().all(|atomic| {
         atomic.is_null()
             || atomic.is_mixed()
@@ -2246,18 +2254,22 @@ pub fn is_written_in_sharp(union: &TUnion) -> bool {
                     None => false,
                     Some(SharpType::Class(_, inner)) => inner.iter().all(is_written_in_sharp),
                     Some(SharpType::List(inner) | SharpType::Set(inner) | SharpType::Iterable(inner)) => {
-                        is_written_in_sharp(inner)
+                        is_written_in_sharp_inside(inner)
                     }
-                    Some(SharpType::Map(key, value)) => is_written_in_sharp(key) && is_written_in_sharp(value),
-                    Some(SharpType::Tuple(tuple)) => {
-                        tuple.tuple_elements().into_iter().flatten().all(|(element, _)| is_written_in_sharp(element))
+                    Some(SharpType::Map(key, value)) => {
+                        is_written_in_sharp_inside(key) && is_written_in_sharp_inside(value)
                     }
+                    Some(SharpType::Tuple(tuple)) => tuple
+                        .tuple_elements()
+                        .into_iter()
+                        .flatten()
+                        .all(|(element, _)| is_written_in_sharp_inside(element)),
                     Some(SharpType::Function(signature)) => {
                         signature.get_return_type().is_none_or(is_written_in_sharp)
                             && signature
                                 .get_parameters()
                                 .iter()
-                                .all(|parameter| parameter.get_type_signature().is_none_or(is_written_in_sharp))
+                                .all(|parameter| parameter.get_type_signature().is_none_or(is_written_in_sharp_inside))
                     }
                     Some(_) => true,
                 }
