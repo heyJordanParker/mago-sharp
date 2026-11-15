@@ -22,7 +22,7 @@ project="$1"
 converted=(src/Box.php src/Spec.php src/Shop/Coupon.php src/Shop/Crate.php src/Shop/Label.php src/Shop/Note.php src/Shop/Order.php
     src/Shop/Shelf.php src/Shop/Source.php src/Shop/Stock.php src/Shop/Tagged.php src/Shop/Tally.php)
 plain=(src/Factory.php src/Shop/Counter.php src/Shop/Feed.php src/Shop/Ledger.php src/Shop/Pair.php)
-expected_warnings='too-wide-member|redundant-docblock-type'
+expected_warnings='redundant-docblock-type'
 
 # Prints the command on stderr, so a file its output is saved in holds the output alone.
 step() { printf '\n$ %s\n' "${*/#$build\//}" >&2; "$@"; }

@@ -1,1 +1,1 @@
-13:16: `str_replace` has no PHP# form here: `ClassMembers.name` passes `"\"` where this call passes another value, and `StringMembers.replace` runs it only where argument 1 is a literal other than `""`
+13:16: `str_replace` has no PHP# form here: `StringMembers.replace` runs it only where argument 1 is a literal other than `""`

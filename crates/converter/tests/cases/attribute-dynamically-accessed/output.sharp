@@ -1,0 +1,12 @@
+namespace App;
+
+// An attribute class a framework reads by reflection keeps its mark, so the members it marks are never too wide (spec
+// section 5, decision 95). Plain PHP marks it as `#[\Sharp\DynamicallyAccessed]`.
+[Attribute(Attribute.TARGET_METHOD)]
+[DynamicallyAccessed]
+public final class Action
+{
+    public Action(public string name { get; private set; })
+    {
+    }
+}

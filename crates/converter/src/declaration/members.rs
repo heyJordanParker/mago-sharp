@@ -207,6 +207,15 @@ impl Converter<'_, '_> {
         };
         let metadata = class.metadata;
         let variable = property.item.variable();
+        // An interface's members are public, and a `set` reaches its own namespace at most (spec section 6.1).
+        if metadata.kind.is_interface()
+            && let Some(set) = property.hook_list.hooks.iter().find(|hook| hook.name.value == b"set")
+        {
+            return self.refuse(
+                set.name.span,
+                "an interface property with a `set` hook has no PHP# form: an interface property states `get` or `init` (spec section 22)",
+            );
+        }
         self.attributes(&property.attribute_lists);
         let Some((head, union, is_public, setters)) = self.property_head(&property.modifiers, variable) else {
             return;
@@ -245,8 +254,9 @@ impl Converter<'_, '_> {
 
     /// The hooks of a property, declared in the class body or on a constructor's parameter, as its accessors (spec
     /// sections 6 and 9). A property with storage, `has_storage`, gains the accessor it declares no hook for. PHP's
-    /// `private(set)` and `protected(set)` among `modifiers` are the `set` accessor's own access level, and a public
-    /// property the class alone sets, `set_by_class`, has a `private` one.
+    /// `private(set)` among `modifiers` is a `private set`, as is the `set` of a public property the class alone sets,
+    /// `set_by_class`, and any other `set` reaches the property's namespace at most, PHP's `protected(set)` too (spec
+    /// section 6.1).
     pub(super) fn hook_list(
         &mut self,
         hooks: &Hooks<'_, '_>,
@@ -256,7 +266,6 @@ impl Converter<'_, '_> {
     ) {
         let set_access = match modifiers.iter().find(|modifier| modifier.is_write_visibility()) {
             Some(Modifier::PrivateSet(_)) => "private ",
-            Some(Modifier::ProtectedSet(_)) => "protected ",
             _ if set_by_class => "private ",
             _ => "",
         };
@@ -429,18 +438,19 @@ impl Converter<'_, '_> {
         }
         let setters = self.setters(variable)?;
 
-        let visibility = match modifiers.iter().find(|modifier| modifier.is_read_visibility()) {
-            Some(Modifier::Protected(_)) => "protected ",
-            Some(Modifier::Private(_)) => "private ",
-            _ if metadata.kind.is_interface() => "",
-            _ => "public ",
-        };
         // A property that redeclares its parent's, as one that changes its initial value does, replaces it, which
         // only a property with accessors marked `override` does: a field replaces nothing (spec section 22).
         let overrides =
             metadata.overridden_property_ids.get(&word(variable.name)).is_some_and(|parents| !parents.is_empty());
+        let visibility = match modifiers.iter().find(|modifier| modifier.is_read_visibility()) {
+            Some(Modifier::Protected(_)) => "protected ",
+            Some(Modifier::Private(_)) => "private ",
+            _ if metadata.kind.is_interface() => "",
+            _ => self.property_access(variable),
+        };
         let is_static = has(modifiers, |modifier| matches!(modifier, Modifier::Static(_))).is_some();
         let is_abstract = has(modifiers, |modifier| matches!(modifier, Modifier::Abstract(_))).is_some();
+        // A property `internal` or wider has accessors, as a public one does, and a narrower one is storage.
         let is_public = !matches!(visibility, "private " | "protected ");
         // A PHP# property is closed unless it is `virtual` (spec section 6.1), so one a subclass may replace takes it,
         // as an open method does.
@@ -455,7 +465,8 @@ impl Converter<'_, '_> {
         // the property to a subclass's replacement.
         let shared = is_open || overrides || is_abstract || metadata.kind.is_interface();
         let setters = if shared { Setters::Namespace } else { setters };
-        if is_public && self.untyped_in_application(&written) {
+        // An interface's property is public.
+        if matches!(visibility, "public " | "") && self.untyped_in_application(&written) {
             let class = self.class.as_ref().map(|class| class.name.clone()).unwrap_or_default();
             self.refuse(
                 variable.span,
@@ -568,29 +579,37 @@ impl Converter<'_, '_> {
             return;
         };
         let metadata = class.metadata;
-        // An interface's constant is public and writes no visibility, as its methods do (spec section 22).
-        let visibility = match constant.modifiers.iter().find(|modifier| modifier.is_read_visibility()) {
-            _ if metadata.kind.is_interface() => "",
-            Some(Modifier::Protected(_)) => "protected ",
-            Some(Modifier::Private(_)) => "private ",
-            _ => "public ",
-        };
+        let declared = constant.modifiers.iter().find(|modifier| modifier.is_read_visibility());
 
         self.attributes(&constant.attribute_lists);
         let span = constant.span();
         let start = constant.modifiers.first().map_or(constant.r#const.span, HasSpan::span).start.offset;
         let attributes = self.edits.render(self.source, span.start.offset, start);
-        // The lowering writes the type into the constant's PHP, which a subclass's constant of the name must then keep.
-        let overridable = constant.hint.is_none()
-            && visibility != "private "
-            && !metadata.flags.is_final()
-            && !metadata.kind.is_enum();
         let mut declarations = Vec::new();
         for item in constant.items.iter() {
             let name = String::from_utf8_lossy(item.name.value).into_owned();
             if self.misnamed(item.name.value, item.name.span, "constant", NameCase::UpperSnake) {
                 continue;
             }
+            // An interface's constant is public and writes no visibility, as its methods do (spec section 22).
+            let visibility = match declared {
+                _ if metadata.kind.is_interface() => "",
+                Some(Modifier::Protected(_)) => "protected ",
+                Some(Modifier::Private(_)) => "private ",
+                _ => {
+                    let attributes = metadata
+                        .constants
+                        .get(&word(item.name.value))
+                        .map_or(&[][..], |found| found.attributes.as_slice());
+                    self.public_access(word(item.name.value), attributes, false)
+                }
+            };
+            // The lowering writes the type into the constant's PHP, which a subclass's constant of the name must then
+            // keep.
+            let overridable = constant.hint.is_none()
+                && visibility != "private "
+                && !metadata.flags.is_final()
+                && !metadata.kind.is_enum();
             if overridable {
                 self.refuse(
                     item.name.span,
@@ -681,18 +700,31 @@ impl Converter<'_, '_> {
             return;
         }
         self.attributes(&method.attribute_lists);
+        let is_abstract = has(&method.modifiers, |modifier| matches!(modifier, Modifier::Abstract(_))).is_some();
+        let is_narrower =
+            has(&method.modifiers, |modifier| matches!(modifier, Modifier::Private(_) | Modifier::Protected(_)))
+                .is_some();
+        // The access level the converter writes for a method PHP makes public, with no access modifier or `public`.
+        let mut access = None;
         if is_interface {
             for modifier in method.modifiers.iter().filter(|modifier| modifier.is_read_visibility()) {
                 let span = modifier.span();
                 self.edits.delete(span.start.offset, self.skip_whitespace(span.end.offset));
             }
-        } else if let Some(at) = Self::missing_visibility(&method.modifiers, function.span) {
-            self.edits.insert(at, "public ");
+        } else if !is_narrower {
+            let replaces = metadata
+                .overridden_method_ids
+                .get(&ascii_lowercase_word(name))
+                .is_some_and(|parents| !parents.is_empty());
+            let written = self.public_access(ascii_lowercase_word(name), &declared.attributes, replaces);
+            // An abstract method is there to be replaced, which a `private` one never is.
+            let written = if is_abstract && written == "private " { "protected " } else { written };
+            self.write_access(&method.modifiers, function.span, written);
+            access = Some(written);
         }
-        let is_abstract = has(&method.modifiers, |modifier| matches!(modifier, Modifier::Abstract(_))).is_some();
-        let is_public = is_interface
-            || has(&method.modifiers, |modifier| matches!(modifier, Modifier::Private(_) | Modifier::Protected(_)))
-                .is_none();
+        let is_public = is_interface || access == Some("public ");
+        let is_private = access == Some("private ")
+            || has(&method.modifiers, |modifier| matches!(modifier, Modifier::Private(_))).is_some();
 
         let mut head = None;
         if is_constructor {
@@ -724,7 +756,6 @@ impl Converter<'_, '_> {
             // decides once it is converted.
             let untyped = inferred || is_public && self.untyped_in_application(&written);
 
-            let is_private = has(&method.modifiers, |modifier| matches!(modifier, Modifier::Private(_))).is_some();
             let is_final = has(&method.modifiers, |modifier| matches!(modifier, Modifier::Final(_)));
             let overrides = metadata.overridden_method_ids.get(&ascii_lowercase_word(name)).is_some_and(|parents| {
                 parents.keys().any(|parent| {
@@ -873,8 +904,8 @@ impl Converter<'_, '_> {
                     self.returns_null(block);
                 }
                 let closed = class_is_final
-                    || has(&method.modifiers, |modifier| matches!(modifier, Modifier::Final(_) | Modifier::Private(_)))
-                        .is_some();
+                    || is_private
+                    || has(&method.modifiers, |modifier| matches!(modifier, Modifier::Final(_))).is_some();
                 // A return narrowed past what PHP declares holds for a closed method alone: a subclass may replace an
                 // open one with a method whose PHP return is the wider one, which PHP refuses to link (spec section 22).
                 if let Some(head) = head.as_mut() {

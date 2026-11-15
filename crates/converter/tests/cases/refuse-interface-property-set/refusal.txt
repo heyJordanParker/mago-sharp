@@ -1,0 +1,1 @@
+11:32: an interface property with a `set` hook has no PHP# form: an interface property states `get` or `init` (spec section 22)

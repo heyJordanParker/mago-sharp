@@ -36,6 +36,7 @@ use mago_word::Word;
 use crate::body::Captures;
 use crate::body::Locals;
 use crate::declaration::NameCase;
+use crate::declaration::Uses;
 use crate::edits::Edits;
 use crate::types::Imports;
 use crate::types::type_text;
@@ -165,6 +166,8 @@ struct Class<'input> {
     required: bool,
     /// The code outside the class that sets each of its properties, by the property's name with `$`.
     writers: HashMap<Word, BTreeSet<String>>,
+    /// Who uses each of its members, by its name in the project's references.
+    uses: HashMap<Word, Uses>,
     /// The name of each static field the `static` locals of its methods became so far, which no later one takes.
     static_fields: Vec<String>,
 }
@@ -235,15 +238,15 @@ impl<'input> Converter<'input, '_> {
         self.refusals.push(Refusal { span, reason: reason.into() });
     }
 
+    /// Whether the file is an application's, a project's, whose `composer.json` says `"type": "project"`.
+    fn in_project(&self) -> bool {
+        self.input.codebase.folder(self.input.file.id).is_some_and(|folder| self.input.library.is_project(folder))
+    }
+
     /// Whether `written`, a type a public member's signature names, holds `Any`, `Any?` or `Object` in an application,
-    /// a file of a project, whose public members name their types.
+    /// whose public members name their types.
     fn untyped_in_application(&self, written: &str) -> bool {
-        types::names_any(written)
-            && self
-                .input
-                .codebase
-                .folder(self.input.file.id)
-                .is_some_and(|folder| self.input.library.is_project(folder))
+        types::names_any(written) && self.in_project()
     }
 
     fn text(&self, span: Span) -> &'input [u8] {

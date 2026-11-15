@@ -169,7 +169,7 @@ fn checked(folder: &Path, converted: &Converted) -> String {
         .0
         .iter()
         .filter(|issue| issue.level >= Level::Warning)
-        .filter(|issue| !matches!(issue.code.as_deref(), Some("too-wide-member" | "redundant-docblock-type")))
+        .filter(|issue| issue.code.as_deref() != Some("redundant-docblock-type"))
         .map(|issue| {
             let line = issue.primary_span().map_or(0, |span| file.line_number(span.start.offset) + 1);
             format!("{line}: {} {}: {}\n", issue.level, issue.code.as_deref().unwrap_or_default(), issue.message)

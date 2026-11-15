@@ -1,0 +1,48 @@
+namespace App;
+
+import App.Routing.Route;
+
+// In a project, each member PHP makes public takes the narrowest access level its uses need, as the checker's
+// `too-wide-member` reads them (spec section 5): `private` for the class's own code, `protected` for a subclass's,
+// `internal` for its namespace's or for no code the analysis reads, and `public` otherwise. A member that implements
+// another keeps its access, as does one a marked attribute says a framework reaches by reflection.
+public class Cart : Countable
+{
+    private const int LIMIT = 3;
+
+    private int items = 0;
+
+    internal virtual string owner { get; set; } = '';
+
+    internal virtual void add()
+    {
+        if (this.items < Cart.LIMIT) {
+            this.items++;
+        }
+    }
+
+    protected virtual int total()
+    {
+        return this.items * 10;
+    }
+
+    public virtual string label()
+    {
+        return 'cart';
+    }
+
+    internal virtual void unused()
+    {
+    }
+
+    [Route('/cart')]
+    public virtual string show()
+    {
+        return 'cart';
+    }
+
+    public virtual int count()
+    {
+        return this.items;
+    }
+}

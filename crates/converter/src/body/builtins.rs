@@ -144,7 +144,9 @@ impl<'input> Converter<'input, '_> {
 
     /// The first standard library member that runs the built-in `function`, named `name`, with PHP's meaning for a call
     /// that passes `passed`, with the place in `passed` of the value in each of its slots, or a refusal at `span` that
-    /// names how each member doesn't. `passed` is `None` for a call with a named or spread argument.
+    /// names how each member doesn't. A member that fits the call but for the literal its body needs runs the function
+    /// with this call's values, so its reason alone is the call's, and a member that passes other values says nothing
+    /// of it. `passed` is `None` for a call with a named or spread argument.
     fn fitting(
         &mut self,
         span: Span,
@@ -160,15 +162,18 @@ impl<'input> Converter<'input, '_> {
             );
             return None;
         }
-        let mut reasons = Vec::new();
+        let (mut reasons, mut unfolded) = (Vec::new(), Vec::new());
         for member in members {
+            let shown = format!("`{}.{}`", short(&member.class.as_str_lossy()), member.name);
             match self.fits(member, function, passed) {
-                Ok(slots) => return Some((member, slots)),
-                Err(reason) => {
-                    reasons.push(format!("`{}.{}` {reason}", short(&member.class.as_str_lossy()), member.name));
-                }
+                Ok(slots) => match passed.and_then(|passed| literal_needed(member, passed, &slots)) {
+                    None => return Some((member, slots)),
+                    Some(reason) => unfolded.push(format!("{shown} {reason}")),
+                },
+                Err(reason) => reasons.push(format!("{shown} {reason}")),
             }
         }
+        let reasons = if unfolded.is_empty() { reasons } else { unfolded };
         self.refuse(span, format!("`{name}` has no PHP# form here: {}", reasons.join(", and ")));
 
         None
@@ -243,18 +248,6 @@ impl<'input> Converter<'input, '_> {
             .into_iter()
             .collect::<Option<_>>()
             .ok_or_else(|| "reads a value this call doesn't pass".to_owned())?;
-        // A member runs the function only for a literal that decides its body as the function's meaning needs.
-        if let Some(fixed) = member.fixed.iter().find(|fixed| {
-            !slots.get(fixed.slot).and_then(|slot| arguments[*slot].argument).is_some_and(|slot| fixed.holds(slot))
-        }) {
-            let position = member.call.arguments.iter().position(|passed| *passed == PhpCallArgument::Slot(fixed.slot));
-            return Err(format!(
-                "runs it only where argument {} is a literal {} `{}`",
-                position.map_or(0, |position| position + 1),
-                if fixed.equal { "equal to" } else { "other than" },
-                String::from_utf8_lossy(&fixed.literal)
-            ));
-        }
 
         for (index, (slot, parameter)) in slots.iter().zip(&method.parameters).enumerate() {
             let declared = parameter.get_type_metadata().map_or_else(get_mixed, |metadata| metadata.type_union.clone());
@@ -295,6 +288,23 @@ impl<'input> Converter<'input, '_> {
             (_, None) => Err("an extension member with no receiver has no call".to_owned()),
         }
     }
+}
+
+/// How `member`, which takes the values a call passes, `passed`, in its `slots`, still runs the function without PHP's
+/// meaning: an argument its body folds as a literal, which this call doesn't pass as one that decides the body as the
+/// function's meaning needs.
+fn literal_needed(member: &Member, passed: &[Passed<'_, '_>], slots: &[usize]) -> Option<String> {
+    let fixed = member.fixed.iter().find(|fixed| {
+        !slots.get(fixed.slot).and_then(|slot| passed[*slot].argument).is_some_and(|slot| fixed.holds(slot))
+    })?;
+    let position = member.call.arguments.iter().position(|argument| *argument == PhpCallArgument::Slot(fixed.slot));
+
+    Some(format!(
+        "runs it only where argument {} is a literal {} `{}`",
+        position.map_or(0, |position| position + 1),
+        if fixed.equal { "equal to" } else { "other than" },
+        String::from_utf8_lossy(&fixed.literal)
+    ))
 }
 
 /// Whether reading `argument` runs nothing: a variable, a literal, a constant or a property read.

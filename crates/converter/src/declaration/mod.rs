@@ -1,8 +1,9 @@
 //! Classes and their members: the header, properties and fields, methods and constructors, and their parameters. This
 //! module holds what every declaration shares, its attributes, docblock and visibility, and each family has a module.
 //!
-//! PHP# defaults a class to `internal` and a member to `private` (spec section 5), so the converter writes `public`
-//! wherever PHP leaves the visibility out. PHP's methods are open unless `final`, and PHP#'s are closed unless
+//! PHP# defaults a class to `internal` and a member to `private` (spec section 5), so the converter writes every class
+//! `public`, and each member PHP makes public `public` in a library and as wide as its uses need in a project, whose
+//! too wide members the checker refuses. PHP's methods are open unless `final`, and PHP#'s are closed unless
 //! `virtual` (spec section 22), so an open PHP method is `virtual`, and one that replaces its parent's is `override`.
 
 mod class;
@@ -15,11 +16,13 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::attribute::AttributeMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferenceKind;
 use mago_codex::reference::SymbolReferences;
+use mago_names::DYNAMICALLY_ACCESSED;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::AttributeList;
@@ -55,9 +58,9 @@ const WRITTEN_TAGS: [&str; 16] = [
 ];
 
 /// The accessors PHP# writes after a property's name: none for a field, which is storage, `get` alone for a
-/// `readonly` one, and a `set` with the narrower visibility PHP's `private(set)` or `protected(set)` gives (spec
-/// sections 6 and 13). A `set` PHP leaves as wide as the property is `private` where `setters` says the class alone sets
-/// it, and reaches the property's namespace otherwise.
+/// `readonly` one, and a `private set` for PHP's `private(set)` (spec sections 6 and 13). Any other `set` reaches the
+/// property's namespace at most, PHP's `protected(set)` and `public(set)` too (spec section 6.1), and is `private`
+/// where `setters` says the class alone sets the property.
 fn accessors(
     is_public: bool,
     is_readonly: bool,
@@ -68,7 +71,6 @@ fn accessors(
     match (is_public, is_readonly, set) {
         (_, true, _) => " { get; }",
         (_, false, Some(Modifier::PrivateSet(_))) => " { get; private set; }",
-        (_, false, Some(Modifier::ProtectedSet(_))) => " { get; protected set; }",
         (true, false, _) if setters == Setters::Class => " { get; private set; }",
         (true, false, _) => " { get; set; }",
         (false, false, _) => "",
@@ -83,6 +85,128 @@ enum Setters {
     Class,
     /// Other code of the class's namespace too.
     Namespace,
+}
+
+/// Who uses a member of the converted class, other than the class's own code, by the project's `references` and the
+/// subclasses that replace it. A member the class's own code alone uses has a `Uses` with nothing set, and one nothing
+/// uses has none.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Uses {
+    /// The code of a subclass, or a subclass that replaces the method.
+    subclass: bool,
+    /// The code of a subclass outside the class's namespace and the namespaces below it, or one that replaces the method.
+    subclass_outside: bool,
+    /// Other code of the class's namespace or one below it, or a subclass there that replaces the property.
+    namespace: bool,
+    /// Any other code, code outside every class and function among it, or a subclass there that replaces the property.
+    outside: bool,
+}
+
+impl Uses {
+    /// The narrowest access level these uses need, as the checker's `too-wide-member` reads them (spec section 5):
+    /// `private` for the class's own code, `protected` for its subclasses' too, `internal` for its namespace's, and
+    /// `public` otherwise. A subclass's code outside the namespace and other code of the namespace together need
+    /// `public`, since neither `protected` nor `internal` reaches both.
+    fn access(self) -> &'static str {
+        if self.outside || self.namespace && self.subclass_outside {
+            "public "
+        } else if self.namespace {
+            "internal "
+        } else if self.subclass {
+            "protected "
+        } else {
+            "private "
+        }
+    }
+}
+
+/// Who uses each member of `class`, by its name in `references`: `$name` for a property, the lowercase name for a
+/// method, and the name for a constant. A use through a subclass's object, as `$order->total()` of a subclass of the
+/// class that declares `total`, is a use of the member. A subclass that replaces a method needs it at least
+/// `protected`, and one that replaces a property needs it a property, which a PHP# field never is, so it counts as code
+/// of its namespace or outside it.
+fn member_uses(
+    class: &ClassLikeMetadata,
+    codebase: &CodebaseMetadata,
+    references: &SymbolReferences,
+) -> HashMap<Word, Uses> {
+    let key = codebase.class_key(class.name.as_bytes());
+    let full_name = class.original_name.as_str_lossy();
+    let own = namespace_of(&full_name);
+    // Whether `symbol`, a class's or a function's name, is a subclass of `class`, and whether it is outside `own`.
+    let place = |symbol: Word| {
+        let name = codebase.get_class_like(symbol.as_bytes()).map_or_else(
+            || symbol.as_str_lossy().into_owned(),
+            |other| other.original_name.as_str_lossy().into_owned(),
+        );
+        let is_subclass = codebase.is_instance_of(symbol.as_bytes(), class.name.as_bytes());
+        (is_subclass, !is_within(namespace_of(&name), own))
+    };
+
+    let mut uses: HashMap<Word, Uses> = HashMap::new();
+    references.for_each_reference(|origin, (on, member), _| {
+        if member.as_bytes().is_empty() || on != key && !codebase.is_instance_of(on.as_bytes(), class.name.as_bytes()) {
+            return;
+        }
+        let found = uses.entry(member).or_default();
+        let ReferenceOrigin::Symbol((symbol, _)) = origin else {
+            found.outside = true;
+            return;
+        };
+        if symbol == key {
+            return;
+        }
+        match place(symbol) {
+            (true, outside) => {
+                found.subclass = true;
+                found.subclass_outside |= outside;
+            }
+            (false, false) => found.namespace = true,
+            (false, true) => found.outside = true,
+        }
+    });
+
+    for (child, metadata) in &codebase.class_likes {
+        if *child == key || !codebase.is_instance_of(metadata.name.as_bytes(), class.name.as_bytes()) {
+            continue;
+        }
+        let (_, outside) = place(*child);
+        // A subclass holds each member it inherits among those it overrides, and replaces the ones it declares.
+        for (method, parents) in &metadata.overridden_method_ids {
+            let is_own =
+                metadata.declaring_method_ids.get(method).is_some_and(|found| found.get_class_name() == *child);
+            if is_own && parents.contains_key(&key) {
+                let found = uses.entry(*method).or_default();
+                found.subclass = true;
+                found.subclass_outside |= outside;
+            }
+        }
+        for (property, parents) in &metadata.overridden_property_ids {
+            if metadata.declaring_property_ids.get(property) == Some(child) && parents.contains(&key) {
+                let found = uses.entry(*property).or_default();
+                if outside {
+                    found.outside = true;
+                } else {
+                    found.namespace = true;
+                }
+            }
+        }
+    }
+
+    uses
+}
+
+/// Whether one of `attributes` is of a class marked `[DynamicallyAccessed]`, as a router's `[Route]`, whose framework
+/// reaches the member it marks, or each public member of the class it marks, by reflection, which no use records
+/// (spec section 5).
+fn dynamically_accessed(codebase: &CodebaseMetadata, attributes: &[AttributeMetadata]) -> bool {
+    let mark = codebase.class_key(DYNAMICALLY_ACCESSED.as_bytes());
+
+    attributes.iter().any(|attribute| {
+        codebase.get_class_like(attribute.name.as_bytes()).is_some_and(|class| {
+            class.attributes.iter().any(|marked| codebase.class_key(marked.name.as_bytes()) == mark)
+        })
+    })
 }
 
 /// The case spec section 24 names a kind of declaration in, as TypeScript does.
@@ -197,6 +321,17 @@ fn cycles(
 /// The namespace of `name`, a full PHP name, as `App\Shop` of `App\Shop\Checkout`, or nothing in PHP's root namespace.
 fn namespace_of(name: &str) -> &str {
     name.rsplit_once('\\').map_or("", |(namespace, _)| namespace)
+}
+
+/// Whether the namespace `inner` is `namespace` or one below it, as PHP matches names, so every namespace is within
+/// the root one.
+fn is_within(inner: &str, namespace: &str) -> bool {
+    namespace.is_empty()
+        || inner.eq_ignore_ascii_case(namespace)
+        || inner.len() > namespace.len()
+            && inner.is_char_boundary(namespace.len())
+            && inner[..namespace.len()].eq_ignore_ascii_case(namespace)
+            && inner.as_bytes()[namespace.len()] == b'\\'
 }
 
 impl Converter<'_, '_> {
@@ -382,13 +517,52 @@ impl Converter<'_, '_> {
         true
     }
 
-    /// The offset `public ` goes at for a member whose modifiers name no visibility, which PHP makes public.
-    fn missing_visibility(modifiers: &Sequence<'_, Modifier<'_>>, keyword: Span) -> Option<u32> {
-        let has_visibility = modifiers
-            .iter()
-            .any(|modifier| matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)));
+    /// The access level, as `internal `, of a member PHP makes public, `member` by its name in the project's
+    /// references, with its `attributes`. In a project, whose public members the checker refuses as too wide, it is
+    /// the narrowest the member's uses need, and `internal` for one nothing the analysis reads uses, as one only a view
+    /// template uses is (spec section 5). A member stays `public` in a library, whose uses are in the projects that
+    /// install it, in an interface, and where it `replaces` another, whose access it keeps, as do a constructor and a
+    /// magic method, which PHP calls itself, and a member a framework reaches by reflection, which a marked attribute on
+    /// it or its class says.
+    fn public_access(&self, member: Word, attributes: &[AttributeMetadata], replaces: bool) -> &'static str {
+        let Some(class) = self.class.as_ref() else {
+            return "public ";
+        };
+        let codebase = self.input.codebase;
+        if replaces
+            || member.as_bytes().starts_with(b"__")
+            || class.metadata.kind.is_interface()
+            || !self.in_project()
+            || dynamically_accessed(codebase, &class.metadata.attributes)
+            || dynamically_accessed(codebase, attributes)
+        {
+            return "public ";
+        }
 
-        (!has_visibility).then(|| modifiers.first().map_or(keyword, HasSpan::span).start.offset)
+        class.uses.get(&member).map_or("internal ", |uses| uses.access())
+    }
+
+    /// The access level of the converted class's property `variable` names, declared in the class body or by a
+    /// constructor's parameter, which PHP makes public.
+    fn property_access(&self, variable: &DirectVariable<'_>) -> &'static str {
+        let name = word(variable.name);
+        let Some(metadata) = self.class.as_ref().map(|class| class.metadata) else {
+            return "public ";
+        };
+        let replaces = metadata.overridden_property_ids.get(&name).is_some_and(|parents| !parents.is_empty());
+        let attributes = metadata.properties.get(&name).map_or(&[][..], |property| property.attributes.as_slice());
+
+        self.public_access(name, attributes, replaces)
+    }
+
+    /// Writes `access` where `modifiers` declare a member that PHP makes public: in place of its `public`, or at the
+    /// start of its declaration, `keyword` where it has no modifier.
+    fn write_access(&mut self, modifiers: &Sequence<'_, Modifier<'_>>, keyword: Span, access: &str) {
+        match has(modifiers, |modifier| matches!(modifier, Modifier::Public(_))) {
+            Some(_) if access == "public " => {}
+            Some(public) => self.edits.replace(public, access.trim_end()),
+            None => self.edits.insert(modifiers.first().map_or(keyword, HasSpan::span).start.offset, access),
+        }
     }
 }
 

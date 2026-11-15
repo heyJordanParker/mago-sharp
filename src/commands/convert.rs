@@ -99,10 +99,9 @@ pub struct ConvertCommand {
     pub dry_run: bool,
 }
 
-/// The warnings a conversion adds by design, decision 9 of `docs/architecture/slices/convert.md`: a member the converter
-/// wrote `public` to keep PHP's reach that nothing outside its namespace uses, and a plain PHP caller's PHPDoc type
-/// that the converted class now declares itself.
-const EXPECTED_WARNINGS: [&str; 2] = ["too-wide-member", "redundant-docblock-type"];
+/// The warnings a conversion adds by design, decision 9 of `docs/architecture/slices/convert.md`: a plain PHP caller's
+/// PHPDoc type that the converted class now declares itself.
+const EXPECTED_WARNINGS: [&str; 1] = ["redundant-docblock-type"];
 
 /// An issue as a later analysis finds it again: its file, level, code, message and line.
 type IssueKey = (Vec<u8>, Level, Option<String>, String, u32);
@@ -1974,15 +1973,19 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         assert_eq!(outcome.proofs, 0);
     }
 
-    /// A project at `root` whose class `Box` converts with a public property and a public method nothing outside its
-    /// namespace uses, which warn once converted, as decision 9 expects.
+    /// A project at `root` whose class `Box` converts with a property only its own method reads, a method a plain PHP
+    /// class of another namespace calls, and a method nothing uses.
     fn boxed(root: &Path) -> Configuration {
         let boxed = (
             "Contracts/Box.php".to_owned(),
-            "<?php\n\nnamespace Generated\\Contracts;\n\nfinal class Box\n{\n    public function __construct(public int $item)\n    {\n    }\n\n    public function size(): int\n    {\n        return $this->item;\n    }\n}\n".to_owned(),
+            "<?php\n\nnamespace Generated\\Contracts;\n\nfinal class Box\n{\n    public function __construct(public int $item)\n    {\n    }\n\n    public function size(): int\n    {\n        return $this->item;\n    }\n\n    public function label(): string\n    {\n        return 'box';\n    }\n}\n".to_owned(),
         );
-        let configuration = project(root, &[boxed]);
-        // A project's public PHP# members warn when nothing outside their namespace uses them, a library's never.
+        let counter = (
+            "Shop/Counter.php".to_owned(),
+            "<?php\n\nnamespace Generated\\Shop;\n\nuse Generated\\Contracts\\Box;\n\nfinal class Counter\n{\n    public function count(Box $box): int\n    {\n        return $box->size();\n    }\n}\n".to_owned(),
+        );
+        let configuration = project(root, &[boxed, counter]);
+        // A project's public PHP# member that nothing outside its namespace uses is an error, and a library's never.
         std::fs::write(
             root.join("composer.json"),
             r#"{"type": "project", "autoload": {"psr-4": {"Generated\\": "src/"}}}"#,
@@ -1992,10 +1995,14 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         configuration
     }
 
-    /// An issue in a converted file a dry run doesn't write names the plain file the user has, at the member it is in
-    /// and that member's line in the plain file, and at its line of the PHP# the diff shows.
+    /// `Box` once converted: `item`, which only `Box` reads, is `private`, `size`, which `Counter` of another namespace
+    /// calls, is `public`, and `label`, which nothing the analysis reads uses, is `internal`.
+    const BOXED: &str = "namespace Generated.Contracts;\n\npublic final class Box\n{\n    public Box(private int item)\n    {\n    }\n\n    public int size()\n    {\n        return this.item;\n    }\n\n    internal string label()\n    {\n        return 'box';\n    }\n}\n";
+
+    /// Each member of a project's class a dry run converts takes the narrowest access level its uses need, so the
+    /// proof finds no member too wide.
     #[test]
-    fn an_issue_in_a_converted_file_a_dry_run_leaves_names_its_plain_file_and_member() {
+    fn a_dry_run_gives_each_member_of_a_project_the_access_its_uses_need() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let configuration = boxed(&root);
@@ -2005,42 +2012,27 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             .unwrap();
 
         assert_eq!(outcome.converted.len(), 1, "{:#?}", outcome.refused);
-        let mut expected: Vec<&str> = outcome.expected.iter().map(|found| found.shown.as_str()).collect();
-        expected.sort_unstable();
-        assert_eq!(
-            expected,
-            [
-                "src/Contracts/Box.php:11, in Box::size(), at line 9 of its PHP#: warning too-wide-member: `Box.size` is public, and nothing outside `Generated.Contracts` uses it.",
-                "src/Contracts/Box.php:7, in Box::$item, at line 5 of its PHP#: warning too-wide-member: `Box.item` is public, and nothing outside `Generated.Contracts` uses it.",
-            ]
-        );
+        assert_eq!(String::from_utf8_lossy(&outcome.converted[0].2), BOXED);
+        let expected: Vec<&str> = outcome.expected.iter().map(|found| found.shown.as_str()).collect();
+        assert!(expected.is_empty(), "{expected:#?}");
     }
 
-    /// An issue in a converted file a run writes names the `.sharp` file, at its own line, with the member it is in.
+    /// A run writes each member of a project's class with the narrowest access level its uses need, and the proof of
+    /// the written files holds.
     #[test]
-    fn an_issue_in_a_converted_file_a_run_writes_names_its_sharp_file_and_member() {
+    fn a_run_writes_each_member_of_a_project_with_the_access_its_uses_need() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let configuration = boxed(&root);
 
-        let (_, outcome) = ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: false }
+        let (exit_code, outcome) = ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: false }
             .run(configuration, ColorChoice::Never)
             .unwrap();
 
-        let written = std::fs::read_to_string(root.join("src/Contracts/Box.sharp")).unwrap();
-        let lines: Vec<&str> = written.lines().collect();
-        let mut expected: Vec<&str> = outcome.expected.iter().map(|found| found.written.as_str()).collect();
-        expected.sort_unstable();
-        assert_eq!(
-            expected,
-            [
-                "src/Contracts/Box.sharp:5, in Box::$item: warning too-wide-member: `Box.item` is public, and nothing outside `Generated.Contracts` uses it.",
-                "src/Contracts/Box.sharp:9, in Box::size(): warning too-wide-member: `Box.size` is public, and nothing outside `Generated.Contracts` uses it.",
-            ],
-            "{written}"
-        );
-        // Each line the warnings name declares its member in the written file.
-        assert!(lines[4].contains("int item") && lines[8].contains("int size()"), "{written}");
+        assert_eq!(exit_code, ExitCode::SUCCESS, "{:#?}", outcome.refused);
+        assert_eq!(std::fs::read_to_string(root.join("src/Contracts/Box.sharp")).unwrap(), BOXED);
+        let expected: Vec<&str> = outcome.expected.iter().map(|found| found.written.as_str()).collect();
+        assert!(expected.is_empty(), "{expected:#?}");
     }
 
     /// A library's function and constant of PHP's root namespace, beside the classes of `Acme\Foundation`, a function of

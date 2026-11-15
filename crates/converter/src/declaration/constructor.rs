@@ -90,11 +90,15 @@ impl Converter<'_, '_> {
             return;
         };
         let visibility = parameter.modifiers.iter().find(|modifier| modifier.is_read_visibility());
-        let is_public = visibility.is_none_or(|modifier| matches!(modifier, Modifier::Public(_)));
+        // The access level of a promoted parameter's property that PHP makes public.
+        let access = (promoted && visibility.is_none_or(|modifier| matches!(modifier, Modifier::Public(_))))
+            .then(|| self.property_access(&parameter.variable));
+        // A property `internal` or wider has accessors, as a public one does, and a narrower one is storage.
+        let is_public = access.is_some_and(|access| !matches!(access, "private " | "protected "));
         let shown = union.get_id();
         let untyped = match member {
             Some(member) => Some(format!("`{member}` takes `{shown}` as `{name}`")),
-            None if promoted && is_public => {
+            None if access == Some("public ") => {
                 let class = self.class.as_ref().map(|class| class.name.clone()).unwrap_or_default();
                 Some(format!("`{class}::{name}` is `{shown}`"))
             }
@@ -128,10 +132,8 @@ impl Converter<'_, '_> {
                 self.edits.delete(readonly.start.offset, self.skip_whitespace(readonly.end.offset));
             }
             // PHP makes a promoted parameter with no visibility public, and PHP# reads one as an ordinary parameter.
-            if visibility.is_none()
-                && let Some(first) = parameter.modifiers.first()
-            {
-                self.edits.insert(first.span().start.offset, "public ");
+            if let Some(access) = access {
+                self.write_access(&parameter.modifiers, parameter.variable.span, access);
             }
             if let Some(list) = &parameter.hooks {
                 return self.hooked_parameter(parameter, list, &union, is_public && setters == Setters::Class, method);
