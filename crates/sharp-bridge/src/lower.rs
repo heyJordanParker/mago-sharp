@@ -3621,10 +3621,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The body of the `[Import]` method `method`, spec section 23: `return \levenshtein($a, $b);`, the call of the PHP
-    /// function `import` names, with each argument and the result crossing as any plain PHP value does. A `Map` or a
-    /// `Set` argument passes as the PHP array plain PHP receives, and the result is read as the method's result type,
-    /// checked by `\Sharp\Internal\returned`, whose error names the function. A function PHP doesn't declare throws
-    /// PHP's error that names it, at the first call.
+    /// function `import` names, with each argument and the result crossing as any plain PHP value does. An argument
+    /// whose parameter's type [`Self::passes_as_array`] passes as an array passes as the PHP array plain PHP receives, and the result is read as the method's result type, checked by
+    /// `\Sharp\Internal\returned`, whose error names the function. A function PHP doesn't declare throws PHP's error
+    /// that names it, at the first call.
     fn imported_call(&mut self, method: &Method, import: (Word, Option<(String, String)>)) -> u32 {
         let (function, check) = import;
         let line = self.line(method.name.span);
@@ -3632,7 +3632,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut arguments = Vec::new();
         for parameter in &method.parameter_list.parameters {
             let mut value = self.variable(parameter.variable.span, parameter.variable.name);
-            if self.crossing_type(parameter).is_some() {
+            if parameter
+                .hint
+                .as_ref()
+                .is_some_and(|hint| self.passes_as_array(hint.span(), self.types.declared_type(hint)))
+            {
                 value = self.array_of(line, value, None);
             }
             arguments.push(if parameter.is_variadic() {
@@ -9659,13 +9663,29 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Whether `value` crosses into plain PHP as its PHP array: where it goes takes an array, as `takes_array` says,
-    /// and plain PHP did not itself give the value, whose type has a PHP array form, as the codex's
-    /// [`get_php_array_form`] says, which the analyzer types the call by too. A value whose type says nothing of what it
-    /// holds, as `Any`, passes as it is.
+    /// plain PHP did not itself give the value, through a member it declares or one its `__get` or `__call` serves, and
+    /// it crosses from code outside the standard library as [`Self::passes_as_array`] says of its type.
     fn received_as_array(&self, value: &Expression, takes_array: bool) -> bool {
         takes_array
             && !self.plain_value(value)
-            && get_php_array_form(self.types.expression_type(value), self.types.codebase()).is_some()
+            && !self.types.plain_magic_member(value)
+            && self.passes_as_array(value.span(), self.types.expression_type(value))
+    }
+
+    /// Whether plain PHP takes a value of `r#type` that code at `span` passes as its PHP array where it takes an
+    /// array: the value may hold a `Map` or a `Set` when it runs, as [`Self::crosses_outward`] says, which `Any`,
+    /// `Any?`, a type parameter, a union and a `List` of them may too, and `\Sharp\Internal\arrayOf` makes each
+    /// collection it holds its PHP array by what it is when it runs. The standard library's own code passes as an
+    /// array only a value whose type names a `Map` or a `Set` itself, as the codex's [`get_php_array_form`] says, and
+    /// every other value as it is, so its members hand PHP's functions their own `List<T>`, as `count()` and
+    /// `array_slice()`, and `serialize()` a `Map` held as `Any?` as itself.
+    fn passes_as_array(&self, span: Span, r#type: &TUnion) -> bool {
+        let codebase = self.types.codebase();
+        if codebase.is_standard_library_file(span.file_id) {
+            return get_php_array_form(r#type, codebase).is_some();
+        }
+
+        self.crosses_outward(r#type)
     }
 
     /// Whether a value of `list` crosses into `parameters` as [`Self::received_as_array`] says.

@@ -170,6 +170,11 @@ pub struct AnalysisArtifacts {
     /// parameter marked `ComparedByOrder` returns, as `sortedBy` orders by its selector's, spec section 12, keyed by the
     /// call's span. A tuple key keeps its elements' types. Read through [`Self::get_ordered_key_type`].
     pub(crate) ordered_key_types: HashMap<(u32, u32), TUnion>,
+    /// The type each PHP# call of plain PHP whose declared result is conditional resolved it to, as plain PHP gives it
+    /// and before PHP# reads it: the branch the call's arguments pick, or both where they pick none, as `array_slice`'s
+    /// `array<int, V>` for `$preserve_keys` `true`. Keyed by the call's span. Read through
+    /// [`Self::get_resolved_return_type`].
+    pub(crate) resolved_return_types: HashMap<(u32, u32), TUnion>,
     /// The parameters of a PHP# method that erase to a narrower type than a parameter of a method it overrides or
     /// implements erases to, as `string value` of `Trimmed.set` against `T value` of `Behavior.set`, keyed by the
     /// span of the parameter's name. The bridge declares each with no PHP type, as Java's bridge method takes the
@@ -238,6 +243,7 @@ impl AnalysisArtifacts {
             list_pattern_tuples: HashMap::default(),
             namespace_constants: HashMap::default(),
             ordered_key_types: HashMap::default(),
+            resolved_return_types: HashMap::default(),
             widened_parameters: HashSet::default(),
             function_values: Vec::new(),
             readonly_calls: Vec::new(),
@@ -581,6 +587,26 @@ impl AnalysisArtifacts {
     /// Records that the PHP# call at `span` orders by keys of `key_type`.
     pub(crate) fn record_ordered_key_type(&mut self, span: Span, key_type: TUnion) {
         self.ordered_key_types.insert((span.start.offset, span.end.offset), key_type);
+    }
+
+    /// The type the PHP# call `call` of plain PHP resolved its conditional declared result to, as plain PHP gives it.
+    /// None for a call whose declared result is no conditional.
+    pub fn get_resolved_return_type<T>(&self, call: &T) -> Option<&TUnion>
+    where
+        T: HasSpan,
+    {
+        self.resolved_return_types.get(&get_expression_range(call))
+    }
+
+    /// Records that the PHP# call at `span` resolved its conditional declared result to `resolved`. Each record joins
+    /// the earlier ones, as a call of several targets, or one a loop checks again, resolves one for each.
+    pub(crate) fn record_resolved_return_type(&mut self, span: Span, resolved: TUnion, codebase: &CodebaseMetadata) {
+        let range = (span.start.offset, span.end.offset);
+        let resolved = match self.resolved_return_types.get(&range) {
+            Some(earlier) => combine_union_types(&resolved, earlier, codebase, CombinerOptions::default()),
+            None => resolved,
+        };
+        self.resolved_return_types.insert(range, resolved);
     }
 
     /// Get the type of expression `expression`.

@@ -40,7 +40,7 @@ use crate::utils::names::is_prelude_stub;
 pub fn fetch_invocation_return_type<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
-    artifacts: &AnalysisArtifacts,
+    artifacts: &mut AnalysisArtifacts,
     invocation: &Invocation<'ctx, '_, 'arena>,
     template_result: &TemplateResult,
     parameters: &WordMap<TUnion>,
@@ -48,6 +48,7 @@ pub fn fetch_invocation_return_type<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    record_resolved_return_type(context, artifacts, invocation, template_result, parameters);
     if context.dialect.is_sharp()
         && let Some(return_type) = fetch_list_wrap_return_type(context, artifacts, invocation)
     {
@@ -113,6 +114,45 @@ where
     }
 
     Ok(fetch_declared_invocation_return_type(context, invocation, template_result, parameters))
+}
+
+/// Records the type the PHP# call `invocation` of plain PHP resolves a conditional declared result to, as plain PHP
+/// gives it, so the bridge reads the value with the keys of that branch, spec section 12: `array_slice`'s
+/// `array<int, V>` for `$preserve_keys` `true` holds a list whose keys may have gaps, and its `list<V>` holds none.
+fn record_resolved_return_type<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    invocation: &Invocation<'_, '_, '_>,
+    template_result: &TemplateResult,
+    parameters: &WordMap<TUnion>,
+) where
+    A: Arena,
+{
+    let Some(declared) = invocation.target.get_return_type() else {
+        return;
+    };
+    if !gives_plain_result(context, invocation)
+        || !declared.types.iter().any(|atomic| matches!(atomic, TAtomic::Conditional(_)))
+    {
+        return;
+    }
+    let resolved = resolve_invocation_type(context, invocation, template_result, parameters, declared.clone());
+
+    artifacts.record_resolved_return_type(invocation.span, resolved, context.codebase);
+}
+
+/// Whether the PHP# call `invocation` runs plain PHP, whose result PHP# reads as `get_sharp_received_type` says. A
+/// method of the prelude's stubs of PHP#'s own classes gives what PHP# declares.
+fn gives_plain_result<A>(context: &Context<'_, '_, A>, invocation: &Invocation<'_, '_, '_>) -> bool
+where
+    A: Arena,
+{
+    context.dialect.is_sharp()
+        && invocation.target.get_function_like_metadata().is_some_and(|metadata| !metadata.flags.is_sharp())
+        && !matches!(
+            invocation.target.get_function_like_identifier(),
+            Some(FunctionLikeIdentifier::Method(class, _)) if is_prelude_stub(*class)
+        )
 }
 
 /// Gives PHP#'s `List.wrap(value)` its type `List<T>`, and refuses it when `T` could itself be a list, as spec section
@@ -362,13 +402,7 @@ where
                 resulting_type = get_php_received_type(&resulting_type, context.codebase);
             }
         }
-        Some(_)
-            if context.dialect.is_sharp()
-                && !matches!(
-                    invocation.target.get_function_like_identifier(),
-                    Some(FunctionLikeIdentifier::Method(class, _)) if is_prelude_stub(*class)
-                ) =>
-        {
+        _ if gives_plain_result(context, invocation) => {
             resulting_type = get_sharp_received_type(&resulting_type);
         }
         _ => {}

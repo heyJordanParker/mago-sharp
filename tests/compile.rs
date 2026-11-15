@@ -594,6 +594,56 @@ fn a_compile_with_a_host_enabled_runs_every_time() {
     assert_ne!(compiled_at(root, "app/Order.sharp"), written);
 }
 
+/// The analysis scans the project's files on its worker threads, whose log the hosts' compile doesn't silence, so a
+/// plain PHP file that doesn't parse warns there. Here 64 such files, so the warnings reach the worker threads whichever
+/// thread scans which file. The warnings are the next run's to report, so the hosts' compile keeps its record and has
+/// nothing to do the next time.
+#[cfg(unix)]
+#[test]
+fn the_hosts_compile_keeps_its_record_whatever_its_worker_threads_log() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the hosts compile record test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "tools/host.php", HOST_READING_THE_COMPILED_FILE);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+    for file in 0..64 {
+        write(root, &format!("vendor/acme/torn/src/Torn{file}.php"), "<?php\n\nfunction torn( {\n");
+    }
+    let cache = tempfile::tempdir().unwrap();
+    let compile = || process::output(command(root, "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
+    // The first run's own compile writes `app/Order.php` after the hosts' compile read the project, so the second run's
+    // hosts' compile reads it too.
+    for _ in 0..2 {
+        let output = compile();
+        assert!(output.status.success(), "{}", printed(&output));
+        assert!(printed(&output).contains("parsing error(s) in 'vendor/acme/torn/src/Torn"), "{}", printed(&output));
+    }
+    let hosts = cache.path().join("mago/hosts");
+    let folder = std::fs::read_dir(&hosts).unwrap().next().expect("the hosts' compile wrote its folder").unwrap();
+    let record = folder.path().join("inputs.json");
+    assert!(record.exists(), "the hosts' compile kept its record");
+    let recorded = std::fs::metadata(&record).unwrap().modified().unwrap();
+
+    let third = compile();
+
+    assert!(third.status.success(), "{}", printed(&third));
+    assert_eq!(
+        std::fs::metadata(&record).unwrap().modified().unwrap(),
+        recorded,
+        "the hosts' compile had nothing to do"
+    );
+}
+
 /// An extension host whose linter rule appends the word the compiled `app/Word.sharp` holds to `host.log` as it lints
 /// a class, as a rule that instantiates a project's attributes loads that file.
 const LINT_HOST_READING_THE_COMPILED_FILE: &str = r#"<?php
@@ -1214,7 +1264,10 @@ fn compile_reports_a_link_to_a_file_outside_the_project_and_writes_no_compiled_f
 
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(printed(&output).contains("vendor/acme/money/src/Money.sharp is a link to"), "{}", printed(&output));
-    assert_eq!(files_under(&root.join(".sharp")), [Path::new("app/Order.sharpc"), Path::new("listeners.php")]);
+    assert_eq!(
+        files_under(&root.join(".sharp")),
+        [Path::new("app/Order.sharpc"), Path::new("inputs.json"), Path::new("listeners.php")]
+    );
 }
 
 #[test]
@@ -1959,19 +2012,65 @@ fn compile_reads_a_source_rewritten_at_the_same_size_with_its_modification_time_
     assert_eq!(header.source_hash, source_hash(rewritten.as_bytes()));
 }
 
-/// A refused compile keeps no record, so the next compile refuses the file again.
+/// A refused compile keeps its record and what it printed, so a compile with every input as it was prints the same
+/// refusal and fails again without compiling, and the first changed input compiles.
 #[test]
-fn compile_refuses_a_file_again_after_a_refused_compile() {
+fn a_compile_after_a_refused_one_with_nothing_changed_refuses_the_file_again_without_compiling() {
     let directory = project(BROKEN_ORDER, MONEY);
     let root = directory.path();
-    let first = compile(root);
-    assert_eq!(first.status.code(), Some(1), "{}", printed(&first));
-    assert!(!root.join(".sharp/inputs.json").exists());
+    let refused = compile(root);
+    assert_eq!(refused.status.code(), Some(1), "{}", printed(&refused));
+    let recorded = || std::fs::metadata(root.join(".sharp/inputs.json")).unwrap().modified().unwrap();
+    let record = recorded();
+    let money = compiled_at(root, MONEY_PATH);
 
-    let second = compile(root);
+    let again = compile(root);
 
-    assert_eq!(second.status.code(), Some(1), "{}", printed(&second));
-    assert!(printed(&second).contains("1 PHP# file was refused"), "{}", printed(&second));
+    assert_eq!(again.status.code(), Some(1), "{}", printed(&again));
+    assert_eq!(again.stdout, refused.stdout);
+    assert_eq!(logged(&again), logged(&refused));
+    assert!(printed(&again).contains("1 PHP# file was refused"), "{}", printed(&again));
+    assert_eq!(compiled_at(root, MONEY_PATH), money, "the compile wrote nothing");
+    assert_eq!(recorded(), record, "the compile kept the record");
+
+    write(root, "app/Order.sharp", ORDER);
+    compile_succeeds(root);
+    assert!(compiled(root, "app/Order.sharp").exists());
+}
+
+/// A compile that fails with an error of its own, as a PHP file someone wrote where a source's PHP file goes, prints
+/// it again from its record while nothing changed.
+#[test]
+fn a_compile_after_a_failed_one_with_nothing_changed_prints_each_error_again() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "app/Order.php", "<?php\n\nnamespace App;\n\nfinal class Order {}\n");
+    let failed = compile(root);
+    assert_eq!(failed.status.code(), Some(1), "{}", printed(&failed));
+    assert!(
+        printed(&failed).contains("app/Order.php and app/Order.sharp both name App.Order."),
+        "{}",
+        printed(&failed)
+    );
+
+    let again = compile(root);
+
+    assert_eq!(again.status.code(), Some(1), "{}", printed(&again));
+    assert_eq!(logged(&again), logged(&failed));
+    assert!(root.join(".sharp/inputs.json").exists(), "the compile kept the record");
+}
+
+/// The engine holds the lock of `.sharp/compile.lock` while it compiles on demand, so the compile keeps that file, as
+/// a compile that deleted it would leave the next request a lock on another file.
+#[test]
+fn compile_keeps_the_engine_s_compile_lock() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, ".sharp/compile.lock", "");
+
+    compile_succeeds(root);
+
+    assert!(root.join(".sharp/compile.lock").exists());
 }
 
 /// A file someone writes over one the compile wrote, while the compile still runs, makes the compile keep no record,
@@ -3348,6 +3447,7 @@ fn compile_reports_an_unavailable_law_checker_on_each_file_that_needs_it_and_who
     assert_eq!(issue_lines(&output), [format!("app/Shared/Money.sharp:8:5:{unavailable}")], "{}", printed(&output));
     assert!(!printed(&output).contains("elan"), "{}", printed(&output));
     assert!(compiled(root, "app/Order.sharp").exists());
+    assert!(!root.join(".sharp/inputs.json").exists(), "the next compile tries to install the law checker again");
 }
 
 #[test]

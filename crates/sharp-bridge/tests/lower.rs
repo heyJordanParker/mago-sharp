@@ -25533,19 +25533,28 @@ fn a_template_is_an_encaps_list_of_its_text_and_interpolations() {
 /// Spec section 12: plain PHP's `array<int, T>` arrives as a `List<T>`, renumbered where PHP# reads it with
 /// `\array_values`. A `List` of `Map`s crosses through `\Sharp\Internal\returned`, which renumbers it as it makes each
 /// `Map`. A `Map` place keeps its keys and makes the `Map` of them, an argument of plain PHP takes the array as plain PHP
-/// gave it, and a value plain PHP declares a list is one already. A conditional return, as `unpack`'s, renumbers where the
-/// branch the call picks is an `int`-keyed shape.
+/// gave it, and a value plain PHP declares a list is one already. A conditional return renumbers where the branch the
+/// call resolves is keyed, as `unpack`'s `int`-keyed shape and `array_slice`'s `array<int, V>` for `$preserve_keys`
+/// `true` are, and never where it is a list.
 #[test]
 fn a_plain_php_int_keyed_array_is_renumbered_where_it_arrives() {
     let ids = (
         "src/App/Tenant/Ids.php",
-        "<?php namespace App\\Tenant; final class Ids { /** @return array<int, int> */ public static function all(): array { return [5 => 1]; } /** @return ($format is 'J' ? array{1: int} : array<string, int>) */ public static function unpacked(string $format): array { return [1 => 7]; } /** @return list<int> */ public static function listed(): array { return [1]; } /** @return array<int, array<string, int>> */ public static function rows(): array { return []; } public static function sum(array $values): int { return array_sum($values); } }",
+        "<?php namespace App\\Tenant; final class Ids { /** @return array<int, int> */ public static function all(): array { return [5 => 1]; } /** @return ($format is 'J' ? array{1: int} : array<string, int>) */ public static function unpacked(string $format): array { return [1 => 7]; } /**\n * @template K of array-key\n * @template V\n * @param array<K, V> $array\n * @return ($array is list<V> ? ($preserve_keys is true ? array<int, V> : list<V>) : array<K, V>)\n */ public static function sliced(array $array, bool $preserve_keys): array { return array_slice($array, 1, null, $preserve_keys); } /** @return list<int> */ public static function listed(): array { return [1]; } /** @return array<int, array<string, int>> */ public static function rows(): array { return []; } public static function sum(array $values): int { return array_sum($values); } }",
     );
     let lowered = |statements: &str| body_in(RUN, statements, &[ids]);
 
     assert!(lowered("        List<int> all = Ids.all();\n        return all[0];\n").contains("ZVAL \"array_values\""));
     assert!(
         lowered("        List<int> one = Ids.unpacked(\"J\");\n        return one[0];\n")
+            .contains("ZVAL \"array_values\"")
+    );
+    assert!(
+        lowered("        List<int> kept = Ids.sliced([1, 2, 3], true);\n        return kept[0];\n")
+            .contains("ZVAL \"array_values\"")
+    );
+    assert!(
+        !lowered("        List<int> numbered = Ids.sliced([1, 2, 3], false);\n        return numbered[0];\n")
             .contains("ZVAL \"array_values\"")
     );
     assert!(

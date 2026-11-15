@@ -11,10 +11,11 @@
 //! source loses its PHP file, and a `.gitignore` the compile writes in each folder that holds such files keeps them
 //! out of git in that checkout alone.
 //!
-//! A compile that succeeds with no warning keeps a record of everything it read and wrote in the `.sharp` folder, and
-//! the next compile checks it before any analysis: when every input and output is as it was, it prints the same summary
-//! and does nothing else. A project with an extension host enabled compiles every time, since a host names none of what
-//! it reads.
+//! A compile that warns of nothing beyond what it refused keeps a record of everything it read and wrote, and of what it
+//! printed, in the `.sharp` folder, and the next compile checks it before any analysis: when every input and output is
+//! as it was, it prints the same outcome, a failure's issues and errors included, exits as it did, and does nothing
+//! else. A compile whose law checker refused a file keeps none, since what the checker does depends on no input. A
+//! project with an extension host enabled compiles every time, since a host names none of what it reads.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -33,11 +34,13 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use mago_allocator::LocalArena;
+use mago_analyzer::code::IssueCode;
 use mago_build_id::BUILD_ID;
 use mago_database::Database;
 use mago_database::DatabaseConfiguration;
 use mago_database::DatabaseReader;
 use mago_database::GlobSettings;
+use mago_database::ReadDatabase;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
 use mago_database::file::COMPANION_START;
@@ -97,11 +100,15 @@ const VENDOR: &[u8] = b"vendor/";
 /// compile of a project with a PHP# file writes it, listeners or none, so the engine can tell when it is out of date.
 const LISTENERS: &str = "listeners.php";
 
-/// The record of everything the last compile that succeeded read and wrote, in the `.sharp` folder and in the hosts'
-/// folder, which the next compile checks before any analysis: when every input and output is as it was, the compile has
-/// nothing to do. A refused, failed, warned or interrupted compile leaves none, and so does one whose output changed
-/// while it ran.
+/// The record of everything the last compile read and wrote, in the `.sharp` folder and in the hosts' folder, which the
+/// next compile checks before any analysis: when every input and output is as it was, the compile has nothing to do. A
+/// compile that warned, was interrupted or had a file refused by the law checker leaves none, and so does one whose
+/// output changed while it ran.
 const INPUTS: &str = "inputs.json";
+
+/// The file in the `.sharp` folder whose lock the engine holds while it runs `sharp.compile_command`, so a project
+/// compiles once at a time on demand. The compile keeps it, since a lock on a file it deleted would lock nothing.
+const COMPILE_LOCK: &str = "compile.lock";
 
 /// Command that compiles every PHP# file into the `.sharp` folder.
 #[derive(Parser, Debug, Default)]
@@ -144,8 +151,8 @@ const HOST_REPORT: &str = "report.json";
 /// The compile runs without the hosts and lowers every file that lowers, whatever the analysis says of it: a host sees
 /// the project as it is, as a Roslyn analyzer gets the compilation with its errors and `tsc` emits despite type errors.
 /// A file that does not lower is in the folder's [`HOST_REPORT`], so a worker that loads it gets the checker's errors.
-/// It runs only when a file is missing from the folder or out of date, and prints nothing: the run with the hosts that
-/// follows reports the project's errors.
+/// It runs only when a file is missing from the folder or out of date, and silences its own thread's log: the run with
+/// the hosts that follows reports the project's errors.
 ///
 /// # Errors
 ///
@@ -182,8 +189,10 @@ pub(crate) fn compile_for_hosts(
 }
 
 /// Compiles the project at `root` into `folder` for its extension hosts, as [`compile_for_hosts`] says, unless every
-/// file there is current, and keeps the record of what it read and wrote in `folder`'s [`INPUTS`]. Returns whether a
-/// file in `folder` changed.
+/// file there is current, and keeps the record of what it read and wrote in `folder`'s [`INPUTS`]. Its log never
+/// decides the record: the loader and the analysis log from their worker threads too, which the main thread's
+/// subscriber doesn't silence, and the run with the hosts that follows reports what they log. Returns whether a file in
+/// `folder` changed.
 fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Result<bool, Error> {
     let record_path = folder.join(INPUTS);
     let mut filesystems = Filesystems::new();
@@ -287,7 +296,7 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     let deleted = delete_all_but(folder, &written, &folder.join(PACKAGE_FOLDER))?;
     if let Some(record) = record {
         let listed = inputs.iter().map(|input| recorded(&input.path, Some(input)));
-        record.write(&record_path, String::new(), database, stamped.into_iter().chain(listed))?;
+        record.write(&record_path, Outcome::default(), database, stamped.into_iter().chain(listed))?;
     }
 
     Ok(changed || deleted > 0)
@@ -362,15 +371,19 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     let sources = source_files(configuration, &root, &mut filesystems);
     // A host names none of what it reads, so only a compile without hosts can know it has nothing to do.
     if !configuration.extension_hosts.values().any(|host| host.enabled)
-        && let Some(record) = Record::read(&record_path)
+        && let Some(mut record) = Record::read(&record_path)
         && every_input_is_current(&record, configuration, &root, &sources, &mut filesystems)
     {
-        tracing::info!("{}", record.summary);
+        let outcome = std::mem::take(&mut record.outcome);
+        let database = outcome.report_database(&root)?;
 
-        return Ok(ExitCode::SUCCESS.into());
+        return outcome.print(database, configuration, color_choice);
     }
     // A record the compile can't delete is in a folder it then fails to write its compiled files to.
     let _ = std::fs::remove_file(&record_path);
+    // A warning or an error the compile doesn't print in its outcome is printed again by the next compile, which a
+    // record would skip.
+    let warnings = logger::warnings();
     // A project with no PHP# file gets no `.sharp` folder to keep a record in.
     let mut record = sources
         .keys()
@@ -395,7 +408,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
 
     // Written before the compile stamps its inputs, which hold the PHP file a default class's name could name in
     // a file's folder, so a compiled file is current once it is written.
-    let mut failed = false;
+    let mut errors = Vec::new();
     let mut written_beside: HashMap<PathBuf, BTreeSet<String>> = HashMap::new();
     let mut folders = BTreeSet::new();
     let mut listings = HashMap::new();
@@ -433,8 +446,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         if let Some(name) = someone_wrote {
             let source = String::from_utf8_lossy(&file.name);
             let written = format!("{}{name}", &source[..source.len() - type_file.len()]);
-            tracing::error!("{written} and {source} both name {class}. Delete {written}, or rename one of them.");
-            failed = true;
+            errors.push(format!("{written} and {source} both name {class}. Delete {written}, or rename one of them."));
             continue;
         }
         // A rename onto a file of another case keeps that file's name on a disk that ignores case.
@@ -486,9 +498,10 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     let library = match standard_library(&root, &database) {
         Ok(library) => library,
         Err(refusal) => {
-            tracing::error!("{refusal}");
+            let outcome = Outcome { errors, summary: refusal, failed: true, ..Outcome::default() };
+            let record = record.filter(|_| logger::warnings() == warnings);
 
-            return Ok(ExitCode::FAILURE.into());
+            return finish(record, &record_path, outcome, &database, Vec::new(), configuration, color_choice);
         }
     };
     let lowered = lowered_files(workspace, &database)?;
@@ -536,14 +549,13 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         let name = String::from_utf8_lossy(&file.name);
         let source = file.path.clone().unwrap_or_else(|| root.join(name.as_ref()));
         let Some(compiled) = unit::compiled_path(&root, &source)? else {
-            tracing::error!(
+            errors.push(format!(
                 "{name} is a link to {}, outside the project, so it was not compiled. Install the package as a copy instead of a link.",
                 source
                     .canonicalize()
                     .map_err(|error| DatabaseError::io(IOAction::ResolvePath, &source, error))?
                     .display()
-            );
-            failed = true;
+            ));
             continue;
         };
 
@@ -556,8 +568,8 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
                 written.insert(compiled);
                 accepted.insert(file_id);
             }
-            Compilation::Refused(errors) => {
-                refused.extend(errors);
+            Compilation::Refused(issues) => {
+                refused.extend(issues);
                 if Dialect::of(file).is_sharp() {
                     refused_files += 1;
                 } else {
@@ -587,74 +599,188 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         }
         written.insert(table);
     }
-    // A compile that writes no compiled file leaves no `.sharp` folder to keep a record in.
-    let record = record.filter(|_| !written.is_empty());
     if compiled_folder.is_dir() {
-        let kept: BTreeSet<PathBuf> =
-            written.iter().cloned().chain(record.as_ref().and_then(Record::marker_path)).collect();
+        let kept: BTreeSet<PathBuf> = written
+            .iter()
+            .cloned()
+            .chain(record.as_ref().and_then(Record::marker_path))
+            .chain([compiled_folder.join(COMPILE_LOCK)])
+            .collect();
         delete_all_but(&compiled_folder, &kept, &compiled_folder.join(PACKAGE_FOLDER))?;
     }
 
     for folder in package_compiled_folders(&root, database) {
-        tracing::error!(
+        errors.push(format!(
             "{folder} is a compiled folder inside a package, and the engine would read it instead of the project's .sharp folder. Delete {folder}."
-        );
-        failed = true;
+        ));
     }
-
-    if !refused.is_empty() {
-        let reporter = Reporter::new(
-            database.read_only(),
-            ReporterConfig {
-                target: Default::default(),
-                format: default_reporting_format(),
-                color_choice: match color_choice {
-                    ColorChoice::Auto => ReportingColorChoice::Auto,
-                    ColorChoice::Always => ReportingColorChoice::Always,
-                    ColorChoice::Never => ReportingColorChoice::Never,
-                },
-                filter_fixable: false,
-                sort: false,
-                minimum_report_level: None,
-                editor_url: configuration.editor_url.clone(),
-            },
-        );
-        reporter.report(refused, None)?;
-    }
-    for refusal in packaged_refusals {
-        tracing::error!("{refusal}");
-    }
+    errors.extend(packaged_refusals);
 
     let mut summary = match (accepted.len(), refused_files) {
         (0, 0) => "No PHP# files found to compile.".to_string(),
         (compiled, _) => format!("Compiled {} into .sharp/.", files(compiled)),
     };
-    let mut errors = Vec::new();
+    let mut refusals = Vec::new();
     match refused_files {
         0 => {}
-        1 => errors.push("1 PHP# file was refused".to_string()),
-        refused => errors.push(format!("{refused} PHP# files were refused")),
+        1 => refusals.push("1 PHP# file was refused".to_string()),
+        refused => refusals.push(format!("{refused} PHP# files were refused")),
     }
     match refused_php_files {
         0 => {}
-        1 => errors.push("1 plain PHP file was refused".to_string()),
-        refused => errors.push(format!("{refused} plain PHP files were refused")),
+        1 => refusals.push("1 plain PHP file was refused".to_string()),
+        refused => refusals.push(format!("{refused} plain PHP files were refused")),
     }
-    if !errors.is_empty() {
-        summary.push_str(&format!(" {}: fix the errors and run vendor/bin/mago compile again.", errors.join(", and ")));
+    if !refusals.is_empty() {
+        summary
+            .push_str(&format!(" {}: fix the errors and run vendor/bin/mago compile again.", refusals.join(", and ")));
     }
-    if failed || !errors.is_empty() {
-        tracing::error!("{summary}");
+    let failed = !errors.is_empty() || !refusals.is_empty();
+    let outcome = Outcome::new(refused, database, errors, summary, failed);
+    let record = record.filter(|_| logger::warnings() == warnings && !outcome.refused_by_law_checker());
+    let listed = inputs.iter().map(|input| recorded(&input.path, Some(input)));
 
-        return Ok(ExitCode::FAILURE.into());
-    }
+    finish(record, &record_path, outcome, database, stamped.into_iter().chain(listed), configuration, color_choice)
+}
+
+/// Keeps `record` at `path`, the record of a compile whose `outcome` it prints again while every input is as it was,
+/// with `inputs`, the stamps the compile took, and prints `outcome`, the files it names read from `database`.
+///
+/// # Errors
+///
+/// Returns the error of writing the record or of printing the outcome.
+fn finish(
+    record: Option<Record>,
+    path: &Path,
+    outcome: Outcome,
+    database: &Database<'_>,
+    inputs: impl IntoIterator<Item = Stamp>,
+    configuration: &Configuration,
+    color_choice: ColorChoice,
+) -> Result<CommandOutcome, Error> {
     if let Some(record) = record {
-        let listed = inputs.iter().map(|input| recorded(&input.path, Some(input)));
-        record.write(&record_path, summary.clone(), database, stamped.into_iter().chain(listed))?;
+        record.write(path, outcome.clone(), database, inputs)?;
     }
-    tracing::info!("{summary}");
 
-    Ok(ExitCode::SUCCESS.into())
+    outcome.print(database.read_only(), configuration, color_choice)
+}
+
+/// What a compile printed once it was done, which [`Record`] keeps, so a compile with nothing to do prints it again,
+/// a failure included, until an input changes.
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct Outcome {
+    /// The issues of each file the compile refused, which the checker's report prints.
+    issues: IssueCollection,
+    /// The name of each file an issue points into, whose lines the report prints.
+    issue_files: Vec<String>,
+    /// Each other error the compile found, as a PHP file someone wrote where a source's PHP file goes.
+    errors: Vec<String>,
+    /// The line the compile printed last.
+    summary: String,
+    /// Whether the compile failed, which its exit status says.
+    failed: bool,
+}
+
+impl Outcome {
+    /// The outcome of a compile that refused `issues`, each in a file of `database`, found `errors` beside them, and
+    /// printed `summary` last, which `failed` or succeeded.
+    fn new(
+        issues: IssueCollection,
+        database: &impl DatabaseReader,
+        errors: Vec<String>,
+        summary: String,
+        failed: bool,
+    ) -> Self {
+        let issue_files = issues
+            .iter()
+            .flat_map(|issue| &issue.annotations)
+            .filter_map(|annotation| database.get_ref(&annotation.span.file_id).ok())
+            .map(|file| String::from_utf8_lossy(&file.name).into_owned())
+            .collect::<BTreeSet<String>>()
+            .into_iter()
+            .collect();
+
+        Self { issues, issue_files, errors, summary, failed }
+    }
+
+    /// Whether the law checker refused a file, as one it could not install or a proof it stopped at its deadline. What
+    /// it did depends on what no record holds, the checker's install and the machine's load, so a compile with such a
+    /// refusal keeps no record, and the next one runs the checker again.
+    fn refused_by_law_checker(&self) -> bool {
+        let law_checker = [IssueCode::LawCheckerUnavailable.as_str(), IssueCode::LawUnproven.as_str()];
+
+        self.issues.iter().any(|issue| issue.code.as_deref().is_some_and(|code| law_checker.contains(&code)))
+    }
+
+    /// The files the issues point into, for the report of a compile with nothing to do: each file in the project of
+    /// `root`, as the compile read it, which every input being as it was keeps, and each of the prelude's.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading a file.
+    fn report_database(&self, root: &Path) -> Result<ReadDatabase, Error> {
+        let mut database = Database::new(DatabaseConfiguration::new(root, vec![], vec![], vec![], vec![]));
+        let mut prelude = None;
+        for name in &self.issue_files {
+            let path = root.join(name);
+            if path.is_file() {
+                database.add(File::read(root, &path, FileType::Host)?);
+                continue;
+            }
+            let prelude = prelude.get_or_insert_with(|| {
+                Prelude::decode_database(PRELUDE_BYTES).expect("Failed to decode embedded prelude")
+            });
+            let file = prelude.get_by_name(name.as_bytes())?;
+            database.add(File::new(file.name.clone(), file.file_type, file.path.clone(), file.contents.clone()));
+        }
+
+        Ok(database.read_only())
+    }
+
+    /// Prints the outcome: the checker's report of each issue, with `configuration`'s editor links and in
+    /// `color_choice`, its lines read from `database`, then each other error, then the summary. Gives the compile's
+    /// exit status.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of printing the report.
+    fn print(
+        self,
+        database: ReadDatabase,
+        configuration: &Configuration,
+        color_choice: ColorChoice,
+    ) -> Result<CommandOutcome, Error> {
+        if !self.issues.is_empty() {
+            let reporter = Reporter::new(
+                database,
+                ReporterConfig {
+                    target: Default::default(),
+                    format: default_reporting_format(),
+                    color_choice: match color_choice {
+                        ColorChoice::Auto => ReportingColorChoice::Auto,
+                        ColorChoice::Always => ReportingColorChoice::Always,
+                        ColorChoice::Never => ReportingColorChoice::Never,
+                    },
+                    filter_fixable: false,
+                    sort: false,
+                    minimum_report_level: None,
+                    editor_url: configuration.editor_url.clone(),
+                },
+            );
+            reporter.report(self.issues, None)?;
+        }
+        for error in &self.errors {
+            tracing::error!("{error}");
+        }
+        if self.failed {
+            tracing::error!("{}", self.summary);
+
+            return Ok(ExitCode::FAILURE.into());
+        }
+        tracing::info!("{}", self.summary);
+
+        Ok(ExitCode::SUCCESS.into())
+    }
 }
 
 /// Whether the hosts' compile in `folder` of the project at `root` has nothing to do: the project has no PHP# file for
@@ -672,9 +798,9 @@ fn every_compiled_file_is_current(
             .is_some_and(|record| every_input_is_current(&record, configuration, root, sources, filesystems))
 }
 
-/// What a compile that succeeded read and wrote, as [`INPUTS`] holds it: the header the compile ran under, each source
-/// file as the compile found it before it read it, with the hash of the bytes it read, the stamp of each other input,
-/// and the status of each file it wrote or kept right after, with the hash of its bytes.
+/// What a compile read and wrote, as [`INPUTS`] holds it: the header the compile ran under, each source file as the
+/// compile found it before it read it, with the hash of the bytes it read, the stamp of each other input, and the
+/// status of each file it wrote or kept right after, with the hash of its bytes.
 #[derive(Serialize, Deserialize)]
 struct Record {
     /// The build ID of the checker that wrote it.
@@ -683,8 +809,8 @@ struct Record {
     root: PathBuf,
     /// The hash of the configuration, as [`configuration_hash`] gives it.
     configuration: [u8; 16],
-    /// What the compile printed once it was done.
-    summary: String,
+    /// What the compile printed once it was done, a failure's issues and errors included.
+    outcome: Outcome,
     /// The modification time of the record's own temp file, which the compile created when it started, in nanoseconds
     /// since the epoch, as the filesystem's clock gave it.
     marker: i64,
@@ -697,9 +823,6 @@ struct Record {
     /// The record's own temp file, whose modification time is the marker, which the compile keeps until it is done.
     #[serde(skip)]
     marker_file: Option<tempfile::NamedTempFile>,
-    /// How many warnings the logger had printed when the compile started.
-    #[serde(skip)]
-    warnings: usize,
     /// Whether an output's status or an input's stamp couldn't be taken, so the record can't stand for the compile.
     #[serde(skip)]
     lost: bool,
@@ -761,13 +884,12 @@ impl Record {
             build: BUILD_ID.to_be_bytes(),
             root: root.to_path_buf(),
             configuration: configuration_hash(configuration),
-            summary: String::new(),
+            outcome: Outcome::default(),
             marker,
             files: sources.iter().map(|(name, found)| (name.clone(), (found.clone(), [0; 16]))).collect(),
             inputs,
             outputs: BTreeMap::new(),
             marker_file: Some(marker_file),
-            warnings: logger::warnings(),
             lost: false,
             filesystems,
         })
@@ -800,11 +922,10 @@ impl Record {
         }
     }
 
-    /// Writes the record to `path` once the compile succeeded and printed `summary`: hashes each source file's bytes as
+    /// Writes the record to `path` once the compile is done with `outcome`: hashes each source file's bytes as
     /// `database` read them, or as the file holds them when the database didn't read it, and adds `inputs`, the stamps
-    /// the compile took. A compile that warned keeps no record, so the next one prints the warning again, and neither
-    /// does one whose output changed since it wrote or kept it, as a file someone swapped in or a compile that ran at
-    /// once changes it.
+    /// the compile took. A compile whose output changed since it wrote or kept it, as a file someone swapped in or a
+    /// compile that ran at once changes it, keeps no record.
     ///
     /// # Errors
     ///
@@ -812,7 +933,7 @@ impl Record {
     fn write(
         mut self,
         path: &Path,
-        summary: String,
+        outcome: Outcome,
         database: &impl DatabaseReader,
         inputs: impl IntoIterator<Item = Stamp>,
     ) -> Result<(), Error> {
@@ -821,7 +942,7 @@ impl Record {
             std::fs::metadata(&output)
                 .map_or(true, |metadata| Status::of(&output, &metadata, &mut self.filesystems) != *status)
         });
-        if self.lost || changed || logger::warnings() != self.warnings {
+        if self.lost || changed {
             return Ok(());
         }
         let mut files = BTreeMap::new();
@@ -844,7 +965,7 @@ impl Record {
         self.inputs.sort_unstable();
         self.inputs.dedup();
         self.files = files;
-        self.summary = summary;
+        self.outcome = outcome;
         let Some(file) = self.marker_file.take() else {
             return Ok(());
         };
@@ -859,7 +980,8 @@ impl Record {
 }
 
 /// A record that is never written deletes its temp file, and then its folder when that holds nothing else, as the
-/// `.sharp` folder of a project whose first compile refused every file doesn't, so no compile leaves an empty folder.
+/// `.sharp` folder of a project whose first compile refused every file and warned doesn't, so no compile leaves an
+/// empty folder.
 impl Drop for Record {
     fn drop(&mut self) {
         if let Some(file) = self.marker_file.take() {
@@ -1816,7 +1938,7 @@ mod tests {
         let sources = source_files(&configuration, &root, &mut forced);
         let mut record = Record::start(&configuration, &root, &sources, folder, forced.clone()).unwrap();
         record.output(&output, b"compiled");
-        record.write(&folder.join(INPUTS), String::new(), &ReadDatabase::empty(), []).unwrap();
+        record.write(&folder.join(INPUTS), Outcome::default(), &ReadDatabase::empty(), []).unwrap();
         let mut current = || {
             let sources = source_files(&configuration, &root, &mut forced);
             every_compiled_file_is_current(&configuration, &root, folder, &sources, &mut forced)

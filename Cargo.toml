@@ -266,7 +266,7 @@ mago-word = { workspace = true }
 mago-bytes = { workspace = true }
 mago-syntax = { workspace = true, features = ["serde"] }
 mago-syntax-core = { workspace = true }
-mago-reporting = { workspace = true, features = ["renderers"] }
+mago-reporting = { workspace = true, features = ["renderers", "serde"] }
 mago-database = { workspace = true, features = ["loader", "watcher"] }
 mago-linter = { workspace = true, features = ["serde"] }
 mago-names = { workspace = true }

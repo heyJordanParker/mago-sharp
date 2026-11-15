@@ -274,12 +274,15 @@ impl<'analysis> Types<'analysis> {
     /// Whether `value`, a call of plain PHP or a read of a property plain PHP declares, may be an `int`-keyed array
     /// whose keys have gaps, which the analysis reads as a `List`, as `get_sharp_received_type` says: plain PHP declares
     /// a keyed array, and the analysis types the value as a `List` and as no other array, as
-    /// [`every_array_is_list`] says. A node the lowering builds has no type.
+    /// [`every_array_is_list`] says. A call whose declared result is conditional declares the branch the analysis
+    /// resolved it to. A node the lowering builds has no type.
     pub(crate) fn arrives_as_list(&self, value: &Expression) -> bool {
         let declared = match value.unparenthesized() {
-            Expression::Call(_) => self
-                .plain_php_call(value)
-                .and_then(|(_, metadata)| metadata.return_type_metadata.as_ref().map(|declared| &declared.type_union)),
+            Expression::Call(_) => self.artifacts.get_resolved_return_type(value).or_else(|| {
+                self.plain_php_call(value).and_then(|(_, metadata)| {
+                    metadata.return_type_metadata.as_ref().map(|declared| &declared.type_union)
+                })
+            }),
             Expression::Access(Access::Property(_)) => self.property_type(value),
             _ => unreachable!("the lowering asks this only of a plain PHP call or property read"),
         };
@@ -811,6 +814,27 @@ impl<'analysis> Types<'analysis> {
                 if self.codebase.get_declaring_method_class(class.as_bytes(), method.as_bytes())
                     .is_some_and(|declaring| self.plain_result(declaring.as_bytes(), method.as_bytes()).is_some()))
         })
+    }
+
+    /// Whether `value` reads a member of a plain PHP class that its `__get` or its `__call` serves, as Eloquent's
+    /// `Model` serves its attributes, so plain PHP gives the value, as it gives one of a member it declares.
+    pub(crate) fn plain_magic_member(&self, value: &Expression) -> bool {
+        let plain =
+            |class: &[u8]| self.codebase.get_class_like(class).is_some_and(|metadata| !metadata.flags.is_sharp());
+        match value.unparenthesized() {
+            Expression::Call(Call::Method(MethodCall {
+                object,
+                method: ClassLikeMemberSelector::Identifier(method),
+                ..
+            })) => self.artifacts.get_expression_type(object).and_then(receiver_classes).is_some_and(|classes| {
+                classes.iter().any(|class| {
+                    self.codebase.get_declaring_method_class(class, method.value).is_none() && plain(class)
+                })
+            }),
+            _ => self.accessed_property(value).is_some_and(|(class, property)| {
+                self.codebase.get_declaring_property_class(class, &property).is_none() && plain(class)
+            }),
+        }
     }
 
     /// Whether the method `method` of `class` replaces a method a parent class or an interface of `class` has, which
@@ -2611,27 +2635,9 @@ pub(crate) fn every_array_is_list(r#type: &TUnion) -> bool {
     holds_list
 }
 
-/// Whether plain PHP's declared `r#type` may give a keyed array. A conditional type's branch counts when it is a shape,
-/// as `unpack`'s `($format is 'q'|'Q'|'J'|'P' ? array{1: int}|false : …)`, whose `array{1: int}` arrives as a `List`.
+/// Whether plain PHP's declared `r#type` may give a keyed array, as `array<int, V>` and the shape `array{1: int}` do.
 fn declares_keyed_array(r#type: &TUnion) -> bool {
-    r#type.types.iter().any(|atomic| match atomic {
-        TAtomic::Array(TArray::Keyed(_)) => true,
-        TAtomic::Conditional(conditional) => {
-            declares_shape(&conditional.then) || declares_shape(&conditional.otherwise)
-        }
-        _ => false,
-    })
-}
-
-/// Whether a branch of a conditional type, the branches it nests included, may give a keyed array shape.
-fn declares_shape(r#type: &TUnion) -> bool {
-    r#type.types.iter().any(|atomic| match atomic {
-        TAtomic::Array(TArray::Keyed(keyed)) => keyed.known_items.is_some(),
-        TAtomic::Conditional(conditional) => {
-            declares_shape(&conditional.then) || declares_shape(&conditional.otherwise)
-        }
-        _ => false,
-    })
+    r#type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
 }
 
 /// The fully qualified names of the classes a class value of `r#type` holds, leaving out `null`, or none when part of
