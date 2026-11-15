@@ -8,7 +8,6 @@ use Composer\InstalledVersions;
 use PharData;
 use RuntimeException;
 use Throwable;
-use ZipArchive;
 
 use function array_map;
 use function basename;
@@ -25,7 +24,6 @@ use function extension_loaded;
 use function fclose;
 use function file;
 use function file_exists;
-use function file_get_contents;
 use function file_put_contents;
 use function flock;
 use function fopen;
@@ -156,13 +154,11 @@ function release_mismatch(string $mago, string $sdk): string
  * Detect the CPU architecture from the system.
  *
  * Maps the raw `php_uname('m')` value to a normalized Rust target architecture name.
- * Only architectures with pre-built release binaries are supported.
- *
- * Supported: x86_64, aarch64, armv7, arm (v5/v6).
+ * Only architectures with pre-built release binaries are supported: x86_64 and aarch64.
  *
  * @throws RuntimeException If the architecture is not supported.
  *
- * @return string Normalized architecture (e.g., "x86_64", "aarch64", "armv7", "arm").
+ * @return string Normalized architecture, "x86_64" or "aarch64".
  *
  * @internal
  */
@@ -173,11 +169,9 @@ function detect_architecture(): string
     return match ($raw) {
         'x86_64', 'amd64' => 'x86_64',
         'arm64', 'aarch64' => 'aarch64',
-        'armv7l' => 'armv7',
-        'armv6l', 'armv5tel', 'armv5l' => 'arm',
         default => throw new RuntimeException(
-            "Unsupported architecture: {$raw}. Pre-built binaries are available for x86_64, aarch64, armv7, and arm. "
-            . 'For other architectures, compile mago from source: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago',
+            "No mago release has a binary for {$raw}: it builds for arm64 and x86_64. "
+            . 'Compile mago from source: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago',
         ),
     };
 }
@@ -205,80 +199,19 @@ function detect_linux_libc(): string
 }
 
 /**
- * Detect the ARM float ABI from /proc/cpuinfo.
- *
- * Checks whether the CPU supports hardware floating point (hard float).
- *
- * @return bool True if the system uses hard float ABI.
- *
- * @internal
- */
-function detect_arm_hard_float(): bool
-{
-    return str_contains((string) file_get_contents('/proc/cpuinfo'), 'hard');
-}
-
-/**
- * Build the Linux OS suffix for the target triple.
- *
- * Combines the C library variant (glibc/musl) with the appropriate ABI suffix
- * for the given architecture. Only combinations with pre-built binaries are supported.
- *
- * Released Linux targets: x86_64 and aarch64, on glibc. No release has a musl binary.
- *
- * @param string $architecture Normalized architecture name.
- * @param string $libc C library variant ("gnu" or "musl").
- *
- * @throws RuntimeException If the architecture/libc combination has no pre-built binary.
- *
- * @return string The OS suffix (e.g., "gnu", "gnueabihf").
- *
- * @internal
- */
-function build_linux_suffix(string $architecture, string $libc): string
-{
-    if ($libc === 'musl') {
-        throw new RuntimeException(
-            'No mago release has a binary for musl Linux, such as Alpine: it builds for glibc Linux. '
-            . 'Compile mago from source: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago',
-        );
-    }
-
-    $hardFloat = match ($architecture) {
-        'arm', 'armv7' => namespace\detect_arm_hard_float(),
-        default => false,
-    };
-
-    return match ($architecture) {
-        'x86_64', 'aarch64' => 'gnu',
-        'armv7' => 'gnueabihf',
-        'arm' => $hardFloat ? 'gnueabihf' : 'gnueabi',
-        default => throw new RuntimeException("No pre-built glibc binary for architecture: {$architecture}"),
-    };
-}
-
-/**
  * Detect the operating system and build platform metadata.
  *
- * Returns all platform-specific values needed to construct the download URL
- * and locate the extracted binary. Only OS/architecture combinations with
- * pre-built release binaries are supported.
- *
- * Released OS targets:
- *   Windows: x86_64 only (msvc)
- *   macOS:   aarch64
- *   Linux:   x86_64, aarch64, armv7, arm
- *   FreeBSD: x86_64 only
+ * Returns the platform values needed to construct the download URL. A release builds `mago` for macOS on Apple
+ * silicon and for glibc Linux on x86_64 and aarch64, and every other platform is refused with the reason.
  *
  * @param string $architecture Normalized architecture name.
  *
  * @throws RuntimeException If the OS/architecture combination is not supported.
  *
- * @return array{os: string, vendor: string, suffix: string, extension: string}
- *   - os: Normalized OS name (e.g., "linux", "darwin", "windows")
- *   - vendor: Target vendor (e.g., "unknown", "apple", "pc")
- *   - suffix: OS/ABI suffix for the target triple (e.g., "gnu", "musl", "msvc")
- *   - extension: Executable file extension (e.g., "", ".exe")
+ * @return array{os: string, vendor: string, suffix: string}
+ *   - os: Normalized OS name, "darwin" or "linux"
+ *   - vendor: Target vendor, "apple" or "unknown"
+ *   - suffix: OS/ABI suffix for the target triple, "" or "gnu"
  *
  * @internal
  */
@@ -287,49 +220,23 @@ function detect_platform(string $architecture): array
     $os = strtolower(php_uname('s'));
 
     return match ($os) {
-        'windows nt' => match ($architecture) {
-            'x86_64' => [
-                'os' => 'windows',
-                'vendor' => 'pc',
-                'suffix' => 'msvc',
-                'extension' => '.exe',
-            ],
-            default => throw new RuntimeException(
-                "No pre-built Windows binary for architecture: {$architecture}. Only x86_64 is supported.",
-            ),
-        },
         'darwin' => match ($architecture) {
-            'aarch64' => [
-                'os' => 'darwin',
-                'vendor' => 'apple',
-                'suffix' => '',
-                'extension' => '',
-            ],
+            'aarch64' => ['os' => 'darwin', 'vendor' => 'apple', 'suffix' => ''],
             default => throw new RuntimeException(
                 "No mago release has a binary for macOS on {$architecture}: it builds for macOS on Apple silicon. "
                 . 'Compile mago from source: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago',
             ),
         },
-        'linux' => [
-            'os' => 'linux',
-            'vendor' => 'unknown',
-            'suffix' => namespace\build_linux_suffix($architecture, namespace\detect_linux_libc()),
-            'extension' => '',
-        ],
-        'freebsd' => match ($architecture) {
-            'x86_64' => [
-                'os' => 'freebsd',
-                'vendor' => 'unknown',
-                'suffix' => '',
-                'extension' => '',
-            ],
+        'linux' => match (namespace\detect_linux_libc()) {
+            'gnu' => ['os' => 'linux', 'vendor' => 'unknown', 'suffix' => 'gnu'],
             default => throw new RuntimeException(
-                "No pre-built FreeBSD binary for architecture: {$architecture}. Only x86_64 is supported.",
+                'No mago release has a binary for musl Linux, such as Alpine: it builds for glibc Linux. '
+                . 'Compile mago from source: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago',
             ),
         },
         default => throw new RuntimeException(
-            "Unsupported operating system: {$os}. Pre-built binaries are available for Windows, macOS, Linux, and FreeBSD. "
-            . 'For other platforms, compile mago from source: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago',
+            "No mago release has a binary for {$os}: it builds for macOS and Linux. "
+            . 'Compile mago from source: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago',
         ),
     };
 }
@@ -340,7 +247,7 @@ function detect_platform(string $architecture): array
  * @param string $arch Architecture (e.g., "x86_64").
  * @param string $vendor Vendor (e.g., "unknown", "apple").
  * @param string $os OS name (e.g., "linux", "darwin").
- * @param string $suffix ABI suffix (e.g., "gnu", "musl", "msvc", or "").
+ * @param string $suffix ABI suffix (e.g., "gnu", or "").
  *
  * @return string The target triple (e.g., "x86_64-unknown-linux-gnu", "aarch64-apple-darwin").
  *
@@ -356,33 +263,18 @@ function build_target_triple(string $arch, string $vendor, string $os, string $s
 }
 
 /**
- * Get the archive file extension for the given platform.
- *
- * Windows MSVC builds are packaged as `.zip`, all other platforms use `.tar.gz`.
- *
- * @return string ".zip" or ".tar.gz".
- *
- * @internal
- */
-function get_archive_extension(string $os, string $suffix): string
-{
-    return $os === 'windows' && $suffix === 'msvc' ? '.zip' : '.tar.gz';
-}
-
-/**
- * Build the GitHub release download URL for a given version and target.
+ * Build the GitHub release download URL of a release's `.tar.gz` archive for a given version and target.
  *
  * @param string $version Package version (e.g., "1.10.0").
  * @param string $storageDir Directory name inside the archive (e.g., "mago-1.10.0-x86_64-unknown-linux-gnu").
- * @param string $archiveExtension Archive extension (".zip" or ".tar.gz").
  *
  * @return string Full download URL.
  *
  * @internal
  */
-function build_download_url(string $version, string $storageDir, string $archiveExtension): string
+function build_download_url(string $version, string $storageDir): string
 {
-    return "https://github.com/heyJordanParker/php-sharp/releases/download/v{$version}/{$storageDir}{$archiveExtension}";
+    return "https://github.com/heyJordanParker/php-sharp/releases/download/v{$version}/{$storageDir}.tar.gz";
 }
 
 /**
@@ -619,9 +511,8 @@ function get_archive_checksum(string $checksumFile, string $archiveName): string
 }
 
 /**
- * Extract an archive to a destination directory, if its SHA-256 is the one the release pins.
- *
- * Supports `.zip` (via ZipArchive) and `.tar.gz` (via PharData). The archive is deleted either way.
+ * Extract a `.tar.gz` archive to a destination directory with PharData, if its SHA-256 is the one the release pins.
+ * The archive is deleted either way.
  *
  * @param string $checksum The SHA-256 `get_archive_checksum` read for the archive.
  *
@@ -629,7 +520,7 @@ function get_archive_checksum(string $checksumFile, string $archiveName): string
  *
  * @internal
  */
-function extract_archive(string $archiveFile, string $checksum, string $destination, string $archiveExtension): void
+function extract_archive(string $archiveFile, string $checksum, string $destination): void
 {
     $actual = (string) hash_file('sha256', $archiveFile);
     if (!hash_equals($checksum, $actual)) {
@@ -641,21 +532,6 @@ function extract_archive(string $archiveFile, string $checksum, string $destinat
             . " has SHA-256 {$actual}, and heyjordanparker/mago-sharp pins {$checksum} for it, so it is not the "
             . 'archive the release built. It was deleted, and nothing was extracted.',
         );
-    }
-
-    if ($archiveExtension === '.zip') {
-        $zip = new ZipArchive();
-        if ($zip->open($archiveFile) !== true) {
-            unlink($archiveFile);
-
-            throw new RuntimeException('Failed to open zip archive.');
-        }
-
-        $zip->extractTo($destination);
-        $zip->close();
-
-        unlink($archiveFile);
-        return;
     }
 
     $phar = new PharData($archiveFile);
@@ -672,8 +548,6 @@ function extract_archive(string $archiveFile, string $checksum, string $destinat
  *
  * @param string $version Package version.
  * @param string $triple Target triple (e.g., "x86_64-unknown-linux-gnu").
- * @param string $executableExtension Executable extension ("" or ".exe").
- * @param string $archiveExtension Archive extension (".zip" or ".tar.gz").
  * @param string $binDir Base directory for storing binaries, the package's `composer/bin`. The package's
  *   `sha256sums.txt` is in its parent directory.
  *
@@ -683,16 +557,11 @@ function extract_archive(string $archiveFile, string $checksum, string $destinat
  *
  * @internal
  */
-function ensure_binary(
-    string $version,
-    string $triple,
-    string $executableExtension,
-    string $archiveExtension,
-    string $binDir,
-): string {
+function ensure_binary(string $version, string $triple, string $binDir): string
+{
     $storageDir = "mago-{$version}-{$triple}";
     $releaseDir = "{$binDir}/{$version}";
-    $executablePath = "{$releaseDir}/{$storageDir}/mago{$executableExtension}";
+    $executablePath = "{$releaseDir}/{$storageDir}/mago";
     $checksumFile = dirname($binDir) . '/sha256sums.txt';
 
     if (file_exists($executablePath)) {
@@ -709,8 +578,6 @@ function ensure_binary(
     return namespace\locked($lockFile, static function () use (
         $version,
         $triple,
-        $executableExtension,
-        $archiveExtension,
         $releaseDir,
         $storageDir,
         $executablePath,
@@ -721,24 +588,21 @@ function ensure_binary(
             return $executablePath;
         }
 
-        $checksum = namespace\get_archive_checksum($checksumFile, "{$storageDir}{$archiveExtension}");
-        $archiveFile = "{$releaseDir}/{$storageDir}{$archiveExtension}";
-        $url = namespace\build_download_url($version, $storageDir, $archiveExtension);
+        $checksum = namespace\get_archive_checksum($checksumFile, "{$storageDir}.tar.gz");
+        $archiveFile = "{$releaseDir}/{$storageDir}.tar.gz";
+        $url = namespace\build_download_url($version, $storageDir);
 
         fprintf(STDERR, "Downloading mago %s for %s...\n", $version, $triple);
         namespace\download($url, $archiveFile);
         fprintf(STDERR, "Downloaded.\n");
 
-        namespace\extract_archive($archiveFile, $checksum, $releaseDir, $archiveExtension);
+        namespace\extract_archive($archiveFile, $checksum, $releaseDir);
 
         if (!file_exists($executablePath)) {
             throw new RuntimeException("Expected binary not found after extraction at {$executablePath}");
         }
 
-        // Ensure binary is executable on Unix
-        if ($executableExtension === '') {
-            chmod($executablePath, 0o755);
-        }
+        chmod($executablePath, 0o755);
 
         return $executablePath;
     });

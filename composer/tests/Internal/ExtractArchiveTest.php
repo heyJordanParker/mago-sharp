@@ -63,7 +63,7 @@ final class ExtractArchiveTest extends TestCase
     {
         $archive = $this->archive();
 
-        extract_archive($archive, (string) hash_file('sha256', $archive), "{$this->directory}/release", '.tar.gz');
+        extract_archive($archive, (string) hash_file('sha256', $archive), "{$this->directory}/release");
 
         self::assertSame('the mago binary', file_get_contents("{$this->directory}/release/mago-1.0.0-test/mago"));
         self::assertFileDoesNotExist($archive);
@@ -76,7 +76,7 @@ final class ExtractArchiveTest extends TestCase
         $pinned = hash('sha256', 'the archive the release built');
 
         try {
-            extract_archive($archive, $pinned, "{$this->directory}/release", '.tar.gz');
+            extract_archive($archive, $pinned, "{$this->directory}/release");
             self::fail('A tampered archive was extracted.');
         } catch (RuntimeException $exception) {
             self::assertSame(
