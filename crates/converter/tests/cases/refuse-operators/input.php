@@ -13,7 +13,7 @@ final class Operators
         $loose = $text == '1';
         $low = ($count xor $flag);
         $added = $text + $count;
-        $divided = $count / 2;
+        $this->whole($count / 2);
         $modulo = $rate % 2;
         $masked = $flag & $flag;
         $power = $count ** $count;
@@ -27,5 +27,9 @@ final class Operators
         $lists = $list === $list;
         $mixed = $flag === $count;
         $rate /= 2;
+    }
+
+    private function whole(int $count): void
+    {
     }
 }

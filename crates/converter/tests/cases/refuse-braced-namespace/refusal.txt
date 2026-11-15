@@ -1,1 +1,2 @@
-6:1: a namespace with braces has no PHP# form: a file is in one namespace
+6:1: a file of several namespaces, or of PHP's root namespace in braces, has no PHP# form: a file is in one namespace, which its first line names (spec section 27)
+12:1: a file of several namespaces, or of PHP's root namespace in braces, has no PHP# form: a file is in one namespace, which its first line names (spec section 27)

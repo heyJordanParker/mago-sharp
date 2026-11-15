@@ -122,6 +122,8 @@ echo $tally->graded(20), ' ', $tally->graded(6), ' ', $tally->graded(2), ' ', $t
 $gift = (new GiftCoupon(5))->doubled();
 echo $gift::class, ' ', $gift->cents, ' ', (new \Proof\Shop\Coupon(3))->doubled()::class, "\n";
 echo $tally->stamped(new \Acme\Format\Stamp()), "\n";
+echo var_export($tally->taxed(7, 15), true), ' ', var_export($tally->taxed(10, 10), true), ' ', $tally->shared(-7, 2), "\n";
+echo var_export($tally->ratio(7, 2), true), ' ', var_export($tally->ratio(6, 2), true), "\n";
 
 $label = new Label();
 echo $label->render('shelf', 3), "\n", $label->folder(), "\n", $label->traced(), ' ', $label->kind(), "\n";

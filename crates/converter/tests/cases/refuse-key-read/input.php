@@ -6,8 +6,8 @@ namespace App;
 
 use App\Errors\OutOfRangeException;
 
-// A read of a `Map` at a key it may lack throws an `OutOfRangeException` where PHP warns, which a file that imports
-// another class of that name can't name, and a key PHP may turn into an `int` reads another entry (spec section 12).
+// A read of a `Map` at a key PHP may turn into an `int` reads another entry, and so refuses, beside a `use` of a class
+// named like the root `OutOfRangeException`, which the conversion imports under another name (spec section 12).
 final class Ledger
 {
     /** @param array<array-key, int> $totals */

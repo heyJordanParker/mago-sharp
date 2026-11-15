@@ -1,0 +1,19 @@
+namespace App;
+
+import App.Errors.OutOfRangeException as ErrorsOutOfRangeException;
+
+// A `use` that takes the name of a root class of `Builtins.sharp`, which a `.sharp` file names bare, imports its class
+// under the name of its namespace before it, so the file still reaches the root `OutOfRangeException` a `Map` read
+// throws where PHP warns (spec sections 12 and 23).
+public final class Ledger
+{
+    public int named(Map<string, int> totals)
+    {
+        return (totals['rent'] ?? throw new OutOfRangeException("Undefined array key \"rent\""));
+    }
+
+    public ErrorsOutOfRangeException failure()
+    {
+        return new ErrorsOutOfRangeException();
+    }
+}

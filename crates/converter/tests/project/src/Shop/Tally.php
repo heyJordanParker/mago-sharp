@@ -29,6 +29,23 @@ final class Tally
         return static fn(int $value): int => $value + $step;
     }
 
+    // Division: PHP's `/` of two `int`s into a `float` divides as floats, into an `int|float` gives the `int` of a whole
+    // quotient, and `intdiv` divides toward zero.
+    public function taxed(int $total, int $rate): float
+    {
+        return $total * $rate / 100;
+    }
+
+    public function ratio(int $total, int $parts): int|float
+    {
+        return $total / $parts;
+    }
+
+    public function shared(int $total, int $parts): int
+    {
+        return intdiv($total, $parts);
+    }
+
     // Method values: `name(...)` and `[$this, 'name']` where a function is declared.
     public function halved(int $amount): int
     {

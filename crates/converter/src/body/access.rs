@@ -1,8 +1,11 @@
 //! Member and constant access: `->` and `::` become `.`, `?->` becomes `?.` (spec section 4), `X::class` becomes
 //! `typeof(X)`, and a static is reached through its class's name or a type parameter (spec sections 11 and 25).
 
+use mago_codex::metadata::property::PropertyMetadata;
+use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::get_mixed;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
@@ -11,14 +14,17 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::MagicConstant;
+use mago_syntax::cst::StaticPropertyAccess;
 use mago_syntax::cst::Variable;
 
 use super::Kind;
 use super::builtins::runs_nothing;
+use super::is_primary;
+use super::natively_checked;
 use crate::Converter;
 use crate::library::short;
 
-impl Converter<'_, '_> {
+impl<'input> Converter<'input, '_> {
     /// A constant: a library's, through its namespace as its functions are (spec section 23), or PHP's own, which the
     /// standard library names.
     pub(super) fn constant(&mut self, expression: &Expression<'_>, constant: &ConstantAccess<'_>) {
@@ -161,7 +167,7 @@ impl Converter<'_, '_> {
             }
             Access::StaticProperty(access) => {
                 if !self.static_class(access.class) {
-                    return self.refuse(expression.span(), self.held_static(expression));
+                    return self.held_static_read(expression, access);
                 }
                 self.edits.replace(access.double_colon, ".");
                 match &access.property {
@@ -245,6 +251,97 @@ impl Converter<'_, '_> {
         };
 
         self.declares(&parameter).then(|| parameter.parameter_name.as_str_lossy().into_owned())
+    }
+
+    /// Whether `place` is a static property reached through a class held at run time, as `$kind::$count`, which PHP#
+    /// reads and writes through reflection.
+    pub(super) fn held_static_place(&self, place: &Expression<'_>) -> bool {
+        matches!(place, Expression::Access(Access::StaticProperty(access))
+            if !names_class(access.class) && self.class_parameter(access.class).is_none())
+    }
+
+    /// The reflection of the static property `access` names, through the class value it is reached through, as
+    /// `kind.properties().first(property => property.name == "count")`, which finds the property of the class the
+    /// value holds, as PHP's `$kind::$count` does (spec section 25), with the property's declaration. A refusal at
+    /// `span` where the value may hold something other than a class value, or the analysis finds no such property.
+    fn held_property(
+        &mut self,
+        span: Span,
+        access: &StaticPropertyAccess<'_>,
+    ) -> Option<(String, &'input PropertyMetadata)> {
+        let Variable::Direct(variable) = &access.property else {
+            self.refuse(access.property.span(), "a property named by a variable has no PHP# form (spec section 25)");
+            return None;
+        };
+        let shown = String::from_utf8_lossy(self.text(span)).into_owned();
+        if !self.is(access.class, &[Kind::Class]) || !runs_nothing(access.class) {
+            let held = self.shown(access.class);
+            self.refuse(
+                span,
+                format!("`{shown}` reaches a static through `{held}`, which holds no class value a second read gives again, and has no PHP# form: {HELD_CLASS}"),
+            );
+            return None;
+        }
+        let codebase = self.input.codebase;
+        let Some(declared) = self
+            .held_class(access.class)
+            .and_then(|class| codebase.get_declaring_property(class.as_bytes(), variable.name))
+        else {
+            let held = self.shown(access.class);
+            self.refuse(
+                span,
+                format!("`{shown}` reaches a static through a class held at run time, which PHP# reads through reflection, and the analysis finds no static property `{}` of `{held}` to type it by (spec section 25)", String::from_utf8_lossy(variable.name)),
+            );
+            return None;
+        };
+        self.expression(access.class, None);
+        let class = self.render(access.class);
+        let class = if is_primary(access.class) { class } else { format!("({class})") };
+        let found = self.unused_name("property", &[]);
+        let name = String::from_utf8_lossy(&variable.name[1..]);
+
+        Some((format!("{class}.properties().first({found} => {found}.name == \"{name}\")"), declared))
+    }
+
+    /// `$kind::$count`, a static property of a class held at run time, as the read through reflection PHP# makes it
+    /// with, `….get(null)`. `get` gives `Any?`, which [`Converter::checked`] takes into the type the analysis gives the
+    /// read (spec section 21).
+    fn held_static_read(&mut self, expression: &Expression<'_>, access: &StaticPropertyAccess<'_>) {
+        let Some((property, declared)) = self.held_property(expression.span(), access) else {
+            return;
+        };
+        self.edits.replace(expression.span(), format!("{property}.get(null)"));
+        let Some(read) = self.type_of(expression).filter(|read| !read.has_mixed()) else {
+            return;
+        };
+        let natively = natively_checked(declared.type_declaration_metadata.as_ref(), read, self.input.codebase);
+        if self.checked(expression, &get_mixed(), read, "Value", natively) {
+            // `as` and `??` bind looser than the operators around a read.
+            let checked = self.render(expression);
+            self.edits.replace(expression.span(), format!("({checked})"));
+        } else {
+            let shown = String::from_utf8_lossy(self.text(expression.span())).into_owned();
+            self.refuse(
+                expression.span(),
+                format!("`{shown}` reaches a static through a class held at run time, which PHP# reads through reflection, whose `get` gives `Any?`, and no PHP# test gives it the `{}` the property holds (spec section 21)", read.get_id()),
+            );
+        }
+    }
+
+    /// `$kind::$count = $value;`, a write of a static property of a class held at run time, as the statement PHP#
+    /// writes it through reflection with, `….set(null, value)`, which checks the value against the property's type,
+    /// as PHP's write does (spec section 25).
+    pub(super) fn held_static_write(&mut self, statement: &Expression<'_>, lhs: &Expression<'_>, rhs: &Expression<'_>) {
+        let Expression::Access(Access::StaticProperty(access)) = lhs else {
+            return;
+        };
+        let Some((property, declared)) = self.held_property(lhs.span(), access) else {
+            return;
+        };
+        let place = declared.type_metadata.as_ref().map(|metadata| metadata.type_union.clone());
+        self.expression(rhs, place.as_ref());
+        let value = self.render(rhs);
+        self.edits.replace(statement.span(), format!("{property}.set(null, {value})"));
     }
 
     /// Why `access`, a static property or constant reached through a class held at run time, as `$class::$count`, has

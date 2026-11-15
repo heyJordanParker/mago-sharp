@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace App;
 
-// PHP# reaches a static through its class's name or a type parameter, and calls a static method of a class held at
-// run time through reflection, which reads no static property or constant, gives no method value, and needs the
-// method the analysis finds to type the call (spec sections 11 and 25).
+// PHP# reaches a static through its class's name or a type parameter, and a static of a class held at run time
+// through reflection, which reads no constant and needs the method the analysis finds to type the call (spec sections
+// 11 and 25).
 final class Reader
 {
     /** @param class-string<Order> $kind */

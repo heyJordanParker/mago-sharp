@@ -24,7 +24,9 @@ use mago_names::ResolvedNames;
 use mago_names::scope::NamespaceScope;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Block;
 use mago_syntax::cst::Identifier;
+use mago_syntax::cst::Namespace;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Statement;
@@ -383,10 +385,16 @@ impl<'input> Converter<'input, '_> {
                 self.edits.delete(declare.span().start.offset, end);
             }
             Statement::Namespace(namespace) => {
-                let NamespaceBody::Implicit(body) = &namespace.body else {
-                    self.refuse(namespace.span(), "a namespace with braces has no PHP# form: a file is in one namespace");
+                let namespaces =
+                    self.input.program.statements.iter().filter(|statement| matches!(statement, Statement::Namespace(_)));
+                let braced = matches!(namespace.body, NamespaceBody::BraceDelimited(_));
+                if braced && (namespace.name.is_none() || namespaces.count() > 1) {
+                    self.refuse(
+                        namespace.span(),
+                        "a file of several namespaces, or of PHP's root namespace in braces, has no PHP# form: a file is in one namespace, which its first line names (spec section 27)",
+                    );
                     return;
-                };
+                }
                 if let Some(name) = &namespace.name {
                     for part in name.value().split(|byte| *byte == b'\\') {
                         self.misnamed(part, name.span(), "namespace", NameCase::Pascal);
@@ -396,9 +404,14 @@ impl<'input> Converter<'input, '_> {
                     self.imports = Imports::new(&written, self.input.codebase, self.input.library);
                     self.scope = NamespaceScope::for_namespace(name.value());
                 }
-                self.imports_at = ImportsAt::AfterNamespace(body.terminator.span().end.offset);
-                for statement in &body.statements {
-                    self.file_statement(statement);
+                match &namespace.body {
+                    NamespaceBody::Implicit(body) => {
+                        self.imports_at = ImportsAt::AfterNamespace(body.terminator.span().end.offset);
+                        for statement in &body.statements {
+                            self.file_statement(statement);
+                        }
+                    }
+                    NamespaceBody::BraceDelimited(block) => self.braced_namespace(namespace, block),
                 }
             }
             Statement::Use(r#use) => self.use_line(r#use),
@@ -469,6 +482,31 @@ impl<'input> Converter<'input, '_> {
         let indentation = self.indentation(span.start.offset);
         self.edits.replace(span, lines.join(&format!("\n{indentation}")));
         self.imports_at = ImportsAt::AfterImport(span.end.offset);
+    }
+
+    /// `namespace A { … }`, a file's one namespace in braces, as `namespace A;` and its body out of the braces, one
+    /// indentation level out, since a PHP# file's first line names its namespace (spec section 27).
+    fn braced_namespace(&mut self, namespace: &Namespace<'_>, block: &Block<'_>) {
+        let Some(name) = &namespace.name else {
+            return;
+        };
+        self.edits.replace_range(name.span().end.offset, block.left_brace.end.offset, ";");
+        self.imports_at = ImportsAt::AfterNamespace(block.left_brace.end.offset);
+        for statement in &block.statements {
+            self.file_statement(statement);
+        }
+        let Some(first) = block.statements.first() else {
+            return self.edits.delete(block.left_brace.end.offset, block.right_brace.end.offset);
+        };
+        let indentation = self.indentation(first.span().start.offset);
+        let body = self.edits.render(self.source, block.left_brace.end.offset, block.right_brace.start.offset);
+        let outdented: Vec<&str> =
+            body.trim().lines().map(|line| line.strip_prefix(indentation.as_str()).unwrap_or(line)).collect();
+        self.edits.replace_range(
+            block.left_brace.end.offset,
+            block.right_brace.end.offset,
+            format!("\n\n{}", outdented.join("\n").trim_end()),
+        );
     }
 
     /// The type parameter list of a class or a method whose analysis gives it type parameters, `templates`, from PHPDoc

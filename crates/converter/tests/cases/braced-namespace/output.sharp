@@ -1,0 +1,12 @@
+// A file's one namespace in braces is `namespace App;`, which a PHP# file's first line names (spec section 27).
+namespace App;
+
+import App.Shop.Item;
+
+public final class Braced
+{
+    public string name(Item item)
+    {
+        return item.name;
+    }
+}

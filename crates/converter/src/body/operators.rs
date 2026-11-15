@@ -53,6 +53,11 @@ impl Converter<'_, '_> {
             // PHP# has no `(bool)`, and a condition's comparison replaces it (spec section 24): the test of PHP's
             // truthiness that a condition of the value's type gives, as `count != 0` (spec section 21).
             UnaryPrefixOperator::BoolCast(..) | UnaryPrefixOperator::BooleanCast(..) => {
+                // A `bool` a declaration makes one at runtime is its own `(bool)`.
+                if self.is(operand, &[Kind::Bool]) && self.holds_type_at_runtime(operand) {
+                    self.expression(operand, None);
+                    return self.edits.delete(expression.span().start.offset, operand.span().start.offset);
+                }
                 if self.is(operand, &[Kind::Bool]) {
                     let shown = self.shown(operand);
                     return self.refuse(
@@ -367,7 +372,41 @@ impl Converter<'_, '_> {
         })
     }
 
-    pub(super) fn binary(&mut self, expression: &Expression<'_>, binary: &Binary<'_>) {
+    /// Whether reading `value` again gives what the first read gave: a literal, a constant, a variable or a property a
+    /// second read gives again, or `+`, `-`, `*`, `%` or a sign of such values, which compute it again.
+    fn recomputes(&self, value: &Expression<'_>) -> bool {
+        match value {
+            Expression::Parenthesized(parenthesized) => self.recomputes(parenthesized.expression),
+            Expression::Literal(_) | Expression::ConstantAccess(_) | Expression::Access(Access::ClassConstant(_)) => {
+                true
+            }
+            Expression::Binary(binary) => {
+                matches!(
+                    binary.operator,
+                    BinaryOperator::Addition(_)
+                        | BinaryOperator::Subtraction(_)
+                        | BinaryOperator::Multiplication(_)
+                        | BinaryOperator::Modulo(_)
+                ) && self.recomputes(binary.lhs)
+                    && self.recomputes(binary.rhs)
+            }
+            Expression::UnaryPrefix(unary) => {
+                matches!(unary.operator, UnaryPrefixOperator::Negation(_) | UnaryPrefixOperator::Plus(_))
+                    && self.recomputes(unary.operand)
+            }
+            value => self.rereads(value),
+        }
+    }
+
+    /// `binary`, whose value lands in the declared type `expected`, when there is one, as a whole value nothing binds
+    /// around where `bare` says so.
+    pub(super) fn binary(
+        &mut self,
+        expression: &Expression<'_>,
+        binary: &Binary<'_>,
+        expected: Option<&TUnion>,
+        bare: bool,
+    ) {
         let (lhs, rhs) = (binary.lhs, binary.rhs);
         let numbers = [Kind::Int, Kind::Float];
         let operator = String::from_utf8_lossy(self.text(binary.operator.span())).into_owned();
@@ -499,7 +538,53 @@ impl Converter<'_, '_> {
                         "turns them into numbers PHP's way, which PHP# does only between numbers",
                     ))
                 } else if self.is(lhs, &[Kind::Int]) && self.is(rhs, &[Kind::Int]) {
-                    Some("PHP's `/` of two `int`s gives a `float` when it doesn't divide evenly, and PHP#'s truncates (spec section 24)".to_owned())
+                    // PHP's `/` of two `int`s gives an `int` where the quotient is whole and a `float` where it isn't,
+                    // and PHP#'s truncates (spec section 24). A `float` place turns PHP's whole quotient into a
+                    // `float` too, so there the two divide as floats.
+                    let into_float = expected.is_some_and(|place| {
+                        kinds(place).into_iter().filter(|kind| *kind != Kind::Null).eq([Kind::Float])
+                    });
+                    if into_float {
+                        self.expression(lhs, None);
+                        self.expression(rhs, None);
+                        let dividend = self.render(lhs);
+                        let dividend = if super::is_primary(lhs) { dividend } else { format!("({dividend})") };
+                        return self.edits.replace(lhs.span(), format!("(float) {dividend}"));
+                    }
+                    // A place of both an `int` and a `float` takes PHP's quotient whole: the `int` where `%` finds it
+                    // whole and the `float` where it doesn't. A whole value with no declared place lands in a local
+                    // or a property of no type, which takes either.
+                    let holds_both = expected.map_or(bare, |place| {
+                        let kinds = kinds(place);
+                        place.has_mixed() || (kinds.contains(&Kind::Int) && kinds.contains(&Kind::Float))
+                    });
+                    if !holds_both {
+                        return self.refuse(
+                            expression.span(),
+                            "PHP's `/` of two `int`s gives an `int` where the quotient is whole and a `float` where it isn't, and this place takes only one of them (spec section 24)",
+                        );
+                    }
+                    if !self.recomputes(lhs) || !self.recomputes(rhs) {
+                        return self.refuse(
+                            expression.span(),
+                            "PHP's `/` of two `int`s gives an `int` where the quotient is whole and a `float` where it isn't, which PHP# tells apart by reading each side again, and a second read of a side that runs code may give another value (spec section 24)",
+                        );
+                    }
+                    self.expression(lhs, None);
+                    self.expression(rhs, None);
+                    let [dividend, divisor] = [lhs, rhs].map(|side| {
+                        let rendered = self.render(side);
+                        if super::is_primary(side) { rendered } else { format!("({rendered})") }
+                    });
+                    // `%` by 0 throws `Modulo by zero`, so a divisor that may be 0 reaches `/`, whose error is PHP's.
+                    let nonzero = matches!(rhs.unparenthesized(), Expression::Literal(Literal::Integer(literal)) if literal.value.is_some_and(|value| value != 0));
+                    let zero = if nonzero { String::new() } else { format!("{divisor} == 0 || ") };
+                    let quotient = format!(
+                        "{zero}{dividend} % {divisor} == 0 ? {dividend} / {divisor} : (float) {dividend} / {divisor}"
+                    );
+                    return self
+                        .edits
+                        .replace(expression.span(), if bare { quotient } else { format!("({quotient})") });
                 } else {
                     None
                 }

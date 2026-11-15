@@ -1,0 +1,42 @@
+namespace App;
+
+// A method with no PHP return type returns `Any?` in PHP#, so a local assigned its call is an `Any?`, read after its
+// block or appended to a `[]` (decision 2).
+public final class Sizes
+{
+    public int guessed(bool wide)
+    {
+        Any? copy = null;
+        if (wide) {
+            const size = this.guess();
+            copy = size;
+        } else {
+            copy = 1;
+        }
+
+        return copy as int ?? throw new TypeError("Return value must be of type int");
+    }
+
+    public int listed()
+    {
+        List<Any?> values = [];
+        values.add(this.guess());
+
+        return values.count();
+    }
+
+    public int nulled(bool wide)
+    {
+        Any? size = null;
+        if (wide) {
+            size = this.guess();
+        }
+
+        return (size ?? 0) as int ?? throw new TypeError("Return value must be of type int");
+    }
+
+    private Any? guess()
+    {
+        return 2;
+    }
+}

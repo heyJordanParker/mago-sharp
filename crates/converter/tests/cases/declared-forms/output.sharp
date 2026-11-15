@@ -1,0 +1,46 @@
+namespace App;
+
+// A `(bool)` of a declared `bool`, a condition of a call read once, a local typed by an operator of declared values,
+// and a `return` whose value first assigns a local (spec sections 2, 3, 21 and 24).
+public final class Forms
+{
+    private string name = '';
+
+    public bool flag(bool on)
+    {
+        return on;
+    }
+
+    public string named()
+    {
+        return this.name;
+    }
+
+    public bool shown()
+    {
+        return (match (this.named()) { "" or "0" => false, default => true }) && true;
+    }
+
+    public bool hidden()
+    {
+        return (match (this.named()) { "" or "0" => true, default => false });
+    }
+
+    public int computed(bool wide, int count)
+    {
+        int? size = null;
+        if (wide) {
+            size = count * 2;
+        } else {
+            size = 1;
+        }
+
+        return size;
+    }
+
+    public string inside(string? text)
+    {
+        const found = text;
+        return (found) != null ? found : '';
+    }
+}

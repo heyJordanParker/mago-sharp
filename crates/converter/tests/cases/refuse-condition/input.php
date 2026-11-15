@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace App;
 
-// PHP's truthiness has no PHP# test for an object that is never null or a value of no known type, and a test of
-// several parts is written only for a variable or a property, which a second read gives again (spec section 21).
+// PHP's truthiness has no PHP# test for an object that is never null or a value of no known type, and a string a
+// second read may not give again, as a call's, is read once by a `match` (spec section 21).
 final class Untested
 {
     private string $name = '';

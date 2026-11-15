@@ -11,6 +11,7 @@ use mago_codex::ttype::combine_union_types;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_null;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::union::populate_union_type;
@@ -279,7 +280,7 @@ impl Converter<'_, '_> {
         let expected = written.map(|(_, union)| union);
         match &expected {
             Some(tagged) => self.wrote(variable.name, rhs, rhs, Some(tagged.clone()), Source::Tagged),
-            None => self.wrote(variable.name, rhs, rhs, self.type_of(rhs).cloned(), self.source(rhs)),
+            None => self.wrote(variable.name, rhs, rhs, self.written_union(rhs), self.source(rhs)),
         }
         self.value(rhs, expected.as_ref());
 
@@ -514,36 +515,56 @@ impl Converter<'_, '_> {
     fn write_of(&self, value: &Expression<'_>) -> Write {
         Write {
             at: value.span(),
-            union: self.type_of(value).cloned(),
+            union: self.written_union(value),
             source: self.source(value),
             runtime: self.holds_type_at_runtime(value),
         }
     }
 
     /// Where the type of `value`, written to a local, comes from: a literal, a parameter, a property, the return of a
-    /// call or a `new` of a class with no type parameters, whose declarations give it, or another local, whose writes
-    /// do. Any other value's type is the analysis's inference, which the converter never writes (decision 2).
+    /// call or a `new` of a class with no type parameters, whose declarations give it, an operator of such values, or
+    /// another local, whose writes do. Any other value's type is the analysis's inference, which the converter never
+    /// writes (decision 2).
     fn source(&self, value: &Expression<'_>) -> Source {
         let declared = |declared: bool| if declared { Source::Declared } else { Source::Inferred };
-        // A return that names a type parameter takes the type the analysis infers for this call (decision 2).
+        // A return that names a type parameter takes the type the analysis infers for this call (decision 2), and a
+        // function that declares none returns `Any?` in PHP#.
         let returns = |function: Option<&FunctionLikeMetadata>| {
             declared(function.is_some_and(|function| {
                 function.return_from_body.is_none()
                     && function
                         .return_type_metadata
                         .as_ref()
-                        .is_some_and(|returned| !returned.type_union.has_template_types())
+                        .is_none_or(|returned| !returned.type_union.has_template_types())
             }))
         };
         match value {
             Expression::Parenthesized(parenthesized) => self.source(parenthesized.expression),
             Expression::Literal(_) => Source::Declared,
-            Expression::UnaryPrefix(unary)
-                if matches!(unary.operator, UnaryPrefixOperator::Negation(_) | UnaryPrefixOperator::Plus(_))
-                    && matches!(unary.operand, Expression::Literal(_)) =>
-            {
-                Source::Declared
-            }
+            // An operator gives the type its rule makes of its operands, so it holds a declared type where its operands
+            // do, and a comparison, a logical operator, `instanceof`, `.` and a cast give their own.
+            Expression::UnaryPrefix(unary) => match unary.operator {
+                UnaryPrefixOperator::Negation(_)
+                | UnaryPrefixOperator::Plus(_)
+                | UnaryPrefixOperator::BitwiseNot(_) => self.source(unary.operand),
+                UnaryPrefixOperator::Not(_)
+                | UnaryPrefixOperator::IntCast(..)
+                | UnaryPrefixOperator::IntegerCast(..)
+                | UnaryPrefixOperator::FloatCast(..)
+                | UnaryPrefixOperator::DoubleCast(..)
+                | UnaryPrefixOperator::RealCast(..)
+                | UnaryPrefixOperator::StringCast(..)
+                | UnaryPrefixOperator::BinaryCast(..) => Source::Declared,
+                _ => Source::Inferred,
+            },
+            Expression::Binary(binary) => match &binary.operator {
+                BinaryOperator::StringConcat(_) | BinaryOperator::Instanceof(_) => Source::Declared,
+                operator if operator.is_comparison() || operator.is_logical() => Source::Declared,
+                _ => declared(
+                    matches!(self.source(binary.lhs), Source::Declared)
+                        && matches!(self.source(binary.rhs), Source::Declared),
+                ),
+            },
             Expression::Variable(Variable::Direct(variable)) => {
                 let Some(method) = self.method.as_ref() else {
                     return Source::Inferred;
@@ -675,6 +696,55 @@ impl Converter<'_, '_> {
             .push((variable.name.to_vec(), Local::new(variable.span, Some(declaration), false, Vec::new())));
         let name = self.variable_name(variable.name);
         self.edits.replace(variable.span, name);
+    }
+
+    /// The type `value` gives the local it is written to: `Any?` for a call of a function that declares no return, as
+    /// `$this->guess()` of `private function guess()`, whose PHP# return is `Any?` where the analysis may infer a
+    /// narrower one (decision 2), and else the analysis's type.
+    fn written_union(&self, value: &Expression<'_>) -> Option<TUnion> {
+        let called = match value.unparenthesized() {
+            Expression::Call(Call::Method(call)) => self.method_of(self.type_of(call.object), &call.method),
+            Expression::Call(Call::NullSafeMethod(call)) => self.method_of(self.type_of(call.object), &call.method),
+            Expression::Call(Call::StaticMethod(call)) => self.static_method_of(call),
+            Expression::Call(Call::Function(FunctionCall { function: Expression::Identifier(identifier), .. })) => {
+                self.function_of(identifier)
+            }
+            _ => None,
+        };
+        if called.is_some_and(|function| function.return_type_metadata.is_none() && function.return_from_body.is_none())
+        {
+            return Some(get_mixed());
+        }
+
+        self.type_of(value).cloned()
+    }
+
+    /// `return ($found = $text) !== null ? $found : '';`, a `return` whose value first assigns a local, as the
+    /// assignment on its own line before it, `const found = text;`, and the `return` of the rest. PHP runs the left side
+    /// of each operator and the condition of `?:` first, so the assignment runs before any other part of the value, as
+    /// the line before the `return` runs it. `keyword` is the `return`'s.
+    pub(super) fn returned_assignment(&mut self, statement: &Statement<'_>, keyword: Span, value: &Expression<'_>) {
+        let Some(assigned) = first_assigned(value) else {
+            return;
+        };
+        let Expression::Assignment(assignment) = assigned else {
+            return;
+        };
+        let (Expression::Variable(Variable::Direct(variable)), true) =
+            (assignment.lhs, assignment.operator.is_assign())
+        else {
+            return;
+        };
+        if !self.is_local(variable.name) {
+            return;
+        }
+        self.declared_by(statement, assignment);
+        let start = assigned.span().start.offset;
+        let opened = String::from_utf8_lossy(&self.source[keyword.start.offset as usize..start as usize]).into_owned();
+        let indentation = self.indentation(statement.span().start.offset);
+        let name = self.variable_name(variable.name);
+        self.edits.delete(keyword.start.offset, start);
+        self.edits.insert(assigned.span().end.offset, format!(";\n{indentation}{opened}{name}"));
     }
 
     /// Declares the local `assignment` writes in the condition of `statement`, an `if`, where the condition named it
@@ -1190,6 +1260,14 @@ impl Converter<'_, '_> {
     pub(super) fn written(&mut self, place: &Expression<'_>) {
         match place {
             Expression::Variable(Variable::Direct(variable)) => self.variable(variable, true),
+            // A static of a class held at run time is written through reflection, by a statement of its own.
+            place if self.held_static_place(place) => {
+                let shown = String::from_utf8_lossy(self.text(place.span())).into_owned();
+                self.refuse(
+                    place.span(),
+                    format!("this write of `{shown}`, a static through a class held at run time, has no PHP# form: PHP# writes one through reflection's `Property.set`, which is a statement of its own and gives no value back (spec section 25)"),
+                );
+            }
             place => self.expression(place, None),
         }
     }
@@ -1356,7 +1434,9 @@ impl Converter<'_, '_> {
         if let Expression::Variable(Variable::Direct(variable)) = lhs {
             // A compound write leaves what its operator gives, as `$sum += 0.5` makes an `int` sum a `float`.
             let left = if assignment.operator.is_assign() { rhs } else { expression };
-            self.wrote(variable.name, rhs, left, self.type_of(left).cloned(), self.source(rhs));
+            let union =
+                if assignment.operator.is_assign() { self.written_union(rhs) } else { self.type_of(left).cloned() };
+            self.wrote(variable.name, rhs, left, union, self.source(rhs));
         }
         self.value(rhs, declared.as_ref());
         // PHP stores any value in a typed property and checks it there, and PHP# takes one of a known type.
@@ -1404,6 +1484,20 @@ pub(super) fn destructured<'ast, 'arena>(place: &'ast Expression<'arena>) -> Opt
         Expression::Array(array) => Some(&array.elements),
         Expression::LegacyArray(array) => Some(&array.elements),
         Expression::List(list) => Some(&list.elements),
+        _ => None,
+    }
+}
+
+/// The assignment in parentheses PHP runs before any other part of `value`: the left side of each operator and the
+/// condition of `?:`, as `($found = $text)` of `($found = $text) !== null ? $found : ''`.
+fn first_assigned<'value, 'arena>(value: &'value Expression<'arena>) -> Option<&'value Expression<'arena>> {
+    match value {
+        Expression::Parenthesized(parenthesized) => match parenthesized.expression {
+            assigned @ Expression::Assignment(_) => Some(assigned),
+            inner => first_assigned(inner),
+        },
+        Expression::Binary(binary) => first_assigned(binary.lhs),
+        Expression::Conditional(conditional) => first_assigned(conditional.condition),
         _ => None,
     }
 }

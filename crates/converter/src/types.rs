@@ -107,12 +107,13 @@ impl<'input> Imports<'input> {
         reached.then_some(declared.span)
     }
 
-    /// Records that the file names `name`, a full PHP name, as `alias`, or, when PHP# reserves `alias` for a type, as
-    /// its namespace's last part before it, as `AttributesAny` for `Attributes\Any`.
+    /// Records that the file names `name`, a full PHP name, as `alias`, or, when PHP# reserves `alias` for a type or a
+    /// root class of `Builtins.sharp` takes it, which the file names bare, as its namespace's last part before it, as
+    /// `AttributesAny` for `Attributes\Any` and `ErrorsOutOfRangeException` for `App\Errors\OutOfRangeException`.
     pub fn add_use(&mut self, alias: &str, name: &str) {
         let name = name.trim_start_matches('\\');
         let alias = match name.rsplit('\\').nth(1) {
-            Some(namespace) if reserved(alias) => format!("{namespace}{alias}"),
+            Some(namespace) if reserved(alias) || Self::is_default(alias) => format!("{namespace}{alias}"),
             _ => alias.to_owned(),
         };
         self.taken.insert(alias.to_ascii_lowercase(), (alias, name.to_owned()));
@@ -138,7 +139,10 @@ impl<'input> Imports<'input> {
     pub fn name_of(&mut self, class: &str) -> Result<String, String> {
         let class = class.trim_start_matches('\\');
         let (namespace, short) = class.rsplit_once('\\').unwrap_or(("", class));
-        let free = !self.taken.contains_key(&short.to_ascii_lowercase()) && !reserved(short);
+        // A root class of `Builtins.sharp` takes its short name in every file.
+        let free = !self.taken.contains_key(&short.to_ascii_lowercase())
+            && !reserved(short)
+            && (Self::is_default(class) || !Self::is_default(short));
         if let Some((alias, _)) = self.taken.values().find(|(_, taken)| taken.eq_ignore_ascii_case(class)) {
             return Ok(alias.clone());
         }
@@ -168,7 +172,9 @@ impl<'input> Imports<'input> {
         let parts: Vec<&str> = name.split('\\').collect();
         let mut alias = short(name).to_owned();
         let mut prefix = parts.len().saturating_sub(1);
-        while prefix > 0 && (self.taken.contains_key(&alias.to_ascii_lowercase()) || reserved(&alias)) {
+        while prefix > 0
+            && (self.taken.contains_key(&alias.to_ascii_lowercase()) || reserved(&alias) || Self::is_default(&alias))
+        {
             prefix -= 1;
             alias = format!("{}{alias}", parts[prefix]);
         }

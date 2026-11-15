@@ -1,6 +1,7 @@
 //! Functions as values: PHP's `fn` and `function` as PHP#'s bare arrow, `(int n) => …`, which captures each variable
 //! it uses with no `use` list, and a method named as a value, `this.name` (spec sections 14.2 and 14.3).
 
+use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
@@ -14,16 +15,20 @@ use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::ClassLikeConstantSelector;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Keyword;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::PartialApplication;
 use mago_syntax::cst::Sequence;
+use mago_syntax::token::is_sharp_keyword;
 use mago_syntax::walker::MutWalker;
 
+use super::Kind;
 use super::Locals;
 use super::access::HELD_CLASS;
+use super::builtins::runs_nothing;
 use super::locals::Capture;
 use super::locals::Captures;
 use super::natively_checked;
@@ -323,11 +328,7 @@ impl Converter<'_, '_> {
                     return;
                 }
                 if !self.static_class(value.class) {
-                    let shown = String::from_utf8_lossy(self.text(expression.span())).into_owned();
-                    return self.refuse(
-                        expression.span(),
-                        format!("`{shown}` names a static method of a class held at run time as a value, which has no PHP# form: {HELD_CLASS}, which gives no method value"),
-                    );
+                    return self.held_method_value(expression, value.class, &value.method);
                 }
                 self.edits.replace(value.double_colon, ".");
                 self.member(&value.method);
@@ -352,6 +353,101 @@ impl Converter<'_, '_> {
             }
         }
         self.edits.delete(arguments.start.offset, arguments.end.offset);
+    }
+
+    /// `$kind::find(...)`, a static method of a class held at run time as a value, as the lambda that calls it through
+    /// reflection, `(int id) => kind.methods().first(method => method.name == "find").invoke(null, [id]) as Order`,
+    /// which runs the `find` of the class the value holds, as PHP's method value does (spec sections 14.3 and 25). The
+    /// lambda takes the method's parameters, and `as` gives `invoke`'s `Any?` the type the method declares, which PHP
+    /// checks where the method returns, so `?? throw` never throws. A method with an optional, a variadic or a
+    /// by-reference parameter, which a PHP# lambda never takes, and one whose return no PHP# test gives, refuse.
+    fn held_method_value(
+        &mut self,
+        expression: &Expression<'_>,
+        class: &Expression<'_>,
+        selector: &ClassLikeMemberSelector<'_>,
+    ) {
+        let span = expression.span();
+        let shown = String::from_utf8_lossy(self.text(span)).into_owned();
+        let ClassLikeMemberSelector::Identifier(name) = selector else {
+            return self.member(selector);
+        };
+        if !self.is(class, &[Kind::Class]) || !runs_nothing(class) {
+            let held = self.shown(class);
+            return self.refuse(
+                span,
+                format!("`{shown}` names a static method through `{held}`, which holds no class value a second read gives again, and has no PHP# form: {HELD_CLASS}"),
+            );
+        }
+        let codebase = self.input.codebase;
+        let Some(method) =
+            self.held_class(class).and_then(|held| codebase.get_declaring_method(held.as_bytes(), name.value))
+        else {
+            let held = self.shown(class);
+            return self.refuse(
+                span,
+                format!("`{shown}` names a static method of a class held at run time, which PHP# calls through reflection, and the analysis finds no method `{}` of `{held}` to type it by (spec section 25)", String::from_utf8_lossy(name.value)),
+            );
+        };
+        let mut chosen: Vec<String> = Vec::new();
+        let mut written = Vec::new();
+        for parameter in &method.parameters {
+            if parameter.flags.is_variadic() || parameter.flags.has_default() || parameter.flags.is_by_reference() {
+                return self.refuse(
+                    span,
+                    format!("`{shown}` takes an optional, a variadic or a by-reference parameter, which the PHP# lambda that calls it through reflection never takes (spec section 14.1)"),
+                );
+            }
+            let union = parameter.get_type_metadata().map_or_else(get_mixed, |declared| declared.type_union.clone());
+            let Some(text) = self.type_text(&union, span) else {
+                return;
+            };
+            let own = String::from_utf8_lossy(parameter.get_name().0.as_bytes()).trim_start_matches('$').to_owned();
+            let fits = mago_casing::is_camel_case(own.as_bytes()) && !is_sharp_keyword(own.as_bytes()) && own != text;
+            let name = self.unused_name(if fits { &own } else { "value" }, &chosen);
+            written.push(format!("{text} {name}"));
+            chosen.push(name);
+        }
+        let returned = method.return_type_metadata.as_ref().map(|declared| &declared.type_union);
+        let tested = returned.map(|union| TUnion::from_vec(union.get_non_nullable_types()));
+        let check = match (returned, tested) {
+            (None, _) => String::new(),
+            (Some(union), _) if union.has_mixed() || union.is_void() || union.is_null() => String::new(),
+            (Some(union), Some(tested)) if tested.types.len() == 1 => {
+                let Some(text) = self.type_text(&tested, span) else {
+                    return;
+                };
+                if union.has_null() {
+                    format!(" as {text}")
+                } else {
+                    let error = match self.imports.name_of("TypeError") {
+                        Ok(error) => error,
+                        Err(reason) => return self.refuse(span, reason),
+                    };
+                    let message = format!("Return value must be of type {}", tested.get_id()).replace('\\', "\\\\");
+                    format!(" as {text} ?? throw new {error}(\"{message}\")")
+                }
+            }
+            (Some(union), _) => {
+                return self.refuse(
+                    span,
+                    format!("`{shown}` names a static method of a class held at run time, which PHP# calls through reflection, whose `invoke` gives `Any?`, and no PHP# test gives it the `{}` the method returns (spec section 21)", union.get_id()),
+                );
+            }
+        };
+        self.expression(class, None);
+        let held = self.render(class);
+        let held = if super::is_primary(class) { held } else { format!("({held})") };
+        let found = self.unused_name("method", &chosen);
+        let declared = method.original_name.as_str_lossy();
+        self.edits.replace(
+            span,
+            format!(
+                "({}) => {held}.methods().first({found} => {found}.name == \"{declared}\").invoke(null, [{}]){check}",
+                written.join(", "),
+                chosen.join(", ")
+            ),
+        );
     }
 
     /// `[$object, 'name']`, `[Class::class, 'name']` and `'Class::name'`, which PHP calls as a function where a

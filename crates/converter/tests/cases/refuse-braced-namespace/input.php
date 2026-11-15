@@ -8,3 +8,6 @@ namespace App {
     {
     }
 }
+
+namespace App\Other {
+}

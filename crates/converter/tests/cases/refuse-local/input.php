@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace App;
 
 // A PHP# local is declared where it is first assigned and lives in its block (spec sections 2 and 3), so a local
-// that starts with no type, starts inside another expression, or is a loop's variable read after the loop keeps the
-// file plain PHP.
+// that starts with no type, or is a loop's variable read after the loop, keeps the file plain PHP. One a `return`
+// assigns first is assigned on its own line before it.
 final class Locals
 {
     /** @return list<int> */
@@ -42,22 +42,5 @@ final class Locals
         }
 
         return $size;
-    }
-
-    public function guessed(bool $wide): int
-    {
-        if ($wide) {
-            $size = $this->guess();
-            $copy = $size;
-        } else {
-            $copy = 1;
-        }
-
-        return $copy;
-    }
-
-    private function guess()
-    {
-        return 2;
     }
 }

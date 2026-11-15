@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace App;
 
-// `(array)` and `(object)` have no PHP# form, nor `(bool)` of a value the analysis types `bool`, which PHPDoc alone may
-// say (spec section 24).
+// `(array)` and `(object)` have no PHP# form, and `(bool)` of a `bool` a declaration makes one at runtime, as a
+// parameter, is the value itself (spec section 24).
 final class Casts
 {
     /** @param bool $on */

@@ -353,12 +353,24 @@ impl Converter<'_, '_> {
         };
         let test = if negated { falsy } else { truthy };
         let parts = test.matches("&&").count() + test.matches("||").count();
+        // A value a second read may not give again is read once, by a `match` on the values PHP reads as false.
         if parts > 0 && !rereads {
-            self.refuse(
-                span,
-                format!("a condition of `{shown}` has no PHP# form here: its PHP# test reads the value more than once, which gives what PHP's one read gives only for a variable or a property"),
-            );
-            return None;
+            let falsy: &[&str] = match bare.as_slice() {
+                [Kind::String] => &["\"\"", "\"0\""],
+                [Kind::Int] => &["0"],
+                [Kind::Float] => &["0.0"],
+                _ => {
+                    self.refuse(
+                        span,
+                        format!("a condition of `{shown}` has no PHP# form here: its PHP# test reads the value more than once, which gives what PHP's one read gives only for a variable or a property"),
+                    );
+                    return None;
+                }
+            };
+            let arms: Vec<&str> = nullable.then_some("null").into_iter().chain(falsy.iter().copied()).collect();
+            let (falsy_arm, truthy_arm) = if negated { ("true", "false") } else { ("false", "true") };
+            let test = format!("match ({value}) {{ {} => {falsy_arm}, default => {truthy_arm} }}", arms.join(" or "));
+            return Some((if top { test } else { format!("({test})") }, value));
         }
 
         Some((if parts > 0 && !top { format!("({test})") } else { test }, value))

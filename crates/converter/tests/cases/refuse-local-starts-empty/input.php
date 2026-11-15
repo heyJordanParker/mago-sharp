@@ -17,26 +17,23 @@ final class Mixed
         return count($values);
     }
 
-    public function guessed(): int
+    /** @param list<int> $items */
+    public function guessed(array $items): int
     {
         $values = [];
-        $values[] = $this->guess();
+        $values[] = $items[0];
 
         return count($values);
     }
 
-    public function nulled(bool $wide): int
+    /** @param list<int> $items */
+    public function nulled(bool $wide, array $items): int
     {
         $size = null;
         if ($wide) {
-            $size = $this->guess();
+            $size = $items[0];
         }
 
         return $size ?? 0;
-    }
-
-    private function guess()
-    {
-        return 2;
     }
 }

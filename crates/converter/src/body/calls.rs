@@ -265,7 +265,7 @@ impl<'input> Converter<'input, '_> {
                 self.arguments(&call.argument_list, method);
                 self.plain_call(call.span(), method, self.static_call_class(call));
             }
-            Call::Function(call) => self.function_call(call),
+            Call::Function(call) => self.function_call(call, false),
             Call::NullSafeFunction(_) => self.refuse(call.span(), "`?.(…)` on a function has no PHP# form"),
         }
     }
@@ -395,7 +395,7 @@ impl<'input> Converter<'input, '_> {
 
     /// The class `class` holds at run time, as the analysis types it: the class of `class-string<Order>`, the bound of
     /// `class-string<T>`, or the class of an `Order` object.
-    fn held_class(&self, class: &Expression<'_>) -> Option<Word> {
+    pub(super) fn held_class(&self, class: &Expression<'_>) -> Option<Word> {
         let [atomic] = self.type_of(class)?.types.as_ref() else {
             return None;
         };
@@ -610,8 +610,8 @@ impl<'input> Converter<'input, '_> {
     }
 
     /// A bare PHP function call: a library's function through its namespace, a type test as `is`, or a refusal that
-    /// names the function.
-    fn function_call(&mut self, call: &FunctionCall<'_>) {
+    /// names the function. `bare` says the call is a whole value, which nothing binds around.
+    pub(super) fn function_call(&mut self, call: &FunctionCall<'_>, bare: bool) {
         let span = call.span();
         let Expression::Identifier(identifier) = call.function else {
             return self.value_call(call);
@@ -634,6 +634,9 @@ impl<'input> Converter<'input, '_> {
 
         if name.eq_ignore_ascii_case("compact") || name.eq_ignore_ascii_case("extract") {
             return self.refuse(span, format!("`{name}` is removed (spec section 2)"));
+        }
+        if name.eq_ignore_ascii_case("intdiv") {
+            return self.int_division(call, bare);
         }
         let Some(target) = type_test(function) else {
             return self.built_in(call, function, &name);
@@ -666,6 +669,34 @@ impl<'input> Converter<'input, '_> {
             None => format!("{value} == null"),
         };
         self.edits.replace(span, test);
+    }
+
+    /// `intdiv($a, $b)` as `a / b`, which divides two `int`s toward zero as `intdiv` does (spec section 24), in
+    /// parentheses unless the call is `bare`.
+    fn int_division(&mut self, call: &FunctionCall<'_>, bare: bool) {
+        let [Argument::Positional(dividend), Argument::Positional(divisor)] = call.argument_list.arguments.as_slice()
+        else {
+            return self.refuse(call.span(), "`intdiv` with a named or spread argument has no PHP# form");
+        };
+        if dividend.ellipsis.is_some() || divisor.ellipsis.is_some() {
+            return self.refuse(call.span(), "`intdiv` with a named or spread argument has no PHP# form");
+        }
+        let (dividend, divisor) = (dividend.value, divisor.value);
+        if !self.is(dividend, &[Kind::Int]) || !self.is(divisor, &[Kind::Int]) {
+            let (dividend, divisor) = (self.shown(dividend), self.shown(divisor));
+            return self.refuse(
+                call.span(),
+                format!("`intdiv` of `{dividend}` and `{divisor}` has no PHP# form: PHP#'s `/` divides toward zero only between two `int`s (spec section 24)"),
+            );
+        }
+        let mut sides = Vec::new();
+        for side in [dividend, divisor] {
+            self.expression(side, None);
+            let rendered = self.render(side);
+            sides.push(if is_primary(side) { rendered } else { format!("({rendered})") });
+        }
+        let quotient = format!("{} / {}", sides[0], sides[1]);
+        self.edits.replace(call.span(), if bare { quotient } else { format!("({quotient})") });
     }
 
     /// The value and the type `expression` tests, each converted, when it is `$x instanceof A`, or a call of the

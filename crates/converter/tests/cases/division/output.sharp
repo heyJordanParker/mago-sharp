@@ -1,0 +1,33 @@
+namespace App;
+
+// PHP's `/` of two `int`s gives an `int` where the quotient is whole and a `float` where it is not, and PHP#'s
+// truncates (spec section 24). A `float` place divides as floats, and a place of both tells the two apart by `%`.
+public final class Invoice
+{
+    public float tax(int total, int rate)
+    {
+        return (float) (total * rate) / 100;
+    }
+
+    public int|float ratio(int total, int parts)
+    {
+        return parts == 0 || total % parts == 0 ? total / parts : (float) total / parts;
+    }
+
+    public int|float half(int count)
+    {
+        const half = count % 2 == 0 ? count / 2 : (float) count / 2;
+
+        return half;
+    }
+
+    public int share(int total, int parts)
+    {
+        return total / parts;
+    }
+
+    public int pairs(int total, int parts)
+    {
+        return 2 * (total / (parts + 1));
+    }
+}

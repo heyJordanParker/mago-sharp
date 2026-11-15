@@ -37,6 +37,7 @@ use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrayAccess;
 use mago_syntax::cst::Block;
+use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Hint;
@@ -190,6 +191,12 @@ impl<'input> Converter<'input, '_> {
                 if let Expression::Call(call) = expression.expression {
                     return self.call(expression.expression, call, false);
                 }
+                if let Expression::Assignment(assignment) = expression.expression
+                    && assignment.operator.is_assign()
+                    && self.held_static_place(assignment.lhs)
+                {
+                    return self.held_static_write(expression.expression, assignment.lhs, assignment.rhs);
+                }
                 if !self.declaration(statement, expression.expression) {
                     self.expression(expression.expression, None);
                 }
@@ -202,6 +209,7 @@ impl<'input> Converter<'input, '_> {
                 if let Some(value) = r#return.value {
                     let returning = self.method.as_ref().and_then(|method| method.returning.clone());
                     self.value(value, returning.as_ref());
+                    self.returned_assignment(statement, r#return.r#return.span, value);
                     if let Some(returning) = &returning {
                         self.narrowed(value, returning);
                     }
@@ -506,6 +514,8 @@ impl<'input> Converter<'input, '_> {
     pub(super) fn value(&mut self, value: &Expression<'_>, expected: Option<&TUnion>) {
         match value {
             Expression::Match(r#match) => self.match_expression(r#match, MatchPlace::Value),
+            Expression::Call(Call::Function(call)) => self.function_call(call, true),
+            Expression::Binary(binary) => self.binary(value, binary, expected, true),
             _ => self.expression(value, expected),
         }
     }
@@ -538,7 +548,7 @@ impl<'input> Converter<'input, '_> {
             Expression::Access(access) => self.access(expression, access),
             Expression::Call(call) => self.call(expression, call, true),
             Expression::Instantiation(instantiation) => self.instantiation(expression, instantiation, expected),
-            Expression::Binary(binary) => self.binary(expression, binary),
+            Expression::Binary(binary) => self.binary(expression, binary, expected, false),
             Expression::UnaryPrefix(unary) => self.unary(expression, &unary.operator, unary.operand),
             Expression::UnaryPostfix(unary) => {
                 if !self.is(unary.operand, &[Kind::Int, Kind::Float]) {

@@ -1,0 +1,23 @@
+namespace App;
+
+// A static property and a static method value of a class held at run time, which PHP# reaches through reflection: a
+// read and a write through `kind.properties()`, and a lambda over `kind.methods()` (spec sections 14.3 and 25).
+public final class Reader
+{
+    public int count(Class<Order> kind)
+    {
+        return (kind.properties().first(property => property.name == "count").get(null) as int ?? throw new TypeError("Value must be of type int")) + 1;
+    }
+
+    public void reset(Class<Order> kind)
+    {
+        kind.properties().first(property => property.name == "count").set(null, 0);
+    }
+
+    public Order? first(Class<Order> kind)
+    {
+        const find = (int id) => kind.methods().first(method => method.name == "find").invoke(null, [id]) as Order;
+
+        return find(1);
+    }
+}
