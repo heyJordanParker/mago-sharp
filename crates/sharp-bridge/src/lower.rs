@@ -2178,8 +2178,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// header gives each generic parent and interface, the bounds of its type parameters, their variance, and what
     /// reflection reads of its declarations, each a text or null when it has none. None for a class-like the codebase
     /// holds no PHP# declaration of. A generic class also declares from it the hidden slot that holds each object's
-    /// type arguments, which start as its bounds. `members` are the class-like's declarations, whose `override`
-    /// reflection reads.
+    /// type arguments, which start as its bounds. `members` are the class-like's declarations, whose `override` and
+    /// constants reflection reads.
     fn class_metadata(&mut self, class: &[u8], line: u32, members: &[ClassLikeMember]) -> Option<u32> {
         let overrides: Vec<&[u8]> = members
             .iter()
@@ -2191,7 +2191,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             .filter(|(modifiers, _)| modifiers.iter().any(|modifier| matches!(modifier, Modifier::Override(_))))
             .map(|(_, name)| name)
             .collect();
-        let declared = self.types.declared(class, &overrides)?;
+        let constants: Vec<&[u8]> = members
+            .iter()
+            .filter_map(|member| match member {
+                ClassLikeMember::Constant(constant) => Some(constant.first_item().name.value),
+                _ => None,
+            })
+            .collect();
+        let declared = self.types.declared(class, &overrides, &constants)?;
 
         let header = self.types.header(class).map_or(NULL, |header| self.string(0, line, header.as_bytes()));
         let bounds = self.types.bounds(class).map_or(NULL, |bounds| self.string(0, line, bounds.as_bytes()));

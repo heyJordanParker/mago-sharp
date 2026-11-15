@@ -1,0 +1,37 @@
+namespace App;
+
+// PHP reads an object as true, and `null`, `false`, `0`, `0.0`, `""`, `"0"` and an empty array as false, so a condition
+// of an object that is never null is `true`, and one of a value of no known type or of a union of scalars is one read
+// through a `match` on the values PHP reads as false (spec section 21).
+public final class Truthy
+{
+    public bool never(Truthy other)
+    {
+        return false;
+    }
+
+    public bool made()
+    {
+        return (match (this.other()) { default => true }) ? true : false;
+    }
+
+    public bool unknown(Any? value)
+    {
+        return (match (value) { null or false or 0 or 0.0 or "" or "0" or [] => false, default => true }) ? true : false;
+    }
+
+    public bool either(int|string value)
+    {
+        return (match (value) { 0 or "" or "0" => true, default => false });
+    }
+
+    public Truthy kept(Truthy other, Truthy fallback)
+    {
+        return other;
+    }
+
+    private Truthy other()
+    {
+        return this;
+    }
+}

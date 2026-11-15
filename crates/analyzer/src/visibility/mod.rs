@@ -232,7 +232,13 @@ where
             context,
             class,
             Some(method_metadata.flags.is_internal_reach()),
-            |context| display_member(context, class.original_name, BytesDisplay(method_name)),
+            |context| {
+                if method_name.eq_ignore_ascii_case(b"__construct") {
+                    format!("new {}", display_class_like_name(context, class.original_name))
+                } else {
+                    display_member(context, class.original_name, BytesDisplay(method_name))
+                }
+            },
             member_span.unwrap_or(access_span),
         )
     {

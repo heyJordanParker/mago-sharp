@@ -298,6 +298,47 @@ function jsonDecode(string $json): mixed {}
 function resolve(string $host): array {}
 
 /**
+ * How many processors the machine has online, as sysconf's `_SC_NPROCESSORS_ONLN` counts them, at least 1. The
+ * standard library's `Environment.processorCount` reads it.
+ *
+ * @return positive-int
+ */
+function processorCount(): int {}
+
+/**
+ * How `$left` orders against `$right`, -1, 0 or 1, as PHP#'s `<` orders two values of their type: an object by the
+ * `operator <=>` its class declares, two tuples element by element, two strings by their bytes, and two numbers as
+ * numbers. The standard library's `SortedMap`, `SortedSet` and `PriorityQueue` order by it when they take no comparison.
+ *
+ * @return -1|0|1
+ *
+ * @throws \ValueError for an object whose class declares no `operator <=>`.
+ */
+function compare(mixed $left, mixed $right): int {}
+
+/**
+ * The global variable `$name`, or its element at `$key`, as `$GLOBALS[$name][$key]` reads it, or null when either is
+ * not set. The standard library's `PhpGlobals.get` and `PhpGlobals.read` run it.
+ */
+function readGlobal(string $name, ?string $key = null): mixed {}
+
+/**
+ * Sets the global variable `$name`, or its element at `$key`, to `$value`, as `$GLOBALS[$name][$key] = $value` does.
+ * The standard library's `PhpGlobals.set` and `PhpGlobals.write` run it.
+ *
+ * @throws \ValueError for a `$key` of a global that holds no array.
+ */
+function writeGlobal(string $name, mixed $value, ?string $key = null): void {}
+
+/**
+ * Runs the PHP file at `$path` in the global scope, so each global variable is in its scope, and each one it sets is a
+ * global after it. The standard library's `PhpGlobals.include` runs it.
+ *
+ * @throws \RuntimeException for a file that cannot be read.
+ */
+function includeGlobal(string $path): void {}
+
+/**
  * Marks the parameter of a standard library collection member that the member compares with the collection's elements
  * by `==`, as `List.contains`'s, so the checker refuses a value whose `==` against an element is no comparison.
  */
@@ -604,6 +645,20 @@ function makeGenericType(string $type, array $arguments): string {}
  * @return list<\UnitEnum>
  */
 function enumCases(string $type): array {}
+
+/**
+ * The constants of the class the class value `$type` names, its own first and then those it inherits, in the order they
+ * are declared, without an enum's cases. The standard library's `Class<T>.constants()` makes a `Constant` of each.
+ *
+ * @return list<list<string>> the class that declares each, its name, and the class value of its type as declared.
+ */
+function constants(string $type): array {}
+
+/**
+ * The value of the constant `$name` that `$class` declares, as a direct read from the caller's code gives it, a `Map` or
+ * `Set` constant's as the object a direct read makes. The standard library's `Constant.value()` returns it.
+ */
+function constant(string $class, string $name): mixed {}
 
 /**
  * A new object of the class the class value `$type` names, with its type arguments, created by its constructor with

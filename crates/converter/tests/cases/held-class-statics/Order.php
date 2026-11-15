@@ -6,6 +6,8 @@ namespace App;
 
 class Order
 {
+    public const int MAX = 10;
+
     public static int $count = 0;
 
     public static function find(int $id): ?Order

@@ -18,6 +18,7 @@ use mago_syntax::cst::Statement;
 use mago_syntax::cst::Variable;
 
 use super::Kind;
+use super::atomic_kinds;
 use super::is_primary;
 use super::kinds;
 use crate::Converter;
@@ -38,6 +39,40 @@ fn first_compared<'condition, 'arena>(
         }
         _ => first_compared(binary.lhs),
     }
+}
+
+/// Whether PHP reads every value of `union` as true: an object, a closure, a callable, an enum case or a class value,
+/// never null, and no `mixed` or type parameter that may hold a scalar.
+fn always_truthy(union: &TUnion) -> bool {
+    !union.types.is_empty()
+        && union.types.iter().all(|atomic| {
+            !atomic.is_mixed()
+                && (!atomic.is_generic_parameter() || atomic.is_object_type())
+                && matches!(atomic_kinds(atomic), [Kind::Object | Kind::Enum | Kind::Class])
+        })
+}
+
+/// The patterns of the values PHP reads as false among those of the kinds `bare`, or of every value where it is `mixed`:
+/// `null`, `false`, `0`, `0.0`, `""`, `"0"` and the empty list `[]`. An object, an enum case and a class value are
+/// always truthy and add none. None where `bare` holds a `Map`, whose empty one no pattern matches.
+fn falsy_patterns(bare: &[Kind], mixed: bool) -> Option<Vec<&'static str>> {
+    if mixed {
+        return Some(vec!["null", "false", "0", "0.0", "\"\"", "\"0\"", "[]"]);
+    }
+    let mut patterns = Vec::new();
+    for kind in bare {
+        match kind {
+            Kind::Bool => patterns.push("false"),
+            Kind::Int => patterns.push("0"),
+            Kind::Float => patterns.push("0.0"),
+            Kind::String => patterns.extend(["\"\"", "\"0\""]),
+            Kind::List => patterns.push("[]"),
+            Kind::Object | Kind::Enum | Kind::Class => {}
+            _ => return None,
+        }
+    }
+
+    Some(patterns)
 }
 
 /// Whether each value of `union` but null is a `bool`, an `int`, a `float` or a string, which a condition reads by its
@@ -181,6 +216,12 @@ impl Converter<'_, '_> {
     /// again, so `value` is one [`Converter::rereads`] gives again (spec section 21). Any other value is read once, by
     /// [`Converter::elvis_once`].
     pub(super) fn elvis(&mut self, expression: &Expression<'_>, value: &Expression<'_>, other: &Expression<'_>) {
+        // PHP gives a value it always reads as true, and never reads `other`.
+        if self.type_of(value).is_some_and(always_truthy) {
+            self.expression(value, None);
+            let value = self.render(value);
+            return self.edits.replace(expression.span(), value);
+        }
         if !self.rereads(value) {
             return self.elvis_once(expression, value, other);
         }
@@ -318,62 +359,75 @@ impl Converter<'_, '_> {
         // An object, and a class value, which names a class, are always truthy, so their test is their null check, as
         // is the test of a value that can only be null.
         let is_object = matches!(bare.as_slice(), [Kind::Object] | [Kind::Enum] | [Kind::Class] | []);
-        if union.types.iter().any(mago_codex::ttype::atomic::TAtomic::is_mixed) || (is_object && !nullable) {
+        let (truthy_arm, falsy_arm) = if negated { ("false", "true") } else { ("true", "false") };
+        // A value PHP always reads as true has the test `true`, which still reads a value that runs code, once.
+        if always_truthy(union) {
+            let value = rendered(self);
+            if rereads {
+                return Some((truthy_arm.to_owned(), value));
+            }
+            let test = format!("match ({value}) {{ default => {truthy_arm} }}");
+            return Some((if top { test } else { format!("({test})") }, value));
+        }
+        if bare.is_empty() && !nullable {
             self.refuse(
                 span,
-                format!("a condition of `{shown}` reads PHP's truthiness, which PHP# has no test for: a PHP# condition is a `bool` (spec section 21)"),
+                format!("a condition of `{shown}` holds no value, which PHP# has no test for (spec section 21)"),
+            );
+            return None;
+        }
+        let scalar_parameter =
+            union.types.iter().filter(|atomic| !atomic.is_object_type()).find_map(TAtomic::get_generic_parameter_name);
+        if let Some(parameter) = scalar_parameter {
+            self.refuse(
+                span,
+                format!("a condition of the type parameter `{parameter}` reads PHP's truthiness of a value that may be a scalar PHP reads as false, which PHP# has no test for: a PHP# pattern compares with `==`, which a type parameter has only through a bound (spec section 21)"),
             );
             return None;
         }
 
+        let mixed = union.types.iter().any(TAtomic::is_mixed);
         let value = rendered(self);
         // PHP's truthiness of each type, as the test for a value that is truthy, and the test for one that is not.
-        let (truthy, falsy) = match bare.as_slice() {
-            [Kind::Bool] => (format!("{value} == true"), format!("{value} != true")),
-            [Kind::Int] => (format!("{value} != 0"), format!("{value} == 0")),
-            [Kind::Float] => (format!("{value} != 0.0"), format!("{value} == 0.0")),
+        let compared = match bare.as_slice() {
+            _ if mixed => None,
+            [Kind::Bool] => Some((format!("{value} == true"), format!("{value} != true"))),
+            [Kind::Int] => Some((format!("{value} != 0"), format!("{value} == 0"))),
+            [Kind::Float] => Some((format!("{value} != 0.0"), format!("{value} == 0.0"))),
             [Kind::String] => {
-                (format!("{value} != \"\" && {value} != \"0\""), format!("{value} == \"\" || {value} == \"0\""))
+                Some((format!("{value} != \"\" && {value} != \"0\""), format!("{value} == \"\" || {value} == \"0\"")))
             }
-            [Kind::List] | [Kind::Map] => (format!("!{value}.isEmpty()"), format!("{value}.isEmpty()")),
-            _ if is_object => (format!("{value} != null"), format!("{value} == null")),
-            _ => {
-                self.refuse(
-                    span,
-                    format!("a condition of `{shown}` reads PHP's truthiness, which PHP# has no test for: a PHP# condition is a `bool` (spec section 21)"),
-                );
-                return None;
-            }
+            [Kind::List] | [Kind::Map] => Some((format!("!{value}.isEmpty()"), format!("{value}.isEmpty()"))),
+            _ if is_object => Some((format!("{value} != null"), format!("{value} == null"))),
+            _ => None,
         };
-        // `bool?` compares with `true`, which a null never equals, and an object's test is its null check.
-        let (truthy, falsy) = if nullable && !is_object && bare != [Kind::Bool] {
-            (format!("{value} != null && {truthy}"), format!("{value} == null || {falsy}"))
-        } else {
-            (truthy, falsy)
-        };
-        let test = if negated { falsy } else { truthy };
-        let parts = test.matches("&&").count() + test.matches("||").count();
-        // A value a second read may not give again is read once, by a `match` on the values PHP reads as false.
-        if parts > 0 && !rereads {
-            let falsy: &[&str] = match bare.as_slice() {
-                [Kind::String] => &["\"\"", "\"0\""],
-                [Kind::Int] => &["0"],
-                [Kind::Float] => &["0.0"],
-                _ => {
-                    self.refuse(
-                        span,
-                        format!("a condition of `{shown}` has no PHP# form here: its PHP# test reads the value more than once, which gives what PHP's one read gives only for a variable or a property"),
-                    );
-                    return None;
-                }
+        if let Some((truthy, falsy)) = compared {
+            // `bool?` compares with `true`, which a null never equals, and an object's test is its null check.
+            let (truthy, falsy) = if nullable && !is_object && bare != [Kind::Bool] {
+                (format!("{value} != null && {truthy}"), format!("{value} == null || {falsy}"))
+            } else {
+                (truthy, falsy)
             };
-            let arms: Vec<&str> = nullable.then_some("null").into_iter().chain(falsy.iter().copied()).collect();
-            let (falsy_arm, truthy_arm) = if negated { ("true", "false") } else { ("false", "true") };
-            let test = format!("match ({value}) {{ {} => {falsy_arm}, default => {truthy_arm} }}", arms.join(" or "));
-            return Some((if top { test } else { format!("({test})") }, value));
+            let test = if negated { falsy } else { truthy };
+            let parts = test.matches("&&").count() + test.matches("||").count();
+            if parts == 0 || rereads {
+                return Some((if parts > 0 && !top { format!("({test})") } else { test }, value));
+            }
         }
+        // A value a second read may not give again, a union of such types and a value of no known type are read once, by
+        // a `match` on the values PHP reads as false, which every other value is not (spec section 21).
+        let Some(patterns) = falsy_patterns(&bare, mixed) else {
+            let map = if bare.contains(&Kind::Map) { ", and no pattern matches an empty `Map`" } else { "" };
+            self.refuse(
+                span,
+                format!("a condition of `{shown}` reads PHP's truthiness, which PHP# has no test for: a PHP# condition is a `bool`{map} (spec section 21)"),
+            );
+            return None;
+        };
+        let arms: Vec<&str> = (nullable && !mixed).then_some("null").into_iter().chain(patterns).collect();
+        let test = format!("match ({value}) {{ {} => {falsy_arm}, default => {truthy_arm} }}", arms.join(" or "));
 
-        Some((if parts > 0 && !top { format!("({test})") } else { test }, value))
+        Some((if top { test } else { format!("({test})") }, value))
     }
 
     /// `isset($a, $b)` as `a != null && b != null`, a `Map` key as `map.get(key) != null`, since `get` gives null for a

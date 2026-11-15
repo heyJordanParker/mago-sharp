@@ -26,7 +26,7 @@ pub const SET_MEMBERS: (&str, &str) = library_file!("Sharp/SetMembers.sharp");
 /// The lazy operations of an `Iterable`, as `LIST_MEMBERS` are a `List`'s members.
 pub const ITERABLE_MEMBERS: (&str, &str) = library_file!("Sharp/IterableMembers.sharp");
 
-pub const EFFECT_CLASSES: [(&str, &str); 33] = [
+pub const EFFECT_CLASSES: [(&str, &str); 39] = [
     LIST_MEMBERS,
     MAP_MEMBERS,
     SET_MEMBERS,
@@ -37,11 +37,16 @@ pub const EFFECT_CLASSES: [(&str, &str); 33] = [
     library_file!("Sharp/IO/Console.sharp"),
     library_file!("Sharp/System/Process.sharp"),
     library_file!("Sharp/System/ProcessResult.sharp"),
+    library_file!("Sharp/System/ChildProcess.sharp"),
     library_file!("Sharp/IO/Files.sharp"),
     library_file!("Sharp/Net/Http.sharp"),
     library_file!("Sharp/Data/Cache.sharp"),
     library_file!("Sharp/Net/Mail.sharp"),
     library_file!("Sharp/Net/Dns.sharp"),
+    library_file!("Sharp/Net/IpAddress.sharp"),
+    library_file!("Sharp/Net/IpFamily.sharp"),
+    library_file!("Sharp/Interop/PhpGlobals.sharp"),
+    library_file!("Sharp/Interop/Superglobal.sharp"),
     library_file!("Sharp/Data/Database.sharp"),
     library_file!("Sharp/Time/Duration.sharp"),
     library_file!("Sharp/Time/Instant.sharp"),
@@ -53,6 +58,7 @@ pub const EFFECT_CLASSES: [(&str, &str); 33] = [
     library_file!("Sharp/Time/Weekday.sharp"),
     library_file!("Sharp/Time/Month.sharp"),
     library_file!("Sharp/Int.sharp"),
+    library_file!("Sharp/ByteOrder.sharp"),
     library_file!("Sharp/Math.sharp"),
     library_file!("Sharp/Net/HttpMethod.sharp"),
     library_file!("Sharp/Net/HttpRequest.sharp"),

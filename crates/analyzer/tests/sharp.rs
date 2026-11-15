@@ -3606,6 +3606,37 @@ fn internal_reaches_its_namespace_and_every_namespace_below_it() {
     );
 }
 
+/// Spec sections 5 and 10: a struct takes every visibility a class takes, so an `internal struct` reaches its
+/// namespace and every namespace below it, as C#'s `internal struct` does. Code of its namespace creates and reads it,
+/// and code of another namespace is refused where it imports it, by the struct's name, and where it creates one, as
+/// for an `internal class`.
+#[test]
+fn an_internal_struct_reaches_only_its_namespace() {
+    let totals = (
+        "src/App/Shop/CheckoutTotals.sharp",
+        "namespace App.Shop;\n\ninternal struct CheckoutTotals\n{\n    public CheckoutTotals(public int cents { get; }) { }\n}\n",
+    );
+    let body = "public class Use\n{\n    public int total() => new CheckoutTotals(250).cents;\n}\n";
+    let inside = ("src/App/Shop/Use.sharp", leak(format!("namespace App.Shop;\n\n{body}")));
+    let outside = (
+        "src/App/Reports/Use.sharp",
+        leak(format!("namespace App.Reports;\n\nimport App.Shop.CheckoutTotals;\n\n{body}")),
+    );
+
+    assert_eq!(messages(inside, &[totals]), Vec::<String>::new());
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), outside, &[totals])
+            .into_iter()
+            .filter(|issue| issue.code.as_deref() == Some("internal-access"))
+            .map(|issue| issue.message)
+            .collect::<Vec<_>>(),
+        [
+            "`CheckoutTotals` is internal to `App.Shop`, and `App.Reports` is outside it.",
+            "`new CheckoutTotals` is internal to `App.Shop`, and `App.Reports` is outside it.",
+        ]
+    );
+}
+
 /// Spec section 6.1: a property's `set` reaches its own namespace at most, so code outside the namespace never changes
 /// the state of its classes. A write from another namespace is refused at the write, a static's and an object
 /// initializer's included, and one from the namespace or one below it compiles. `init` keeps the property's level, so
@@ -10187,7 +10218,7 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
         ),
         [
             "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `byteLength`, `byteSubstring`, `bytes`, `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `equals`, `indexOf`, `isDigit`, `isLetter`, `isLetterOrDigit`, `isLowercase`, `isUppercase`, `isWhitespace`, `lastIndexOf`, `length`, `lines`, `lowercase`, `normalized`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `titlecase`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
-            "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `checkedAdd`, `checkedMultiply`, `checkedSubtract`, `clamp`, `floorDiv`, `format`, `mod`, `saturatingAdd`, `saturatingMultiply`, `saturatingSubtract`, `toByteString`, `toCharacter`, `toHex`.",
+            "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `checkedAdd`, `checkedMultiply`, `checkedSubtract`, `clamp`, `floorDiv`, `format`, `mod`, `saturatingAdd`, `saturatingMultiply`, `saturatingSubtract`, `toByteString`, `toBytes`, `toCharacter`, `toHex`.",
             "7:40 non-existent-method Method `missing` does not exist on `float`. | A `float` has the methods `abs`, `ceil`, `clamp`, `floor`, `format`, `isFinite`, `isNaN`, `round`.",
             "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
         ]
@@ -27230,7 +27261,7 @@ fn uses_none_warns_on_a_method_and_is_refused_beside_another_effect() {
                 format!("7:22 invalid-effect {beside}"),
                 format!("9:45 invalid-effect {beside}"),
                 format!("11:38 invalid-effect {beside}"),
-                "11:44 invalid-effect `Htp` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Mail, Process, Random, Events or a `foreign` class. | Written here. | An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`.".to_owned(),
+                "11:44 invalid-effect `Htp` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Mail, PhpGlobals, Process, Random, Events or a `foreign` class. | Written here. | An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`.".to_owned(),
             ],
             Vec::<String>::new(),
         )
@@ -27382,7 +27413,7 @@ fn a_uses_that_names_no_effect_lists_the_effects_its_file_can_name() {
     assert_eq!(
         worded(gateway, &[payments, ledger, audit]),
         [
-            "7:32 invalid-effect `Clok` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Ledger, Mail, Payments, Process, Random, Events or a `foreign` class. | Written here. | An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`."
+            "7:32 invalid-effect `Clok` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Ledger, Mail, Payments, PhpGlobals, Process, Random, Events or a `foreign` class. | Written here. | An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`."
         ]
     );
 }
@@ -28169,6 +28200,34 @@ fn a_name_lookup_of_php_has_the_effect_dns() {
             "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Net/HostLookup.sharp:5:44 incompatible-effects: `HostLookup.overHttp` calls `gethostbyname`, which has the effect `Dns`, so `uses Http` on `Lookup.overHttp` cannot accept it."
         ]
     );
+}
+
+/// Spec section 21: `is bool` tests a value PHP gives as `false` or a resource, as `tmpfile()` gives one, and it can
+/// hold after `||` as it can on its own line.
+#[test]
+fn an_is_bool_test_of_a_false_or_resource_value_can_hold_after_or() {
+    let temporary = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/IO/Temporary.sharp",
+        "namespace Sharp.IO;\n\npublic class Temporary\n{\n    public bool missing()\n    {\n        const output = global.tmpfile();\n        const errorOutput = global.tmpfile();\n\n        return output is bool || errorOutput is bool;\n    }\n\n    public bool alone()\n    {\n        const errorOutput = global.tmpfile();\n\n        return errorOutput is bool;\n    }\n}\n",
+    );
+
+    assert_eq!(issues(temporary, &[BUILTINS]), Vec::<String>::new());
+}
+
+/// Spec section 12: PHP's `unpack` with a format of one number gives `array{1: int}`, an int-keyed shape, so PHP# reads
+/// it as a `List<int>` whether the format is a literal or an enum's value, and a list pattern takes its one element.
+#[test]
+fn unpack_of_one_number_is_a_list_whatever_writes_its_format() {
+    let order = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Order.sharp",
+        "namespace Sharp;\n\npublic enum Order : string\n{\n    case Big = \"J\";\n    case Little = \"P\";\n}\n",
+    );
+    let bytes = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Bytes.sharp",
+        "namespace Sharp;\n\npublic class Bytes\n{\n    public static int? literal(string bytes) => global.unpack(\"J\", bytes) is [int value] ? value : null;\n\n    public static int? ordered(string bytes, Order order) => global.unpack(order.value, bytes) is [int value] ? value : null;\n}\n",
+    );
+
+    assert_eq!(issues(bytes, &[order, BUILTINS]), Vec::<String>::new());
 }
 
 /// Decision 83: PHP is reached only through the standard library, so a PHP built-in class, interface or namespace of

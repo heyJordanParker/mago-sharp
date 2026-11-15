@@ -1,2 +1,2 @@
-15:32: `$kind::MAX` reaches a static through a class held at run time, which has no PHP# form: PHP# reaches a static through its class's name or a type parameter, and calls a static method of a class held at run time through reflection (spec sections 11 and 25)
+15:45: `$kind::LIMIT` reads a constant that declares no type, which a subclass of `App\Order` may give a value of another type, and PHP# reads through reflection as `Any?`: declare its type, as `const int LIMIT`, or the constant or the class `final` (spec section 25)
 29:16: `$kind::find(…)` is a static call through a class held at run time, which PHP# makes through reflection, and the analysis finds no method `find` of `class-string` to type it by (spec section 25)

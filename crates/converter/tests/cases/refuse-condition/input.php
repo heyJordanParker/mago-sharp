@@ -4,8 +4,9 @@ declare(strict_types=1);
 
 namespace App;
 
-// PHP's truthiness has no PHP# test for an object that is never null or a value of no known type, and a string a
-// second read may not give again, as a call's, is read once by a `match` (spec section 21).
+// PHP reads an empty array as false, and no PHP# pattern matches an empty `Map` among a union's other types or a
+// type parameter's value, which has no `==` without a bound, while a string a second read may not give again, as a
+// call's, is read once by a `match` (spec section 21).
 final class Untested
 {
     private string $name = '';
@@ -13,14 +14,20 @@ final class Untested
     /** @var list<int> */
     private array $counts = [];
 
-    public function always(Untested $other): bool
+    /** @param array<string, int>|int $value */
+    public function keyed(array|int $value): bool
     {
-        return !$other;
+        return !$value;
     }
 
-    public function unknown(mixed $value): bool
+    /**
+     * @template T
+     *
+     * @param T $value
+     */
+    public function held(mixed $value): bool
     {
-        return $value ? true : false;
+        return !$value;
     }
 
     public function twice(): bool

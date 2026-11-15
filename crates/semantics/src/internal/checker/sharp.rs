@@ -760,8 +760,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(Place::Struct)
         }
-        // `check_struct_declaration` reports every modifier but `public`. A struct's members are a class's.
-        (Node::Modifier(modifier), Place::Struct) => matches!(modifier, Modifier::Public(_)).then_some(Place::Struct),
+        // `check_struct_declaration` reports every modifier but `public` and `internal`. A struct's members are a
+        // class's.
+        (Node::Modifier(modifier), Place::Struct) => {
+            matches!(modifier, Modifier::Public(_) | Modifier::Internal(_)).then_some(Place::Struct)
+        }
         (Node::AttributeList(list), Place::Struct) => check_attribute_target(list, context),
         (Node::ClassLikeMember(_), Place::Struct) => enter(node, Class, context),
         // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`.
@@ -3161,18 +3164,19 @@ fn check_extension_type_parameters(
     }
 }
 
-/// Reports what spec section 10 refuses in a struct: a modifier but `public`, `readonly` above all because every
-/// struct is read-only, a `set` accessor, and a member modifier only a subclass would need.
+/// Reports what spec section 10 refuses in a struct: a modifier but `public` and `internal`, the visibilities a class
+/// takes, `readonly` above all because every struct is read-only, a `set` accessor, and a member modifier only a
+/// subclass would need.
 fn check_struct_declaration(r#struct: &Struct, context: &mut Context<'_, '_, '_>) {
     let mut report = |issue: Issue| context.report(issue);
 
     for modifier in &r#struct.modifiers {
         let issue = match modifier {
-            Modifier::Public(_) => continue,
+            Modifier::Public(_) | Modifier::Internal(_) => continue,
             Modifier::Readonly(_) => Issue::error("Every struct is already read-only: write `struct`.")
                 .with_annotation(Annotation::primary(modifier.span()).with_message("Remove `readonly`.")),
             _ => Issue::error(format!(
-                "A struct takes only `public`: remove `{}`.",
+                "A struct takes only `public` or `internal`: remove `{}`.",
                 BytesDisplay(modifier.get_keyword().value)
             ))
             .with_annotation(Annotation::primary(modifier.span()).with_message("Written here."))

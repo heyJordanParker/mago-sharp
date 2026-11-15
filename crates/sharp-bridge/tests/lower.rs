@@ -2879,7 +2879,7 @@ fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_static
                     null
                     null
                     null
-                    ZVAL "\n$calc: Lib.Calc\n$next set private: int\n$most set private: int\n$size: int\n$name set private: string\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
+                    ZVAL "\n$calc: Lib.Calc\n$next set private: int\n$most set private: int\n$size: int\n$name set private: string\n::MOST: int\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
                 null
                 null
         "##}
@@ -17669,7 +17669,7 @@ fn internal_runs_as_public() {
                   null
                   null
                   null
-                  ZVAL "\n$stock set internal: int\n$id init internal: int\n$views set internal: int\nsecret: Function<int()>\nparse: Function<Shop(Map<string, Any?>|Object)>\ntryParse: Function<Shop?(Map<string, Any?>|Object)>"
+                  ZVAL "\n$stock set internal: int\n$id init internal: int\n$views set internal: int\n::MAX: int\nsecret: Function<int()>\nparse: Function<Shop(Map<string, Any?>|Object)>\ntryParse: Function<Shop?(Map<string, Any?>|Object)>"
               null
               null
         "#}
@@ -18409,7 +18409,7 @@ fn a_class_constant_is_a_class_constant_group_of_one_constant() {
                 null
                 null
                 null
-                ZVAL "\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
+                ZVAL "\n::MAX: int\n::LIMIT: Any?\n::MIN: int\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -18456,7 +18456,7 @@ fn a_union_typed_class_constant_has_its_type_union() {
                 null
                 null
                 null
-                ZVAL "\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
+                ZVAL "\n::KEY: int|string\n::CODE: (int|string)?\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -18564,7 +18564,7 @@ fn a_map_or_a_set_constant_is_its_php_array() {
                 null
                 null
                 null
-                ZVAL "\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
+                ZVAL "\n::LIMITS: Map<string, int>\n::LEVELS: Map<App.Tenant.Level, int>\n::CODES: Set<string>\n::SPARE: Map<string, int>?\n::NAMES: List<string>\n::CODES_LIST: List<string>\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -18716,7 +18716,7 @@ fn an_iterable_or_a_tuple_constant_holds_its_list_literal() {
                 null
                 null
                 null
-                ZVAL "\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
+                ZVAL "\n::STEPS: Iterable<int>\n::PAIR: [int, string]\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -25533,16 +25533,21 @@ fn a_template_is_an_encaps_list_of_its_text_and_interpolations() {
 /// Spec section 12: plain PHP's `array<int, T>` arrives as a `List<T>`, renumbered where PHP# reads it with
 /// `\array_values`. A `List` of `Map`s crosses through `\Sharp\Internal\returned`, which renumbers it as it makes each
 /// `Map`. A `Map` place keeps its keys and makes the `Map` of them, an argument of plain PHP takes the array as plain PHP
-/// gave it, and a value plain PHP declares a list is one already.
+/// gave it, and a value plain PHP declares a list is one already. A conditional return, as `unpack`'s, renumbers where the
+/// branch the call picks is an `int`-keyed shape.
 #[test]
 fn a_plain_php_int_keyed_array_is_renumbered_where_it_arrives() {
     let ids = (
         "src/App/Tenant/Ids.php",
-        "<?php namespace App\\Tenant; final class Ids { /** @return array<int, int> */ public static function all(): array { return [5 => 1]; } /** @return list<int> */ public static function listed(): array { return [1]; } /** @return array<int, array<string, int>> */ public static function rows(): array { return []; } public static function sum(array $values): int { return array_sum($values); } }",
+        "<?php namespace App\\Tenant; final class Ids { /** @return array<int, int> */ public static function all(): array { return [5 => 1]; } /** @return ($format is 'J' ? array{1: int} : array<string, int>) */ public static function unpacked(string $format): array { return [1 => 7]; } /** @return list<int> */ public static function listed(): array { return [1]; } /** @return array<int, array<string, int>> */ public static function rows(): array { return []; } public static function sum(array $values): int { return array_sum($values); } }",
     );
     let lowered = |statements: &str| body_in(RUN, statements, &[ids]);
 
     assert!(lowered("        List<int> all = Ids.all();\n        return all[0];\n").contains("ZVAL \"array_values\""));
+    assert!(
+        lowered("        List<int> one = Ids.unpacked(\"J\");\n        return one[0];\n")
+            .contains("ZVAL \"array_values\"")
+    );
     assert!(
         lowered("        List<Map<string, int>> rows = Ids.rows();\n        return rows.count();\n")
             .contains("ZVAL \"Sharp\\\\Internal\\\\returned\"")
@@ -30089,7 +30094,7 @@ fn an_enum_constant_is_a_class_constant_group_that_reads_a_case() {
                 null
                 null
                 null
-                ZVAL "\n$value: string\n$name: string\nfrom: Function<App.Tenant.Status(string)>\ntryFrom: Function<App.Tenant.Status?(string)>\ncases: Function<List<App.Tenant.Status>()>"
+                ZVAL "\n$value: string\n$name: string\n::Default: App.Tenant.Status\nfrom: Function<App.Tenant.Status(string)>\ntryFrom: Function<App.Tenant.Status?(string)>\ncases: Function<List<App.Tenant.Status>()>"
         "#}
     );
 }
@@ -30352,7 +30357,7 @@ fn an_enum_returns_self_and_holds_a_union_typed_constant() {
                   null
                   null
                   null
-                  ZVAL "\n$value: string\n$name: string\nfrom: Function<App.Status(string)>\nfirst: Function<App.Status()>\ntryFrom: Function<App.Status?(string)>\ncases: Function<List<App.Status>()>\nall: Function<List<App.Status>()>"
+                  ZVAL "\n$value: string\n$name: string\n::Key: int|string\nfrom: Function<App.Status(string)>\nfirst: Function<App.Status()>\ntryFrom: Function<App.Status?(string)>\ncases: Function<List<App.Status>()>\nall: Function<List<App.Status>()>"
               null
               ZVAL [1] "string"
         "#}

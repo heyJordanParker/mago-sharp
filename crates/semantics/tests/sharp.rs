@@ -1963,15 +1963,18 @@ fn a_required_property_has_init_or_set() {
     );
 }
 
-/// Spec section 10: every struct is already read-only, and a struct is a value with no subclasses, so `public` is its
-/// only modifier. Each refusal's fix, a plain `public struct`, compiles, and so does a struct's attribute.
+/// Spec section 10: every struct is already read-only, and a struct is a value with no subclasses, so its only
+/// modifiers are the visibilities a class takes, `public` and `internal`. Each refusal's fix, a plain `public struct`,
+/// compiles, and so do an `internal struct` and a struct's attribute.
 #[test]
-fn a_struct_takes_only_public() {
+fn a_struct_takes_only_public_or_internal() {
     for (declaration, expected) in [
         ("public readonly struct Size { }", vec!["3:8 Every struct is already read-only: write `struct`."]),
-        ("abstract struct Area { }", vec!["3:1 A struct takes only `public`: remove `abstract`."]),
-        ("final struct Shape { }", vec!["3:1 A struct takes only `public`: remove `final`."]),
+        ("abstract struct Area { }", vec!["3:1 A struct takes only `public` or `internal`: remove `abstract`."]),
+        ("final struct Shape { }", vec!["3:1 A struct takes only `public` or `internal`: remove `final`."]),
+        ("private struct Depth { }", vec!["3:1 A struct takes only `public` or `internal`: remove `private`."]),
         ("public struct Width { }", vec![]),
+        ("internal struct CheckoutTotals { }", vec![]),
         ("[Stable]\npublic struct Height { }", vec![]),
     ] {
         let code = leak(format!("namespace App.Tenant;\n\n{declaration}\n"));

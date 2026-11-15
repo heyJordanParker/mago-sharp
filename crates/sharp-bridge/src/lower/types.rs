@@ -284,9 +284,8 @@ impl<'analysis> Types<'analysis> {
             _ => unreachable!("the lowering asks this only of a plain PHP call or property read"),
         };
 
-        declared.is_some_and(|declared| {
-            declared.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
-        }) && self.artifacts.get_expression_type(value).is_some_and(every_array_is_list)
+        declared.is_some_and(declares_keyed_array)
+            && self.artifacts.get_expression_type(value).is_some_and(every_array_is_list)
     }
 
     /// Whether the collection `expression` may hold a `Map`, whose element a loop reads as its entry, spec section 17.
@@ -487,14 +486,16 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// What reflection reads of the fully qualified class name `class` when it is a PHP# class-like, spec section 25:
-    /// a first line of its type parameters' names joined by `, `, then a line per property and method it declares,
-    /// `$tags set private: List<string>` and `first virtual: Function<$0?(List<$0>, int)>`, a property with what writes
+    /// a first line of its type parameters' names joined by `, `, then a line per property, constant and method it
+    /// declares, `$tags set private: List<string>`, `::LIMIT: int` and `first virtual: Function<$0?(List<$0>, int)>`,
+    /// a property with what writes
     /// it as [`setter_text`] spells it, then `virtual` for a member a subclass may replace and `override` for one named
     /// in `overrides`, the names, a property's without `$`, of the members the declaration writes `override` on, and
-    /// each type as [`Parameter::Declared`] writes it. A type a declaration leaves out is `Any?`, and so is a plain PHP
+    /// each type as [`Parameter::Declared`] writes it. `constants` are the names of the constants the declaration
+    /// writes, in order, which the engine reads on the class that declares them, so an inherited one has no line. A type a declaration leaves out is `Any?`, and so is a plain PHP
     /// type a member takes over that PHP# can't write. A member of an enum or a final class is never `virtual`, and a
     /// hidden method, as `#statics`, has no line.
-    pub(crate) fn declared(&self, class: &[u8], overrides: &[&[u8]]) -> Option<String> {
+    pub(crate) fn declared(&self, class: &[u8], overrides: &[&[u8]], constants: &[&[u8]]) -> Option<String> {
         let metadata = self.codebase.get_class_like(class).filter(|metadata| metadata.flags.is_sharp())?;
 
         let written = |r#type: Option<&TypeMetadata>| match r#type {
@@ -519,6 +520,11 @@ impl<'analysis> Types<'analysis> {
                 if overridden(&property.name.0.as_bytes()[1..]) { " override" } else { "" },
                 written(property.type_metadata.as_ref())
             ));
+        }
+        // A constant's line keys by `::` and its name, which no property's or method's starts with.
+        for name in constants {
+            let declared = metadata.constants.get(&word(name)).and_then(|constant| constant.type_metadata.as_ref());
+            lines.push(format!("::{}: {}", String::from_utf8_lossy(name), written(declared)));
         }
         // Reflection never reads a hidden method, as `#statics`, so it has no line.
         let methods = metadata.methods.iter().filter(|method| !method.as_bytes().contains(&b'#'));
@@ -2603,6 +2609,29 @@ pub(crate) fn every_array_is_list(r#type: &TUnion) -> bool {
     }
 
     holds_list
+}
+
+/// Whether plain PHP's declared `r#type` may give a keyed array. A conditional type's branch counts when it is a shape,
+/// as `unpack`'s `($format is 'q'|'Q'|'J'|'P' ? array{1: int}|false : …)`, whose `array{1: int}` arrives as a `List`.
+fn declares_keyed_array(r#type: &TUnion) -> bool {
+    r#type.types.iter().any(|atomic| match atomic {
+        TAtomic::Array(TArray::Keyed(_)) => true,
+        TAtomic::Conditional(conditional) => {
+            declares_shape(&conditional.then) || declares_shape(&conditional.otherwise)
+        }
+        _ => false,
+    })
+}
+
+/// Whether a branch of a conditional type, the branches it nests included, may give a keyed array shape.
+fn declares_shape(r#type: &TUnion) -> bool {
+    r#type.types.iter().any(|atomic| match atomic {
+        TAtomic::Array(TArray::Keyed(keyed)) => keyed.known_items.is_some(),
+        TAtomic::Conditional(conditional) => {
+            declares_shape(&conditional.then) || declares_shape(&conditional.otherwise)
+        }
+        _ => false,
+    })
 }
 
 /// The fully qualified names of the classes a class value of `r#type` holds, leaving out `null`, or none when part of
