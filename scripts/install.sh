@@ -127,102 +127,37 @@ green "Detecting your system configuration..."
 arch=$(uname -m)
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 
+# A release publishes mago for macOS on Apple silicon and for glibc Linux on arm64 and x86_64, the platforms PHP# runs
+# on. A Linux whose ldd names musl, such as Alpine, has no build, and one without ldd takes the glibc build.
 case "$arch" in
-  x86_64)
-    arch="x86_64"
-    ;;
-  amd64)
+  x86_64 | amd64)
     arch="x86_64"
     ;;
   arm64 | aarch64)
     arch="aarch64"
     ;;
-  armv7l)
-    arch="armv7"
-    ;;
-  i386 | i486 | i586 | i686)
-    arch="i686"
-    ;;
-  ppc)
-    arch="powerpc"
-    ;;
-  ppc64)
-    arch="powerpc64"
-    ;;
-  ppc64le)
-    arch="powerpc64le"
-    ;;
-  s390x)
-    arch="s390x"
-    ;;
   *)
-    red "Unsupported architecture: ${arch}. Please open an issue on GitHub at ${NEW_ISSUE}."
-    exit 1
+    fail "No mago release has a binary for ${arch}: it builds for arm64 and x86_64."
     ;;
 esac
 
 case "$os" in
   darwin)
-    vendor="apple"
-    os_suffix=""
+    if [ "$arch" != aarch64 ]; then
+      fail "No mago release has a binary for Intel macOS: it builds for macOS on Apple silicon."
+    fi
+    target_triple="aarch64-apple-darwin"
     ;;
   linux)
-    vendor="unknown"
-    os_suffix=""
-    if command -v ldd > /dev/null; then
-      ldd_version=$(ldd --version 2>&1)
-      if echo "$ldd_version" | grep -q "musl"; then
-        case "$arch" in
-          x86_64 | aarch64 | i686)
-            os_suffix="musl"
-            ;;
-          arm | armv7)
-            if grep -q "hard" /proc/cpuinfo 2> /dev/null; then
-              os_suffix="musleabihf"
-            else
-              os_suffix="musleabi"
-            fi
-            ;;
-          *)
-            fail "Unsupported architecture for musl: ${arch}"
-            ;;
-        esac
-      else
-        case "$arch" in
-          x86_64 | aarch64 | i686 | powerpc | powerpc64 | powerpc64le | s390x)
-            os_suffix="gnu"
-            ;;
-          arm | armv7)
-            if grep -q "hard" /proc/cpuinfo 2> /dev/null; then
-              os_suffix="gnueabihf"
-            else
-              os_suffix="gnueabi"
-            fi
-            ;;
-          *)
-            fail "Unsupported architecture for glibc: ${arch}"
-            ;;
-        esac
-      fi
-    else
-      os_suffix="musl"
+    if command -v ldd > /dev/null && ldd --version 2>&1 | grep -q "musl"; then
+      fail "No mago release has a binary for musl Linux, such as Alpine: it builds for glibc Linux."
     fi
-    ;;
-  freebsd)
-    vendor="unknown"
-    os_suffix=""
+    target_triple="${arch}-unknown-linux-gnu"
     ;;
   *)
-    fail "Unsupported operating system: ${os}. Please open an issue on GitHub at ${NEW_ISSUE}."
+    fail "No mago release has a binary for ${os}: it builds for macOS and Linux."
     ;;
 esac
-
-# If the os_suffix is empty, we use `{arch}-{vendor}-{os}` as the target triple
-if [ -z "$os_suffix" ]; then
-  target_triple="${arch}-${vendor}-${os}"
-else
-  target_triple="${arch}-${vendor}-${os}-${os_suffix}"
-fi
 
 green "Detected target: ${target_triple}"
 

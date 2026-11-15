@@ -186,7 +186,7 @@ function detect_architecture(): string
  * Detect the C library variant on Linux (glibc or musl).
  *
  * Uses `ldd --version` output to distinguish between glibc and musl.
- * Falls back to musl if `ldd` is not found (common in minimal containers).
+ * Takes glibc if `ldd` is not found, as in a minimal glibc container, since every released Linux binary is glibc's.
  *
  * @return string "musl" or "gnu".
  *
@@ -196,7 +196,7 @@ function detect_linux_libc(): string
 {
     $lddPath = trim((string) shell_exec('command -v ldd 2>/dev/null'));
     if ($lddPath === '') {
-        return 'musl';
+        return 'gnu';
     }
 
     $lddVersion = (string) shell_exec('ldd --version 2>&1');
@@ -224,36 +224,30 @@ function detect_arm_hard_float(): bool
  * Combines the C library variant (glibc/musl) with the appropriate ABI suffix
  * for the given architecture. Only combinations with pre-built binaries are supported.
  *
- * Released Linux targets:
- *   x86_64:  gnu, musl
- *   aarch64: gnu, musl
- *   armv7:   gnueabihf, musleabihf (hard float only)
- *   arm:     gnueabi, gnueabihf, musleabi, musleabihf
+ * Released Linux targets: x86_64 and aarch64, on glibc. No release has a musl binary.
  *
  * @param string $architecture Normalized architecture name.
  * @param string $libc C library variant ("gnu" or "musl").
  *
  * @throws RuntimeException If the architecture/libc combination has no pre-built binary.
  *
- * @return string The OS suffix (e.g., "gnu", "musl", "gnueabihf", "musleabi").
+ * @return string The OS suffix (e.g., "gnu", "gnueabihf").
  *
  * @internal
  */
 function build_linux_suffix(string $architecture, string $libc): string
 {
+    if ($libc === 'musl') {
+        throw new RuntimeException(
+            'No mago release has a binary for musl Linux, such as Alpine: it builds for glibc Linux. '
+            . 'Compile mago from source: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago',
+        );
+    }
+
     $hardFloat = match ($architecture) {
         'arm', 'armv7' => namespace\detect_arm_hard_float(),
         default => false,
     };
-
-    if ($libc === 'musl') {
-        return match ($architecture) {
-            'x86_64', 'aarch64' => 'musl',
-            'armv7' => 'musleabihf',
-            'arm' => $hardFloat ? 'musleabihf' : 'musleabi',
-            default => throw new RuntimeException("No pre-built musl binary for architecture: {$architecture}"),
-        };
-    }
 
     return match ($architecture) {
         'x86_64', 'aarch64' => 'gnu',
@@ -272,7 +266,7 @@ function build_linux_suffix(string $architecture, string $libc): string
  *
  * Released OS targets:
  *   Windows: x86_64 only (msvc)
- *   macOS:   x86_64, aarch64
+ *   macOS:   aarch64
  *   Linux:   x86_64, aarch64, armv7, arm
  *   FreeBSD: x86_64 only
  *
@@ -305,14 +299,15 @@ function detect_platform(string $architecture): array
             ),
         },
         'darwin' => match ($architecture) {
-            'x86_64', 'aarch64' => [
+            'aarch64' => [
                 'os' => 'darwin',
                 'vendor' => 'apple',
                 'suffix' => '',
                 'extension' => '',
             ],
             default => throw new RuntimeException(
-                "No pre-built macOS binary for architecture: {$architecture}. Only x86_64 and aarch64 are supported.",
+                "No mago release has a binary for macOS on {$architecture}: it builds for macOS on Apple silicon. "
+                . 'Compile mago from source: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago',
             ),
         },
         'linux' => [
