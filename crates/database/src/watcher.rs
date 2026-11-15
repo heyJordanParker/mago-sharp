@@ -1272,6 +1272,18 @@ mod tests {
         fn text(&self) -> String {
             String::from_utf8_lossy(&self.0.lock().unwrap_or_else(PoisonError::into_inner)).into_owned()
         }
+
+        /// A dispatcher that writes each log line to this log. While one dispatcher exists, tracing keeps a log line's
+        /// interest from the dispatcher of the first thread to reach it, so a test running beside this one with none
+        /// would silence the line here: a second dispatcher, alive for the whole run, makes tracing ask every one.
+        fn dispatch(&self) -> tracing::Dispatch {
+            static SECOND: std::sync::LazyLock<tracing::Dispatch> =
+                std::sync::LazyLock::new(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+            std::sync::LazyLock::force(&SECOND);
+            let log = self.clone();
+
+            tracing::Dispatch::new(tracing_subscriber::fmt().with_ansi(false).with_writer(move || log.clone()).finish())
+        }
     }
 
     impl std::io::Write for Log {
@@ -1288,11 +1300,7 @@ mod tests {
     /// Runs `start` with a subscriber that keeps the log, and returns what `start` returns with the log.
     fn logged<T>(start: impl FnOnce() -> T) -> (T, String) {
         let log = Log::default();
-        let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer({
-            let log = log.clone();
-            move || log.clone()
-        });
-        let started = tracing::subscriber::with_default(subscriber.finish(), start);
+        let started = tracing::dispatcher::with_default(&log.dispatch(), start);
 
         (started, log.text())
     }
@@ -1963,11 +1971,7 @@ mod tests {
         let app = root.join("app");
         let (events, received) = mpsc::channel();
         let log = Log::default();
-        let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer({
-            let log = log.clone();
-            move || log.clone()
-        });
-        let _watcher = tracing::subscriber::with_default(subscriber.finish(), || {
+        let _watcher = tracing::dispatcher::with_default(&log.dispatch(), || {
             start_watcher_of::<ReportsWhenTold, _, _>(
                 events,
                 &[(app.clone(), RecursiveMode::Recursive)],

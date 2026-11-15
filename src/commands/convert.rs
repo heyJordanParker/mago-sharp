@@ -1628,8 +1628,14 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         .unwrap()
     }
 
-    /// What `run` logs at `info` and above on this thread, after what it returns.
+    /// What `run` logs at `info` and above on this thread, after what it returns. While one dispatcher exists, tracing
+    /// keeps a log line's interest from the dispatcher of the first thread to reach it, so a test running beside this
+    /// one with none would silence the line here: a second dispatcher, alive for the whole run, makes tracing ask every
+    /// one.
     fn logged<T>(run: impl FnOnce() -> T) -> (T, String) {
+        static SECOND: std::sync::LazyLock<tracing::Dispatch> =
+            std::sync::LazyLock::new(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+        std::sync::LazyLock::force(&SECOND);
         let log = tempfile::NamedTempFile::new().unwrap();
         let path = log.path().to_path_buf();
         let subscriber = tracing_subscriber::fmt()
