@@ -413,10 +413,11 @@ fn too_wide(files: &[(&'static str, &'static str)]) -> Vec<String> {
 /// exempt, and an override keeps its parent's types, as a plain PHP parent's `mixed` is `Any?`.
 #[test]
 fn a_public_member_of_an_application_names_its_types() {
-    let store = "namespace App.Shop;\n\nimport Lib.Base;\n\npublic class Store : Base\n{\n    public Any label { get; init; } = 1;\n\n    public Store(public Object owner { get; }) { }\n\n    public Map<string, Any> checkoutPayload() => [:];\n\n    public void take(List<Map<string, Any?>> rows) { }\n\n    public T first<T>(List<T> items) => items[0];\n\n    public void each(Iterable<string> names, Set<string> tags, Function<int(int)> step) { }\n\n    public Iterable<Object> owners()\n    {\n        yield this.owner;\n    }\n\n    public Any? find(string key) => null;\n\n    public override Any? load(Any? key) => key;\n\n    internal Any hidden() => 1;\n\n    private Any secret() => 1;\n\n    internal bool use() => this.secret() is int;\n}\n";
+    let store = "namespace App.Shop;\n\nimport Lib.Base;\n\npublic class Store : Base\n{\n    public Any label { get; init; } = 1;\n\n    public Store(public Object owner { get; }) { }\n\n    public Map<string, Any> checkoutPayload() => [:];\n\n    public void take(List<Map<string, Any?>> rows) { }\n\n    public void pair(Feed & Holder<Any> both) { }\n\n    public T first<T>(List<T> items) => items[0];\n\n    public void each(Iterable<string> names, Set<string> tags, Function<int(int)> step) { }\n\n    public Iterable<Object> owners()\n    {\n        yield this.owner;\n    }\n\n    public Any? find(string key) => null;\n\n    public override Any? load(Any? key) => key;\n\n    internal Any hidden() => 1;\n\n    private Any secret() => 1;\n\n    internal bool use() => this.secret() is int;\n}\n";
     let base =
         "<?php\n\nnamespace Lib;\n\nabstract class Base\n{\n    abstract public function load(mixed $key): mixed;\n}\n";
     let feed = "namespace App.Shop;\n\npublic interface Feed\n{\n    List<Object> next();\n}\n";
+    let holder = "namespace App.Shop;\n\npublic interface Holder<T>\n{\n    T held();\n}\n";
     let library = "namespace Kit;\n\npublic class Bag\n{\n    public Any get(string key) => 1;\n}\n";
     let named = |member: &str, kind: &str| {
         format!("`{member}` is public, and a public member of an application names its types: {kind}.")
@@ -426,6 +427,7 @@ fn a_public_member_of_an_application_names_its_types() {
         package_errors(&[
             ("app/Shop/Store.sharp", store),
             ("app/Shop/Feed.sharp", feed),
+            ("app/Shop/Holder.sharp", holder),
             ("src/Lib/Base.php", base),
             ("library/Kit/Bag.sharp", library),
         ]),
@@ -434,6 +436,7 @@ fn a_public_member_of_an_application_names_its_types() {
             named("Store.owner", "`Object`"),
             named("Store.checkoutPayload", "`Any` in `Map<string, Any>`"),
             named("Store.take", "`Any?` in `List<Map<string, Any?>>`"),
+            named("Store.pair", "`Any` in `Feed & Holder<Any>`"),
             named("Store.owners", "`Object` in `Iterable<Object>`"),
             named("Store.find", "`Any?`"),
             named("Feed.next", "`Object` in `List<Object>`"),
@@ -11829,6 +11832,18 @@ fn a_match_statement_takes_expression_arms_and_not_reads_beside_or_and_a_nullabl
     );
 
     assert_eq!(worded(sharp, &[]), Vec::<String>::new());
+}
+
+/// Spec section 6.6: an indexer's accessors are `get` and `set`, as C#'s are. Another accessor, as `init`, is the
+/// checker's refusal alone, and the analysis reads no body for it.
+#[test]
+fn an_indexer_accessor_other_than_get_or_set_is_refused_once() {
+    let sharp = "namespace Demo;\n\npublic class Rows\n{\n    public int this[int index]\n    {\n        get => index;\n        init => undefinedName;\n    }\n}\n";
+
+    assert_eq!(
+        compile_errors(("src/Demo/Rows.sharp", sharp), &[]),
+        ["An indexer declares only `get` and `set`, and `init` is neither."]
+    );
 }
 
 /// Spec section 6: an indexer's `get` gives `cart[0]` its type, its `set` takes the value `cart[0] = x` writes, of

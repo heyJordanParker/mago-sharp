@@ -364,6 +364,60 @@ fn inlined_body(signature: &str, statements: &str) -> String {
     Lowered::inlining(&code, &[LOUD, LOUD_HELPERS, LOUD_EXTERNS], &[TEXT]).body()
 }
 
+/// A standard library class whose `swapped` compares a parameter a call passes with a literal, as
+/// `StringMembers.replace` compares `old` with `""`. `paired` compares two parameters, `counted` and `limited` test a
+/// default with `is`, and `guarded` compares a local with a literal.
+const SWAPS: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Swaps.sharp",
+    "namespace Sharp;\n\npublic class Swaps\n{\n    public static string swapped(string text, string old, string replacement) => old == \"\" ? global.strtoupper(text) : global.str_replace(old, replacement, text);\n\n    public static string paired(string text, bool loud = false, bool quiet = false) => loud == quiet ? global.strtoupper(text) : global.strtolower(text);\n\n    public static string counted(string text, int? limit = null) => limit is int ? global.strtoupper(text) : global.strtolower(text);\n\n    public static string limited(string text, int? limit = 3) => limit is int ? global.strtoupper(text) : global.strtolower(text);\n\n    public static string guarded(string text)\n    {\n        const trimmed = global.trim(text);\n        if (trimmed == \"\") {\n            return text;\n        }\n        return trimmed;\n    }\n}\n",
+);
+
+/// ```php
+/// return \str_replace(' ', '-', $title);
+/// return \Sharp\Swaps::swapped($title, '', '-');
+/// return \Sharp\Swaps::swapped($title, $separator, '-');
+/// ```
+///
+/// A form that folds a comparison of a parameter the call passes with a literal runs only for a call whose literal
+/// decides it as the form did, as `replace(" ", "-")` runs `str_replace` where `old != ""` holds. A call that passes
+/// `""`, or a value that is no literal, calls the method.
+///
+/// A comparison of two parameters decides nothing, nor does one of a local with a literal, and `is int` decides
+/// only a `null` default, so `counted` alone folds, for the call that leaves `limit` out.
+#[test]
+fn a_form_that_fixes_an_argument_inlines_only_a_call_whose_literal_decides_it_so() {
+    assert_eq!(form_names(SWAPS), ["Sharp\\Swaps::swapped", "Sharp\\Swaps::counted#1"]);
+
+    let lowered = |argument: &str| {
+        let code = format!(
+            "namespace App.Tenant;\n\nimport Sharp.Swaps;\n\nclass Report\n{{\n    public string run(string title, string separator) => Swaps.swapped(title, {argument}, \"-\");\n}}\n"
+        );
+
+        Lowered::inlining(&code, &[], &[SWAPS]).body()
+    };
+
+    let inlined = lowered("\" \"");
+    assert!(inlined.contains("ZVAL \"str_replace\"\n"), "{inlined}");
+    for kept in ["\"\"", "separator"] {
+        let called = lowered(kept);
+        assert!(called.contains("ZVAL \"swapped\"\n") && !called.contains("str_replace"), "{called}");
+    }
+
+    // The form names the argument it fixes, and its fingerprint counts it, the same on each check.
+    let forms = || -> InlineForms {
+        common::checked(SWAPS.0, SWAPS.1, &[], inline_forms).expect("the library file is checked").into_iter().collect()
+    };
+    let (first, second) = (forms(), forms());
+    let form = |forms: &InlineForms| {
+        forms.iter().find(|(_, member, _)| *member == b"swapped").map(|(_, _, form)| form.clone())
+    };
+    let swapped = form(&first).expect("swapped has a form");
+    let fixed: Vec<(usize, Vec<u8>, bool)> =
+        swapped.fixed().iter().map(|fixed| (fixed.slot, fixed.literal.clone(), fixed.equal)).collect();
+    assert_eq!(fixed, [(1, b"\"\"".to_vec(), false)]);
+    assert_eq!(swapped.fingerprint(), form(&second).expect("swapped has a form").fingerprint());
+}
+
 /// A file declaring the method `run` with `body`. Its body starts on line 9.
 fn method(body: &str) -> String {
     method_with(RUN, body)
@@ -21848,6 +21902,63 @@ fn a_position_current_default_takes_the_position_of_the_php_sharp_call() {
     );
 
     assert_eq!(positions(&lowered), ["5:66 App.Reports.logSlow", "9:9 App.Reports.run", "10:42 App.Reports.run"]);
+}
+
+/// Spec section 6.6: an indexer runs as PHP's `ArrayAccess`, which the class implements: `offsetGet` and
+/// `offsetExists` call its hidden `#get`, `offsetSet` its `#set`, and the method of an accessor it doesn't declare, as
+/// `offsetUnset` always, throws `LogicException` with the reason. A struct's indexer runs the same way.
+#[test]
+fn an_indexer_runs_as_array_access() {
+    let rows = Lowered::new(
+        "namespace App;\n\npublic class Rows\n{\n    private List<int> lines = [];\n\n    public int this[int index]\n    {\n        get => this.lines[index];\n        set => this.lines[index] = value;\n    }\n}\n",
+    );
+    let tree = rows.tree();
+    assert!(tree.contains("ZVAL \"ArrayAccess\"\n"), "{tree}");
+    let exists = rows.body_of("offsetExists");
+    assert!(exists.contains("ZVAL \"#get\"\n") && exists.contains("BINARY_OP"), "{exists}");
+    assert!(rows.body_of("offsetSet").contains("ZVAL \"#set\"\n"));
+    assert!(rows.body_of("offsetUnset").contains("`App.Rows`'s indexer has no unset, as a C# indexer has none."));
+
+    let read_only = Lowered::new(
+        "namespace App;\n\npublic struct Pair\n{\n    public Pair(public int first { get; }) { }\n\n    public int this[int index]\n    {\n        get => this.first + index;\n    }\n}\n",
+    );
+    let set = read_only.body_of("offsetSet");
+    assert!(set.contains("`App.Pair`'s indexer has no set, as a C# indexer has none."), "{set}");
+}
+
+/// Spec section 18: a template shows a `bool` as `true` or `false`, and a union that holds one tests the value each
+/// time it runs, so `${flag}` of an `int|bool` shows an `int` as the number.
+#[test]
+fn a_template_shows_the_bool_of_a_union_as_its_text() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic class Shown\n{\n    public string show(int|bool flag) => `flag: ${flag}`;\n}\n",
+    );
+
+    let show = lowered.body_of("show");
+    assert!(show.contains("ZVAL \"is_bool\"\n") && show.contains("CONDITIONAL"), "{show}");
+}
+
+/// Spec section 12: a struct that names `Iterable<T>` in its header is PHP's `IteratorAggregate`, as a class is.
+#[test]
+fn a_struct_that_names_iterable_is_an_iterator_aggregate() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic struct Digits : Iterable<int>\n{\n    public Digits(public int count { get; }) { }\n\n    public Iterable<int> elements()\n    {\n        yield this.count;\n    }\n}\n",
+    );
+
+    let tree = lowered.tree();
+    assert!(tree.contains("ZVAL \"IteratorAggregate\"\n"), "{tree}");
+}
+
+/// Spec section 27: a default that reads one field of the caller's position, as `Position.current().line`, takes that
+/// field of the position of the PHP# call that leaves the parameter out.
+#[test]
+fn a_caller_position_field_default_takes_that_field_of_the_callers_position() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Reports\n{\n    public static void logSlow(string message, int line = Position.current().line) { }\n\n    public void run()\n    {\n        Reports.logSlow(\"slow query\");\n    }\n}\n",
+    );
+
+    let run = lowered.body_of("run");
+    assert!(run.contains("NAMED_ARG\n") && run.contains("PROP\n") && run.contains("ZVAL \"line\"\n"), "{run}");
 }
 
 /// A call that spreads a list of known length that doesn't reach the parameter passes the caller's position, as a

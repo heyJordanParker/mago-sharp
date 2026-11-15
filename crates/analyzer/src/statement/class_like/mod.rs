@@ -1902,10 +1902,9 @@ where
             signatures.push((word(mago_bytes::trim_start_byte(name.as_bytes(), b'$')), declared));
         }
     }
-    for name in &class.methods {
-        let Some(method) = codebase.function_likes.get(&(class.name, *name)) else {
-            continue;
-        };
+    let methods =
+        class.methods.iter().filter_map(|name| Some((name, codebase.function_likes.get(&(class.name, *name))?)));
+    for (name, method) in methods {
         // A method the codex gives the class spans the whole class, and nobody wrote it. PHP fixes a magic method's
         // types, and a promoted parameter is its property's.
         if method.span == class.span

@@ -89,7 +89,8 @@ preg_match_all('/^import ([\w.]+)(?: as (\w+))?;$/m', $builtins, $imports, PREG_
 // Each imported class by the name `Builtins.sharp` gives it, its alias or its short name, to its full name.
 $imported = [];
 foreach ($imports as $import) {
-    $imported[$import[2] ?? basename(str_replace('.', '/', $import[1] ?? ''))] = str_replace('.', '\\', $import[1] ?? '');
+    $full = $import[1] ?? '';
+    $imported[$import[2] ?? basename(str_replace('.', '/', $full))] = str_replace('.', '\\', $full);
 }
 $externs = [];
 preg_match_all('/^extern (\w+);$/m', $builtins, $externs);
@@ -102,9 +103,10 @@ $declared = array_flip($declared[1]);
 // and stays out.
 $roots = array_values(array_diff($externs[1], array_keys($imported)));
 foreach ($imported as $name => $class) {
-    if (str_contains($class, '\\') && !isset($declared[$name])) {
-        $roots[] = $class;
+    if (!str_contains($class, '\\') || array_key_exists($name, $declared)) {
+        continue;
     }
+    $roots[] = $class;
 }
 
 $effects = [];

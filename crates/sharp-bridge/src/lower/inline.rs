@@ -525,8 +525,7 @@ impl Lowering<'_, '_> {
                 continue;
             };
             let IfBody::Statement(body) = &r#if.body else {
-                folded.push(statement);
-                continue;
+                unreachable!("check_slice refuses a colon-delimited `if`");
             };
             let Some(taken) = self.decided(r#if.condition, known) else {
                 folded.push(statement);
@@ -656,14 +655,16 @@ impl Lowering<'_, '_> {
             .into_iter()
             .chain(parameters.iter().map(|parameter| parameter.variable.name))
             .collect();
-        let fixed = fixed
+        let fixed: Vec<FixedArgument> = fixed
             .into_iter()
             .map(|(parameter, literal, equal)| {
-                let slot = names.iter().position(|name| *name == parameter.as_slice())?;
+                let slot = names.iter().position(|name| *name == parameter.as_slice()).unwrap_or_else(|| {
+                    unreachable!("the fold fixes only a parameter of the method, which names a slot")
+                });
 
-                Some(FixedArgument { slot, literal, equal })
+                FixedArgument { slot, literal, equal }
             })
-            .collect::<Option<Vec<_>>>()?;
+            .collect();
         let (root, in_order) = match body {
             Body::Expression(expression) => {
                 let mut steps = Vec::new();

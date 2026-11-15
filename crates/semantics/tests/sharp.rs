@@ -2324,6 +2324,20 @@ fn an_iterable_class_may_declare_a_get_iterator_twin() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 12: a class, a struct and an interface may name `Iterable<T>` in their header, and an enum may not,
+/// since it declares no `elements()` a loop reads.
+#[test]
+fn an_enum_names_no_iterable_in_its_header() {
+    let code = "namespace App.Shop;\n\nenum Level : Iterable<int>\n{\n    case Low;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "3:14 Only a class, a struct or an interface names `Iterable<T>` in its header, and a class or a struct declares the `elements()` a loop reads."
+        ]
+    );
+}
+
 /// A constant value cannot read a static member or a member of one, since a property read runs code, and a parameter's
 /// default, which is any expression, can. A case's `value` and `name` are constants.
 #[test]
@@ -2835,12 +2849,13 @@ fn an_import_alias_starts_with_a_capital_letter() {
     assert_eq!(issues(capitalized), Vec::<String>::new());
 }
 
-/// Spec section 6: an indexer is a property that takes parameters, with C#'s rules: a class's gives each accessor a
-/// body, an interface's none, a struct's has no `set`, and it takes one parameter, PHP's `ArrayAccess` offset, `get`,
-/// `set` or both once, no `static`, and no accessor modifier but a class's `private set`.
+/// Spec section 6: an indexer is a property that takes parameters, with C#'s rules: it takes attributes, a class's
+/// gives each accessor a body, an interface's none, a struct's has no `set`, and it takes one parameter, PHP's
+/// `ArrayAccess` offset, `get`, `set` or both once, never none, no `static`, and no accessor modifier but a class's
+/// `private set`.
 #[test]
 fn an_indexer_follows_csharp_rules() {
-    let class = "namespace App.Tenant;\n\npublic class Cart\n{\n    private List<int> lines = [];\n\n    public int this[int index]\n    {\n        get => this.lines[index];\n        private set => this.lines[index] = value;\n    }\n}\n";
+    let class = "namespace App.Tenant;\n\npublic class Cart\n{\n    private List<int> lines = [];\n\n    [Deprecated]\n    public int this[int index]\n    {\n        get => this.lines[index];\n        private set => this.lines[index] = value;\n    }\n}\n";
     let interface = "namespace App.Tenant;\n\npublic interface Rows\n{\n    int this[int index] { get; }\n}\n";
     let r#struct = "namespace App.Tenant;\n\npublic struct Pair\n{\n    public int this[int index]\n    {\n        get => index;\n        set => index;\n    }\n}\n";
     let refused = "namespace App.Tenant;\n\npublic class Cart\n{\n    public static int this[]\n    {\n        get;\n        get => 1;\n        fetch => 2;\n        public set => 3;\n    }\n}\n";
@@ -2862,6 +2877,12 @@ fn an_indexer_follows_csharp_rules() {
         ]
     );
     assert_eq!(issues(interface_body), ["5:27 An interface's indexer declares `get` with no body, as in `get;`."]);
+
+    let empty = "namespace App.Tenant;\n\npublic class Rows\n{\n    public int this[int index] { }\n}\n";
+    assert_eq!(
+        issues(empty),
+        ["5:5 An indexer declares a `get`, a `set` or both, as in `{ get => this.lines[index]; }`."]
+    );
 }
 
 /// Spec section 19: an interface named with C#'s `I` prefix or an `Interface` suffix is a naming warning, as a name

@@ -14,7 +14,6 @@ use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
-use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::expander::StaticClassType;
@@ -874,11 +873,10 @@ where
 
     if binds_type_arguments {
         let declared_type_arguments = declared_type.flatten().and_then(|declared| {
-            let (name, type_arguments) = match declared.types.as_ref() {
-                [TAtomic::Object(TObject::Named(object))] => (object.name, object.type_parameters.as_ref()),
-                [TAtomic::Reference(TReference::Symbol { name, parameters, .. })] => (*name, parameters.as_ref()),
-                _ => return None,
+            let [TAtomic::Object(TObject::Named(object))] = declared.types.as_ref() else {
+                return None;
             };
+            let (name, type_arguments) = (object.name, object.type_parameters.as_ref());
             (context.codebase.class_key(name.as_bytes()) == metadata.name).then(|| type_arguments.cloned()).flatten()
         });
         let mut unfixed = vec![];
