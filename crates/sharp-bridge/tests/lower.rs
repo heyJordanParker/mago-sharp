@@ -25396,6 +25396,68 @@ fn a_call_of_a_built_in_that_returns_its_failure_runs_without_its_warning() {
 }
 
 /// ```php
+/// $count = $archive->count();
+/// $result = $method->invoke(null);
+/// $declared = @$method->getReturnType();
+/// return @$archive->close();
+/// ```
+///
+/// The standard library reads a built-in method's failure from its value too, so a call of one whose declared return
+/// type holds `false` or `null`, as `ZipArchive::close`'s `bool` and `ReflectionMethod::getReturnType`'s
+/// `?ReflectionType` do, runs without PHP's warning for the same failure.
+/// A method that cannot fail, as `ZipArchive::count`, and one that returns `mixed`, as `ReflectionMethod::invoke`,
+/// which runs the class's own code, keep their warnings.
+#[test]
+fn a_standard_library_call_of_a_built_in_method_that_returns_its_failure_runs_without_its_warning() {
+    let lowered = Lowered(common::checked(
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Packer.sharp",
+        "namespace Sharp;\n\nimport ReflectionMethod;\nimport ZipArchive;\n\nclass Packer\n{\n    public bool run(ZipArchive archive, ReflectionMethod method)\n    {\n        int count = archive.count();\n        Any? result = method.invoke(null);\n        Any? declared = method.getReturnType();\n        return archive.close();\n    }\n}\n",
+        &[],
+        lower,
+    ));
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "count"
+                METHOD_CALL
+                  VAR
+                    ZVAL "archive"
+                  ZVAL "count"
+                  ARG_LIST
+              ASSIGN
+                VAR
+                  ZVAL "result"
+                METHOD_CALL
+                  VAR
+                    ZVAL "method"
+                  ZVAL "invoke"
+                  ARG_LIST
+                    ZVAL null
+              ASSIGN
+                VAR
+                  ZVAL "declared"
+                SILENCE
+                  METHOD_CALL
+                    VAR
+                      ZVAL "method"
+                    ZVAL "getReturnType"
+                    ARG_LIST
+              RETURN
+                SILENCE
+                  METHOD_CALL
+                    VAR
+                      ZVAL "archive"
+                    ZVAL "close"
+                    ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
 /// return \Vendor\Pdf\DEFAULT_DPI + \PDF_VERSION;
 /// ```
 ///
@@ -25823,6 +25885,75 @@ fn an_imported_method_s_body_calls_the_php_function_it_names() {
               ARG_LIST
                 VAR
                   ZVAL "microseconds"
+        "#}
+    );
+}
+
+/// ```php
+/// return \Sharp\Internal\returned((${'failure#1'} = @\hex2bin($hex)) === false ? null : ${'failure#1'}, …);
+/// return \is_numeric($text);
+/// ```
+///
+/// Spec section 24: an `[Import]` result that holds `null` and no `false` reads the `false` a built-in returns for its
+/// failure, as `hex2bin`'s `string|false`, as `null`, and the call runs without PHP's warning for that failure. A
+/// result that holds a `bool` keeps PHP's `false`.
+#[test]
+fn an_imported_method_reads_its_function_s_false_as_null_where_its_result_is_nullable() {
+    let words = Lowered::with(
+        "namespace App.Tenant;\n\nimport Sharp.Interop.Import;\n\npublic static class Words\n{\n    [Import(\"hex2bin\")]\n    public static string? bytes(string hex);\n\n    [Import(\"is_numeric\")]\n    public static bool? numeric(string text);\n}\n",
+        &[IMPORT_LIBRARY],
+    );
+
+    let call = |name: &str| {
+        let body = words.child(words.method_named(name), 2);
+
+        words.render(words.child(body, words.nodes()[body as usize].child_count - 1))
+    };
+
+    assert_eq!(
+        call("bytes"),
+        indoc! {r#"
+            RETURN
+              CALL
+                ZVAL "Sharp\\Internal\\returned"
+                ARG_LIST
+                  CONDITIONAL [1]
+                    BINARY_OP [16]
+                      ASSIGN
+                        VAR
+                          ZVAL "failure#1"
+                        SILENCE
+                          CALL
+                            ZVAL "hex2bin"
+                            ARG_LIST
+                              VAR
+                                ZVAL "hex"
+                      ZVAL false
+                    ZVAL null
+                    VAR
+                      ZVAL "failure#1"
+                  ZVAL null
+                  ZVAL ""
+                  ZVAL "string?"
+                  ZVAL "hex2bin()"
+        "#}
+    );
+    assert_eq!(
+        call("numeric"),
+        indoc! {r#"
+            RETURN
+              CALL
+                ZVAL "Sharp\\Internal\\returned"
+                ARG_LIST
+                  CALL
+                    ZVAL "is_numeric"
+                    ARG_LIST
+                      VAR
+                        ZVAL "text"
+                  ZVAL null
+                  ZVAL ""
+                  ZVAL "bool?"
+                  ZVAL "is_numeric()"
         "#}
     );
 }

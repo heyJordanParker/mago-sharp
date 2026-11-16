@@ -824,7 +824,9 @@ where
 /// Spec section 32: refuses `call`, a plain PHP call in PHP# code, at `span` when a value of a class a module binds
 /// comes out of it: its result type names one, or `narrowed`, the classes PHP# code narrows its result to with `as`
 /// or `is`, names one. A bound class reaches code only through injection, a constructor or a method parameter, as
-/// Dagger and Angular hand a bound class only to what they build.
+/// Dagger and Angular hand a bound class only to what they build. The one place plain PHP gives one is the expression
+/// of the binding that binds it, when it is a plain PHP class: there a framework's object enters the container, as
+/// C#'s `services.AddScoped<T>(sp => …)` adapts one.
 pub(crate) fn report_bound_from_plain_php<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
@@ -851,8 +853,14 @@ pub(crate) fn report_bound_from_plain_php<A>(
             _ => None,
         })
     });
+    let binding = enclosing_binding(codebase, span);
+    let adapted = |class: &Word| {
+        binding.is_some_and(|binding| binds(binding, class.as_bytes()))
+            && codebase.get_class_like(class.as_bytes()).is_some_and(|class| !class.flags.is_sharp())
+    };
     let Some((class, module)) = returned
         .chain(narrowed.iter().copied())
+        .filter(|class| !adapted(class))
         .find_map(|class| Some((class, bound_module(codebase, class.as_bytes())?)))
     else {
         return;
@@ -876,10 +884,24 @@ pub(crate) fn report_bound_from_plain_php<A>(
 
 /// The base or environment module that binds the class named `class`, spec section 32.
 fn bound_module<'codebase>(codebase: &'codebase CodebaseMetadata, class: &[u8]) -> Option<&'codebase ModuleMetadata> {
-    codebase.modules.iter().filter(|module| module.kind != ModuleKind::Test).find(|module| {
-        module.bindings.iter().any(|binding| {
-            binding.service.type_union.clone().without_readonly().get_id().as_bytes().eq_ignore_ascii_case(class)
-        })
+    codebase
+        .modules
+        .iter()
+        .filter(|module| module.kind != ModuleKind::Test)
+        .find(|module| module.bindings.iter().any(|binding| binds(binding, class)))
+}
+
+/// Whether `binding`'s service is the class named `class`.
+fn binds(binding: &BindingMetadata, class: &[u8]) -> bool {
+    binding.service.type_union.clone().without_readonly().get_id().as_bytes().eq_ignore_ascii_case(class)
+}
+
+/// The binding whose expression holds `span`, a lambda in it included, spec section 32.
+pub(crate) fn enclosing_binding(codebase: &CodebaseMetadata, span: Span) -> Option<&BindingMetadata> {
+    codebase.modules.iter().flat_map(|module| &module.bindings).find(|binding| {
+        matches!(binding.value, BindingValueMetadata::Expression(_))
+            && binding.span.file_id == span.file_id
+            && binding.span.contains(&span.start)
     })
 }
 

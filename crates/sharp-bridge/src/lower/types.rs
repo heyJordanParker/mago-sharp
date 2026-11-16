@@ -2073,17 +2073,23 @@ impl<'analysis> Types<'analysis> {
         }
     }
 
-    /// Whether `function`, a plain PHP function, is one of PHP's built-ins whose declared return type holds its failure,
-    /// `false` or `null`, as `hex2bin` returns `string|false`. PHP# reads the failure from that value, so PHP's warning
-    /// for the same failure only repeats it, and the call runs without it. A built-in that takes a function, as
-    /// `call_user_func` and `array_reduce` do, runs that function's code inside the call, whose warnings are no failure of
-    /// the built-in, so it keeps its warnings, as a plain PHP library's own function does. The engine's own functions,
-    /// under `Sharp\Internal`, throw where they fail.
-    pub(crate) fn returns_its_failure(&self, function: Word) -> bool {
-        let engine = function.as_bytes().get(..15).is_some_and(|root| root.eq_ignore_ascii_case(b"sharp\\internal\\"));
+    /// Whether `callee`, a plain PHP function or method, is one of PHP's built-ins whose declared return type holds its
+    /// failure, `false` or `null`, as `hex2bin` returns `string|false` and `ZipArchive::close` returns `bool`. PHP# reads
+    /// the failure from that value, so PHP's warning for the same failure only repeats it, and the call runs without it.
+    /// A built-in that takes a function, as `call_user_func` and `array_reduce` do, runs that function's code inside the
+    /// call, whose warnings are no failure of the built-in, so it keeps its warnings, as a plain PHP library's own
+    /// function does. A method that returns `mixed`, as `ReflectionMethod::invoke` and
+    /// `ReflectionParameter::getDefaultValue` do, runs the class's own code in the call, so it keeps its warnings too.
+    /// The engine's own functions, under `Sharp\Internal`, throw where they fail.
+    pub(crate) fn returns_its_failure(&self, callee: &FunctionLikeIdentifier) -> bool {
+        let engine = matches!(
+            callee,
+            FunctionLikeIdentifier::Function(function)
+                if function.as_bytes().get(..15).is_some_and(|root| root.eq_ignore_ascii_case(b"sharp\\internal\\"))
+        );
 
         !engine
-            && self.codebase.get_function(function.as_bytes()).is_some_and(|metadata| {
+            && self.codebase.get_function_like(callee).is_some_and(|metadata| {
                 metadata.flags.is_built_in()
                     && !metadata.parameters.iter().any(|parameter| {
                         [parameter.get_type_declaration_metadata(), parameter.get_type_metadata()]
@@ -2097,12 +2103,25 @@ impl<'analysis> Types<'analysis> {
                         .or(metadata.return_type_metadata.as_ref())
                         .is_some_and(|returned| {
                             returned.type_union.types.iter().any(|atomic| match atomic {
-                                TAtomic::Null | TAtomic::Mixed(_) => true,
+                                TAtomic::Null => true,
+                                TAtomic::Mixed(_) => matches!(callee, FunctionLikeIdentifier::Function(_)),
                                 TAtomic::Scalar(scalar) => scalar.is_false() || scalar.is_general_bool(),
                                 _ => false,
                             })
                         })
             })
+    }
+
+    /// Whether the call `call` runs one plain PHP method that [`Self::returns_its_failure`] finds, as the standard
+    /// library's `this.archive.close()` runs `ZipArchive::close`.
+    pub(crate) fn runs_method_returning_its_failure(&self, call: &Expression) -> bool {
+        let mut callees = self.artifacts.get_callees(call);
+
+        matches!(
+            (callees.next(), callees.next()),
+            (Some(CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(..), .. }), None)
+                if self.returns_its_failure(callee)
+        )
     }
 
     /// The full name of the plain PHP constant the read `read` reaches through its namespace, as `Pdf.DEFAULT_DPI` reads

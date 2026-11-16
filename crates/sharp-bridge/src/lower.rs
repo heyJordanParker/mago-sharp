@@ -5,6 +5,7 @@ use mago_allocator::LocalArena;
 use mago_analyzer::CollectionKind;
 use mago_analyzer::artifacts::MemberCall;
 use mago_codex::defaults_trait_name;
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::BindingValueMetadata;
@@ -3624,7 +3625,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// function `import` names, with each argument and the result crossing as any plain PHP value does. An argument
     /// whose parameter's type [`Self::passes_as_array`] passes as an array passes as the PHP array plain PHP receives, and the result is read as the method's result type, checked by
     /// `\Sharp\Internal\returned`, whose error names the function. A function PHP doesn't declare throws PHP's error
-    /// that names it, at the first call.
+    /// that names it, at the first call. A result type that holds `null` and no `false` reads the `false` a built-in
+    /// returns for its failure as `null`, spec section 24, as [`Types::returns_its_failure`] finds one, so the call runs
+    /// without PHP's warning for that failure: `($failure#1 = @\file_get_contents($path)) === false ? null : $failure#1`.
     fn imported_call(&mut self, method: &Method, import: (Word, Option<(String, String)>)) -> u32 {
         let (function, check) = import;
         let line = self.line(method.name.span);
@@ -3650,6 +3653,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if !method.returns_value() {
             return call;
         }
+        let failure_is_null = method.return_type_hint.as_ref().is_some_and(|returned| {
+            let declared = self.types.declared_type(&returned.hint);
+
+            declared.can_be_null() && !declared.accepts_false()
+        }) && self.types.returns_its_failure(&FunctionLikeIdentifier::Function(function));
+        let call = if failure_is_null {
+            self.temporaries += 1;
+            let held = format!("failure#{}", self.temporaries).into_bytes();
+            let silenced = self.node(SHARP_AST_SILENCE, 0, line, &[call]);
+            let variable = self.variable(method.name.span, &held);
+            let assigned = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, silenced]);
+            let r#false = self.zval(line, sharp_value::SHARP_FALSE, |_| {});
+            let failed = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[assigned, r#false]);
+            let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+            let value = self.variable(method.name.span, &held);
+            self.temporaries -= 1;
+
+            self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[failed, null, value])
+        } else {
+            call
+        };
         let result = match check {
             Some(check) => {
                 let implementer = self.zval(line, sharp_value::SHARP_NULL, |_| {});
@@ -8626,14 +8650,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `object.m()` is an instance call, or a call of the function in the property `m` when the checker found that
     /// property, as spec section 14 calls one. A call of a standard library method with an inline form runs that form.
     /// `Pdf.render(html)` and `Foundation.abort(404)` call the plain PHP function the checker found, spec section 23,
-    /// `\Vendor\Pdf\render` and `\abort`, which takes each `Map` and `Set` as [`Self::call`] crosses them.
+    /// `\Vendor\Pdf\render` and `\abort`, which takes each `Map` and `Set` as [`Self::call`] crosses them. A built-in
+    /// function or a standard library call of a built-in method that [`Types::returns_its_failure`] finds runs under
+    /// `@`, as `@$this->archive->close()`.
     fn method_call(&mut self, expression: &Expression, call: &MethodCall) -> u32 {
         if let Expression::SuperOf(_) = call.object {
             return self.super_of_call(expression, call);
         }
         if let Some(function) = self.types.namespace_function(expression) {
             let line = self.line(call);
-            let quiet = self.types.returns_its_failure(function);
+            let quiet = self.types.returns_its_failure(&FunctionLikeIdentifier::Function(function));
             // An engine function parameter that takes what the call gives gets it from this call, or in an inline
             // form a slot the inlined call fills.
             let slots = self.types.call_slots(function, call);
@@ -8725,6 +8751,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let type_arguments = if static_property_call { None } else { self.types.call_type_arguments(expression) };
         let parameters = self.types.call_parameters(expression);
         let callee = self.types.sharp_callee(expression);
+        // A built-in method's failure the standard library reads from its value, as `ZipArchive::close`'s `false`,
+        // runs without PHP's warning for it, as a built-in function's does.
+        let quiet = !property_call
+            && !static_property_call
+            && self.types.codebase().is_standard_library_file(call.span().file_id)
+            && self.types.runs_method_returning_its_failure(expression);
 
         self.call(Some(call.span()), &call.argument_list, type_arguments, parameters, callee, |this, arguments| {
             if property_call {
@@ -8738,8 +8770,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 return this.node(SHARP_AST_CALL, 0, line, &[property, arguments]);
             }
+            let call = this.node(kind, 0, line, &[object, method, arguments]);
 
-            this.node(kind, 0, line, &[object, method, arguments])
+            if quiet { this.node(SHARP_AST_SILENCE, 0, line, &[call]) } else { call }
         })
     }
 

@@ -29843,6 +29843,40 @@ fn a_reflection_call_read_or_write_may_have_every_effect() {
     );
 }
 
+/// Spec sections 25 and 29: `Property.isInitialized` and `Property.hasDefaultValue` read PHP's reflection only through
+/// members that run no code a project wrote, which `Builtins.sharp` declares pure, so a method held to `uses Database`
+/// calls them. `Property.get` runs a computed property's `get`, and `Property.defaultValue` runs an initial value that
+/// is not constant, so each may still have every effect.
+#[test]
+fn a_reflection_read_that_runs_no_project_code_is_pure() {
+    let ledger = (
+        "app/Shop/Ledger.sharp",
+        "namespace App.Shop;\n\npublic interface Ledger\n{\n    bool check() uses Database;\n}\n",
+    );
+    let loaded = (
+        "app/Shop/Loaded.sharp",
+        "namespace App.Shop;\n\npublic class Loaded : Ledger\n{\n    public int count { get; set; } = 0;\n\n    public bool check()\n    {\n        const property = typeof(Loaded).properties()[0];\n\n        return property.isInitialized(this) && property.hasDefaultValue;\n    }\n}\n",
+    );
+    let computed = (
+        "app/Shop/Computed.sharp",
+        "namespace App.Shop;\n\npublic class Computed : Ledger\n{\n    public int doubled => 2;\n\n    public bool check() => typeof(Computed).properties()[0].get(this) is int;\n}\n",
+    );
+    let defaulted = (
+        "app/Shop/Defaulted.sharp",
+        "namespace App.Shop;\n\npublic class Defaulted : Ledger\n{\n    public int count { get; set; } = 0;\n\n    public bool check() => typeof(Defaulted).properties()[0].defaultValue() is int;\n}\n",
+    );
+    let [a, b, c, d, e, f] = REFLECTION;
+
+    assert_eq!(issues(loaded, &[ledger, a, b, c, d, e, f]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[loaded, computed, defaulted, ledger, a, b, c, d, e, f]),
+        [
+            "app/Shop/Computed.sharp:7:28 incompatible-effects: `Computed.check` reaches `Property.get`, which may have every effect, so `uses Database` on `Ledger.check` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+            "app/Shop/Defaulted.sharp:7:28 incompatible-effects: `Defaulted.check` reaches `Property.defaultValue`, which may have every effect, so `uses Database` on `Ledger.check` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+}
+
 /// Spec section 24: a string names a class-like by its key, so plain PHP's `'Demo\BOX'` is never the PHP# class
 /// `Demo\Box`'s name, on either side of `===`, while `'lib\words'` is the plain `Lib\Words`'s.
 #[test]
@@ -32273,6 +32307,73 @@ fn a_bound_class_reaches_code_only_through_injection() {
         "`StoreService` is bound in `App.Shop`'s module, so it reaches code through a constructor or a parameter.";
 
     assert_eq!(compile_errors(("app/Shop/Checkout.sharp", checkout), &others), [message, message, message]);
+}
+
+/// Spec section 32: a binding's expression is where a framework's object enters, as C#'s
+/// `services.AddScoped<T>(sp => …)` adapts one, so a plain PHP call in it, or an `as` on one, gives the plain PHP class
+/// that binding binds. A call there that gives another bound class is refused, as is one that gives a PHP# class,
+/// which only the container builds, and as is the same call in a method. Each row is `App.Shop`'s bindings, whether a
+/// method of `Desk` is analyzed in place of the module, and the classes its refusals name.
+#[test]
+fn a_binding_takes_the_plain_php_class_it_binds_from_plain_php() {
+    let class = |name: &str, body: &str| {
+        (
+            leak(format!("src/Framework/{name}.php")),
+            leak(format!("<?php\n\nnamespace Framework;\n\nfinal class {name}\n{{\n{body}}}\n")),
+        )
+    };
+    let make = "    public function make(string $id): object\n    {\n        return new \\stdClass();\n    }\n\n    public function worker(): Worker\n    {\n        return new Worker();\n    }\n";
+    let framework = "<?php\n\nnamespace Lib;\n\nfunction request(): \\Framework\\Request\n{\n    return new \\Framework\\Request();\n}\n\nfunction app(): \\Framework\\Application\n{\n    return new \\Framework\\Application();\n}\n\nfunction checkout(): \\App\\Shop\\Checkout\n{\n    return new \\App\\Shop\\Checkout();\n}\n";
+    let checkout = ("app/Shop/Checkout.sharp", "namespace App.Shop;\n\npublic class Checkout\n{\n}\n");
+    let desk = (
+        "app/Shop/Desk.sharp",
+        "namespace App.Shop;\n\nimport Lib;\n\npublic class Desk\n{\n    internal void serve()\n    {\n        const request = Lib.request();\n    }\n}\n",
+    );
+    let module = |members: &str| {
+        (
+            "app/Shop/Module.sharp",
+            leak(format!(
+                "namespace App.Shop;\n\nimport Lib;\nimport Framework.Request;\nimport Framework.Application;\nimport Framework.Migrator;\nimport Framework.Worker;\nimport RuntimeException;\n\nmodule\n{{\n{members}\n}}\n"
+            )),
+        )
+    };
+    let files = [
+        class("Request", ""),
+        class("Application", make),
+        class("Migrator", ""),
+        class("Worker", ""),
+        ("src/Lib/framework.php", framework),
+        checkout,
+    ];
+    let application = "    singleton Application = Lib.app();\n";
+
+    let refused: Vec<Vec<String>> = [
+        ("    scoped Request = Lib.request();", false),
+        (
+            leak(format!(
+                "{application}    singleton Migrator(Application app) = app.make(\"migrator\") as Migrator ?? throw new RuntimeException(\"migrator\");"
+            )),
+            false,
+        ),
+        (leak(format!("{application}    singleton Worker = Lib.app().worker();")), false),
+        ("    singleton Checkout = Lib.checkout();", false),
+        ("    scoped Request = Lib.request();", true),
+    ]
+    .into_iter()
+    .map(|(members, in_method)| {
+        let module = module(members);
+        let (analyzed, other) = if in_method { (desk, module) } else { (module, desk) };
+        let others: Vec<_> = files.iter().copied().chain([other]).collect();
+        compile_errors(analyzed, &others)
+    })
+    .collect();
+    let bound = |class: &str| {
+        vec![format!(
+            "`{class}` is bound in `App.Shop`'s module, so it reaches code through a constructor or a parameter."
+        )]
+    };
+
+    assert_eq!(refused, [vec![], vec![], bound("Application"), bound("Checkout"), bound("Request")]);
 }
 
 /// Spec section 32: a binding's value is a class the container can build that is its service, a list of such classes

@@ -8,7 +8,6 @@ use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
-use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
@@ -75,6 +74,7 @@ use crate::resolver::class_name::type_parameter_of_no_class;
 use crate::statement::class_like::requiring_class;
 use crate::statement::function_like::get_this_type;
 use crate::statement::function_like::known_type_or_error;
+use crate::statement::module::enclosing_binding;
 use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
@@ -296,12 +296,7 @@ fn check_foreign_outside_module<A>(
     else {
         return;
     };
-    let in_binding = context.codebase.modules.iter().flat_map(|module| &module.bindings).any(|binding| {
-        matches!(binding.value, BindingValueMetadata::Expression(_))
-            && binding.span.file_id == span.file_id
-            && binding.span.contains(&span.start)
-    });
-    if in_binding {
+    if enclosing_binding(context.codebase, span).is_some() {
         return;
     }
 
