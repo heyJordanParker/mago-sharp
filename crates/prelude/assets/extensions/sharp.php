@@ -402,6 +402,14 @@ final class AcceptsAnyEffect {}
 final class StartsListener {}
 
 /**
+ * Marks a standard library generic method that creates the attributes of its type argument, as `attributes<T>()` of
+ * `Class<T>` and `Property` does, so a call whose type argument is a PHP# class is pure: the checker holds every PHP#
+ * attribute's constructor and initial values to no effects, since an attribute is data.
+ */
+#[\Attribute(\Attribute::TARGET_METHOD)]
+final class CreatesAttributes {}
+
+/**
  * Marks the standard library interface every `emit` hands its event to, as `Dispatcher` is, so the app's binding of it
  * is its dispatcher. The checker, the compile command and the lowering of `emit` read the mark, so none copies the
  * library's name.
@@ -729,6 +737,24 @@ function read(?object $receiver, string $class, string $property): mixed {}
  * @throws \InvalidArgumentException
  */
 function write(?object $receiver, string $class, string $property, mixed $value, bool $beforeLoad = false): void {}
+
+/**
+ * The value the storage of the field or auto-property `$field` that `$class` declares holds on `$receiver`, or the
+ * static `$field`'s, reached as a direct read from the caller's code would reach it, with no accessor, no initializer
+ * of a lazy object and no initial value of statics run. The standard library's `Field.get` returns it.
+ *
+ * @throws \InvalidArgumentException
+ */
+function readField(?object $receiver, string $class, string $field): mixed {}
+
+/**
+ * Writes `$value` into the storage of the field or auto-property `$field` that `$class` declares on `$receiver`, or
+ * into the static `$field`, as a direct write from the caller's code would reach it, with no accessor, no initializer of
+ * a lazy object and no initial value of statics run. The standard library's `Field.set` runs it.
+ *
+ * @throws \InvalidArgumentException
+ */
+function writeField(?object $receiver, string $class, string $field, mixed $value): void {}
 
 /**
  * The listeners of `$event`, one function per listener that takes the event, as `emit` gives them to the dispatcher.

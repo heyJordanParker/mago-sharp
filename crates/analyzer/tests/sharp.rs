@@ -29691,10 +29691,14 @@ fn a_static_field_holding_a_foreign_object_is_refused() {
 }
 
 /// The standard library's reflection of a class's members, spec section 25, as a project installs it.
-const REFLECTION: [(&str, &str); 6] = [
+const REFLECTION: [(&str, &str); 7] = [
     (
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ClassMembers.sharp",
         include_str!("../../../../composer/library/Sharp/ClassMembers.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Field.sharp",
+        include_str!("../../../../composer/library/Sharp/Field.sharp"),
     ),
     (
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Method.sharp",
@@ -29854,10 +29858,10 @@ fn a_reflection_call_read_or_write_may_have_every_effect() {
         "app/Shop/Free.sharp",
         "namespace App.Shop;\n\npublic class Free\n{\n    public void run(Till till) { typeof(Till).properties()[0].set(till, typeof(Till).methods()[0].invoke(till, [1])); }\n}\n",
     );
-    let [a, b, c, d, e, f] = REFLECTION;
+    let [a, b, c, d, e, f, g] = REFLECTION;
 
     assert_eq!(
-        effect_issues(&[calling, reading, writing, free, audit, till, a, b, c, d, e, f]),
+        effect_issues(&[calling, reading, writing, free, audit, till, a, b, c, d, e, f, g]),
         [
             "app/Shop/Calling.sharp:5:34 incompatible-effects: `Calling.run` reaches `Method.invoke`, which may have every effect, so the pure `Audit.run` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
             "app/Shop/Reading.sharp:5:34 incompatible-effects: `Reading.run` reaches `Property.get`, which may have every effect, so the pure `Audit.run` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
@@ -29888,14 +29892,120 @@ fn a_reflection_read_that_runs_no_project_code_is_pure() {
         "app/Shop/Defaulted.sharp",
         "namespace App.Shop;\n\npublic class Defaulted : Ledger\n{\n    public int count { get; set; } = 0;\n\n    public bool check() => typeof(Defaulted).properties()[0].defaultValue() is int;\n}\n",
     );
-    let [a, b, c, d, e, f] = REFLECTION;
+    let [a, b, c, d, e, f, g] = REFLECTION;
 
-    assert_eq!(issues(loaded, &[ledger, a, b, c, d, e, f]), Vec::<String>::new());
+    assert_eq!(issues(loaded, &[ledger, a, b, c, d, e, f, g]), Vec::<String>::new());
     assert_eq!(
-        effect_issues(&[loaded, computed, defaulted, ledger, a, b, c, d, e, f]),
+        effect_issues(&[loaded, computed, defaulted, ledger, a, b, c, d, e, f, g]),
         [
             "app/Shop/Computed.sharp:7:28 incompatible-effects: `Computed.check` reaches `Property.get`, which may have every effect, so `uses Database` on `Ledger.check` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
             "app/Shop/Defaulted.sharp:7:28 incompatible-effects: `Defaulted.check` reaches `Property.defaultValue`, which may have every effect, so `uses Database` on `Ledger.check` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+}
+
+/// Spec sections 6, 25 and 29: a field is storage, and so is an auto-property's that is neither `virtual` nor
+/// `abstract`, so `Field.get`, `Field.set` and `Field.isInitialized` run no code a project wrote, and a method held to
+/// `uses Database` reads and writes a declared field and an auto-property's storage through `fields()`. `Field` reads
+/// through members `Property` never calls, so `Property.get`, `Property.set` and `Property.defaultValue()` still may
+/// have every effect, and so does `Field.defaultValue()`, which runs an initial value that is not constant.
+#[test]
+fn a_field_read_or_write_runs_no_project_code() {
+    let store = (
+        "app/Shop/Store.sharp",
+        "namespace App.Shop;\n\npublic interface Store\n{\n    bool sync(Row row) uses Database;\n}\n",
+    );
+    let row = (
+        "app/Shop/Row.sharp",
+        "namespace App.Shop;\n\npublic class Row\n{\n    private int total = 0;\n\n    public string name { get; set; } = \"\";\n\n    public virtual int level { get; set; } = 1;\n}\n",
+    );
+    let stored = (
+        "app/Shop/FieldStore.sharp",
+        "namespace App.Shop;\n\npublic class FieldStore : Store\n{\n    public bool sync(Row row)\n    {\n        const fields = typeof(Row).fields();\n        fields[0].set(row, 2);\n        fields[1].set(row, \"ada\");\n\n        return fields[0].get(row) is int && fields[1].get(row) is string && fields[1].isInitialized(row);\n    }\n}\n",
+    );
+    let reading = (
+        "app/Shop/PropertyRead.sharp",
+        "namespace App.Shop;\n\npublic class PropertyRead : Store\n{\n    public bool sync(Row row) => typeof(Row).properties()[0].get(row) is string;\n}\n",
+    );
+    let writing = (
+        "app/Shop/PropertyWrite.sharp",
+        "namespace App.Shop;\n\npublic class PropertyWrite : Store\n{\n    public bool sync(Row row)\n    {\n        typeof(Row).properties()[0].set(row, \"ada\");\n\n        return true;\n    }\n}\n",
+    );
+    let defaulted = (
+        "app/Shop/PropertyDefault.sharp",
+        "namespace App.Shop;\n\npublic class PropertyDefault : Store\n{\n    public bool sync(Row row) => typeof(Row).properties()[0].defaultValue() is string;\n}\n",
+    );
+    let field_default = (
+        "app/Shop/FieldDefault.sharp",
+        "namespace App.Shop;\n\npublic class FieldDefault : Store\n{\n    public bool sync(Row row) => typeof(Row).fields()[0].defaultValue() is int;\n}\n",
+    );
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(issues(stored, &[store, row, a, b, c, d, e, f, g]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[stored, reading, writing, defaulted, field_default, store, row, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/PropertyRead.sharp:5:34 incompatible-effects: `PropertyRead.sync` reaches `Property.get`, which may have every effect, so `uses Database` on `Store.sync` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+            "app/Shop/PropertyWrite.sharp:7:9 incompatible-effects: `PropertyWrite.sync` reaches `Property.set`, which may have every effect, so `uses Database` on `Store.sync` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+            "app/Shop/PropertyDefault.sharp:5:34 incompatible-effects: `PropertyDefault.sync` reaches `Property.defaultValue`, which may have every effect, so `uses Database` on `Store.sync` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+            "app/Shop/FieldDefault.sharp:5:34 incompatible-effects: `FieldDefault.sync` reaches `Field.defaultValue`, which may have every effect, so `uses Database` on `Store.sync` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+}
+
+/// Spec sections 1, 25 and 29: an attribute is data, so the constructor a PHP# attribute class runs, its own or one it
+/// inherits, and its initial values have no effect, and each one that has one is refused naming it. So
+/// `attributes<Column>()` of a PHP# attribute class `Column` is pure on a class, a property, a field, a method and a
+/// parameter, and a method held to `uses Database` calls it. `attributes<Object>()` creates attributes of any class,
+/// plain PHP's included, so it still may have every effect.
+#[test]
+fn an_attribute_has_no_effects_so_reading_a_sharp_attribute_is_pure() {
+    let rows = (
+        "src/Lib/Rows.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Rows\n{\n    public function find(int $id): int\n    {\n        return $id;\n    }\n}\n",
+    );
+    let stub = ("app/Stubs/Rows.sharp", "namespace App.Stubs;\n\nimport Lib.Rows;\n\nextern Rows uses Database;\n");
+    let column = (
+        "app/Shop/Column.sharp",
+        "namespace App.Shop;\n\n[Attribute]\npublic class Column\n{\n    public Column(public string name { get; } = \"\") { }\n}\n",
+    );
+    let ledger = (
+        "app/Shop/Ledger.sharp",
+        "namespace App.Shop;\n\npublic interface Ledger\n{\n    int columns() uses Database;\n}\n",
+    );
+    let entry = (
+        "app/Shop/Entry.sharp",
+        "namespace App.Shop;\n\n[Column(\"entries\")]\npublic class Entry : Ledger\n{\n    [Column(\"total\")] public int total { get; set; } = 0;\n\n    public int columns()\n    {\n        const touch = typeof(Entry).methods()[1];\n\n        return typeof(Entry).attributes<Column>().count() + typeof(Entry).properties()[0].attributes<Column>().count()\n            + typeof(Entry).fields()[0].attributes<Column>().count() + touch.attributes<Column>().count()\n            + touch.parameters()[0].attributes<Column>().count();\n    }\n\n    [Column] public void touch([Column] int depth) { }\n}\n",
+    );
+    let loose = (
+        "app/Shop/Loose.sharp",
+        "namespace App.Shop;\n\npublic class Loose : Ledger\n{\n    public int columns() => typeof(Loose).attributes<Object>().count();\n}\n",
+    );
+    let indexed = (
+        "app/Shop/Indexed.sharp",
+        "namespace App.Shop;\n\nimport Lib.Rows;\n\n[Attribute]\npublic class Indexed\n{\n    public Indexed() { new Rows().find(1); }\n}\n",
+    );
+    let counted = (
+        "app/Shop/Counted.sharp",
+        "namespace App.Shop;\n\nimport Lib.Rows;\n\n[Attribute]\npublic class Counted\n{\n    public int count { get; } = new Rows().find(1);\n}\n",
+    );
+    let keyed = (
+        "app/Shop/Keyed.sharp",
+        "namespace App.Shop;\n\nimport Lib.Rows;\n\npublic class Keyed\n{\n    public Keyed() { new Rows().find(1); }\n}\n",
+    );
+    let unique = ("app/Shop/Unique.sharp", "namespace App.Shop;\n\n[Attribute]\npublic class Unique : Keyed\n{\n}\n");
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(issues(entry, &[column, ledger, a, b, c, d, e, f, g]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[
+            entry, loose, column, ledger, indexed, counted, keyed, unique, rows, stub, a, b, c, d, e, f, g
+        ]),
+        [
+            "app/Shop/Loose.sharp:5:29 incompatible-effects: `Loose.columns` reaches `ClassMembers.attributes`, which may have every effect, so `uses Database` on `Ledger.columns` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+            "app/Shop/Indexed.sharp:8:24 incompatible-effects: The constructor of `Indexed` calls `Rows.find`, which has the effect `Database`, and an attribute has no effects. Help: Give the attribute constants, and do the work in the code that reads it.",
+            "app/Shop/Counted.sharp:8:33 incompatible-effects: The initial value of `Counted.count` calls `Rows.find`, which has the effect `Database`, and an attribute has no effects. Help: Give the attribute constants, and do the work in the code that reads it.",
+            "app/Shop/Keyed.sharp:7:22 incompatible-effects: The constructor of `Keyed`, which the attribute `Unique` runs, calls `Rows.find`, which has the effect `Database`, and an attribute has no effects. Help: Give the attribute constants, and do the work in the code that reads it.",
         ]
     );
 }

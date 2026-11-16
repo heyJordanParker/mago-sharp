@@ -157,6 +157,80 @@ pub(crate) fn values_have_no_effects(
         .collect()
 }
 
+/// Spec section 1: an attribute is data, so creating one has no effect: the constructor a PHP# attribute class runs and
+/// the initial values of the class and of each class it extends have no effect, a plain PHP call no `extern` declares
+/// included, so reading a PHP# class's attributes with `attributes<T>()` is pure. A change of state is no effect. The
+/// refusal names the code and the effect: "The constructor of `Column` calls `Store.load`, which has the effect
+/// `Database`, and an attribute has no effects".
+pub(crate) fn attributes_have_no_effects(
+    effects: &Effects,
+    codebase: &CodebaseMetadata,
+    short_name_counts: &OnceCell<HashMap<String, u32>>,
+) -> IssueCollection {
+    effects
+        .bodies_with_effects()
+        .filter_map(|(body, member, imports, _, impurity)| {
+            let (class, code) = match body {
+                Body::Method(class, method) if method.as_bytes() == b"__construct" => (class, "constructor"),
+                Body::InitialValue(class, _) => (class, "initial value"),
+                _ => return None,
+            };
+            let declaring = codebase.get_class_like(class.as_bytes())?;
+            let attribute = created_attribute(codebase, declaring, code == "constructor")?;
+
+            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
+            let written = if code == "constructor" {
+                format!("`{}`", class_name(declaring.original_name))
+            } else {
+                format!("`{}`", display_sharp_member(class_name(declaring.original_name), member))
+            };
+            let runs = if attribute == declaring.original_name {
+                String::new()
+            } else {
+                format!(", which the attribute `{}` runs,", class_name(attribute))
+            };
+
+            Some(
+                Issue::error(format!(
+                    "The {code} of {written}{runs} {}, and an attribute has no effects.",
+                    impurity.describe(&class_name, &effect_name)
+                ))
+                .with_code(IssueCode::IncompatibleEffects.as_str())
+                .with_annotation(Annotation::primary(impurity.span).with_message("The effect comes from here."))
+                .with_note("Reflection creates an attribute each time code reads it, so reading one stays pure.")
+                .with_help("Give the attribute constants, and do the work in the code that reads it."),
+            )
+        })
+        .collect()
+}
+
+/// The PHP# attribute class whose creation runs `declaring`'s constructor, when `constructor` says so, or else its
+/// initial values: `declaring` itself, or else the first by name of the classes that extend it, which runs
+/// `declaring`'s constructor only when it declares none of its own.
+fn created_attribute(codebase: &CodebaseMetadata, declaring: &ClassLikeMetadata, constructor: bool) -> Option<Word> {
+    let creates = |attribute: &ClassLikeMetadata| {
+        attribute.flags.is_sharp()
+            && attribute.attribute_flags.is_some()
+            && (!constructor
+                || codebase.get_declaring_method_class(attribute.name.as_bytes(), b"__construct").is_some_and(|runs| {
+                    codebase.class_key(runs.as_bytes()) == codebase.class_key(declaring.name.as_bytes())
+                }))
+    };
+    if creates(declaring) {
+        return Some(declaring.original_name);
+    }
+    let mut descendants: Vec<&ClassLikeMetadata> = codebase
+        .get_all_descendants(declaring.name.as_bytes())
+        .iter()
+        .filter_map(|descendant| codebase.get_class_like(descendant.as_bytes()))
+        .filter(|descendant| creates(descendant))
+        .collect();
+    descendants.sort_by_key(|descendant| descendant.original_name.as_bytes());
+
+    descendants.first().map(|attribute| attribute.original_name)
+}
+
 /// Spec section 28: a law holds only over pure code, which is the code Lean reads.
 pub(crate) fn laws_must_be_pure(
     effects: &Effects,

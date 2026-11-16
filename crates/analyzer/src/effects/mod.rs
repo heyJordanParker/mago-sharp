@@ -547,6 +547,7 @@ impl Effects {
         issues.extend(check::implementations_must_fit_their_declarations(self, codebase, &short_name_counts));
         issues.extend(check::readonly_values_call_readonly_methods(self, codebase, &short_name_counts));
         issues.extend(check::values_have_no_effects(self, codebase, &short_name_counts));
+        issues.extend(check::attributes_have_no_effects(self, codebase, &short_name_counts));
 
         issues
     }
@@ -723,6 +724,14 @@ impl Effects {
             effects.first_item(body, |item| matches!(item, Item::Effect(effect) if effect.named().is_some()))
         })
         .map(|(body, member, imports, _, impurity)| (body, member, imports, impurity))
+    }
+
+    /// Each body that has an effect, a plain PHP call no `extern` declares included, and the first call that leads to
+    /// one, as [`Self::bodies_with`] gives them. A change of state is no effect.
+    fn bodies_with_effects(
+        &self,
+    ) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
+        self.bodies_with(|effects, body| effects.first_item(body, |item| matches!(item, Item::Effect(_))))
     }
 
     /// Each body that changes the object it runs on, and the write that leads to it, as [`Self::bodies_with`] gives

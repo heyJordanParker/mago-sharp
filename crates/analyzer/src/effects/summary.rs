@@ -16,6 +16,7 @@ use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
+use mago_names::CREATES_ATTRIBUTES;
 use mago_names::binding::Binding;
 use mago_names::binding::Local;
 use mago_names::binding::php_variable_name;
@@ -37,6 +38,7 @@ use mago_syntax::cst::Emit;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForOf;
 use mago_syntax::cst::FunctionLikeParameterList;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Is;
 use mago_syntax::cst::LawProof;
@@ -45,6 +47,7 @@ use mago_syntax::cst::LocalTarget;
 use mago_syntax::cst::NullSafePropertyAccess;
 use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::TypeArgumentList;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPostfix;
 use mago_syntax::cst::UnaryPrefix;
@@ -907,12 +910,16 @@ where
 
     fn call(&mut self, call: &'ast CallExpression<'arena>) {
         let span = call.span();
-        let (receiver, arguments, function) = match call {
-            CallExpression::Function(call) => (None, &call.argument_list, Some(call.function)),
-            CallExpression::NullSafeFunction(call) => (None, &call.argument_list, Some(call.function)),
-            CallExpression::Method(call) => (Some(call.object), &call.argument_list, None),
-            CallExpression::NullSafeMethod(call) => (Some(call.object), &call.argument_list, None),
-            CallExpression::StaticMethod(call) => (None, &call.argument_list, None),
+        let (receiver, arguments, function, type_arguments) = match call {
+            CallExpression::Function(call) => (None, &call.argument_list, Some(call.function), None),
+            CallExpression::NullSafeFunction(call) => (None, &call.argument_list, Some(call.function), None),
+            CallExpression::Method(call) => {
+                (Some(call.object), &call.argument_list, None, call.type_arguments.as_ref())
+            }
+            CallExpression::NullSafeMethod(call) => {
+                (Some(call.object), &call.argument_list, None, call.type_arguments.as_ref())
+            }
+            CallExpression::StaticMethod(call) => (None, &call.argument_list, None, None),
         };
 
         // A call of a lambda written in this body runs the lambda here. A call of any other function value, such as a
@@ -934,15 +941,17 @@ where
             }
         }
 
-        self.call_targets(span, receiver, arguments);
+        self.call_targets(span, receiver, arguments, type_arguments);
     }
 
-    /// Records the functions and methods the analysis resolved the call at `span` to, with `receiver` and `arguments`.
+    /// Records the functions and methods the analysis resolved the call at `span` to, with `receiver`, `arguments` and
+    /// the `type_arguments` the call writes.
     fn call_targets(
         &mut self,
         span: Span,
         receiver: Option<&'ast Expression<'arena>>,
         arguments: &'ast ArgumentList<'arena>,
+        type_arguments: Option<&'ast TypeArgumentList<'arena>>,
     ) {
         let artifacts = self.artifacts;
         let Some(targets) = artifacts.call_targets.get(&(span.start.offset, span.end.offset)) else {
@@ -960,6 +969,11 @@ where
                     callee: FunctionLikeIdentifier::Method(declaring_class, method_name),
                     class: named_class,
                 } => {
+                    if type_arguments
+                        .is_some_and(|written| self.creates_attributes(declaring_class, method_name, written))
+                    {
+                        continue;
+                    }
                     let class = named_class.unwrap_or(declaring_class);
                     self.method_call(declaring_class, method_name, class, span, receiver, arguments);
                 }
@@ -975,6 +989,35 @@ where
                 | CallTarget::MagicMethod { .. } => {}
             }
         }
+    }
+
+    /// Whether the call of `method` of `class` with the type arguments `written` creates only attributes PHP# code
+    /// writes, which have no effects, spec section 1: the standard library marks the method `CreatesAttributes`, as
+    /// `Class<T>.attributes<TAttribute>()`, and its one type argument names a PHP# class-like that no plain PHP class
+    /// extends or implements, since the attributes it reads are of the class or of one that extends or implements it,
+    /// and whose constructor, each one's own or inherited, PHP# declares.
+    fn creates_attributes(&self, class: Word, method: Word, written: &TypeArgumentList<'arena>) -> bool {
+        let codebase = self.codebase();
+        let marked = codebase
+            .get_method(class.as_bytes(), method.as_bytes())
+            .is_some_and(|method| method.has_attribute(codebase, CREATES_ATTRIBUTES.as_bytes()));
+        let [Hint::Identifier(attribute)] = written.arguments.as_slice() else {
+            return false;
+        };
+        if !marked || self.context.resolved_names.is_type_parameter(attribute) {
+            return false;
+        }
+        let attribute = self.context.resolved_names.get(attribute);
+        let is_sharp = |class: &[u8]| codebase.get_class_like(class).is_some_and(|class| class.flags.is_sharp());
+        let written_in_sharp = |class: &[u8]| {
+            is_sharp(class)
+                && codebase
+                    .get_declaring_method_class(class, b"__construct")
+                    .is_none_or(|constructor| is_sharp(constructor.as_bytes()))
+        };
+
+        written_in_sharp(attribute)
+            && codebase.get_all_descendants(attribute).iter().all(|descendant| written_in_sharp(descendant.as_bytes()))
     }
 
     /// Records a call of the property `property` of `class` that holds a function. A PHP# class declares it with a
@@ -1158,7 +1201,7 @@ where
 
     /// Records `: super(…)`: the call of the base class's constructor the analysis resolved at its span.
     fn constructor_initializer(&mut self, initializer: &'ast ConstructorInitializer<'arena>) {
-        self.call_targets(initializer.span(), None, &initializer.argument_list);
+        self.call_targets(initializer.span(), None, &initializer.argument_list, None);
     }
 
     /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the

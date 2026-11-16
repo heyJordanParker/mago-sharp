@@ -74,6 +74,12 @@ pub const ACCEPTS_ANY_EFFECT: &str = "Sharp\\Internal\\AcceptsAnyEffect";
 /// as `Events.on`.
 pub const STARTS_LISTENER: &str = "Sharp\\Internal\\StartsListener";
 
+/// The mark of a generic method that creates the attributes of its type argument, as `Class<T>.attributes<T>()`.
+///
+/// A call whose type argument is a PHP# class is pure, spec section 1: every PHP# attribute's constructor and initial
+/// values have no effects.
+pub const CREATES_ATTRIBUTES: &str = "Sharp\\Internal\\CreatesAttributes";
+
 /// The mark of the interface every `emit` hands its event to, as `Dispatcher`.
 ///
 /// The app's binding of the interface is its dispatcher, spec section 15. The checker, the compile command and the
