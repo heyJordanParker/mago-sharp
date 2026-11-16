@@ -29953,6 +29953,35 @@ fn a_field_read_or_write_runs_no_project_code() {
     );
 }
 
+/// Spec sections 23 and 29: PHP# calls a class's static method as `Rows.find(1)`, a method call, so the effect summary
+/// records it with its effect as it records an instance call, with the type arguments a method call writes. PHP's
+/// `Rows::find(1)` is a parse error in a `.sharp` file, so no body the summary records holds one.
+#[test]
+fn a_static_call_is_a_method_call_that_carries_its_effect() {
+    let rows = (
+        "src/Lib/Rows.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Rows\n{\n    public static function find(int $id): int\n    {\n        return $id;\n    }\n}\n",
+    );
+    let stub = ("app/Stubs/Rows.sharp", "namespace App.Stubs;\n\nimport Lib.Rows;\n\nextern Rows uses Database;\n");
+    let ledger = ("app/Shop/Ledger.sharp", "namespace App.Shop;\n\npublic interface Ledger\n{\n    int count();\n}\n");
+    let counter = (
+        "app/Shop/Counter.sharp",
+        "namespace App.Shop;\n\nimport Lib.Rows;\n\npublic class Counter : Ledger\n{\n    public int count() => Rows.find(1);\n}\n",
+    );
+    let colons = "namespace App.Shop;\n\nimport Lib.Rows;\n\npublic class Colons\n{\n    public int count() => Rows::find(1);\n}\n";
+
+    assert_eq!(
+        effect_issues(&[counter, ledger, rows, stub]),
+        [
+            "app/Shop/Counter.sharp:7:27 incompatible-effects: `Counter.count` calls `Rows.find`, which has the effect `Database`, so the pure `Ledger.count` cannot accept it."
+        ]
+    );
+
+    let arena = LocalArena::new();
+    let file = File::ephemeral(Cow::Borrowed(b"app/Shop/Colons.sharp"), Cow::Borrowed(colons.as_bytes()));
+    assert!(parse_file(&arena, &file).has_errors(), "`::` parses in a .sharp file");
+}
+
 /// Spec sections 1, 25 and 29: an attribute is data, so the constructor a PHP# attribute class runs, its own or one it
 /// inherits, and its initial values have no effect, and each one that has one is refused naming it. So
 /// `attributes<Column>()` of a PHP# attribute class `Column` is pure on a class, a property, a field, a method and a

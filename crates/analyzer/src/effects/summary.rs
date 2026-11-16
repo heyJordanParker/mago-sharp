@@ -559,7 +559,7 @@ where
                     CallExpression::NullSafeFunction(call) => (None, &call.argument_list),
                     CallExpression::Method(call) => (Some(call.object), &call.argument_list),
                     CallExpression::NullSafeMethod(call) => (Some(call.object), &call.argument_list),
-                    CallExpression::StaticMethod(call) => (None, &call.argument_list),
+                    CallExpression::StaticMethod(_) => unreachable!("the parser reads PHP's `::` in PHP# as an error"),
                 };
 
                 let mut roots = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
@@ -919,7 +919,7 @@ where
             CallExpression::NullSafeMethod(call) => {
                 (Some(call.object), &call.argument_list, None, call.type_arguments.as_ref())
             }
-            CallExpression::StaticMethod(call) => (None, &call.argument_list, None, None),
+            CallExpression::StaticMethod(_) => unreachable!("the parser reads PHP's `::` in PHP# as an error"),
         };
 
         // A call of a lambda written in this body runs the lambda here. A call of any other function value, such as a
