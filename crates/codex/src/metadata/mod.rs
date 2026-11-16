@@ -26,7 +26,6 @@ use crate::diff::CodebaseDiff;
 use crate::identifier::method::MethodIdentifier;
 use crate::issue::ScanningIssueKind;
 use crate::metadata::attribute::AttributeMetadata;
-use crate::metadata::attribute::ConstantExpression;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::class_like::ParsedField;
 
@@ -888,6 +887,67 @@ impl CodebaseMetadata {
             && self.get_method(class, b"parse").is_some_and(|parse| parse.span == metadata.span)
     }
 
+    /// The family above `class`, spec section 10: the parent class, interface or enum marked `[Tag]` whose `parse`
+    /// builds `class` by its `[Key]`. None for a class-like with none above it, a family itself included.
+    #[must_use]
+    pub fn family_of(&self, class: &ClassLikeMetadata) -> Option<&ClassLikeMetadata> {
+        class
+            .all_parent_classes
+            .iter()
+            .chain(&class.all_parent_interfaces)
+            .filter_map(|parent| self.get_class_like(parent.as_bytes()))
+            .find(|parent| parent.tag_key().is_some())
+    }
+
+    /// The variants of the family `family`, spec section 10, in the order of their names: each PHP# class, struct and
+    /// enum case below it that is not abstract, with the name its `[Key]` gives, or None where it gives none.
+    #[must_use]
+    pub fn variants(&self, family: &ClassLikeMetadata) -> Vec<(Option<&[u8]>, &ClassLikeMetadata)> {
+        let mut variants: Vec<(Option<&[u8]>, &ClassLikeMetadata)> = self
+            .all_class_like_descendants
+            .get(&family.name)
+            .into_iter()
+            .flatten()
+            .filter_map(|descendant| self.get_class_like(descendant.as_bytes()))
+            .filter(|descendant| descendant.flags.is_sharp() && descendant.is_variant_kind())
+            .map(|variant| (variant.variant_name(), variant))
+            .collect();
+        variants
+            .sort_by(|(a, a_class), (b, b_class)| a.cmp(b).then(a_class.name.as_bytes().cmp(b_class.name.as_bytes())));
+
+        variants
+    }
+
+    /// Whether the class `class` is a value as text, spec section 10: it declares a static `parse` of one `string` and
+    /// a `toString()` that takes no argument, as `Decimal` and `Instant` do, so `Json.encode` writes its `toString()`
+    /// and a field `parse` reads gives a `string` to its `parse`.
+    #[must_use]
+    pub fn is_text_value(&self, class: &[u8]) -> bool {
+        let Some(parse) = self.get_method(class, b"parse") else {
+            return false;
+        };
+        let Some(to_string) = self.get_method(class, b"toString") else {
+            return false;
+        };
+
+        is_static_method(parse)
+            && matches!(parse.parameters.as_slice(), [text] if text.type_metadata.as_ref().is_some_and(|written| written.type_union.is_string()))
+            && !is_static_method(to_string)
+            && to_string.parameters.iter().all(|parameter| parameter.flags.has_default())
+    }
+
+    /// Whether the class `class` declares a static `parse` of one `Any?`, which reads any value, as `JsonValue` does,
+    /// spec section 24, so a field `parse` reads gives it the value as it is.
+    #[must_use]
+    pub fn parses_any_value(&self, class: &[u8]) -> bool {
+        self.get_method(class, b"parse").is_some_and(|parse| {
+            is_static_method(parse)
+                && matches!(parse.parameters.as_slice(), [value] if value.type_metadata.as_ref().is_some_and(|written| {
+                    written.type_union.types.iter().any(|atomic| matches!(atomic, TAtomic::Mixed(mixed) if !mixed.is_non_null()))
+                }))
+        })
+    }
+
     /// The fields a PHP# struct's or class's `parse` reads, spec section 10: its main constructor's parameters in
     /// order, then each property an object initializer may set, a public `init` or `set` one, as creation from a `Map`
     /// is the constructor call and then the initializer. A parameter that declares its property is that property's one
@@ -904,19 +964,12 @@ impl CodebaseMetadata {
                     let r#type = parameter.type_metadata.as_ref().or(parameter.type_declaration_metadata.as_ref())?;
                     let name = parameter.name.0.as_bytes();
                     let name = name.strip_prefix(b"$").unwrap_or(name);
-                    // `Sharp\Key` is a PHP# class-like, keyed by its exact name, spec section 24.
-                    let key = parameter
-                        .attributes
-                        .iter()
-                        .find(|attribute| attribute.name.as_bytes() == b"Sharp\\Key")
-                        .and_then(|attribute| match attribute.arguments.first()?.value.as_ref()? {
-                            ConstantExpression::String(key) => Some(key.as_bytes()),
-                            _ => None,
-                        });
+                    let (key, omits_null) = field_key(&parameter.attributes, name);
 
                     Some(ParsedField {
                         name,
-                        key: key.unwrap_or(name),
+                        key,
+                        omits_null,
                         r#type: &r#type.type_union,
                         has_default: parameter.flags.has_default(),
                         is_parameter: true,
@@ -942,10 +995,12 @@ impl CodebaseMetadata {
                     if set_by_constructor && parameters.iter().any(|parameter| parameter.key == name) {
                         return None;
                     }
+                    let (key, omits_null) = field_key(&property.attributes, name);
 
                     Some(ParsedField {
                         name,
-                        key: name,
+                        key,
+                        omits_null,
                         r#type: &r#type.type_union,
                         has_default: property.flags.has_default() || set_by_constructor,
                         is_parameter: false,
@@ -2146,6 +2201,22 @@ impl CodebaseMetadata {
     pub fn get_all_file_ids(&self) -> Vec<FileId> {
         self.file_signatures.keys().copied().collect()
     }
+}
+
+/// The key of the field named `name` whose declaration carries `attributes`, spec section 10, and whether the encoding
+/// leaves it out when null: the name `[Key("…")]` gives, or the field's own, and `[Key(omitNull: true)]`'s flag.
+/// `Sharp\Key` is a PHP# class-like, keyed by its exact name, spec section 24.
+fn field_key<'codebase>(attributes: &'codebase [AttributeMetadata], name: &'codebase [u8]) -> (&'codebase [u8], bool) {
+    let Some(key) = attributes.iter().find(|attribute| attribute.name.as_bytes() == b"Sharp\\Key") else {
+        return (name, false);
+    };
+
+    (key.text_argument(0, b"name").unwrap_or(name), key.flag_argument(1, b"omitNull"))
+}
+
+/// Whether `method` is static, which its method metadata holds, not its flags.
+fn is_static_method(method: &FunctionLikeMetadata) -> bool {
+    method.method_metadata.as_ref().is_some_and(|method| method.is_static)
 }
 
 /// Returns the subset of methods declared by `patch` that are inherited by `target` from

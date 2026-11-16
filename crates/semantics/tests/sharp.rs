@@ -4142,11 +4142,27 @@ fn an_extern_method_with_a_body_has_its_body_checked() {
     );
 }
 
+/// Spec section 14.3: an `extern` property is the get-only one plain PHP's `__get` gives, so a field, a static, a
+/// property with a `set` and one with a body are each refused at their `extern`, and `{ get; }` is not.
 #[test]
-fn extern_on_a_field_is_an_error() {
-    let code = "namespace Sharp.Text;\n\npublic static class Text\n{\n    private static extern int count = 0;\n}\n";
+fn extern_on_a_member_other_than_a_get_only_property_is_an_error() {
+    let refusal = "An `extern` property is the one plain PHP's `__get` gives, so it is get-only, as in `public extern Collection<int, Product> products { get; }`.";
+    for (member, column) in [
+        ("private static extern int count = 0;", 20),
+        ("private extern int count;", 13),
+        ("public extern int count { get; set; }", 12),
+        ("public extern int count { get => 1; }", 12),
+        ("public extern static int count { get; }", 12),
+    ] {
+        let code = leak(format!("namespace App;\n\npublic class Text\n{{\n    {member}\n}}\n"));
 
-    assert_eq!(issues(code), ["5:20 A field or property takes no `extern`: remove it."]);
+        assert_eq!(issues(code), [format!("5:{column} {refusal}")], "{member}");
+    }
+
+    assert_eq!(
+        issues("namespace App;\n\npublic class Text\n{\n    public extern int count { get; }\n}\n"),
+        Vec::<String>::new()
+    );
 }
 
 /// Spec section 2: `@` before a name makes a keyword a name, and PHP# has no `@` before a value, in the standard

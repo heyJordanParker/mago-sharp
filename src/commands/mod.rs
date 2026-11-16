@@ -30,6 +30,7 @@
 //! - **`lint`** ([`LintCommand`]): Run linting rules on PHP code
 //! - **`analyze`** ([`AnalyzeCommand`]): Perform static analysis
 //! - **`compile`** ([`CompileCommand`]): Compile every PHP# file into the `.sharp` folder
+//! - **`move`** ([`MoveCommand`]): Move a PHP# class, or every class of a namespace, into another namespace
 //! - **`format`** ([`FormatCommand`]): Format PHP code
 //! - **`guard`** ([`GuardCommand`]): Enforce architectural rules
 //! - **`inspect-baseline`** ([`InspectBaselineCommand`]): Visualize a baseline file
@@ -72,6 +73,7 @@ use crate::commands::init::InitCommand;
 use crate::commands::inspect_baseline::InspectBaselineCommand;
 use crate::commands::lint::LintCommand;
 use crate::commands::list_files::ListFilesCommand;
+use crate::commands::r#move::MoveCommand;
 use crate::commands::self_update::SelfUpdateCommand;
 use crate::error::Error;
 
@@ -91,6 +93,7 @@ pub mod init;
 pub mod inspect_baseline;
 pub mod lint;
 pub mod list_files;
+pub mod r#move;
 mod outcome;
 pub mod self_update;
 pub mod stdin_input;
@@ -240,6 +243,16 @@ pub enum MagoCommand {
     /// **Usage**: `mago convert <PATHS>... [--dry-run]`
     #[command(name = "convert")]
     Convert(ConvertCommand),
+
+    /// Move a PHP# class, or every class of a namespace, into another namespace.
+    ///
+    /// Moves each class's file into the namespace's folder, rewrites its `namespace` line,
+    /// and rewrites every file that names a moved class. A moved class's name inside a
+    /// string is printed with its place and never rewritten.
+    ///
+    /// **Usage**: `mago move <NAME> <TARGET>`
+    #[command(name = "move")]
+    Move(MoveCommand),
 
     /// Enforce architectural rules and layer dependencies.
     ///

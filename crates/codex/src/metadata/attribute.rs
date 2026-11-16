@@ -46,6 +46,39 @@ pub struct AttributeMetadata {
     pub arguments: Vec<AttributeArgumentMetadata>,
 }
 
+impl AttributeMetadata {
+    /// The literal string the attribute's argument at `position` gives, or the argument `name` names, as PHP binds a
+    /// positional argument before named ones: `"return_url"` of both `Key("return_url")` and
+    /// `Key(name: "return_url")`. None for an argument that is no literal string or that the attribute leaves out.
+    #[must_use]
+    pub fn text_argument(&self, position: usize, name: &[u8]) -> Option<&[u8]> {
+        match self.argument(position, name)? {
+            ConstantExpression::String(text) => Some(text.as_bytes()),
+            _ => None,
+        }
+    }
+
+    /// Whether the argument at `position`, or the one `name` names, is the literal `true`: `omitNull` of
+    /// `Key(omitNull: true)`.
+    #[must_use]
+    pub fn flag_argument(&self, position: usize, name: &[u8]) -> bool {
+        matches!(self.argument(position, name), Some(ConstantExpression::Bool(true)))
+    }
+
+    fn argument(&self, position: usize, name: &[u8]) -> Option<&ConstantExpression> {
+        self.arguments
+            .iter()
+            .enumerate()
+            .find(|(index, argument)| match argument.name {
+                Some(named) => named.as_bytes() == name,
+                None => *index == position,
+            })?
+            .1
+            .value
+            .as_ref()
+    }
+}
+
 impl HasSpan for AttributeMetadata {
     fn span(&self) -> Span {
         self.span

@@ -88,8 +88,8 @@ impl Lowered {
         self.tree_without(&[])
     }
 
-    /// The tree, leaving out the methods PHP declares as one of `methods`, and the `parse` and `tryParse` the bridge
-    /// gives a struct or a class, which tests of their own show.
+    /// The tree, leaving out the methods PHP declares as one of `methods`, and the `#fields`, `#json`, `parse` and
+    /// `tryParse` the bridge gives a struct or a class, which tests of their own show.
     fn tree_without(&self, methods: &[&str]) -> String {
         assert_eq!(self.diagnostics(), Vec::<String>::new(), "the source lowers");
         let mut tree = String::new();
@@ -98,8 +98,8 @@ impl Lowered {
         tree
     }
 
-    /// The `parse` and `tryParse` methods the bridge gives a struct or a class. Each spans the type's name, so it
-    /// starts and ends on the line of its class.
+    /// The `#fields`, `#json`, `parse` and `tryParse` methods the bridge gives a struct or a class. Each spans the
+    /// type's name, so it starts and ends on the line of its class.
     fn generated(&self) -> HashSet<u32> {
         let mut generated = HashSet::new();
         for (index, class) in self.nodes().iter().enumerate() {
@@ -116,7 +116,7 @@ impl Lowered {
                 let member = self.child(members, member);
                 let method = &self.nodes()[member as usize];
                 if method.kind == sharp_kind::SHARP_AST_METHOD
-                    && ["parse", "tryParse"].contains(&self.text(method.text).as_str())
+                    && ["#fields", "#json", "parse", "tryParse"].contains(&self.text(method.text).as_str())
                     && (method.line, method.end_line) == (class.line, class.line)
                 {
                     generated.insert(member);
@@ -128,7 +128,7 @@ impl Lowered {
     }
 
     /// Each node the source writes, with its index, in the order the bridge lowers them: every node but those of the
-    /// `parse` and `tryParse` the bridge gives a struct or a class.
+    /// `#fields`, `#json`, `parse` and `tryParse` the bridge gives a struct or a class.
     fn written(&self) -> Vec<(usize, &sharp_node)> {
         let mut left_out = HashSet::new();
         let mut pending: Vec<u32> = self.generated().into_iter().collect();
@@ -239,17 +239,6 @@ impl Lowered {
         for child in 0..node.child_count {
             self.render_into(self.child(index, child), depth + 1, skipped, generated, tree);
         }
-    }
-
-    /// The statement of `parse` that reads each field of the struct, in order, each after a blank line.
-    fn parse_reads(&self) -> String {
-        let parse = self.method_named("parse");
-        let body = self.child(parse, 2);
-        // `parse` starts with the input and three empty arrays, and ends with the throw, the object, its properties
-        // and the return.
-        let reads = 4..self.nodes()[body as usize].child_count - 4;
-
-        reads.map(|read| self.render(self.child(body, read))).collect::<Vec<String>>().join("\n")
     }
 
     fn text(&self, text: sharp_str) -> String {
@@ -24889,7 +24878,10 @@ fn a_method_that_yields_is_a_generator() {
         .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD)
         .map(|node| format!("{} [{}]", lowered.text(node.text), node.attr))
         .collect();
-    assert_eq!(methods, ["lines [16777217]", "all [16777217]", "kept [1]", "parse [17]", "tryParse [17]"]);
+    assert_eq!(
+        methods,
+        ["lines [16777217]", "all [16777217]", "kept [1]", "#fields [17]", "parse [17]", "tryParse [17]", "#json [1]"]
+    );
 }
 
 /// A function whose result can hold a `Map` or a `Set`, at any depth, as `Any`, a type parameter or an `Iterable` can,
@@ -27444,6 +27436,63 @@ fn a_read_of_a_sharp_class_whose_plain_php_parent_defines_get_reads_the_property
                           ZVAL "owner"
                     ZVAL 1
                     ZVAL 0
+        "#}
+    );
+}
+
+/// An `extern` property of a PHP# class whose plain PHP parent defines `__get` is the property `__get` gives, spec
+/// section 14.3: the class declares no PHP property for it, so the read reaches `__get`, and the engine checks the value
+/// against the declared type where it enters PHP#, beside the method of its name.
+#[test]
+fn an_extern_property_declares_nothing_and_its_read_is_checked_where_it_enters() {
+    let model = (
+        "src/Lib/Model.php",
+        "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return $name;\n    }\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Row : Model\n{\n    public extern string owner { get; }\n\n    public Row() : super() { }\n\n    public string owner() => \"relation\";\n\n    public string run() => this.owner;\n}\n";
+    let lowered = Lowered::with(code, &[model]);
+
+    assert_eq!(
+        member_in(std::slice::from_ref(&lowered), "Row", &[]),
+        indoc! {r#"
+            STMT_LIST
+              METHOD [1] "__construct" @9-9
+                PARAM_LIST
+                null
+                STMT_LIST
+                null
+                null
+              METHOD [1] "owner" @11-11
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    ZVAL "relation"
+                SHARP_TYPE_ARGS
+                  ZVAL [1] "string"
+                  ZVAL "Function<string()>"
+                null
+              METHOD [1] "run" @13-13
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    VERIFY_TYPE_ARGS
+                      PROP
+                        VAR
+                          ZVAL "this"
+                        ZVAL "owner"
+                      ZVAL "string"
+                      ZVAL "App.Tenant.Row.owner"
+                SHARP_TYPE_ARGS
+                  ZVAL [1] "string"
+                  ZVAL "Function<string()>"
+                null
+              SHARP_CLASS_METADATA
+                null
+                null
+                null
+                ZVAL "\ntryParse: Function<App.Tenant.Row?(Map<string, Any?>|Object)>\nowner: Function<string()>\nparse: Function<App.Tenant.Row(Map<string, Any?>|Object)>\n__construct: Function<Any?()>\nrun: Function<string()>"
         "#}
     );
 }
@@ -32987,35 +33036,26 @@ const KEY: (&str, &str) = (
 );
 
 /// ```php
+/// public static function '#fields'(): array
+/// {
+///     return [['id', 'ticket_id', 'int', true, false], ['seats', 'seats', 'int', true, true], ['note', 'note', 'string', false, true], ['owner', 'owner', 'string?', false, false]];
+/// }
+///
 /// public static function parse(array|object $value): \App\Ticket
 /// {
-///     ${'input#1'} = \is_object($value) ? \get_object_vars($value) : $value;
-///     ${'fields#2'} = [];
-///     ${'arguments#3'} = [];
-///     ${'properties#4'} = [];
-///     if (\array_key_exists('ticket_id', ${'input#1'})) {
-///         ${'read#8'} = ${'input#1'}['ticket_id'];
-///         \Sharp\Internal\accepts('int', ${'read#8'}, 'ticket_id', ${'fields#2'});
-///         ${'arguments#3'}['id'] = ${'read#8'};
-///     } else { ${'fields#2'}['ticket_id'] = 'missing'; }
-///     if (\array_key_exists('seats', ${'input#1'})) { …the read of an int… }
-///     if (\array_key_exists('note', ${'input#1'})) { …the read of a string into ${'properties#4'}['note']… }
-///     if (\array_key_exists('owner', ${'input#1'})) { …the read of a string? … } else { ${'properties#4'}['owner'] = null; }
-///     if (${'fields#2'} !== []) { throw new \Sharp\InvalidFields(${'fields#2'}); }
-///     ${'object#5'} = new \App\Ticket(...${'arguments#3'});
-///     foreach (${'properties#4'} as ${'name#6'} => ${'property#7'}) { ${'object#5'}->${'name#6'} = ${'property#7'}; }
-///     return ${'object#5'};
+///     return \Sharp\Internal\parseAs('App\Ticket', $value, false);
 /// }
 ///
 /// public static function tryParse(array|object $value): ?\App\Ticket
 /// {
-///     try { return \App\Ticket::parse($value); } catch (\Sharp\InvalidFields) { return null; }
+///     try { return \App\Ticket::parse($value); } catch (\ValueError) { return null; }
 /// }
 /// ```
 ///
-/// Spec section 10: `parse` reads each main constructor parameter from its key, which `[Key]` renames, then each
-/// property an object initializer may set, records every bad or missing field, and throws them all at once. The
-/// arguments go in by name, so a missing key takes its parameter's default, and a missing `T?` property is null. A
+/// Spec section 10: the engine's reader builds a struct by the rows of its `#fields`: each main constructor parameter
+/// under its key, which `[Key]` renames, then each property an object initializer may set, each with whether a missing
+/// key leaves it to its default. It records every bad or missing field, throws them all at once, and passes the
+/// parameters by name, so a missing key takes its parameter's default, and a missing `T?` property is null. A
 /// parameter that reads the key of a property the main constructor doesn't set is refused, so `parse` never leaves
 /// that property unset.
 #[test]
@@ -33026,8 +33066,89 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
     );
 
     assert_eq!(
-        [lowered.declared("parse"), lowered.declared("tryParse")].join("\n"),
-        indoc! {r#"
+        [lowered.declared("#fields"), lowered.declared("parse"), lowered.declared("tryParse")].join("\n"),
+        indoc! {r##"
+            METHOD [17] "#fields" @5-5
+              PARAM_LIST
+              null
+              STMT_LIST
+                RETURN
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "id"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "ticket_id"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "int"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "seats"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "seats"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "int"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "note"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "note"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "string"
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "owner"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "owner"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "string?"
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+              null
+              null
+
             METHOD [17] "parse" @5-5
               PARAM_LIST
                 PARAM
@@ -33041,235 +33162,14 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
                   null
               null
               STMT_LIST
-                ASSIGN
-                  VAR
-                    ZVAL "input#1"
-                  CONDITIONAL
-                    INSTANCEOF
-                      VAR
-                        ZVAL "value"
-                      ZVAL "Sharp\\Map"
-                    CALL
-                      ZVAL "iterator_to_array"
-                      ARG_LIST
-                        VAR
-                          ZVAL "value"
-                    CONDITIONAL [1]
-                      CALL
-                        ZVAL "is_object"
-                        ARG_LIST
-                          VAR
-                            ZVAL "value"
-                      CALL
-                        ZVAL "get_object_vars"
-                        ARG_LIST
-                          VAR
-                            ZVAL "value"
-                      VAR
-                        ZVAL "value"
-                ASSIGN
-                  VAR
-                    ZVAL "fields#2"
-                  ARRAY [3]
-                ASSIGN
-                  VAR
-                    ZVAL "arguments#3"
-                  ARRAY [3]
-                ASSIGN
-                  VAR
-                    ZVAL "properties#4"
-                  ARRAY [3]
-                IF
-                  IF_ELEM
-                    CALL
-                      ZVAL "array_key_exists"
-                      ARG_LIST
-                        ZVAL "ticket_id"
-                        VAR
-                          ZVAL "input#1"
-                    STMT_LIST
-                      STMT_LIST
-                        ASSIGN
-                          VAR
-                            ZVAL "read#8"
-                          DIM
-                            VAR
-                              ZVAL "input#1"
-                            ZVAL "ticket_id"
-                        CALL
-                          ZVAL "Sharp\\Internal\\accepts"
-                          ARG_LIST
-                            ZVAL "int"
-                            VAR
-                              ZVAL "read#8"
-                            ZVAL "ticket_id"
-                            VAR
-                              ZVAL "fields#2"
-                        ASSIGN
-                          DIM
-                            VAR
-                              ZVAL "arguments#3"
-                            ZVAL "id"
-                          VAR
-                            ZVAL "read#8"
-                  IF_ELEM
-                    null
-                    STMT_LIST
-                      ASSIGN
-                        DIM
-                          VAR
-                            ZVAL "fields#2"
-                          ZVAL "ticket_id"
-                        ZVAL "missing"
-                IF
-                  IF_ELEM
-                    CALL
-                      ZVAL "array_key_exists"
-                      ARG_LIST
-                        ZVAL "seats"
-                        VAR
-                          ZVAL "input#1"
-                    STMT_LIST
-                      STMT_LIST
-                        ASSIGN
-                          VAR
-                            ZVAL "read#10"
-                          DIM
-                            VAR
-                              ZVAL "input#1"
-                            ZVAL "seats"
-                        CALL
-                          ZVAL "Sharp\\Internal\\accepts"
-                          ARG_LIST
-                            ZVAL "int"
-                            VAR
-                              ZVAL "read#10"
-                            ZVAL "seats"
-                            VAR
-                              ZVAL "fields#2"
-                        ASSIGN
-                          DIM
-                            VAR
-                              ZVAL "arguments#3"
-                            ZVAL "seats"
-                          VAR
-                            ZVAL "read#10"
-                IF
-                  IF_ELEM
-                    CALL
-                      ZVAL "array_key_exists"
-                      ARG_LIST
-                        ZVAL "note"
-                        VAR
-                          ZVAL "input#1"
-                    STMT_LIST
-                      STMT_LIST
-                        ASSIGN
-                          VAR
-                            ZVAL "read#12"
-                          DIM
-                            VAR
-                              ZVAL "input#1"
-                            ZVAL "note"
-                        CALL
-                          ZVAL "Sharp\\Internal\\accepts"
-                          ARG_LIST
-                            ZVAL "string"
-                            VAR
-                              ZVAL "read#12"
-                            ZVAL "note"
-                            VAR
-                              ZVAL "fields#2"
-                        ASSIGN
-                          DIM
-                            VAR
-                              ZVAL "properties#4"
-                            ZVAL "note"
-                          VAR
-                            ZVAL "read#12"
-                IF
-                  IF_ELEM
-                    CALL
-                      ZVAL "array_key_exists"
-                      ARG_LIST
-                        ZVAL "owner"
-                        VAR
-                          ZVAL "input#1"
-                    STMT_LIST
-                      STMT_LIST
-                        ASSIGN
-                          VAR
-                            ZVAL "read#14"
-                          DIM
-                            VAR
-                              ZVAL "input#1"
-                            ZVAL "owner"
-                        CALL
-                          ZVAL "Sharp\\Internal\\accepts"
-                          ARG_LIST
-                            ZVAL "string?"
-                            VAR
-                              ZVAL "read#14"
-                            ZVAL "owner"
-                            VAR
-                              ZVAL "fields#2"
-                        ASSIGN
-                          DIM
-                            VAR
-                              ZVAL "properties#4"
-                            ZVAL "owner"
-                          VAR
-                            ZVAL "read#14"
-                  IF_ELEM
-                    null
-                    STMT_LIST
-                      ASSIGN
-                        DIM
-                          VAR
-                            ZVAL "properties#4"
-                          ZVAL "owner"
-                        ZVAL null
-                IF
-                  IF_ELEM
-                    BINARY_OP [17]
-                      VAR
-                        ZVAL "fields#2"
-                      ARRAY [3]
-                    STMT_LIST
-                      THROW
-                        NEW
-                          ZVAL "Sharp\\InvalidFields"
-                          ARG_LIST
-                            VAR
-                              ZVAL "fields#2"
-                ASSIGN
-                  VAR
-                    ZVAL "object#5"
-                  NEW
-                    ZVAL "App\\Ticket"
-                    ARG_LIST
-                      UNPACK
-                        VAR
-                          ZVAL "arguments#3"
-                FOREACH
-                  VAR
-                    ZVAL "properties#4"
-                  VAR
-                    ZVAL "property#7"
-                  VAR
-                    ZVAL "name#6"
-                  STMT_LIST
-                    ASSIGN
-                      PROP
-                        VAR
-                          ZVAL "object#5"
-                        VAR
-                          ZVAL "name#6"
-                      VAR
-                        ZVAL "property#7"
                 RETURN
-                  VAR
-                    ZVAL "object#5"
+                  CALL
+                    ZVAL "Sharp\\Internal\\parseAs"
+                    ARG_LIST
+                      ZVAL "App\\Ticket"
+                      VAR
+                        ZVAL "value"
+                      ZVAL false
               SHARP_TYPE_ARGS
                 ZVAL "App\\Ticket"
                 ZVAL "Function<App.Ticket(Map<string, Any?>|Object)>"
@@ -33300,7 +33200,7 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
                   CATCH_LIST
                     CATCH
                       NAME_LIST
-                        ZVAL "Sharp\\InvalidFields"
+                        ZVAL "ValueError"
                       null
                       STMT_LIST
                         RETURN
@@ -33310,7 +33210,7 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
                 ZVAL [256] "App\\Ticket"
                 ZVAL "Function<App.Ticket?(Map<string, Any?>|Object)>"
               null
-        "#}
+        "##}
     );
     assert_eq!(
         Lowered::new(
@@ -33324,42 +33224,22 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
 }
 
 /// ```php
-/// ${'read#N'} = ${'input#1'}['amount']; \Sharp\Internal\accepts('float', ${'read#N'}, 'amount', ${'fields#2'});
-/// if (\is_string(${'read#N'}) && (${'case#N'} = \App\Status::tryFrom((string) ${'read#N'})) !== null) { ${'read#N'} = ${'case#N'}; }
-/// ${'failed#N'} = [];
-/// if (!${'read#N'} instanceof \App\Address && (\is_array(${'read#N'}) || \is_object(${'read#N'}))) {
-///     try { ${'read#N'} = \App\Address::parse(${'read#N'}); }
-///     catch (\Sharp\InvalidFields ${'inner#N'}) { …each problem under 'address.' . ${'key#N'}…; ${'failed#N'}[] = 'address'; }
-/// }
-/// \Sharp\Internal\accepts('App.Address', ${'read#N'}, 'address', ${'fields#2'});
-/// foreach (${'failed#N'} as ${'path#N'}) { unset(${'fields#2'}[${'path#N'}]); }
-/// if (\is_array(${'read#N'})) { foreach (${'read#N'} as ${'key#N'} => ${'element#N'}) { …built under 'addresses[' . ${'key#N'} . ']'… } }
-/// \Sharp\Internal\accepts('Map<App.Status, int>', …);
-/// …the PHP# class App\Plan built through its own parse, as App\Address is…
-/// ${'arguments#3'}['extra'] = ${'input#1'}['extra'];   // Any?
-/// \Sharp\Internal\accepts('int|string', …);
-/// if (!… instanceof \App\Address && !… instanceof \App\Point && …) { try { …Address… } catch (\Sharp\InvalidFields) { try { …Point… } catch (\Sharp\InvalidFields) { } } }
-/// …(Point|Address)? and each value of a Map<string, Point|Address> try Point first…
-/// if (\Sharp\Internal\accepts('Set<App.Status>', ${'read#N'}, 'seen', ${'fields#2'})) { ${'read#N'} = \is_array(${'read#N'}) ? new \Sharp\Set(${'read#N'}) : ${'read#N'}; }
-/// if (\Sharp\Internal\accepts('List<List<Set<int>>>', …)) { if (\is_array(…)) { foreach (…) { …each list's Sets built… } } }
-/// \Sharp\Internal\accepts('Any', …); \Sharp\Internal\accepts('bool', …);
-/// if (\is_int(${'read#N'}) && (${'case#N'} = \App\Rank::tryFrom(${'read#N'})) !== null) { ${'read#N'} = ${'case#N'}; }
-/// \Sharp\Internal\accepts('App.Mood', …);
-/// …Point|List<Point> tries Point, then each element of a list as a Point…
-/// …List<List<Point>> builds each Point of each inner list…
-/// …the property Point|Address corner tries Point first, into ${'properties#4'}['corner']…
+/// return [
+///     ['corner', 'corner', 'App.Address|App.Point', false, true, 'App.Point, App.Address'],
+///     ['amount', 'amount', 'float', true, false],
+///     …
+///     ['place', 'place', 'App.Address|App.Point', true, false, 'App.Address, App.Point'],
+///     ['spot', 'spot', '(App.Address|App.Point)?', true, false, 'App.Point, App.Address'],
+///     …
+/// ];
 /// ```
 ///
-/// Spec section 10 and generics R3c: `parse` checks each field through the one walk, `\Sharp\Internal\accepts`, with
-/// the field's type text and its key as the path. First it builds what the walk takes only as an object: a backed
-/// enum case from its backing value, and a nested struct or PHP# class through its own `parse`, its problems under the
-/// field's path, where the walk's own problem for it is then dropped, element by element inside a collection at any
-/// depth. A union of structs takes the first that builds, in the order the field's main constructor parameter or
-/// property writes them, which a method's parameter of the same name doesn't change. A private field, a get-only
-/// property and one whose `init` is private are no field, and a property the main constructor sets may be left out.
-/// Once the walk accepts a value, each `Set` in it that the input gave as an array becomes a `Sharp\Set`, through
-/// nested collections. An `int`-backed enum case is built from its value uncast, and an enum with no backing value
-/// isn't built: the checker refuses `parse` where it is called. `Any?` takes the value as it is.
+/// Spec section 10 and generics R3c: each row of `#fields` holds the field's type text, which the engine's reader
+/// builds the value as and checks it against through the one walk, with the field's key as its path. A field whose
+/// declaration writes more than one class lists them in the order it writes them, so a union of structs takes the
+/// first that builds in that order, at any depth, which a method's parameter of the same name doesn't change. A
+/// private field, a get-only property and one whose `init` is private are no field, and a property the main
+/// constructor sets may be left out.
 #[test]
 fn parse_reads_each_field_as_its_type() {
     let lowered = Lowered::with(
@@ -33384,2049 +33264,389 @@ fn parse_reads_each_field_as_its_type() {
     );
 
     assert_eq!(
-        lowered.parse_reads(),
-        indoc! {r#"
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "amount"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#8"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "amount"
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "float"
-                        VAR
-                          ZVAL "read#8"
-                        ZVAL "amount"
-                        VAR
-                          ZVAL "fields#2"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "amount"
-                      VAR
-                        ZVAL "read#8"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "amount"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "status"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#10"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "status"
-                    IF
-                      IF_ELEM
-                        AND
-                          CALL
-                            ZVAL "is_string"
-                            ARG_LIST
-                              VAR
-                                ZVAL "read#10"
-                          BINARY_OP [17]
-                            ASSIGN
-                              VAR
-                                ZVAL "case#12"
-                              STATIC_CALL
-                                ZVAL "App\\Status"
-                                ZVAL "tryFrom"
-                                ARG_LIST
-                                  CAST [6]
-                                    VAR
-                                      ZVAL "read#10"
-                            ZVAL null
-                        STMT_LIST
-                          ASSIGN
-                            VAR
-                              ZVAL "read#10"
-                            VAR
-                              ZVAL "case#12"
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "App.Status"
-                        VAR
-                          ZVAL "read#10"
-                        ZVAL "status"
-                        VAR
-                          ZVAL "fields#2"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "status"
-                      VAR
-                        ZVAL "read#10"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "status"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "address"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#13"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "address"
-                    ASSIGN
-                      VAR
-                        ZVAL "failed#14"
+        lowered.declared("#fields"),
+        indoc! {r##"
+            METHOD [17] "#fields" @3-3
+              PARAM_LIST
+              null
+              STMT_LIST
+                RETURN
+                  ARRAY [3]
+                    ARRAY_ELEM
                       ARRAY [3]
-                    IF
-                      IF_ELEM
-                        AND
-                          UNARY_OP [14]
-                            INSTANCEOF
-                              VAR
-                                ZVAL "read#13"
-                              ZVAL "App\\Address"
-                          OR
-                            CALL
-                              ZVAL "is_array"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "read#13"
-                            CALL
-                              ZVAL "is_object"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "read#13"
-                        STMT_LIST
-                          TRY
-                            STMT_LIST
-                              ASSIGN
-                                VAR
-                                  ZVAL "read#13"
-                                STATIC_CALL
-                                  ZVAL "App\\Address"
-                                  ZVAL "parse"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "read#13"
-                            CATCH_LIST
-                              CATCH
-                                NAME_LIST
-                                  ZVAL "Sharp\\InvalidFields"
-                                ZVAL "inner#15"
-                                STMT_LIST
-                                  FOREACH
-                                    PROP
-                                      VAR
-                                        ZVAL "inner#15"
-                                      ZVAL "fields"
-                                    VAR
-                                      ZVAL "problem#17"
-                                    VAR
-                                      ZVAL "key#16"
-                                    STMT_LIST
-                                      ASSIGN
-                                        DIM
-                                          VAR
-                                            ZVAL "fields#2"
-                                          BINARY_OP [8]
-                                            BINARY_OP [8]
-                                              ZVAL "address"
-                                              ZVAL "."
-                                            VAR
-                                              ZVAL "key#16"
-                                        VAR
-                                          ZVAL "problem#17"
-                                  ASSIGN
-                                    DIM
-                                      VAR
-                                        ZVAL "failed#14"
-                                      null
-                                    ZVAL "address"
-                            null
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "App.Address"
-                        VAR
-                          ZVAL "read#13"
-                        ZVAL "address"
-                        VAR
-                          ZVAL "fields#2"
-                    FOREACH
-                      VAR
-                        ZVAL "failed#14"
-                      VAR
-                        ZVAL "path#18"
+                        ARRAY_ELEM
+                          ZVAL "amount"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "amount"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "float"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
                       null
-                      STMT_LIST
-                        UNSET
-                          DIM
-                            VAR
-                              ZVAL "fields#2"
-                            VAR
-                              ZVAL "path#18"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "address"
-                      VAR
-                        ZVAL "read#13"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "address"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "addresses"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#19"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "addresses"
-                    ASSIGN
-                      VAR
-                        ZVAL "failed#20"
+                    ARRAY_ELEM
                       ARRAY [3]
-                    IF
-                      IF_ELEM
-                        CALL
-                          ZVAL "is_array"
-                          ARG_LIST
-                            VAR
-                              ZVAL "read#19"
-                        STMT_LIST
-                          FOREACH
-                            VAR
-                              ZVAL "read#19"
-                            VAR
-                              ZVAL "element#22"
-                            VAR
-                              ZVAL "key#21"
-                            STMT_LIST
-                              IF
-                                IF_ELEM
-                                  AND
-                                    UNARY_OP [14]
-                                      INSTANCEOF
-                                        VAR
-                                          ZVAL "element#22"
-                                        ZVAL "App\\Address"
-                                    OR
-                                      CALL
-                                        ZVAL "is_array"
-                                        ARG_LIST
-                                          VAR
-                                            ZVAL "element#22"
-                                      CALL
-                                        ZVAL "is_object"
-                                        ARG_LIST
-                                          VAR
-                                            ZVAL "element#22"
-                                  STMT_LIST
-                                    TRY
-                                      STMT_LIST
-                                        ASSIGN
-                                          VAR
-                                            ZVAL "element#22"
-                                          STATIC_CALL
-                                            ZVAL "App\\Address"
-                                            ZVAL "parse"
-                                            ARG_LIST
-                                              VAR
-                                                ZVAL "element#22"
-                                      CATCH_LIST
-                                        CATCH
-                                          NAME_LIST
-                                            ZVAL "Sharp\\InvalidFields"
-                                          ZVAL "inner#23"
-                                          STMT_LIST
-                                            FOREACH
-                                              PROP
-                                                VAR
-                                                  ZVAL "inner#23"
-                                                ZVAL "fields"
-                                              VAR
-                                                ZVAL "problem#25"
-                                              VAR
-                                                ZVAL "key#24"
-                                              STMT_LIST
-                                                ASSIGN
-                                                  DIM
-                                                    VAR
-                                                      ZVAL "fields#2"
-                                                    BINARY_OP [8]
-                                                      BINARY_OP [8]
-                                                        BINARY_OP [8]
-                                                          BINARY_OP [8]
-                                                            BINARY_OP [8]
-                                                              ZVAL "addresses"
-                                                              ZVAL "["
-                                                            VAR
-                                                              ZVAL "key#21"
-                                                          ZVAL "]"
-                                                        ZVAL "."
-                                                      VAR
-                                                        ZVAL "key#24"
-                                                  VAR
-                                                    ZVAL "problem#25"
-                                            ASSIGN
-                                              DIM
-                                                VAR
-                                                  ZVAL "failed#20"
-                                                null
-                                              BINARY_OP [8]
-                                                BINARY_OP [8]
-                                                  BINARY_OP [8]
-                                                    ZVAL "addresses"
-                                                    ZVAL "["
-                                                  VAR
-                                                    ZVAL "key#21"
-                                                ZVAL "]"
-                                      null
-                              ASSIGN
-                                DIM
-                                  VAR
-                                    ZVAL "read#19"
-                                  VAR
-                                    ZVAL "key#21"
-                                VAR
-                                  ZVAL "element#22"
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "List<App.Address>"
-                        VAR
-                          ZVAL "read#19"
-                        ZVAL "addresses"
-                        VAR
-                          ZVAL "fields#2"
-                    FOREACH
-                      VAR
-                        ZVAL "failed#20"
-                      VAR
-                        ZVAL "path#26"
+                        ARRAY_ELEM
+                          ZVAL "status"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "status"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Status"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
                       null
-                      STMT_LIST
-                        UNSET
-                          DIM
-                            VAR
-                              ZVAL "fields#2"
-                            VAR
-                              ZVAL "path#26"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "addresses"
-                      VAR
-                        ZVAL "read#19"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "addresses"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "prices"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#27"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "prices"
-                    IF
-                      IF_ELEM
-                        CALL
-                          ZVAL "Sharp\\Internal\\accepts"
-                          ARG_LIST
-                            ZVAL "Map<App.Status, int>"
-                            VAR
-                              ZVAL "read#27"
-                            ZVAL "prices"
-                            VAR
-                              ZVAL "fields#2"
-                        STMT_LIST
-                          ASSIGN
-                            VAR
-                              ZVAL "read#27"
-                            CONDITIONAL
-                              CALL
-                                ZVAL "is_array"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "read#27"
-                              SHARP_TYPE_ARGS
-                                NEW
-                                  ZVAL "Sharp\\Map"
-                                  ARG_LIST
-                                    CALL
-                                      ZVAL "array_merge"
-                                      ARG_LIST
-                                        ARRAY [3]
-                                        UNPACK
-                                          CALL
-                                            ZVAL "array_map"
-                                            ARG_LIST
-                                              ARROW_FUNC "" @3-3
-                                                PARAM_LIST
-                                                  PARAM
-                                                    null
-                                                    ZVAL "key#29"
-                                                    null
-                                                    null
-                                                    null
-                                                    null
-                                                  PARAM
-                                                    null
-                                                    ZVAL "value#30"
-                                                    null
-                                                    null
-                                                    null
-                                                    null
-                                                null
-                                                ARRAY [3]
-                                                  ARRAY_ELEM
-                                                    STATIC_CALL
-                                                      ZVAL "App\\Status"
-                                                      ZVAL "from"
-                                                      ARG_LIST
-                                                        CAST [6]
-                                                          VAR
-                                                            ZVAL "key#29"
-                                                    null
-                                                  ARRAY_ELEM
-                                                    VAR
-                                                      ZVAL "value#30"
-                                                    null
-                                                null
-                                                null
-                                              CALL
-                                                ZVAL "array_keys"
-                                                ARG_LIST
-                                                  VAR
-                                                    ZVAL "read#27"
-                                              VAR
-                                                ZVAL "read#27"
-                                ZVAL "App.Status, int"
-                              VAR
-                                ZVAL "read#27"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "prices"
-                      VAR
-                        ZVAL "read#27"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "prices"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "plan"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#29"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "plan"
-                    ASSIGN
-                      VAR
-                        ZVAL "failed#30"
+                    ARRAY_ELEM
                       ARRAY [3]
-                    IF
-                      IF_ELEM
-                        AND
-                          UNARY_OP [14]
-                            INSTANCEOF
-                              VAR
-                                ZVAL "read#29"
-                              ZVAL "App\\Plan"
-                          OR
-                            CALL
-                              ZVAL "is_array"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "read#29"
-                            CALL
-                              ZVAL "is_object"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "read#29"
-                        STMT_LIST
-                          TRY
-                            STMT_LIST
-                              ASSIGN
-                                VAR
-                                  ZVAL "read#29"
-                                STATIC_CALL
-                                  ZVAL "App\\Plan"
-                                  ZVAL "parse"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "read#29"
-                            CATCH_LIST
-                              CATCH
-                                NAME_LIST
-                                  ZVAL "Sharp\\InvalidFields"
-                                ZVAL "inner#31"
-                                STMT_LIST
-                                  FOREACH
-                                    PROP
-                                      VAR
-                                        ZVAL "inner#31"
-                                      ZVAL "fields"
-                                    VAR
-                                      ZVAL "problem#33"
-                                    VAR
-                                      ZVAL "key#32"
-                                    STMT_LIST
-                                      ASSIGN
-                                        DIM
-                                          VAR
-                                            ZVAL "fields#2"
-                                          BINARY_OP [8]
-                                            BINARY_OP [8]
-                                              ZVAL "plan"
-                                              ZVAL "."
-                                            VAR
-                                              ZVAL "key#32"
-                                        VAR
-                                          ZVAL "problem#33"
-                                  ASSIGN
-                                    DIM
-                                      VAR
-                                        ZVAL "failed#30"
-                                      null
-                                    ZVAL "plan"
-                            null
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "App.Plan"
-                        VAR
-                          ZVAL "read#29"
-                        ZVAL "plan"
-                        VAR
-                          ZVAL "fields#2"
-                    FOREACH
-                      VAR
-                        ZVAL "failed#30"
-                      VAR
-                        ZVAL "path#34"
+                        ARRAY_ELEM
+                          ZVAL "address"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "address"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Address"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
                       null
-                      STMT_LIST
-                        UNSET
-                          DIM
-                            VAR
-                              ZVAL "fields#2"
-                            VAR
-                              ZVAL "path#34"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "plan"
-                      VAR
-                        ZVAL "read#29"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "plan"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "extra"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "arguments#3"
-                      ZVAL "extra"
-                    DIM
-                      VAR
-                        ZVAL "input#1"
-                      ZVAL "extra"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "arguments#3"
-                      ZVAL "extra"
-                    ZVAL null
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "reference"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#35"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "reference"
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "int|string"
-                        VAR
-                          ZVAL "read#35"
-                        ZVAL "reference"
-                        VAR
-                          ZVAL "fields#2"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "reference"
-                      VAR
-                        ZVAL "read#35"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "reference"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "place"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#37"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "place"
-                    IF
-                      IF_ELEM
-                        AND
-                          UNARY_OP [14]
-                            INSTANCEOF
-                              VAR
-                                ZVAL "read#37"
-                              ZVAL "App\\Point"
-                          AND
-                            UNARY_OP [14]
-                              INSTANCEOF
-                                VAR
-                                  ZVAL "read#37"
-                                ZVAL "App\\Address"
-                            OR
-                              CALL
-                                ZVAL "is_array"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "read#37"
-                              CALL
-                                ZVAL "is_object"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "read#37"
-                        STMT_LIST
-                          STMT_LIST
-                            TRY
-                              STMT_LIST
-                                ASSIGN
-                                  VAR
-                                    ZVAL "read#37"
-                                  STATIC_CALL
-                                    ZVAL "App\\Address"
-                                    ZVAL "parse"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "read#37"
-                              CATCH_LIST
-                                CATCH
-                                  NAME_LIST
-                                    ZVAL "Sharp\\InvalidFields"
-                                  null
-                                  STMT_LIST
-                                    TRY
-                                      STMT_LIST
-                                        ASSIGN
-                                          VAR
-                                            ZVAL "read#37"
-                                          STATIC_CALL
-                                            ZVAL "App\\Point"
-                                            ZVAL "parse"
-                                            ARG_LIST
-                                              VAR
-                                                ZVAL "read#37"
-                                      CATCH_LIST
-                                        CATCH
-                                          NAME_LIST
-                                            ZVAL "Sharp\\InvalidFields"
-                                          null
-                                          STMT_LIST
-                                      null
-                              null
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "App.Address|App.Point"
-                        VAR
-                          ZVAL "read#37"
-                        ZVAL "place"
-                        VAR
-                          ZVAL "fields#2"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "place"
-                      VAR
-                        ZVAL "read#37"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "place"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "spot"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#39"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "spot"
-                    IF
-                      IF_ELEM
-                        AND
-                          UNARY_OP [14]
-                            INSTANCEOF
-                              VAR
-                                ZVAL "read#39"
-                              ZVAL "App\\Address"
-                          AND
-                            UNARY_OP [14]
-                              INSTANCEOF
-                                VAR
-                                  ZVAL "read#39"
-                                ZVAL "App\\Point"
-                            OR
-                              CALL
-                                ZVAL "is_array"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "read#39"
-                              CALL
-                                ZVAL "is_object"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "read#39"
-                        STMT_LIST
-                          STMT_LIST
-                            TRY
-                              STMT_LIST
-                                ASSIGN
-                                  VAR
-                                    ZVAL "read#39"
-                                  STATIC_CALL
-                                    ZVAL "App\\Point"
-                                    ZVAL "parse"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "read#39"
-                              CATCH_LIST
-                                CATCH
-                                  NAME_LIST
-                                    ZVAL "Sharp\\InvalidFields"
-                                  null
-                                  STMT_LIST
-                                    TRY
-                                      STMT_LIST
-                                        ASSIGN
-                                          VAR
-                                            ZVAL "read#39"
-                                          STATIC_CALL
-                                            ZVAL "App\\Address"
-                                            ZVAL "parse"
-                                            ARG_LIST
-                                              VAR
-                                                ZVAL "read#39"
-                                      CATCH_LIST
-                                        CATCH
-                                          NAME_LIST
-                                            ZVAL "Sharp\\InvalidFields"
-                                          null
-                                          STMT_LIST
-                                      null
-                              null
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "(App.Address|App.Point)?"
-                        VAR
-                          ZVAL "read#39"
-                        ZVAL "spot"
-                        VAR
-                          ZVAL "fields#2"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "spot"
-                      VAR
-                        ZVAL "read#39"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "arguments#3"
-                      ZVAL "spot"
-                    ZVAL null
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "spots"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#41"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "spots"
-                    IF
-                      IF_ELEM
-                        CALL
-                          ZVAL "is_array"
-                          ARG_LIST
-                            VAR
-                              ZVAL "read#41"
-                        STMT_LIST
-                          FOREACH
-                            VAR
-                              ZVAL "read#41"
-                            VAR
-                              ZVAL "element#44"
-                            VAR
-                              ZVAL "key#43"
-                            STMT_LIST
-                              IF
-                                IF_ELEM
-                                  AND
-                                    UNARY_OP [14]
-                                      INSTANCEOF
-                                        VAR
-                                          ZVAL "element#44"
-                                        ZVAL "App\\Address"
-                                    AND
-                                      UNARY_OP [14]
-                                        INSTANCEOF
-                                          VAR
-                                            ZVAL "element#44"
-                                          ZVAL "App\\Point"
-                                      OR
-                                        CALL
-                                          ZVAL "is_array"
-                                          ARG_LIST
-                                            VAR
-                                              ZVAL "element#44"
-                                        CALL
-                                          ZVAL "is_object"
-                                          ARG_LIST
-                                            VAR
-                                              ZVAL "element#44"
-                                  STMT_LIST
-                                    STMT_LIST
-                                      TRY
-                                        STMT_LIST
-                                          ASSIGN
-                                            VAR
-                                              ZVAL "element#44"
-                                            STATIC_CALL
-                                              ZVAL "App\\Point"
-                                              ZVAL "parse"
-                                              ARG_LIST
-                                                VAR
-                                                  ZVAL "element#44"
-                                        CATCH_LIST
-                                          CATCH
-                                            NAME_LIST
-                                              ZVAL "Sharp\\InvalidFields"
-                                            null
-                                            STMT_LIST
-                                              TRY
-                                                STMT_LIST
-                                                  ASSIGN
-                                                    VAR
-                                                      ZVAL "element#44"
-                                                    STATIC_CALL
-                                                      ZVAL "App\\Address"
-                                                      ZVAL "parse"
-                                                      ARG_LIST
-                                                        VAR
-                                                          ZVAL "element#44"
-                                                CATCH_LIST
-                                                  CATCH
-                                                    NAME_LIST
-                                                      ZVAL "Sharp\\InvalidFields"
-                                                    null
-                                                    STMT_LIST
-                                                null
-                                        null
-                              ASSIGN
-                                DIM
-                                  VAR
-                                    ZVAL "read#41"
-                                  VAR
-                                    ZVAL "key#43"
-                                VAR
-                                  ZVAL "element#44"
-                    IF
-                      IF_ELEM
-                        CALL
-                          ZVAL "Sharp\\Internal\\accepts"
-                          ARG_LIST
-                            ZVAL "Map<string, App.Address|App.Point>"
-                            VAR
-                              ZVAL "read#41"
-                            ZVAL "spots"
-                            VAR
-                              ZVAL "fields#2"
-                        STMT_LIST
-                          ASSIGN
-                            VAR
-                              ZVAL "read#41"
-                            CONDITIONAL
-                              CALL
-                                ZVAL "is_array"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "read#41"
-                              SHARP_TYPE_ARGS
-                                NEW
-                                  ZVAL "Sharp\\Map"
-                                  ARG_LIST
-                                    CALL
-                                      ZVAL "array_merge"
-                                      ARG_LIST
-                                        ARRAY [3]
-                                        UNPACK
-                                          CALL
-                                            ZVAL "array_map"
-                                            ARG_LIST
-                                              ARROW_FUNC "" @3-3
-                                                PARAM_LIST
-                                                  PARAM
-                                                    null
-                                                    ZVAL "key#45"
-                                                    null
-                                                    null
-                                                    null
-                                                    null
-                                                  PARAM
-                                                    null
-                                                    ZVAL "value#46"
-                                                    null
-                                                    null
-                                                    null
-                                                    null
-                                                null
-                                                ARRAY [3]
-                                                  ARRAY_ELEM
-                                                    CAST [6]
-                                                      VAR
-                                                        ZVAL "key#45"
-                                                    null
-                                                  ARRAY_ELEM
-                                                    VAR
-                                                      ZVAL "value#46"
-                                                    null
-                                                null
-                                                null
-                                              CALL
-                                                ZVAL "array_keys"
-                                                ARG_LIST
-                                                  VAR
-                                                    ZVAL "read#41"
-                                              VAR
-                                                ZVAL "read#41"
-                                ZVAL "string, App.Address|App.Point"
-                              VAR
-                                ZVAL "read#41"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "spots"
-                      VAR
-                        ZVAL "read#41"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "spots"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "seen"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#45"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "seen"
-                    IF
-                      IF_ELEM
-                        CALL
-                          ZVAL "is_array"
-                          ARG_LIST
-                            VAR
-                              ZVAL "read#45"
-                        STMT_LIST
-                          FOREACH
-                            VAR
-                              ZVAL "read#45"
-                            VAR
-                              ZVAL "element#48"
-                            VAR
-                              ZVAL "key#47"
-                            STMT_LIST
-                              IF
-                                IF_ELEM
-                                  AND
-                                    CALL
-                                      ZVAL "is_string"
-                                      ARG_LIST
-                                        VAR
-                                          ZVAL "element#48"
-                                    BINARY_OP [17]
-                                      ASSIGN
-                                        VAR
-                                          ZVAL "case#49"
-                                        STATIC_CALL
-                                          ZVAL "App\\Status"
-                                          ZVAL "tryFrom"
-                                          ARG_LIST
-                                            CAST [6]
-                                              VAR
-                                                ZVAL "element#48"
-                                      ZVAL null
-                                  STMT_LIST
-                                    ASSIGN
-                                      VAR
-                                        ZVAL "element#48"
-                                      VAR
-                                        ZVAL "case#49"
-                              ASSIGN
-                                DIM
-                                  VAR
-                                    ZVAL "read#45"
-                                  VAR
-                                    ZVAL "key#47"
-                                VAR
-                                  ZVAL "element#48"
-                    IF
-                      IF_ELEM
-                        CALL
-                          ZVAL "Sharp\\Internal\\accepts"
-                          ARG_LIST
-                            ZVAL "Set<App.Status>"
-                            VAR
-                              ZVAL "read#45"
-                            ZVAL "seen"
-                            VAR
-                              ZVAL "fields#2"
-                        STMT_LIST
-                          ASSIGN
-                            VAR
-                              ZVAL "read#45"
-                            CONDITIONAL
-                              CALL
-                                ZVAL "is_array"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "read#45"
-                              SHARP_TYPE_ARGS
-                                NEW
-                                  ZVAL "Sharp\\Set"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "read#45"
-                                ZVAL "App.Status"
-                              VAR
-                                ZVAL "read#45"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "seen"
-                      VAR
-                        ZVAL "read#45"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "seen"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "groups"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#50"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "groups"
-                    IF
-                      IF_ELEM
-                        CALL
-                          ZVAL "Sharp\\Internal\\accepts"
-                          ARG_LIST
-                            ZVAL "List<List<Set<int>>>"
-                            VAR
-                              ZVAL "read#50"
-                            ZVAL "groups"
-                            VAR
-                              ZVAL "fields#2"
-                        STMT_LIST
-                          ASSIGN
-                            VAR
-                              ZVAL "read#50"
-                            CONDITIONAL
-                              CALL
-                                ZVAL "is_array"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "read#50"
-                              CALL
-                                ZVAL "array_map"
-                                ARG_LIST
-                                  ARROW_FUNC "" @3-3
-                                    PARAM_LIST
-                                      PARAM
-                                        null
-                                        ZVAL "element#52"
-                                        null
-                                        null
-                                        null
-                                        null
-                                    null
-                                    CONDITIONAL
-                                      CALL
-                                        ZVAL "is_array"
-                                        ARG_LIST
-                                          VAR
-                                            ZVAL "element#52"
-                                      CALL
-                                        ZVAL "array_map"
-                                        ARG_LIST
-                                          ARROW_FUNC "" @3-3
-                                            PARAM_LIST
-                                              PARAM
-                                                null
-                                                ZVAL "element#53"
-                                                null
-                                                null
-                                                null
-                                                null
-                                            null
-                                            CONDITIONAL
-                                              CALL
-                                                ZVAL "is_array"
-                                                ARG_LIST
-                                                  VAR
-                                                    ZVAL "element#53"
-                                              SHARP_TYPE_ARGS
-                                                NEW
-                                                  ZVAL "Sharp\\Set"
-                                                  ARG_LIST
-                                                    VAR
-                                                      ZVAL "element#53"
-                                                ZVAL "int"
-                                              VAR
-                                                ZVAL "element#53"
-                                            null
-                                            null
-                                          VAR
-                                            ZVAL "element#52"
-                                      VAR
-                                        ZVAL "element#52"
-                                    null
-                                    null
-                                  VAR
-                                    ZVAL "read#50"
-                              VAR
-                                ZVAL "read#50"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "groups"
-                      VAR
-                        ZVAL "read#50"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "groups"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "note"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#52"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "note"
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "Any"
-                        VAR
-                          ZVAL "read#52"
-                        ZVAL "note"
-                        VAR
-                          ZVAL "fields#2"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "note"
-                      VAR
-                        ZVAL "read#52"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "note"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "paid"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#54"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "paid"
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "bool"
-                        VAR
-                          ZVAL "read#54"
-                        ZVAL "paid"
-                        VAR
-                          ZVAL "fields#2"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "paid"
-                      VAR
-                        ZVAL "read#54"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "paid"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "rank"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#56"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "rank"
-                    IF
-                      IF_ELEM
-                        AND
-                          CALL
-                            ZVAL "is_int"
-                            ARG_LIST
-                              VAR
-                                ZVAL "read#56"
-                          BINARY_OP [17]
-                            ASSIGN
-                              VAR
-                                ZVAL "case#58"
-                              STATIC_CALL
-                                ZVAL "App\\Rank"
-                                ZVAL "tryFrom"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "read#56"
-                            ZVAL null
-                        STMT_LIST
-                          ASSIGN
-                            VAR
-                              ZVAL "read#56"
-                            VAR
-                              ZVAL "case#58"
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "App.Rank"
-                        VAR
-                          ZVAL "read#56"
-                        ZVAL "rank"
-                        VAR
-                          ZVAL "fields#2"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "rank"
-                      VAR
-                        ZVAL "read#56"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "rank"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "mood"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#59"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "mood"
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "App.Mood"
-                        VAR
-                          ZVAL "read#59"
-                        ZVAL "mood"
-                        VAR
-                          ZVAL "fields#2"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "mood"
-                      VAR
-                        ZVAL "read#59"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "mood"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "trail"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#61"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "trail"
-                    ASSIGN
-                      VAR
-                        ZVAL "failed#62"
+                    ARRAY_ELEM
                       ARRAY [3]
-                    IF
-                      IF_ELEM
-                        AND
-                          UNARY_OP [14]
-                            INSTANCEOF
-                              VAR
-                                ZVAL "read#61"
-                              ZVAL "App\\Point"
-                          OR
-                            CALL
-                              ZVAL "is_array"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "read#61"
-                            CALL
-                              ZVAL "is_object"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "read#61"
-                        STMT_LIST
-                          STMT_LIST
-                            TRY
-                              STMT_LIST
-                                ASSIGN
-                                  VAR
-                                    ZVAL "read#61"
-                                  STATIC_CALL
-                                    ZVAL "App\\Point"
-                                    ZVAL "parse"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "read#61"
-                              CATCH_LIST
-                                CATCH
-                                  NAME_LIST
-                                    ZVAL "Sharp\\InvalidFields"
-                                  null
-                                  STMT_LIST
-                              null
-                    IF
-                      IF_ELEM
-                        CALL
-                          ZVAL "is_array"
-                          ARG_LIST
-                            VAR
-                              ZVAL "read#61"
-                        STMT_LIST
-                          FOREACH
-                            VAR
-                              ZVAL "read#61"
-                            VAR
-                              ZVAL "element#64"
-                            VAR
-                              ZVAL "key#63"
-                            STMT_LIST
-                              IF
-                                IF_ELEM
-                                  AND
-                                    UNARY_OP [14]
-                                      INSTANCEOF
-                                        VAR
-                                          ZVAL "element#64"
-                                        ZVAL "App\\Point"
-                                    OR
-                                      CALL
-                                        ZVAL "is_array"
-                                        ARG_LIST
-                                          VAR
-                                            ZVAL "element#64"
-                                      CALL
-                                        ZVAL "is_object"
-                                        ARG_LIST
-                                          VAR
-                                            ZVAL "element#64"
-                                  STMT_LIST
-                                    TRY
-                                      STMT_LIST
-                                        ASSIGN
-                                          VAR
-                                            ZVAL "element#64"
-                                          STATIC_CALL
-                                            ZVAL "App\\Point"
-                                            ZVAL "parse"
-                                            ARG_LIST
-                                              VAR
-                                                ZVAL "element#64"
-                                      CATCH_LIST
-                                        CATCH
-                                          NAME_LIST
-                                            ZVAL "Sharp\\InvalidFields"
-                                          ZVAL "inner#65"
-                                          STMT_LIST
-                                            FOREACH
-                                              PROP
-                                                VAR
-                                                  ZVAL "inner#65"
-                                                ZVAL "fields"
-                                              VAR
-                                                ZVAL "problem#67"
-                                              VAR
-                                                ZVAL "key#66"
-                                              STMT_LIST
-                                                ASSIGN
-                                                  DIM
-                                                    VAR
-                                                      ZVAL "fields#2"
-                                                    BINARY_OP [8]
-                                                      BINARY_OP [8]
-                                                        BINARY_OP [8]
-                                                          BINARY_OP [8]
-                                                            BINARY_OP [8]
-                                                              ZVAL "trail"
-                                                              ZVAL "["
-                                                            VAR
-                                                              ZVAL "key#63"
-                                                          ZVAL "]"
-                                                        ZVAL "."
-                                                      VAR
-                                                        ZVAL "key#66"
-                                                  VAR
-                                                    ZVAL "problem#67"
-                                            ASSIGN
-                                              DIM
-                                                VAR
-                                                  ZVAL "failed#62"
-                                                null
-                                              BINARY_OP [8]
-                                                BINARY_OP [8]
-                                                  BINARY_OP [8]
-                                                    ZVAL "trail"
-                                                    ZVAL "["
-                                                  VAR
-                                                    ZVAL "key#63"
-                                                ZVAL "]"
-                                      null
-                              ASSIGN
-                                DIM
-                                  VAR
-                                    ZVAL "read#61"
-                                  VAR
-                                    ZVAL "key#63"
-                                VAR
-                                  ZVAL "element#64"
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "App.Point|List<App.Point>"
-                        VAR
-                          ZVAL "read#61"
-                        ZVAL "trail"
-                        VAR
-                          ZVAL "fields#2"
-                    FOREACH
-                      VAR
-                        ZVAL "failed#62"
-                      VAR
-                        ZVAL "path#68"
+                        ARRAY_ELEM
+                          ZVAL "addresses"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "addresses"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "List<App.Address>"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
                       null
-                      STMT_LIST
-                        UNSET
-                          DIM
-                            VAR
-                              ZVAL "fields#2"
-                            VAR
-                              ZVAL "path#68"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "trail"
-                      VAR
-                        ZVAL "read#61"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "trail"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "rows"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#69"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "rows"
-                    ASSIGN
-                      VAR
-                        ZVAL "failed#70"
+                    ARRAY_ELEM
                       ARRAY [3]
-                    IF
-                      IF_ELEM
-                        CALL
-                          ZVAL "is_array"
-                          ARG_LIST
-                            VAR
-                              ZVAL "read#69"
-                        STMT_LIST
-                          FOREACH
-                            VAR
-                              ZVAL "read#69"
-                            VAR
-                              ZVAL "element#72"
-                            VAR
-                              ZVAL "key#71"
-                            STMT_LIST
-                              IF
-                                IF_ELEM
-                                  CALL
-                                    ZVAL "is_array"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "element#72"
-                                  STMT_LIST
-                                    FOREACH
-                                      VAR
-                                        ZVAL "element#72"
-                                      VAR
-                                        ZVAL "element#74"
-                                      VAR
-                                        ZVAL "key#73"
-                                      STMT_LIST
-                                        IF
-                                          IF_ELEM
-                                            AND
-                                              UNARY_OP [14]
-                                                INSTANCEOF
-                                                  VAR
-                                                    ZVAL "element#74"
-                                                  ZVAL "App\\Point"
-                                              OR
-                                                CALL
-                                                  ZVAL "is_array"
-                                                  ARG_LIST
-                                                    VAR
-                                                      ZVAL "element#74"
-                                                CALL
-                                                  ZVAL "is_object"
-                                                  ARG_LIST
-                                                    VAR
-                                                      ZVAL "element#74"
-                                            STMT_LIST
-                                              TRY
-                                                STMT_LIST
-                                                  ASSIGN
-                                                    VAR
-                                                      ZVAL "element#74"
-                                                    STATIC_CALL
-                                                      ZVAL "App\\Point"
-                                                      ZVAL "parse"
-                                                      ARG_LIST
-                                                        VAR
-                                                          ZVAL "element#74"
-                                                CATCH_LIST
-                                                  CATCH
-                                                    NAME_LIST
-                                                      ZVAL "Sharp\\InvalidFields"
-                                                    ZVAL "inner#75"
-                                                    STMT_LIST
-                                                      FOREACH
-                                                        PROP
-                                                          VAR
-                                                            ZVAL "inner#75"
-                                                          ZVAL "fields"
-                                                        VAR
-                                                          ZVAL "problem#77"
-                                                        VAR
-                                                          ZVAL "key#76"
-                                                        STMT_LIST
-                                                          ASSIGN
-                                                            DIM
-                                                              VAR
-                                                                ZVAL "fields#2"
-                                                              BINARY_OP [8]
-                                                                BINARY_OP [8]
-                                                                  BINARY_OP [8]
-                                                                    BINARY_OP [8]
-                                                                      BINARY_OP [8]
-                                                                        BINARY_OP [8]
-                                                                          BINARY_OP [8]
-                                                                            BINARY_OP [8]
-                                                                              ZVAL "rows"
-                                                                              ZVAL "["
-                                                                            VAR
-                                                                              ZVAL "key#71"
-                                                                          ZVAL "]"
-                                                                        ZVAL "["
-                                                                      VAR
-                                                                        ZVAL "key#73"
-                                                                    ZVAL "]"
-                                                                  ZVAL "."
-                                                                VAR
-                                                                  ZVAL "key#76"
-                                                            VAR
-                                                              ZVAL "problem#77"
-                                                      ASSIGN
-                                                        DIM
-                                                          VAR
-                                                            ZVAL "failed#70"
-                                                          null
-                                                        BINARY_OP [8]
-                                                          BINARY_OP [8]
-                                                            BINARY_OP [8]
-                                                              BINARY_OP [8]
-                                                                BINARY_OP [8]
-                                                                  BINARY_OP [8]
-                                                                    ZVAL "rows"
-                                                                    ZVAL "["
-                                                                  VAR
-                                                                    ZVAL "key#71"
-                                                                ZVAL "]"
-                                                              ZVAL "["
-                                                            VAR
-                                                              ZVAL "key#73"
-                                                          ZVAL "]"
-                                                null
-                                        ASSIGN
-                                          DIM
-                                            VAR
-                                              ZVAL "element#72"
-                                            VAR
-                                              ZVAL "key#73"
-                                          VAR
-                                            ZVAL "element#74"
-                              ASSIGN
-                                DIM
-                                  VAR
-                                    ZVAL "read#69"
-                                  VAR
-                                    ZVAL "key#71"
-                                VAR
-                                  ZVAL "element#72"
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "List<List<App.Point>>"
-                        VAR
-                          ZVAL "read#69"
-                        ZVAL "rows"
-                        VAR
-                          ZVAL "fields#2"
-                    FOREACH
-                      VAR
-                        ZVAL "failed#70"
-                      VAR
-                        ZVAL "path#78"
+                        ARRAY_ELEM
+                          ZVAL "prices"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "prices"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "Map<App.Status, int>"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
                       null
-                      STMT_LIST
-                        UNSET
-                          DIM
-                            VAR
-                              ZVAL "fields#2"
-                            VAR
-                              ZVAL "path#78"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "rows"
-                      VAR
-                        ZVAL "read#69"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "rows"
-                    ZVAL "missing"
-
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "corner"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#79"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "corner"
-                    IF
-                      IF_ELEM
-                        AND
-                          UNARY_OP [14]
-                            INSTANCEOF
-                              VAR
-                                ZVAL "read#79"
-                              ZVAL "App\\Address"
-                          AND
-                            UNARY_OP [14]
-                              INSTANCEOF
-                                VAR
-                                  ZVAL "read#79"
-                                ZVAL "App\\Point"
-                            OR
-                              CALL
-                                ZVAL "is_array"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "read#79"
-                              CALL
-                                ZVAL "is_object"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "read#79"
-                        STMT_LIST
-                          STMT_LIST
-                            TRY
-                              STMT_LIST
-                                ASSIGN
-                                  VAR
-                                    ZVAL "read#79"
-                                  STATIC_CALL
-                                    ZVAL "App\\Point"
-                                    ZVAL "parse"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "read#79"
-                              CATCH_LIST
-                                CATCH
-                                  NAME_LIST
-                                    ZVAL "Sharp\\InvalidFields"
-                                  null
-                                  STMT_LIST
-                                    TRY
-                                      STMT_LIST
-                                        ASSIGN
-                                          VAR
-                                            ZVAL "read#79"
-                                          STATIC_CALL
-                                            ZVAL "App\\Address"
-                                            ZVAL "parse"
-                                            ARG_LIST
-                                              VAR
-                                                ZVAL "read#79"
-                                      CATCH_LIST
-                                        CATCH
-                                          NAME_LIST
-                                            ZVAL "Sharp\\InvalidFields"
-                                          null
-                                          STMT_LIST
-                                      null
-                              null
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "App.Address|App.Point"
-                        VAR
-                          ZVAL "read#79"
-                        ZVAL "corner"
-                        VAR
-                          ZVAL "fields#2"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "properties#4"
-                        ZVAL "corner"
-                      VAR
-                        ZVAL "read#79"
-        "#}
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "plan"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "plan"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Plan"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "extra"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "extra"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "Any?"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "reference"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "reference"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "int|string"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "place"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "place"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Address|App.Point"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Address, App.Point"
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "spot"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "spot"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "(App.Address|App.Point)?"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Point, App.Address"
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "spots"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "spots"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "Map<string, App.Address|App.Point>"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Point, App.Address"
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "seen"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "seen"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "Set<App.Status>"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "groups"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "groups"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "List<List<Set<int>>>"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "note"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "note"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "Any"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "paid"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "paid"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "bool"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "rank"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "rank"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Rank"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "mood"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "mood"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Mood"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "trail"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "trail"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Point|List<App.Point>"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "rows"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "rows"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "List<List<App.Point>>"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "corner"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "corner"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Address|App.Point"
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Point, App.Address"
+                          null
+                      null
+              null
+              null
+        "##}
     );
 }
 
@@ -35565,15 +33785,16 @@ fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
 /// ```php
 /// public static function tryParse(array|object $value): ?\App\Ticket
 /// {
-///     try { return \App\Ticket::parse($value); } catch (\Sharp\InvalidFields) { return null; }
+///     try { return \App\Ticket::parse($value); } catch (\ValueError) { return null; }
 /// }
 /// ```
 ///
 /// Spec section 10: a PHP# class that can be created parses the same way a struct does, so the same members give the
-/// same `parse` and `tryParse`, and `tryParse` gives null where `parse` throws. A class with no constructor of its own
-/// reads the main constructor it inherits, `[Key]` included, and a list of a class is built element by element through
-/// that class's `parse`. A class whose parent declares `parse`, an abstract or a
-/// static class, and a class or a struct that declares its own `parse` get neither method.
+/// same `#fields`, `parse` and `tryParse`, and `tryParse` gives null where `parse` throws, a `\ValueError` its main
+/// constructor throws included. A class with no constructor of its own reads the main constructor it inherits, `[Key]`
+/// included, and the engine builds a list of a class element by element, so no `parse` calls another. A class whose
+/// parent declares `parse`, an abstract or a static class, and a class or a struct that declares its own `parse` get
+/// none of them.
 #[test]
 fn a_class_parses_as_a_struct_does() {
     let members = "Ticket([Key(\"ticket_id\")] public int id { get; }, public int seats { get; } = 1) { }\n\n    public string note { get; init; } = \"\";\n}\n";
@@ -35585,6 +33806,7 @@ fn a_class_parses_as_a_struct_does() {
     };
     let (class, r#struct) = (lowered("class"), lowered("struct"));
 
+    assert_eq!(class.declared("#fields"), r#struct.declared("#fields"));
     assert_eq!(class.declared("parse"), r#struct.declared("parse"));
     assert_eq!(class.declared("tryParse"), r#struct.declared("tryParse"));
     assert_eq!(
@@ -35615,7 +33837,7 @@ fn a_class_parses_as_a_struct_does() {
                   CATCH_LIST
                     CATCH
                       NAME_LIST
-                        ZVAL "Sharp\\InvalidFields"
+                        ZVAL "ValueError"
                       null
                       STMT_LIST
                         RETURN
@@ -35633,51 +33855,35 @@ fn a_class_parses_as_a_struct_does() {
         "namespace App;\n\nimport Sharp.Key;\n\npublic class Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n}\n",
     );
     assert_eq!(
-        Lowered::with("namespace App;\n\npublic class Memo : Note\n{\n}\n", &[KEY, note]).parse_reads(),
-        indoc! {r#"
-            IF
-              IF_ELEM
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL "body"
-                    VAR
-                      ZVAL "input#1"
-                STMT_LIST
-                  STMT_LIST
-                    ASSIGN
-                      VAR
-                        ZVAL "read#8"
-                      DIM
-                        VAR
-                          ZVAL "input#1"
-                        ZVAL "body"
-                    CALL
-                      ZVAL "Sharp\\Internal\\accepts"
-                      ARG_LIST
-                        ZVAL "string"
-                        VAR
-                          ZVAL "read#8"
-                        ZVAL "body"
-                        VAR
-                          ZVAL "fields#2"
-                    ASSIGN
-                      DIM
-                        VAR
-                          ZVAL "arguments#3"
-                        ZVAL "text"
-                      VAR
-                        ZVAL "read#8"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "body"
-                    ZVAL "missing"
-        "#}
+        Lowered::with("namespace App;\n\npublic class Memo : Note\n{\n}\n", &[KEY, note]).declared("#fields"),
+        indoc! {r##"
+            METHOD [17] "#fields" @3-3
+              PARAM_LIST
+              null
+              STMT_LIST
+                RETURN
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "text"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "body"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "string"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+              null
+              null
+        "##}
     );
 
     let letter = Lowered::with(
@@ -35691,7 +33897,7 @@ fn a_class_parses_as_a_struct_does() {
         .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_STATIC_CALL)
         .map(|(index, _)| letter.text(letter.nodes()[letter.child(index as u32, 0) as usize].text))
         .collect();
-    assert_eq!(parsed, ["App\\Note", "App\\Letter"], "each copy through `Note::parse`, then `tryParse`'s own call");
+    assert_eq!(parsed, ["App\\Letter"], "the engine builds each copy, so the one call is `tryParse`'s own");
 
     let methods = |code: &str| {
         let clock = (
@@ -35780,9 +33986,9 @@ fn a_generated_parse_lists_the_effects_of_what_it_runs() {
     );
 }
 
-/// Spec section 10: no input holds a function, so a struct with a function field, also in a list, lowers with no
-/// `parse` or `tryParse`, which the checker refuses where they are called. A struct with a pure enum field keeps both,
-/// as the enum has a type text, and the checker refuses those calls too.
+/// Spec section 10: no input holds a function, so a struct with a function field, also in a list or a tuple, lowers
+/// with no `parse` or `tryParse`, which the checker refuses where they are called. A struct with a pure enum field keeps
+/// both, as the enum has a type text, and the checker refuses those calls too.
 #[test]
 fn a_struct_that_holds_a_function_has_no_parse() {
     let methods = |code: &str| {
@@ -35803,17 +34009,23 @@ fn a_struct_that_holds_a_function_has_no_parse() {
         methods(
             "namespace App;\n\npublic struct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n\n    public bool allows(int value) => this.check(value);\n}\n"
         ),
-        ["__construct", "allows", "op_Equality"]
+        ["__construct", "allows", "op_Equality", "#json"]
     );
     assert_eq!(
         methods(
             "namespace App;\n\npublic struct Makers\n{\n    public Makers(public List<Function<int()>> builders { get; }) { }\n}\n"
         ),
-        ["__construct", "op_Equality"]
+        ["__construct", "op_Equality", "#json"]
+    );
+    assert_eq!(
+        methods(
+            "namespace App;\n\npublic struct Hooks\n{\n    public Hooks(public [string, Function<int()>] named { get; }) { }\n}\n"
+        ),
+        ["__construct", "op_Equality", "#json"]
     );
     assert_eq!(
         methods("namespace App;\n\npublic struct Feeling\n{\n    public Feeling(public Mood mood { get; }) { }\n}\n"),
-        ["__construct", "op_Equality", "parse", "tryParse"]
+        ["__construct", "op_Equality", "#fields", "parse", "tryParse", "#json"]
     );
 }
 
@@ -36060,7 +34272,7 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
             .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD)
             .map(|node| declared.text(node.text))
             .collect::<Vec<_>>(),
-        ["__construct", "op_Equality", "hash", "run"]
+        ["__construct", "op_Equality", "hash", "run", "#json"]
     );
     assert_eq!(
         declared.body(),
@@ -36825,5 +35037,428 @@ fn an_extern_line_with_attributes_lowers_to_the_declaration_and_its_attributes()
                       ARG_LIST
                         ZVAL "time"
         "#}
+    );
+}
+
+/// ```php
+/// return [['inner', 'inner', 'App.Pair<int, string>', true, false]];
+/// ```
+///
+/// Spec section 10: a field of a generic struct's type writes the type with its arguments, so the reader builds the
+/// struct with them, and its own fields of a type parameter read as those arguments.
+#[test]
+fn a_field_of_a_generic_type_reads_with_its_type_arguments() {
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic struct Wrapped\n{\n    public Wrapped(public Pair<int, string> inner { get; }) { }\n}\n",
+        &[(
+            "src/App/Pair.sharp",
+            "namespace App;\n\npublic struct Pair<TFirst, TSecond>\n{\n    public Pair(public TFirst first { get; }, public TSecond second { get; }) { }\n}\n",
+        )],
+    );
+
+    assert_eq!(
+        lowered.declared("#fields"),
+        indoc! {r##"
+            METHOD [17] "#fields" @3-3
+              PARAM_LIST
+              null
+              STMT_LIST
+                RETURN
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "inner"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "inner"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App.Pair<int, string>"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+              null
+              null
+        "##}
+    );
+}
+
+/// `Sharp\Key` and `Sharp\Tag`, as `sharp/composer/` ships them.
+const FAMILY_ATTRIBUTES: [(&str, &str); 2] = [
+    ("src/Sharp/Key.sharp", include_str!("../../../../composer/library/Sharp/Key.sharp")),
+    ("src/Sharp/Tag.sharp", include_str!("../../../../composer/library/Sharp/Tag.sharp")),
+];
+
+/// The interface family `App.Method` and its variant `App.Card`, whose `note` is left out when it is null.
+const METHOD_FAMILY: [(&str, &str); 2] = [
+    (
+        "src/App/Method.sharp",
+        "namespace App;\n\nimport Sharp.Tag;\n\n[Tag(\"type\")]\npublic sealed interface Method\n{\n}\n",
+    ),
+    (
+        "src/App/Card.sharp",
+        "namespace App;\n\nimport Sharp.Key;\n\n[Key(\"card\")]\npublic struct Card : Method\n{\n    public Card(public string last4 { get; }, [Key(omitNull: true)] public string? note { get; }) { }\n}\n",
+    ),
+];
+
+/// Spec section 10: `Json.encode` writes a variant with its name under its family's key and leaves out a null
+/// `[Key(omitNull: true)]` field, and a value as text as its `toString()`. A family's `parse` asks the engine for the
+/// variant its input names, and a call of an interface family's `parse` or `tryParse`, which holds no body, does so
+/// itself. A tuple field reads as each of its elements.
+#[test]
+fn a_family_reads_and_writes_a_variant_by_its_name() {
+    let library = [FAMILY_ATTRIBUTES.as_slice(), METHOD_FAMILY.as_slice()].concat();
+    let card = Lowered::with(METHOD_FAMILY[1].1, &[FAMILY_ATTRIBUTES.as_slice(), &METHOD_FAMILY[..1]].concat());
+    let code = Lowered::with(
+        "namespace App;\n\npublic struct Code\n{\n    private Code(private string text { get; }) { }\n\n    public static Code parse(string text) => new Code(text);\n\n    public string toString() => this.text;\n}\n",
+        &[],
+    );
+    let shape = Lowered::with(
+        "namespace App;\n\nimport Sharp.Tag;\n\n[Tag(\"kind\")]\npublic abstract class Shape\n{\n}\n",
+        &[
+            FAMILY_ATTRIBUTES.as_slice(),
+            &[(
+                "src/App/Circle.sharp",
+                "namespace App;\n\nimport Sharp.Key;\n\n[Key(\"circle\")]\npublic class Circle : Shape\n{\n    public Circle(public int radius { get; }) { }\n}\n",
+            )],
+        ]
+        .concat(),
+    );
+    let holder = Lowered::with(
+        "namespace App;\n\npublic struct Holder\n{\n    public Holder(public [string, int] pair { get; }) { }\n}\n",
+        &[],
+    );
+    let ledger = Lowered::with(
+        "namespace App;\n\npublic class Ledger\n{\n    public static Method method(Map<string, Any?> input) => Method.parse(input);\n\n    public static Method? maybe(Map<string, Any?> input) => Method.tryParse(input);\n}\n",
+        &library,
+    );
+
+    assert_eq!(
+        card.declared("#json"),
+        indoc! {r##"
+            METHOD [1] "#json" @6-6
+              PARAM_LIST
+              null
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "json#1"
+                  NEW
+                    ZVAL "stdClass"
+                    ARG_LIST
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "json#1"
+                    ZVAL "type"
+                  ZVAL "card"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "json#1"
+                    ZVAL "last4"
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "last4"
+                IF
+                  IF_ELEM
+                    BINARY_OP [17]
+                      PROP
+                        VAR
+                          ZVAL "this"
+                        ZVAL "note"
+                      ZVAL null
+                    STMT_LIST
+                      ASSIGN
+                        PROP
+                          VAR
+                            ZVAL "json#1"
+                          ZVAL "note"
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "note"
+                RETURN
+                  VAR
+                    ZVAL "json#1"
+              null
+              null
+        "##}
+    );
+    assert_eq!(
+        code.declared("#json"),
+        indoc! {r##"
+            METHOD [1] "#json" @3-3
+              PARAM_LIST
+              null
+              STMT_LIST
+                RETURN
+                  METHOD_CALL
+                    VAR
+                      ZVAL "this"
+                    ZVAL "toString"
+                    ARG_LIST
+              null
+              null
+        "##}
+    );
+    assert_eq!(
+        shape.declared("parse"),
+        indoc! {r##"
+            METHOD [17] "parse" @6-6
+              PARAM_LIST
+                PARAM
+                  TYPE_UNION
+                    TYPE [7]
+                    ZVAL [1] "object"
+                  ZVAL "value"
+                  null
+                  null
+                  null
+                  null
+              null
+              STMT_LIST
+                RETURN
+                  CALL
+                    ZVAL "Sharp\\Internal\\parseVariant"
+                    ARG_LIST
+                      ZVAL "App\\Shape"
+                      VAR
+                        ZVAL "value"
+              SHARP_TYPE_ARGS
+                ZVAL "App\\Shape"
+                ZVAL "Function<App.Shape(Map<string, Any?>|Object)>"
+              null
+        "##}
+    );
+    assert_eq!(
+        holder.declared("#fields"),
+        indoc! {r##"
+            METHOD [17] "#fields" @3-3
+              PARAM_LIST
+              null
+              STMT_LIST
+                RETURN
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "pair"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "pair"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "[string, int]"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                      null
+              null
+              null
+        "##}
+    );
+    assert_eq!(
+        ledger.declared("method"),
+        indoc! {r##"
+            METHOD [17] "method" @5-5
+              PARAM_LIST
+                PARAM
+                  TYPE_UNION
+                    ZVAL "Sharp\\Map"
+                    TYPE [7]
+                  ZVAL "input"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  null
+                  ZVAL "Map<string, Any?>"
+              null
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "input"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "input"
+                    SHARP_TYPE_ARGS
+                      NEW
+                        ZVAL "Sharp\\Map"
+                        ARG_LIST
+                          CALL
+                            ZVAL "array_merge"
+                            ARG_LIST
+                              ARRAY [3]
+                              UNPACK
+                                CALL
+                                  ZVAL "array_map"
+                                  ARG_LIST
+                                    ARROW_FUNC "" @5-5
+                                      PARAM_LIST
+                                        PARAM
+                                          null
+                                          ZVAL "key#1"
+                                          null
+                                          null
+                                          null
+                                          null
+                                        PARAM
+                                          null
+                                          ZVAL "value#2"
+                                          null
+                                          null
+                                          null
+                                          null
+                                      null
+                                      ARRAY [3]
+                                        ARRAY_ELEM
+                                          CAST [6]
+                                            VAR
+                                              ZVAL "key#1"
+                                          null
+                                        ARRAY_ELEM
+                                          VAR
+                                            ZVAL "value#2"
+                                          null
+                                      null
+                                      null
+                                    CALL
+                                      ZVAL "array_keys"
+                                      ARG_LIST
+                                        VAR
+                                          ZVAL "input"
+                                    VAR
+                                      ZVAL "input"
+                      ZVAL "string, Any?"
+                    VAR
+                      ZVAL "input"
+                RETURN
+                  CALL
+                    ZVAL "Sharp\\Internal\\parseVariant"
+                    ARG_LIST
+                      ZVAL "App\\Method"
+                      CALL
+                        ZVAL "Sharp\\Internal\\arrayOf"
+                        ARG_LIST
+                          VAR
+                            ZVAL "input"
+                      ZVAL true
+              SHARP_TYPE_ARGS
+                ZVAL "App\\Method"
+                ZVAL "Function<App.Method(Map<string, Any?>)>"
+              null
+        "##}
+    );
+    assert_eq!(
+        ledger.declared("maybe"),
+        indoc! {r##"
+            METHOD [17] "maybe" @7-7
+              PARAM_LIST
+                PARAM
+                  TYPE_UNION
+                    ZVAL "Sharp\\Map"
+                    TYPE [7]
+                  ZVAL "input"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  null
+                  ZVAL "Map<string, Any?>"
+              null
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "input"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "input"
+                    SHARP_TYPE_ARGS
+                      NEW
+                        ZVAL "Sharp\\Map"
+                        ARG_LIST
+                          CALL
+                            ZVAL "array_merge"
+                            ARG_LIST
+                              ARRAY [3]
+                              UNPACK
+                                CALL
+                                  ZVAL "array_map"
+                                  ARG_LIST
+                                    ARROW_FUNC "" @7-7
+                                      PARAM_LIST
+                                        PARAM
+                                          null
+                                          ZVAL "key#1"
+                                          null
+                                          null
+                                          null
+                                          null
+                                        PARAM
+                                          null
+                                          ZVAL "value#2"
+                                          null
+                                          null
+                                          null
+                                          null
+                                      null
+                                      ARRAY [3]
+                                        ARRAY_ELEM
+                                          CAST [6]
+                                            VAR
+                                              ZVAL "key#1"
+                                          null
+                                        ARRAY_ELEM
+                                          VAR
+                                            ZVAL "value#2"
+                                          null
+                                      null
+                                      null
+                                    CALL
+                                      ZVAL "array_keys"
+                                      ARG_LIST
+                                        VAR
+                                          ZVAL "input"
+                                    VAR
+                                      ZVAL "input"
+                      ZVAL "string, Any?"
+                    VAR
+                      ZVAL "input"
+                RETURN
+                  CALL
+                    ZVAL "Sharp\\Internal\\parseVariant"
+                    ARG_LIST
+                      ZVAL "App\\Method"
+                      CALL
+                        ZVAL "Sharp\\Internal\\arrayOf"
+                        ARG_LIST
+                          VAR
+                            ZVAL "input"
+                      ZVAL false
+              SHARP_TYPE_ARGS
+                ZVAL [256] "App\\Method"
+                ZVAL "Function<App.Method?(Map<string, Any?>)>"
+              null
+        "##}
     );
 }

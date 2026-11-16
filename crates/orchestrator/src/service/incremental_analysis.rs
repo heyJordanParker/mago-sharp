@@ -35,6 +35,7 @@ use mago_analyzer::settings::Settings;
 #[cfg(not(target_arch = "wasm32"))]
 use mago_analyzer::telemetry as analyzer_telemetry;
 use mago_analyzer::too_wide_members;
+use mago_analyzer::unused_classes;
 use mago_codex::diff::CodebaseDiff;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseEntryKeys;
@@ -61,6 +62,7 @@ use mago_database::ReadDatabase;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_database::file::FolderNamespace;
 use mago_names::ResolvedNames;
 use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::ExternNamespaces;
@@ -2048,11 +2050,21 @@ impl IncrementalAnalysisService {
         aggregated_result.symbol_references.extend(external_symbol_references.clone());
         aggregated_result.symbol_references.extend(late_symbol_references.clone());
 
-        // The too-wide warning reads the uses of every file, the skipped ones' included, and a scan analyzes none.
+        // The too-wide and unused-class errors read the uses of every file, the skipped ones' included, and a scan
+        // analyzes none.
         let too_wide = if self.scan_only {
             IssueCollection::default()
         } else {
-            too_wide_members(codebase, &aggregated_result.symbol_references)
+            let mut issues = too_wide_members(codebase, &aggregated_result.symbol_references);
+            let test_files: Vec<FileId> = self
+                .database
+                .files()
+                .filter(|file| file.folder_namespace == Some(FolderNamespace::Test))
+                .map(|file| file.id)
+                .collect();
+            issues.extend(unused_classes(codebase, &aggregated_result.symbol_references, &test_files));
+
+            issues
         };
         let mut per_file_project_issues: HashMap<FileId, IssueCollection> = HashMap::default();
         for issue in Effects::solve(codebase, &effect_summaries).issues(codebase).into_iter().chain(too_wide) {

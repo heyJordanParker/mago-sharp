@@ -92,10 +92,6 @@ pub const DISPATCHES_EMITS: &str = "Sharp\\Internal\\DispatchesEmits";
 /// check.
 pub const PARSES_TYPE_ARGUMENT: &str = "Sharp\\Internal\\ParsesTypeArgument";
 
-/// The prelude class a type parameter with no class bound stands for in a method marked [`PARSES_TYPE_ARGUMENT`]: it
-/// declares the `parse` and `tryParse` each struct and PHP# class gets.
-pub const PARSED: &str = "Sharp\\Internal\\Parsed";
-
 /// The attribute the standard library marks a method with that a law's proof reads as the Lean function the
 /// attribute's argument names, folded over the call's arguments, as `Math.max` is Lean's `max`.
 pub const LEAN_FUNCTION: &str = "Sharp\\Internal\\LeanFunction";

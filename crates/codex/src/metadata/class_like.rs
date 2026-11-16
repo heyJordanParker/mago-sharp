@@ -148,8 +148,10 @@ pub struct ClassLikeMetadata {
 pub struct ParsedField<'codebase> {
     /// The name, without `$`.
     pub name: &'codebase [u8],
-    /// The key `parse` reads: the name, or the one `[Key("…")]` gives a parameter.
+    /// The key `parse` reads and `Json.encode` writes: the name, or the one `[Key("…")]` gives.
     pub key: &'codebase [u8],
+    /// Whether `[Key(omitNull: true)]` leaves the key out of the encoding when the value is null.
+    pub omits_null: bool,
     pub r#type: &'codebase TUnion,
     /// Whether a missing key leaves the field to its default value or its initial value.
     pub has_default: bool,
@@ -557,6 +559,34 @@ impl ClassLikeMetadata {
         let name = codebase.class_key(name);
 
         self.attributes.iter().any(|attribute| codebase.class_key(attribute.name.as_bytes()) == name)
+    }
+
+    /// The key `[Tag("…")]` names on the class-like, a family, spec section 10, whose value names the variant its
+    /// `parse` builds. None without a `Tag`.
+    #[must_use]
+    pub fn tag_key(&self) -> Option<&[u8]> {
+        self.attribute_text(b"Sharp\\Tag", b"key")
+    }
+
+    /// The name `[Key("…")]` gives the class-like, a variant of the family above it, spec section 10, by which that
+    /// family's `parse` and `withTag` find it and which its encoding writes. None without one, which the analyzer
+    /// refuses on a variant.
+    #[must_use]
+    pub fn variant_name(&self) -> Option<&[u8]> {
+        self.attribute_text(b"Sharp\\Key", b"name")
+    }
+
+    /// Whether the class-like is a variant a family's `parse` can build, spec section 10: a class, a struct or an enum
+    /// case, and not abstract.
+    #[must_use]
+    pub fn is_variant_kind(&self) -> bool {
+        self.kind.is_class() && !self.flags.is_abstract()
+    }
+
+    /// The literal text the first argument, or the one named `argument`, of the class-like's attribute `attribute`
+    /// gives. `Sharp\Tag` and `Sharp\Key` are PHP# class-likes, named exactly, spec section 24.
+    fn attribute_text(&self, attribute: &[u8], argument: &[u8]) -> Option<&[u8]> {
+        self.attributes.iter().find(|found| found.name.as_bytes() == attribute)?.text_argument(0, argument)
     }
 
     /// Adds or updates the declaring method identifier for a method name.

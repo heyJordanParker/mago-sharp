@@ -1,0 +1,8 @@
+namespace App;
+
+public enum Status
+{
+    case Open;
+    case Paused;
+    case Closed;
+}

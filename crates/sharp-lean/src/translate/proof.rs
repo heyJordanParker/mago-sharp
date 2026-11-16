@@ -21,6 +21,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Law as LawNode;
 use mago_syntax::cst::LawProof;
+use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PatternMatchArmBody;
@@ -248,8 +249,10 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     }
 
     /// A `match` statement: each arm is a case that knows its pattern and its `when` guard, as the pattern tests of a
-    /// method's `match` test them, and `default` is the case where no arm matches. The subject is a value the tactics
-    /// name, so each case split rewrites it where the claim reads it.
+    /// method's `match` test them, and `default` is the case where no arm matches. An arm that joins patterns with `or`
+    /// is a case for each of them, as the arms written one per pattern are, since Lean's automatic steps split no `||`
+    /// a case knows, and an error names the pattern it fails for. The subject is a value the tactics name, so each case
+    /// split rewrites it where the claim reads it.
     fn r#match(
         &mut self,
         r#match: &'ast PatternMatch<'arena>,
@@ -280,7 +283,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         let mut missed = Vec::new();
         let mut default = None;
         let mut tested = true;
-        for (arm, path) in r#match.arms.iter().zip(paths) {
+        'arms: for (arm, path) in r#match.arms.iter().zip(paths) {
             let PatternMatchArmBody::Block(block) = arm.body() else {
                 continue;
             };
@@ -288,32 +291,35 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
                 default = Some(block);
                 continue;
             };
-            let Some(mut test) = body.test(&subject, Some(&written), r#type, arm.pattern) else {
-                tested = false;
-                break;
-            };
-            let pattern = self.source(arm.pattern.span());
-            let (holds, fails_here) = match &arm.guard {
-                Some(guard) => {
-                    let Some(condition) = body.pure(guard.condition, "a guard that can throw", issues::GUARD) else {
-                        tested = false;
-                        break;
-                    };
-                    test.conditions.push(condition);
-                    let guarded = format!("{written} is {pattern} && {}", self.source(guard.condition.span()));
-                    (guarded.clone(), format!("!({guarded})"))
-                }
-                None => (format!("{written} is {pattern}"), format!("{written} is not {pattern}")),
-            };
+            for pattern in joined(arm.pattern) {
+                let Some(mut test) = body.test(&subject, Some(&written), r#type, pattern) else {
+                    tested = false;
+                    break 'arms;
+                };
+                let pattern = self.source(pattern.span());
+                let (holds, fails_here) = match &arm.guard {
+                    Some(guard) => {
+                        let Some(condition) = body.pure(guard.condition, "a guard that can throw", issues::GUARD)
+                        else {
+                            tested = false;
+                            break 'arms;
+                        };
+                        test.conditions.push(condition);
+                        let guarded = format!("{written} is {pattern} && {}", self.source(guard.condition.span()));
+                        (guarded.clone(), format!("!({guarded})"))
+                    }
+                    None => (format!("{written} is {pattern}"), format!("{written} is not {pattern}")),
+                };
 
-            let mut case = scope.clone();
-            case.hypotheses.push((String::new(), holds));
-            case.path = path;
-            let mut tactics = Vec::new();
-            self.statements(&statements(Some(block)), case, &mut tactics);
-            arms.push((test, tactics));
+                let mut case = scope.clone();
+                case.hypotheses.push((String::new(), holds));
+                case.path = path.clone();
+                let mut tactics = Vec::new();
+                self.statements(&statements(Some(block)), case, &mut tactics);
+                arms.push((test, tactics));
 
-            missed.push(fails_here);
+                missed.push(fails_here);
+            }
         }
         self.proof.uses.append(&mut body.uses);
         self.proof.unmodeled.append(&mut body.unmodeled);
@@ -563,6 +569,20 @@ fn covers(patterns: &[&str]) -> bool {
     patterns.iter().any(|pattern| name(pattern))
         || (patterns.contains(&"[]")
             && patterns.iter().any(|pattern| pattern.split_once(" :: ").is_some_and(|(_, tail)| name(tail))))
+}
+
+/// The patterns `pattern` joins with `or`, in their order, or `pattern` alone when it joins none. No pattern under `or`
+/// declares a variable, so each one tests the subject alone.
+fn joined<'ast, 'arena>(pattern: &'ast Pattern<'arena>) -> Vec<&'ast Pattern<'arena>> {
+    match pattern {
+        Pattern::Binary(binary) if !binary.is_and() => {
+            let mut patterns = joined(binary.left);
+            patterns.extend(joined(binary.right));
+            patterns
+        }
+        Pattern::Parenthesized(parenthesized) => joined(parenthesized.pattern),
+        _ => vec![pattern],
+    }
 }
 
 /// `tactics` as one branch of a case split: `·` before the first.

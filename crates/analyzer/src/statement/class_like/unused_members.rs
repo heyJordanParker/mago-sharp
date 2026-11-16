@@ -27,6 +27,7 @@ use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferenceKind;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::symbol::SymbolIdentifier;
+use mago_database::file::FileId;
 use mago_names::DYNAMICALLY_ACCESSED;
 use mago_names::EXPORT;
 use mago_names::display_sharp_member;
@@ -659,6 +660,80 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
     }
 
     issues
+}
+
+/// Refuses each class of an application that no code uses, spec section 5, so it never runs.
+///
+/// No code creates such a class, binds it in a module, names it as a type, extends or implements it, or names it in
+/// `typeof` or an attribute, as a plugin nothing wires in. The pass reads `references` of every file, so it runs once
+/// the whole project is analyzed, beside [`too_wide_members`].
+///
+/// A use is any reference to the class or a member of it from code outside the class and its own cases, a plain PHP
+/// file's included. Only a PHP# class-like of a project has none to find: a library's users are in the projects that
+/// install it, which the analysis never sees. A module runs no code, PHP# creates each class that declares an `on`
+/// method, and the code that reads a marked attribute of a class or of one of its members reaches the class through
+/// reflection, which no use records, so none of them is refused. A class in one of `test_files`, the files of an
+/// `autoload-dev` folder, runs under its test runner, as PHPUnit creates a test class, so it is never refused either.
+#[must_use]
+pub fn unused_classes(
+    codebase: &CodebaseMetadata,
+    references: &SymbolReferences,
+    test_files: &[FileId],
+) -> IssueCollection {
+    let test_files: HashSet<FileId> = test_files.iter().copied().collect();
+    let mut used = HashSet::<Word>::default();
+    references.for_each_reference(|origin, (class, _), _| {
+        let from_inside = match origin {
+            ReferenceOrigin::Symbol((symbol, _)) => {
+                symbol == class
+                    || codebase
+                        .get_class_like(symbol.as_bytes())
+                        .is_some_and(|case| case.flags.is_enum_case_class() && case.direct_parent_class == Some(class))
+            }
+            ReferenceOrigin::File(_) => false,
+        };
+        if !from_inside {
+            used.insert(class);
+        }
+    });
+
+    let short_name_counts = OnceCell::new();
+    let mut issues = IssueCollection::default();
+    for (class_name, class) in &codebase.class_likes {
+        if !class.flags.is_user_defined()
+            || !class.flags.is_project()
+            || class.flags.is_module()
+            || class.flags.is_enum_case_class()
+            || test_files.contains(&class.span.file_id)
+            || used.contains(class_name)
+            || is_dynamically_accessed(codebase, &class.attributes)
+            || is_reached_by_its_members(codebase, *class_name, class)
+        {
+            continue;
+        }
+        let class_label = sharp_class_like_name(codebase, &WordMap::default(), &short_name_counts, *class_name);
+        issues.push(
+            Issue::error(format!("Nothing uses `{class_label}`, so it never runs."))
+                .with_code(IssueCode::UnusedClass)
+                .with_annotation(Annotation::primary(class.name_span.unwrap_or(class.span)).with_message("Declared here."))
+                .with_note("No code creates it, binds it in a module, names it as a type, extends or implements it, or names it in `typeof` or an attribute.")
+                .with_help("Use it where the application runs, bind it in a module, or remove it. A framework that reaches it by reflection reads an attribute whose class is marked `[DynamicallyAccessed]`."),
+        );
+    }
+
+    issues
+}
+
+/// Whether the engine or a framework reaches `class` through one of its members: PHP# creates a class that declares an
+/// `on` method, spec section 15, and the code that reads a member's marked attribute reaches the member's class.
+fn is_reached_by_its_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLikeMetadata) -> bool {
+    class.properties.values().any(|property| is_dynamically_accessed(codebase, &property.attributes))
+        || class.constants.values().any(|constant| is_dynamically_accessed(codebase, &constant.attributes))
+        || class
+            .methods
+            .iter()
+            .filter_map(|name| codebase.function_likes.get(&(class_name, *name)))
+            .any(|method| !method.listens.is_empty() || is_dynamically_accessed(codebase, &method.attributes))
 }
 
 /// The `public` members `class` declares that [`too_wide_members`] checks, each as its key in `references`, its name

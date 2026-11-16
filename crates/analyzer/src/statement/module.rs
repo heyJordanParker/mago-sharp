@@ -731,7 +731,8 @@ where
 }
 
 /// Spec section 32: checks the `imports` line of `metadata`, a folder's module. Each namespace it lists is a namespace
-/// of the project or its libraries that each list above it allows.
+/// of the project or its libraries that each list above it allows: one a class or function declares, or one an
+/// `extern namespace` line gives a library's folder, spec section 23, as a class import from it resolves.
 pub(crate) fn analyze_imports<A>(context: &mut Context<'_, '_, A>, metadata: &ModuleMetadata)
 where
     A: Arena,
@@ -740,9 +741,19 @@ where
         return;
     }
 
+    let codebase = context.codebase;
+    let given = |namespace: &[u8]| {
+        codebase.extern_namespaces.iter().any(|declaration| {
+            declaration.namespace.as_bytes().eq_ignore_ascii_case(namespace)
+                && codebase.extern_namespace_folder(declaration).is_some()
+        })
+    };
     for (namespace, span) in &metadata.imports {
         let namespace = namespace.as_bytes();
-        if !context.codebase.namespace_exists(namespace) && !holds_function_or_constant(context.codebase, namespace) {
+        if !codebase.namespace_exists(namespace)
+            && !holds_function_or_constant(codebase, namespace)
+            && !given(namespace)
+        {
             report_non_existent_import(context, *span, namespace, "namespace");
         } else if let Some(parent) = list_refusing(context.codebase, metadata.namespace.as_bytes(), namespace) {
             let parent = display_namespace(context.codebase, parent);

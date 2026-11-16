@@ -183,12 +183,135 @@ pub(crate) fn report_keys_read_twice<A>(
     }
 }
 
+/// Reports what breaks the family `class` is or belongs to, spec section 10, for a PHP# class-like whose name is at
+/// `name`. `[Tag]` goes on a sealed interface, an abstract class or an enum whose cases carry data, and `[Key]` on a
+/// class-like names a variant of a family. Each variant below a family that is not abstract gives its name with
+/// `[Key]`, no two variants of one family share a name, and no field of a variant reads the tag's key. An enum's cases
+/// are checked with the enum, which declares them.
+pub(crate) fn check_family<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, name: Span)
+where
+    A: Arena,
+{
+    if let Some(tag) = class.attributes.iter().find(|attribute| attribute.name.as_bytes() == b"Sharp\\Tag") {
+        // An enum whose cases carry data runs as an abstract class, spec section 20.
+        let is_family_kind =
+            if class.kind.is_interface() { class.flags.is_sealed() } else { class.flags.is_abstract() };
+        if !is_family_kind {
+            let class_name = display_class_like_name(context, class.original_name);
+            context.collector.report_with_code(
+                IssueCode::InvalidStruct,
+                Issue::error(format!("`{class_name}` can't be a family: `[Tag]` goes on a sealed interface, an abstract class or an enum whose cases carry data."))
+                    .with_annotation(Annotation::primary(tag.span).with_message("Tagged here."))
+                    .with_note("A family's `parse` builds one of the classes below it, by the name its input holds under the tag's key.")
+                    .with_help("Remove the `[Tag]`, or put it on the interface or abstract class the variants share."),
+            );
+
+            return;
+        }
+        for case in data_cases(context.codebase, class) {
+            check_variant(context, class, case, case.name_span.unwrap_or(name));
+        }
+    }
+
+    match context.codebase.family_of(class) {
+        Some(family) if class.is_variant_kind() => check_variant(context, family, class, name),
+        _ => report_stray_key(context, class),
+    }
+}
+
+/// Reports what breaks `variant`, a class-like of the family `family` whose name is at `name`, spec section 10: a
+/// missing `[Key]` name, a name another variant of the family has, and a field that reads the tag's key.
+fn check_variant<A>(
+    context: &mut Context<'_, '_, A>,
+    family: &ClassLikeMetadata,
+    variant: &ClassLikeMetadata,
+    name: Span,
+) where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let variant_name = display_class_like_name(context, variant.original_name);
+    let family_name = display_class_like_name(context, family.original_name);
+    let Some(written) = variant.variant_name() else {
+        context.collector.report_with_code(
+            IssueCode::InvalidStruct,
+            Issue::error(format!("`{variant_name}` is a variant of `{family_name}` and gives no name for it."))
+                .with_annotation(Annotation::primary(name).with_message("Declared here."))
+                .with_note(format!("`{family_name}.parse` builds the variant whose `[Key]` its input names, and the encoding writes that name, so renaming the class never changes stored data."))
+                .with_help("Name it with `[Key(\"…\")]`, the name its input holds under the tag's key."),
+        );
+
+        return;
+    };
+    let named_at = variant
+        .attributes
+        .iter()
+        .find(|attribute| attribute.name.as_bytes() == b"Sharp\\Key")
+        .map_or(name, |attribute| attribute.span);
+    let twin = codebase
+        .variants(family)
+        .into_iter()
+        .find(|(other, other_variant)| *other == Some(written) && other_variant.name != variant.name);
+    if let Some((_, twin)) = twin {
+        context.collector.report_with_code(
+            IssueCode::InvalidStruct,
+            Issue::error(format!(
+                "`{variant_name}` and `{}` are both named `{}` in `{family_name}`.",
+                display_class_like_name(context, twin.original_name),
+                BytesDisplay(written)
+            ))
+            .with_annotation(Annotation::primary(named_at).with_message("Named here."))
+            .with_note(format!("`{family_name}.parse` and `withTag` find one variant by each name."))
+            .with_help(format!("Give `{variant_name}` a name of its own in `[Key(\"…\")]`.")),
+        );
+    }
+
+    let Some(key) = family.tag_key() else {
+        unreachable!("a family is the class-like its `[Tag]` gives a key");
+    };
+    if let Some(field) = codebase.struct_parse_fields(variant.name.as_bytes()).iter().find(|field| field.key == key) {
+        let kind = if field.is_parameter { "the main constructor parameter" } else { "the property" };
+        context.collector.report_with_code(
+            IssueCode::InvalidStruct,
+            Issue::error(format!(
+                "`{}` is read twice: by the tag of `{family_name}` and {kind} `{}`.",
+                BytesDisplay(key),
+                BytesDisplay(field.name)
+            ))
+            .with_annotation(Annotation::primary(field.span.unwrap_or(name)).with_message("Read again here."))
+            .with_note("The tag's key holds the variant's name, and `parse` reads each key into one field.")
+            .with_help(format!("Give `{}` another key with `[Key(\"…\")]`.", BytesDisplay(field.name))),
+        );
+    }
+}
+
+/// Reports a `[Key]` on `class`, a class-like that is no variant of a family, where it names nothing, spec section 10.
+fn report_stray_key<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    let Some(key) = class.attributes.iter().find(|attribute| attribute.name.as_bytes() == b"Sharp\\Key") else {
+        return;
+    };
+    let class_name = display_class_like_name(context, class.original_name);
+    context.collector.report_with_code(
+        IssueCode::InvalidStruct,
+        Issue::error(format!("`{class_name}` is no variant of a family, so its `[Key]` names nothing."))
+            .with_annotation(Annotation::primary(key.span).with_message("Named here."))
+            .with_note(
+                "On a class, `[Key]` names a variant below a sealed interface, abstract class or enum marked `[Tag]`.",
+            )
+            .with_help("Remove the `[Key]`, or mark the interface or abstract class above it with `[Tag(\"…\")]`."),
+    );
+}
+
 /// Reports `Order.parse`, or `Order.tryParse` when it does not `throws`, on a struct or a PHP# class with a field
 /// `parse` can't read from a value, spec section 10's language rule 11: an enum with no backing value, a function
 /// type, or a class no `parse` builds, also inside a collection or a nested struct or class. A generic type's field
 /// reads as the call's `type_arguments` give it, as `int` for `TFirst` of `Pair<int, string>.parse`, and one of a type
-/// parameter only through the walk, whose type argument holds no part `parse` builds first. The type itself
-/// compiles, so code that never parses it may hold such a field.
+/// parameter only through the walk, whose type argument holds no part `parse` builds first. The `parse` of a family
+/// reads the fields of each of its variants, each named with its class. The type itself compiles, so code that never
+/// parses it may hold such a field.
 pub(crate) fn check_struct_parse<A>(
     context: &mut Context<'_, '_, A>,
     r#struct: &ClassLikeMetadata,
@@ -200,71 +323,88 @@ pub(crate) fn check_struct_parse<A>(
 {
     let method = if throws { "parse" } else { "tryParse" };
     let class = display_class_like_name(context, r#struct.original_name);
-    for field in context.codebase.struct_parse_fields(r#struct.name.as_bytes()) {
-        let Some((unreadable, why)) =
-            unreadable_field(context.codebase, r#struct, type_arguments, &field, &mut vec![r#struct.name])
-        else {
-            continue;
-        };
+    for (parsed, type_arguments) in parsed_classes(context.codebase, r#struct, type_arguments) {
+        for field in context.codebase.struct_parse_fields(parsed.name.as_bytes()) {
+            let Some((unreadable, why)) = unreadable_field(
+                context.codebase,
+                parsed,
+                type_arguments,
+                &field,
+                &mut vec![r#struct.name, parsed.name],
+            ) else {
+                continue;
+            };
+            let field_name = if parsed.name == r#struct.name {
+                BytesDisplay(field.name).to_string()
+            } else {
+                format!("{}.{}", display_class_like_name(context, parsed.original_name), BytesDisplay(field.name))
+            };
 
-        context.collector.report_with_code(
-            IssueCode::InvalidStruct,
-            Issue::error(format!(
-                "`{class}.{method}` can't read `{}`: `{}` {why}.",
-                BytesDisplay(field.name),
-                display_sharp_type(context, &TUnion::from_atomic(unreadable))
-            ))
-            .with_annotation(Annotation::primary(span).with_message("Called here."))
-            .with_note(
-                "`parse` reads each field from a value, and that value names an enum case by its backing value.",
-            ),
-        );
+            context.collector.report_with_code(
+                IssueCode::InvalidStruct,
+                Issue::error(format!(
+                    "`{class}.{method}` can't read `{field_name}`: `{}` {why}.",
+                    display_sharp_type(context, &TUnion::from_atomic(unreadable))
+                ))
+                .with_annotation(Annotation::primary(span).with_message("Called here."))
+                .with_note(
+                    "`parse` reads each field from a value, and that value names an enum case by its backing value.",
+                ),
+            );
+        }
     }
 }
 
+/// The classes whose fields the `parse` of `class` reads, spec section 10, each with the type arguments it reads them
+/// with: `class` itself with `type_arguments`, or for a family, each of its variants, which takes none from it.
+fn parsed_classes<'codebase, 'arguments>(
+    codebase: &'codebase CodebaseMetadata,
+    class: &'codebase ClassLikeMetadata,
+    type_arguments: &'arguments [TUnion],
+) -> Vec<(&'codebase ClassLikeMetadata, &'arguments [TUnion])> {
+    if class.tag_key().is_none() {
+        return vec![(class, type_arguments)];
+    }
+
+    codebase.variants(class).into_iter().map(|(_, variant)| (variant, [].as_slice())).collect()
+}
+
 /// Reports the type argument `parsed` of a call of `parser`, a method the standard library marks `ParsesTypeArgument`,
-/// as `Json.decode<T>`, when the type's `parse` can't read it: the struct parse check's error for a struct or a PHP#
-/// class, and one error for any other type, which has no `parse`, spec section 10. A type parameter is the caller's to
-/// bound, and a class that doesn't exist was reported where it is written.
+/// as `Json.decode<T>`, when it is a type no field `parse` reads can hold, spec section 10: the struct parse check's
+/// error for a struct or a PHP# class, and the unreadable part of any other type, as `List<Function<void()>>`. A type
+/// parameter is the caller's to bound, and a class that doesn't exist was reported where it is written.
 pub(crate) fn check_parsed_type_argument<A>(context: &mut Context<'_, '_, A>, parser: &str, parsed: &TUnion, span: Span)
 where
     A: Arena,
 {
     let codebase = context.codebase;
+    if parsed.has_template_types() || is_refused_type(parsed) {
+        return;
+    }
     let parsing = parsed
         .get_single_named_object()
         .and_then(|named| Some((named, codebase.get_class_like(named.name.as_bytes())?)))
         .filter(|(_, class)| codebase.parses(class.name.as_bytes()));
     if let Some((named, class)) = parsing {
-        if class.template_types.is_empty() {
-            check_struct_parse(context, class, named.type_parameters.as_deref().unwrap_or_default(), true, span);
-
-            return;
-        }
-
-        let parsed = display_sharp_type(context, parsed);
-        context.collector.report_with_code(
-            IssueCode::InvalidStruct,
-            Issue::error(format!(
-                "`{parser}` can't read `{parsed}`: its `parse` takes the type arguments of a generic type, which the call through its type argument does not pass."
-            ))
-            .with_annotation(Annotation::primary(span).with_message("Called here."))
-            .with_help(format!("Decode into a struct or a class with no type parameters, or call `{parsed}.parse(…)` on the parsed value.")),
-        );
+        check_struct_parse(context, class, named.type_parameters.as_deref().unwrap_or_default(), true, span);
 
         return;
     }
-    if parsed.has_template_types() || is_refused_type(parsed) {
+    let Some((unreadable, why)) = unreadable_part(codebase, parsed, &mut Vec::new()) else {
         return;
-    }
+    };
 
-    let parsed = display_sharp_type(context, parsed);
     context.collector.report_with_code(
         IssueCode::InvalidStruct,
-        Issue::error(format!("`{parser}` parses its type argument with the type's `parse`, and `{parsed}` has none."))
-            .with_annotation(Annotation::primary(span).with_message("Called here."))
-            .with_note("Each struct and PHP# class has a `parse`, which reads each field from a value.")
-            .with_help("Give it a struct or a PHP# class as its type argument."),
+        Issue::error(format!(
+            "`{parser}` can't read `{}`: `{}` {why}.",
+            display_sharp_type(context, parsed),
+            display_sharp_type(context, &TUnion::from_atomic(unreadable))
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Called here."))
+        .with_note(
+            "It reads any type a field `parse` reads can hold, and builds each struct, class and enum case in it.",
+        ),
     );
 }
 
@@ -390,7 +530,8 @@ where
 /// The part of `r#type` `parse` can't read from a value, with why: an enum with no backing value, a function, a class
 /// no `parse` builds, or any other type but `Any`, `int`, `float`, `string`, `bool` and a collection, which the bridge
 /// writes no `parse` for, also inside a collection or a struct or class `parse` reads through, which `visiting` holds
-/// while it is read.
+/// while it is read. A family, an interface or an abstract class included, reads through each of its variants, and a
+/// value as text, as `Decimal`, and a class whose `parse` reads any value, as `JsonValue`, read through their own.
 fn unreadable_part(
     codebase: &CodebaseMetadata,
     r#type: &TUnion,
@@ -402,7 +543,13 @@ fn unreadable_part(
             .filter(|r#enum| r#enum.enum_type.is_none())
             .map(|_| (atomic.clone(), "has no backing value")),
         TAtomic::Callable(_) => Some((atomic.clone(), "is a function")),
-        TAtomic::Object(TObject::Named(object)) if visiting.contains(&object.name) => None,
+        TAtomic::Object(TObject::Named(object))
+            if visiting.contains(&object.name)
+                || codebase.is_text_value(object.name.as_bytes())
+                || codebase.parses_any_value(object.name.as_bytes()) =>
+        {
+            None
+        }
         TAtomic::Object(TObject::Named(object)) if !codebase.parses(object.name.as_bytes()) => {
             // A type that names no class is reported where it is written.
             let class = codebase.get_class_like(object.name.as_bytes())?;
@@ -422,10 +569,16 @@ fn unreadable_part(
             let class = codebase.get_class_like(object.name.as_bytes())?;
             let type_arguments = object.get_type_parameters().unwrap_or_default();
             visiting.push(object.name);
-            let found = codebase
-                .struct_parse_fields(object.name.as_bytes())
-                .iter()
-                .find_map(|field| unreadable_field(codebase, class, type_arguments, field, visiting));
+            let found = parsed_classes(codebase, class, type_arguments).into_iter().find_map(|(parsed, arguments)| {
+                visiting.push(parsed.name);
+                let found = codebase
+                    .struct_parse_fields(parsed.name.as_bytes())
+                    .iter()
+                    .find_map(|field| unreadable_field(codebase, parsed, arguments, field, visiting));
+                visiting.pop();
+
+                found
+            });
             visiting.pop();
 
             found

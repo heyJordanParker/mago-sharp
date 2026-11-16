@@ -526,7 +526,7 @@ pub fn validate_method_signature_compatibility(
 /// match only when each pair has the same bound, and only when the override declares as many as the method it
 /// overrides, as C# requires. Otherwise returns the issue of a count that differs, or of the first type parameter whose
 /// bound differs. An override that declares none keeps its own types.
-fn with_parent_type_parameters<'method>(
+pub(super) fn with_parent_type_parameters<'method>(
     codebase: &CodebaseMetadata,
     child_method: &'method FunctionLikeMetadata,
     parent_method: &FunctionLikeMetadata,

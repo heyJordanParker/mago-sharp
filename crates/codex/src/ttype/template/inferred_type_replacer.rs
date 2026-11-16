@@ -123,12 +123,12 @@ pub fn replace_with_polarity(
                     let template_type = get_most_specific_type_from_bounds(bounds, codebase);
 
                     // A class string names each class of the type, and a PHP# class value of the rest holds that whole
-                    // type, as `Class<T>` of an `int|string` is a `Class<int|string>`, spec section 25.
+                    // type, as `Class<T>` of an `int|string` is a `Class<int|string>` and of an `Any?` a
+                    // `Class<Any?>`, which may hold a type that is no class, spec section 25.
                     let mut class_template_types = Vec::new();
                     let mut held = Vec::new();
                     for template_type_part in template_type.types.as_ref() {
-                        if template_type_part.is_mixed() || matches!(template_type_part, TAtomic::Object(TObject::Any))
-                        {
+                        if matches!(template_type_part, TAtomic::Object(TObject::Any)) {
                             class_template_types
                                 .push(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Any { kind: *kind })));
                         } else if let TAtomic::Object(TObject::Named(_)) = template_type_part {

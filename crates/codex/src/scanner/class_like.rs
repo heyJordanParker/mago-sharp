@@ -159,7 +159,8 @@ where
 }
 
 /// Registers a class. A PHP# class that can be created, neither abstract nor static, gets the `parse` and `tryParse`
-/// a struct gets, spec section 10, unless it declares a member of either name.
+/// a struct gets, spec section 10, unless it declares a member of either name, and so does an abstract one marked
+/// `[Tag]`, a family, whose `parse` builds the variant its input's tag names.
 #[inline]
 pub fn register_class<'arena, A>(
     codebase: &mut CodebaseMetadata,
@@ -191,7 +192,7 @@ where
         scope,
     )?;
     if context.program.dialect.is_sharp()
-        && !class.modifiers.contains_abstract()
+        && (!class.modifiers.contains_abstract() || class_like_metadata.tag_key().is_some())
         && !class.modifiers.contains_static()
         && leaves_parse_free(&class.members)
     {
@@ -234,6 +235,14 @@ where
     // Spec section 20.1: the populator gathers a sealed interface's implementers, the classes of its namespace.
     if interface.sealed.is_some() {
         class_like_metadata.flags |= MetadataFlags::SEALED;
+    }
+    // Spec section 10: a PHP# interface marked `[Tag]`, a family, gets the `parse` and `tryParse` that build the
+    // variant its input's tag names.
+    if context.program.dialect.is_sharp()
+        && class_like_metadata.tag_key().is_some()
+        && leaves_parse_free(&interface.members)
+    {
+        create_parse_methods(codebase, &mut class_like_metadata, span);
     }
 
     finish_registration(codebase, class_like_metadata)
@@ -309,6 +318,10 @@ where
         if !declares_equality(&r#enum.members) {
             create_value_equality(codebase, &mut class_like_metadata, span);
         }
+        // Spec section 10: an enum marked `[Tag]` is a family, whose `parse` builds the case its input's tag names.
+        if class_like_metadata.tag_key().is_some() && leaves_parse_free(&r#enum.members) {
+            create_parse_methods(codebase, &mut class_like_metadata, span);
+        }
     }
 
     finish_registration(codebase, class_like_metadata)
@@ -332,6 +345,7 @@ fn register_case_classes<'arena, A>(
     A: Arena,
 {
     enum_metadata.flags |= MetadataFlags::ABSTRACT;
+    let family = enum_metadata.tag_key().is_some();
     let flags = MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP;
     let enum_templates = template_context(&enum_metadata.template_types);
 
@@ -348,6 +362,7 @@ fn register_case_classes<'arena, A>(
 
         let span = case.span();
         let mut case_metadata = ClassLikeMetadata::new(name, original_name, span, Some(case_name.span), flags);
+        case_metadata.attributes = scan_attribute_lists(&case.attribute_lists, context, scope, Some(original_name));
         case_metadata.kind = SymbolKind::Class;
         case_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::ENUM_CASE_CLASS;
         case_metadata.direct_parent_class = Some(enum_metadata.name);
@@ -402,6 +417,11 @@ fn register_case_classes<'arena, A>(
                     .collect();
                 let mut factory = create_static_method("", span, parameters, case_type, vec![]);
                 add_method(codebase, b"__construct", &mut case_metadata, constructor);
+                // Spec section 10: a case that carries data is a variant its `[Tag]` enum's `parse` builds through the
+                // case's own `parse`.
+                if family {
+                    create_parse_methods(codebase, &mut case_metadata, span);
+                }
 
                 factory.name = word(case_name.value);
                 factory.original_name = factory.name;
@@ -2013,9 +2033,14 @@ where
             ClassLikeMember::Property(property) => {
                 let properties =
                     scan_properties(property, &mut class_like_metadata, name, &type_context, context, scope);
+                let is_extern = property.modifiers().iter().any(|modifier| matches!(modifier, Modifier::Extern(_)));
 
                 for property_metadata in properties {
-                    class_like_metadata.add_property_metadata(property_metadata);
+                    if is_extern {
+                        add_extern_property(&mut class_like_metadata, property_metadata);
+                    } else {
+                        class_like_metadata.add_property_metadata(property_metadata);
+                    }
                 }
             }
             _ => {}
@@ -2080,6 +2105,20 @@ fn add_instance_method(
         metadata.is_static = false;
     }
     add_method(codebase, name.as_bytes(), class_like_metadata, method);
+}
+
+/// Adds `scanned`, a property written `extern`, as the property plain PHP's `__get` gives, spec section 14.3: a
+/// get-only magic property of the type it declares, as a `@property-read` line declares one, which the class declares no
+/// storage for, so the engine's read reaches `__get`.
+fn add_extern_property(class_like: &mut ClassLikeMetadata, scanned: PropertyMetadata) {
+    let mut property = PropertyMetadata::new(scanned.name, MetadataFlags::READONLY);
+    property.read_visibility = scanned.read_visibility;
+    property.type_metadata = scanned.type_metadata.or(scanned.type_declaration_metadata);
+    property.set_span(scanned.span);
+    property.set_name_span(scanned.name_span);
+
+    class_like.magic_property_ids.insert(property.name.0, class_like.name);
+    class_like.magic_properties.insert(property.name.0, property);
 }
 
 /// Marks each public `init` property of a struct written without an initial value as required, spec section 10: a

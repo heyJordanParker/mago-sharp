@@ -1442,6 +1442,7 @@ dependencies = [
  "mago-server",
  "mago-sharp-bridge",
  "mago-sharp-lean",
+ "mago-span",
  "mago-syntax",
  "mago-syntax-core",
  "mago-text-edit",

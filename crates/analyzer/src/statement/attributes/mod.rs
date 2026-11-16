@@ -36,6 +36,7 @@ use crate::invocation::MethodInvocationKind;
 use crate::invocation::MethodTargetContext;
 use crate::invocation::analyzer::analyze_invocation;
 use crate::resolver::class_name::report_missing_class;
+use crate::statement::class_like::r#struct::data_cases;
 use crate::utils::names::display_class_like_name;
 use crate::visibility::check_method_visibility;
 
@@ -365,7 +366,7 @@ where
         // `Sharp\Key` is a PHP# class-like, keyed by its exact name, spec section 24.
         if context.dialect.is_sharp()
             && attribute_name_bytes == b"Sharp\\Key"
-            && !is_parsed_parameter(context.codebase, block_context, target)
+            && !is_keyed_place(context.codebase, block_context, target)
         {
             context.collector.report_with_code(
                 IssueCode::InvalidStruct,
@@ -410,13 +411,25 @@ fn list_target(list: &AttributeList, declared: AttributeTarget) -> AttributeTarg
     }
 }
 
-/// Whether an attribute on `target` is on a parameter of the main constructor of a type with the `parse` spec section
-/// 10 gives a struct or a PHP# class, the one place `[Key]` renames the key that `parse` reads.
-fn is_parsed_parameter(codebase: &CodebaseMetadata, block_context: &BlockContext<'_>, target: AttributeTarget) -> bool {
-    matches!(target, AttributeTarget::Parameter | AttributeTarget::PromotedProperty)
-        && block_context.scope.get_class_like().is_some_and(|class| codebase.parses(class.name.as_bytes()))
-        && matches!(block_context.scope.get_function_like_identifier(),
-            Some(FunctionLikeIdentifier::Method(_, method)) if method.as_bytes().eq_ignore_ascii_case(b"__construct"))
+/// Whether an attribute on `target` is where `[Key]` names something, spec section 10: a parameter of the main
+/// constructor of a type with the `parse` spec section 10 gives a struct or a PHP# class, the one place it renames the
+/// key that `parse` reads, or a class-like or a case of an enum marked `[Tag]` whose cases carry data, where it names
+/// a variant of a family. The family check refuses a `[Key]` on a class-like that is no variant. Such an enum runs as
+/// an abstract class, spec section 20, so its cases are what tell it apart.
+fn is_keyed_place(codebase: &CodebaseMetadata, block_context: &BlockContext<'_>, target: AttributeTarget) -> bool {
+    let class = block_context.scope.get_class_like();
+    match target {
+        AttributeTarget::ClassLike => true,
+        AttributeTarget::ClassLikeConstant => {
+            class.is_some_and(|class| class.tag_key().is_some() && !data_cases(codebase, class).is_empty())
+        }
+        AttributeTarget::Parameter | AttributeTarget::PromotedProperty => {
+            class.is_some_and(|class| codebase.parses(class.name.as_bytes()))
+                && matches!(block_context.scope.get_function_like_identifier(),
+                    Some(FunctionLikeIdentifier::Method(_, method)) if method.as_bytes().eq_ignore_ascii_case(b"__construct"))
+        }
+        _ => false,
+    }
 }
 
 fn analyze_attribute_argument_expressions<'ctx, 'arena, A>(

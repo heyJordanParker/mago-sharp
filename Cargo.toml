@@ -270,6 +270,7 @@ mago-reporting = { workspace = true, features = ["renderers", "serde"] }
 mago-database = { workspace = true, features = ["loader", "watcher"] }
 mago-linter = { workspace = true, features = ["serde"] }
 mago-names = { workspace = true }
+mago-span = { workspace = true }
 mago-formatter = { workspace = true, features = ["serde"] }
 mago-text-edit = { workspace = true }
 mago-php-version = { workspace = true }

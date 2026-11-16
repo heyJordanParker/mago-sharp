@@ -18,6 +18,7 @@ use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::ExternAttributes;
+use mago_orchestrator::service::incremental_analysis::compile::Family;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
@@ -174,6 +175,12 @@ impl Server {
     #[must_use]
     pub fn listeners(&self) -> Vec<Listener> {
         self.service.listeners()
+    }
+
+    /// Every PHP# family of the last analysis, by its full name, with each variant's name and class.
+    #[must_use]
+    pub fn families(&self) -> Vec<Family> {
+        self.service.families()
     }
 
     /// The app's module whose binding of the dispatcher serves the whole app.

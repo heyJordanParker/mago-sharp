@@ -3,7 +3,12 @@
 //! `switch` is a `match` statement with block arms, or an `if … else if` chain where a `case` is on a value that is no
 //! constant.
 
+use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::r#enum::TEnum;
+use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
@@ -28,6 +33,7 @@ use mago_syntax::cst::SwitchCase;
 use mago_syntax::cst::SwitchCaseSeparator;
 use mago_syntax::cst::While;
 use mago_syntax::walker::MutWalker;
+use mago_word::Word;
 
 use super::Kind;
 use super::builtins::runs_nothing;
@@ -41,7 +47,9 @@ impl Converter<'_, '_> {
     /// `switch` as a `match` statement with block arms, when no case falls through into the next: each case's
     /// statements end in `break`, `return` or `throw`, or the `switch` ends. A case with no statements of its own joins
     /// the next case's arm with `or`, and one that joins `default` goes, since `default` covers it. A `switch` without
-    /// `default` gains an empty one, as PHP runs nothing where no case fits. PHP compares a case with `==`, which a
+    /// `default` gains an empty one, as PHP runs nothing where no case fits. On a project's enum, `default` is the cases
+    /// it stands for, and a `switch` without one gains an empty arm for the cases no arm names, as
+    /// [`Converter::list_default`] and [`Converter::unlisted_cases`] write them. PHP compares a case with `==`, which a
     /// constant pattern keeps for a constant of the value's own scalar type, but for a numeric string, which `==`
     /// compares as a number, and `null` (spec sections 19 and 21). Cases between `:` and `endswitch` are cases in
     /// braces.
@@ -68,11 +76,13 @@ impl Converter<'_, '_> {
         self.edits.replace(switch.switch.span, "match");
 
         let count = cases.len();
-        let mut has_default = false;
+        let mut default = None;
         // The end of a case with no statements of its own, which joins the next case's arm.
         let mut joined: Option<u32> = None;
         // The constants of the arm being read, which become its patterns once the arm converts.
         let mut constants = Vec::new();
+        // The constants of every arm, which leave the cases `default` stands for.
+        let mut handled = Vec::new();
         for (index, case) in cases.iter().enumerate() {
             let is_last = index + 1 == count;
             let indentation = self.indentation(case.span().start.offset);
@@ -98,6 +108,7 @@ impl Converter<'_, '_> {
                         return self.refuse(case.expression.span(), reason);
                     }
                     constants.push(case.expression);
+                    handled.push(case.expression);
                     match joined.take() {
                         Some(end) => self.edits.replace_range(end, case.expression.span().start.offset, " or "),
                         None => self.edits.delete(case.case.span.start.offset, case.expression.span().start.offset),
@@ -115,7 +126,7 @@ impl Converter<'_, '_> {
                             "a `case` that joins `default` with a value that runs code has no PHP# form: a PHP# `default` arm stands alone, and PHP runs the value before `default` runs (spec section 21)",
                         );
                     }
-                    has_default = true;
+                    default = Some(case.default.span);
                     (&case.separator, &case.statements)
                 }
             };
@@ -129,10 +140,18 @@ impl Converter<'_, '_> {
                 self.pattern(subject, constant);
             }
         }
-        if !has_default {
+        if let Some(default) = default {
+            return self.list_default(default, subject, &handled);
+        }
+        let pattern = match self.unlisted_cases(subject, &handled) {
+            None => "default".to_owned(),
+            Some(Ok(listed)) => listed,
+            Some(Err(reason)) => return self.refuse(switch.switch.span, reason),
+        };
+        if !pattern.is_empty() {
             let indentation = self.indentation(statement.span().start.offset);
             let line = end - u32::try_from(indentation.len()).unwrap_or(0);
-            self.edits.insert(line, format!("{indentation}    default => {{}},\n"));
+            self.edits.insert(line, format!("{indentation}    {pattern} => {{}},\n"));
         }
     }
 
@@ -440,6 +459,16 @@ impl Converter<'_, '_> {
         if unhandled {
             self.unhandled_arm(r#match, subject, statement);
         }
+        let handled: Vec<&Expression<'_>> = r#match
+            .arms
+            .iter()
+            .filter_map(|arm| match arm {
+                MatchArm::Expression(arm) => Some(arm.conditions.iter()),
+                MatchArm::Default(_) => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
         for arm in r#match.arms.iter() {
             let value = match arm {
                 MatchArm::Expression(arm) => {
@@ -463,6 +492,7 @@ impl Converter<'_, '_> {
                     if let Some(comma) = arm.comma {
                         self.edits.delete(comma.start.offset, comma.end.offset);
                     }
+                    self.list_default(arm.default.span, subject, &handled);
                     arm.expression
                 }
             };
@@ -608,6 +638,66 @@ impl Converter<'_, '_> {
             );
         }
         self.expression(condition, None);
+    }
+
+    /// Writes `default`, the keyword of a `default` arm on `subject`, as the cases it stands for where `subject` holds
+    /// an enum of the project, as [`Converter::unlisted_cases`] gives them, since a PHP# `match` over a project's enum
+    /// lists its cases (spec section 21). A `default` that stands for no case never runs, and has no PHP# form.
+    fn list_default(&mut self, default: Span, subject: &Expression<'_>, handled: &[&Expression<'_>]) {
+        match self.unlisted_cases(subject, handled) {
+            None => {}
+            Some(Ok(listed)) if listed.is_empty() => self.refuse(
+                default,
+                "a `default` after arms that name every case of the enum never runs, and a PHP# `match` over a project's enum lists its cases and takes no `default` (spec section 21)",
+            ),
+            Some(Ok(listed)) => self.edits.replace(default, listed),
+            Some(Err(reason)) => self.refuse(default, reason),
+        }
+    }
+
+    /// The cases of the project's enum `subject` holds that no constant of `handled` names, as patterns joined by
+    /// `or`, as `Status.Paused or Status.Closed`, in the order the enum declares them, and `null` last where `subject`
+    /// may hold it and no constant is `null`: what a `default` arm on `subject` stands for. Empty where `handled` names
+    /// every one, the reason no name reaches the enum, and `None` where `subject` holds no enum of the project, as a
+    /// plain PHP library's enum, whose `default` stays, since its library can add cases in an upgrade.
+    fn unlisted_cases(
+        &mut self,
+        subject: &Expression<'_>,
+        handled: &[&Expression<'_>],
+    ) -> Option<Result<String, String>> {
+        let union = self.type_of(subject)?;
+        let mut enums =
+            union.types.iter().filter(|atomic| !atomic.is_null()).map(|atomic| match get_sharp_type(atomic) {
+                Some(SharpType::Enum(name)) => Some(name),
+                _ => None,
+            });
+        let name = enums.next()??;
+        if !enums.all(|other| other == Some(name)) {
+            return None;
+        }
+        let r#enum = self.input.codebase.get_enum(name.as_bytes()).filter(|r#enum| r#enum.flags.is_user_defined())?;
+
+        let named: Vec<Word> = handled
+            .iter()
+            .filter_map(|constant| self.type_of(constant))
+            .flat_map(|constant| constant.types.iter())
+            .filter_map(|atomic| match atomic {
+                TAtomic::Object(TObject::Enum(TEnum { case: Some(case), .. })) => Some(*case),
+                _ => None,
+            })
+            .collect();
+        let written = match self.imports.name_of(&r#enum.original_name.to_string()) {
+            Ok(written) => written,
+            Err(reason) => return Some(Err(reason)),
+        };
+        let mut cases: Vec<_> = r#enum.enum_cases.values().filter(|case| !named.contains(&case.name)).collect();
+        cases.sort_by_key(|case| case.span.start.offset);
+        let mut listed: Vec<String> = cases.iter().map(|case| format!("{written}.{}", case.name)).collect();
+        if union.has_null() && !handled.iter().any(|constant| self.type_of(constant).is_some_and(TUnion::is_null)) {
+            listed.push("null".to_owned());
+        }
+
+        Some(Ok(listed.join(" or ")))
     }
 }
 

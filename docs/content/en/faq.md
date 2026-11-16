@@ -40,6 +40,7 @@ One binary runs:
 - `mago guard`, which enforces architectural layer rules.
 - `mago compile`, which compiles PHP# files for the PHP# engine.
 - `mago convert <paths>`, which turns each plain PHP class file the paths name into PHP#, or names what keeps it plain PHP. Each converted file is checked with the whole project before it is written, and git sees it as a rename. `--dry-run` prints the changes and writes nothing.
+- `mago move <name> <namespace>`, which moves a PHP# class, as `mago move App.Shop.Order App.Billing`, or every class of a namespace, as `mago move App.Shop App.Billing`, into the namespace. It moves each file into the namespace's folder, rewrites its `namespace` line, and rewrites every file that names a moved class: PHP# `import` lines, plain PHP `use` lines, fully qualified names and PHPDoc types. Code that reached a moved class through its own namespace gets an import. A moved namespace takes every PHP# file of its folder, its `Module.sharp` included, and each module's `imports` line and `module :` that names it is rewritten. A folder the move empties is deleted. A plain PHP class is refused. It prints each place a string names a moved class, and leaves the string as it is. Run `mago analyze` after the move: it reports an import cycle the move made, as when a class moves away from a class of its old namespace that it names and that names it.
 
 `mago fix` applies fixes from the guard, analyzer, linter, and formatter until none of them changes anything.
 

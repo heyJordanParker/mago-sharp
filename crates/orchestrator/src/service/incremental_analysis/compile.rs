@@ -124,6 +124,20 @@ pub struct ExternAttributes {
     pub declaration: Word,
 }
 
+/// A family, spec section 10: a sealed interface, abstract class or enum marked `[Tag]`, whose `parse` and `withTag`
+/// the engine answers by finding the variant its input names.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Family {
+    /// The file that declares it.
+    pub file_id: FileId,
+    /// The fully qualified name of the family.
+    pub class: Word,
+    /// The key its `[Tag]` names, whose value is a variant's name.
+    pub key: Word,
+    /// Each variant's name, as its `[Key]` gives it, with the fully qualified name of its class, in the order of names.
+    pub variants: Vec<(Word, Word)>,
+}
+
 /// The app's module whose binding of the dispatcher serves the whole app, spec section 15, which `emit` reads wherever
 /// the event is emitted.
 #[derive(Debug, PartialEq, Eq)]
@@ -208,6 +222,32 @@ impl IncrementalAnalysisService {
         });
 
         listeners.into_iter().map(|(_, _, listener)| listener).collect()
+    }
+
+    /// Every PHP# family of the last analysis, spec section 10, by its full name, with each variant that gives its
+    /// name, which the analyzer requires of every variant.
+    #[must_use]
+    pub fn families(&self) -> Vec<Family> {
+        let mut families: Vec<Family> = self
+            .codebase
+            .class_likes
+            .values()
+            .filter(|class| class.flags.is_sharp())
+            .filter_map(|family| {
+                let key = word(family.tag_key()?);
+                let variants = self
+                    .codebase
+                    .variants(family)
+                    .into_iter()
+                    .filter_map(|(name, variant)| Some((word(name?), variant.original_name)))
+                    .collect();
+
+                Some(Family { file_id: family.span.file_id, class: family.original_name, key, variants })
+            })
+            .collect();
+        families.sort_by(|a, b| a.class.as_bytes().cmp(b.class.as_bytes()));
+
+        families
     }
 
     /// The app's module whose binding of the dispatcher serves the whole app, spec section 15: a module of the one

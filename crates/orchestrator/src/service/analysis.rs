@@ -13,6 +13,7 @@ use mago_analyzer::external::apply_refinements;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
 use mago_analyzer::too_wide_members;
+use mago_analyzer::unused_classes;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::r#extern::extern_namespace_classes;
 use mago_codex::populator::populate_codebase;
@@ -22,6 +23,7 @@ use mago_database::DatabaseReader;
 use mago_database::ReadDatabase;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_database::file::FolderNamespace;
 use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::ExternNamespaces;
 use mago_names::resolver::NameResolver;
@@ -228,8 +230,16 @@ impl AnalysisService {
             }
         }
 
-        // The file is the whole project here, so its uses, the late ones included, are every use.
+        // The file is the whole project here, so its uses, the late ones included, are every use, for the too-wide and
+        // the unused-class errors.
         analysis_result.issues.extend(too_wide_members(&self.codebase, &analysis_result.symbol_references));
+        let test_files: Vec<FileId> = self
+            .database
+            .files()
+            .filter(|file| file.folder_namespace == Some(FolderNamespace::Test))
+            .map(|file| file.id)
+            .collect();
+        analysis_result.issues.extend(unused_classes(&self.codebase, &analysis_result.symbol_references, &test_files));
         analysis_result.issues.extend(self.codebase.take_issues(true));
         let mut pragma_reconciler =
             DeferredIssueReconciler::new(analysis_result.take_deferred_pragmas(), self.database.files());

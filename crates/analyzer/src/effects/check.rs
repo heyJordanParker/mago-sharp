@@ -530,6 +530,10 @@ fn impure(
                 code_class_name(class)
             ))
         }
+        Some(Effect::Unknown(None)) if impurity.cause.0.is_empty() => issue.with_help(format!(
+            "`{}` is a function plain PHP wrote, which no `extern` can declare. Call it outside the {body}.",
+            impurity.cause.1
+        )),
         Some(Effect::Unknown(None)) => {
             let (class, property) = impurity.cause;
             let class = class_name(class);

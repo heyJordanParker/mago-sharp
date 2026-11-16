@@ -7,6 +7,7 @@ use std::sync::Arc;
 use foldhash::HashSet;
 
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
@@ -22,6 +23,7 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::string::TString;
 use mago_codex::ttype::combine_union_types;
+use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::combiner::combine;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
@@ -164,6 +166,9 @@ where
             }
             None => None,
         };
+    let own = literal_type.as_ref().or_else(|| artifacts.get_expression_type(value));
+    let tuple = own.and_then(|own| get_declared_tuple(context, own, declared_type));
+    let literal_type = tuple.or(literal_type);
     if let Some(literal_type) = &literal_type {
         artifacts.set_expression_type(literal, literal_type.clone());
         artifacts.set_expression_type(value, literal_type.clone());
@@ -175,10 +180,40 @@ where
     literal_type
 }
 
+/// The tuples of `declared` that a list literal of the type `own` becomes, spec section 30: each one it fits, so it
+/// keeps the tuple's names, as `held["a"] = [owner, "a"]` writes a `[Designable? owner, string css]` into a `Map` of
+/// them. `None` where it fits none.
+fn get_declared_tuple<A>(context: &Context<'_, '_, A>, own: &TUnion, declared: &TUnion) -> Option<TUnion>
+where
+    A: Arena,
+{
+    let tuples: Vec<TAtomic> = declared
+        .types
+        .iter()
+        .filter(|atomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_names.is_some()))
+        .filter(|tuple| {
+            let mut result = ComparisonResult::for_dialect(context.dialect);
+            is_contained_by(
+                context.codebase,
+                own,
+                &TUnion::from_atomic((*tuple).clone()),
+                false,
+                false,
+                false,
+                &mut result,
+            )
+        })
+        .cloned()
+        .collect();
+
+    (!tuples.is_empty()).then(|| TUnion::from_vec(tuples))
+}
+
 /// The type of the literal `array_literal`, written where `declared_type` declares its elements, once each element that
 /// is a literal has the type its place gives it, as [`get_set_literal_type`] gives it: the `Set` of the elements' types
-/// when the literal `becomes_set`, or else a `List` of them or a `Map` of its keys to them, a spread's elements
-/// included. A missing element, refused on its own, adds no type. `None` when no element took a type from its place.
+/// when the literal `becomes_set`, a `Map` of its keys to them, or else the list of each element's type in its place,
+/// which a `List` and a tuple of them take, spec section 30, or a `List` of them with a spread. A missing element,
+/// refused on its own, adds no type. `None` when no element took a type from its place.
 fn get_literal_of_sets_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -190,23 +225,15 @@ fn get_literal_of_sets_type<A>(
 where
     A: Arena,
 {
-    let declared_element = declared_type
-        .types
-        .iter()
-        .filter_map(|atomic| match atomic {
-            TAtomic::Array(collection @ TArray::Set(_)) if becomes_set => {
-                Some(get_array_parameters(collection, context.codebase).1)
-            }
-            TAtomic::Array(collection @ (TArray::List(_) | TArray::Keyed(_))) if !becomes_set => {
-                Some(get_array_parameters(collection, context.codebase).1)
-            }
-            _ => None,
-        })
-        .reduce(|first, other| {
-            combine_union_types(&first, &other, context.codebase, context.settings.combiner_options())
-        })?;
-
+    let collections = declared_type.types.iter().filter_map(|atomic| match atomic {
+        TAtomic::Array(collection @ TArray::Set(_)) if becomes_set => Some(collection),
+        TAtomic::Array(collection @ (TArray::List(_) | TArray::Keyed(_))) if !becomes_set => Some(collection),
+        _ => None,
+    });
+    let options = context.settings.combiner_options();
+    let is_list_literal = !becomes_set && is_map_literal(array_literal) == Some(false);
     let mut placed_element = false;
+    let mut has_spread = false;
     let mut element_types = Vec::with_capacity(array_literal.elements.len());
     for element in array_literal.elements.iter() {
         let element_value = match element {
@@ -215,16 +242,25 @@ where
             ArrayElement::Variadic(spread) => {
                 let spread = artifacts.get_expression_type(spread.value)?.get_single_array()?;
                 element_types.push(get_array_parameters(spread, context.codebase).1);
+                has_spread = true;
                 continue;
             }
             ArrayElement::Missing(_) => continue,
         };
+        let position = (is_list_literal && !has_spread).then_some(element_types.len());
+        let declared_element = declared_element_type(context.codebase, options, collections.clone(), position)?;
         placed_element |=
             get_set_literal_type(context, artifacts, element_value, &declared_element, function_like).is_some();
         element_types.push(artifacts.get_expression_type(element_value)?.clone());
     }
     if !placed_element {
         return None;
+    }
+
+    if is_list_literal && !has_spread {
+        let elements = element_types.into_iter().map(|element_type| (false, element_type)).enumerate().collect();
+
+        return Some(TUnion::from_atomic(TAtomic::Array(TArray::List(TList::from_known_elements(elements)))));
     }
 
     let element_type = element_types.into_iter().reduce(|first, other| {
@@ -242,6 +278,29 @@ where
     };
 
     Some(TUnion::from_atomic(TAtomic::Array(collection)))
+}
+
+/// The type `collections`, the collections a place declares, give the element of a literal written there at
+/// `position`, spec section 14.2: the type a tuple declares for that place, spec section 30, as `[:]` takes the `Map` of
+/// `[string, Map<string, string>]`, and the element type of every other collection, joined. `None` where no
+/// collection is declared.
+fn declared_element_type<'collection>(
+    codebase: &CodebaseMetadata,
+    options: CombinerOptions,
+    collections: impl Iterator<Item = &'collection TArray>,
+    position: Option<usize>,
+) -> Option<TUnion> {
+    collections
+        .map(|collection| match (collection, position) {
+            (TArray::List(list), Some(position))
+                if let Some((_, element)) =
+                    list.known_elements.as_ref().and_then(|elements| elements.get(&position)) =>
+            {
+                element.clone()
+            }
+            (collection, _) => get_array_parameters(collection, codebase).1,
+        })
+        .reduce(|first, other| combine_union_types(&first, &other, codebase, options))
 }
 
 /// The collection the place declared `declared` gives a literal written there as `value`: spec section 12 has a
@@ -396,18 +455,22 @@ where
 
     // Spec section 14.2: each element of a collection literal takes the element type its collection type declares, as C#
     // types a collection initializer's elements, so a lambda in it takes its parameter types from it.
-    let element_type = artifacts.get_expected_type(&expression_span).and_then(|expected| {
-        expected
-            .types
-            .iter()
-            .filter_map(|atomic| match atomic {
-                TAtomic::Array(collection) => Some(get_array_parameters(collection, context.codebase).1),
+    let expected = artifacts.get_expected_type(&expression_span).cloned();
+    let codebase = context.codebase;
+    let options = context.settings.combiner_options();
+    let element_type = |position: Option<&ArrayKey>| {
+        let collections =
+            expected.iter().flat_map(|expected| expected.types.iter()).filter_map(|atomic| match atomic {
+                TAtomic::Array(collection) => Some(collection),
                 _ => None,
-            })
-            .reduce(|first, other| {
-                combine_union_types(&first, &other, context.codebase, context.settings.combiner_options())
-            })
-    });
+            });
+        let position = match position {
+            Some(ArrayKey::Integer(index)) => usize::try_from(*index).ok(),
+            _ => None,
+        };
+
+        declared_element_type(codebase, options, collections, position)
+    };
 
     for element in elements {
         let (item_key_value, key_type, item_is_list_item, value) = match element {
@@ -583,7 +646,7 @@ where
 
         let was_inside_general_use = block_context.flags.inside_general_use();
         block_context.flags.set_inside_general_use(true);
-        expect_type(context, artifacts, value, element_type.as_ref());
+        expect_type(context, artifacts, value, element_type(item_key_value.as_ref()).as_ref());
         value.analyze(context, block_context, artifacts)?;
         block_context.flags.set_inside_general_use(was_inside_general_use);
 

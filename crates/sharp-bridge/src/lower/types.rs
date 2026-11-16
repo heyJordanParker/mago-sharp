@@ -1008,6 +1008,9 @@ impl<'analysis> Types<'analysis> {
         r#type: &TUnion,
         in_static: bool,
     ) -> Option<(String, String)> {
+        if let Some(read) = self.extern_property_read(call) {
+            return Some((text(r#type, self.codebase, Parameter::Index), read));
+        }
         if let Some(name) = self.unchecked_result_call(call) {
             return needs_result_check(r#type)
                 .then(|| (text(r#type, self.codebase, Parameter::Index), format!("{name}()")));
@@ -1019,6 +1022,17 @@ impl<'analysis> Types<'analysis> {
         let text = self.checked_text(r#type, metadata.flags.is_user_defined())?;
 
         Some((text, name))
+    }
+
+    /// The name of the `extern` property the read `read` reaches, as `App.Offer.products`, spec section 14.3: plain PHP's
+    /// `__get` gives its value with no type PHP checks, so [`Self::call_check_as`] checks it whole where it enters PHP#.
+    /// None for any other expression.
+    fn extern_property_read(&self, read: &Expression) -> Option<String> {
+        let (class, variable) = self.accessed_property(read)?;
+        let declaring = self.codebase.get_class_like(class)?.magic_property_ids.get(&word(&variable))?;
+        let owner = self.codebase.get_class_like(declaring.as_bytes()).filter(|owner| owner.flags.is_sharp())?;
+
+        Some(format!("{}.{}", class_text(owner.name, self.codebase), String::from_utf8_lossy(&variable[1..])))
     }
 
     /// The check a call into plain PHP takes where its result, an object of a plain PHP class that is a `Traversable`,
@@ -1954,13 +1968,38 @@ impl<'analysis> Types<'analysis> {
         self.codebase.parses(class)
     }
 
+    /// Whether the class `class` is a value as text, which a field `parse` reads through the class's `parse(string)`
+    /// and `Json.encode` writes as its `toString()`, as the codex gives it.
+    pub(crate) fn is_text_value(&self, class: &[u8]) -> bool {
+        self.codebase.is_text_value(class)
+    }
+
+    /// Whether the class `class` declares or inherits the property `name`, written without `$`.
+    pub(crate) fn has_property(&self, class: &[u8], name: &[u8]) -> bool {
+        self.codebase.get_declaring_property(class, &[b"$".as_slice(), name].concat()).is_some()
+    }
+
+    /// Whether the class-like `class` is a family, marked `[Tag]`, whose `parse` builds a variant by its name.
+    pub(crate) fn is_family(&self, class: &[u8]) -> bool {
+        self.codebase.get_class_like(class).is_some_and(|class| class.tag_key().is_some())
+    }
+
+    /// The key of the family above the class `class` and the class's name in it, which its encoding writes first, as
+    /// `("type", "card")`. None for a class that is no named variant of a family.
+    pub(crate) fn variant_tag(&self, class: &[u8]) -> Option<(&'analysis [u8], &'analysis [u8])> {
+        let class = self.codebase.get_class_like(class)?;
+
+        Some((self.codebase.family_of(class)?.tag_key()?, class.variant_name()?))
+    }
+
     /// The fields the `parse` of the struct or PHP# class `class` reads, as the codex gives them.
     pub(crate) fn struct_parse_fields(&self, class: &[u8]) -> Vec<ParsedField<'analysis>> {
         self.codebase.struct_parse_fields(class)
     }
 
     /// `r#type` as the type text generics R3c's walk reads, php-sharp's decision 72: a class by its full dotted name as
-    /// it is declared, `int`, `float`, `string`, `bool`, `Any`, `List<T>`, `Set<T>`, `Map<K, V>`, a class's type
+    /// it is declared, with its type arguments, `App.Pair<int, string>`, `int`, `float`, `string`, `bool`, `Any`,
+    /// `List<T>`, `Set<T>`, `Map<K, V>`, a class's type
     /// parameter by its index, `$0`, and `T?`, `A|B` and `(A|B)?` with union members sorted by their text. These are
     /// the types a struct's `parse` reads, so a type that holds a function, which no input holds, has none.
     pub(crate) fn type_text(&self, r#type: &TUnion) -> Option<String> {
@@ -1993,7 +2032,26 @@ impl<'analysis> Types<'analysis> {
             TAtomic::Scalar(TScalar::Bool(_)) => "bool".to_owned(),
 
             TAtomic::Object(TObject::Enum(r#enum)) => self.class_text(r#enum.name),
-            TAtomic::Object(TObject::Named(object)) => self.class_text(object.name),
+            TAtomic::Object(TObject::Named(object)) => match object.get_type_parameters() {
+                Some(arguments) if !arguments.is_empty() => {
+                    let arguments =
+                        arguments.iter().map(|argument| self.type_text(argument)).collect::<Option<Vec<String>>>()?;
+
+                    format!("{}<{}>", self.class_text(object.name), arguments.join(", "))
+                }
+                _ => self.class_text(object.name),
+            },
+            // A tuple reads each element by its own type, spec section 30, as `[string, int]`.
+            TAtomic::Array(TArray::List(list)) if list.tuple_elements().is_some() => {
+                let elements = list
+                    .tuple_elements()
+                    .into_iter()
+                    .flatten()
+                    .map(|(element, _)| self.type_text(element))
+                    .collect::<Option<Vec<String>>>()?;
+
+                format!("[{}]", elements.join(", "))
+            }
             TAtomic::Array(array) => {
                 let (key, element) = self.array_parameters(array);
                 match array {
@@ -2048,6 +2106,26 @@ impl<'analysis> Types<'analysis> {
         };
 
         Some(self.codebase.get_function(function.as_bytes()).map_or(*function, |metadata| metadata.original_name))
+    }
+
+    /// The interface the call `call` runs the `parse` or `tryParse` of, a family's, spec section 10, with whether it is
+    /// `parse`, which throws. An interface holds no static method's body, so the engine builds its variant. None for a
+    /// call of any other method.
+    #[must_use]
+    pub fn interface_family_parse(&self, call: &Expression) -> Option<(Word, bool)> {
+        let Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }) =
+            self.artifacts.get_callees(call).next()
+        else {
+            return None;
+        };
+        let family = self.codebase.get_class_like(class.as_bytes())?;
+        let throws = match method.as_bytes() {
+            b"parse" => true,
+            b"tryParse" => false,
+            _ => return None,
+        };
+
+        (family.kind.is_interface() && family.tag_key().is_some()).then_some((family.original_name, throws))
     }
 
     /// The Lean function the method the call `call` runs is marked [`LEAN_FUNCTION`] with, as `max` for `Math.max(…)`.

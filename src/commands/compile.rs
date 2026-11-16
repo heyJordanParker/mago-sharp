@@ -54,6 +54,7 @@ use mago_orchestrator::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::ExternAttributes;
+use mago_orchestrator::service::incremental_analysis::compile::Family;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_prelude::Prelude;
 use mago_reporting::CompiledIgnoreSet;
@@ -264,10 +265,12 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
         let listeners = server.listeners();
         let externs = server.extern_attributes();
         let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| accepted.contains(&line.file_id)).collect();
+        let families = server.families();
+        let families: Vec<&Family> = families.iter().filter(|family| accepted.contains(&family.file_id)).collect();
         let accepted: Vec<&Listener> =
             listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
         let table = folder.join(LISTENERS);
-        write(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref(), &externs))?;
+        write(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref(), &externs, &families))?;
         written.insert(table);
     }
 
@@ -589,10 +592,12 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     if !inputs.is_empty() {
         let externs = server.extern_attributes();
         let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| accepted.contains(&line.file_id)).collect();
+        let families = server.families();
+        let families: Vec<&Family> = families.iter().filter(|family| accepted.contains(&family.file_id)).collect();
         let accepted: Vec<&Listener> =
             listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
         let table = compiled_folder.join(LISTENERS);
-        let bytes = listener_table(&inputs, &accepted, server.dispatcher_module().as_ref(), &externs);
+        let bytes = listener_table(&inputs, &accepted, server.dispatcher_module().as_ref(), &externs, &families);
         write_by_rename(&table, &bytes)?;
         if let Some(record) = record.as_mut() {
             record.output(&table, &bytes);
@@ -1345,12 +1350,15 @@ fn listener_inputs(root: &Path, database: &impl DatabaseReader) -> Result<Vec<un
 /// `dispatcher` is the app's module whose binding of the dispatcher serves the whole app, as its path and namespace,
 /// or `null`. Its `attributes` are, for each plain PHP class, method and function an `extern` line gives attributes,
 /// the files whose lines do, which the engine compiles when reflection reads its attributes, spec section 29. A class
-/// is keyed by its full name, a method as `class::method`, and a function as `function()`, each in lowercase.
+/// is keyed by its full name, a method as `class::method`, and a function as `function()`, each in lowercase. Its
+/// `tags` are, for each family, spec section 10, under its full name, the key its `[Tag]` names and each variant's
+/// class under the variant's name, which a family's `parse` and `withTag` read.
 fn listener_table(
     inputs: &[unit::Input],
     listeners: &[&Listener],
     dispatcher: Option<&DispatcherModule>,
     externs: &[&ExternAttributes],
+    families: &[&Family],
 ) -> Vec<u8> {
     let mut table = b"<?php\n\nreturn [\n    'inputs' => [\n".to_vec();
     for input in inputs {
@@ -1404,6 +1412,23 @@ fn listener_table(
             quoted(&mut table, file.as_bytes());
         }
         table.extend_from_slice(b"],\n");
+    }
+    table.extend_from_slice(b"    ],\n    'tags' => [\n");
+    for family in families {
+        table.extend_from_slice(b"        ");
+        quoted(&mut table, family.class.as_bytes());
+        table.extend_from_slice(b" => [");
+        quoted(&mut table, family.key.as_bytes());
+        table.extend_from_slice(b", [");
+        for (index, (name, variant)) in family.variants.iter().enumerate() {
+            if index > 0 {
+                table.extend_from_slice(b", ");
+            }
+            quoted(&mut table, name.as_bytes());
+            table.extend_from_slice(b" => ");
+            quoted(&mut table, variant.as_bytes());
+        }
+        table.extend_from_slice(b"]],\n");
     }
     table.extend_from_slice(b"    ],\n];\n");
 

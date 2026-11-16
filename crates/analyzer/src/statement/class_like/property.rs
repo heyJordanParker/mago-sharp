@@ -1,6 +1,7 @@
 use mago_allocator::Arena;
 use std::rc::Rc;
 
+use mago_bytes::BytesDisplay;
 use mago_codex::context::ScopeContext;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
@@ -18,6 +19,7 @@ use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
 use mago_names::PROPERTY_BEHAVIOR;
 use mago_names::binding::php_variable_name;
+use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -76,6 +78,32 @@ use crate::utils::report_int_for_float;
 use crate::utils::with_function_fit_message;
 use crate::visibility::is_visible_from_scope;
 use crate::visibility::reaches_internal;
+
+/// Refuses `property`, a property of `class` written `extern`, where the class inherits no `__get`, spec section 14.3:
+/// an `extern` property is the one a plain PHP ancestor's `__get` gives, as Eloquent's `Model` gives a loaded relation.
+pub(crate) fn check_extern_property<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    property: &Property<'_>,
+) where
+    A: Arena,
+{
+    if context.codebase.method_exists(class.name.as_bytes(), b"__get") {
+        return;
+    }
+
+    let class_name = display_class_like_name(context, class.original_name);
+    let variable = property.first_variable();
+    let member = display_sharp_member(class_name, BytesDisplay(variable.name));
+    context.collector.report_with_code(
+        IssueCode::MissingMagicMethod,
+        Issue::error(format!(
+            "`{member}` is `extern`, the property a plain PHP `__get` gives, and `{class_name}` inherits no `__get`."
+        ))
+        .with_annotation(Annotation::primary(variable.span).with_message("Declared `extern` here."))
+        .with_help("Extend the plain PHP class whose `__get` gives it, as Eloquent's `Model`, or declare the property without `extern`."),
+    );
+}
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Property<'arena> {
     fn analyze<'ctx, A>(

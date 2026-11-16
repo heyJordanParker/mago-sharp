@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
 use mago_word::Word;
@@ -10,7 +8,6 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
-use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::r#enum::TEnum;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -19,8 +16,6 @@ use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
 use mago_codex::ttype::builder::get_class_strings_of;
 use mago_codex::ttype::union::TUnion;
-use mago_names::PARSED;
-use mago_names::PARSES_TYPE_ARGUMENT;
 use mago_names::binding::Binding;
 use mago_names::kind::NameKind;
 use mago_names::short_name;
@@ -357,23 +352,7 @@ fn resolve_type_parameter<'ctx, A>(
 where
     A: Arena,
 {
-    let mut parameter = get_type_from_hint(context, block_context, artifacts, &Hint::Identifier(*name));
-    // In a method the standard library marks `PARSES_TYPE_ARGUMENT`, a type parameter with no bound is bounded by
-    // `PARSED`, which declares the `parse` and `tryParse` each struct and PHP# class gets, so `T.parse(value)` gives a
-    // `T`. Each call's type argument gets the struct parse check.
-    if let [TAtomic::GenericParameter(generic)] = parameter.types.as_ref()
-        && generic.constraint.is_mixed()
-        && block_context
-            .scope
-            .get_function_like()
-            .is_some_and(|function| function.has_attribute(context.codebase, PARSES_TYPE_ARGUMENT.as_bytes()))
-    {
-        let parsed = TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new(word(PARSED)))));
-        parameter = TUnion::from_atomic(TAtomic::GenericParameter(TGenericParameter {
-            constraint: Arc::new(parsed),
-            ..generic.clone()
-        }));
-    }
+    let parameter = get_type_from_hint(context, block_context, artifacts, &Hint::Identifier(*name));
     artifacts.record_tested_type(name, parameter.clone());
 
     let classes: Vec<ResolvedClassname> = get_class_strings_of(TClassLikeStringKind::Class, parameter, name.span())

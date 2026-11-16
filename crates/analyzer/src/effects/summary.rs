@@ -160,8 +160,9 @@ pub(crate) fn record_behaviors<A>(
 /// Records the `parse` and `tryParse` spec section 10 gives the struct or PHP# class `class`, whose bodies the bridge
 /// writes, so each one's function type lists the effects of what it runs. `parse` calls the main constructor, writes
 /// each property field through its `set` accessor, and calls the `parse` of each struct or class a field's type holds,
-/// and `tryParse` calls `parse`. Each makes the object it gives, so neither changes state. A call that reaches a
-/// `foreign` object has its class's effect, as a written call does.
+/// and `tryParse` calls `parse`. The `parse` of a family calls the `parse` of one of its variants. Each
+/// makes the object it gives, so neither changes state. A call that reaches a `foreign` object has its class's effect,
+/// as a written call does.
 pub(crate) fn record_parse<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -203,6 +204,25 @@ pub(crate) fn record_parse<A>(
     let parse = Body::Method(class.name, class.method_key(b"parse"));
 
     let mut parsing = summary(parse, b"parse");
+    let mut trying = summary(Body::Method(class.name, class.method_key(b"tryParse")), b"tryParse");
+    reach(&mut trying, class.name, parse, b"parse");
+    if class.tag_key().is_some() {
+        for (_, variant) in codebase.variants(class) {
+            // A case that carries no data is one object, which the family's `parse` gives as it is. A case is no
+            // class the analysis visits, so the enum records the `parse` of each.
+            if !codebase.parses(variant.name.as_bytes()) {
+                continue;
+            }
+            if variant.flags.is_enum_case_class() {
+                record_parse(context, artifacts, variant);
+            }
+            reach(&mut parsing, variant.name, Body::Method(variant.name, variant.method_key(b"parse")), b"parse");
+        }
+        artifacts.effect_summaries.push(parsing);
+        artifacts.effect_summaries.push(trying);
+
+        return;
+    }
     let constructor = codebase
         .get_declaring_method_class(class.name.as_bytes(), b"__construct")
         .and_then(|declaring| codebase.get_class_like(declaring.as_bytes()));
@@ -233,9 +253,6 @@ pub(crate) fn record_parse<A>(
         reach(&mut parsing, nested.name, Body::Method(nested.name, nested.method_key(b"parse")), b"parse");
     }
 
-    let mut trying = summary(Body::Method(class.name, class.method_key(b"tryParse")), b"tryParse");
-    reach(&mut trying, class.name, parse, b"parse");
-
     artifacts.effect_summaries.push(parsing);
     artifacts.effect_summaries.push(trying);
 }
@@ -250,7 +267,11 @@ fn parsed_classes<'codebase>(
 ) {
     for atomic in r#type.types.iter() {
         match atomic {
-            TAtomic::Object(TObject::Named(object)) if codebase.parses(object.name.as_bytes()) => {
+            TAtomic::Object(TObject::Named(object))
+                if codebase.parses(object.name.as_bytes())
+                    || codebase.is_text_value(object.name.as_bytes())
+                    || codebase.parses_any_value(object.name.as_bytes()) =>
+            {
                 let Some(class) = codebase.get_class_like(object.name.as_bytes()) else {
                     unreachable!("a class that parses is in the codebase");
                 };
@@ -537,7 +558,8 @@ where
         match expression {
             Expression::Parenthesized(parenthesized) => self.roots(parenthesized.expression),
             Expression::ConstantAccess(name) => match self.context.resolved_names.binding(&name.name) {
-                Some(Binding::This | Binding::Member | Binding::Field) => Roots::from([Changed::This]),
+                Some(Binding::This) => Roots::from([Changed::This]),
+                Some(Binding::Member | Binding::Field) => self.read_roots(expression, Roots::from([Changed::This])),
                 Some(Binding::Local(local)) => self.local_roots(local),
                 _ => Roots::new(),
             },
@@ -546,12 +568,14 @@ where
                 if StaticProperty::from_property_access(access, self.context.resolved_names).is_some() {
                     Roots::from([Changed::Shared])
                 } else {
-                    self.roots(access.object)
+                    self.read_roots(expression, self.roots(access.object))
                 }
             }
-            Expression::Access(Access::NullSafeProperty(access)) => self.roots(access.object),
+            Expression::Access(Access::NullSafeProperty(access)) => {
+                self.read_roots(expression, self.roots(access.object))
+            }
             Expression::Access(Access::StaticProperty(_)) => Roots::from([Changed::Shared]),
-            Expression::ArrayAccess(access) => self.roots(access.array),
+            Expression::ArrayAccess(access) => self.read_roots(expression, self.roots(access.array)),
             // A call's result has the roots of what the call is given.
             Expression::Call(call) => {
                 let (receiver, arguments) = match call {
@@ -585,6 +609,19 @@ where
             Expression::As(r#as) => self.roots(r#as.value),
             _ => Roots::new(),
         }
+    }
+
+    /// The roots of `read`, a value read from a place of the roots `place`. An object is no part of the object that
+    /// holds it, so an object `this` holds is held by `this`, and changing it writes no field of `this`, spec section
+    /// 6.1. A collection, string or scalar is part of the object that holds it, spec section 13, and so is a value of
+    /// a type the analysis doesn't know.
+    fn read_roots(&self, read: &Expression<'arena>, place: Roots) -> Roots {
+        let is_object = self.artifacts.get_expression_type(read).is_some_and(|read_type| {
+            !read_type.types.is_empty()
+                && read_type.types.iter().all(|atomic| atomic.is_object_type() || atomic.is_null())
+        });
+
+        if is_object { place.into_iter().map(Changed::held).collect() } else { place }
     }
 
     fn local_roots(&self, local: Local) -> Roots {
@@ -923,7 +960,9 @@ where
         };
 
         // A call of a lambda written in this body runs the lambda here. A call of any other function value, such as a
-        // local's or a parameter's, has the effects its function type lists.
+        // local's or a parameter's, has the effects its function type lists. One whose plain PHP source declares no
+        // PHP# type runs code no `extern` declares, so it is `Unknown`, as a plain PHP call without one is, spec
+        // section 21.
         if let Some(lambda) = function.and_then(|function| self.lambda(function)) {
             let roots: Vec<Roots> = arguments.arguments.iter().map(|argument| self.roots(argument.value())).collect();
             self.inline(lambda, |index| roots.get(index).cloned().unwrap_or_default());
@@ -938,6 +977,9 @@ where
             let cause = (empty_word(), self.text(function.span()));
             for effect in declared_effects(self.context.codebase, function_type) {
                 self.summary.effects.push((Effect::Foreign(effect), span, cause));
+            }
+            if function_type.types.iter().any(is_undeclared_function) {
+                self.summary.effects.push((Effect::Unknown(None), span, cause));
             }
         }
 
@@ -1581,6 +1623,12 @@ fn lambda_literal<'ast, 'arena>(expression: &'ast Expression<'arena>) -> Option<
     let expression = expression.unparenthesized();
 
     matches!(expression, Expression::ArrowFunction(_) | Expression::Closure(_)).then_some(expression)
+}
+
+/// Whether `atomic` is a function plain PHP wrote with no PHP# type and no function it names, as a `Closure` its
+/// declaration gives.
+fn is_undeclared_function(atomic: &TAtomic) -> bool {
+    matches!(atomic, TAtomic::Callable(TCallable::Signature(signature)) if signature.effects.is_none() && signature.source.is_none())
 }
 
 /// The effects the function types of `value_type` list, each once. A function value with a `source` runs a PHP# body,

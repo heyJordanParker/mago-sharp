@@ -815,6 +815,14 @@ pub(crate) fn can_be_identical(
         return true;
     }
 
+    if let (
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint: first_held, .. })),
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint: second_held, .. })),
+    ) = (first_part, second_part)
+    {
+        return class_values_can_be_identical(codebase, first_held, second_held, inside_assertion);
+    }
+
     let mut first_comparison_result = ComparisonResult::new();
     let mut second_comparison_result = ComparisonResult::new();
 
@@ -860,6 +868,34 @@ pub(crate) fn can_be_identical(
                 TAtomic::Object(_) | TAtomic::Reference(TReference::Symbol { .. })
             )
     )
+}
+
+/// Whether a class value of `first_held` and one of `second_held` can name one class, spec section 21: a class of one
+/// type extends or implements the other, or a subclass of an open class implements an interface, as a `Class<Element>`
+/// may be a `Class<FormRegion>` through a subclass of `Element` that implements `FormRegion`. A final class that
+/// implements no such interface never is one.
+fn class_values_can_be_identical(
+    codebase: &CodebaseMetadata,
+    first_held: &TUnion,
+    second_held: &TUnion,
+    inside_assertion: bool,
+) -> bool {
+    let subclass_implements = |class: &TAtomic, interface: &TAtomic| {
+        matches!(
+            (class, interface),
+            (TAtomic::Object(TObject::Named(class)), TAtomic::Object(TObject::Named(interface)))
+                if codebase.interface_exists(interface.name.as_bytes()) && codebase.is_inheritable(class.name.as_bytes())
+        )
+    };
+
+    first_held.types.iter().any(|first| {
+        second_held.types.iter().any(|second| {
+            is_contained_by(codebase, first, second, inside_assertion, &mut ComparisonResult::new())
+                || is_contained_by(codebase, second, first, inside_assertion, &mut ComparisonResult::new())
+                || subclass_implements(first, second)
+                || subclass_implements(second, first)
+        })
+    })
 }
 
 /// Checks whether two string types can share at least one concrete value.

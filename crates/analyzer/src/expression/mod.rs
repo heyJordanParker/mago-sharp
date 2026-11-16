@@ -65,6 +65,7 @@ use mago_syntax::cst::Parenthesized;
 use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PatternMatchArm;
+use mago_syntax::cst::PatternMatchDefaultArm;
 use mago_syntax::cst::PatternMatchPatternArm;
 use mago_syntax::cst::Propagate;
 use mago_syntax::cst::PropertiesPattern;
@@ -777,7 +778,6 @@ where
 
     if let Node::Expression(Expression::PatternMatch(pattern_match))
     | Node::Statement(Statement::PatternMatch(pattern_match)) = node
-        && !pattern_match.arms.iter().any(PatternMatchArm::is_default)
     {
         // A `when` condition may be false for any value, so only the tests of arms without one handle a case.
         let handled: Vec<&Expression<'_>> = pattern_match
@@ -792,11 +792,18 @@ where
             .map(|test| handled_test(test, context.arena, artifacts))
             .collect();
 
-        // Its PHP is an `if` per arm with no `else`, which the analysis reads as running no arm for some value. A
-        // `match` statement that handles every value runs one of its arms, so it ends the block when each arm does.
-        if report_unhandled(pattern_match, first_hidden, &handled, context, block_context, artifacts)
+        let default = pattern_match.arms.iter().find_map(|arm| match arm {
+            PatternMatchArm::Default(default) => Some(default),
+            PatternMatchArm::Pattern(_) => None,
+        });
+        if let Some(default) = default {
+            report_listed_default(pattern_match, default, first_hidden, &handled, context, block_context, artifacts);
+        } else if report_unhandled(pattern_match, first_hidden, &handled, context, block_context, artifacts)
             && let Node::Statement(statement) = node
         {
+            // Its PHP is an `if` per arm with no `else`, which the analysis reads as running no arm for some value. A
+            // `match` statement that handles every value runs one of its arms, so it ends the block when each arm
+            // does.
             let actions = ControlAction::from_statements(vec![statement], vec![], Some(artifacts), true);
             if actions.len() == 1 && actions.contains(ControlAction::End) {
                 block_context.flags.set_has_returned(true);
@@ -883,14 +890,7 @@ fn report_unhandled<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    // Each arm reads a local in its own test, never where `match` writes it, so a local's type is the variable's, and
-    // any other value's is its own, as `MatchAnalyzer` reads a subject.
-    let value_type = context
-        .get_assertion_context_from_block(block_context)
-        .get_expression_id(pattern_match.expression)
-        .and_then(|id| block_context.locals.get(&id).map(|value| (**value).clone()))
-        .or_else(|| artifacts.get_expression_type(pattern_match.expression).cloned())
-        .unwrap_or_else(get_mixed);
+    let value_type = matched_type(pattern_match, context, block_context, artifacts);
     // After a `match` statement whose every arm returns, a local is the value no arm handles: `never` when the arms
     // handle every value.
     let is_closed = value_type.types.iter().all(|atomic| {
@@ -927,6 +927,80 @@ where
     );
 
     false
+}
+
+/// Refuses `default`, the `default` arm of `pattern_match`, where its value is a project's enum or sealed interface,
+/// nullable or not, spec section 21: such a `match` lists its cases, so a case added later is a compile error at each
+/// `match` that misses it. The error names the cases `default` stands for, the cases no `handled` test matches. A plain
+/// PHP enum keeps `default`, since its library can add cases in an upgrade, and so does an enum of a vendored package.
+fn report_listed_default<'ctx, 'arena, A>(
+    pattern_match: &PatternMatch<'arena>,
+    default: &PatternMatchDefaultArm<'arena>,
+    first_hidden: Option<Word>,
+    handled: &[&Expression<'arena>],
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) where
+    A: Arena,
+{
+    let value_type = matched_type(pattern_match, context, block_context, artifacts);
+    let codebase = context.codebase;
+    let mut cases =
+        value_type.types.iter().filter(|atomic| !matches!(atomic, TAtomic::Null | TAtomic::Never)).peekable();
+    let is_project_set = |atomic: &TAtomic| {
+        enum_value(atomic, codebase)
+            .map(|(name, _)| name)
+            .or_else(|| closed_class(atomic, codebase).map(|class| class.name))
+            .and_then(|name| codebase.get_class_like(name.as_bytes()))
+            .is_some_and(|class| class.flags.is_sharp() && class.flags.is_user_defined())
+    };
+    if cases.peek().is_none() || !cases.all(is_project_set) {
+        return;
+    }
+
+    // Arms that handle every case leave `default` nothing, which the last of them reports as always true.
+    let (missing, enums) =
+        missing_cases(pattern_match, first_hidden, &value_type, handled, context, block_context, artifacts);
+    let matched = display_sharp_type(context, &value_type);
+    let message = match missing.as_slice() {
+        [] => return,
+        [only] => format!("A `match` on `{matched}` lists its cases; missing: {only}."),
+        [rest @ .., last] => {
+            format!("A `match` on `{matched}` lists its cases; missing: {} and {last}.", rest.join(", "))
+        }
+    };
+    let message = match display_missing_imports(context, enums) {
+        Some(imports) => format!("{message} {imports}"),
+        None => message,
+    };
+
+    context.collector.report_with_code(
+        IssueCode::MatchNotExhaustive,
+        Issue::error(message)
+            .with_annotation(Annotation::primary(default.default.span).with_message("Stands for the cases it misses."))
+            .with_note("A case added to the enum or the sealed interface later is then a compile error at each `match` that misses it, where a `default` would take it.")
+            .with_help("Replace `default` with arms for the cases it misses, and join the cases that share an arm with `or`."),
+    );
+}
+
+/// The type of the value `pattern_match` tests. Each arm reads a local in its own test, never where `match` writes it,
+/// so a local's type is the variable's, and any other value's is its own, as `MatchAnalyzer` reads a subject.
+fn matched_type<'ctx, A>(
+    pattern_match: &PatternMatch<'_>,
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
+) -> TUnion
+where
+    A: Arena,
+{
+    context
+        .get_assertion_context_from_block(block_context)
+        .get_expression_id(pattern_match.expression)
+        .and_then(|id| block_context.locals.get(&id).map(|value| (**value).clone()))
+        .or_else(|| artifacts.get_expression_type(pattern_match.expression).cloned())
+        .unwrap_or_else(get_mixed)
 }
 
 /// The PHP variable the PHP of `pattern_match` tests, as `php_shape` writes it: the local the `match` names, or

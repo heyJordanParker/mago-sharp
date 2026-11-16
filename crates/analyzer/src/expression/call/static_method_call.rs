@@ -1,5 +1,6 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
@@ -387,23 +388,37 @@ where
     if let Some((encoder, position)) = json_encoder
         && let Some(argument) = call.argument_list.arguments.get(position)
         && let Some(value) = artifacts.get_expression_type(argument.value())
-        && let Some(key) = invalid_json_key(context, value, &mut Vec::new())
+        && let Some(unwritable) = unwritable_json(context, value, &mut Vec::new())
     {
-        let (message, help) = match key {
-            InvalidJsonKey::Class(class) => {
+        let (code, message, help) = match unwritable {
+            UnwritableJson::KeyClass(class) => {
                 let class = display_class_like_name(context, class);
                 (
+                    IssueCode::InvalidJsonKey,
                     format!("`{encoder}` writes each `Map` key as JSON text, and `{class}` has no `toString()`."),
                     format!("Declare `public string toString()` on `{class}`, or encode a `Map` keyed by text."),
                 )
             }
-            InvalidJsonKey::Scalar(scalar) => (
+            UnwritableJson::KeyScalar(scalar) => (
+                IssueCode::InvalidJsonKey,
                 format!("`{encoder}` writes each `Map` key as JSON text, and a `{scalar}` key has none."),
                 "Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
             ),
+            UnwritableJson::UnheldParameter(class, parameter) => {
+                let class = display_class_like_name(context, class);
+                (
+                    IssueCode::InvalidStruct,
+                    format!(
+                        "`{encoder}` writes `{class}` from the properties its `parse` reads, and the main constructor parameter `{parameter}` holds no property."
+                    ),
+                    format!(
+                        "Declare `{parameter}` with `{{ get; }}` in the main constructor of `{class}`, so it is a property."
+                    ),
+                )
+            }
         };
         context.collector.report_with_code(
-            IssueCode::InvalidJsonKey,
+            code,
             Issue::error(message)
                 .with_annotation(Annotation::primary(argument.span()).with_message("Encoded here."))
                 .with_help(help),
@@ -443,58 +458,85 @@ where
     Ok(())
 }
 
-/// A `Map` key a JSON encoder can't write as JSON text.
-enum InvalidJsonKey {
-    /// A class, a struct or a pure enum that declares no `toString()`.
-    Class(Word),
-    /// A `float` or a `bool`.
-    Scalar(&'static str),
+/// A part of a value a JSON encoder can't write.
+enum UnwritableJson {
+    /// A `Map` key of a class, a struct or a pure enum that declares no `toString()`.
+    KeyClass(Word),
+    /// A `Map` key of a `float` or a `bool`.
+    KeyScalar(&'static str),
+    /// A main constructor parameter of a struct or a class that its `parse` reads and no property holds, by its name.
+    UnheldParameter(Word, String),
 }
 
-/// The first `Map` key in `value` that has no JSON text, spec section 10, wherever `value` holds it: in a collection's
-/// elements, keys and values, and in the properties of a PHP# struct or class, `visiting` the classes it is inside. A
-/// key has text exactly where the engine's `sharp_table_json_key` gives it: an `int`, a `string`, a backed enum case,
-/// or an object with `toString()`. An `Any` is decided where it runs.
-fn invalid_json_key<A>(context: &Context<'_, '_, A>, value: &TUnion, visiting: &mut Vec<Word>) -> Option<InvalidJsonKey>
+/// The first part of `value` a JSON encoder can't write, spec section 10, wherever `value` holds it: in a collection's
+/// elements, keys and values, and in the properties of a PHP# struct or class and of each variant of a family,
+/// `visiting` the classes it is inside. A `Map` key has text exactly where the engine's `sharp_table_json_key` gives it:
+/// an `int`, a `string`, a backed enum case, or an object with `toString()`. A struct or class writes the fields its
+/// `parse` reads from its properties, so a main constructor parameter that holds no property can't be written. An
+/// `Any` is decided where it runs.
+fn unwritable_json<A>(context: &Context<'_, '_, A>, value: &TUnion, visiting: &mut Vec<Word>) -> Option<UnwritableJson>
 where
     A: Arena,
 {
     let codebase = context.codebase;
     value.types.iter().find_map(|atomic| match get_sharp_type(atomic)? {
         SharpType::List(element) | SharpType::Set(element) | SharpType::Iterable(element) => {
-            invalid_json_key(context, element, visiting)
+            unwritable_json(context, element, visiting)
         }
         SharpType::Map(key, value) => key
             .types
             .iter()
             .find_map(|key| match get_sharp_type(key)? {
-                SharpType::Float => Some(InvalidJsonKey::Scalar("float")),
-                SharpType::Bool => Some(InvalidJsonKey::Scalar("bool")),
+                SharpType::Float => Some(UnwritableJson::KeyScalar("float")),
+                SharpType::Bool => Some(UnwritableJson::KeyScalar("bool")),
                 SharpType::Enum(name) | SharpType::Class(name, _) => {
                     let class = codebase.get_class_like(name.as_bytes())?;
                     let has_text = class.enum_type.is_some()
                         || codebase.get_method(name.as_bytes(), b"toString").is_some()
                         || codebase.get_method(name.as_bytes(), b"__toString").is_some();
 
-                    (!has_text).then_some(InvalidJsonKey::Class(class.name))
+                    (!has_text).then_some(UnwritableJson::KeyClass(class.name))
                 }
                 _ => None,
             })
-            .or_else(|| invalid_json_key(context, key, visiting))
-            .or_else(|| invalid_json_key(context, value, visiting)),
+            .or_else(|| unwritable_json(context, key, visiting))
+            .or_else(|| unwritable_json(context, value, visiting)),
         SharpType::Class(name, _) if !visiting.contains(&name) => {
             let class = codebase.get_class_like(name.as_bytes()).filter(|class| class.flags.is_sharp())?;
+            let written: Vec<&ClassLikeMetadata> = if class.tag_key().is_some() {
+                codebase.variants(class).into_iter().map(|(_, variant)| variant).collect()
+            } else {
+                vec![class]
+            };
             visiting.push(name);
-            let invalid = class.properties.values().filter(|property| property.read_visibility.is_public()).find_map(
-                |property| {
+            let unwritable = written.into_iter().find_map(|class| {
+                let parsed = if codebase.parses(class.name.as_bytes()) {
+                    codebase.struct_parse_fields(class.name.as_bytes())
+                } else {
+                    Vec::new()
+                };
+                let unheld = parsed.into_iter().find(|field| {
+                    field.is_parameter
+                        && codebase
+                            .get_declaring_property(class.name.as_bytes(), &[b"$".as_slice(), field.name].concat())
+                            .is_none()
+                });
+                if let Some(unheld) = unheld {
+                    return Some(UnwritableJson::UnheldParameter(
+                        class.name,
+                        String::from_utf8_lossy(unheld.name).into_owned(),
+                    ));
+                }
+
+                class.properties.values().filter(|property| property.read_visibility.is_public()).find_map(|property| {
                     let r#type = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?;
 
-                    invalid_json_key(context, &r#type.type_union, visiting)
-                },
-            );
+                    unwritable_json(context, &r#type.type_union, visiting)
+                })
+            });
             visiting.pop();
 
-            invalid
+            unwritable
         }
         _ => None,
     })

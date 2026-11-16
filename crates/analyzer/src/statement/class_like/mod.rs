@@ -74,6 +74,7 @@ use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
+use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
@@ -1266,6 +1267,9 @@ where
     if context.codebase.parses(class_like_metadata.name.as_bytes()) {
         record_parse(context, artifacts, class_like_metadata);
     }
+    if class_like_metadata.flags.is_sharp() {
+        r#struct::check_family(context, class_like_metadata, name_span.unwrap_or(declaration_span));
+    }
     report_class_like_named_as_a_namespace(context, class_like_metadata, name_span.unwrap_or(declaration_span));
     report_namespace_named_as_a_plain_php_class_like(
         context,
@@ -1653,6 +1657,11 @@ where
 
                 class_like_constant.analyze(context, &mut block_context, artifacts)?;
             }
+            ClassLikeMember::Property(property)
+                if property.modifiers().iter().any(|modifier| matches!(modifier, Modifier::Extern(_))) =>
+            {
+                property::check_extern_property(context, class_like_metadata, property);
+            }
             ClassLikeMember::Property(property) => {
                 if context.settings.diff {
                     let first_var_name = match property {
@@ -1946,12 +1955,14 @@ where
 }
 
 /// The first `Any`, `Any?` or `Object` of `atomic` at any depth, as PHP# writes the type. A type parameter is a named
-/// type, so its bound, `Any?` when it states none, doesn't count, and `Iterable<T>` names its element type only, as
-/// its key is PHP's `mixed`.
+/// type, so its bound, `Any?` when it states none, doesn't count, in `T` and in its class value `Class<T>` alike, and
+/// `Iterable<T>` names its element type only, as its key is PHP's `mixed`.
 fn unnamed_type(atomic: &TAtomic) -> Option<&TAtomic> {
     match atomic {
         TAtomic::Mixed(_) | TAtomic::Object(TObject::Any) => Some(atomic),
-        TAtomic::GenericParameter(_) => None,
+        TAtomic::GenericParameter(_) | TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic { .. })) => {
+            None
+        }
         TAtomic::Iterable(iterable) if iterable.get_key_type().is_mixed() => {
             iterable.get_value_type().types.iter().find_map(unnamed_type)
         }
@@ -4294,38 +4305,49 @@ fn widens_parameter(
 
 /// Refuses a class that takes a plain PHP method declaring no return type under members of its PHP# interfaces that
 /// declare different results, spec section 22, as Kotlin refuses a class that inherits conflicting members: a PHP# call
-/// of the method checks its result against one member's type, so the members agree on it.
+/// of the method checks its result against one member's type, so the members agree on it. A generic member's type
+/// parameters are the first member's in the same place, as an override's are its parent's, so two members that
+/// declare one generic signature agree.
 fn check_untyped_implementations<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, class_span: Span)
 where
     A: Arena,
 {
+    let codebase = context.codebase;
     for (method_id, method) in class
         .declaring_method_ids
         .values()
-        .filter_map(|method_id| Some((method_id, context.codebase.get_method_by_id(method_id)?)))
+        .filter_map(|method_id| Some((method_id, codebase.get_method_by_id(method_id)?)))
     {
-        let results: Vec<(Word, Span, TUnion)> = untyped_implementations(context.codebase, class, method)
+        let members: Vec<(Word, Span, FunctionLikeMetadata)> = untyped_implementations(codebase, class, method)
             .into_iter()
             .filter_map(|member| {
-                let interface = context.codebase.get_class_like(member.get_class_name().as_bytes())?;
-                let metadata = context.codebase.get_method_by_id(&member)?;
-                let substituted =
-                    get_substituted_method(metadata, class, member.get_class_name(), context.codebase, context.dialect);
+                let interface = codebase.get_class_like(member.get_class_name().as_bytes())?;
+                let metadata = codebase.get_method_by_id(&member)?;
+                metadata.return_type_metadata.as_ref()?;
 
                 Some((
                     interface.original_name,
                     metadata.name_span.unwrap_or(metadata.span),
-                    substituted.return_type_metadata?.type_union,
+                    get_substituted_method(metadata, class, member.get_class_name(), codebase, context.dialect),
                 ))
             })
             .collect();
-        if results.iter().all(|(_, _, result)| results.first().is_some_and(|(_, _, first)| result == first)) {
+        fn returned(member: &FunctionLikeMetadata) -> Option<&TUnion> {
+            member.return_type_metadata.as_ref().map(|returned| &returned.type_union)
+        }
+        let agrees = |(_, _, member): &(Word, Span, FunctionLikeMetadata)| {
+            let (_, _, first) = &members[0];
+            method_signature::with_parent_type_parameters(codebase, member, first)
+                .is_ok_and(|member| returned(&member) == returned(first))
+        };
+        if members.is_empty() || members.iter().all(agrees) {
             continue;
         }
 
-        let declared = results
+        let declared = members
             .iter()
-            .map(|(interface, _, result)| {
+            .filter_map(|(interface, _, member)| Some((interface, returned(member)?)))
+            .map(|(interface, result)| {
                 format!(
                     "`{}` of `{}`",
                     display_type(context, result),
@@ -4346,7 +4368,7 @@ where
             "Make the members declare one return type, or declare `{}()` in the class with a return type.",
             method.original_name
         ));
-        for (_, span, _) in &results {
+        for (_, span, _) in &members {
             issue = issue.with_annotation(Annotation::secondary(*span));
         }
         context.collector.report_with_code(IssueCode::IncompatibleReturnType, issue);

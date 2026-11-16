@@ -1,0 +1,42 @@
+namespace App;
+
+// A PHP# `match` over a project's enum lists its cases, so a `default` on one is the cases it stands for, and a
+// `switch` without `default` gains an empty arm for the cases no `case` names, `null` included (spec section 21).
+public final class Board
+{
+    public string label(Status status)
+    {
+        return match (status) {
+            Status.Open => 'open',
+            Status.Paused or Status.Closed => 'done',
+        };
+    }
+
+    public int count(Status status)
+    {
+        let total = 0;
+        match (status) {
+            Status.Open => {
+                total = 1;
+            },
+            Status.Paused or Status.Closed => {
+                total = 2;
+            },
+        }
+
+        return total;
+    }
+
+    public int mark(Status? status)
+    {
+        let total = 0;
+        match (status) {
+            Status.Paused => {
+                total = 1;
+            },
+            Status.Open or Status.Closed or null => {},
+        }
+
+        return total;
+    }
+}

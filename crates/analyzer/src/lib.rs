@@ -78,6 +78,7 @@ mod utils;
 mod visibility;
 
 pub use crate::statement::class_like::unused_members::too_wide_members;
+pub use crate::statement::class_like::unused_members::unused_classes;
 
 const COLLECTOR_CATEGORIES: &[&str] = &["analysis", "analyzer", "analyser"];
 

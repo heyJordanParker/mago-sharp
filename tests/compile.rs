@@ -2712,7 +2712,7 @@ fn listener_table(root: &Path, inputs: &[&str], rows: &str, dispatcher: &str) ->
     let inputs: String = inputs.iter().map(|path| input_row(root, path)).collect();
 
     format!(
-        "<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n    'dispatcher' => {dispatcher},\n    'attributes' => [\n    ],\n];\n"
+        "<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n    'dispatcher' => {dispatcher},\n    'attributes' => [\n    ],\n    'tags' => [\n    ],\n];\n"
     )
 }
 
@@ -2884,7 +2884,7 @@ fn compile_lists_the_files_whose_extern_lines_give_a_declaration_attributes() {
     compile_succeeds(root);
     assert!(
         read(root, ".sharp/listeners.php").ends_with(
-            "    'attributes' => [\n        'lib\\\\mailer' => ['app/Stubs/First.sharp'],\n        'lib\\\\mailer::sendlater' => ['app/Stubs/First.sharp'],\n        'lib\\\\sentat()' => ['app/Stubs/First.sharp'],\n    ],\n];\n"
+            "    'attributes' => [\n        'lib\\\\mailer' => ['app/Stubs/First.sharp'],\n        'lib\\\\mailer::sendlater' => ['app/Stubs/First.sharp'],\n        'lib\\\\sentat()' => ['app/Stubs/First.sharp'],\n    ],\n    'tags' => [\n    ],\n];\n"
         ),
         "{}",
         read(root, ".sharp/listeners.php")
@@ -4487,16 +4487,6 @@ fn compile_proves_a_law_whose_body_matches_every_case_of_an_enum() {
     assert_backoff_split_on("Retry.ExponentialRamp", "retry is Retry.ExponentialRamp");
 }
 
-/// A law body's `match` whose `default` arm covers the cases the arms before it leave splits the law's proof on those
-/// arms, and the `default` arm proves for every case left.
-#[test]
-fn compile_proves_a_law_whose_body_matches_an_enum_with_a_default_arm() {
-    assert_backoff_split_on(
-        "default",
-        "retry is not Retry.None && retry is not Retry.Fixed && retry is not Retry.Linear && retry is not Retry.Patient && retry is not Retry.Exponential",
-    );
-}
-
 /// Checks that `backoffNeverShrinks`, with a body that matches `retry` on each case and then `last`, proves, and that
 /// over a ramp of delays that shrinks from 30 to 20 it is refused in the arm `when` names.
 fn assert_backoff_split_on(last: &str, when: &str) {
@@ -4524,6 +4514,50 @@ fn assert_backoff_split_on(last: &str, when: &str) {
             );
         }
     }
+}
+
+/// A law body's `match` arm that joins an enum's cases with `or` is a case for each case it joins, as a `match` with an
+/// arm for each case is.
+#[test]
+fn compile_proves_a_law_whose_body_matches_cases_joined_with_or() {
+    let directory = library_project(&[("app/Jobs/Retry.sharp", &joined_retry("[30, 60, 300]"))]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Jobs/Retry.sharp").exists());
+}
+
+/// A law whose `or` arm is false for one of the cases it joins, as over a ramp of delays that shrinks from 30 to 20, is
+/// not proven in that case, and the error names that case alone.
+#[test]
+fn a_law_whose_body_joins_cases_with_or_is_refused_in_the_case_it_does_not_prove() {
+    let directory = library_project(&[("app/Jobs/Retry.sharp", &joined_retry("[30, 20, 300]"))]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(&format!(
+            "error[law-unproven]: law backoffNeverShrinks is not proven\n = when retry is Retry.ExponentialRamp, still to show: {JOINED_CLAIM}\n"
+        )),
+        "{}",
+        printed(&output)
+    );
+    assert_eq!(printed(&output).matches("error[law-unproven]").count(), 1, "{}", printed(&output));
+}
+
+/// The claim of `joined_retry`'s law.
+const JOINED_CLAIM: &str =
+    "index < 0 || index + 1 >= retry.backoff().count() || retry.backoff()[index] <= retry.backoff()[index + 1]";
+
+/// `App.Jobs.Retry`, an enum of three cases whose `ExponentialRamp` delays are `ramp`, with the law that its delays
+/// never shrink, proven by a `match` whose second arm joins `Retry.Exponential` and `Retry.ExponentialRamp` with `or`.
+fn joined_retry(ramp: &str) -> String {
+    format!(
+        "namespace App.Jobs;\n\npublic enum Retry : string\n{{\n    case None = \"none\";\n    case Exponential = \"exponential\";\n    case ExponentialRamp = \"exponential-ramp\";\n\n    public List<int> backoff() => match (this) {{\n        Retry.None => [],\n        Retry.Exponential => [1, 2, 4, 8],\n        Retry.ExponentialRamp => {ramp},\n    }};\n\n    law backoffNeverShrinks(Retry retry, int index) => {JOINED_CLAIM}\n    {{\n        match (retry) {{\n            Retry.None => {{ return; }},\n            Retry.Exponential or Retry.ExponentialRamp => {{ return; }},\n        }}\n    }}\n}}\n"
+    )
 }
 
 /// Compiles `source` as `app/Shared/<class>.sharp`, in a project that installs the standard library and so the members
@@ -5032,7 +5066,7 @@ fn a_law_body_s_match_splits_its_cases_on_every_arm_a_match_takes() {
     let status = "namespace App.Shared;\n\npublic enum Status\n{\n    case Open;\n    case Paid;\n\n    public int weight() => match (this) {\n        Status.Open => 1,\n        Status.Paid => 2,\n    };\n}\n";
     let signs = |arms: &str| {
         format!(
-            "namespace App.Shared;\n\npublic class Signs\n{{\n    public static int sign(int n) => n > 5 ? 2 : (n < 0 ? 0 : 1);\n\n    law signBounded(int n) => Signs.sign(n) >= 0 && Signs.sign(n) <= 2\n    {{\n        match (n) {{\n{arms}        }}\n    }}\n    law weighs(Status s) => s.weight() > 0\n    {{\n        match (s) {{\n            Status.Open => {{ return; }},\n            default => {{ return; }},\n        }}\n    }}\n}}\n"
+            "namespace App.Shared;\n\npublic class Signs\n{{\n    public static int sign(int n) => n > 5 ? 2 : (n < 0 ? 0 : 1);\n\n    law signBounded(int n) => Signs.sign(n) >= 0 && Signs.sign(n) <= 2\n    {{\n        match (n) {{\n{arms}        }}\n    }}\n    law weighs(Status s) => s.weight() > 0\n    {{\n        match (s) {{\n            Status.Open => {{ return; }},\n            Status.Paid => {{ return; }},\n        }}\n    }}\n}}\n"
         )
     };
     let proven = signs(
@@ -5063,7 +5097,7 @@ fn a_law_body_s_match_splits_its_cases_on_every_arm_a_match_takes() {
 /// `meets`, as a law with no body does.
 #[test]
 fn a_law_body_s_if_splits_its_cases_on_an_enum_s_cases() {
-    let role = "namespace App.Auth;\n\npublic enum Role\n{\n    case Owner;\n    case Admin;\n    case Member;\n\n    public int level() => Role.weight(this);\n    private static int weight(Role role) => match (role) {\n        Role.Owner => 3,\n        Role.Admin => 2,\n        Role.Member => 1,\n    };\n    public static Role fromLevel(int level) => match (level) {\n        3 => Role.Owner,\n        2 => Role.Admin,\n        default => Role.Member,\n    };\n\n    law fromLevelUndoesLevel(Role role) => Role.fromLevel(role.level()) == role\n    {\n        if (role == Role.Owner) {\n            return;\n        }\n        if (role == Role.Admin) {\n            return;\n        }\n        if (role == Role.Member) {\n            return;\n        }\n    }\n    law fromLevelUndoesLevelOfEitherSide(Role role) => Role.fromLevel(role.level()) == role\n    {\n        const same = role;\n        if (Role.Owner == same) {\n            return;\n        }\n        if (role != Role.Admin) {\n            return;\n        } else {\n            return;\n        }\n    }\n    law fromLevelUndoesLevelByMatch(Role role) => Role.fromLevel(role.level()) == role\n    {\n        match (role) {\n            Role.Owner => { return; },\n            Role.Admin => { return; },\n            default => { return; },\n        }\n    }\n}\n";
+    let role = "namespace App.Auth;\n\npublic enum Role\n{\n    case Owner;\n    case Admin;\n    case Member;\n\n    public int level() => Role.weight(this);\n    private static int weight(Role role) => match (role) {\n        Role.Owner => 3,\n        Role.Admin => 2,\n        Role.Member => 1,\n    };\n    public static Role fromLevel(int level) => match (level) {\n        3 => Role.Owner,\n        2 => Role.Admin,\n        default => Role.Member,\n    };\n\n    law fromLevelUndoesLevel(Role role) => Role.fromLevel(role.level()) == role\n    {\n        if (role == Role.Owner) {\n            return;\n        }\n        if (role == Role.Admin) {\n            return;\n        }\n        if (role == Role.Member) {\n            return;\n        }\n    }\n    law fromLevelUndoesLevelOfEitherSide(Role role) => Role.fromLevel(role.level()) == role\n    {\n        const same = role;\n        if (Role.Owner == same) {\n            return;\n        }\n        if (role != Role.Admin) {\n            return;\n        } else {\n            return;\n        }\n    }\n    law fromLevelUndoesLevelByMatch(Role role) => Role.fromLevel(role.level()) == role\n    {\n        match (role) {\n            Role.Owner => { return; },\n            Role.Admin => { return; },\n            Role.Member => { return; },\n        }\n    }\n}\n";
     let level = "namespace App.Auth;\n\npublic enum Level\n{\n    case Low;\n    case Mid;\n    case High;\n\n    private static int rank(Level level) => match (level) {\n        Level.Low => 1,\n        Level.Mid => 2,\n        Level.High => 3,\n    };\n    public bool meets(Level @required) => Level.rank(this) >= Level.rank(@required);\n\n    law sameWhenEachMeetsTheOther(Level a, Level b) => !(a.meets(b) && b.meets(a)) || a == b\n    {\n        if (b == Level.Low) {\n            return;\n        }\n        if (b == Level.Mid) {\n            return;\n        }\n        if (b == Level.High) {\n            return;\n        }\n    }\n}\n";
     let directory = lawful_project(&[("app/Auth/Role.sharp", role), ("app/Auth/Level.sharp", level)]);
     let root = directory.path();

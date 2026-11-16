@@ -1778,3 +1778,165 @@ fn analyze_refuses_a_pin_to_the_next_major_and_names_the_pin_of_this_binary() {
     assert!(stderr.contains(pin), "{stderr}");
     assert!(!stderr.contains("--to-project-version"), "{stderr}");
 }
+
+/// The project `mago move` runs on: `App.Shop.Order`, which `Customer` reaches through its own namespace, two PHP#
+/// files of `App.Sales` import, and a plain PHP file names through `use`, a fully qualified name, a PHPDoc type and a
+/// string, and `App.Shop`'s module.
+const MOVED_PROJECT: [(&str, &str); 7] = [
+    (
+        "src/App/Shop/Order.sharp",
+        "namespace App.Shop;\n\npublic class Order\n{\n    public string label() => \"App.Shop.Order\";\n}\n",
+    ),
+    (
+        "src/App/Shop/Customer.sharp",
+        "namespace App.Shop;\n\npublic class Customer\n{\n    public Order first() => new Order();\n}\n",
+    ),
+    (
+        "src/App/Sales/Report.sharp",
+        "namespace App.Sales;\n\nimport App.Shop.Order;\n\npublic class Report\n{\n    public string title(Order order) => order.label();\n}\n",
+    ),
+    (
+        "src/App/Sales/Invoice.sharp",
+        "namespace App.Sales;\n\nimport App.Shop.Order;\n\npublic class Invoice\n{\n    public Order order() => new Order();\n}\n",
+    ),
+    (
+        "src/Legacy/Exporter.php",
+        r"<?php
+
+namespace Legacy;
+
+use App\Shop\Order;
+
+class Exporter
+{
+    /**
+     * @param \App\Shop\Order $order
+     */
+    public function export(Order $order): string
+    {
+        $class = 'App\Shop\Order';
+
+        return $class . \App\Shop\Order::class . $order->label();
+    }
+}
+",
+    ),
+    ("composer.json", r#"{"autoload": {"psr-4": {"App\\": "src/App/", "Legacy\\": "src/Legacy/"}}}"#),
+    ("src/App/Shop/Module.sharp", "namespace App.Shop;\n\nmodule\n{\n    transient Customer = Customer;\n}\n"),
+];
+
+fn write_moved_project(root: &Path) {
+    std::fs::write(root.join("mago.toml"), include_str!("fixtures/sharp/mago.toml")).unwrap();
+    for (path, code) in MOVED_PROJECT {
+        std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+        std::fs::write(root.join(path), code).unwrap();
+    }
+    analyzes_clean(root);
+}
+
+fn analyzes_clean(workspace: &Path) {
+    let output = run(workspace, "analyze", &[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(stderr.contains("No issues found."), "{stdout}{stderr}");
+}
+
+#[test]
+fn move_puts_a_class_in_its_new_namespace_and_rewrites_every_file_that_names_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write_moved_project(root);
+
+    let output = run(root, "move", &["App.Shop.Order", "App.Billing"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+
+    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!root.join("src/App/Shop/Order.sharp").exists());
+    assert_eq!(
+        read("src/App/Billing/Order.sharp"),
+        MOVED_PROJECT[0].1.replace("namespace App.Shop;", "namespace App.Billing;")
+    );
+    assert_eq!(
+        read("src/App/Shop/Customer.sharp"),
+        MOVED_PROJECT[1].1.replace("App.Shop;\n", "App.Shop;\n\nimport App.Billing.Order;\n")
+    );
+    assert_eq!(read("src/App/Sales/Report.sharp"), MOVED_PROJECT[2].1.replace("App.Shop.Order", "App.Billing.Order"));
+    assert_eq!(read("src/App/Sales/Invoice.sharp"), MOVED_PROJECT[3].1.replace("App.Shop.Order", "App.Billing.Order"));
+    assert_eq!(
+        read("src/Legacy/Exporter.php"),
+        MOVED_PROJECT[4]
+            .1
+            .replace(r"App\Shop\Order;", r"App\Billing\Order;")
+            .replace(r"\App\Shop\Order ", r"\App\Billing\Order ")
+            .replace(r"\App\Shop\Order::", r"\App\Billing\Order::"),
+        "the string keeps the old name"
+    );
+    for printed in [
+        "moved src/App/Shop/Order.sharp to src/App/Billing/Order.sharp",
+        "rewrote src/App/Shop/Customer.sharp",
+        "rewrote src/App/Sales/Report.sharp",
+        "rewrote src/App/Sales/Invoice.sharp",
+        "rewrote src/Legacy/Exporter.php",
+        "src/App/Billing/Order.sharp:5:31: a string names `App.Shop.Order`, which is now `App.Billing.Order`. Check it by hand.",
+        r"src/Legacy/Exporter.php:14:19: a string names `App\Shop\Order`, which is now `App.Billing.Order`. Check it by hand.",
+    ] {
+        assert!(stdout.lines().any(|line| line == printed), "{printed}\n{stdout}");
+    }
+    assert_eq!(stdout.lines().count(), 7, "{stdout}");
+    analyzes_clean(root);
+
+    let back = run(root, "move", &["App.Billing", "App.Shop"]);
+
+    assert!(back.status.success(), "{}", String::from_utf8_lossy(&back.stderr));
+    for (path, code) in MOVED_PROJECT {
+        assert_eq!(read(path), code, "{path}");
+    }
+    assert!(!root.join("src/App/Billing").exists());
+    assert!(String::from_utf8_lossy(&back.stdout).lines().any(|line| line == "removed src/App/Billing"));
+    analyzes_clean(root);
+
+    let missing = run(root, "move", &["App.Shop.Refund", "App.Billing"]);
+
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr)
+            .contains("No PHP# class or namespace of the project is named `App.Shop.Refund`."),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+}
+
+#[test]
+fn move_takes_a_namespace_with_its_module_and_deletes_the_folder_it_empties() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write_moved_project(root);
+    let sales_module = "namespace App.Sales;\n\nmodule\n{\n    imports App.Shop;\n}\n";
+    std::fs::write(root.join("src/App/Sales/Module.sharp"), sales_module).unwrap();
+    analyzes_clean(root);
+
+    let output = run(root, "move", &["App.Shop", "App.Store"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+
+    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!root.join("src/App/Shop").exists(), "{stdout}");
+    assert!(stdout.lines().any(|line| line == "removed src/App/Shop"), "{stdout}");
+    for (moved, code) in [MOVED_PROJECT[0], MOVED_PROJECT[1], MOVED_PROJECT[6]] {
+        assert_eq!(
+            read(&moved.replace("/Shop/", "/Store/")),
+            code.replace("namespace App.Shop;", "namespace App.Store;"),
+            "{moved}"
+        );
+    }
+    assert_eq!(read("src/App/Sales/Module.sharp"), sales_module.replace("App.Shop", "App.Store"));
+    assert_eq!(read("src/App/Sales/Report.sharp"), MOVED_PROJECT[2].1.replace("App.Shop.Order", "App.Store.Order"));
+    assert_eq!(
+        read("src/Legacy/Exporter.php"),
+        MOVED_PROJECT[4].1.replace(r"\App\Shop\Order", r"\App\Store\Order").replace(r"use App\Shop", r"use App\Store")
+    );
+    analyzes_clean(root);
+}

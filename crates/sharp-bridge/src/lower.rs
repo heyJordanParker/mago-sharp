@@ -19,7 +19,6 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::object::TObject;
-use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::crosses_outward;
@@ -484,32 +483,6 @@ enum Side<'side, 'ast> {
     },
 }
 
-/// A place a struct's `parse` reads a value from or writes one to: a hidden variable, or an element of one.
-#[derive(Clone)]
-struct Place {
-    variable: Vec<u8>,
-    index: Index,
-}
-
-#[derive(Clone)]
-enum Index {
-    None,
-    Text(Vec<u8>),
-    Variable(Vec<u8>),
-    /// `$variable[]`, a new element at the end.
-    Append,
-}
-
-impl Place {
-    fn variable(name: &[u8]) -> Self {
-        Self { variable: name.to_vec(), index: Index::None }
-    }
-
-    fn element(array: &[u8], index: Index) -> Self {
-        Self { variable: array.to_vec(), index }
-    }
-}
-
 /// How a `Map` takes back a key plain PHP's array holds, spec section 12.
 #[derive(Clone, Copy)]
 enum KeyCrossing<'class> {
@@ -519,19 +492,6 @@ enum KeyCrossing<'class> {
     Text,
     /// A backing value back as its case of this backed enum.
     Case(&'class [u8]),
-}
-
-/// A part of the path a problem of `parse` is recorded under: text, or the key a hidden variable holds.
-#[derive(Clone)]
-enum PathPart {
-    Text(Vec<u8>),
-    Variable(Vec<u8>),
-}
-
-/// Whether a missing key leaves a field of `r#type` null, as spec section 10 reads a `T?` or `Any?` parameter.
-fn takes_null(r#type: &TUnion) -> bool {
-    r#type.is_nullable()
-        || r#type.types.iter().any(|atomic| matches!(atomic, TAtomic::Mixed(mixed) if !mixed.is_non_null()))
 }
 
 /// Lowers one checked file. Every node is pushed after its children, and each node's children are contiguous.
@@ -917,6 +877,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut members =
             self.class_members(&class.members, parent_name, class.class.span, class.left_brace, class.right_brace);
         members.extend(self.parse_methods(&class.members, class.name.span));
+        members.extend(self.json_encoding(class.name.span));
         members.extend(self.string_conversion(class.members.as_slice(), class.left_brace, class.right_brace));
         members
             .extend(class.inheritance.as_ref().and_then(|inheritance| self.iteration(inheritance, class.right_brace)));
@@ -1026,6 +987,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.push(self.value_equality(r#struct.name.span, &[self.class]));
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
+        members.extend(self.json_encoding(r#struct.name.span));
         members.extend(self.string_conversion(r#struct.members.as_slice(), r#struct.left_brace, r#struct.right_brace));
         members.extend(
             r#struct.inheritance.as_ref().and_then(|inheritance| self.iteration(inheritance, r#struct.right_brace)),
@@ -1124,142 +1086,288 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The `parse` and `tryParse` of the struct or PHP# class being lowered, whose `members` are declared and whose name
-    /// is at `span`, where the codex gives it them, spec section 10. No input holds a function, so a type with a
-    /// function field, also inside a collection, has neither, and the checker refuses its call. Each carries its whole
-    /// type, as a declared method does, with the effects the analysis records for it, so `is` and `methods()` read it.
+    /// is at `span`, where the codex gives it them, spec section 10, with the `#fields` the engine reads a struct or a
+    /// class by. No input holds a function, so a type with a function field, also inside a collection, has none of
+    /// them, and the checker refuses its call. Each carries its whole type, as a declared method does, with the effects
+    /// the analysis records for it, so `is` and `methods()` read it.
     fn parse_methods(&mut self, members: &Sequence<ClassLikeMember>, span: Span) -> Vec<u32> {
         if !self.types.parses(self.class) {
             return Vec::new();
         }
-        let Some(parse) = self.parse(members, span) else {
+        if self.types.is_family(self.class) {
+            return vec![self.family_parse(span), self.try_parse(span)];
+        }
+        let Some(fields) = self.parse_fields(members, span) else {
             return Vec::new();
         };
 
-        vec![parse, self.try_parse(span)]
+        vec![fields, self.parse(span), self.try_parse(span)]
     }
 
-    /// A struct's or a PHP# class's `parse`, spec section 10, as
-    /// `public static function parse(array|object $value): \App\Point`, spanning the type's name, at `span`, with
-    /// `members` its declared members. It reads each field `struct_parse_fields` gives from the input, a `Map`, the PHP
-    /// array plain PHP passes for one, or an object's public properties, records each bad value's problem under its
-    /// path in `$fields#2` through generics R3c's walk, and throws one `\Sharp\InvalidFields` when any is bad. Otherwise
-    /// it creates the struct through its main constructor, with the arguments spread by name, so a missing key takes its
-    /// parameter's default, then writes each property read. A field whose type has no type text, a function, gives no
-    /// `parse`:
-    ///
-    /// ```php
-    /// $input#1 = $value instanceof \Sharp\Map ? \iterator_to_array($value) : (\is_object($value) ? \get_object_vars($value) : $value);
-    /// $fields#2 = [];
-    /// $arguments#3 = [];
-    /// $properties#4 = [];
-    /// if (\array_key_exists('customerId', $input#1)) { …the read of an int… } else { $fields#2['customerId'] = 'missing'; }
-    /// if ($fields#2 !== []) { throw new \Sharp\InvalidFields($fields#2); }
-    /// $object#5 = new \App\RenewRequest(...$arguments#3);
-    /// foreach ($properties#4 as $name#6 => $property#7) { $object#5->$name#6 = $property#7; }
-    /// return $object#5;
-    /// ```
-    fn parse(&mut self, members: &Sequence<ClassLikeMember>, span: Span) -> Option<u32> {
-        let fields = self.types.struct_parse_fields(self.class);
-        let texts = fields.iter().map(|field| self.types.type_text(field.r#type)).collect::<Option<Vec<_>>>()?;
+    /// The `parse` of the family being lowered, an abstract class or an enum, spec section 10, which builds the variant
+    /// whose name its input holds under the family's key, as the engine's tag table gives it:
+    /// `public static function parse(array|object $value): \App\Step { return \Sharp\Internal\parseVariant('App\Step', $value); }`.
+    /// An interface holds no static method's body, so a call of an interface's `parse` calls the engine directly.
+    fn family_parse(&mut self, span: Span) -> u32 {
         self.enter(b"parse");
-        // A generic type's `parse` takes its type arguments as a static method does, spec section 11.
-        self.static_type_parameters = self.types.static_type_parameters(self.class);
         let line = self.line(span);
-        let taken = self.temporaries;
-        let [input, problems, arguments, properties, object, name, property] =
-            ["input", "fields", "arguments", "properties", "object", "name", "property"].map(|base| self.hidden(base));
-        let value = Place::variable(b"value");
-
-        let mut statements = Vec::new();
-        let is_map = self.instance_of(span, &value, b"Sharp\\Map");
-        let entries = self.global_call_of(span, b"iterator_to_array", &value);
-        let is_object = self.global_call_of(span, b"is_object", &value);
-        let properties_of = self.global_call_of(span, b"get_object_vars", &value);
-        let itself = self.place(span, &value);
-        let read =
-            self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_object, properties_of, itself]);
-        let read = self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_map, entries, read]);
-        statements.push(self.assign(span, &Place::variable(&input), read));
-        for collected in [&problems, &arguments, &properties] {
-            let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
-            statements.push(self.assign(span, &Place::variable(collected), empty));
-        }
-        for (field, text) in fields.iter().zip(&texts) {
-            let collected = if field.is_parameter { &arguments } else { &properties };
-            let target = Place::element(collected, Index::Text(field.name.to_vec()));
-            let source = Place::element(&input, Index::Text(field.key.to_vec()));
-            let hint = written_hint(members, field.name);
-            let read = self.parse_field(span, field.r#type, text, hint, &source, field.key, &target, &problems);
-            let key = self.string(0, line, field.key);
-            let input_read = self.variable(span, &input);
-            let present = self.global_call(line, b"array_key_exists", &[key, input_read]);
-            let mut branches = vec![(present, read)];
-            if !field.has_default {
-                let missing = if takes_null(field.r#type) {
-                    let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
-                    self.assign(span, &target, null)
-                } else {
-                    let missing = self.string(0, line, b"missing");
-                    self.assign(span, &Place::element(&problems, Index::Text(field.key.to_vec())), missing)
-                };
-                branches.push((NULL, missing));
-            }
-            statements.push(self.if_chain(span, &branches));
-        }
-
-        let any_bad = self.not_empty(span, &problems);
-        let exception = self.string(ZEND_NAME_FQ, line, b"Sharp\\InvalidFields");
-        let problems = self.variable(span, &problems);
-        let problems = self.node(SHARP_AST_ARG_LIST, 0, line, &[problems]);
-        let created = self.node(SHARP_AST_NEW, 0, line, &[exception, problems]);
-        let throw = self.node(SHARP_AST_THROW, 0, line, &[created]);
-        statements.push(self.if_chain(span, &[(any_bad, throw)]));
-
-        let class = self.string(ZEND_NAME_FQ, line, self.class);
-        let spread = self.variable(span, &arguments);
-        let spread = self.node(SHARP_AST_UNPACK, 0, line, &[spread]);
-        let spread = self.node(SHARP_AST_ARG_LIST, 0, line, &[spread]);
-        let mut created = self.node(SHARP_AST_NEW, 0, line, &[class, spread]);
-        if let Some(count) = self.static_type_parameters {
-            let own = self.type_text(line, &type_parameters_text(count));
-            created = self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[created, own]);
-        }
-        statements.push(self.assign(span, &Place::variable(&object), created));
-        let object_read = self.variable(span, &object);
-        let property_name = self.variable(span, &name);
-        let written = self.node(SHARP_AST_PROP, 0, line, &[object_read, property_name]);
-        let property_read = self.variable(span, &property);
-        let write = self.node(SHARP_AST_ASSIGN, 0, line, &[written, property_read]);
-        let write = self.node(SHARP_AST_STMT_LIST, 0, line, &[write]);
-        let each = [self.variable(span, &properties), self.variable(span, &property), self.variable(span, &name)];
-        statements.push(self.node(SHARP_AST_FOREACH, 0, line, &[each[0], each[1], each[2], write]));
-        let object_read = self.variable(span, &object);
-        statements.push(self.node(SHARP_AST_RETURN, 0, line, &[object_read]));
-        self.temporaries = taken;
-
+        let family = self.string(0, line, self.class);
+        let value = self.variable(span, b"value");
+        let parsed = self.global_call(line, b"Sharp\\Internal\\parseVariant", &[family, value]);
+        let parsed = self.node(SHARP_AST_RETURN, 0, line, &[parsed]);
         let parameters = self.parse_parameters(span);
-        self.static_type_parameters = None;
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed]);
         let return_type = self.string(ZEND_NAME_FQ, line, self.class);
         let return_type = self.function_type(return_type, self.types.method_type(self.class, b"parse"), 0, line);
 
-        Some(self.declaration(
+        self.declaration(
             SHARP_AST_METHOD,
             ZEND_ACC_PUBLIC | ZEND_ACC_STATIC,
             span,
             span,
             b"parse",
             &[parameters, NULL, body, return_type, NULL],
+        )
+    }
+
+    /// The `#json` method of the class being lowered, at `span`, which the engine's JSON encoder calls, spec section
+    /// 10, so `Json.encode` writes what `parse` reads: a value as text as its `toString()`, and a struct, class or enum
+    /// case whose `parse` the codex gives as an object that holds its family's key and its name first when it is a
+    /// variant, then each field `parse` reads under its key, without a `[Key(omitNull: true)]` field that holds null.
+    /// A field is read from the property of its name, so a main constructor parameter that declares none is not
+    /// written. A case that carries no data writes its name alone. None for any other class, which the encoder writes
+    /// as plain PHP does. No PHP# or plain PHP code can call a method whose name holds `#`.
+    ///
+    /// ```php
+    /// public function '#json'(): string|object
+    /// {
+    ///     $json#1 = new \stdClass();
+    ///     $json#1->type = 'card';
+    ///     $json#1->last4 = $this->last4;
+    ///     if ($this->coupon !== null) { $json#1->coupon = $this->coupon; }
+    ///     return $json#1;
+    /// }
+    /// ```
+    fn json_encoding(&mut self, span: Span) -> Option<u32> {
+        let line = self.line(span);
+        let mut statements = Vec::new();
+        let taken = self.temporaries;
+        if self.types.is_text_value(self.class) {
+            let this = self.variable(span, b"this");
+            let method = self.string(0, line, b"toString");
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+            let text = self.node(SHARP_AST_METHOD_CALL, 0, line, &[this, method, arguments]);
+            statements.push(self.node(SHARP_AST_RETURN, 0, line, &[text]));
+        } else {
+            let tag = self.types.variant_tag(self.class);
+            let parses = self.types.parses(self.class) && !self.types.is_family(self.class);
+            if !parses && tag.is_none() {
+                return None;
+            }
+            let json = self.hidden("json");
+            let class = self.string(ZEND_NAME_FQ, line, b"stdClass");
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+            let created = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
+            statements.push(self.assign(span, &json, created));
+            if let Some((key, name)) = tag {
+                let name = self.string(0, line, name);
+                statements.push(self.json_write(span, &json, key, name));
+            }
+            let fields = if parses { self.types.struct_parse_fields(self.class) } else { Vec::new() };
+            for field in fields {
+                if !self.types.has_property(self.class, field.name) {
+                    continue;
+                }
+                let value = self.this_property(span, field.name);
+                let write = self.json_write(span, &json, field.key, value);
+                statements.push(if field.omits_null {
+                    let held = self.this_property(span, field.name);
+                    let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+                    let present = self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[held, null]);
+
+                    self.if_chain(span, &[(present, write)])
+                } else {
+                    write
+                });
+            }
+            let written = self.variable(span, &json);
+            statements.push(self.node(SHARP_AST_RETURN, 0, line, &[written]));
+        }
+        self.temporaries = taken;
+
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+
+        Some(self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            span,
+            span,
+            b"#json",
+            &[parameters, NULL, body, NULL, NULL],
         ))
     }
 
-    /// A struct's or a PHP# class's `tryParse`, spec section 10: its `parse`, giving null where `parse` throws
-    /// `\Sharp\InvalidFields`.
+    /// `$this->name`.
+    fn this_property(&mut self, span: Span, name: &[u8]) -> u32 {
+        let line = self.line(span);
+        let this = self.variable(span, b"this");
+        let property = self.string(0, line, name);
+
+        self.node(SHARP_AST_PROP, 0, line, &[this, property])
+    }
+
+    /// `$json->key = value;`, the property `key` of the object in the variable `json` written with `value`.
+    fn json_write(&mut self, span: Span, json: &[u8], key: &[u8], value: u32) -> u32 {
+        let line = self.line(span);
+        let object = self.variable(span, json);
+        let key = self.string(0, line, key);
+        let property = self.node(SHARP_AST_PROP, 0, line, &[object, key]);
+
+        self.node(SHARP_AST_ASSIGN, 0, line, &[property, value])
+    }
+
+    /// The `#fields` of the struct or PHP# class being lowered, at `span`, with `members` its declared members, which the
+    /// engine's reader calls to build the type, spec section 10: a row per field `struct_parse_fields` gives, of its
+    /// name, its key, its type text, whether the main constructor takes it, and whether a missing key leaves it to its
+    /// default, then, for a field whose declaration writes more than one class, those classes in the order it writes
+    /// them, which a union of them tries in that order. None for a type with a field whose type has no type text, a
+    /// function, which no input holds. No PHP# or plain PHP code can call a method whose name holds `#`.
+    ///
+    /// ```php
+    /// public static function '#fields'(): array
+    /// {
+    ///     return [['returnUrl', 'return_url', 'string', true, false], ['method', 'method', 'App.Bank|App.Card', true, false, 'App.Card, App.Bank']];
+    /// }
+    /// ```
+    fn parse_fields(&mut self, members: &Sequence<ClassLikeMember>, span: Span) -> Option<u32> {
+        let fields = self.types.struct_parse_fields(self.class);
+        let texts = fields.iter().map(|field| self.types.type_text(field.r#type)).collect::<Option<Vec<_>>>()?;
+        let line = self.line(span);
+        let mut rows = Vec::new();
+        for (field, text) in fields.iter().zip(&texts) {
+            let mut parts = vec![
+                self.string(0, line, field.name),
+                self.string(0, line, field.key),
+                self.string(0, line, text.as_bytes()),
+                self.zval(
+                    line,
+                    if field.is_parameter { sharp_value::SHARP_TRUE } else { sharp_value::SHARP_FALSE },
+                    |_| {},
+                ),
+                self.zval(
+                    line,
+                    if field.has_default { sharp_value::SHARP_TRUE } else { sharp_value::SHARP_FALSE },
+                    |_| {},
+                ),
+            ];
+            let mut order = Vec::new();
+            if let Some(hint) = written_hint(members, field.name) {
+                self.written_classes(hint, &mut order);
+            }
+            if order.len() > 1 {
+                parts.push(self.string(0, line, order.join(", ").as_bytes()));
+            }
+            let parts: Vec<u32> =
+                parts.into_iter().map(|part| self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[part, NULL])).collect();
+            let row = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &parts);
+            rows.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[row, NULL]));
+        }
+        let rows = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &rows);
+        let rows = self.node(SHARP_AST_RETURN, 0, line, &[rows]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[rows]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+
+        Some(self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC,
+            span,
+            span,
+            b"#fields",
+            &[parameters, NULL, body, NULL, NULL],
+        ))
+    }
+
+    /// Adds to `classes` each class the written type `hint` names, at any depth, in the order it writes them, by its full
+    /// dotted name as it is declared, `App.Card`, once.
+    fn written_classes(&self, hint: &Hint, classes: &mut Vec<String>) {
+        let mut add = |name: Option<&[u8]>| {
+            if let Some(class) = name.and_then(|name| self.types.codebase().get_class_like(name)) {
+                let dotted = class.original_name.as_str_lossy().trim_start_matches('\\').replace('\\', ".");
+                if !classes.contains(&dotted) {
+                    classes.push(dotted);
+                }
+            }
+        };
+        match hint {
+            Hint::Identifier(name) => add(self.names.resolve(name)),
+            Hint::Generic(generic) => {
+                add(self.names.resolve(&generic.name));
+                for argument in generic.type_arguments.arguments.iter() {
+                    self.written_classes(argument, classes);
+                }
+            }
+            Hint::Union(union) => {
+                self.written_classes(union.left, classes);
+                self.written_classes(union.right, classes);
+            }
+            Hint::Nullable(nullable) => self.written_classes(nullable.hint, classes),
+            Hint::Parenthesized(parenthesized) => self.written_classes(parenthesized.hint, classes),
+            _ => {}
+        }
+    }
+
+    /// A struct's or a PHP# class's `parse`, spec section 10, as
+    /// `public static function parse(array|object $value): \App\Point`, spanning the type's name, at `span`: the
+    /// engine's reader builds the type from the input, a `Map`, the PHP array plain PHP passes for one, or an object's
+    /// public properties, by the rows of its `#fields`, and throws one `\Sharp\InvalidFields` that lists every bad
+    /// field. A generic type's reads its own type arguments, which it takes as a static method does, spec section 11:
+    ///
+    /// ```php
+    /// return \Sharp\Internal\parseAs('App\Point', $value, false);
+    /// return \Sharp\Internal\parseAs(typeof(App.Pair<#0, #1>), $value, false);
+    /// ```
+    fn parse(&mut self, span: Span) -> u32 {
+        self.enter(b"parse");
+        self.static_type_parameters = self.types.static_type_parameters(self.class);
+        let line = self.line(span);
+        let own = match self.static_type_parameters {
+            Some(count) => {
+                let class = String::from_utf8_lossy(self.class).replace('\\', ".");
+                let own = self.type_text(line, &format!("{class}<{}>", type_parameters_text(count)));
+
+                self.node(SHARP_AST_SHARP_TYPE_OF, 0, line, &[own])
+            }
+            None => self.string(0, line, self.class),
+        };
+        let value = self.variable(span, b"value");
+        let text = self.zval(line, sharp_value::SHARP_FALSE, |_| {});
+        let parsed = self.global_call(line, b"Sharp\\Internal\\parseAs", &[own, value, text]);
+        let parsed = self.node(SHARP_AST_RETURN, 0, line, &[parsed]);
+
+        let parameters = self.parse_parameters(span);
+        self.static_type_parameters = None;
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed]);
+        let return_type = self.string(ZEND_NAME_FQ, line, self.class);
+        let return_type = self.function_type(return_type, self.types.method_type(self.class, b"parse"), 0, line);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC,
+            span,
+            span,
+            b"parse",
+            &[parameters, NULL, body, return_type, NULL],
+        )
+    }
+
+    /// A struct's or a PHP# class's `tryParse`, spec section 10: its `parse`, giving null wherever `parse` throws, a
+    /// `\ValueError` its main constructor throws included, of which `\Sharp\InvalidFields` is one.
     ///
     /// ```php
     /// public static function tryParse(array|object $value): ?\App\Point
     /// {
-    ///     try { return \App\Point::parse($value); } catch (\Sharp\InvalidFields) { return null; }
+    ///     try { return \App\Point::parse($value); } catch (\ValueError) { return null; }
     /// }
     /// ```
     fn try_parse(&mut self, span: Span) -> u32 {
@@ -1276,7 +1384,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let parsed = self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]);
         let parsed = self.node(SHARP_AST_RETURN, 0, line, &[parsed]);
         let parsed = self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed]);
-        let exception = self.string(ZEND_NAME_FQ, line, b"Sharp\\InvalidFields");
+        let exception = self.string(ZEND_NAME_FQ, line, b"ValueError");
         let exception = self.node(SHARP_AST_NAME_LIST, 0, line, &[exception]);
         let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
         let null = self.node(SHARP_AST_RETURN, 0, line, &[null]);
@@ -1316,368 +1424,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters)
     }
 
-    /// The read of a field present in the input, from `source` into `target`. Each nested struct is built from its
-    /// value through its own `parse`, and each backed enum case from its backing value, then generics R3c's walk checks
-    /// the whole value against `r#type`, adding each bad value's problem to `fields` under its path, which starts at
-    /// `key`. The walk takes only a struct object where a struct is expected, so where a nested `parse` already moved
-    /// its problems under a path, the walk's own problem at that path is dropped. Once the walk accepts the value, each
-    /// `Set` in it holds its elements under their keys. `Any?` takes the value as it is. `hint` is the type as the
-    /// field writes it, which orders a union of structs.
-    ///
-    /// ```php
-    /// $read#N = $input#1['addresses'];
-    /// $failed#N = [];
-    /// …each nested struct and enum case built in $read#N…
-    /// if (\Sharp\Internal\accepts('List<App.Address>', $read#N, 'addresses', $fields#2)) { …each Set built… }
-    /// foreach ($failed#N as $path#N) { unset($fields#2[$path#N]); }
-    /// $arguments#3['addresses'] = $read#N;
-    /// ```
-    #[allow(clippy::too_many_arguments)]
-    fn parse_field(
-        &mut self,
-        span: Span,
-        r#type: &TUnion,
-        text: &str,
-        hint: Option<&Hint>,
-        source: &Place,
-        key: &[u8],
-        target: &Place,
-        fields: &[u8],
-    ) -> u32 {
-        let line = self.line(span);
-        if r#type.types.iter().any(|atomic| matches!(atomic, TAtomic::Mixed(mixed) if !mixed.is_non_null())) {
-            let value = self.place(span, source);
+    /// `$variable = value;`.
+    fn assign(&mut self, span: Span, variable: &[u8], value: u32) -> u32 {
+        let variable = self.variable(span, variable);
 
-            return self.assign(span, target, value);
-        }
-
-        let [read, failed] = ["read", "failed"].map(|base| self.hidden(base));
-        let value = self.place(span, source);
-        let mut statements = vec![self.assign(span, &Place::variable(&read), value)];
-        let mut moves = false;
-        let path = [PathPart::Text(key.to_vec())];
-        let built = self.parse_build(span, r#type, hint, &read, &path, fields, &failed, &mut moves);
-        if moves {
-            let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
-            statements.push(self.assign(span, &Place::variable(&failed), empty));
-        }
-        statements.extend(built);
-
-        let arguments = [
-            self.type_text(line, text),
-            self.variable(span, &read),
-            self.string(0, line, key),
-            self.variable(span, fields),
-        ];
-        let accepts = self.global_call(line, b"Sharp\\Internal\\accepts", &arguments);
-        statements.push(match self.crossing_array(r#type) {
-            Some(_) => {
-                let place = self.variable(span, &read);
-                let first = self.variable(span, &read);
-                let crossed = self.crossed(span, r#type, &read, first);
-                let crossed = self.node(SHARP_AST_ASSIGN, 0, line, &[place, crossed]);
-
-                self.if_chain(span, &[(accepts, crossed)])
-            }
-            None => accepts,
-        });
-        if moves {
-            let path = self.hidden("path");
-            let slot = self.place(span, &Place::element(fields, Index::Variable(path.clone())));
-            let unset = self.node(SHARP_AST_UNSET, 0, line, &[slot]);
-            let unset = self.node(SHARP_AST_STMT_LIST, 0, line, &[unset]);
-            let each = [self.variable(span, &failed), self.variable(span, &path)];
-            statements.push(self.node(SHARP_AST_FOREACH, 0, line, &[each[0], each[1], NULL, unset]));
-        }
-        let read_value = self.variable(span, &read);
-        statements.push(self.assign(span, target, read_value));
-
-        self.node(SHARP_AST_STMT_LIST, 0, line, &statements)
-    }
-
-    /// The statements that build, in the value of `variable`, each struct and backed enum case `r#type` holds from the
-    /// value plain PHP gives, at `path`: a struct through its own `parse` from a `Map` or an object, and a case through
-    /// `tryFrom` from its backing value, inside a `List`, `Set` or `Map` element by element. A value that builds
-    /// nothing stays as it is, for the walk to report. Where the value can only be the one struct, that struct's
-    /// problems move under `path`, which `failed` records, and `moves` becomes true. Where it may be one of several, the
-    /// first that builds is taken, in the order `hint`, the type as the source writes it, names them, as serde's
-    /// untagged enums try their variants. The checker's union holds its members sorted, so only `hint` keeps that order.
-    ///
-    /// ```php
-    /// if (!$read#N instanceof \App\Address && (\is_array($read#N) || \is_object($read#N))) {
-    ///     try { $read#N = \App\Address::parse($read#N); }
-    ///     catch (\Sharp\InvalidFields $inner#N) {
-    ///         foreach ($inner#N->fields as $key#N => $problem#N) { $fields#2[path . '.' . $key#N] = $problem#N; }
-    ///         $failed#N[] = path;
-    ///     }
-    /// }
-    /// if (\is_string($read#N) && ($case#N = \App\Status::tryFrom($read#N)) !== null) { $read#N = $case#N; }
-    /// if (\is_array($read#N)) { foreach ($read#N as $key#N => $element#N) { …$element#N built… $read#N[$key#N] = $element#N; } }
-    /// ```
-    #[allow(clippy::too_many_arguments)]
-    fn parse_build(
-        &mut self,
-        span: Span,
-        r#type: &TUnion,
-        hint: Option<&Hint>,
-        variable: &[u8],
-        path: &[PathPart],
-        fields: &[u8],
-        failed: &[u8],
-        moves: &mut bool,
-    ) -> Vec<u32> {
-        let line = self.line(span);
-        let value = Place::variable(variable);
-        let members: Vec<&TAtomic> = r#type.types.iter().filter(|atomic| !atomic.is_null()).collect();
-        let written = hint.map(written_members).unwrap_or_default();
-        let mut statements = Vec::new();
-
-        let mut structs: Vec<&TNamedObject> = members
-            .iter()
-            .filter_map(|atomic| match atomic {
-                TAtomic::Object(TObject::Named(object)) if self.types.parses(object.name.as_bytes()) => Some(object),
-                _ => None,
-            })
-            .collect();
-        // A type that parses is PHP#, named only as written, spec section 24.
-        structs.sort_by_key(|class| {
-            written.iter().position(
-                |member| matches!(member, Hint::Identifier(name) if self.names.get(name) == class.name.as_bytes()),
-            )
-        });
-        if !structs.is_empty() {
-            let readable =
-                [self.global_call_of(span, b"is_array", &value), self.global_call_of(span, b"is_object", &value)];
-            let mut condition = self.node(SHARP_AST_OR, 0, line, &readable);
-            for class in &structs {
-                let is_struct = self.instance_of(span, &value, class.name.as_bytes());
-                let is_not = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[is_struct]);
-                condition = self.node(SHARP_AST_AND, 0, line, &[is_not, condition]);
-            }
-            let built = if let ([class], [_]) = (structs.as_slice(), members.as_slice()) {
-                *moves = true;
-                self.parse_nested(span, class, variable, path, fields, failed)
-            } else {
-                let mut otherwise = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
-                for class in structs.iter().rev() {
-                    let parsed = self.nested_parse(span, class, variable);
-                    let exception = self.string(ZEND_NAME_FQ, line, b"Sharp\\InvalidFields");
-                    let exception = self.node(SHARP_AST_NAME_LIST, 0, line, &[exception]);
-                    let catch = self.node(SHARP_AST_CATCH, 0, line, &[exception, NULL, otherwise]);
-                    let catches = self.node(SHARP_AST_CATCH_LIST, 0, line, &[catch]);
-                    let r#try = self.node(SHARP_AST_TRY, 0, line, &[parsed, catches, NULL]);
-                    otherwise = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#try]);
-                }
-
-                otherwise
-            };
-            statements.push(self.if_chain(span, &[(condition, built)]));
-        }
-
-        for atomic in &members {
-            let TAtomic::Object(TObject::Enum(r#enum)) = atomic else {
-                continue;
-            };
-            let class = r#enum.name.as_bytes();
-            let Some(backing) = self.types.backing_type(class) else {
-                continue;
-            };
-            let case = self.hidden("case");
-            let backs: &[u8] = if backing.is_int() { b"is_int" } else { b"is_string" };
-            let backs = self.global_call_of(span, backs, &value);
-            let found = self.try_from(span, class, &value);
-            let case_read = self.variable(span, &case);
-            let found = self.node(SHARP_AST_ASSIGN, 0, line, &[case_read, found]);
-            let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
-            let found = self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[found, null]);
-            let named = self.node(SHARP_AST_AND, 0, line, &[backs, found]);
-            let case_read = self.variable(span, &case);
-            let from_value = self.assign(span, &value, case_read);
-            statements.push(self.if_chain(span, &[(named, from_value)]));
-        }
-
-        for atomic in &members {
-            let TAtomic::Array(array) = atomic else {
-                continue;
-            };
-            let (_, element_type) = self.types.array_parameters(array);
-            if !self.builds(&element_type) {
-                continue;
-            }
-            let [key, element] = ["key", "element"].map(|base| self.hidden(base));
-            let (open, close): (&[u8], &[u8]) =
-                if matches!(array, TArray::Keyed(_)) { (b"[\"", b"\"]") } else { (b"[", b"]") };
-            let element_path = [
-                path,
-                &[PathPart::Text(open.to_vec()), PathPart::Variable(key.clone()), PathPart::Text(close.to_vec())],
-            ]
-            .concat();
-            let element_hint = written.iter().find_map(|member| element_hint(member, array));
-            let mut each =
-                self.parse_build(span, &element_type, element_hint, &element, &element_path, fields, failed, moves);
-            let element_read = self.variable(span, &element);
-            each.push(self.assign(span, &Place::element(variable, Index::Variable(key.clone())), element_read));
-            let each = self.node(SHARP_AST_STMT_LIST, 0, line, &each);
-            let parts = [self.place(span, &value), self.variable(span, &element), self.variable(span, &key)];
-            let each = self.node(SHARP_AST_FOREACH, 0, line, &[parts[0], parts[1], parts[2], each]);
-            let is_array = self.global_call_of(span, b"is_array", &value);
-            statements.push(self.if_chain(span, &[(is_array, each)]));
-        }
-
-        statements
-    }
-
-    /// `try { $read#N = \App\Address::parse($read#N); }`, the struct `class` built from the value of `variable`, a
-    /// generic one with the type arguments the field gives it, as `\App\Pair::parse($read#N, <int, string>)`.
-    fn nested_parse(&mut self, span: Span, class: &TNamedObject, variable: &[u8]) -> u32 {
-        let line = self.line(span);
-        let name = self.string(ZEND_NAME_FQ, line, class.name.as_bytes());
-        let method = self.string(0, line, b"parse");
-        let mut arguments = vec![self.variable(span, variable)];
-        if let Some(type_arguments) = class.get_type_parameters() {
-            let text = self.types.argument_texts(type_arguments);
-            arguments.push(self.type_arguments_argument(line, &text));
-        }
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
-        let parsed = self.node(SHARP_AST_STATIC_CALL, 0, line, &[name, method, arguments]);
-        let parsed = self.assign(span, &Place::variable(variable), parsed);
-
-        self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed])
-    }
-
-    /// The struct `class` built from the value of `variable` through its own `parse`, each of its problems moved
-    /// under `path`, as `addresses[1].city`, and `path` recorded in `failed`.
-    fn parse_nested(
-        &mut self,
-        span: Span,
-        class: &TNamedObject,
-        variable: &[u8],
-        path: &[PathPart],
-        fields: &[u8],
-        failed: &[u8],
-    ) -> u32 {
-        let line = self.line(span);
-        let [inner, key, problem] = ["inner", "key", "problem"].map(|base| self.hidden(base));
-        let parsed = self.nested_parse(span, class, variable);
-        let inner_path = [path, &[PathPart::Text(b".".to_vec()), PathPart::Variable(key.clone())]].concat();
-        let moved = self.parse_problem(span, &inner_path, fields, Place::variable(&problem));
-        let moved = self.node(SHARP_AST_STMT_LIST, 0, line, &[moved]);
-        let inner_read = self.variable(span, &inner);
-        let property = self.string(0, line, b"fields");
-        let problems = self.node(SHARP_AST_PROP, 0, line, &[inner_read, property]);
-        let each = [self.variable(span, &problem), self.variable(span, &key)];
-        let each = self.node(SHARP_AST_FOREACH, 0, line, &[problems, each[0], each[1], moved]);
-        let path = self.path(span, path);
-        let recorded = self.assign(span, &Place::element(failed, Index::Append), path);
-        let caught = self.node(SHARP_AST_STMT_LIST, 0, line, &[each, recorded]);
-        let exception = self.string(ZEND_NAME_FQ, line, b"Sharp\\InvalidFields");
-        let exception = self.node(SHARP_AST_NAME_LIST, 0, line, &[exception]);
-        let inner = self.string(0, line, &inner);
-        let catch = self.node(SHARP_AST_CATCH, 0, line, &[exception, inner, caught]);
-        let catches = self.node(SHARP_AST_CATCH_LIST, 0, line, &[catch]);
-
-        self.node(SHARP_AST_TRY, 0, line, &[parsed, catches, NULL])
-    }
-
-    /// Whether `r#type` holds a struct, a PHP# class or a backed enum, at any depth, which `parse_build` builds from a
-    /// value.
-    fn builds(&self, r#type: &TUnion) -> bool {
-        r#type.types.iter().any(|atomic| match atomic {
-            TAtomic::Object(TObject::Named(object)) => self.types.parses(object.name.as_bytes()),
-            TAtomic::Object(TObject::Enum(r#enum)) => self.types.backing_type(r#enum.name.as_bytes()).is_some(),
-            TAtomic::Array(array) => self.builds(&self.types.array_parameters(array).1),
-            _ => false,
-        })
-    }
-
-    /// `\App\Status::tryFrom($value)`, its value cast to a `string` for a `string`-backed enum, as PHP holds an
-    /// all-digit `string` key as an `int`.
-    fn try_from(&mut self, span: Span, class: &[u8], source: &Place) -> u32 {
-        let line = self.line(span);
-        let mut value = self.place(span, source);
-        if !self.types.backing_type(class).is_some_and(TAtomic::is_int) {
-            value = self.node(SHARP_AST_CAST, IS_STRING, line, &[value]);
-        }
-        let name = self.string(ZEND_NAME_FQ, line, class);
-        let method = self.string(0, line, b"tryFrom");
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
-
-        self.node(SHARP_AST_STATIC_CALL, 0, line, &[name, method, arguments])
-    }
-
-    /// `$fields[path] = $problem;`, a problem a nested struct's `parse` reported, recorded under `path`.
-    fn parse_problem(&mut self, span: Span, path: &[PathPart], fields: &[u8], problem: Place) -> u32 {
-        let line = self.line(span);
-        let problem = self.place(span, &problem);
-        let path = self.path(span, path);
-        let fields = self.variable(span, fields);
-        let slot = self.node(SHARP_AST_DIM, 0, line, &[fields, path]);
-
-        self.node(SHARP_AST_ASSIGN, 0, line, &[slot, problem])
-    }
-
-    /// `$value instanceof \Class`.
-    fn instance_of(&mut self, span: Span, source: &Place, class: &[u8]) -> u32 {
-        let line = self.line(span);
-        let value = self.place(span, source);
-        let class = self.string(ZEND_NAME_FQ, line, class);
-
-        self.node(SHARP_AST_INSTANCEOF, 0, line, &[value, class])
-    }
-
-    /// `\function($value)`, a global PHP function called on a read of `source`.
-    fn global_call_of(&mut self, span: Span, function: &[u8], source: &Place) -> u32 {
-        let value = self.place(span, source);
-
-        self.global_call(self.line(span), function, &[value])
-    }
-
-    /// `$variable !== []`.
-    fn not_empty(&mut self, span: Span, variable: &[u8]) -> u32 {
-        let line = self.line(span);
-        let read = self.variable(span, variable);
-        let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
-
-        self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[read, empty])
-    }
-
-    /// A read of `place`.
-    fn place(&mut self, span: Span, place: &Place) -> u32 {
-        let line = self.line(span);
-        let variable = self.variable(span, &place.variable);
-        let index = match &place.index {
-            Index::None => return variable,
-            Index::Text(text) => self.string(0, line, text),
-            Index::Variable(name) => self.variable(span, name),
-            Index::Append => NULL,
-        };
-
-        self.node(SHARP_AST_DIM, 0, line, &[variable, index])
-    }
-
-    /// `place = value;`.
-    fn assign(&mut self, span: Span, place: &Place, value: u32) -> u32 {
-        let place = self.place(span, place);
-
-        self.node(SHARP_AST_ASSIGN, 0, self.line(span), &[place, value])
-    }
-
-    /// The text of `parts` joined by `.`, as `'addresses' . '[' . $key#N . ']'`.
-    fn path(&mut self, span: Span, parts: &[PathPart]) -> u32 {
-        let line = self.line(span);
-        let mut joined: Option<u32> = None;
-        for part in parts {
-            let part = match part {
-                PathPart::Text(text) => self.string(0, line, text),
-                PathPart::Variable(name) => self.variable(span, name),
-            };
-            joined = Some(match joined {
-                Some(earlier) => self.node(SHARP_AST_BINARY_OP, ZEND_CONCAT, line, &[earlier, part]),
-                None => part,
-            });
-        }
-
-        joined.unwrap_or_else(|| unreachable!("a path names its field"))
+        self.node(SHARP_AST_ASSIGN, 0, self.line(span), &[variable, value])
     }
 
     /// An `if` of `branches`, each a condition and its statement, the last one `else` when its condition is `NULL`.
@@ -1747,6 +1498,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         // A law, spec section 28, is checked and never runs, so the engine gets no node for it.
         for member in class_members.iter().filter(|member| !matches!(member, ClassLikeMember::Law(_))) {
             let member = match member {
+                // Spec section 14.3: an `extern` property is the one a plain PHP ancestor's `__get` gives, so the class
+                // declares none, and a read reaches `__get`.
+                ClassLikeMember::Property(property)
+                    if property.modifiers().iter().any(|modifier| matches!(modifier, Modifier::Extern(_))) =>
+                {
+                    continue;
+                }
                 // A generic class keeps its static fields in `statics_store`, and its statics with accessors' storage.
                 ClassLikeMember::Property(property)
                     if keeps_statics && property.modifiers().contains_static() && !runs_static_accessors(property) =>
@@ -2586,6 +2344,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             });
         }
         members.extend(self.class_metadata(self.class, self.line(r#enum.name), r#enum.members.as_slice()));
+        members.extend(self.parse_methods(&r#enum.members, r#enum.name.span));
         let cases: Vec<Vec<u8>> = r#enum
             .members
             .iter()
@@ -2619,19 +2378,28 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let name = case.item.name();
             let line = self.line(name.span);
             let case_class = [enum_name, b"\\", name.value].concat();
+            let Some(class) = self.types.class_name(&case_class) else {
+                unreachable!("the codex declares a class for each case of an enum that runs as classes");
+            };
             let mut members = match &case.item {
                 // The case's class declares the constructor and its fields, so their checks are its own.
                 EnumCaseItem::Data(item) => {
-                    let Some(class) = self.types.class_name(&case_class) else {
-                        unreachable!("the codex declares a class for each case that carries data");
-                    };
                     self.class = class;
-                    let constructor = self.promoted_constructor(name.span, &item.parameter_list);
+                    let mut members = self.promoted_constructor(name.span, &item.parameter_list);
+                    members.extend(self.parse_methods(&Sequence::empty(), name.span));
+                    members.extend(self.json_encoding(name.span));
                     self.class = enum_name;
 
-                    constructor
+                    members
                 }
-                EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => self.case_object(&case_class, name.span),
+                EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => {
+                    let mut members = self.case_object(&case_class, name.span);
+                    self.class = class;
+                    members.extend(self.json_encoding(name.span));
+                    self.class = enum_name;
+
+                    members
+                }
             };
             // A case of a generic enum passes its type arguments to the enum, as `Ok<T, TError>` to `Result<T, TError>`.
             members.extend(self.class_metadata(&case_class, line, &[]));
@@ -8657,6 +8425,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if let Expression::SuperOf(_) = call.object {
             return self.super_of_call(expression, call);
         }
+        // Spec section 10: an interface holds no static method's body, so a family's `parse` and `tryParse` of an
+        // interface run in the engine, as `\Sharp\Internal\parseVariant('App\PaymentMethod', $value, false)`.
+        if let Some((family, throws)) = self.types.interface_family_parse(expression) {
+            let line = self.line(call);
+            let (parameters, callee) = (self.types.call_parameters(expression), self.types.sharp_callee(expression));
+
+            return self.call(Some(call.span()), &call.argument_list, None, parameters, callee, |this, arguments| {
+                let first = this.nodes[arguments as usize].first_child as usize;
+                let count = this.nodes[arguments as usize].child_count as usize;
+                let value = this.children[first..first + count].to_vec();
+                let family = this.string(0, line, family.as_bytes());
+                let throws =
+                    this.zval(line, if throws { sharp_value::SHARP_TRUE } else { sharp_value::SHARP_FALSE }, |_| {});
+
+                this.global_call(
+                    line,
+                    b"Sharp\\Internal\\parseVariant",
+                    &[[family].as_slice(), &value, &[throws]].concat(),
+                )
+            });
+        }
         if let Some(function) = self.types.namespace_function(expression) {
             let line = self.line(call);
             let quiet = self.types.returns_its_failure(&FunctionLikeIdentifier::Function(function));
@@ -10057,30 +9846,6 @@ fn written_hint<'hint, 'arena>(
         ClassLikeMember::Property(property) if named(property.first_variable()) => property.hint(),
         _ => None,
     })
-}
-
-/// The members of a written type in the order they are written, seen through `?` and parentheses.
-fn written_members<'hint, 'arena>(hint: &'hint Hint<'arena>) -> Vec<&'hint Hint<'arena>> {
-    match hint {
-        Hint::Nullable(nullable) => written_members(nullable.hint),
-        Hint::Parenthesized(parenthesized) => written_members(parenthesized.hint),
-        _ => union_members(hint),
-    }
-}
-
-/// The written element type of `member` when it is the collection `array`: a `List`'s or a `Set`'s one type
-/// argument, or a `Map`'s value type.
-fn element_hint<'hint, 'arena>(member: &'hint Hint<'arena>, array: &TArray) -> Option<&'hint Hint<'arena>> {
-    let Hint::Generic(generic) = member else {
-        return None;
-    };
-    let (name, index): (&[u8], usize) = match array {
-        TArray::List(_) => (b"List", 0),
-        TArray::Set(_) => (b"Set", 0),
-        TArray::Keyed(_) => (b"Map", 1),
-    };
-
-    (generic.name.value == name).then(|| generic.type_arguments.arguments.iter().nth(index)).flatten()
 }
 
 /// The type PHP writes for a PHP# type that is not a union, once generics are erased.

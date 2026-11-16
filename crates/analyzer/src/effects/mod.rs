@@ -44,7 +44,8 @@ pub(crate) enum Effect {
     /// A call into plain PHP that no `extern` declaration covers, with the callee an `extern` would declare as its full
     /// class name and its member: `Lib\Bag` and `__call`, an empty class and `trim` for a function, and the class and
     /// an empty member for a constructor. A call of a plain PHP property holding a function has none, because an
-    /// `extern` declares a class's members, not the code a property holds.
+    /// `extern` declares a class's members, not the code a property holds, and nor does a call of any other function
+    /// plain PHP wrote, whose cause has an empty class and the function value as the call writes it.
     Unknown(Option<(Word, Word)>),
     /// The effect `effect` of a call into a plain PHP class without an `extern`, which the class carries because `by`,
     /// a call an `extern` declares, returns it: a full class name and a member, or an empty class and a function.
@@ -71,10 +72,29 @@ impl Effect {
 pub(crate) enum Changed {
     /// The object the body runs on.
     This,
+    /// An object `this` holds in a field, or one such an object holds. Changing it changes no field of `this`, so a
+    /// getter may, spec section 6.1, and a `readonly` value may not, since readonly reaches everything read through it,
+    /// spec section 13.
+    HeldByThis,
     /// What the caller passed as the parameter at this index.
     Parameter(u32),
     /// State every body reaches, such as a static property.
     Shared,
+}
+
+impl Changed {
+    /// The root of an object read from a place of this root: one `this` holds is held by `this`.
+    pub(crate) fn held(self) -> Self {
+        match self {
+            Changed::This => Changed::HeldByThis,
+            root => root,
+        }
+    }
+
+    /// Whether this root is `this` or an object `this` holds, which a `readonly` value reaches.
+    fn is_reached_from_this(self) -> bool {
+        matches!(self, Changed::This | Changed::HeldByThis)
+    }
 }
 
 /// The roots of a value. A value with no root is fresh: the body made it, so changing it changes nothing given.
@@ -557,7 +577,8 @@ impl Effects {
     /// imports of the calling body's file name the classes of the write.
     fn readonly_calls(&self) -> impl Iterator<Item = (&ReadonlyCall, &WordMap<Word>, Option<Impurity>)> + '_ {
         self.readonly_calls.iter().map(|(call, caller)| {
-            let change = self.first_item(call.callee, |item| item == Item::Changed(Changed::This));
+            let change =
+                self.first_item(call.callee, |item| matches!(item, Item::Changed(root) if root.is_reached_from_this()));
 
             (call, &*self.imports[*caller], change)
         })
@@ -566,7 +587,9 @@ impl Effects {
     fn body_impurity(&self, body: Body) -> Option<Impurity> {
         let constructor = matches!(body, Body::Method(_, method) if method.as_bytes() == b"__construct");
 
-        self.first_item(body, |item| !(constructor && item == Item::Changed(Changed::This)))
+        self.first_item(body, |item| {
+            !(constructor && matches!(item, Item::Changed(root) if root.is_reached_from_this()))
+        })
     }
 
     /// Why `body` has an effect that `allowed` does not list.
@@ -909,6 +932,7 @@ fn through(item: Item, call: &Call) -> impl Iterator<Item = Item> + '_ {
     let roots: Vec<Changed> = match item {
         Item::Effect(_) => Vec::new(),
         Item::Changed(Changed::This) => call.receiver.iter().copied().collect(),
+        Item::Changed(Changed::HeldByThis) => call.receiver.iter().map(|root| root.held()).collect(),
         Item::Changed(Changed::Parameter(index)) => {
             call.arguments.get(index as usize).map(|roots| roots.iter().copied().collect()).unwrap_or_default()
         }
