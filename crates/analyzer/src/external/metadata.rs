@@ -1698,16 +1698,16 @@ mod tests {
     fn a_class_read_while_analyzing_sends_a_member_read_as_what_it_reads() {
         const CRATE: (&str, &str) = (
             "src/App/Crate.sharp",
-            "namespace App;\n\nimport Vendor.Pdf;\n\n[Tag(Pdf.DEFAULT_DPI)]\npublic class Crate {}\n",
+            "namespace App;\n\nimport Vendor.Pdf;\n\n[Badge(Pdf.DEFAULT_DPI)]\npublic class Crate {}\n",
         );
-        const TAG: (&str, &str) = (
-            "src/App/Tag.php",
-            "<?php\n\nnamespace App;\n\n#[\\Attribute]\nfinal class Tag\n{\n    public function __construct(public int $dpi) {}\n}\n",
+        const BADGE: (&str, &str) = (
+            "src/App/Badge.php",
+            "<?php\n\nnamespace App;\n\n#[\\Attribute]\nfinal class Badge\n{\n    public function __construct(public int $dpi) {}\n}\n",
         );
         const PDF: (&str, &str) =
             ("src/Vendor/pdf.php", "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n");
 
-        analyzed(&[CRATE, TAG, PDF], |analysis| {
+        analyzed(&[CRATE, BADGE, PDF], |analysis| {
             let session = ExternalAnalysisSession::from_files(analysis.files.iter().cloned());
             let mut writer = protocol::message_writer(CODEBASE_QUERY_REQUEST);
             writer.write_u64(session.generation());

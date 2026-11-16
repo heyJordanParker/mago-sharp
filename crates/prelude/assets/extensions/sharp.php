@@ -574,6 +574,15 @@ function methods(string $type): array {}
 function constructor(string $type): ?array {}
 
 /**
+ * The function that evaluates the initial value the declaration of the property or field `$name` that the class
+ * `$class` declares gives it, or null for one whose initial value PHP takes as its default, or that has none. Each
+ * call evaluates it anew. The standard library's `Property.defaultValue()` and `Field.defaultValue()` run it.
+ *
+ * @return (\Closure(): mixed)|null
+ */
+function initial(string $class, string $name): ?\Closure {}
+
+/**
  * The class values of the type arguments of the type the class value `$type` holds without its `?`, in order, each
  * whole. The standard library's `Class<T>.typeArguments()` returns them.
  *

@@ -29266,27 +29266,27 @@ fn a_getter_with_an_effect_compiles_and_a_law_reading_it_is_refused() {
 #[test]
 fn a_write_of_a_property_carries_its_observers_effects_once_the_object_is_built() {
     let quiet = (
-        "app/Shop/Tag.sharp",
-        "namespace App.Shop;\n\npublic class Tag\n{\n    public string name { get; set; didSet => field.length; } = \"\";\n\n    public Tag()\n    {\n        this.name = \"new\";\n    }\n\n    public static Tag renamed()\n    {\n        const tag = new Tag();\n        tag.name = \"old\";\n        return tag;\n    }\n}\n",
+        "app/Shop/Badge.sharp",
+        "namespace App.Shop;\n\npublic class Badge\n{\n    public string name { get; set; didSet => field.length; } = \"\";\n\n    public Badge()\n    {\n        this.name = \"new\";\n    }\n\n    public static Badge renamed()\n    {\n        const badge = new Badge();\n        badge.name = \"old\";\n        return badge;\n    }\n}\n",
     );
     let timed = (
-        "app/Shop/Tag.sharp",
-        "namespace App.Shop;\n\nimport Acme.Chrono;\n\npublic class Tag\n{\n    public string name { get; set; didSet => Chrono.now(); } = \"\";\n\n    public Tag()\n    {\n        this.name = \"new\";\n    }\n\n    public Tag.titled(string title) : this()\n    {\n        this.name = title;\n    }\n\n    public static Tag renamed()\n    {\n        const tag = new Tag();\n        tag.name = \"old\";\n        return tag;\n    }\n}\n",
+        "app/Shop/Badge.sharp",
+        "namespace App.Shop;\n\nimport Acme.Chrono;\n\npublic class Badge\n{\n    public string name { get; set; didSet => Chrono.now(); } = \"\";\n\n    public Badge()\n    {\n        this.name = \"new\";\n    }\n\n    public Badge.titled(string title) : this()\n    {\n        this.name = title;\n    }\n\n    public static Badge renamed()\n    {\n        const badge = new Badge();\n        badge.name = \"old\";\n        return badge;\n    }\n}\n",
     );
     let quiet_laws = (
         "app/Shop/Labels.sharp",
-        "namespace App.Shop;\n\npublic class Labels\n{\n    law built(int size) => new Tag().name.length > size;\n\n    law renamed(int size) => Tag.renamed().name.length > size;\n}\n",
+        "namespace App.Shop;\n\npublic class Labels\n{\n    law built(int size) => new Badge().name.length > size;\n\n    law renamed(int size) => Badge.renamed().name.length > size;\n}\n",
     );
     let timed_laws = (
         "app/Shop/Labels.sharp",
-        "namespace App.Shop;\n\npublic class Labels\n{\n    law built(int size) => new Tag().name.length > size;\n\n    law titled(int size) => Tag.titled(\"a\").name.length > size;\n\n    law renamed(int size) => Tag.renamed().name.length > size;\n}\n",
+        "namespace App.Shop;\n\npublic class Labels\n{\n    law built(int size) => new Badge().name.length > size;\n\n    law titled(int size) => Badge.titled(\"a\").name.length > size;\n\n    law renamed(int size) => Badge.renamed().name.length > size;\n}\n",
     );
 
     assert_eq!(effect_issues(&[quiet, quiet_laws, CLOCK_STUB, NOW]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[timed, timed_laws, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Labels.sharp:9:30 impure-law: Law `renamed` reaches `Tag.name`, which calls `Chrono.now` with the effect `Clock`. Laws hold only over pure code."
+            "app/Shop/Labels.sharp:9:30 impure-law: Law `renamed` reaches `Badge.name`, which calls `Chrono.now` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
 }
@@ -29353,15 +29353,15 @@ fn a_behavior_s_accessors_may_have_any_effect_and_the_property_s_reads_carry_it(
         "app/Shop/Stamped.sharp",
         "namespace App.Shop;\n\nimport Acme.Chrono;\nimport Sharp.Behavior;\n\npublic class Stamped : Behavior<int>\n{\n    private int writes = 0;\n\n    public int get(int value) => value + Chrono.now();\n\n    public int set(int value)\n    {\n        this.writes = this.writes + 1;\n        return value;\n    }\n}\n",
     );
-    let tag = (
-        "app/Shop/Tag.sharp",
-        "namespace App.Shop;\n\npublic class Tag\n{\n    public int stamp { get; set; } via Stamped = 0;\n}\n",
+    let badge = (
+        "app/Shop/Badge.sharp",
+        "namespace App.Shop;\n\npublic class Badge\n{\n    public int stamp { get; set; } via Stamped = 0;\n}\n",
     );
     let sizes =
-        ("app/Shop/Sizes.sharp", "namespace App.Shop;\n\npublic interface Sizes\n{\n    int size(Tag tag);\n}\n");
-    let tag_sizes = (
-        "app/Shop/TagSizes.sharp",
-        "namespace App.Shop;\n\npublic class TagSizes : Sizes\n{\n    public int size(Tag tag) => tag.stamp;\n}\n",
+        ("app/Shop/Sizes.sharp", "namespace App.Shop;\n\npublic interface Sizes\n{\n    int size(Badge badge);\n}\n");
+    let badge_sizes = (
+        "app/Shop/BadgeSizes.sharp",
+        "namespace App.Shop;\n\npublic class BadgeSizes : Sizes\n{\n    public int size(Badge badge) => badge.stamp;\n}\n",
     );
     let counted = (
         "app/Shop/Counted.sharp",
@@ -29372,12 +29372,12 @@ fn a_behavior_s_accessors_may_have_any_effect_and_the_property_s_reads_carry_it(
         "namespace App.Shop;\n\npublic class Note\n{\n    public int views { get; set; } via Counted = 0;\n}\n",
     );
 
-    assert_eq!(issues(tag, &[BEHAVIOR_LIBRARY, stamped, CLOCK_STUB, NOW]), Vec::<String>::new());
-    assert_eq!(effect_issues(&[tag, BEHAVIOR_LIBRARY, stamped, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(issues(badge, &[BEHAVIOR_LIBRARY, stamped, CLOCK_STUB, NOW]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[badge, BEHAVIOR_LIBRARY, stamped, CLOCK_STUB, NOW]), Vec::<String>::new());
     assert_eq!(
-        effect_issues(&[sizes, tag_sizes, tag, BEHAVIOR_LIBRARY, stamped, CLOCK_STUB, NOW]),
+        effect_issues(&[sizes, badge_sizes, badge, BEHAVIOR_LIBRARY, stamped, CLOCK_STUB, NOW]),
         [
-            "app/Shop/TagSizes.sharp:5:33 incompatible-effects: `TagSizes.size` reaches `Stamped.get`, which calls `Chrono.now` with the effect `Clock`, so the pure `Sizes.size` cannot accept it."
+            "app/Shop/BadgeSizes.sharp:5:37 incompatible-effects: `BadgeSizes.size` reaches `Stamped.get`, which calls `Chrono.now` with the effect `Clock`, so the pure `Sizes.size` cannot accept it."
         ]
     );
     assert_eq!(
