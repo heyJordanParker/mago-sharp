@@ -1233,6 +1233,14 @@ fn null_coalescing_assignment_makes_a_local_non_null_as_in_php() {
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 
+/// A `??` whose right side never returns narrows its left side, and each error inside the left side is reported once.
+#[test]
+fn an_error_on_the_left_of_null_coalescing_with_a_throw_is_reported_once() {
+    let sharp = "namespace Demo;\n\nimport Lib.Calc;\nimport RuntimeException;\n\nclass Report\n{\n    public static Any? find(string id) => null;\n\n    public static Calc run()\n    {\n        return Report.find(5) as Calc ?? throw new RuntimeException(\"m\");\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Calc.php", CALC)]), ["12:28 invalid-argument"]);
+}
+
 #[test]
 fn null_safe_access_gives_a_nullable_value_as_in_php() {
     let sharp = "namespace Demo;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int? maybe(Calc? calc)\n    {\n        return calc?.add(1, 2);\n    }\n\n    public static int total(Calc? calc)\n    {\n        return calc?.add(1, 2);\n    }\n}\n";
@@ -4092,6 +4100,21 @@ fn a_plain_php_function_is_called_through_its_namespace() {
 
     assert_eq!(sharp_issues, ["9:52 invalid-argument", "10:50 invalid-argument"]);
     assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/Report.php", php), &others)));
+}
+
+/// PHP keeps functions and classes apart, so a class whose name differs from a plain PHP function's only by case never
+/// hides the function: a call through the namespace calls it, as `Lib.request()` and `Lib.Request()` beside the class
+/// `Lib\Request`, and so does the function value `Lib.request`. `Lib.Request` without a call names the class, which a
+/// type and a read both write in full.
+#[test]
+fn a_call_through_a_namespace_calls_its_function_beside_a_class_of_the_name_in_another_case() {
+    let functions = "<?php\n\nnamespace Lib;\n\nfunction request(): \\Lib\\Request\n{\n    return new Request();\n}\n";
+    let request = "<?php\n\nnamespace Lib;\n\nclass Request\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib;\n\nclass Report\n{\n    public static Any current() => Lib.request();\n    public static Any upper() => Lib.Request();\n    public static Any value() => Lib.request;\n    public static bool test(Object value) => value is Lib.Request;\n    public static Any kind() => Lib.Request;\n}\n";
+    let others = [("src/Lib/functions.php", functions), ("src/Lib/Request.php", request)];
+    let full = "non-existent-class-like Full names appear only in `import` lines: add `import Lib.Request;` and write `Request`. | In code, `.` is always member access, so a class is written by the short name its import brings in.";
+
+    assert_eq!(refusals(("src/Demo/Report.sharp", sharp), &others), [format!("10:55 {full}"), format!("11:33 {full}")]);
 }
 
 /// Laravel's `helpers.php` files and stancl/tenancy's, each a library's functions in PHP's root namespace beside its

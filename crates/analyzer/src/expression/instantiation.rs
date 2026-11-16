@@ -97,7 +97,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
         // PHP#'s `new (type)(…)` creates an object from a class value, spec section 25, and only a class's `Class`
         // creates one: a `Class<int>` or a `Class<int|string>` holds a type that is no class.
         // As a call with an invalid target, a full name, as `new App.Order()` writes, gets no type.
-        if report_full_name(context, self.class, self.constructor.as_ref().map(|constructor| &constructor.name)) {
+        if report_full_name(context, self.class, self.constructor.as_ref().map(|constructor| &constructor.name), false)
+        {
             self.argument_list.analyze(context, block_context, artifacts)?;
             artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
 

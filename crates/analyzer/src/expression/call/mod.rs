@@ -217,6 +217,7 @@ where
                     ClassLikeMemberSelector::Identifier(method) => Some(method),
                     _ => None,
                 },
+                true,
             ) =>
         {
             call.argument_list.analyze(context, block_context, artifacts)?;

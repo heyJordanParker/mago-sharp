@@ -79,7 +79,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
             // As after an invalid call target, the read is an error, so nothing reports again on what it reads.
             Access::Property(PropertyAccess {
                 object, property: ClassLikeMemberSelector::Identifier(name), ..
-            }) if report_full_name(context, object, Some(name)) => {
+            }) if report_full_name(context, object, Some(name), false) => {
                 artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
 
                 Ok(())
@@ -256,13 +256,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
 /// file imports as a namespace starts the name with the namespace, as `Pdf.Document` after `import Vendor.Pdf;` does.
 /// One file cannot tell `App.Status` from `Status.Active`, so the analyzer makes this refusal for the checker.
 ///
-/// `object` is the chain before `last`, its last member name or the method a call calls. It runs at the chain's
-/// outermost member, which the analysis reaches first, and returns whether it reported, so the caller analyzes nothing
-/// inside the chain.
+/// `object` is the chain before `last`, its last member name or the method a call calls, and `is_call` says whether
+/// `object.last(…)` calls it. It runs at the chain's outermost member, which the analysis reaches first, and returns
+/// whether it reported, so the caller analyzes nothing inside the chain.
 pub(crate) fn report_full_name<A>(
     context: &mut Context<'_, '_, A>,
     object: &Expression<'_>,
     last: Option<&LocalIdentifier<'_>>,
+    is_call: bool,
 ) -> bool
 where
     A: Arena,
@@ -305,7 +306,7 @@ where
     };
 
     let resolved = context.resolved_names.get(root);
-    let reported = !context.codebase.class_like_exists(resolved) && report_full_name_in(context, root, &names);
+    let reported = !context.codebase.class_like_exists(resolved) && report_full_name_in(context, root, &names, is_call);
     // The semantic checks leave a `new` without arguments a chain reads through to this refusal, as
     // `new Order.of.total`, when it is no full name.
     if let Some(new) = new
@@ -331,6 +332,7 @@ fn report_full_name_in<A>(
     context: &mut Context<'_, '_, A>,
     root: &Identifier<'_>,
     names: &[&LocalIdentifier<'_>],
+    is_call: bool,
 ) -> bool
 where
     A: Arena,
@@ -347,17 +349,21 @@ where
             .collect()
     };
 
-    starts.into_iter().any(|start| report_full_name_from(context, root, start, names))
+    starts.into_iter().any(|start| report_full_name_from(context, root, start, names, is_call))
 }
 
 /// Reports the chain that `root` starts, read as one name from `start`, the full name `root` stands for, and the
 /// member `names` after it, innermost last, when it names a class-like or a member of a namespace written in two parts
-/// or more. Returns whether it reported.
+/// or more. PHP keeps functions apart from classes, so a name through a namespace of one part is its function when
+/// `is_call` says the code calls it, as `Lib.request()` beside the class `Lib\Request`, or when no class has the name
+/// in the case the code writes it, as the function value `Lib.request`. `Lib.Request` names the class. Returns
+/// whether it reported.
 fn report_full_name_from<A>(
     context: &mut Context<'_, '_, A>,
     root: &Identifier<'_>,
     start: Vec<u8>,
     names: &[&LocalIdentifier<'_>],
+    is_call: bool,
 ) -> bool
 where
     A: Arena,
@@ -367,10 +373,19 @@ where
     for (written_parts, (index, name)) in (1..).zip(names.iter().enumerate().rev()) {
         let member = [full_name.as_slice(), b"\\", name.value].concat();
         let reached = namespace_member(context.codebase, word(&full_name), name.value);
-        if written_parts > 1
+        let reaches_function = context.codebase.function_exists(reached.as_bytes());
+        if written_parts == 1
             && index == 0
-            && (context.codebase.function_exists(reached.as_bytes())
-                || context.codebase.constant_exists(reached.as_bytes()))
+            && reaches_function
+            && (is_call
+                || context
+                    .codebase
+                    .get_class_like(&member)
+                    .is_none_or(|class| short_name(class.original_name).as_bytes() != name.value))
+        {
+            return false;
+        }
+        if written_parts > 1 && index == 0 && (reaches_function || context.codebase.constant_exists(reached.as_bytes()))
         {
             // A full name counts as an import, spec section 32.
             if !check_listed_import(context, &member, root.span().join(name.span)) {
