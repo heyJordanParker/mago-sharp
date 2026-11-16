@@ -434,8 +434,8 @@ impl Converter<'_, '_> {
                         self.expression(other, None);
                         let text = self.render(other);
                         let text = if super::is_primary(other) { text } else { format!("({text})") };
-                        let test = if equal { "isEmpty" } else { "isNotEmpty" };
-                        return self.edits.replace(expression.span(), format!("{text}.{test}()"));
+                        let member = if equal { "isEmpty" } else { "isNotEmpty" };
+                        return self.edits.replace(expression.span(), format!("{text}.{member}()"));
                     }
                 }
                 // `Order::class` is the string of the class's name, which PHP compiles in, so a string compares with

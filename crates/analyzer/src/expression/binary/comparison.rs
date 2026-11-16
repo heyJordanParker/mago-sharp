@@ -1363,8 +1363,11 @@ fn report_compile_time_selection<A>(
     let is_pattern = operator == binary.lhs.span() || operator == binary.rhs.span();
     let selection =
         if is_pattern { "A pattern".to_owned() } else { format!("`{}`", BytesDisplay(binary.operator.as_bytes())) };
-    let empty_test = is_empty_text(fixed_type)
-        .then_some(if binary.operator.is_negated_equality() { "isNotEmpty" } else { "isEmpty" });
+    let empty_test = is_empty_text(fixed_type).then_some(if binary.operator.is_negated_equality() {
+        "isNotEmpty"
+    } else {
+        "isEmpty"
+    });
     let span = if is_pattern { operator } else { binary.span() };
 
     report_selection(context, &selection, compared, fixed, empty_test, span);
