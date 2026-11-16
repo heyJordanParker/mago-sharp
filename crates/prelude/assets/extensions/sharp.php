@@ -574,13 +574,16 @@ function methods(string $type): array {}
 function constructor(string $type): ?array {}
 
 /**
- * The function that evaluates the initial value the declaration of the property or field `$name` that the class
- * `$class` declares gives it, or null for one whose initial value PHP takes as its default, or that has none. Each
- * call evaluates it anew. The standard library's `Property.defaultValue()` and `Field.defaultValue()` run it.
+ * The method `$name` of the class `$class` that the compile made, whose name holds `#`, as a function, or null for a
+ * class without it. PHP's reflection finds no such method. The standard library's `Property.defaultValue()` and
+ * `Field.defaultValue()` run a member's `name#initial`, and `Method.attributes<T>()` reads a static accessor's
+ * `name#get` and `name#set`.
  *
  * @return (\Closure(): mixed)|null
+ *
+ * @throws \ValueError
  */
-function initial(string $class, string $name): ?\Closure {}
+function hiddenMethod(string $class, string $name): ?\Closure {}
 
 /**
  * The class values of the type arguments of the type the class value `$type` holds without its `?`, in order, each
