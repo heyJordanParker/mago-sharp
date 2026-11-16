@@ -10570,6 +10570,42 @@ fn an_application_selects_by_a_backed_enum_never_by_a_string_fixed_at_compile_ti
     );
 }
 
+/// Spec section 24: in an application, `equals` with a string fixed at compile time on either side selects as `==`
+/// does, and so does a `List`'s or a `Set`'s search for one, `contains`, `indexOf` or `remove`, or for a string in a
+/// literal of them. Each is a compile error that names both sides, and `equals("")` names `isEmpty()`. A `Set`'s `add`
+/// searches nothing, so it compiles, as a search for a string from data, `equals` of two strings from data and a text
+/// operation do, and a library is exempt.
+#[test]
+fn an_application_selects_by_no_string_fixed_at_compile_time_through_equals_or_a_search() {
+    let checks = "namespace Shop;\n\npublic class Checks\n{\n    const PAID = \"paid\";\n\n    public int run(string status, string name, List<string> statuses, Set<string> tags, string tag, string line)\n    {\n        int hits = 0;\n        if (status.equals(\"paid\")) { hits += 1; }\n        if (\"paid\".equals(status, true)) { hits += 1; }\n        if (name.equals(\"\")) { hits += 1; }\n        if (statuses.contains(Checks.PAID)) { hits += 1; }\n        if ([\"paid\", \"due\"].contains(status)) { hits += 1; }\n        int at = statuses.indexOf(\"paid\") ?? 0;\n        if (tags.contains(\"new\")) { hits += 1; }\n        List<string> kept = [tag];\n        kept.remove(\"old\");\n        Set<string> seen = [tag];\n        seen.add(\"new\");\n        if (tags.contains(tag) || statuses.contains(tag) || [tag, name].contains(status)) { hits += 1; }\n        if (status.equals(name) || line.contains(\"#\") || line.startsWith(\"#\")) { hits += 1; }\n        return hits + at;\n    }\n}\n";
+    let library = "namespace Kit;\n\npublic class Checks\n{\n    public bool run(string status, List<string> statuses) => status.equals(\"paid\") || statuses.contains(\"paid\") || [\"paid\"].contains(status);\n}\n";
+
+    assert_eq!(
+        package_errors(&[
+            ("src/Shop/Checks.sharp", checks),
+            ("library/Kit/Checks.sharp", library),
+            (
+                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharp",
+                include_str!("../../../../composer/library/Sharp/Text/StringMembers.sharp"),
+            ),
+            (
+                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/NormalizationForm.sharp",
+                include_str!("../../../../composer/library/Sharp/Text/NormalizationForm.sharp"),
+            ),
+        ]),
+        [
+            "`equals` compares `status` with `\"paid\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "`equals` compares `status` with `\"paid\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "`equals` compares `name` with `\"\"`, a string fixed at compile time.",
+            "`contains` compares `statuses` with `Checks.PAID`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "`contains` compares `status` with each of `[\"paid\", \"due\"]`, strings fixed at compile time, so it selects one of a closed set of values.",
+            "`indexOf` compares `statuses` with `\"paid\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "`contains` compares `tags` with `\"new\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "`remove` compares `kept` with `\"old\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+        ]
+    );
+}
+
 /// Spec section 11.2: `keyof T` holds the names of `T`'s members, and `nameof(Order.total)` is a `keyof Order`. A
 /// `keyof` parameter takes a `nameof` and refuses `"total"`. A `string` parameter takes a `nameof`, and so does a plain
 /// PHP `literal-string` one, since a member's name is fixed at compile time. In an application a `nameof` still
@@ -10629,7 +10665,8 @@ fn a_keyof_takes_the_names_of_a_parent_s_members_and_never_a_child_s() {
 
 /// Spec section 23: an `extern` line may state a plain PHP method's or function's signature, which a PHP# call is
 /// checked against instead of the library's docblock. A wrong argument is refused, a docblock's wrong `array` is
-/// corrected to the object the body reads, and a generic class's method takes its member names through `keyof`.
+/// corrected to the object the body reads, and a generic class's method takes its member names through `keyof`, so a
+/// raw string is refused even when it names a member.
 #[test]
 fn a_typed_extern_checks_each_call_against_the_signature_it_states() {
     let routing = "<?php\n\nnamespace Lib\\Routing;\n\nfunction route(string $name, array $parameters = []): string\n{\n    return '/' . $name;\n}\n";
@@ -10639,7 +10676,7 @@ fn a_typed_extern_checks_each_call_against_the_signature_it_states() {
     let route_name = "namespace Shop;\n\npublic enum RouteName : string\n{\n    case Checkout = \"checkout\";\n}\n";
     let element = "namespace Shop;\n\npublic class Element\n{\n    public Element(public int id { get; }) { }\n}\n";
     let order = "namespace Shop;\n\npublic class Order\n{\n    public Order(public string status { get; }) { }\n}\n";
-    let pages = "namespace Shop;\n\nimport Lib.Database.Builder;\nimport Lib.Elements;\nimport Lib.Routing;\n\npublic class Pages\n{\n    public string run(Builder<Order> query, Element element)\n    {\n        string url = Routing.route(RouteName.Checkout);\n        string bad = Routing.route(\"checkout\");\n        Builder<Order> paid = query.where(nameof(Order.status), \"paid\").where(\"stauts\", \"paid\");\n        return url + bad + Elements.render(element);\n    }\n}\n";
+    let pages = "namespace Shop;\n\nimport Lib.Database.Builder;\nimport Lib.Elements;\nimport Lib.Routing;\n\npublic class Pages\n{\n    public string run(Builder<Order> query, Element element)\n    {\n        string url = Routing.route(RouteName.Checkout);\n        string bad = Routing.route(\"checkout\");\n        Builder<Order> paid = query.where(nameof(Order.status), \"paid\").where(\"status\", \"paid\");\n        return url + bad + Elements.render(element);\n    }\n}\n";
 
     assert_eq!(
         package_errors(&[

@@ -1339,11 +1339,9 @@ where
     Some(analyze_operator_call(context, artifacts, method, &operands, binary.span()))
 }
 
-/// Reports `refusal` on `binary`, naming both types and the comparison to write instead.
-/// Spec section 24: in an application, `==`, `!=` or a value pattern that compares a string with a string fixed at
-/// compile time, a literal, a constant, a backed case's `.value` or a join of them, selects one of a closed set of
-/// values, and a closed set of values is a backed enum. The error names the compared value and the fixed string. `""`
-/// is the empty text, which `isEmpty()` tests. Two strings from data compare as text, and a library is exempt.
+/// Spec section 24: `==`, `!=` or a value pattern that compares a string with a string fixed at compile time, a
+/// literal, a constant, a backed case's `.value` or a join of them, selects one of a closed set of values, as
+/// [`report_selection`] reports it.
 fn report_compile_time_selection<A>(
     context: &mut Context<'_, '_, A>,
     binary: &Binary<'_>,
@@ -1353,10 +1351,7 @@ fn report_compile_time_selection<A>(
     A: Arena,
 {
     let operator = binary.operator.span();
-    if !context.dialect.is_sharp()
-        || !context.source_file.is_project
-        || operator.file_id.is_zero()
-        || !matches!(binary.operator, BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_))
+    if operator.file_id.is_zero() || !matches!(binary.operator, BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_))
     {
         return;
     }
@@ -1365,25 +1360,59 @@ fn report_compile_time_selection<A>(
         (true, false) if rhs_type.has_string() => (binary.rhs, binary.lhs, lhs_type),
         _ => return,
     };
-    let (compared, fixed_text) = (quoted_source(context, compared.span()), quoted_source(context, fixed.span()));
     let is_pattern = operator == binary.lhs.span() || operator == binary.rhs.span();
     let selection =
         if is_pattern { "A pattern".to_owned() } else { format!("`{}`", BytesDisplay(binary.operator.as_bytes())) };
-    let issue = if fixed_type.get_single_literal_string_value() == Some(b"".as_slice()) {
-        let test = if binary.operator.is_negated_equality() { "isNotEmpty" } else { "isEmpty" };
-
-        Issue::error(format!("{selection} compares `{compared}` with `\"\"`, a string fixed at compile time."))
-            .with_help(format!("Call `{compared}.{test}()`."))
-    } else {
-        Issue::error(format!(
-            "{selection} compares `{compared}` with `{fixed_text}`, a string fixed at compile time, so it selects one of a closed set of values."
-        ))
-        .with_note("A string fixed at compile time is a literal, a constant, a backed case's `.value` or a join of them.")
-        .with_help(format!(
-            "Declare the values `{compared}` takes as a backed enum, read them into it where the data enters, and compare `{compared}` with a case."
-        ))
-    };
+    let empty_test = is_empty_text(fixed_type)
+        .then_some(if binary.operator.is_negated_equality() { "isNotEmpty" } else { "isEmpty" });
     let span = if is_pattern { operator } else { binary.span() };
+
+    report_selection(context, &selection, compared, fixed, empty_test, span);
+}
+
+/// Whether `value` is the empty text alone, `""`.
+pub(crate) fn is_empty_text(value: &TUnion) -> bool {
+    value.get_single_literal_string_value() == Some(b"".as_slice())
+}
+
+/// Spec section 24: in an application, `selection`, as `==` or `contains`, compares `compared` with `fixed`, a string
+/// fixed at compile time or a collection literal of them, so it selects one of a closed set of values, and a closed set
+/// of values is a backed enum. The error, at `span`, names both sides. Where `fixed` is `""` and `compared` is text, it
+/// tests for the empty text, and the error names `empty_test`, as `isEmpty`. Two strings from data compare as text,
+/// and a library is exempt.
+pub(crate) fn report_selection<A>(
+    context: &mut Context<'_, '_, A>,
+    selection: &str,
+    compared: &Expression<'_>,
+    fixed: &Expression<'_>,
+    empty_test: Option<&str>,
+    span: Span,
+) where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || !context.source_file.is_project {
+        return;
+    }
+    let (compared, fixed_text) = (quoted_source(context, compared.span()), quoted_source(context, fixed.span()));
+    let issue = match empty_test {
+        Some(test) => {
+            Issue::error(format!("{selection} compares `{compared}` with `\"\"`, a string fixed at compile time."))
+                .with_help(format!("Call `{compared}.{test}()`."))
+        }
+        None => {
+            let fixed = if matches!(fixed.unparenthesized(), Expression::Array(_)) {
+                format!("each of `{fixed_text}`, strings fixed at compile time")
+            } else {
+                format!("`{fixed_text}`, a string fixed at compile time")
+            };
+
+            Issue::error(format!("{selection} compares `{compared}` with {fixed}, so it selects one of a closed set of values."))
+                .with_note("A string fixed at compile time is a literal, a constant, a backed case's `.value` or a join of them.")
+                .with_help(format!(
+                    "Declare the values `{compared}` takes as a backed enum, read them into it where the data enters, and compare `{compared}` with a case."
+                ))
+        }
+    };
 
     context.collector.report_with_code(IssueCode::InvalidOperand, issue.with_annotation(Annotation::primary(span)));
 }

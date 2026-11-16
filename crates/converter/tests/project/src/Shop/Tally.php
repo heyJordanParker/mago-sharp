@@ -86,9 +86,9 @@ final class Tally
 
     // A read of a key the row may lack converts behind `??`, which PHP reads without a warning.
     /** @param array<string, int> $row */
-    public function priced(array $row): int
+    public function priced(array $row, string $price, string $count): int
     {
-        return ($row['price'] ?? 0) * ($row['count'] ?? 1);
+        return ($row[$price] ?? 0) * ($row[$count] ?? 1);
     }
 
     // A local one pass of a loop assigns keeps its value into the next pass, as PHP's variable lives for the method.

@@ -60,9 +60,9 @@ final class Label
 
     // A read of a `Map` whose values are never null, at a key it may lack.
     /** @param array<string, int> $sizes */
-    public function sized(array $sizes): int
+    public function sized(array $sizes, string $size): int
     {
-        return $sizes['small'];
+        return $sizes[$size];
     }
 
     // A condition of a `bool` only PHPDoc types, which reads PHP's truthiness of what it holds.

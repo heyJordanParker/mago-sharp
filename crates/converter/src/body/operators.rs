@@ -427,6 +427,17 @@ impl Converter<'_, '_> {
             }
             BinaryOperator::Identical(span) | BinaryOperator::NotIdentical(span) => {
                 let equal = matches!(binary.operator, BinaryOperator::Identical(_));
+                for (empty, other) in [(lhs, rhs), (rhs, lhs)] {
+                    if matches!(empty.unparenthesized(), Expression::Literal(Literal::String(string)) if string.value == Some(b"".as_slice()))
+                        && self.is(other, &[Kind::String])
+                    {
+                        self.expression(other, None);
+                        let text = self.render(other);
+                        let text = if super::is_primary(other) { text } else { format!("({text})") };
+                        let test = if equal { "isEmpty" } else { "isNotEmpty" };
+                        return self.edits.replace(expression.span(), format!("{text}.{test}()"));
+                    }
+                }
                 // `Order::class` is the string of the class's name, which PHP compiles in, so a string compares with
                 // that text, `"Shop\\Order"`, as PHP's `===` compares two strings (spec section 25).
                 for (named, other) in [(lhs, rhs), (rhs, lhs)] {

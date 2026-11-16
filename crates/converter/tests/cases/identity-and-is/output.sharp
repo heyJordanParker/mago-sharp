@@ -63,4 +63,14 @@ public final class Check
     {
         return name == "App\\Spec" || "App\\Check" != name;
     }
+
+    public bool blank(string text)
+    {
+        return text.isEmpty();
+    }
+
+    public bool filled()
+    {
+        return (Position.current().directory).isNotEmpty();
+    }
 }

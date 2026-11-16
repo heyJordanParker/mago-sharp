@@ -16,7 +16,7 @@ public final class Inviter
 
     public Any? some(string name)
     {
-        if (name == '') {
+        if (name.isEmpty()) {
             return 1;
         }
         this.notify(name);
@@ -59,7 +59,7 @@ public final class Inviter
     // A body that returns or throws on every path ends as it is.
     public Any? either(string name)
     {
-        if (name == '') {
+        if (name.isEmpty()) {
             return 1;
         } else {
             return 2;

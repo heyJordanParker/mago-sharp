@@ -6,6 +6,7 @@ set -uo pipefail
 # that:
 # - `--dry-run` changes no file
 # - each file mago convert refuses stays plain PHP, and every other file converts
+# - the report names the selection by a string fixed at compile time that keeps src/Shop/Reply.php plain PHP
 # - src/Externs.sharp holds the one `extern namespace` line the converted files need, for acme/format's `shout()`
 # - the index holds each conversion as a rename alone, `R100`, and `git log --follow` reaches the plain PHP file
 # - `mago compile` accepts every file, the plain PHP subclasses of converted classes included
@@ -21,7 +22,7 @@ mago=("$build/mago/debug/mago" --no-version-check --colors never)
 project="$1"
 converted=(src/Box.php src/Spec.php src/Shop/Coupon.php src/Shop/Crate.php src/Shop/Label.php src/Shop/Note.php src/Shop/Order.php
     src/Shop/Shelf.php src/Shop/Source.php src/Shop/Stock.php src/Shop/Tagged.php src/Shop/Tally.php)
-plain=(src/Factory.php src/Shop/Counter.php src/Shop/Feed.php src/Shop/Ledger.php src/Shop/Pair.php)
+plain=(src/Factory.php src/Shop/Counter.php src/Shop/Feed.php src/Shop/Ledger.php src/Shop/Pair.php src/Shop/Reply.php)
 expected_warnings='redundant-docblock-type'
 
 # Prints the command on stderr, so a file its output is saved in holds the output alone.
@@ -62,6 +63,8 @@ for file in "${plain[@]}"; do
     grep -q "$file stays plain PHP:" ../convert || fail "$file converted"
     [ -f "$file" ] || fail "$file is gone"
 done
+grep -qF "src/Shop/Reply.php:11, in Reply::agreed(), at line 9 of its PHP#: error invalid-operand: \`==\` compares \`answer\` with \`'yes'\`, a string fixed at compile time" ../convert ||
+    fail "the report doesn't name the selection that keeps src/Shop/Reply.php plain PHP"
 for file in "${converted[@]}"; do
     [ -f "${file%.php}.sharp" ] || fail "$file did not convert"
     [ ! -f "$file" ] || fail "$file is still there"

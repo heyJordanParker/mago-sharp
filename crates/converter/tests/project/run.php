@@ -13,6 +13,7 @@ use Proof\Shop\Ledger;
 use Proof\Shop\Note;
 use Proof\Shop\Order;
 use Proof\Shop\Pair;
+use Proof\Shop\Reply;
 use Proof\Shop\Shelf;
 use Proof\Shop\Stock;
 use Proof\Shop\Tagged;
@@ -99,13 +100,13 @@ echo $tagged->label(), ' ', $tagged->tag, ' ', $tagged->name, "\n";
 
 $note = new Note();
 echo $note->describe('hi'), ' / ', $note->describe(5), "\n";
-echo $note->headed('memo'), ' ', $note->headed('0'), ' ', $note->headed(''), ' ', $note->headed(null), "\n";
+echo $note->headed(3), ' ', $note->headed(0), ' ', $note->headed(null), "\n";
 echo $note->signed('Ann'), ' ', $note->signed(null), "\n";
-echo $note->tagged('yes', 3, '!'), ' ', $note->tagged(1, 0, null), ' ', $note->tagged(true, -2, ''), "\n";
+echo $note->tagged('yes', 'yes', 3, '!'), ' ', $note->tagged(1, 'yes', 0, null), ' ', $note->tagged(true, 'yes', -2, ''), "\n";
 echo $note->labelled(new \Acme\Format\Sku('A1')), "\n";
-echo json_encode([$note->namesSpec('Proof\Spec'), $note->namesSpec('proof\spec'), $note->namesSpec(null)]), "\n";
-echo json_encode([$note->matched(Spec::class, Spec::class, 'id'), $note->matched(Spec::class, null, 7), $note->matched(Spec::class, Special::class, '7')]), "\n";
-echo json_encode([$note->flagged(0, '0'), $note->flagged(2, ''), $note->flagged(-1, 'x'), $note->flagged(0, null)]), "\n";
+echo json_encode([$note->matched(Spec::class, Spec::class, 'id', 'id'), $note->matched(Spec::class, null, 7, 'id'), $note->matched(Spec::class, Special::class, '7', 'id')]), "\n";
+echo json_encode([$note->flagged(0, 0.0), $note->flagged(2, 0.5), $note->flagged(-1, -0.0), $note->flagged(0, null)]), "\n";
+echo json_encode([(new Reply())->agreed('yes'), (new Reply())->agreed('no')]), "\n";
 
 echo (new Factory())->make()->get()->label(), "\n";
 $source = new ArraySource();
@@ -115,7 +116,7 @@ echo (new Pair())->both(), "\n";
 $tally = new Tally();
 $plusThree = $tally->adder(3);
 echo $tally->sum(2, 5, 10), ' ', $plusThree(4), ' ', $tally->halved(10), "\n";
-echo $tally->counted([3]), ' ', $tally->made(Pair::class), ' ', $tally->priced(['price' => 4, 'count' => 3]), "\n";
+echo $tally->counted([3]), ' ', $tally->made(Pair::class), ' ', $tally->priced(['price' => 4, 'count' => 3], 'price', 'count'), "\n";
 echo $tally->carried([3, -1, 4, -2]), ' ', $tally->guarded(3), ' ', $tally->guarded(0), "\n";
 echo $tally->bounded(2), ' ', $tally->bounded(0), ' ', $tally->bounded(-1), "\n";
 echo $tally->graded(20), ' ', $tally->graded(6), ' ', $tally->graded(2), ' ', $tally->bounds(), ' ', $tally->stepped(3), "\n";
@@ -129,7 +130,7 @@ $label = new Label();
 echo $label->render('shelf', 3), "\n", $label->folder(), "\n", $label->traced(), ' ', $label->kind(), "\n";
 echo $label->status(201), ' ', $label->status(404), ' ', $label->status(500), "\n";
 echo $label->size(500, false), ' ', $label->size(5, true), ' ', $label->size(20, false), ' ', $label->size(1, false), "\n";
-echo $label->titled('hey'), ' ', $label->counted(4), ' ', $label->sized(['small' => 2]);
+echo $label->titled('hey'), ' ', $label->counted(4), ' ', $label->sized(['small' => 2], 'small');
 foreach ([fn () => $label->titled(5), fn () => $label->counted('4')] as $refused) {
     try {
         $refused();
@@ -150,7 +151,7 @@ echo var_export($stock->quantity(new \Acme\Format\Record(['quantity' => '5'])), 
 echo var_export($stock->coded(new \Acme\Format\Record(['code' => 5])), true), "\n";
 echo $stock->counted(new \Acme\Format\Lines(['a', 'b', 'c'])), ' ', implode(',', $stock->marked(new \Acme\Format\Lines(['a', 'b']))), "\n";
 echo (new Ledger())->priceOf(['42' => 1, 'x' => 2], '42'), "\n";
-echo var_export($stock->given(['email' => 'a', 5 => 'x', '42' => 'y']), true), "\n";
+echo var_export($stock->given(['email' => 'a', 5 => 'x', '42' => 'y'], 7, 42), true), "\n";
 echo var_export($stock->shelves(), true), "\n";
 echo $stock->nth(['a', 'b'], 1), ' ', $stock->nth(['a'], 5), ' ', $stock->nth(['a'], -1), "\n";
 $bag = new \Acme\Format\Bag();

@@ -67,4 +67,14 @@ final class Check
     {
         return $name === Spec::class || self::class !== $name;
     }
+
+    public function blank(string $text): bool
+    {
+        return $text === '';
+    }
+
+    public function filled(): bool
+    {
+        return '' !== __DIR__;
+    }
 }

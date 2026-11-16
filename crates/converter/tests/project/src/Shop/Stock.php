@@ -68,15 +68,15 @@ final class Stock
      * @param array<array-key, string> $input
      * @return list<array-key>
      */
-    public function given(array $input): array
+    public function given(array $input, int $added, int $asked): array
     {
-        $input['source'] = 'form';
+        $input[$added] = 'form';
         $keys = [];
         foreach ($input as $key => $value) {
             $keys[] = $key;
         }
-        if (isset($input['email'])) {
-            $keys[] = 'email given';
+        if (isset($input[$asked])) {
+            $keys[] = 'asked given';
         }
 
         return $keys;
