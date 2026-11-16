@@ -11,7 +11,6 @@ use function in_array;
 
 /**
  * @api
- * @mago-expect lint:cyclomatic-complexity
  */
 final class AttributeMetadata
 {
@@ -66,8 +65,6 @@ final class AttributeMetadata
 
     /**
      * Instantiates the attribute as PHP's `ReflectionAttribute::newInstance()` does.
-     *
-     * @mago-expect analysis:unknown-class-instantiation An attribute names its class only in the scanned source.
      */
     public function newInstance(): object
     {

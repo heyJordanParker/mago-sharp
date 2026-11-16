@@ -95,7 +95,7 @@ class C4 implements I4
 {
     use T1;
 
-    // @mago-expect analysis:incompatible-visibility
+    // @mago-expect analysis:incompatible-visibility(2)
     protected function save()
     {
     }

@@ -11,7 +11,6 @@ use Mago\Sdk\SourceLocation;
  * A stable semantic snapshot of a class, interface, trait, or enum.
  *
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class ClassLikeMetadata
 {

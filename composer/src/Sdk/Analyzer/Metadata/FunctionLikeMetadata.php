@@ -13,7 +13,6 @@ use Mago\Sdk\SourceLocation;
  * A complete stable snapshot of a function, method, or closure signature.
  *
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class FunctionLikeMetadata
 {

@@ -65,10 +65,6 @@ use function array_slice;
 
 /**
  * @internal
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:kan-defect
- * @mago-expect lint:no-boolean-flag-parameter
- * @mago-expect lint:too-many-methods
  */
 final class TypeCodec
 {
@@ -391,7 +387,6 @@ final class TypeCodec
         }
     }
 
-    /** @mago-expect lint:halstead */
     private static function writeCallable(PayloadWriter $writer, CallableType $callable): void
     {
         if ($callable->signature === null) {
@@ -522,7 +517,6 @@ final class TypeCodec
         throw new ProtocolException('Cannot encode an unknown object type.');
     }
 
-    /** @mago-expect lint:halstead */
     private static function writeArray(PayloadWriter $writer, ListType|KeyedArrayType $array): void
     {
         if ($array instanceof ListType) {

@@ -29,9 +29,6 @@ use function unpack;
  * Data requested by a registered hook may be embedded in the lifecycle batch. Other expensive data is fetched lazily.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:excessive-parameter-list
- * @mago-expect lint:too-many-methods
  */
 final class FileAnalysis
 {
@@ -150,8 +147,6 @@ final class FileAnalysis
      *
      * When it was not embedded in the lifecycle batch, the snapshot is requested on the first call. It is never
      * reconstructed from the filesystem.
-     *
-     * @mago-expect lint:halstead
      */
     public function getSourceFile(): SourceFile
     {

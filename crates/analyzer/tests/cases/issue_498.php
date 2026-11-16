@@ -1,7 +1,7 @@
 <?php
 
 /**
- * @mago-expect analysis:mixed-assignment
+ * @mago-expect analysis:mixed-assignment(2)
  */
 function foo(array $array): void
 {

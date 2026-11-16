@@ -101,10 +101,10 @@ class Z
 }
 
 /**
- * @mago-expect analysis:redundant-comparison
- * @mago-expect analysis:redundant-logical-operation
- * @mago-expect analysis:impossible-condition
- * @mago-expect analysis:impossible-type-comparison
+ * @mago-expect analysis:redundant-comparison(26)
+ * @mago-expect analysis:redundant-logical-operation(24)
+ * @mago-expect analysis:impossible-condition(2)
+ * @mago-expect analysis:impossible-type-comparison(324)
  */
 function test(): void
 {

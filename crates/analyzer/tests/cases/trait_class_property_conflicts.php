@@ -97,7 +97,7 @@ trait T8
 
 class C7
 {
-    // @mago-expect analysis:incompatible-property-default
+    // @mago-expect analysis:incompatible-property-default(2)
     public $prop = 3;
     // @mago-expect analysis:incompatible-property-default
     use T7, T8; // Also conflicts between T7 and T8

@@ -10,7 +10,6 @@ use Mago\Sdk\Exception\InvalidArgumentException;
  * An issue together with its analyzer code and severity.
  *
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class ReportedIssue
 {

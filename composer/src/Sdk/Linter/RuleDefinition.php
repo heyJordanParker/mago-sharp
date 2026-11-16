@@ -42,7 +42,6 @@ final class RuleDefinition
      * @param string $name Human-readable rule name.
      * @param string $description Concise rule description.
      * @param list<NodeKind> $targets
-     * @mago-expect lint:excessive-parameter-list
      */
     public function __construct(
         string $code,

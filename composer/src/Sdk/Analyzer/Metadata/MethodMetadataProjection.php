@@ -18,7 +18,6 @@ use Mago\Sdk\SourceLocation;
  * an omitted group from a selected nullable value.
  *
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class MethodMetadataProjection
 {

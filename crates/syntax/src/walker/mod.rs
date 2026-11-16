@@ -136,6 +136,7 @@ use crate::cst::cst::InterpolatedString;
 use crate::cst::cst::IntersectionHint;
 use crate::cst::cst::Is;
 use crate::cst::cst::IssetConstruct;
+use crate::cst::cst::KeyOfHint;
 use crate::cst::cst::KeyValueArrayElement;
 use crate::cst::cst::Keyword;
 use crate::cst::cst::Label;
@@ -681,7 +682,21 @@ generate_ast_walker! {
             walker.walk_keyword(namespace, context);
         }
 
+        if let Some(return_type_hint) = &r#extern.return_type_hint {
+            walker.walk_hint(return_type_hint, context);
+        }
+
         walker.walk_identifier(&r#extern.target, context);
+
+        if let Some(type_parameters) = &r#extern.type_parameters {
+            walker.walk_type_parameter_list(type_parameters, context);
+        }
+        if let Some(member) = &r#extern.member {
+            walker.walk_local_identifier(member, context);
+        }
+        if let Some(parameter_list) = &r#extern.parameter_list {
+            walker.walk_function_like_parameter_list(parameter_list, context);
+        }
 
         if let Some(namespaced) = &r#extern.namespaced {
             walker.walk_keyword(&namespaced.r#for, context);
@@ -3203,6 +3218,9 @@ generate_ast_walker! {
             Hint::Readonly(readonly_hint) => {
                 walker.walk_readonly_hint(readonly_hint, context);
             }
+            Hint::KeyOf(key_of_hint) => {
+                walker.walk_key_of_hint(key_of_hint, context);
+            }
         });
     }
 
@@ -3277,6 +3295,11 @@ generate_ast_walker! {
     'arena ReadonlyHint as readonly_hint => {
         walker.walk_keyword(&readonly_hint.readonly, context);
         walker.walk_hint(readonly_hint.hint, context);
+    }
+
+    'arena KeyOfHint as key_of_hint => {
+        walker.walk_keyword(&key_of_hint.keyof, context);
+        walker.walk_hint(key_of_hint.hint, context);
     }
 
     'arena UnionHint as union_hint => {

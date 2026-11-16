@@ -2,6 +2,7 @@
 //! a function parameter goes, and the rules over solved effects.
 
 use std::cell::OnceCell;
+use std::sync::Arc;
 
 use foldhash::HashMap;
 use mago_allocator::Arena;
@@ -9,11 +10,20 @@ use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::r#extern::ExternMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::generic::TGenericParameter;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::expander::TypeExpansionOptions;
+use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_names::binding::MethodParts;
@@ -82,6 +92,7 @@ use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
 use crate::utils::names::sharp_effect_name;
 use crate::utils::names::sharp_missing_imports;
+use crate::utils::quoted_source;
 
 /// Spec section 6.1: a `get` body may have any effect, and a read carries it, but it never writes `this`: neither a
 /// write of a field of `this` nor a call of a method that writes one. Unlike a method marked `readonly` (section 13),
@@ -562,6 +573,15 @@ fn written_function(function: Word, code_class_name: &dyn Fn(Word) -> String) ->
     }
 }
 
+/// What an `extern` line names as its code writes it, as `Mailer.send`, and `Builder.where` for a line that writes the
+/// class's type parameters before its member, as `Builder<TModel>.where`.
+pub(crate) fn written_target(r#extern: &Extern<'_>) -> String {
+    match &r#extern.member {
+        Some(member) => format!("{}.{}", BytesDisplay(r#extern.target.value()), BytesDisplay(member.value)),
+        None => String::from_utf8_lossy(r#extern.target.value()).into_owned(),
+    }
+}
+
 /// Spec section 29: an `extern` declaration declares plain PHP that exists, once in the whole project.
 pub(crate) fn check_extern<A>(context: &mut Context<'_, '_, A>, r#extern: &Extern<'_>)
 where
@@ -597,7 +617,7 @@ where
         return;
     };
 
-    let written = String::from_utf8_lossy(r#extern.target.value());
+    let written = written_target(r#extern);
     if let Some(first) = declarations.first()
         && first.span != span
     {
@@ -644,6 +664,8 @@ where
         // `extern Pdf.render` after `import Vendor.Pdf;` declares the function `render` of that namespace, spec
         // section 23, as `extern Foundation.now` declares Laravel's `now()`.
         if namespace_function(context.codebase, class, member.as_bytes()).is_some() {
+            check_extern_signature(context, r#extern, own, &written);
+
             return;
         }
 
@@ -686,6 +708,201 @@ where
             IssueCode::NonExistentMethod,
             Issue::error(format!("Method `{written}` does not exist.")).with_annotation(Annotation::primary(target)),
         );
+    } else {
+        check_extern_signature(context, r#extern, own, &written);
+    }
+}
+
+/// Spec section 23: the signature an `extern` line states fits the library's native types, never its docblock. Each
+/// parameter's type crosses to the declared one, a backed case as its value, each declared parameter after the stated
+/// ones has a default, and the return type takes the declared one, a `List` or a `Map` the array the library declares.
+/// A generic class's type parameters are written as the class declares them. An untyped declaration takes any type.
+fn check_extern_signature<A>(
+    context: &mut Context<'_, '_, A>,
+    r#extern: &Extern<'_>,
+    own: &ExternMetadata,
+    written: &str,
+) where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let Some(parameter_list) = &r#extern.parameter_list else {
+        return;
+    };
+    let (class, member) = own.target;
+    let Some((declared, stated)) = codebase
+        .extern_declaration(own)
+        .and_then(|key| Some((codebase.function_likes.get(&key)?, codebase.extern_signatures.get(&key)?)))
+    else {
+        // `check_extern` found the method, so the class only inherits it, and its declaring class's line states it, as
+        // its attributes are.
+        let declaring_class = codebase.get_declaring_method_class(class.as_bytes(), member.as_bytes()).unwrap_or(class);
+        let declaring_class = display_class_like_name(context, declaring_class);
+        let member = BytesDisplay(r#extern.member_name().unwrap_or_default());
+        context.collector.report_with_code(
+            IssueCode::NonExistentMethod,
+            Issue::error(format!(
+                "`{written}` is a method of `{declaring_class}`, so `extern {declaring_class}.{member}` states its signature."
+            ))
+            .with_annotation(Annotation::primary(r#extern.target.span()).with_message("Inherited here.")),
+        );
+
+        return;
+    };
+    let parameter_name = |name: Word| {
+        let name = name.as_bytes();
+
+        String::from_utf8_lossy(name.strip_prefix(b"$").unwrap_or(name)).into_owned()
+    };
+    let class_metadata = (!class.is_empty()).then(|| codebase.get_class_like(class.as_bytes())).flatten();
+    // The class's own type, its type parameters as its type arguments, is what the declaration's `self` and `static`
+    // are, so `static` fits a stated `Builder<TModel>`.
+    let own_type = class_metadata.map(|class| {
+        let arguments = class
+            .template_types
+            .iter()
+            .map(|(name, template)| {
+                TUnion::from_atomic(TAtomic::GenericParameter(TGenericParameter::new(
+                    *name,
+                    Arc::new(template.constraint.clone()),
+                    template.defining_entity,
+                )))
+            })
+            .collect::<Vec<_>>();
+
+        TNamedObject::new_with_type_parameters(class.name, (!arguments.is_empty()).then_some(arguments))
+    });
+    let expanded = |type_union: &TUnion| {
+        let mut type_union = type_union.clone();
+        let options = TypeExpansionOptions {
+            self_class: class_metadata.map(|class| class.name),
+            static_class_type: own_type
+                .clone()
+                .map_or(StaticClassType::None, |own| StaticClassType::Object(TObject::Named(own))),
+            ..Default::default()
+        };
+        expand_union(codebase, &mut type_union, &options);
+
+        type_union
+    };
+    let dialect = context.dialect;
+    let fits = |input: &TUnion, container: &TUnion| {
+        let mut result = ComparisonResult::for_dialect(dialect);
+
+        union_comparator::is_contained_by(codebase, input, container, false, false, false, &mut result)
+    };
+
+    if let Some(type_parameters) = &r#extern.type_parameters
+        && let Some(class_metadata) = class_metadata
+    {
+        let declared_names: Vec<&[u8]> = class_metadata.template_types.keys().map(|name| name.as_bytes()).collect();
+        let written_names: Vec<&[u8]> =
+            type_parameters.parameters.iter().map(|parameter| parameter.name.value).collect();
+        if declared_names != written_names {
+            let class_name = display_class_like_name(context, class_metadata.original_name);
+            let names = declared_names.iter().map(|name| String::from_utf8_lossy(name)).collect::<Vec<_>>().join(", ");
+            let message = if declared_names.is_empty() {
+                format!("`{class_name}` declares no type parameters, so its `extern` line writes `{class_name}` alone.")
+            } else {
+                format!(
+                    "`{class_name}` declares the type parameters `{names}`, so its `extern` line writes `{class_name}<{names}>`."
+                )
+            };
+            context.collector.report_with_code(
+                IssueCode::InvalidTemplateParameter,
+                Issue::error(message).with_annotation(Annotation::primary(type_parameters.span())),
+            );
+        }
+    }
+
+    for (index, (parameter, written_parameter)) in
+        stated.parameters.iter().zip(parameter_list.parameters.iter()).enumerate()
+    {
+        let Some(native) = declared
+            .parameters
+            .get(index)
+            .or_else(|| declared.parameters.last().filter(|last| last.flags.is_variadic()))
+        else {
+            context.collector.report_with_code(
+                IssueCode::IncompatibleParameterCount,
+                Issue::error(format!(
+                    "`{written}` has no parameter where its `extern` line states `{}`.",
+                    parameter_name(parameter.name.0)
+                ))
+                .with_annotation(
+                    Annotation::primary(written_parameter.span()).with_message("No parameter takes this."),
+                ),
+            );
+
+            break;
+        };
+        let (Some(native_type), Some(stated_type)) = (&native.type_declaration_metadata, &parameter.type_metadata)
+        else {
+            continue;
+        };
+        let native_type = expanded(&native_type.type_union);
+        let crosses = expanded(&stated_type.type_union).types.iter().all(|atomic| {
+            let backing = match atomic {
+                TAtomic::Object(TObject::Enum(object)) => Some(object.name),
+                _ => None,
+            }
+            .and_then(|name| codebase.get_class_like(name.as_bytes())?.enum_type.clone());
+
+            fits(&TUnion::from_atomic(atomic.clone()), &native_type)
+                || backing.is_some_and(|backing| fits(&TUnion::from_atomic(backing), &native_type))
+        });
+        if !crosses {
+            context.collector.report_with_code(
+                IssueCode::IncompatibleParameterType,
+                Issue::error(format!(
+                    "`{}` does not cross to `{written}`'s `{}`, which the library declares `{}`.",
+                    quoted_source(context, written_parameter.span()),
+                    parameter_name(native.name.0),
+                    display_sharp_type(context, &native_type),
+                ))
+                .with_annotation(Annotation::primary(written_parameter.span()).with_message("Stated here."))
+                .with_note("A stated type fits the library's native type, so plain PHP takes each value the line lets a call pass.")
+                .with_help(format!("State a type `{}` takes.", display_sharp_type(context, &native_type))),
+            );
+        }
+    }
+    if let Some(native) = declared
+        .parameters
+        .iter()
+        .skip(stated.parameters.len())
+        .find(|native| !native.flags.has_default() && !native.flags.is_variadic())
+    {
+        context.collector.report_with_code(
+            IssueCode::IncompatibleParameterCount,
+            Issue::error(format!(
+                "`{written}` takes `{}`, which has no default, so its `extern` line states it.",
+                parameter_name(native.name.0)
+            ))
+            .with_annotation(Annotation::primary(parameter_list.span()).with_message("Stated here.")),
+        );
+    }
+    if let (Some(native), Some(stated), Some(hint)) = (
+        &declared.return_type_declaration_metadata,
+        &stated.return_type_declaration_metadata,
+        &r#extern.return_type_hint,
+    ) {
+        let (native, stated) = (expanded(&native.type_union), expanded(&stated.type_union));
+        let takes = native.types.iter().all(|atomic| {
+            fits(&TUnion::from_atomic(atomic.clone()), &stated)
+                || (atomic.is_array() && stated.types.iter().any(TAtomic::is_array))
+        });
+        if !takes {
+            context.collector.report_with_code(
+                IssueCode::IncompatibleReturnType,
+                Issue::error(format!(
+                    "`{written}` returns `{}`, which the stated `{}` does not take.",
+                    display_sharp_type(context, &native),
+                    quoted_source(context, hint.span()),
+                ))
+                .with_annotation(Annotation::primary(hint.span()).with_message("Stated here."))
+                .with_help(format!("State a type that takes `{}`.", display_sharp_type(context, &native))),
+            );
+        }
     }
 }
 

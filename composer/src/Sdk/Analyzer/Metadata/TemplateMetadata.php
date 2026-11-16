@@ -10,7 +10,6 @@ use Mago\Sdk\Analyzer\Type\Variance;
 
 /**
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class TemplateMetadata
 {

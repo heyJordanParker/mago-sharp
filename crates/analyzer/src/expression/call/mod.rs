@@ -52,6 +52,7 @@ use crate::context::scope::control_action::ControlAction;
 use crate::error::AnalysisError;
 use crate::expression::access::report_full_name;
 use crate::expression::access::report_member_of_mixed_kinds;
+use crate::expression::array_access::report_fixed_map_key;
 use crate::expression::binary::comparison::Searched;
 use crate::expression::binary::comparison::check_element_equality;
 use crate::expression::binary::comparison::check_ordered_key;
@@ -71,7 +72,10 @@ use crate::invocation::template_result::seed_extension_type_arguments;
 use crate::plugin::hook::NamedCall;
 use crate::plugin::hook::StaticCall;
 use crate::reconciler::assertion_reconciler;
+use crate::resolver::extension::CollectionKind;
+use crate::resolver::extension::collection_member_kind;
 use crate::resolver::extension::is_collection_member;
+use crate::utils::is_compile_time_string;
 use crate::utils::names::collection_type_parameters;
 use crate::utils::names::display_function_like_identifier;
 use crate::utils::quoted_source;
@@ -365,6 +369,7 @@ where
 
     let mut resulting_type = None;
     for target in invocation_targets {
+        let target = with_extern_signature(context, target);
         if let InvocationTarget::FunctionLike { metadata, .. } = &target {
             let name = metadata.name;
             match true {
@@ -669,6 +674,14 @@ where
         else {
             continue;
         };
+        // A `Map` member's `key`, as in `get("plan")` and the `set` an index write runs, is a key as an index is, so a
+        // string fixed at compile time is refused there too, spec section 12.
+        if parameter.get_name().0.as_bytes() == b"$key"
+            && collection_member_kind(class, metadata) == Some(CollectionKind::Map)
+            && artifacts.get_expression_type(value).is_some_and(is_compile_time_string)
+        {
+            report_fixed_map_key(context, value);
+        }
         // A collection member orders by the keys the function in a parameter marked `ComparedByOrder` returns, as
         // `sortedBy` does, so a key type `<` cannot order is refused, and the bridge passes the engine how to order it.
         if parameter.has_attribute(context.codebase, COMPARED_BY_ORDER)
@@ -991,6 +1004,35 @@ pub(crate) fn report_missing_function<A>(
             .with_note(format!("This often means the {kind_str} is misspelled, or not defined or autoloaded."))
             .with_help(format!("Check the spelling of `{name_str}`{place}.")),
     );
+}
+
+/// Spec section 23: a PHP# call of a plain PHP method or function whose `extern` line states its signature takes the
+/// line's parameters and gives its return type. Plain PHP's own calls keep the declaration's.
+fn with_extern_signature<'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    target: InvocationTarget<'ctx>,
+) -> InvocationTarget<'ctx>
+where
+    A: Arena,
+{
+    match target {
+        InvocationTarget::FunctionLike {
+            identifier,
+            metadata,
+            inferred_return_type,
+            effective_signature,
+            method_context,
+            span,
+        } if context.dialect.is_sharp() && !metadata.flags.is_sharp() => InvocationTarget::FunctionLike {
+            identifier,
+            metadata: context.codebase.get_extern_signature(&identifier).unwrap_or(metadata),
+            inferred_return_type,
+            effective_signature,
+            method_context,
+            span,
+        },
+        target => target,
+    }
 }
 
 fn get_function_like_target_inner<'ctx, A>(

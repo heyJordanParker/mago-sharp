@@ -45,7 +45,7 @@ function nestedAccess(?Outer $outer): bool
     return $outer?->container?->tagValue instanceof Value && $outer->container->tagValue->amount > 0;
 }
 
-/** @mago-expect analysis:possibly-null-property-access */
+/** @mago-expect analysis:possibly-null-property-access(2) */
 function negatedBranch(?Container $container): void
 {
     if ($container?->tagValue instanceof Value) {
@@ -64,7 +64,7 @@ function guardClause(?Container $container): int
     return $container->tagValue->amount;
 }
 
-/** @mago-expect analysis:possibly-null-property-access */
+/** @mago-expect analysis:possibly-null-property-access(2) */
 function falseComparison(?Container $container): void
 {
     if (($container?->tagValue instanceof Value) === false) {

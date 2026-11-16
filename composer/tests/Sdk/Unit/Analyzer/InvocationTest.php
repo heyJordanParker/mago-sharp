@@ -23,9 +23,6 @@ use function range;
 use function sprintf;
 use function substr;
 
-/**
- * @mago-expect lint:too-many-methods
- */
 final class InvocationTest extends TestCase
 {
     /**

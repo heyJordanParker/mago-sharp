@@ -86,7 +86,7 @@ pub fn populate_docblock_variables_excluding<'ctx, A>(
                             .with_message(format!("`{ref_name}` is not defined in the current codebase")),
                     )
                     .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
-                    .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
+                    .with_note("If this type comes from an optional dependency or extension, add `non-existent-class-like` to the analyzer's `ignore` list in `mago.toml`, scoped to the files that name it.")
                     .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present."),
             );
         }

@@ -1,6 +1,13 @@
+use std::sync::Arc;
+
 use mago_allocator::Arena;
 use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::derived::TDerived;
+use mago_codex::ttype::atomic::derived::key_of::TKeyOf;
 use mago_codex::ttype::get_literal_string;
+use mago_codex::ttype::get_named_object;
+use mago_codex::ttype::wrap_atomic;
 use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -20,8 +27,9 @@ use crate::resolver::property::resolve_declared_property;
 use crate::utils::names::display_class_like_name;
 use crate::visibility::is_visible_from_scope;
 
-/// `nameof(X.y)` is the string `'y'`, spec section 6.3, checked against the class `X`: `y` is a property, a field or
-/// a method of `X`, its own or inherited, instance or static, visible where `nameof` is written, as C#'s `nameof` is.
+/// `nameof(X.y)` is the string `'y'` of the type `keyof X`, spec sections 6.3 and 11, checked against the class `X`:
+/// `y` is a property, a field or a method of `X`, its own or inherited, instance or static, visible where `nameof` is
+/// written. A `keyof X` is a string no literal is, so it compares and keys a `Map` as a string from data does.
 /// `nameof(X)` is the class's own name, spec section 25, the part of its name after the last `.`.
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for NameOf<'arena> {
     fn analyze<'ctx, A>(
@@ -51,6 +59,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NameOf<'arena> {
         let Some(member) = &self.member else {
             return Ok(());
         };
+        artifacts.set_expression_type(
+            self,
+            wrap_atomic(TAtomic::Derived(TDerived::KeyOf(TKeyOf::new(Arc::new(get_named_object(
+                class.original_name,
+                None,
+            )))))),
+        );
         let scope = block_context.scope.get_class_like_name();
         let property_name = concat_word!("$", member.name.value);
         let class_name = display_class_like_name(context, class.original_name);

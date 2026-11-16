@@ -8,7 +8,6 @@ namespace Mago\Sdk\Analyzer\Declaration;
  * What one method, function, or closure declaration states beyond its native signature.
  *
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class SignatureRefinement
 {

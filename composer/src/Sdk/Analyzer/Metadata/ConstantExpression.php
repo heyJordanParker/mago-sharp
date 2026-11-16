@@ -17,7 +17,6 @@ use function constant;
  * attribute is instantiated.
  *
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class ConstantExpression
 {
@@ -34,9 +33,6 @@ final class ConstantExpression
         public readonly ?SourceLocation $location = null,
     ) {}
 
-    /**
-     * @mago-expect analysis:unknown-class-instantiation A `new` expression names its class only in the evaluated source.
-     */
     public function evaluate(): mixed
     {
         return match ($this->kind) {

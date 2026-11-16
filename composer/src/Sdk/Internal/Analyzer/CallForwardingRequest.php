@@ -8,7 +8,6 @@ use Mago\Sdk\Analyzer\Type;
 
 /**
  * @internal
- * @mago-expect lint:excessive-parameter-list
  */
 final class CallForwardingRequest
 {

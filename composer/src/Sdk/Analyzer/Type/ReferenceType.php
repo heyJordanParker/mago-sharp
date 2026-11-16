@@ -8,7 +8,6 @@ use Mago\Sdk\Analyzer\Type;
 
 /**
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class ReferenceType implements AtomicType
 {

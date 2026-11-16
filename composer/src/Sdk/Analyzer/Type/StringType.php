@@ -8,7 +8,6 @@ use Mago\Sdk\Exception\InvalidArgumentException;
 
 /**
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class StringType
 {

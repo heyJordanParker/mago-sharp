@@ -52,7 +52,7 @@ trait ConcreteT
     }
 }
 
-// @mago-expect analysis:incompatible-parameter-count
+// @mago-expect analysis:incompatible-parameter-count(2)
 class Conflict3
 {
     use ConcreteT;
@@ -98,7 +98,7 @@ trait H
     abstract public function method(string $x): void;
 }
 
-// @mago-expect analysis:incompatible-parameter-type
+// @mago-expect analysis:incompatible-parameter-type(2)
 class Conflict4
 {
     use G;
@@ -124,7 +124,7 @@ trait K
 }
 
 // @mago-expect analysis:unimplemented-abstract-method
-// @mago-expect analysis:incompatible-parameter-type
+// @mago-expect analysis:incompatible-parameter-type(2)
 class Conflict5
 {
     use I, J, K;

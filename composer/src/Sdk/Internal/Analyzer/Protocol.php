@@ -72,10 +72,6 @@ use function unpack;
 
 /**
  * @internal
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:excessive-parameter-list
- * @mago-expect lint:kan-defect
- * @mago-expect lint:too-many-methods
  */
 final class Protocol
 {
@@ -260,7 +256,6 @@ final class Protocol
     /**
      * @param non-empty-list<Extension> $extensions
      * @param list<RegisteredPlugin> $plugins
-     * @mago-expect lint:halstead
      */
     public static function writeDescribeResponse(array $extensions, array $plugins): string
     {
@@ -431,7 +426,6 @@ final class Protocol
         return $flags;
     }
 
-    /** @mago-expect lint:halstead */
     private static function writeRegistrationTarget(
         PayloadWriter $writer,
         FunctionTarget|MethodTarget|PropertyTarget|ClassTarget|NodeKind|ClassLikeTarget|string $target,
@@ -801,7 +795,6 @@ final class Protocol
     /**
      * @param positive-int $requestId
      * @param list<NodeKind> $nodeKinds
-     * @mago-expect lint:excessive-parameter-list
      */
     public static function readLifecycleRequest(
         int $kind,
@@ -881,7 +874,6 @@ final class Protocol
     /**
      * @param positive-int $requestId
      * @param list<NodeKind> $nodeKinds
-     * @mago-expect lint:excessive-parameter-list
      */
     private static function readProjectAnalysis(
         PayloadReader $reader,
@@ -921,8 +913,6 @@ final class Protocol
      * @param list<array{string|null, list<array{int, int, string}>, list<array{int, int, string}>}> $recordedReads
      *   each file's codebase reads, or the before-analysis hooks', which name no file: the reads of plugins with no
      *   provider, then those of plugins with one
-     *
-     * @mago-expect lint:halstead
      */
     public static function writeLifecycleResponse(
         int $requestKind,
@@ -1056,8 +1046,6 @@ final class Protocol
     /**
      * @param positive-int $requestId
      * @param list<NodeKind> $nodeKinds
-     * @mago-expect lint:excessive-parameter-list
-     * @mago-expect lint:halstead
      */
     private static function readFileAnalysis(
         PayloadReader $reader,
@@ -1185,7 +1173,6 @@ final class Protocol
      * @param list<NodeKind> $nodeKinds
      *
      * @return non-empty-list<FileAnalysis>
-     * @mago-expect lint:excessive-parameter-list
      */
     private static function readFileAnalysisBatch(
         PayloadReader $reader,

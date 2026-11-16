@@ -85,10 +85,6 @@ final class InvocationAudit
     }
 }
 
-/**
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:single-class-per-file
- */
 final class InvocationFunctionProvider implements FunctionReturnTypeProvider, CallableSignatureOverride
 {
     public function getTargets(): array
@@ -140,7 +136,6 @@ final class InvocationFunctionProvider implements FunctionReturnTypeProvider, Ca
     }
 }
 
-/** @mago-expect lint:single-class-per-file */
 final class InvocationFunctionAssertionProvider implements FunctionAssertionProvider
 {
     public function getTargets(): array
@@ -165,10 +160,6 @@ final class InvocationFunctionAssertionProvider implements FunctionAssertionProv
     }
 }
 
-/**
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:single-class-per-file
- */
 final class InvocationMethodAssertionProvider implements MethodAssertionProvider
 {
     public function getTargets(): array
@@ -233,12 +224,6 @@ final class InvocationMethodAssertionProvider implements MethodAssertionProvider
     }
 }
 
-/**
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:halstead
- * @mago-expect lint:kan-defect
- * @mago-expect lint:single-class-per-file
- */
 final class InvocationMethodProvider implements MethodReturnTypeProvider, CallableSignatureOverride
 {
     public function getTargets(): array
@@ -691,9 +676,6 @@ final class InvocationMethodProvider implements MethodReturnTypeProvider, Callab
     }
 }
 
-/**
- * @mago-expect lint:single-class-per-file
- */
 final class InvocationPropertyProvider implements PropertyTypeProvider
 {
     public function getTargets(): array
@@ -724,9 +706,6 @@ final class InvocationPropertyProvider implements PropertyTypeProvider
     }
 }
 
-/**
- * @mago-expect lint:single-class-per-file
- */
 final class InvocationPropertyInitializationProvider implements PropertyInitializationProvider
 {
     public function getTargets(): array
@@ -756,10 +735,6 @@ final class InvocationPropertyInitializationProvider implements PropertyInitiali
     }
 }
 
-/**
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:single-class-per-file
- */
 final class InvocationClassInitializerProvider implements ClassInitializerProvider
 {
     public function getTargets(): array
@@ -832,9 +807,6 @@ final class InvocationClassInitializerProvider implements ClassInitializerProvid
     }
 }
 
-/**
- * @mago-expect lint:single-class-per-file
- */
 final class InvocationCallKindHook implements NodeAnalysisHook
 {
     /**
@@ -885,8 +857,6 @@ final class InvocationCallKindHook implements NodeAnalysisHook
 
 /**
  * Records the type arguments each call passes, apart from its arguments, as `wrap<int>(1)` for `calc.wrap<int>(1)`.
- *
- * @mago-expect lint:single-class-per-file
  */
 final class InvocationTypeArgumentsHook implements NodeAnalysisHook
 {
@@ -925,8 +895,6 @@ final class InvocationTypeArgumentsHook implements NodeAnalysisHook
 /**
  * Searches for the methods each attribute marks at a method call, and records each method it finds. A search names an
  * attribute as written, a PHP# one by its exact name, and the host keys it.
- *
- * @mago-expect lint:single-class-per-file
  */
 final class InvocationAttributedMethodsHook implements NodeAnalysisHook
 {
@@ -952,9 +920,6 @@ final class InvocationAttributedMethodsHook implements NodeAnalysisHook
     }
 }
 
-/**
- * @mago-expect lint:single-class-per-file
- */
 final class InvocationBareCallHook implements NodeAnalysisHook
 {
     public function __construct(
@@ -977,9 +942,6 @@ final class InvocationBareCallHook implements NodeAnalysisHook
     }
 }
 
-/**
- * @mago-expect lint:single-class-per-file
- */
 final class InvocationMethodCallHook implements MethodCallAnalysisHook
 {
     public function getTargets(): array
@@ -1002,8 +964,6 @@ final class InvocationMethodCallHook implements MethodCallAnalysisHook
 /**
  * Provides the result of the PHP# `Demo\Box::total`, and never of its twin `Total`, a method of its own, spec section
  * 24. It records each call it provides.
- *
- * @mago-expect lint:single-class-per-file
  */
 final class InvocationTwinProvider implements MethodReturnTypeProvider
 {
@@ -1022,8 +982,6 @@ final class InvocationTwinProvider implements MethodReturnTypeProvider
 
 /**
  * Hooks each call of the PHP# `Demo\Box::Total`, and never of its twin `total`, spec section 24.
- *
- * @mago-expect lint:single-class-per-file
  */
 final class InvocationTwinHook implements MethodCallAnalysisHook
 {
@@ -1046,8 +1004,6 @@ final class InvocationTwinHook implements MethodCallAnalysisHook
 /**
  * Forwards each call on `ForwardingModel` to a `ForwardedQuery`, as a framework's model forwards a call to its query
  * builder, and records each call it forwards.
- *
- * @mago-expect lint:single-class-per-file
  */
 final class InvocationCallForwardingProvider implements CallForwardingProvider
 {
@@ -1064,10 +1020,6 @@ final class InvocationCallForwardingProvider implements CallForwardingProvider
     }
 }
 
-/**
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:single-class-per-file
- */
 final class InvocationPlugin implements IssueFilterHook, Plugin
 {
     /**

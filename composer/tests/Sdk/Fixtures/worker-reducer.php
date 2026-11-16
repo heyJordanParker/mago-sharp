@@ -9,9 +9,6 @@ use Mago\Sdk\WorkerReductionContext;
 
 require_once __DIR__ . '/../../../../vendor/autoload.php';
 
-/**
- * @mago-expect lint:file-name
- */
 final class AuditWorkerReducer implements WorkerReducer
 {
     public function __construct(

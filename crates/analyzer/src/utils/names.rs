@@ -17,6 +17,7 @@ use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::derived::TDerived;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
@@ -860,6 +861,9 @@ where
             };
 
             format!("Function<{}({}){uses}>", written(signature.get_return_type()), parameters.join(", "))
+        }
+        TAtomic::Derived(TDerived::KeyOf(key_of)) if key_of.names_members() => {
+            format!("keyof {}", display_sharp_type(context, key_of.get_target_type()))
         }
         TAtomic::Scalar(TScalar::ClassLikeString(class_string)) => match class_string {
             TClassLikeString::Literal { value } => format!(

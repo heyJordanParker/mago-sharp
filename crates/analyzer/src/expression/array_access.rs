@@ -30,6 +30,7 @@ use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::get_array_access_id;
 use crate::utils::expression::get_block_expression_id;
+use crate::utils::is_compile_time_string;
 use crate::utils::quoted_source;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
@@ -257,12 +258,14 @@ pub(crate) fn check_sharp_map_read<'arena, A>(
     if !kinds.map {
         return;
     }
+    let fixed_key = artifacts.get_expression_type(access.index).is_some_and(is_compile_time_string)
+        && report_fixed_map_key(context, access.index);
 
     if block_context.flags.inside_isset() {
         if let Some(read) = artifacts.get_expression_type(access).cloned() {
             artifacts.set_expression_type(access, read.as_nullable());
         }
-    } else if !kinds.set {
+    } else if !kinds.set && !fixed_key {
         context.collector.report_with_code(
             IssueCode::PossiblyUndefinedArrayIndex,
             Issue::error("A `Map` is not read by a bare index, because its key may be missing.")
@@ -270,6 +273,28 @@ pub(crate) fn check_sharp_map_read<'arena, A>(
                 .with_help("Read it with `??`, as in `map[key] ?? fallback`, or with `map.get(key)`, which gives null for a missing key. `+=`, `++` and `--` read first, so write `m[k] = (m[k] ?? 0) + 1`."),
         );
     }
+}
+
+/// Spec section 12: in an application, a `Map` key that is a string fixed at compile time, read or written, names a
+/// field of a fixed shape, and a fixed shape is a struct. Keys from data, as `counts[tag]`, are a `Map`'s own. Gives
+/// whether it reported `key`, which a library never is.
+pub(crate) fn report_fixed_map_key<A>(context: &mut Context<'_, '_, A>, key: &Expression<'_>) -> bool
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || !context.source_file.is_project {
+        return false;
+    }
+    let written = quoted_source(context, key.span());
+
+    context.collector.report_with_code(
+        IssueCode::InvalidArrayIndex,
+        Issue::error(format!("`{written}` is a string fixed at compile time, so it names a field of a fixed shape, not a key of a `Map`."))
+            .with_annotation(Annotation::primary(key.span()).with_message("This key is fixed at compile time."))
+            .with_help("Parse the `Map` into a struct whose properties are its fields where the data enters, and read the property."),
+    );
+
+    true
 }
 
 /// Spec section 12 makes a `List` index a place, as a Rust `Vec` index and a Go slice index are, so a change through

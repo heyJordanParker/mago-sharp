@@ -8,7 +8,6 @@ use Mago\Sdk\Span;
 
 /**
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class Argument
 {

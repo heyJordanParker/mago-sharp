@@ -625,8 +625,6 @@ function ensure_binary(string $version, string $triple, string $binDir): string
  * @param string $executablePath Path to the mago binary.
  * @param string $packageRoot The package root directory.
  *
- * @mago-expect lint:no-empty-catch-clause
- *
  * @internal
  */
 function ensure_schema(string $executablePath, string $packageRoot): void
@@ -738,8 +736,6 @@ function open_schema_process(string $executablePath): array
  * @param list<string> $args Command-line arguments to pass.
  *
  * @return never
- *
- * @mago-expect lint:no-error-control-operator
  *
  * @internal
  */

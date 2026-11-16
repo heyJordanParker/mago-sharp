@@ -15,7 +15,6 @@ use Throwable;
 
 /**
  * @internal
- * @mago-expect lint:cyclomatic-complexity
  */
 final class HostClient
 {

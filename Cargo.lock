@@ -1577,14 +1577,10 @@ dependencies = [
 name = "mago-collector"
 version = "0.6.20"
 dependencies = [
- "foldhash",
  "mago-allocator",
  "mago-database",
  "mago-reporting",
- "mago-span",
- "mago-syntax",
  "mago-text-edit",
- "memchr",
 ]
 
 [[package]]
@@ -1792,7 +1788,6 @@ dependencies = [
  "mago-analyzer",
  "mago-bytes",
  "mago-codex",
- "mago-collector",
  "mago-database",
  "mago-formatter",
  "mago-guard",

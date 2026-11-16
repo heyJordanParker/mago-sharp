@@ -38,6 +38,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Expression;
 use mago_syntax::dialect::Dialect;
 use mago_word::Word;
@@ -56,6 +57,7 @@ use crate::invocation::InvocationTargetParameter;
 use crate::invocation::analyzer::adjust_offset_for_variadic;
 use crate::resolver::extension::is_collection_member;
 use crate::statement::function_like::rejected_nullable_parameter::writes_null;
+use crate::utils::expression::get_literal_array_key;
 use crate::utils::expression::is_referenceable;
 use crate::utils::get_type_diff;
 use crate::utils::int_refused_for_float;
@@ -335,6 +337,97 @@ where
 }
 
 /// Verifies an argument's type against the expected parameter type, and returns whether the argument fits it.
+/// Spec section 12: in an application, a `Map` literal passed where a plain PHP parameter declares an array shape, as
+/// `array{code: string, raw: bool}`, is checked key by key and value by value against the shape: each key it gives is
+/// one the shape declares, unless the shape is open, its value fits the key's type, and it gives every key the shape
+/// requires. Gives `false` after reporting each misfit, or `None` where the literal fits, or the argument is no such
+/// literal with keys fixed at compile time, which the parameter's type then checks as any other value.
+fn check_map_literal_shape<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    parameter_type: &TUnion,
+    argument: &Expression<'_>,
+    invocation_target: &InvocationTarget<'_>,
+) -> Option<bool>
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || !context.source_file.is_project || !parameter_type.is_single() {
+        return None;
+    }
+    let TAtomic::Array(TArray::Keyed(shape)) = parameter_type.get_single() else {
+        return None;
+    };
+    let shape_items = shape.known_items.as_ref()?;
+    let Expression::Array(literal) = argument.unparenthesized() else {
+        return None;
+    };
+    let entries = literal
+        .elements
+        .iter()
+        .map(|element| match element {
+            ArrayElement::KeyValue(entry) => {
+                Some((get_literal_array_key(entry.key, artifacts)?, entry.key, entry.value))
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let target = invocation_target.guess_name(context);
+    let shown = parameter_type.get_id();
+    let mut fits = true;
+    let mut report = |context: &mut Context<'_, '_, A>, message: String, span: Span| {
+        fits = false;
+        context.collector.report_with_code(
+            IssueCode::InvalidArgument,
+            Issue::error(message)
+                .with_annotation(Annotation::primary(span))
+                .with_annotation(
+                    Annotation::secondary(invocation_target.span()).with_message(format!("`{target}` takes `{shown}`")),
+                )
+                .with_help("Give the keys the shape declares, each with a value of its type."),
+        );
+    };
+    for (key, written, value) in &entries {
+        match shape_items.get(key) {
+            Some((_, declared)) => {
+                let given = artifacts.get_expression_type(*value).cloned().unwrap_or_else(get_mixed);
+                if !is_contained_by(
+                    context.codebase,
+                    &given,
+                    declared,
+                    false,
+                    false,
+                    false,
+                    &mut ComparisonResult::for_dialect(context.dialect),
+                ) {
+                    let (declared, given) = (declared.get_id(), given.get_id());
+                    report(
+                        context,
+                        format!("`{shown}` holds `{declared}` under the key `{key}`, and this value is `{given}`."),
+                        value.span(),
+                    );
+                }
+            }
+            None if shape.parameters.is_none() => {
+                report(context, format!("`{shown}` has no key `{key}`."), written.span());
+            }
+            None => {}
+        }
+    }
+    for (key, (optional, _)) in shape_items {
+        if !optional && !entries.iter().any(|(given, _, _)| given == key) {
+            report(
+                context,
+                format!("`{shown}` requires the key `{key}`, and this `Map` doesn't give it."),
+                argument.span(),
+            );
+        }
+    }
+
+    (!fits).then_some(false)
+}
+
 pub fn verify_argument_type<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
     artifacts: &AnalysisArtifacts,
@@ -402,6 +495,11 @@ where
     // one error is the refusal's.
     if is_refused_type(parameter_type) {
         return true;
+    }
+
+    if let Some(fits) = check_map_literal_shape(context, artifacts, parameter_type, input_expression, invocation_target)
+    {
+        return fits;
     }
 
     let takes_null =

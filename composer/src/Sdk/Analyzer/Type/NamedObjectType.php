@@ -11,7 +11,6 @@ use function count;
 
 /**
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class NamedObjectType implements AtomicType
 {

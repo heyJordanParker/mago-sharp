@@ -29,8 +29,6 @@ use function is_string;
 
 /**
  * @internal
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:kan-defect
  */
 final class AssertionCodec
 {

@@ -86,7 +86,6 @@ function extension_consumer(
     return $provided->answer() + $provided->unrelated() + extension_answer(0) + EXTENSION_ANSWER;
 }
 
-/** @mago-expect analysis:non-existent-class-like */
 final class IncompleteLifecycleClass implements Vendor\Unresolvable\LifecycleContract {}
 
 $lifecycleInstance = new LifecycleClass0();
@@ -111,11 +110,8 @@ $lifecycleArrow = fn(): int => $lifecycleInstance->fileArrowTarget();
             if index == 0 && framework_reference_enabled { "\nconst ENABLE_FRAMEWORK_ACTION = true;\n" } else { "" };
         let late_reference_marker =
             if index == 5 && late_reference_enabled { "\nconst ENABLE_LATE_FRAMEWORK_ACTION = true;\n" } else { "" };
-        let after_file_expectation =
-            if index == 0 { "// @mago-expect analysis:lifecycle-one/after-file\n" } else { "" };
-        let after_analysis_expectation = if index == 0 { "// @mago-expect analysis:lifecycle-one/after\n" } else { "" };
         let contents = format!(
-            "<?php\n\n/* exact-in-memory-source:{index}:{value} */\n\ndeclare(strict_types=1);\n\n{after_file_expectation}{after_analysis_expectation}final class LifecycleClass{index}{inheritance} {{\n    public function value(): int {{ return {value}; }}\n{private_methods}}}\n\nfunction lifecycle_function_{index}(int $value): int {{ return $value + {value}; }}\n{extension_usage}{framework_reference_marker}{late_reference_marker}{generator}"
+            "<?php\n\n/* exact-in-memory-source:{index}:{value} */\n\ndeclare(strict_types=1);\n\nfinal class LifecycleClass{index}{inheritance} {{\n    public function value(): int {{ return {value}; }}\n{private_methods}}}\n\nfunction lifecycle_function_{index}(int $value): int {{ return $value + {value}; }}\n{extension_usage}{framework_reference_marker}{late_reference_marker}{generator}"
         );
         let file = File::new(
             Cow::Owned(format!("src/file{index}.php").into_bytes()),
@@ -150,14 +146,10 @@ fn count_code(issues: &IssueCollection, code: &str) -> usize {
 
 fn assert_issue_cardinality(issues: &IssueCollection, unused_methods: usize) {
     assert_eq!(count_code(issues, "unused-method"), unused_methods);
-    assert_eq!(count_code(issues, "unfulfilled-expect"), 0);
     for plugin in PLUGINS {
         assert_eq!(count_code(issues, &format!("{plugin}/before")), 1);
-        assert_eq!(
-            count_code(issues, &format!("{plugin}/after-file")),
-            FILE_COUNT - usize::from(plugin == "lifecycle-one")
-        );
-        assert_eq!(count_code(issues, &format!("{plugin}/after")), usize::from(plugin != "lifecycle-one"));
+        assert_eq!(count_code(issues, &format!("{plugin}/after-file")), FILE_COUNT);
+        assert_eq!(count_code(issues, &format!("{plugin}/after")), 1);
     }
 
     let final_issue = issues
@@ -269,12 +261,15 @@ fn external_analyzer_lifecycle_is_exact_across_workers_and_incremental_runs() {
         .issues
         .iter()
         .filter(|issue| {
-            issue.code.as_deref().is_none_or(|code| !code.starts_with("lifecycle-") && code != "unused-method")
+            issue.code.as_deref().is_none_or(|code| {
+                !code.starts_with("lifecycle-") && code != "unused-method" && code != "non-existent-class-like"
+            })
         })
         .map(|issue| (issue.code.as_deref(), issue.message.as_str()))
         .collect::<Vec<_>>();
     assert!(unexpected.is_empty(), "unexpected analyzer issues: {unexpected:#?}");
     assert_eq!(count_code(&initial.issues, "unused-method"), 1);
+    assert_eq!(count_code(&initial.issues, "non-existent-class-like"), 1);
     assert_issue_cardinality(&initial.issues, 1);
     let external_annotation = initial
         .issues

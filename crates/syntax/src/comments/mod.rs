@@ -38,7 +38,7 @@ fn trim_ascii_whitespace_start(input: &[u8]) -> &[u8] {
 
 /// Splits a comment into lines, preserving the offset of each line from the start of the trivia.
 ///
-/// This is crucial for calculating the precise `Span` of pragmas within a comment.
+/// A rule that reports a tag within a comment, such as a `TODO`, computes the tag's precise `Span` from it.
 ///
 /// # Returns
 ///

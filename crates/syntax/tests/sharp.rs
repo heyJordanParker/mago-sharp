@@ -4938,6 +4938,53 @@ fn an_extern_line_takes_attributes() {
     );
 }
 
+/// An `extern` line states a signature in PHP# method order, spec section 23: the return type, the target, the class's
+/// type parameters and its member when it names them, and the parameters, with `uses` after them. A member's name type
+/// is `keyof` before a class or a type parameter, spec section 11.2.
+#[test]
+fn an_extern_line_states_a_signature_in_method_order() {
+    const CODE: &str = "namespace App.Stubs;\n\nextern string Foundation.route(RouteName name) uses Http;\nextern Builder<TModel> Builder<TModel>.where(keyof TModel column, Any? value);\nextern Foundation.now uses Clock;\nextern string Report.sort(keyof Query<Order> column);\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Stubs/Stubs.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+        panic!("expected a namespace, got {:#?}", program.statements);
+    };
+    let externs: Vec<[Option<&str>; 5]> = namespace
+        .statements()
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Extern(declaration) => Some(declaration),
+            _ => None,
+        })
+        .map(|declaration| {
+            [
+                declaration.return_type_hint.as_ref().map(|hint| source(CODE, hint)),
+                Some(source(CODE, &declaration.target)),
+                declaration.type_parameters.as_ref().map(|list| source(CODE, list)),
+                declaration.member_name().map(|member| std::str::from_utf8(member).expect("an ASCII name")),
+                declaration.parameter_list.as_ref().map(|list| source(CODE, list)),
+            ]
+        })
+        .collect();
+    assert_eq!(
+        externs,
+        [
+            [Some("string"), Some("Foundation.route"), None, Some("route"), Some("(RouteName name)")],
+            [
+                Some("Builder<TModel>"),
+                Some("Builder"),
+                Some("<TModel>"),
+                Some("where"),
+                Some("(keyof TModel column, Any? value)")
+            ],
+            [None, Some("Foundation.now"), None, Some("now"), None],
+            [Some("string"), Some("Report.sort"), None, Some("sort"), Some("(keyof Query<Order> column)")],
+        ]
+    );
+}
+
 /// `extern` declares only when a name follows it, so `extern(text)` at the start of a PHP# statement stays a call.
 #[test]
 fn extern_before_a_parenthesis_stays_a_call_in_php_sharp() {

@@ -3,15 +3,12 @@ use mago_allocator::Arena;
 use mago_collector::Collector;
 use mago_database::file::File;
 use mago_reporting::IssueCollection;
-use mago_syntax::cst::Program;
 
 use crate::report::breach::BoundaryBreach;
 use crate::report::flaw::StructuralFlaw;
 
 pub mod breach;
 pub mod flaw;
-
-const COLLECTOR_CATEGORIES: &[&str] = &["guard"];
 
 #[derive(Debug, Default)]
 pub struct FortressReport {
@@ -29,11 +26,11 @@ impl FortressReport {
         self.boundary_breaches.is_empty() && self.structural_flaws.is_empty()
     }
 
-    pub fn report_into_issues<A>(self, arena: &A, source_file: &File, program: &Program) -> IssueCollection
+    pub fn report_into_issues<A>(self, arena: &A, source_file: &File) -> IssueCollection
     where
         A: Arena,
     {
-        let mut collector = Collector::new(arena, source_file, program, COLLECTOR_CATEGORIES);
+        let mut collector = Collector::new(arena, source_file);
         for boundary_breach in self.boundary_breaches {
             collector.report_with_code(boundary_breach.vector.error_code(), boundary_breach.into());
         }

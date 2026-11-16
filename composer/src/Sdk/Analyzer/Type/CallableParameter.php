@@ -9,7 +9,6 @@ use Mago\Sdk\Internal\Analyzer\DefinitionName;
 
 /**
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class CallableParameter
 {

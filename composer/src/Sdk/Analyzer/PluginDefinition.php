@@ -13,7 +13,6 @@ use function strtolower;
  * Immutable metadata describing an analyzer plugin.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
  */
 final class PluginDefinition
 {

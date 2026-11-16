@@ -45,7 +45,7 @@ class StringBox extends GenericContainer
  * @template TKey
  * @template TValue
  *
- * @mago-expect analysis:unused-template-parameter
+ * @mago-expect analysis:unused-template-parameter(2)
  */
 class GenericPair
 {

@@ -1111,7 +1111,7 @@ fn expand_key_of(
     expand_union(codebase, &mut target_type, options);
 
     let Some(new_return_types) = TKeyOf::get_key_of_targets(&target_type.types, codebase, false) else {
-        return vec![TAtomic::Derived(TDerived::KeyOf(return_type_key_of.clone()))];
+        return vec![TAtomic::Derived(TDerived::KeyOf(TKeyOf::new(Arc::new(target_type))))];
     };
 
     new_return_types.types.into_owned()

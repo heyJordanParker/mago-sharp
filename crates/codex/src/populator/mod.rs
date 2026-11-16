@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use foldhash::HashMap;
 use foldhash::HashSet;
 use indexmap::IndexMap;
 
@@ -11,6 +12,8 @@ use crate::metadata::CodebaseMetadata;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::constant::ConstantMetadata;
 use crate::metadata::flags::MetadataFlags;
+use crate::metadata::function_like::FunctionLikeMetadata;
+use crate::metadata::shared::Shared;
 use crate::misc::GenericParent;
 use crate::reference::ReferenceSource;
 use crate::reference::SymbolReferences;
@@ -360,9 +363,48 @@ fn populate_codebase_inner(
         docblock::inherit_method_docblocks(codebase, &safe_symbols, dirty_classes);
         docblock::inherit_property_docblocks(codebase, &safe_symbols, dirty_classes);
     }
+    populate_extern_signatures(codebase, symbol_references);
 
     codebase.safe_symbols = safe_symbols;
     codebase.safe_symbol_members = safe_symbol_members;
+}
+
+/// Makes the method or function a PHP# caller sees for each one whose first `extern` line states its signature, spec
+/// section 23: the declaration with the line's parameters and return type. A caller passes its arguments by the line's
+/// names only when each is the declaration's at its place, since PHP reads a named argument by its own name.
+fn populate_extern_signatures(codebase: &mut CodebaseMetadata, symbol_references: &mut SymbolReferences) {
+    let mut signatures = HashMap::default();
+    for declaration in codebase.externs.values().filter_map(|declarations| declarations.first()) {
+        let (Some(parameters), Some(key)) = (&declaration.parameters, codebase.extern_declaration(declaration)) else {
+            continue;
+        };
+        let Some(declared) = codebase.function_likes.get(&key) else {
+            continue;
+        };
+        let mut stated = FunctionLikeMetadata::clone(declared);
+        let renamed = parameters.iter().enumerate().any(|(index, parameter)| {
+            stated.parameters.get(index).is_none_or(|declared| declared.name != parameter.name)
+        });
+        stated.flags.set(MetadataFlags::NO_NAMED_ARGUMENTS, renamed || stated.flags.forbids_named_arguments());
+        stated.parameters.clone_from(parameters);
+        stated.return_type_declaration_metadata.clone_from(&declaration.return_type);
+        stated.return_type_metadata.clone_from(&declaration.return_type);
+        let reference_source = if key.1.is_empty() {
+            ReferenceSource::Symbol(true, key.0)
+        } else {
+            ReferenceSource::ClassLikeMember(true, key.0, key.1)
+        };
+        signatures::populate_function_like_metadata(
+            &mut stated,
+            &codebase.symbols,
+            &reference_source,
+            symbol_references,
+            true,
+        );
+        signatures.insert(key, Shared::new(stated));
+    }
+
+    codebase.extern_signatures = signatures;
 }
 
 /// Sets the permitted inheritors of each PHP# sealed interface, spec section 20.1: the classes and enums of its

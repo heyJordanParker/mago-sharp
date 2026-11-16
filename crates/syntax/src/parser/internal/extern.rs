@@ -15,8 +15,11 @@ where
     A: Arena,
 {
     /// Parses a PHP# `extern` declaration after its `attribute_lists`: `extern`, `event` when the class is an event, its
-    /// target, a bare name or `Class.member`, then an optional `uses` clause. `extern namespace WordPress for WP_Post;`
-    /// gives a library's class, function or constant of PHP's root namespace a namespace instead, spec section 23.
+    /// target, a bare name or `Class.member`, then an optional `uses` clause. A stated signature writes its return type
+    /// before the target and its parameters after it, and a generic class's type parameters between the class and the
+    /// method, as in `extern Builder<TModel> Builder<TModel>.where(keyof TModel column);`.
+    /// `extern namespace WordPress for WP_Post;` gives a library's class, function or constant of PHP's root namespace a
+    /// namespace instead, spec section 23.
     pub(crate) fn parse_extern(
         &mut self,
         attribute_lists: Sequence<'arena, AttributeList<'arena>>,
@@ -34,9 +37,28 @@ where
         } else {
             None
         };
+        let return_type_hint = if event.is_none() && namespace.is_none() && self.is_at_extern_signature()? {
+            Some(self.parse_type_hint()?)
+        } else {
+            None
+        };
         // The target is a bare name or `Class.member`. A longer one is a full name, which the analyzer refuses with the
         // import to add, spec section 23. A namespace is dotted as any namespace.
         let target = self.parse_dotted_identifier()?;
+        let (type_parameters, member, parameter_list) = if return_type_hint.is_some() {
+            let type_parameters = self.parse_optional_type_parameter_list()?;
+            let member = if type_parameters.is_some() {
+                self.stream.eat_span(T!["."])?;
+
+                Some(self.parse_local_identifier()?)
+            } else {
+                None
+            };
+
+            (type_parameters, member, Some(self.parse_function_like_parameter_list()?))
+        } else {
+            (None, None, None)
+        };
         let (namespaced, uses) = if namespace.is_some() {
             let r#for = self.expect_keyword(T!["for"])?;
 
@@ -50,11 +72,28 @@ where
             r#extern,
             event,
             namespace,
+            return_type_hint,
             target,
+            type_parameters,
+            member,
+            parameter_list,
             namespaced,
             uses,
             terminator: self.parse_terminator()?,
         })
+    }
+
+    /// Whether the `extern` line ahead states a signature: a `(` comes before the line ends.
+    fn is_at_extern_signature(&self) -> Result<bool, ParseError<'arena>> {
+        for token in self.stream.peek_tokens() {
+            match token?.kind {
+                T!["("] => return Ok(true),
+                T![";" | "{" | "}"] => return Ok(false),
+                _ => {}
+            }
+        }
+
+        Ok(false)
     }
 
     /// Parses a `uses` clause when one starts here: `uses`, which stays a name everywhere else, and its effects.

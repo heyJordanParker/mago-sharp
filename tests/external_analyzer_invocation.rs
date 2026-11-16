@@ -310,10 +310,7 @@ take_string($user->name);
 take_int($user->id);
 take_user($user->self);
 $user->secret = 'token';
-// @mago-expect analysis:invalid-property-write
 $user->id = 'forbidden';
-// @mago-expect analysis:invalid-property-read
-// @mago-expect analysis:no-value
 echo $user->secret;
 
 /** @var Builder<User> $builder */
@@ -470,9 +467,12 @@ fn external_providers_receive_complete_invocation_context() -> Result<(), Box<dy
     }
 
     let observation = analyze_with_fixture("src/invocation.php", SOURCE, &[])?;
-    assert!(
-        observation.issues.is_empty(),
-        "complete external invocation context should preserve precise types: {:#?}",
+    let mut codes: Vec<&str> = observation.issues.iter().filter_map(|(code, _)| code.as_deref()).collect();
+    codes.sort_unstable();
+    assert_eq!(
+        codes,
+        ["invalid-property-read", "invalid-property-write", "no-value"],
+        "complete external invocation context should preserve precise types, and leave only the fixture's own errors: {:#?}",
         observation.issues
     );
 

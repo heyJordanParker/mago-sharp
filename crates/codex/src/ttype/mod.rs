@@ -1572,7 +1572,7 @@ pub fn get_collection_object(array: &TArray, codebase: &CodebaseMetadata) -> Opt
 ///
 /// It is the type the bridge writes in a PHP declaration, and so the type the engine links a plain PHP class's method
 /// against. A type parameter is its bound, or `mixed` without one; a generic class is its class; `Self` is `static`;
-/// `Class<T>` is `string`; a `List` or a tuple is `array`; a `Map` or a `Set` is the engine's `Sharp\Map` or
+/// `Class<T>` and `keyof T` are `string`; a `List` or a tuple is `array`; a `Map` or a `Set` is the engine's `Sharp\Map` or
 /// `Sharp\Set`; an `Iterable` is `iterable`; a function type is `Closure`, and PHP's `callable` stays `callable`; and
 /// `Any` is `mixed`. A plain PHP trait is
 /// `object`, since no value is `instanceof` a trait, so an intersection keeps its classes alone. Members that erase to
@@ -1619,6 +1619,7 @@ pub fn get_php_declared_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TU
         TAtomic::Callable(callable) if callable.is_closure() => vec![named("Closure")],
         TAtomic::Callable(_) => get_mixed_callable().types.into_owned(),
         TAtomic::Scalar(TScalar::ClassLikeString(_)) => get_string().types.into_owned(),
+        atomic if atomic.is_member_name() => get_string().types.into_owned(),
         TAtomic::Object(TObject::Named(TNamedObject { intersection_types, .. }))
         | TAtomic::Reference(TReference::Symbol { intersection_types, .. }) => {
             let mut classes = std::iter::once(atomic)
@@ -2203,7 +2204,7 @@ pub enum SharpType<'atomic> {
 }
 
 /// `atomic` as PHP# writes it, or `None` for a type only a PHP docblock writes, such as `array-key`, `scalar`,
-/// `numeric`, `resource` or an `array{…}` shape.
+/// `numeric`, `resource` or an `array{…}` shape. A member name, `keyof T`, is a `string`.
 #[must_use]
 pub fn get_sharp_type(atomic: &TAtomic) -> Option<SharpType<'_>> {
     Some(match atomic {
@@ -2225,6 +2226,7 @@ pub fn get_sharp_type(atomic: &TAtomic) -> Option<SharpType<'_>> {
         TAtomic::Iterable(iterable) => SharpType::Iterable(iterable.get_value_type()),
         TAtomic::GenericParameter(parameter) => SharpType::Parameter(parameter),
         TAtomic::Callable(TCallable::Signature(signature)) => SharpType::Function(signature),
+        atomic if atomic.is_member_name() => SharpType::String,
         _ => return None,
     })
 }

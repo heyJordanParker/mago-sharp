@@ -56,8 +56,6 @@ require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
  * from `src/flag.php` to `Box::value` while `PROOF_REFERENCE` is declared, a node hook that reports
  * each function and fails in a file marked `node hook: fail`, a failing after-analysis hook, and a
  * cross-file rule that reports a route declared by two analyzed files.
- *
- * @mago-expect lint:cyclomatic-complexity
  */
 final class ServerProofPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysisHook, AfterAnalysisHook
 {
@@ -145,9 +143,6 @@ final class ServerProofPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysi
  * the method's visibility, in a file marked `lists: classes` every class name, and in a file
  * marked `compares: Class` whether the class is a `Base`. Each report counts the hook's runs in
  * this worker, so a test sees whether Mago ran it again.
- *
- * @mago-expect lint:single-class-per-file
- * @mago-expect lint:cyclomatic-complexity
  */
 final class ServerReadsPlugin implements Plugin, AfterFileAnalysisHook
 {
@@ -243,8 +238,6 @@ final class ServerReadsPlugin implements Plugin, AfterFileAnalysisHook
  * `App\Models\Order::total()` declares, read from the codebase, `App\Models\Query::models()`
  * with `int` once it listed every class, and `App\Models\Query::billable()` with `int` when
  * `App\Models\Order` is an `App\Models\Model` and `0` otherwise.
- *
- * @mago-expect lint:single-class-per-file
  */
 final class ServerModelPlugin implements Plugin, MethodReturnTypeProvider
 {
@@ -291,8 +284,6 @@ final class ServerModelPlugin implements Plugin, MethodReturnTypeProvider
  * one file and answers every later file of the analysis from it. In a file marked `owners: Class` it reports at each
  * class declaration whether `Class` has such a method, and in the file it read the listing for that it read it there.
  * Each report counts the hook's runs in its file in this worker, so a test sees whether Mago ran it again.
- *
- * @mago-expect lint:single-class-per-file
  */
 final class ServerOwnersPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysisHook
 {
@@ -371,8 +362,6 @@ final class ServerOwnersPlugin implements Plugin, BeforeAnalysisHook, NodeAnalys
  * and answers every later file of the analysis from it. In a file marked `extends: Class Parent` it reports at each
  * class declaration whether `Class` extends `Parent`. Each report counts the hook's runs in its file in this worker, so
  * a test sees whether Mago ran it again.
- *
- * @mago-expect lint:single-class-per-file
  */
 final class ServerParentsPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysisHook
 {
@@ -442,8 +431,6 @@ final class ServerParentsPlugin implements Plugin, BeforeAnalysisHook, NodeAnaly
  * A rule that reads `Shipment`'s parents before the analysis and keeps them in a field, as an app's rule fills a cache
  * before any file. In a file marked `prepared: Parent` it reports at each class declaration whether `Shipment` extends
  * `Parent`. Each report counts the hook's runs in its file in this worker, so a test sees whether Mago ran it again.
- *
- * @mago-expect lint:single-class-per-file
  */
 final class ServerPreparedPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysisHook
 {
@@ -512,8 +499,6 @@ final class ServerPreparedPlugin implements Plugin, BeforeAnalysisHook, NodeAnal
  * A rule that lists the methods with a `#[Relation]` attribute before the analysis, in a project that declares
  * `App\Models\Line`, and keeps them in a field, and a property type provider of the same plugin that answers
  * `App\Models\Order::$items` from that field alone, reading nothing itself: `int` while any class has a relation.
- *
- * @mago-expect lint:single-class-per-file
  */
 final class ServerRelationsPlugin implements Plugin, BeforeAnalysisHook, PropertyTypeProvider
 {

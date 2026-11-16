@@ -10,7 +10,6 @@ use Mago\Sdk\Syntax\NodeKind;
 
 /**
  * @internal
- * @mago-expect lint:excessive-parameter-list
  */
 final class NodeAnalysisData
 {

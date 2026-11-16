@@ -4203,14 +4203,11 @@ fn compile_proves_a_package_law_and_writes_nothing_under_vendor() {
 }
 
 #[test]
-fn compile_refuses_an_unproven_law_whatever_pragma_ignore_entry_or_baseline_entry_targets_it() {
-    let broken = |pragma: &str| {
-        LAWFUL_MONEY
-            .replace("this.amount + other.amount, this.currency", "this.amount + other.amount, other.currency")
-            .replace("    law ", &format!("    {pragma}\n    law "))
-    };
-    let workspace = |pragma: &str, analyzer: &str| {
-        let directory = lawful_project(&[("app/Shared/Money.sharp", &broken(pragma))]);
+fn compile_refuses_an_unproven_law_whatever_ignore_entry_or_baseline_entry_targets_it() {
+    let broken =
+        LAWFUL_MONEY.replace("this.amount + other.amount, this.currency", "this.amount + other.amount, other.currency");
+    let workspace = |analyzer: &str| {
+        let directory = lawful_project(&[("app/Shared/Money.sharp", &broken)]);
         write(
             directory.path(),
             "mago.toml",
@@ -4218,18 +4215,16 @@ fn compile_refuses_an_unproven_law_whatever_pragma_ignore_entry_or_baseline_entr
         );
         directory
     };
-    let baselined = workspace("", "baseline = \"baseline.toml\"");
+    let baselined = workspace("baseline = \"baseline.toml\"");
     write(
         baselined.path(),
         "baseline.toml",
         "variant = \"strict\"\n\n[[entries.\"app/Shared/Money.sharp\".issues]]\ncode = \"law-unproven\"\nstart_line = 8\nend_line = 8\n",
     );
 
-    for (suppression, directory) in [
-        ("a pragma", workspace("// @mago-expect analysis:law-unproven", "")),
-        ("an ignore entry", workspace("", "ignore = [\"law-unproven\"]")),
-        ("a baseline entry", baselined),
-    ] {
+    for (suppression, directory) in
+        [("an ignore entry", workspace("ignore = [\"law-unproven\"]")), ("a baseline entry", baselined)]
+    {
         let output = compile_lines(directory.path());
 
         assert_eq!(output.status.code(), Some(1), "{suppression}: {}", printed(&output));

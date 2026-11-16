@@ -705,8 +705,13 @@ where
     /// An `extern` target is a class when it is `Class.member` or the file imports, declares or names it by default,
     /// and a global function otherwise, since PHP# declares no functions. `Class.member` resolves its class and keeps the
     /// member as written. `Pdf.render` binds as a class whose member the analysis finds as a function when the import
-    /// names a namespace.
+    /// names a namespace. A stated signature's parameters are its own, and the type parameters written after its class,
+    /// as `TModel` in `Builder<TModel>.where`, are in scope until the line ends.
     fn walk_in_extern(&mut self, r#extern: &'ast Extern<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        if r#extern.parameter_list.is_some() {
+            self.locals.enter_method();
+            self.enter_type_parameters(r#extern.type_parameters.as_ref());
+        }
         let target = &r#extern.target;
         // Spec section 23: `extern namespace WordPress for WP_Post;` names a namespace through the file's import of it,
         // as `Foundation` after `import Illuminate.Foundation;`, or as written, and a class, function or constant of
@@ -725,6 +730,7 @@ where
         let (fqn, imported) = self.resolve_class(context, class);
         // An `extern event` always names a class, spec section 15.
         if r#extern.event.is_none()
+            && r#extern.member.is_none()
             && !target.is_dotted()
             && !imported
             && !self.declared_classes.contains(class)
@@ -737,6 +743,13 @@ where
 
         self.resolved_names.insert_at(target.span(), fqn, imported);
         self.resolved_names.bind(target.span(), Binding::Class);
+    }
+
+    fn walk_out_extern(&mut self, r#extern: &'ast Extern<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        if r#extern.parameter_list.is_some() {
+            self.locals.exit_method();
+            self.exit_type_parameters();
+        }
     }
 
     /// A name in `uses` names an effect, spec section 29. A standard effect's name is that effect even where the file

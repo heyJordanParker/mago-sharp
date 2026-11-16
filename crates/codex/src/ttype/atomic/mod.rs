@@ -645,6 +645,12 @@ impl TAtomic {
         }
     }
 
+    /// Whether this is a member name, PHP#'s `keyof Order`, spec section 11: a `string` only `nameof` gives.
+    #[must_use]
+    pub fn is_member_name(&self) -> bool {
+        matches!(self, TAtomic::Derived(TDerived::KeyOf(key_of)) if key_of.names_members())
+    }
+
     #[must_use]
     pub fn get_integer(&self) -> Option<TInteger> {
         match self {

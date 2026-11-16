@@ -23,7 +23,6 @@ use const PHP_OS_FAMILY;
  * A serialized writer specialized for Mago's worker pipe.
  *
  * @internal
- * @mago-expect lint:cyclomatic-complexity
  */
 final class ResourceWriter
 {
@@ -78,8 +77,6 @@ final class ResourceWriter
 
     /**
      * Queue bytes and drain them in frame order.
-     *
-     * @mago-expect lint:no-isset
      */
     public function write(string $bytes): void
     {

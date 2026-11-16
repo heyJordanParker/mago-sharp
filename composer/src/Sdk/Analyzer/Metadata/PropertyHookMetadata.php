@@ -10,7 +10,6 @@ use Mago\Sdk\SourceLocation;
  * Metadata for a PHP property get or set hook.
  *
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class PropertyHookMetadata
 {

@@ -67,11 +67,6 @@ use const LOCK_EX;
 
 require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
 
-/**
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:kan-defect
- * @mago-expect lint:too-many-methods
- */
 final class LifecycleProofPlugin implements
     Plugin,
     InitializationHook,
@@ -223,7 +218,6 @@ final class LifecycleProofPlugin implements
         $context->report(Level::Help, 'before', Issue::at('Before-analysis hook ran.', $base->location));
     }
 
-    /** @mago-expect lint:halstead */
     public function afterFileAnalysis(AfterFileAnalysisContext $context): void
     {
         $this->verifySharedContext($context);
@@ -352,7 +346,6 @@ final class LifecycleProofPlugin implements
         );
     }
 
-    /** @mago-expect lint:halstead */
     public function afterAnalysis(AfterAnalysisContext $context): void
     {
         $base = $this->verifySharedContext($context);
@@ -376,8 +369,7 @@ final class LifecycleProofPlugin implements
         $lateReferenceEnabled = $context->codebase->getConstant('ENABLE_LATE_FRAMEWORK_ACTION') !== null;
         $project = $context->analysis;
         $expectedIssueCount =
-            3 + ($frameworkReferenceEnabled ? 0 : 1) + ($lateReferenceEnabled ? 0 : 1) + (count($project->files) * 2)
-            - 1;
+            4 + ($frameworkReferenceEnabled ? 0 : 1) + ($lateReferenceEnabled ? 0 : 1) + (count($project->files) * 2);
         if ($project->issueCount !== $expectedIssueCount) {
             throw new RuntimeException(
                 "The final hook received {$project->issueCount} issues; expected {$expectedIssueCount}.",
@@ -540,7 +532,6 @@ final class LifecycleProofPlugin implements
         );
     }
 
-    /** @mago-expect lint:halstead */
     private function verifySharedContext(LifecycleContext $context): ClassLikeMetadata
     {
         [$base, $missing] = $context->codebase->getMultipleClasses(['LifecycleClass0', 'DefinitelyMissing']);
@@ -659,9 +650,6 @@ final class LifecycleProofPlugin implements
     }
 }
 
-/**
- * @mago-expect lint:single-class-per-file
- */
 final class LifecycleMethodCallHook implements MethodCallAnalysisHook
 {
     public function __construct(
@@ -701,9 +689,6 @@ final class LifecycleMethodCallHook implements MethodCallAnalysisHook
     }
 }
 
-/**
- * @mago-expect lint:single-class-per-file
- */
 final class LifecycleClassLikeHook implements ClassLikeAnalysisHook
 {
     public function __construct(

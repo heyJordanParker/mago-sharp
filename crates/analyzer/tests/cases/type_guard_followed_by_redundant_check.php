@@ -5,10 +5,10 @@ function foo(string $_x): void
 }
 
 /**
- * @mago-expect analysis:redundant-condition - second if condition
+ * @mago-expect analysis:redundant-condition(2) - second if condition
  * @mago-expect analysis:redundant-logical-operation - `||` in second `if`
  * @mago-expect analysis:unreachable-else-clause - `else if` is unreachable
- * @mago-expect analysis:redundant-type-comparison
+ * @mago-expect analysis:redundant-type-comparison(3)
  */
 function bar(string|null|false $x): void
 {

@@ -55,7 +55,7 @@ pub mod r#use;
 pub mod variable;
 pub mod r#yield;
 
-const DEFAULT_IMPORTANT_COMMENT_PATTERNS: &[&[u8]] = &[b"@mago-", b"@"];
+const DEFAULT_IMPORTANT_COMMENT_PATTERNS: &[&[u8]] = &[b"@"];
 
 /// Hashes a byte slice into `hasher` after ASCII case-folding.
 ///

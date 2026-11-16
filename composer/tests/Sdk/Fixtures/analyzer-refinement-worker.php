@@ -43,9 +43,6 @@ require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
  * arguments a class gives its parent, the parent every user of a trait extends, the members of an
  * anonymous class, and applications of a generic class on another class's members, all read from the
  * scanned source.
- *
- * @mago-expect lint:file-name
- * @mago-expect lint:cyclomatic-complexity
  */
 final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
 {

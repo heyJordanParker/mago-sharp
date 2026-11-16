@@ -14,7 +14,6 @@ use Mago\Sdk\Exception\InvalidArgumentException;
  * while the native declarations stay in place and an incompatible refinement is still reported.
  *
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class ClassLikeRefinement
 {

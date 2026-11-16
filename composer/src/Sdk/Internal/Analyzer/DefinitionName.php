@@ -15,7 +15,6 @@ use function strtolower;
  * Validates names carried by direct codebase definitions.
  *
  * @internal
- * @mago-expect lint:cyclomatic-complexity
  */
 final class DefinitionName
 {

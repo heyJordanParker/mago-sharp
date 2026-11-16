@@ -19,7 +19,6 @@ use function count;
  * Performs codebase-aware type comparisons using Mago's native type system.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
  */
 final class TypeComparator
 {
@@ -64,8 +63,6 @@ final class TypeComparator
      * @param list<TypeComparison> $comparisons
      *
      * @return list<bool>
-     *
-     * @mago-expect analysis:impossible-condition Runtime validation protects untyped callers.
      */
     public function compareMultiple(array $comparisons): array
     {

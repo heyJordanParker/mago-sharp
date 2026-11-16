@@ -8,6 +8,7 @@ use crate::ttype::atomic::derived::value_of::TValueOf;
 use crate::ttype::comparator::ComparisonResult;
 use crate::ttype::comparator::atomic_comparator;
 use crate::ttype::comparator::union_comparator;
+use crate::ttype::get_non_empty_unspecified_literal_string;
 
 pub fn is_contained_by(
     codebase: &CodebaseMetadata,
@@ -36,6 +37,20 @@ pub fn is_contained_by(
         };
 
         return match (derived_container, derived_input) {
+            // A class's member names include its parent's, so `keyof Line` fits `keyof Order` when `Order` is a `Line`,
+            // spec section 11.2.
+            (TDerived::KeyOf(container), TDerived::KeyOf(input)) if container.names_members() => {
+                input.names_members()
+                    && union_comparator::is_contained_by(
+                        codebase,
+                        container.get_target_type(),
+                        input.get_target_type(),
+                        false,
+                        false,
+                        inside_assertion,
+                        atomic_comparison_result,
+                    )
+            }
             (TDerived::KeyOf(_), TDerived::KeyOf(_))
             | (TDerived::ValueOf(_), TDerived::ValueOf(_))
             | (TDerived::PropertiesOf(_), TDerived::PropertiesOf(_)) => {
@@ -102,6 +117,7 @@ pub fn is_contained_by(
     };
 
     let input_union = match derived_input {
+        TDerived::KeyOf(key_of) if key_of.names_members() => Some(get_non_empty_unspecified_literal_string()),
         TDerived::KeyOf(key_of) => TKeyOf::get_key_of_targets(&key_of.get_target_type().types, codebase, false),
         TDerived::ValueOf(value_of) => {
             TValueOf::get_value_of_targets(&value_of.get_target_type().types, codebase, false)

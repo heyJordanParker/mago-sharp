@@ -20,8 +20,6 @@ use function substr;
  * An immutable syntax view of the exact source analyzed by Mago.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:too-many-methods
  */
 final class SourceFile
 {
@@ -38,7 +36,6 @@ final class SourceFile
     /**
      * @param array<int, int<0, 4294967295>> $targetNodeIds
      * @internal
-     * @mago-expect lint:excessive-parameter-list
      */
     public function __construct(
         public readonly PHPVersion $phpVersion,

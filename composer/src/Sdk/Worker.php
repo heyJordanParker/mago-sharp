@@ -98,10 +98,6 @@ use const STDOUT;
  * Persistent worker process serving one or more Mago extensions.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:kan-defect
- * @mago-expect lint:too-many-methods
- * @mago-expect lint:too-many-properties
  */
 final class Worker
 {
@@ -178,9 +174,6 @@ final class Worker
 
     private ?MetadataCache $metadataCache = null;
 
-    /**
-     * @mago-expect lint:halstead
-     */
     public function __construct(Extension $extension, Extension ...$additionalExtensions)
     {
         $extensions = [$extension, ...array_values($additionalExtensions)];
@@ -531,7 +524,6 @@ final class Worker
      * @param resource|null $input
      * @param resource|null $output
      * @param int $maximumPayloadSize Maximum accepted frame payload in bytes.
-     * @mago-expect lint:halstead
      */
     public function run(
         mixed $input = null,
@@ -842,9 +834,6 @@ final class Worker
      * and in `$issueReads` otherwise.
      *
      * @param positive-int $requestId
-     *
-     * @mago-expect lint:excessive-parameter-list
-     * @mago-expect lint:halstead
      */
     private function handleProviderRequest(
         int $kind,
@@ -1292,7 +1281,6 @@ final class Worker
 
     /**
      * @param positive-int $requestId
-     * @mago-expect lint:halstead
      */
     private function handleAnalyzerLifecycleRequest(
         int $kind,

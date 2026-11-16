@@ -15,7 +15,6 @@ use function array_key_last;
  * Supplying one also establishes an otherwise-dynamic magic call as known.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
  */
 final class EffectiveCallableSignature
 {

@@ -14,7 +14,6 @@ use Mago\Sdk\PHPVersion;
  * method or property name, and `receiverType` the object it was requested on.
  *
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class CallForwardingProviderContext
 {

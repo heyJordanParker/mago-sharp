@@ -5,8 +5,11 @@ use mago_word::Word;
 
 use crate::metadata::CodebaseMetadata;
 use crate::metadata::attribute::AttributeMetadata;
+use crate::metadata::parameter::FunctionLikeParameterMetadata;
+use crate::metadata::ttype::TypeMetadata;
 
-/// A PHP# `extern` declaration, which states the effects of one plain PHP class, method or function, spec section 29.
+/// A PHP# `extern` declaration, which states the effects of one plain PHP class, method or function, spec section 29,
+/// and may state a method's or a function's signature, spec section 23.
 ///
 /// The standard library's declarations order first, then the others by their file's name and where the file declares
 /// them, so the first declaration of a target is the same whatever order the files are scanned in, and a project's
@@ -30,6 +33,10 @@ pub struct ExternMetadata {
     pub event: bool,
     /// The attributes written before it, which what it declares carries as its own, spec section 29.
     pub attributes: Vec<AttributeMetadata>,
+    /// The parameters of the signature it states, in PHP# method order, or `None` when it states none.
+    pub parameters: Option<Vec<FunctionLikeParameterMetadata>>,
+    /// The return type of the signature it states.
+    pub return_type: Option<TypeMetadata>,
 }
 
 impl Ord for ExternMetadata {

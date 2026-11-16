@@ -28,6 +28,8 @@ use crate::ttype::atomic::array::list::TList;
 use crate::ttype::atomic::callable::TCallable;
 use crate::ttype::atomic::callable::TCallableSignature;
 use crate::ttype::atomic::callable::parameter::TCallableParameter;
+use crate::ttype::atomic::derived::TDerived;
+use crate::ttype::atomic::derived::key_of::TKeyOf;
 use crate::ttype::atomic::iterable::TIterable;
 use crate::ttype::atomic::mixed::TMixed;
 use crate::ttype::atomic::object::TObject;
@@ -220,6 +222,10 @@ fn union_from_hint(
         }
         // Spec section 13: `readonly` before a type makes the value readonly, and everything read through it.
         Hint::Readonly(readonly) => convert(readonly.hint).to_readonly(),
+        // Spec section 11: `keyof Order` holds the names of `Order`'s members, which `nameof` gives.
+        Hint::KeyOf(key_of) => {
+            wrap_atomic(TAtomic::Derived(TDerived::KeyOf(TKeyOf::new(Arc::new(convert(key_of.hint))))))
+        }
         Hint::Nullable(nullable_hint) => match nullable_hint.hint {
             Hint::Null(_) => get_null(),
             Hint::String(_) => get_nullable_string(),

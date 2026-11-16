@@ -111,7 +111,7 @@ impl GuardService {
 
             issues.extend(
                 // Report as issues
-                report.report_into_issues(arena, &source_file, program),
+                report.report_into_issues(arena, &source_file),
             );
 
             Ok(issues)

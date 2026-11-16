@@ -4,7 +4,7 @@
  * @template Tk of array-key
  * @template Tv
  *
- * @mago-expect analysis:unused-template-parameter
+ * @mago-expect analysis:unused-template-parameter(2)
  */
 interface CollectionInterface
 {
@@ -14,7 +14,7 @@ interface CollectionInterface
  * @template Tk of array-key
  * @template Tv
  *
- * @mago-expect analysis:unused-template-parameter
+ * @mago-expect analysis:unused-template-parameter(2)
  */
 interface IndexAccessInterface
 {

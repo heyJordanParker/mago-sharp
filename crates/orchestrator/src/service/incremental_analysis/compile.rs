@@ -301,7 +301,7 @@ impl IncrementalAnalysisService {
     /// file is at it, as [`Self::module_inputs`] gives them. A file outside `vendor/` lists the `Module.sharp` of its
     /// own folder and of each folder above it, whose `imports` line limits what it imports. `check` gets the Lean
     /// translation of every accepted file, and returns the issues of each file whose law is not proved, which refuse
-    /// that file whatever pragma, ignore entry or baseline the analysis honors.
+    /// that file whatever ignore entry or baseline the analysis honors.
     ///
     /// `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or none when no
     /// file is there. It is called once per input. An input no file is at is stored absent: its size, modification

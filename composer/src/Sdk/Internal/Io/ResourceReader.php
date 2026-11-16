@@ -21,7 +21,6 @@ use function substr;
  * A buffered, non-blocking reader specialized for Mago's worker pipe.
  *
  * @internal
- * @mago-expect lint:cyclomatic-complexity
  */
 final class ResourceReader
 {
@@ -73,7 +72,6 @@ final class ResourceReader
      * Returns null only for a clean EOF before any bytes of the next value.
      *
      * @param int<0, max> $length
-     * @mago-expect lint:halstead
      */
     public function readExactly(int $length): ?string
     {

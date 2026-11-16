@@ -27306,6 +27306,68 @@ fn statements_at(code: &str, library: &[(&str, &str)], positions: std::ops::Rang
 }
 
 /// ```php
+/// $url = \Lib\Routing\route($name->value);
+/// return $url . \Lib\Routing\label($maybe?->value) . \Lib\Routing\keep($name);
+/// ```
+///
+/// Spec section 23: a backed case goes into a plain PHP parameter that natively declares only scalars as its value,
+/// read with `?->` when it may be null, as the parameter its `extern` line states takes the case. A parameter that
+/// declares no type takes the case itself.
+#[test]
+fn a_backed_case_goes_into_a_scalar_plain_php_parameter_as_its_value() {
+    let routing = (
+        "src/Lib/Routing/functions.php",
+        "<?php namespace Lib\\Routing; function route(string $name): string { return $name; } function label(?string $name): string { return (string) $name; } function keep($name): string { return 'kept'; }",
+    );
+    let stubs = (
+        "src/Stubs/Routing.sharp",
+        "namespace Stubs;\n\nimport App.Tenant.RouteName;\nimport Lib.Routing;\n\nextern string Routing.route(RouteName name);\nextern string Routing.label(RouteName? name);\nextern string Routing.keep(RouteName name);\n",
+    );
+    let route_name = (
+        "src/App/Tenant/RouteName.sharp",
+        "namespace App.Tenant;\n\npublic enum RouteName : string\n{\n    case Checkout = \"checkout\";\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Routing;\n\nclass Report\n{\n    public string run(RouteName name, RouteName? maybe)\n    {\n        string url = Routing.route(name);\n        return url + Routing.label(maybe) + Routing.keep(name);\n    }\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[routing, stubs, route_name], 0..2),
+        [
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "url"
+                  CALL
+                    ZVAL "Lib\\Routing\\route"
+                    ARG_LIST
+                      PROP
+                        VAR
+                          ZVAL "name"
+                        ZVAL "value"
+            "#},
+            indoc! {r#"
+                RETURN
+                  BINARY_OP [8]
+                    BINARY_OP [8]
+                      VAR
+                        ZVAL "url"
+                      CALL
+                        ZVAL "Lib\\Routing\\label"
+                        ARG_LIST
+                          NULLSAFE_PROP
+                            VAR
+                              ZVAL "maybe"
+                            ZVAL "value"
+                    CALL
+                      ZVAL "Lib\\Routing\\keep"
+                      ARG_LIST
+                        VAR
+                          ZVAL "name"
+            "#},
+        ]
+    );
+}
+
+/// ```php
 /// \Lib\Calc::sum(\Sharp\Internal\arrayOf($stock), extra: \Sharp\Internal\arrayOf($stock));
 /// ```
 ///

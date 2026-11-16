@@ -40,7 +40,6 @@ use crate::error::OrchestratorError;
 use crate::service::body_return::resolve_body_returns;
 use crate::service::incremental_analysis::receiver_changing_members;
 use crate::service::incremental_analysis::resolve_member_reads;
-use crate::service::issue_reconciliation::DeferredIssueReconciler;
 
 pub struct AnalysisService {
     database: ReadDatabase,
@@ -193,7 +192,6 @@ impl AnalysisService {
         if let Some(requirements) = node_analysis_requirements.as_ref() {
             analyzer = analyzer.with_node_analysis_requirements(requirements);
         }
-        analyzer = analyzer.with_deferred_pragmas();
         if let Some(session) = external_session.as_ref() {
             analyzer = analyzer.with_external_analysis_session(session);
         }
@@ -241,9 +239,6 @@ impl AnalysisService {
             .collect();
         analysis_result.issues.extend(unused_classes(&self.codebase, &analysis_result.symbol_references, &test_files));
         analysis_result.issues.extend(self.codebase.take_issues(true));
-        let mut pragma_reconciler =
-            DeferredIssueReconciler::new(analysis_result.take_deferred_pragmas(), self.database.files());
-        analysis_result.issues = pragma_reconciler.reconcile(std::mem::take(&mut analysis_result.issues))?;
         issues.extend(analysis_result.issues.iter().cloned());
         if after_analysis {
             let snapshot = Arc::new(FileAnalysisSnapshot::new(
@@ -263,10 +258,8 @@ impl AnalysisService {
                 &self.codebase,
                 external_session.as_ref(),
             )?;
-            issues.extend(pragma_reconciler.reconcile(reported)?);
+            issues.extend(reported);
         }
-
-        issues.extend(pragma_reconciler.finish()?);
 
         Ok(issues)
     }

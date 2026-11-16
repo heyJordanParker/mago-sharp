@@ -48,6 +48,7 @@ pub enum Hint<'arena> {
     Function(FunctionHint<'arena>),
     Tuple(TupleHint<'arena>),
     Readonly(ReadonlyHint<'arena>),
+    KeyOf(KeyOfHint<'arena>),
 }
 
 /// Represents a PHP# tuple type, as spec section 30 writes it in TypeScript's brackets: a fixed number of element
@@ -86,6 +87,21 @@ pub struct TupleElementHint<'arena> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ReadonlyHint<'arena> {
     pub readonly: Keyword<'arena>,
+    pub hint: &'arena Hint<'arena>,
+}
+
+/// Represents a PHP# member name type, as spec section 11 writes `keyof` before a class or a type parameter: the names
+/// of its members that are readable where the type is written, which `nameof` gives.
+///
+/// # Examples
+///
+/// ```csharp
+/// public Query<T> orderBy(keyof T column)
+/// ```
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct KeyOfHint<'arena> {
+    pub keyof: Keyword<'arena>,
     pub hint: &'arena Hint<'arena>,
 }
 
@@ -449,6 +465,7 @@ impl HasSpan for Hint<'_> {
             Hint::Function(function) => function.span(),
             Hint::Tuple(tuple) => tuple.span(),
             Hint::Readonly(readonly) => readonly.span(),
+            Hint::KeyOf(key_of) => key_of.span(),
         }
     }
 }
@@ -468,6 +485,12 @@ impl HasSpan for TupleElementHint<'_> {
 impl HasSpan for ReadonlyHint<'_> {
     fn span(&self) -> Span {
         self.readonly.span().join(self.hint.span())
+    }
+}
+
+impl HasSpan for KeyOfHint<'_> {
+    fn span(&self) -> Span {
+        self.keyof.span().join(self.hint.span())
     }
 }
 

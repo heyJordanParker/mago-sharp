@@ -36,8 +36,6 @@ use function strlen;
  * An immutable semantic type returned by an analyzer provider.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:too-many-methods
  */
 final class Type
 {

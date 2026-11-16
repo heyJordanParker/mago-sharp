@@ -21,7 +21,6 @@ use const STREAM_SHUT_WR;
  * Connects the worker's non-blocking input transport when requested by Mago.
  *
  * @internal
- * @mago-expect lint:cyclomatic-complexity
  */
 final class InputTransport
 {

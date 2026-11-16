@@ -71,6 +71,7 @@ use crate::statement::class_like::r#struct::data_enum;
 use crate::statement::class_like::r#struct::declares_equality;
 use crate::statement::class_like::r#struct::value_properties;
 use crate::utils::expression::get_literal_array_key;
+use crate::utils::is_compile_time_string;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::article;
 use crate::utils::names::display_bool;
@@ -122,6 +123,9 @@ where
         report_sharp_refusal(context, binary, refusal, lhs_type, rhs_type);
     }
     let refused = refusal.is_some();
+    if !refused {
+        report_compile_time_selection(context, binary, lhs_type, rhs_type);
+    }
 
     // A PHP# comparison of instances runs the operator their class declares, which returns the `bool` it decides.
     if !refused
@@ -1336,6 +1340,54 @@ where
 }
 
 /// Reports `refusal` on `binary`, naming both types and the comparison to write instead.
+/// Spec section 24: in an application, `==`, `!=` or a value pattern that compares a string with a string fixed at
+/// compile time, a literal, a constant, a backed case's `.value` or a join of them, selects one of a closed set of
+/// values, and a closed set of values is a backed enum. The error names the compared value and the fixed string. `""`
+/// is the empty text, which `isEmpty()` tests. Two strings from data compare as text, and a library is exempt.
+fn report_compile_time_selection<A>(
+    context: &mut Context<'_, '_, A>,
+    binary: &Binary<'_>,
+    lhs_type: &TUnion,
+    rhs_type: &TUnion,
+) where
+    A: Arena,
+{
+    let operator = binary.operator.span();
+    if !context.dialect.is_sharp()
+        || !context.source_file.is_project
+        || operator.file_id.is_zero()
+        || !matches!(binary.operator, BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_))
+    {
+        return;
+    }
+    let (compared, fixed, fixed_type) = match (is_compile_time_string(lhs_type), is_compile_time_string(rhs_type)) {
+        (_, true) if lhs_type.has_string() => (binary.lhs, binary.rhs, rhs_type),
+        (true, false) if rhs_type.has_string() => (binary.rhs, binary.lhs, lhs_type),
+        _ => return,
+    };
+    let (compared, fixed_text) = (quoted_source(context, compared.span()), quoted_source(context, fixed.span()));
+    let is_pattern = operator == binary.lhs.span() || operator == binary.rhs.span();
+    let selection =
+        if is_pattern { "A pattern".to_owned() } else { format!("`{}`", BytesDisplay(binary.operator.as_bytes())) };
+    let issue = if fixed_type.get_single_literal_string_value() == Some(b"".as_slice()) {
+        let test = if binary.operator.is_negated_equality() { "isNotEmpty" } else { "isEmpty" };
+
+        Issue::error(format!("{selection} compares `{compared}` with `\"\"`, a string fixed at compile time."))
+            .with_help(format!("Call `{compared}.{test}()`."))
+    } else {
+        Issue::error(format!(
+            "{selection} compares `{compared}` with `{fixed_text}`, a string fixed at compile time, so it selects one of a closed set of values."
+        ))
+        .with_note("A string fixed at compile time is a literal, a constant, a backed case's `.value` or a join of them.")
+        .with_help(format!(
+            "Declare the values `{compared}` takes as a backed enum, read them into it where the data enters, and compare `{compared}` with a case."
+        ))
+    };
+    let span = if is_pattern { operator } else { binary.span() };
+
+    context.collector.report_with_code(IssueCode::InvalidOperand, issue.with_annotation(Annotation::primary(span)));
+}
+
 pub(crate) fn report_sharp_refusal<A>(
     context: &mut Context<'_, '_, A>,
     binary: &Binary<'_>,

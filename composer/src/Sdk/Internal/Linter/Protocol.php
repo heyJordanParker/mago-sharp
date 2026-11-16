@@ -21,7 +21,6 @@ use function unpack;
 
 /**
  * @internal
- * @mago-expect lint:cyclomatic-complexity
  */
 final class Protocol
 {

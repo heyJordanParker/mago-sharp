@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace Mago\Tests\Sdk\Unit\Analyzer;
 
 use Mago\Sdk\Analyzer\Type;
+use Mago\Sdk\Analyzer\Type\DerivedType;
+use Mago\Sdk\Analyzer\Type\DerivedTypeKind;
 use Mago\Sdk\Analyzer\Type\ListType;
+use Mago\Sdk\Analyzer\Type\NamedObjectType;
 use Mago\Sdk\Analyzer\Type\TypeFlags;
 use Mago\Sdk\Internal\Protocol\PayloadReader;
 use PHPUnit\Framework\TestCase;
@@ -35,5 +38,24 @@ final class TypeEncodingTest extends TestCase
         self::assertFalse($reader->readBoolean());
         self::assertTrue($reader->readBoolean());
         $reader->finish();
+    }
+
+    /** PHP#'s `keyof Order`, the type `nameof(Order.total)` has, is a key-of over the class. */
+    public function testAMemberNameTypeEncodesAsAKeyOfItsClass(): void
+    {
+        $order = new NamedObjectType('App\\Order', null, null, false, false, null, false);
+        $type = Type::fromAtomic(new DerivedType(DerivedTypeKind::KeyOf, [Type::fromAtomic($order)]));
+        $reader = new PayloadReader($type->encode());
+
+        self::assertSame(20, $reader->readU8());
+        self::assertSame(0, $reader->readU16());
+        self::assertSame(1, $reader->readU32());
+        self::assertSame(12, $reader->readU8());
+        self::assertSame(1, $reader->readU8());
+        self::assertSame(0, $reader->readU16());
+        self::assertSame(1, $reader->readU32());
+        self::assertSame(4, $reader->readU8());
+        self::assertSame(2, $reader->readU8());
+        self::assertSame('App\\Order', $reader->readBytes());
     }
 }

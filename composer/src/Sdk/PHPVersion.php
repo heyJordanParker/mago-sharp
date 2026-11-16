@@ -10,7 +10,6 @@ use Mago\Sdk\Exception\InvalidArgumentException;
  * The PHP language version selected by Mago for the current operation.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
  */
 final class PHPVersion
 {

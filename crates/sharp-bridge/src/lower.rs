@@ -9420,9 +9420,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The arguments of `list` as a call of plain PHP whose parameters are `parameters` takes them, each `Map` or `Set`
-    /// crossed as [`Self::call`] says, with each typed local a reference parameter writes, whose type holds a `Map` or a
-    /// `Set` that plain PHP's array crosses back into: its span, its name, its declared type, and whether the parameter
-    /// takes an array, as [`PlainParameter::takes_array`] says.
+    /// crossed as [`Self::call`] says and each backed case as [`Self::backing_value`] says, with each typed local a
+    /// reference parameter writes, whose type holds a `Map` or a `Set` that plain PHP's array crosses back into: its
+    /// span, its name, its declared type, and whether the parameter takes an array, as [`PlainParameter::takes_array`]
+    /// says.
     #[allow(clippy::type_complexity)]
     fn crossing_arguments<'value>(
         &mut self,
@@ -9448,6 +9449,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                     self.arriving(value, Arrival::Plain)
                 }
+                (false, _) if let Some(backing) = self.backing_value(line, value, parameter) => backing,
                 _ => self.received_value(line, value, takes_array, receiver),
             };
             arguments.push(match argument {
@@ -9462,6 +9464,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         (arguments, written)
+    }
+
+    /// The lowered `value->value` on line `line`, `?->` for a nullable one, when `value` is a backed case and plain PHP's
+    /// `parameter` natively declares only scalars, as `string $name`, which take the case's value and never the case,
+    /// spec section 23. None otherwise, for a parameter that may take the case itself.
+    fn backing_value(&mut self, line: u32, value: &Expression, parameter: Option<PlainParameter>) -> Option<u32> {
+        let Some(PlainParameter::Declared(parameter)) = parameter else {
+            return None;
+        };
+        let native = &parameter.type_declaration_metadata.as_ref()?.type_union;
+        let r#type = self.types.expression_type(value);
+        if self.backed_enum(&r#type.to_non_nullable()).is_none()
+            || !native.types.iter().all(|atomic| atomic.is_some_scalar() || atomic.is_null())
+        {
+            return None;
+        }
+        let read = if r#type.has_null() { SHARP_AST_NULLSAFE_PROP } else { SHARP_AST_PROP };
+        let case = self.arriving(value, Arrival::Plain);
+        let backing = self.string(0, line, b"value");
+
+        Some(self.node(read, 0, line, &[case, backing]))
     }
 
     /// The lowered `value` as plain PHP receives it on line `line`, in a parameter or a place it declares, which

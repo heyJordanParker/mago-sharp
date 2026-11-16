@@ -38,9 +38,6 @@ use function strtolower;
  * Read-only access to Mago's frozen, merged codebase metadata.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:kan-defect
- * @mago-expect lint:too-many-methods
  */
 final class Codebase
 {
@@ -464,7 +461,6 @@ final class Codebase
      *
      * @param list<string> $withAnyAttribute
      * @return list<MethodMetadataProjection>
-     * @mago-expect lint:excessive-parameter-list
      */
     public function findMethods(
         ?string $class = null,

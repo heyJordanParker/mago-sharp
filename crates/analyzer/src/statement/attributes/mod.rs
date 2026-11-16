@@ -28,6 +28,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects::check::written_target;
 use crate::error::AnalysisError;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
@@ -152,11 +153,11 @@ where
                         IssueCode::InvalidAttributeTarget,
                         Issue::error(format!(
                             "`{}` is a method of `{declaring_class}`, so an `extern` line of `{declaring_class}`'s method gives it attributes.",
-                            BytesDisplay(r#extern.target.value()),
+                            written_target(r#extern),
                         ))
                         .with_help(format!(
                             "Write the attributes on `extern {declaring_class}.{};`.",
-                            BytesDisplay(r#extern.target.last_segment())
+                            BytesDisplay(r#extern.member_name().unwrap_or_default())
                         ))
                         .with_annotation(Annotation::primary(first.span()).with_message("Written here."))
                         .with_annotation(Annotation::secondary(r#extern.target.span()).with_message("Declared here.")),

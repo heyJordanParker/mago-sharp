@@ -119,6 +119,11 @@ pub struct CodebaseMetadata {
     /// duplicate.
     #[cfg_attr(feature = "serde", serde(default))]
     pub externs: HashMap<(Word, Word), Vec<ExternMetadata>>,
+    /// The method or function a PHP# caller sees for each plain PHP method and function whose `extern` line states its
+    /// signature, spec section 23: its own, with the line's parameters and return type. Keyed as `function_likes` keys
+    /// it, and made again on each population.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extern_signatures: HashMap<(Word, Word), Shared<FunctionLikeMetadata>>,
     /// Every PHP# module, spec section 32, in the order [`ModuleMetadata`] sorts them.
     #[cfg_attr(feature = "serde", serde(default))]
     pub modules: Vec<ModuleMetadata>,
@@ -643,6 +648,27 @@ impl CodebaseMetadata {
             FunctionLikeIdentifier::Method(class, method) => self.get_method(class.as_bytes(), method.as_bytes()),
             FunctionLikeIdentifier::Closure(name) => self.get_closure(name),
         }
+    }
+
+    /// The method or function `identifier` as a PHP# caller sees it when its `extern` line states its signature, spec
+    /// section 23: the line's parameters and return type, which the call is checked against.
+    #[must_use]
+    pub fn get_extern_signature(
+        &self,
+        identifier: &crate::identifier::function_like::FunctionLikeIdentifier,
+    ) -> Option<&FunctionLikeMetadata> {
+        use crate::identifier::function_like::FunctionLikeIdentifier;
+        let key = match identifier {
+            FunctionLikeIdentifier::Function(name) => (empty_word(), ascii_lowercase_word(name.as_bytes())),
+            FunctionLikeIdentifier::Method(class, method) => {
+                let class = self.class_key(class.as_bytes());
+
+                (class, self.method_key(class, method.as_bytes()))
+            }
+            FunctionLikeIdentifier::Closure(_) => return None,
+        };
+
+        self.extern_signatures.get(&key).map(|metadata| &**metadata)
     }
 
     /// Retrieves metadata for a global constant.

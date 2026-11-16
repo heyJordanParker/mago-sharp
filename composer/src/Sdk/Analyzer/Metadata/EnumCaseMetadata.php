@@ -9,7 +9,6 @@ use Mago\Sdk\SourceLocation;
 
 /**
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class EnumCaseMetadata
 {

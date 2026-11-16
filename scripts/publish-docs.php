@@ -345,8 +345,6 @@ function read_versions_file(string $path): array
 }
 
 /**
- * @mago-expect lint:cyclomatic-complexity
- *
  * @param array<string, mixed> $entry
  *
  * @return null|array{id: string, label: string, stable: bool, paths: list<string>}

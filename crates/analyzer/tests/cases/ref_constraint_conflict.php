@@ -89,7 +89,7 @@ function constraint_conflict_in_try(): void
 
 /**
  * @mago-expect analysis:conflicting-reference-constraint
- * @mago-expect analysis:reference-constraint-violation
+ * @mago-expect analysis:reference-constraint-violation(3)
  */
 function constraint_conflict_in_loop(): void
 {

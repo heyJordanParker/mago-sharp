@@ -53,10 +53,6 @@ use Mago\Sdk\Span;
 
 /**
  * @internal
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:halstead
- * @mago-expect lint:kan-defect
- * @mago-expect lint:too-many-methods
  */
 final class MetadataCodec
 {

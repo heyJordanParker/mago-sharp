@@ -17,7 +17,6 @@ use function strtolower;
  * neither, and is compared by the rule of the identifier it is compared with.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
  */
 final class FunctionLikeIdentifier
 {

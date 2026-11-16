@@ -22,7 +22,7 @@ class Relation
 
     public function __call(string $name, mixed $arguments): mixed
     {
-        // @mago-ignore analysis:string-member-selector
+        // @mago-expect analysis:string-member-selector
         return $this->builder->$name(...$arguments);
     }
 }
@@ -36,7 +36,7 @@ trait RelationTrait
 
     public function __call(string $name, mixed $arguments): mixed
     {
-        // @mago-ignore analysis:string-member-selector
+        // @mago-expect analysis:string-member-selector
         return $this->builder->$name(...$arguments);
     }
 }

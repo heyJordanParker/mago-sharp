@@ -161,6 +161,6 @@ trait T19
 
 class C9
 {
-    // @mago-expect analysis:incompatible-property-default
+    // @mago-expect analysis:incompatible-property-default(3)
     use T17, T18, T19;
 }

@@ -3,7 +3,7 @@
 /**
  * @return array{mixed, mixed}
  *
- * @mago-expect analysis:mixed-assignment
+ * @mago-expect analysis:mixed-assignment(2)
  */
 function get_first_pair(mixed $mixed): array
 {

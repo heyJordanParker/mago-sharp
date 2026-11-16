@@ -104,7 +104,7 @@ function test_always_matching_arm(bool $flag): string
 }
 
 /**
- * @mago-expect analysis:unreachable-match-arm
+ * @mago-expect analysis:unreachable-match-arm(2)
  * @mago-expect analysis:match-default-arm-always-executed
  */
 function test_always_executed_default(string $s): string

@@ -92,6 +92,10 @@ impl Fingerprintable for Hint<'_> {
                 "readonly".hash(hasher);
                 r.hint.fingerprint_with_hasher(hasher, resolved_names, options);
             }
+            Hint::KeyOf(k) => {
+                "keyof".hash(hasher);
+                k.hint.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
         }
     }
 }

@@ -106,7 +106,7 @@ class ExampleWithMagicBothNoDocs
 /**
  * Contains all test cases that should produce an ERROR.
  *
- * @mago-expect analysis:impossible-assignment
+ * @mago-expect analysis:impossible-assignment(8)
  */
 function err(): void
 {

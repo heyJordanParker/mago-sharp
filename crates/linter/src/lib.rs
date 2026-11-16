@@ -40,8 +40,6 @@ pub mod rule_meta;
 pub mod scope;
 pub mod settings;
 
-const COLLECTOR_CATEGORIES: &[&str] = &["lint", "linter"];
-
 #[derive(Debug, Clone)]
 pub struct Linter<'arena, A>
 where
@@ -104,8 +102,7 @@ where
 
     /// Lints a file with both built-in rules and registered external rules.
     ///
-    /// External issues pass through the same collector as built-in issues, so
-    /// `@mago-ignore` and `@mago-expect` pragmas behave identically for both.
+    /// External issues pass through the same collector as built-in issues.
     ///
     /// # Errors
     ///
@@ -130,12 +127,7 @@ where
     where
         T: LinterTransport,
     {
-        let mut collector = Collector::new(self.arena, source_file, program, COLLECTOR_CATEGORIES);
-
-        // Set active codes if --only filter was used
-        if let Some(only_codes) = &self.registry.only {
-            collector.set_active_codes(only_codes);
-        }
+        let collector = Collector::new(self.arena, source_file);
 
         let mut excluded_rules = Vec::new_in(self.arena);
         if let Ok(file_name) = std::str::from_utf8(source_file.name.as_ref()) {

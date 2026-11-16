@@ -247,7 +247,9 @@ where
                 )
         })
     {
-        if left_type.is_any_string() && right_type.is_any_string() {
+        let joins_strings =
+            |operand: &TUnion| operand.types.iter().all(|atomic| atomic.is_any_string() || atomic.is_member_name());
+        if joins_strings(&left_type) && joins_strings(&right_type) {
             let joined = fold_concat_operands(
                 &[binary.lhs, binary.rhs],
                 artifacts,

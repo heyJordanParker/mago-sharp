@@ -73,7 +73,7 @@ mago fix src/ tests/ --potentially-unsafe
 mago fix --no-analyze --no-guard
 ```
 
-Only safe fixes run by default. The command respects each tool's configuration, excludes, inline suppressions, and baseline. Issues without an allowed fix do not stop the other tools or cause an endless loop.
+Only safe fixes run by default. The command respects each tool's configuration, excludes, ignore entries, and baseline. Issues without an allowed fix do not stop the other tools or cause an endless loop.
 
 | Flag | Description |
 | :--- | :--- |

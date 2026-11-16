@@ -26,7 +26,7 @@ function array_key(): TypeInterface
  * @template Tk of array-key
  * @template Tv
  *
- * @mago-expect analysis:mixed-assignment
+ * @mago-expect analysis:mixed-assignment(3)
  */
 final class ShapeType
 {

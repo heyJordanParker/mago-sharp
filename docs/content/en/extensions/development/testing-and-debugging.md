@@ -81,27 +81,7 @@ mago --workspace tests/corpus lint --verify-baseline
 mago --workspace tests/corpus analyze --verify-baseline
 ```
 
-Verification fails when a diagnostic is added or removed. Regenerate a baseline only when an intentional extension change alters the expected result, then review the baseline diff before committing it.
-
-For small, focused fixtures, inline expectations can be easier to review. Place `@mago-expect` immediately before every diagnostic that fixture should produce:
-
-```php
-<?php
-
-declare(strict_types=1);
-
-// @mago-expect lint:acme/no-eval
-$result = eval($source);
-```
-
-When the named issue is emitted, Mago consumes it. If it disappears, Mago reports `unfulfilled-expect`; if the extension or Mago emits a new issue, that issue remains visible. A successful corpus run therefore has no output issues while still asserting every expected diagnostic by code and location.
-
-When a corpus uses only inline expectations, run both tools and require zero issues:
-
-```sh
-mago --workspace tests/corpus lint --reporting-format count
-mago --workspace tests/corpus analyze --reporting-format count
-```
+Verification fails when a diagnostic is added or removed. Regenerate a baseline only when an intentional extension change alters the expected result, then review the baseline diff before committing it. A comment in a fixture hides no issue, so the baseline is where a corpus states the diagnostics it expects.
 
 Both commands should report zero issues. Treat any non-zero count as a corpus regression.
 

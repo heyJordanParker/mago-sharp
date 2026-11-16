@@ -14,9 +14,6 @@ use function str_starts_with;
  * A structured view over a function, method, or static-method call.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:excessive-parameter-list
- * @mago-expect lint:kan-defect
  */
 final class CallExpression
 {

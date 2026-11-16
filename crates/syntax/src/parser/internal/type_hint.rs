@@ -8,6 +8,7 @@ use crate::cst::cst::GenericHint;
 use crate::cst::cst::Hint;
 use crate::cst::cst::Identifier;
 use crate::cst::cst::IntersectionHint;
+use crate::cst::cst::KeyOfHint;
 use crate::cst::cst::Keyword;
 use crate::cst::cst::LocalIdentifier;
 use crate::cst::cst::NullableHint;
@@ -159,6 +160,7 @@ where
             T!["static"] => Hint::Static(self.expect_any_keyword()?),
             T!["self"] => Hint::Self_(self.expect_any_keyword()?),
             T!["parent"] => Hint::Parent(self.expect_any_keyword()?),
+            T![Identifier] if self.is_at_key_of_hint()? => Hint::KeyOf(self.parse_key_of_hint()?),
             T![Identifier] if self.is_at_function_hint()? => Hint::Function(self.parse_function_hint()?),
             T![Identifier] if self.is_at_generic_hint()? => Hint::Generic(self.parse_generic_hint()?),
             T!["enum" | "from" | QualifiedIdentifier | FullyQualifiedIdentifier] => {
@@ -609,6 +611,26 @@ where
                 None
             },
         })
+    }
+
+    /// Whether a PHP# member name type starts here, spec section 11: `keyof` followed by a name, as in `keyof T`.
+    fn is_at_key_of_hint(&mut self) -> Result<bool, ParseError<'arena>> {
+        Ok(self.dialect.is_sharp()
+            && self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"keyof")
+            && self.stream.peek_kind(1)? == Some(T![Identifier]))
+    }
+
+    /// Parses a PHP# member name type: `keyof` and the class or type parameter whose member names it holds, as in
+    /// `keyof Order`, `keyof TModel` or `keyof Query<Order>`.
+    fn parse_key_of_hint(&mut self) -> Result<KeyOfHint<'arena>, ParseError<'arena>> {
+        let keyof = self.expect_any_keyword()?;
+        let hint = if self.is_at_generic_hint()? {
+            Hint::Generic(self.parse_generic_hint()?)
+        } else {
+            Hint::Identifier(self.parse_identifier()?)
+        };
+
+        Ok(KeyOfHint { keyof, hint: self.arena.alloc(hint) })
     }
 
     /// Whether a PHP# function type starts here: `Function` followed by `<`.

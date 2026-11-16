@@ -113,10 +113,10 @@ impl LintRule for NoEmptyCatchClauseRule {
                     Annotation::primary(catch_clause.span())
                         .with_message("This `catch` block is empty and will swallow exceptions"),
                 )
-                .with_note("Swallowing exceptions silently can hide critical errors and make debugging extremely difficult.")
-                .with_help(
-                    "Either log the exception, re-throw it, or handle it. If ignoring it is intentional, add a `@mago-expect` comment explaining why.",
-                );
+                .with_note(
+                    "Swallowing exceptions silently can hide critical errors and make debugging extremely difficult.",
+                )
+                .with_help("Either log the exception, re-throw it, or handle it.");
 
             ctx.collector.report(issue);
         }

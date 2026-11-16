@@ -609,10 +609,10 @@ impl Issue {
     /// Returns `true` when a suppression may hide this issue in the file named `file_name`.
     ///
     /// This is the one place Mago decides it. The language's own error in a PHP# file keeps the file from running, so
-    /// nothing hides it: not an `@mago-ignore` or `@mago-expect` pragma, not an analyzer `ignore` entry, not a baseline
-    /// entry. Every other issue may be suppressed, an extension host's at any level, as C#'s `#pragma warning disable`
-    /// hides an analyzer's error but never the compiler's, and ESLint's `eslint-disable-next-line` hides a rule set to
-    /// error. A host's issue is the one whose code names its host, `<host>/<rule>`, as ESLint names a plugin's rule.
+    /// nothing hides it: not an analyzer `ignore` entry, not a baseline entry. Every other issue may be suppressed, an
+    /// extension host's at any level, as a C# project's `.editorconfig` turns off an analyzer's error but never the
+    /// compiler's, and ESLint's configuration turns off a rule set to error. A host's issue is the one whose code names
+    /// its host, `<host>/<rule>`, as ESLint names a plugin's rule.
     #[must_use]
     pub fn can_be_suppressed_in(&self, file_name: &[u8]) -> bool {
         self.level < Level::Error
@@ -624,7 +624,7 @@ impl Issue {
     /// `annotations` point at the suppression and the error.
     #[must_use]
     pub fn unsuppressible_error(annotations: impl IntoIterator<Item = Annotation>) -> Self {
-        Self::warning("A pragma, an `ignore` entry or the baseline hides an extension host rule's error, never one of the language's errors.")
+        Self::warning("An `ignore` entry or the baseline hides an extension host rule's error, never one of the language's errors.")
             .with_code(UNSUPPRESSIBLE_ERROR)
             .with_annotations(annotations)
             .with_help("Fix the error, then remove the suppression.")

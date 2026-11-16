@@ -250,13 +250,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for CompositeString<'arena> {
 }
 
 /// Whether a PHP# template shows a value of `part_type`: an `int`, a `float`, a `string` or a `bool`, literal and
-/// narrowed types included, or a union of them, as `int|string`, as spec section 18 states.
+/// narrowed types included, a member name, or a union of them, as `int|string`, as spec section 18 states.
 fn is_shown(part_type: &TUnion) -> bool {
     !part_type.types.is_empty()
-        && part_type
-            .types
-            .iter()
-            .all(|atomic| atomic.is_int() || atomic.is_float() || atomic.is_string() || atomic.is_bool())
+        && part_type.types.iter().all(|atomic| {
+            atomic.is_int() || atomic.is_float() || atomic.is_string() || atomic.is_member_name() || atomic.is_bool()
+        })
 }
 
 /// Whether each type `part_type` holds is a class, an interface or an enum that declares `toString()`, itself or

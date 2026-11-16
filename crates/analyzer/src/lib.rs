@@ -80,8 +80,6 @@ mod visibility;
 pub use crate::statement::class_like::unused_members::too_wide_members;
 pub use crate::statement::class_like::unused_members::unused_classes;
 
-const COLLECTOR_CATEGORIES: &[&str] = &["analysis", "analyzer", "analyser"];
-
 #[derive(Debug)]
 pub struct Analyzer<'ctx, 'ast, 'arena, A>
 where
@@ -96,7 +94,6 @@ where
     pub external_analysis_session: Option<&'ctx ExternalAnalysisSession>,
     pub additional_symbol_references: Option<&'ctx SymbolReferences>,
     variable_definedness_targets: Option<Arc<[bool; NodeKind::COUNT]>>,
-    defer_pragmas: bool,
 }
 
 impl<'ctx, 'ast, 'arena, A> Analyzer<'ctx, 'ast, 'arena, A>
@@ -121,7 +118,6 @@ where
             external_analysis_session: None,
             additional_symbol_references: None,
             variable_definedness_targets: None,
-            defer_pragmas: false,
         }
     }
 
@@ -140,14 +136,6 @@ where
     #[must_use]
     pub fn with_node_analysis_requirements(mut self, requirements: &NodeAnalysisRequirements) -> Self {
         self.variable_definedness_targets = requirements.variable_definedness_targets();
-        self
-    }
-
-    /// Defers unused and unfulfilled pragma reporting until codebase and external lifecycle
-    /// diagnostics have been collected.
-    #[must_use]
-    pub fn with_deferred_pragmas(mut self) -> Self {
-        self.defer_pragmas = true;
         self
     }
 
@@ -198,10 +186,7 @@ where
 
         #[cfg(not(target_arch = "wasm32"))]
         let setup_start = trace_enabled.then(std::time::Instant::now);
-        let mut collector = Collector::new(self.arena, self.source_file, program, COLLECTOR_CATEGORIES);
-        if self.settings.diff {
-            collector.set_skip_unfulfilled_expect(true);
-        }
+        let collector = Collector::new(self.arena, self.source_file);
 
         let mut context = Context::new(
             self.arena,
@@ -239,7 +224,7 @@ where
                 }
 
                 analysis_result.symbol_references.extend(std::mem::take(&mut artifacts.symbol_references));
-                context.finish_collector(analysis_result, self.defer_pragmas);
+                context.finish_collector(analysis_result);
 
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -280,7 +265,7 @@ where
         #[cfg(not(target_arch = "wasm32"))]
         let finish_start = trace_enabled.then(std::time::Instant::now);
         analysis_result.symbol_references.extend(std::mem::take(&mut artifacts.symbol_references));
-        context.finish_collector(analysis_result, self.defer_pragmas);
+        context.finish_collector(analysis_result);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(start) = finish_start {
             telemetry::record_finish(start.elapsed());

@@ -23,9 +23,6 @@ use Mago\Sdk\Exception\InvalidArgumentException;
 use Mago\Sdk\Span;
 use PHPUnit\Framework\TestCase;
 
-/**
- * @mago-expect lint:too-many-methods
- */
 final class ValueTest extends TestCase
 {
     public function testInvalidSpanIsRejected(): void

@@ -137,7 +137,7 @@ pub struct AnalyzeCommand {
     ///
     /// Reports every issue the analyzer finds, including codes suppressed by the
     /// configured `ignore` entries. Useful for one-off runs that audit what is
-    /// currently being hidden. Inline suppressions in the source are unaffected.
+    /// currently being hidden. The baseline is unaffected.
     #[arg(long, default_value_t = false)]
     pub skip_ignores: bool,
 

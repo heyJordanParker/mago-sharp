@@ -16,7 +16,6 @@ use function unpack;
  * Lazily materializes public nodes from Mago's fixed-width node table.
  *
  * @internal
- * @mago-expect lint:cyclomatic-complexity
  */
 final class NodeStore
 {
@@ -88,14 +87,13 @@ final class NodeStore
 
     /**
      * @return list<Node>
-     * @mago-expect lint:no-multi-assignments
      */
     public function getAll(?NodeKind $kind = null): array
     {
         if ($kind === null) {
             $nodes = [];
             for ($id = 0; $id < $this->nodeCount; ++$id) {
-                $nodes[] = $this->nodes[$id] ??= $this->materialize($id);
+                $nodes[] = $this->get($id);
             }
 
             return $nodes;
@@ -115,7 +113,6 @@ final class NodeStore
 
     /**
      * @return list<Node>
-     * @mago-expect lint:no-multi-assignments
      */
     public function getChildren(Node $node): array
     {
@@ -126,7 +123,7 @@ final class NodeStore
         while ($child !== self::NO_NODE) {
             /** @var array{1: int<0, 4294967295>, 2: int<0, 4294967295>, 3: int<0, 4294967295>} $childRecord */
             $childRecord = unpack('N3', $this->records, ($child * self::RECORD_SIZE) + 10);
-            $children[] = $this->nodes[$child] ??= $this->materialize($child);
+            $children[] = $this->get($child);
             $child = $childRecord[3];
         }
 

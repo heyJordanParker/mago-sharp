@@ -50,6 +50,7 @@ use crate::expression::access::analyze_rest_of_chain;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
 use crate::expression::array_access::check_change_through_index;
+use crate::expression::array_access::report_fixed_map_key;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::expression::assignment::static_property_assignment;
@@ -66,6 +67,7 @@ use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_index_id;
 use crate::utils::int_refused_for_float;
+use crate::utils::is_compile_time_string;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
@@ -197,6 +199,13 @@ where
                 .with_annotation(Annotation::primary(access.span()).with_message("This index write runs `set`."))
                 .with_help(kind.missing_library_help()),
         );
+    }
+    if let ArrayTarget::Access(access) = array_target
+        && let Some(written) = artifacts.get_expression_type(access.array)
+        && matches!(indexed_collection(written), Some((CollectionKind::Map, _)))
+        && artifacts.get_expression_type(access.index).is_some_and(is_compile_time_string)
+    {
+        report_fixed_map_key(context, access.index);
     }
 
     let root_is_string = root_array_type.has_string();

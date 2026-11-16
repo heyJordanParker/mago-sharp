@@ -298,6 +298,16 @@ where
     }
 }
 
+/// Whether `value` is a string fixed at compile time, spec section 24's `literal-string`: a literal, a constant, a
+/// backed case's `.value`, `""`, or a join of them.
+pub(crate) fn is_compile_time_string(value: &TUnion) -> bool {
+    !value.types.is_empty()
+        && value
+            .types
+            .iter()
+            .all(|atomic| matches!(atomic, TAtomic::Scalar(scalar) if scalar.is_literal_origin_string()))
+}
+
 /// The source text at `span`, as one line: every run of whitespace that holds a newline becomes one space, so a value
 /// written over several lines keeps a message's title on one line.
 pub(crate) fn quoted_source<A>(context: &Context<'_, '_, A>, span: Span) -> String

@@ -13,8 +13,6 @@ use function unpack;
 
 /**
  * @internal
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:too-many-methods
  */
 final class PayloadReader
 {

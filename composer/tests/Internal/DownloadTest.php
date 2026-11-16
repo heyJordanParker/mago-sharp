@@ -140,8 +140,6 @@ final class DownloadTest extends TestCase
 
     /**
      * Waits up to five seconds for the server to accept a connection.
-     *
-     * @mago-expect lint:no-error-control-operator
      */
     private static function awaitServer(): void
     {

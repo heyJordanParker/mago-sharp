@@ -121,6 +121,21 @@ fn an_extern_event_names_a_class() {
     assert_eq!(issues(code), ["9:14 An `extern event` names a class, and `Carbon.now` names a member."]);
 }
 
+/// Spec section 23: an `extern` line states the signature of a method or a function, with the class's type parameters
+/// and `keyof`, in its types alone. A class is no signature, and a default is the library's own.
+#[test]
+fn an_extern_signature_names_a_member_and_states_its_types_alone() {
+    let code = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Builder;\nimport Illuminate.Foundation;\nimport Illuminate.Mail.Mailer;\n\nextern string Foundation.route(string name);\nextern Builder<TModel> Builder<TModel>.where(keyof TModel column, Any? value) uses Database;\nextern void Mailer(string to);\nextern void Mailer.send(string to = \"\");\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "9:13 An `extern` line states the signature of a method or a function, and `Mailer` names neither.",
+            "10:35 An `extern` line states types alone, so `to` takes no default: a call passes each parameter the line states, and the library's own default fills each one after them.",
+        ]
+    );
+}
+
 /// Spec section 15: an event runs as a final class whose parameters are its public get-only properties. It takes only
 /// `public` or `internal`, spec section 5, and each parameter is a type, a `Set` among them, a name and an optional
 /// default. An event is a class, so any capitalized word but a reserved type name names one, as `Print` and `Exit` do,

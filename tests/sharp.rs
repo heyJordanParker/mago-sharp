@@ -1166,21 +1166,26 @@ fn lint_format_and_guard_refuse_a_sharp_file_named_on_the_command_line() {
     }
 }
 
-/// A PHP# class whose method returns a string where it declares `int`, with `pragma` on the line before.
-fn broken_sharp(pragma: &str) -> String {
+/// A PHP# class whose method returns a string where it declares `int`, with `comment` on the line before.
+fn broken_sharp(comment: &str) -> String {
     format!(
-        "namespace Demo;\n\npublic class Broken\n{{\n    public int total()\n    {{\n        {pragma}\n        return \"one\";\n    }}\n}}\n"
+        "namespace Demo;\n\npublic class Broken\n{{\n    public int total()\n    {{\n        {comment}\n        return \"one\";\n    }}\n}}\n"
     )
 }
 
 /// The PHP twin of [`broken_sharp`].
-fn broken_php(pragma: &str) -> String {
+fn broken_php(comment: &str) -> String {
     format!(
-        "<?php\n\nnamespace Demo;\n\nfinal class Broken\n{{\n    public function total(): int\n    {{\n        {pragma}\n        return 'one';\n    }}\n}}\n"
+        "<?php\n\nnamespace Demo;\n\nfinal class Broken\n{{\n    public function total(): int\n    {{\n        {comment}\n        return 'one';\n    }}\n}}\n"
     )
 }
 
-const EXPECT_PRAGMA: &str = "// @mago-expect analysis:invalid-return-statement";
+/// A PHP# class whose condition is always true, a warning, with `comment` on the line before.
+fn sure_sharp(comment: &str) -> String {
+    format!(
+        "namespace Demo;\n\npublic class Sure\n{{\n    public int one()\n    {{\n        {comment}\n        if (true) {{\n            return 1;\n        }}\n        return 2;\n    }}\n}}\n"
+    )
+}
 
 const IGNORE_ENTRY: &str = "ignore = [\"invalid-return-statement\"]";
 
@@ -1224,39 +1229,47 @@ fn write_strict_baseline(workspace: &Path, entries: &[&str]) {
     std::fs::write(workspace.join("baseline.toml"), format!("variant = \"strict\"\n\n{}", entries.join("\n"))).unwrap();
 }
 
-/// Three workspaces holding `src/Demo/{name}`, each hiding the issues `code` names with one suppression: an
-/// `@mago-expect` pragma that `contents` places, an analyzer `ignore` entry, and a baseline entry.
+/// Two workspaces holding `src/Demo/{name}`, each hiding the issues `code` names with one suppression: an analyzer
+/// `ignore` entry, and a baseline entry.
 fn suppressed_workspaces(
     name: &str,
     contents: impl Fn(&str) -> String,
     code: &str,
-) -> [(&'static str, tempfile::TempDir); 3] {
+) -> [(&'static str, tempfile::TempDir); 2] {
     let baselined = suppressed_workspace(name, &contents(""), "baseline = \"baseline.toml\"");
     generate_baseline(baselined.path());
 
     [
-        ("a pragma", suppressed_workspace(name, &contents(&format!("// @mago-expect analysis:{code}")), "")),
         ("an ignore entry", suppressed_workspace(name, &contents(""), &format!("ignore = [\"{code}\"]"))),
         ("a baseline entry", baselined),
     ]
 }
 
+/// Spec section 27: a comment is text in every file Mago reads, so an `@mago-ignore` or `@mago-expect` comment hides
+/// no issue: the error of a `.php` file, the error of a `.sharp` file and the warning of a `.sharp` file it names all
+/// stay reported, and nothing else is reported about the comment.
 #[test]
-fn analyze_reports_a_sharp_error_an_expect_pragma_targets_and_points_at_the_pragma() {
-    let directory = suppressed_workspace("Broken.sharp", &broken_sharp(EXPECT_PRAGMA), "");
+fn a_mago_ignore_or_mago_expect_comment_hides_nothing_in_a_php_or_a_sharp_file() {
+    for pragma in ["@mago-ignore", "@mago-expect"] {
+        let error = format!("// {pragma} analysis:invalid-return-statement");
+        let warning = format!("// {pragma} analysis:redundant-condition");
+        let php = suppressed_workspace("Broken.php", &broken_php(&error), "");
+        let sharp = suppressed_workspace("Broken.sharp", &broken_sharp(&error), "");
+        let sure = suppressed_workspace("Sure.sharp", &sure_sharp(&warning), "");
 
-    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+        for (directory, reported) in [
+            (&php, "src/Demo/Broken.php:10:16:error - invalid-return-statement:"),
+            (&sharp, "src/Demo/Broken.sharp:8:16:error - invalid-return-statement:"),
+            (&sure, "src/Demo/Sure.sharp:8:13:warning - redundant-condition:"),
+        ] {
+            let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let reports: Vec<&str> = stdout.lines().filter(|line| line.starts_with("src/Demo/")).collect();
 
-    assert!(!output.status.success(), "{stdout}");
-    assert!(stdout.contains("src/Demo/Broken.sharp:8:16:error - invalid-return-statement:"), "{stdout}");
-    assert!(
-        stdout.contains(
-            "src/Demo/Broken.sharp:7:12:warning - unsuppressible-error: A pragma, an `ignore` entry or the baseline hides an extension host rule's error, never one of the language's errors."
-        ),
-        "{stdout}"
-    );
-    assert!(!stdout.contains("unfulfilled-expect"), "{stdout}");
+            assert_eq!(reports.len(), 1, "{pragma}: {stdout}");
+            assert!(reports[0].starts_with(reported), "{pragma}: {stdout}");
+        }
+    }
 }
 
 #[test]
@@ -1272,7 +1285,7 @@ fn analyze_reports_a_sharp_error_an_ignore_entry_targets_and_points_at_the_error
     assert!(stdout.contains("src/Demo/Broken.sharp:8:16:error - invalid-return-statement:"), "{stdout}");
     assert!(
         stdout.contains(
-            "src/Demo/Broken.sharp:8:16:warning - unsuppressible-error: A pragma, an `ignore` entry or the baseline hides an extension host rule's error, never one of the language's errors."
+            "src/Demo/Broken.sharp:8:16:warning - unsuppressible-error: An `ignore` entry or the baseline hides an extension host rule's error, never one of the language's errors."
         ),
         "{stdout}"
     );
@@ -1294,7 +1307,7 @@ fn analyze_reports_a_sharp_error_a_baseline_entry_targets_and_points_at_the_erro
     assert!(stdout.contains("src/Demo/Broken.sharp:8:16:error - invalid-return-statement:"), "{stdout}");
     assert!(
         stdout.contains(
-            "src/Demo/Broken.sharp:8:16:warning - unsuppressible-error: A pragma, an `ignore` entry or the baseline hides an extension host rule's error, never one of the language's errors."
+            "src/Demo/Broken.sharp:8:16:warning - unsuppressible-error: An `ignore` entry or the baseline hides an extension host rule's error, never one of the language's errors."
         ),
         "{stdout}"
     );
@@ -1326,7 +1339,7 @@ fn a_generated_baseline_leaves_out_a_sharp_error_and_keeps_a_php_error() {
 }
 
 #[test]
-fn a_pragma_an_ignore_entry_and_a_baseline_entry_still_hide_a_php_error() {
+fn an_ignore_entry_and_a_baseline_entry_still_hide_a_php_error() {
     for (suppression, directory) in suppressed_workspaces("Broken.php", broken_php, "invalid-return-statement") {
         let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1338,14 +1351,8 @@ fn a_pragma_an_ignore_entry_and_a_baseline_entry_still_hide_a_php_error() {
 }
 
 #[test]
-fn a_pragma_an_ignore_entry_and_a_baseline_entry_still_hide_a_sharp_warning() {
-    let sure = |pragma: &str| {
-        format!(
-            "namespace Demo;\n\npublic class Sure\n{{\n    public int one()\n    {{\n        {pragma}\n        if (true) {{\n            return 1;\n        }}\n        return 2;\n    }}\n}}\n"
-        )
-    };
-
-    for (suppression, directory) in suppressed_workspaces("Sure.sharp", sure, "redundant-condition") {
+fn an_ignore_entry_and_a_baseline_entry_still_hide_a_sharp_warning() {
+    for (suppression, directory) in suppressed_workspaces("Sure.sharp", sure_sharp, "redundant-condition") {
         let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -1356,12 +1363,11 @@ fn a_pragma_an_ignore_entry_and_a_baseline_entry_still_hide_a_sharp_warning() {
 }
 
 #[test]
-fn compile_refuses_a_sharp_file_whose_error_a_pragma_an_ignore_entry_or_a_baseline_entry_targets() {
+fn compile_refuses_a_sharp_file_whose_error_an_ignore_entry_or_a_baseline_entry_targets() {
     let baselined = suppressed_workspace("Broken.sharp", &broken_sharp(""), "baseline = \"baseline.toml\"");
     write_strict_baseline(baselined.path(), &[SHARP_ERROR_ENTRY]);
 
     for (suppression, directory) in [
-        ("a pragma", suppressed_workspace("Broken.sharp", &broken_sharp(EXPECT_PRAGMA), "")),
         ("an ignore entry", suppressed_workspace("Broken.sharp", &broken_sharp(""), IGNORE_ENTRY)),
         ("a baseline entry", baselined),
     ] {

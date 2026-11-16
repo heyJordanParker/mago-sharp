@@ -49,11 +49,6 @@ use function fclose;
 use function Mago\Internal\get_version;
 use function pack;
 
-/**
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:kan-defect
- * @mago-expect lint:too-many-methods
- */
 final class WorkerTest extends TestCase
 {
     private const ANALYZER_MAGIC = 0x4D41_4E41;

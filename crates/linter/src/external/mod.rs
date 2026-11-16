@@ -717,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn external_issues_obey_lint_expect_pragmas() {
+    fn an_external_issue_stays_reported_whatever_comment_names_it() {
         let source = b"<?php\n// @mago-expect lint:acme/no-foo\nfoo();\n";
         let arena = LocalArena::new();
         let file = File::ephemeral(Cow::Borrowed(b"test.php"), Cow::Borrowed(source));
@@ -750,7 +750,8 @@ mod tests {
         let issues = linter
             .lint_internal(&file, program, &resolved_names, Some(&external))
             .expect("external lint should succeed");
-        assert!(issues.is_empty(), "expected pragma should suppress the external issue: {issues:#?}");
+        let codes: Vec<_> = issues.iter().filter_map(|issue| issue.code.as_deref()).collect();
+        assert_eq!(codes, ["acme/no-foo"], "a comment hides no issue: {issues:#?}");
     }
 
     #[test]

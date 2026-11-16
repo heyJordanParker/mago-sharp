@@ -103,7 +103,10 @@ use crate::scanner::function_like::scan_closure;
 use crate::scanner::function_like::scan_function;
 use crate::scanner::function_like::scan_initial_values_constructor;
 use crate::scanner::function_like::scan_method;
+use crate::scanner::parameter::scan_function_like_parameter;
 use crate::scanner::property::scan_promoted_property;
+use crate::scanner::ttype::get_type_metadata_from_hint;
+use crate::scanner::ttype::scan_type_parameters;
 use crate::symbol::SymbolKind;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::generic::TGenericParameter;
@@ -653,7 +656,8 @@ where
 
     /// Records a PHP# `extern` declaration. The binder decides whether its target is a class, with the member after
     /// `.` when it names one, or a global function. In the standard library alone, `global.now` is the function `now`
-    /// of PHP's root namespace, spec section 23.
+    /// of PHP's root namespace, spec section 23. A stated signature's types read the class's type parameters written
+    /// after the class, as `TModel` in `Builder<TModel>.where`, as the class's own.
     #[inline]
     fn walk_in_extern(&mut self, r#extern: &'arena Extern<'arena>, context: &mut Context<'ctx, 'arena, A>) {
         let target = &r#extern.target;
@@ -678,7 +682,7 @@ where
         let target = if let Some(function) = root_function {
             (empty_word(), ascii_lowercase_word(function))
         } else if context.resolved_names.binding(target) == Some(Binding::Class) {
-            (name, if target.is_dotted() { ascii_lowercase_word(target.last_segment()) } else { empty_word() })
+            (name, r#extern.member_name().map_or_else(empty_word, ascii_lowercase_word))
         } else {
             (empty_word(), name)
         };
@@ -688,6 +692,29 @@ where
             .flat_map(|uses| uses.names.iter())
             .map(|effect| word(context.resolved_names.get(effect)))
             .collect();
+        let mut type_context = TypeResolutionContext::new();
+        if let Some(type_parameters) = &r#extern.type_parameters {
+            scan_type_parameters(
+                type_parameters,
+                GenericParent::ClassLike(name),
+                name,
+                &mut type_context,
+                context,
+                &mut self.scope.clone(),
+            );
+        }
+        let parameters = r#extern.parameter_list.as_ref().map(|list| {
+            list.parameters
+                .iter()
+                .filter_map(|parameter| {
+                    scan_function_like_parameter(parameter, None, &type_context, context, &self.scope)
+                })
+                .collect()
+        });
+        let return_type = r#extern
+            .return_type_hint
+            .as_ref()
+            .map(|hint| get_type_metadata_from_hint(hint, None, &type_context, context));
 
         self.codebase.externs.entry(target).or_default().push(ExternMetadata {
             file: word(&context.file.name),
@@ -697,6 +724,8 @@ where
             effects,
             event: r#extern.event.is_some(),
             attributes: scan_attribute_lists(&r#extern.attribute_lists, context, &self.scope, None),
+            parameters,
+            return_type,
         });
     }
 

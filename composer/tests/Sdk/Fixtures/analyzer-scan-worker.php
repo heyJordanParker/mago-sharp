@@ -28,7 +28,6 @@ use const LOCK_EX;
 
 require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
 
-/** @mago-expect lint:cyclomatic-complexity */
 final class CodebaseScanProofPlugin implements CodebaseScanHook, Plugin
 {
     /** @var array<string, list<string>> */
@@ -90,7 +89,6 @@ final class CodebaseScanProofPlugin implements CodebaseScanHook, Plugin
     }
 }
 
-/** @mago-expect lint:single-class-per-file */
 final class DisabledCodebaseScanPlugin implements CodebaseScanHook, Plugin
 {
     public function getTargets(): array

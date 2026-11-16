@@ -26,10 +26,12 @@ use mago_analyzer::plugin::context::ProviderContext;
 use mago_analyzer::plugin::hook::ExpressionHook;
 use mago_analyzer::plugin::hook::ExpressionHookResult;
 use mago_analyzer::plugin::hook::FunctionCallHook;
+use mago_analyzer::plugin::hook::HookAction;
 use mago_analyzer::plugin::hook::HookResult;
 use mago_analyzer::plugin::hook::MethodCallHook;
 use mago_analyzer::plugin::hook::NamedCall;
 use mago_analyzer::plugin::hook::NullSafeMethodCallHook;
+use mago_analyzer::plugin::hook::ProgramHook;
 use mago_analyzer::plugin::hook::StaticCall;
 use mago_analyzer::plugin::hook::StaticMethodCallHook;
 use mago_analyzer::plugin::provider::ExpressionThrowTypeProvider;
@@ -3605,9 +3607,10 @@ fn an_override_of_a_plain_php_property_keeps_its_set_and_its_level() {
     );
 }
 
-/// `nameof(X.y)` is the string `'y'`, spec section 6.3, and the checker proves `X` declares or inherits `y`, a
-/// property, a field or a method, instance or static, readable where `nameof` is written, as C#'s `nameof` does. A
-/// misspelled name is an error wherever it is written. `nameof(X)` is the class's own name, spec section 25.
+/// `nameof(X.y)` is the string `'y'` of the type `keyof X`, spec sections 6.3 and 11, and the checker proves `X`
+/// declares or inherits `y`, a property, a field or a method, instance or static, readable where `nameof` is written,
+/// as C#'s `nameof` does. A misspelled name is an error wherever it is written. `nameof(X)` is the class's own name,
+/// spec section 25.
 #[test]
 fn nameof_names_a_member_the_class_has_and_is_a_string() {
     let entity = (
@@ -3629,7 +3632,7 @@ fn nameof_names_a_member_the_class_has_and_is_a_string() {
             "`Order.secret` is `private`, so `nameof` can't name it here.",
             "`Order.audit` is `private`, so `nameof` can't name it here.",
             "Cannot find type `Demo.Missing`.",
-            "Invalid return type for method `Report.number`: expected `int`, but found `string`.",
+            "Invalid return type for method `Report.number`: expected `int`, but found `keyof Order`.",
         ]
     );
 
@@ -6928,6 +6931,46 @@ impl FunctionCallHook for FunctionCallSkipper {
     }
 }
 
+struct ProgramSkipper;
+
+impl Provider for ProgramSkipper {
+    fn meta() -> &'static ProviderMeta {
+        static META: ProviderMeta = ProviderMeta::new("test::program", "program", "Skips every program.");
+
+        &META
+    }
+}
+
+impl ProgramHook for ProgramSkipper {
+    fn before_program(
+        &self,
+        _file: &File,
+        program: &Program<'_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> HookResult<HookAction> {
+        context.report(
+            IssueCode::InvalidArgument,
+            Issue::error("Skipped.").with_annotation(Annotation::primary(program.span())),
+        );
+
+        Ok(HookAction::Skip)
+    }
+}
+
+/// A program hook that skips a file gives the file's issues as only the ones the hook reports: the call the analysis
+/// would refuse is never analyzed.
+#[test]
+fn a_program_hook_that_skips_a_file_reports_only_its_own_issues() {
+    let sharp = "namespace Demo;\n\nclass Probe\n{\n    public int count() => \"many\";\n}\n";
+    let mut registry = PluginRegistry::default();
+    registry.register_program_hook(ProgramSkipper);
+
+    assert_eq!(
+        written(sharp, &analyze(&registry, settings(), ("src/Demo/Probe.sharp", sharp), &[])),
+        ["1:1 invalid-argument Skipped."]
+    );
+}
+
 /// A function call hook sees the standard library's `global.strtoupper("a")` as PHP's `\strtoupper('a')`: what it
 /// reports, the analysis it skips, and the type it gives the call. A call it does not skip, `strrev`, reaches the hooks
 /// after the analysis too. With no function call hook the call is analyzed as usual.
@@ -7659,6 +7702,44 @@ fn a_function_value_crosses_plain_php_callbacks_that_declare_no_types() {
             "20:38 invalid-local-assignment-value: `Callbacks.untyped()` gives a function whose types plain PHP doesn't declare, so it is no `Function<int(int)>`: hold it with `const`, and check what each call gives.",
         ],
     );
+}
+
+/// Spec section 12: in an application, a `Map` literal passed where a plain PHP parameter declares an array shape is
+/// checked key by key and value by value: the literal that gives each key a value of its type compiles, and so does a
+/// key an open shape doesn't declare, and an unknown key, a missing key and a value of another type are each an error.
+/// A `Map` value, a `List` literal and a literal with a key from data are checked by the parameter's type as before.
+#[test]
+fn a_map_literal_is_checked_against_a_plain_php_array_shape_key_by_key() {
+    let template = "<?php\n\nnamespace Lib;\n\nfinal class Template\n{\n    /** @param array{code: string, raw: bool} $part */\n    public static function compose(array $part): string\n    {\n        return $part['code'];\n    }\n\n    /** @param array{code: string, ...} $part */\n    public static function open(array $part): string\n    {\n        return $part['code'];\n    }\n}\n";
+    let part = "namespace Shop;\n\npublic struct Part\n{\n    public Part(public string code { get; }, public bool raw { get; }) { }\n}\n";
+    let compose = "namespace Shop;\n\nimport Lib.Template;\n\npublic class Compose\n{\n    public void run(Part part, string label, Map<string, string> given)\n    {\n        Template.compose([\"code\": part.code, \"raw\": part.raw]);\n        Template.compose([\"cod\": part.code, \"raw\": part.raw]);\n        Template.compose([\"code\": part.code]);\n        Template.compose([\"code\": part.code, \"raw\": part.code]);\n        Template.open([\"code\": part.code, \"extra\": part.code]);\n        Template.compose(given);\n        Template.compose([part.code, part.raw]);\n        Template.compose([\"code\": part.code, label: part.raw]);\n    }\n}\n";
+
+    assert_eq!(
+        package_errors(&[
+            ("src/Lib/Template.php", template),
+            ("src/Shop/Part.sharp", part),
+            ("src/Shop/Compose.sharp", compose)
+        ]),
+        [
+            "`array{'code': string, 'raw': bool}` has no key `'cod'`.",
+            "`array{'code': string, 'raw': bool}` requires the key `'code'`, and this `Map` doesn't give it.",
+            "`array{'code': string, 'raw': bool}` requires the key `'raw'`, and this `Map` doesn't give it.",
+            "`array{'code': string, 'raw': bool}` holds `bool` under the key `'raw'`, and this value is `string`.",
+            "Argument #1 of `Template.compose` is a `Map<string, string>`, and the array shape it takes requires the keys `code` and `raw`, which a `Map` never promises.",
+            "Invalid argument type for argument #1 of `Template.compose`: expected `Map<\"code\"|\"raw\", bool|string>`, but found `List<bool|string>`.",
+            "Possible argument type mismatch for argument #1 of `Template.compose`: expected `Map<\"code\"|\"raw\", bool|string>`, but possibly received `Map<string, bool|string>`.",
+        ]
+    );
+}
+
+/// Spec section 21: a plain PHP `callable` parameter with no signature takes a PHP# function value whatever its
+/// parameters, as an untyped `\Closure` does: none, two or three of them, a method and a lambda.
+#[test]
+fn an_untyped_plain_php_callable_takes_a_function_value_of_any_arity() {
+    let template = "<?php\n\nnamespace Lib;\n\nfinal class Template\n{\n    public static function each(callable $visit): void\n    {\n    }\n\n    public static function eachClosure(\\Closure $visit): void\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Template;\n\nclass Visits\n{\n    public int visit(int a, int b) => a + b;\n\n    public void run(Function<void()> none, Function<int(int, string)> two, Function<void(int, int, int)> three)\n    {\n        Template.each(none);\n        Template.each(two);\n        Template.each(three);\n        Template.each(this.visit);\n        Template.each((int a, string b, bool c) => { });\n        Template.eachClosure(three);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Visits.sharp", sharp), &[("src/Lib/Template.php", template)]), Vec::<String>::new());
 }
 
 /// A read of an extension method the file doesn't import is told so where the code reads it, not where it calls it.
@@ -10420,10 +10501,210 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
             ]
         ),
         [
-            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `byteLength`, `byteSubstring`, `bytes`, `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `equals`, `indexOf`, `isDigit`, `isLetter`, `isLetterOrDigit`, `isLowercase`, `isUppercase`, `isWhitespace`, `lastIndexOf`, `length`, `lines`, `lowercase`, `normalized`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `titlecase`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
+            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `byteLength`, `byteSubstring`, `bytes`, `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `equals`, `indexOf`, `isDigit`, `isEmpty`, `isLetter`, `isLetterOrDigit`, `isLowercase`, `isNotEmpty`, `isUppercase`, `isWhitespace`, `lastIndexOf`, `length`, `lines`, `lowercase`, `normalized`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `titlecase`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
             "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `checkedAdd`, `checkedMultiply`, `checkedSubtract`, `clamp`, `floorDiv`, `format`, `mod`, `saturatingAdd`, `saturatingMultiply`, `saturatingSubtract`, `toByteString`, `toBytes`, `toCharacter`, `toHex`.",
             "7:40 non-existent-method Method `missing` does not exist on `float`. | A `float` has the methods `abs`, `ceil`, `clamp`, `floor`, `format`, `isFinite`, `isNaN`, `round`.",
             "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
+        ]
+    );
+}
+
+/// Spec section 18: a `string` says whether it holds a character with `isEmpty()` and `isNotEmpty()`, as a collection
+/// says whether it holds an element. Each gives a `bool` and takes no argument.
+#[test]
+fn a_string_says_whether_it_is_empty() {
+    let sharp = "namespace Demo;\n\nclass Name\n{\n    public bool run(string name) => name.isEmpty() || name.isNotEmpty();\n\n    public void wrong(string name)\n    {\n        name.isEmpty(1);\n    }\n}\n";
+
+    assert_eq!(
+        issues(
+            ("src/Demo/Name.sharp", sharp),
+            &[(
+                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharp",
+                include_str!("../../../../composer/library/Sharp/Text/StringMembers.sharp"),
+            )]
+        ),
+        ["9:22 too-many-arguments"]
+    );
+}
+
+/// Spec section 24: in an application, `==`, `!=` and a value pattern that compare a string with a string fixed at
+/// compile time, a literal, a constant or a backed case's `.value`, are each a compile error that names both sides, and
+/// one with `""` names `isEmpty()`. A string fixed at compile time as a `Map` key, read or written, by an index or a
+/// member, is a compile error that says a struct holds the field. A backed case, two strings from data, a text member
+/// and a key from data compile, and a library is exempt.
+#[test]
+fn an_application_selects_by_a_backed_enum_never_by_a_string_fixed_at_compile_time() {
+    let status = "namespace Shop;\n\npublic enum OrderStatus : string\n{\n    case Paid = \"paid\";\n    case Open = \"open\";\n}\n";
+    let order = "namespace Shop;\n\npublic class Order\n{\n    public Order(public string status { get; }, public OrderStatus state { get; }) { }\n}\n";
+    let checks = "namespace Shop;\n\npublic class Checks\n{\n    const PAID = \"paid\";\n\n    public int run(Order order, string name, string password, string confirmation, Map<string, string> row, Map<string, int> counts, string tag, string line)\n    {\n        int hits = 0;\n        if (order.status == \"paid\") { hits += 1; }\n        if (order.status != Checks.PAID) { hits += 1; }\n        if (order.status == OrderStatus.Paid.value) { hits += 1; }\n        if (\"open\" == order.status) { hits += 1; }\n        if (name == \"\") { hits += 1; }\n        if (name != \"\") { hits += 1; }\n        string label = match (order.status) { \"paid\" => \"done\", default => \"open\" };\n        string plan = row[\"plan\"] ?? \"free\";\n        row[\"plan\"] = \"pro\";\n        string held = row.get(\"plan\") ?? \"free\";\n        row.set(Checks.PAID, \"pro\");\n        if (order.state == OrderStatus.Paid) { hits += 1; }\n        if (password == confirmation) { hits += 1; }\n        if (name.isEmpty() || name.isNotEmpty()) { hits += 1; }\n        if (line.startsWith(\"#\")) { hits += 1; }\n        List<string> parts = line.split(\",\");\n        counts[tag] = (counts[tag] ?? 0) + 1;\n        if (label == plan || held == plan) { hits += 1; }\n        return hits;\n    }\n}\n";
+    let library = "namespace Kit;\n\npublic class Checks\n{\n    const PAID = \"paid\";\n\n    public bool run(string status, Map<string, string> row)\n    {\n        row[\"plan\"] = \"pro\";\n        return status == \"paid\" || status != Checks.PAID || (row[\"plan\"] ?? \"\") == \"\" || row.has(\"plan\");\n    }\n}\n";
+
+    assert_eq!(
+        package_errors(&[
+            ("src/Shop/OrderStatus.sharp", status),
+            ("src/Shop/Order.sharp", order),
+            ("src/Shop/Checks.sharp", checks),
+            ("library/Kit/Checks.sharp", library),
+            (
+                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharp",
+                include_str!("../../../../composer/library/Sharp/Text/StringMembers.sharp"),
+            ),
+            (
+                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/NormalizationForm.sharp",
+                include_str!("../../../../composer/library/Sharp/Text/NormalizationForm.sharp"),
+            ),
+        ]),
+        [
+            "`==` compares `order.status` with `\"paid\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "`!=` compares `order.status` with `Checks.PAID`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "`==` compares `order.status` with `OrderStatus.Paid.value`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "`==` compares `order.status` with `\"open\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "`==` compares `name` with `\"\"`, a string fixed at compile time.",
+            "`!=` compares `name` with `\"\"`, a string fixed at compile time.",
+            "A pattern compares `order.status` with `\"paid\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "`\"plan\"` is a string fixed at compile time, so it names a field of a fixed shape, not a key of a `Map`.",
+            "`\"plan\"` is a string fixed at compile time, so it names a field of a fixed shape, not a key of a `Map`.",
+            "`\"plan\"` is a string fixed at compile time, so it names a field of a fixed shape, not a key of a `Map`.",
+            "`Checks.PAID` is a string fixed at compile time, so it names a field of a fixed shape, not a key of a `Map`.",
+        ]
+    );
+}
+
+/// Spec section 11.2: `keyof T` holds the names of `T`'s members, and `nameof(Order.total)` is a `keyof Order`. A
+/// `keyof` parameter takes a `nameof` and refuses `"total"`. A `string` parameter takes a `nameof`, and so does a plain
+/// PHP `literal-string` one, since a member's name is fixed at compile time. In an application a `nameof` still
+/// compares and keys a `Map` as a string from data does.
+#[test]
+fn a_member_name_is_a_keyof_type_that_only_nameof_gives() {
+    let order = "namespace Shop;\n\npublic class Order\n{\n    public Order(public int total { get; }, public string status { get; }) { }\n}\n";
+    let query = "namespace Shop;\n\npublic class Query<T>\n{\n    public Query<T> orderBy(keyof T column) => this;\n\n    public bool sorts(keyof Order column) => true;\n}\n";
+    let labels =
+        "namespace Shop;\n\npublic static class Labels\n{\n    public static string label(string name) => name;\n}\n";
+    let raw = "<?php\n\nnamespace Lib;\n\nfinal class Raw\n{\n    /** @param literal-string $column */\n    public static function orderBy(string $column): string\n    {\n        return $column;\n    }\n}\n";
+    let report = "namespace Shop;\n\nimport Lib.Raw;\n\npublic class Report\n{\n    public int run(Query<Order> query, string column, Map<string, int> row)\n    {\n        query.orderBy(nameof(Order.total)).orderBy(\"total\");\n        bool sorted = query.sorts(nameof(Order.status)) && query.sorts(\"status\");\n        string label = Labels.label(nameof(Order.status)) + Raw.orderBy(nameof(Order.total));\n        List<string> columns = [nameof(Order.total), nameof(Order.status)];\n        string message = `${nameof(Order.total)} is invalid`;\n        string joined = nameof(Order.total) + nameof(Order.status);\n        int size = nameof(Order.total).length() + joined.length();\n        int hits = sorted ? 1 : 0;\n        if (column == nameof(Order.total)) { hits += 1; }\n        row[nameof(Order.status)] = 1;\n        return hits + (row[nameof(Order.total)] ?? 0) + label.length() + columns.count() + message.length() + size;\n    }\n}\n";
+
+    assert_eq!(
+        package_errors(&[
+            ("src/Shop/Order.sharp", order),
+            ("src/Shop/Query.sharp", query),
+            ("src/Shop/Labels.sharp", labels),
+            ("src/Lib/Raw.php", raw),
+            ("src/Shop/Report.sharp", report),
+            (
+                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharp",
+                include_str!("../../../../composer/library/Sharp/Text/StringMembers.sharp"),
+            ),
+            (
+                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/NormalizationForm.sharp",
+                include_str!("../../../../composer/library/Sharp/Text/NormalizationForm.sharp"),
+            ),
+        ]),
+        [
+            "Invalid argument type for argument #1 of `Query.orderBy`: expected `keyof Order`, but found `string`.",
+            "Invalid argument type for argument #1 of `Query.sorts`: expected `keyof Order`, but found `string`.",
+        ]
+    );
+}
+
+/// Spec section 11.2: a class inherits its parent's members, so a name of `Entity`'s member is a name of `Order`'s, and
+/// a `keyof Entity` passes where a `keyof Order` is expected. A `keyof Order` may name `Order`'s own member, which is
+/// none of `Entity`'s, so it is refused where a `keyof Entity` is expected.
+#[test]
+fn a_keyof_takes_the_names_of_a_parent_s_members_and_never_a_child_s() {
+    let entity = "namespace Shop;\n\npublic abstract class Entity\n{\n    public int id { get; } = 1;\n}\n";
+    let order = "namespace Shop;\n\npublic class Order : Entity\n{\n    public int total { get; } = 0;\n}\n";
+    let sorter = "namespace Shop;\n\npublic class Sorter\n{\n    public bool byOrder(keyof Order column) => true;\n\n    public bool byEntity(keyof Entity column) => true;\n\n    public bool run() => this.byOrder(nameof(Entity.id)) && this.byEntity(nameof(Order.total));\n}\n";
+
+    assert_eq!(
+        package_errors(&[
+            ("src/Shop/Entity.sharp", entity),
+            ("src/Shop/Order.sharp", order),
+            ("src/Shop/Sorter.sharp", sorter),
+        ]),
+        [
+            "Possible argument type mismatch for argument #1 of `Sorter.byEntity`: expected `keyof Entity`, but possibly received `keyof Order`."
+        ]
+    );
+}
+
+/// Spec section 23: an `extern` line may state a plain PHP method's or function's signature, which a PHP# call is
+/// checked against instead of the library's docblock. A wrong argument is refused, a docblock's wrong `array` is
+/// corrected to the object the body reads, and a generic class's method takes its member names through `keyof`.
+#[test]
+fn a_typed_extern_checks_each_call_against_the_signature_it_states() {
+    let routing = "<?php\n\nnamespace Lib\\Routing;\n\nfunction route(string $name, array $parameters = []): string\n{\n    return '/' . $name;\n}\n";
+    let elements = "<?php\n\nnamespace Lib;\n\nfinal class Elements\n{\n    /** @param array $element */\n    public static function render($element = null): string\n    {\n        return 'element';\n    }\n}\n";
+    let builder = "<?php\n\nnamespace Lib\\Database;\n\n/** @template TModel */\nfinal class Builder\n{\n    /** @return static */\n    public function where($column, $value = null): static\n    {\n        return $this;\n    }\n}\n";
+    let stubs = "namespace Stubs;\n\nimport Lib.Database.Builder;\nimport Lib.Elements;\nimport Lib.Routing;\nimport Shop.Element;\nimport Shop.RouteName;\n\nextern string Routing.route(RouteName name);\nextern string Elements.render(Element element);\nextern Builder<TModel> Builder<TModel>.where(keyof TModel column, Any? value);\n";
+    let route_name = "namespace Shop;\n\npublic enum RouteName : string\n{\n    case Checkout = \"checkout\";\n}\n";
+    let element = "namespace Shop;\n\npublic class Element\n{\n    public Element(public int id { get; }) { }\n}\n";
+    let order = "namespace Shop;\n\npublic class Order\n{\n    public Order(public string status { get; }) { }\n}\n";
+    let pages = "namespace Shop;\n\nimport Lib.Database.Builder;\nimport Lib.Elements;\nimport Lib.Routing;\n\npublic class Pages\n{\n    public string run(Builder<Order> query, Element element)\n    {\n        string url = Routing.route(RouteName.Checkout);\n        string bad = Routing.route(\"checkout\");\n        Builder<Order> paid = query.where(nameof(Order.status), \"paid\").where(\"stauts\", \"paid\");\n        return url + bad + Elements.render(element);\n    }\n}\n";
+
+    assert_eq!(
+        package_errors(&[
+            ("src/Lib/Routing/functions.php", routing),
+            ("src/Lib/Elements.php", elements),
+            ("src/Lib/Database/Builder.php", builder),
+            ("src/Stubs/Library.sharp", stubs),
+            ("src/Shop/RouteName.sharp", route_name),
+            ("src/Shop/Element.sharp", element),
+            ("src/Shop/Order.sharp", order),
+            ("src/Shop/Pages.sharp", pages),
+        ]),
+        [
+            "Invalid argument type for argument #1 of `Routing.route`: expected `RouteName`, but found `string`.",
+            "Invalid argument type for argument #1 of `Builder.where`: expected `keyof Order`, but found `string`.",
+        ]
+    );
+}
+
+/// Spec section 23: a signature an `extern` line states fits the library's native types. A stated parameter that
+/// does not cross to the native one, a native parameter without a default the line leaves out, a stated parameter the
+/// native method has no place for, a stated return type that does not take the native one and a generic class's type
+/// parameters written other than as it declares them are refused at the line, and so is a method the class only
+/// inherits, whose declaring class's line states it. A `List` takes the array a library returns, and a variadic
+/// parameter takes each stated parameter after it.
+#[test]
+fn a_typed_extern_that_misfits_the_native_types_is_refused_at_its_line() {
+    let library = "<?php\n\nnamespace Lib;\n\nclass Mailer\n{\n    public static function send(int $id, string $to): ?string\n    {\n        return null;\n    }\n\n    public static function count(int $id): int\n    {\n        return $id;\n    }\n\n    public static function ping(): bool\n    {\n        return true;\n    }\n\n    public static function tags(string ...$tags): array\n    {\n        return $tags;\n    }\n\n    public static function flush(): void\n    {\n    }\n}\n\nfinal class QueuedMailer extends Mailer\n{\n}\n";
+    let bag = "<?php\n\nnamespace Lib;\n\n/**\n * @template TKey\n * @template TValue\n */\nfinal class Bag\n{\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n";
+    let stubs = "namespace Stubs;\n\nimport Lib.Bag;\nimport Lib.Mailer;\nimport Lib.QueuedMailer;\n\nextern string Mailer.send(string id, string to);\nextern int Mailer.count();\nextern bool Mailer.ping(int id);\nextern List<string> Mailer.tags(string first, string second);\nextern Any? Bag<TValue>.first();\nextern void Mailer<T>.flush();\nextern bool QueuedMailer.ping();\n";
+
+    assert_eq!(
+        package_errors(&[
+            ("src/Lib/Mailer.php", library),
+            ("src/Lib/Bag.php", bag),
+            ("src/Stubs/Library.sharp", stubs)
+        ]),
+        [
+            "`string id` does not cross to `Mailer.send`'s `id`, which the library declares `int`.",
+            "`Mailer.send` returns `string?`, which the stated `string` does not take.",
+            "`Mailer.count` takes `id`, which has no default, so its `extern` line states it.",
+            "`Mailer.ping` has no parameter where its `extern` line states `id`.",
+            "`Bag` declares the type parameters `TKey, TValue`, so its `extern` line writes `Bag<TKey, TValue>`.",
+            "`Mailer` declares no type parameters, so its `extern` line writes `Mailer` alone.",
+            "`QueuedMailer.ping` is a method of `Mailer`, so `extern Mailer.ping` states its signature.",
+        ]
+    );
+}
+
+/// Spec section 24: the help of each refusal names what to write instead: a backed enum for a selection, the empty
+/// tests for `""`, and a struct for a `Map` key.
+#[test]
+fn a_string_fixed_at_compile_time_that_selects_names_what_to_write() {
+    let checks = "namespace Shop;\n\npublic class Checks\n{\n    public bool run(string status, string name, Map<string, string> row)\n        => status == \"paid\" || name != \"\" || row.has(\"plan\");\n}\n";
+
+    let (_, _, issues) = analyze_package(&[("src/Shop/Checks.sharp", checks)]);
+    let helps: Vec<String> =
+        issues.into_iter().filter(|issue| issue.level == Level::Error).filter_map(|issue| issue.help).collect();
+
+    assert_eq!(
+        helps,
+        [
+            "Declare the values `status` takes as a backed enum, read them into it where the data enters, and compare `status` with a case.",
+            "Call `name.isNotEmpty()`.",
+            "Parse the `Map` into a struct whose properties are its fields where the data enters, and read the property.",
         ]
     );
 }
@@ -17722,6 +18003,30 @@ fn a_list_literal_with_an_empty_collection_becomes_a_tuple() {
     let sharp = "namespace Demo;\n\nclass Layout\n{\n    public [string base, Map<string, string> breakpoints] split() { return [\"a\", [:]]; }\n\n    public [List<int> sizes, string name] sized() { return [[], \"a\"]; }\n\n    public [Map<string, int> counts, List<string> names] empty() => [[:], []];\n}\n";
 
     assert_eq!(reported(("src/Demo/Layout.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// Spec section 30: a list literal becomes the declared tuple whatever its elements are: an element that is a lambda's
+/// result, a tuple a lambda returns through a generic method into a declared tuple, and a tuple a `Map` holds, read with
+/// `get(k) ?? throw` and unpacked.
+#[test]
+fn a_list_literal_becomes_the_tuple_a_lambda_or_a_map_carries() {
+    let media = "namespace Demo;\n\nclass Media\n{\n    public string path { get; } = \"\";\n}\n";
+    let reference = "namespace Demo;\n\nclass Reference\n{\n    public Reference(public string path { get; }) { }\n\n    public static Reference copy(Media media) => new Reference(media.path);\n}\n";
+    let store =
+        "namespace Demo;\n\nclass Store\n{\n    public static T atomically<T>(Function<T()> work) => work();\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tuples\n{\n    public [Map<string, int> data, List<Reference> references] copied(Map<string, int> data, Map<string, Media> media)\n    {\n        return [data, media.values().map((Media r) => Reference.copy(r))];\n    }\n\n    public int saved(Reference saved, List<string> issues)\n    {\n        [Reference saved, List<string> issues] result = Store.atomically(() => { return [saved, issues]; });\n        return result.issues.count();\n    }\n\n    public string tagged(Map<string, [string tag, string? attribute, string value]> tags, string k)\n    {\n        const [tag, named, value] = tags.get(k) ?? throw new OutOfRangeException(\"no tag\");\n        return tag + (named ?? \"\") + value;\n    }\n}\n";
+
+    assert_eq!(
+        reported(
+            ("src/Demo/Tuples.sharp", sharp),
+            &[
+                ("src/Demo/Media.sharp", media),
+                ("src/Demo/Reference.sharp", reference),
+                ("src/Demo/Store.sharp", store)
+            ]
+        ),
+        Vec::<String>::new()
+    );
 }
 
 /// Spec section 30: a list literal written where a named tuple is declared becomes that tuple, so the field or local it

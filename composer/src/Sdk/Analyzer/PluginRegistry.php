@@ -8,8 +8,6 @@ namespace Mago\Sdk\Analyzer;
  * Collects the semantic providers contributed by one analyzer plugin.
  *
  * @api
- * @mago-expect lint:too-many-methods
- * @mago-expect lint:too-many-properties
  */
 final class PluginRegistry
 {

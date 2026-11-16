@@ -46,7 +46,7 @@ function test5(?Unknown $_x): void {}
 
 class WithMethod
 {
-    // @mago-expect analysis:non-existent-class-like,missing-return-statement
+    // @mago-expect analysis:non-existent-class-like(2),missing-return-statement
     public function method(Invalid $_p): Missing {}
 }
 

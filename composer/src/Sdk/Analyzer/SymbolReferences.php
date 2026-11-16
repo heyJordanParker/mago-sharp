@@ -17,7 +17,6 @@ use function count;
  * Lazy, read-only access to Mago's final merged symbol-reference graph.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
  */
 final class SymbolReferences
 {

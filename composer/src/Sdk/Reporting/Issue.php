@@ -12,7 +12,6 @@ use Mago\Sdk\Span;
  * A diagnostic reported by a Mago extension.
  *
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class Issue
 {

@@ -165,10 +165,80 @@ fn run_test_case_inner(config: TestCase) {
         );
     }
 
-    verify_reported_issues(config.name, analysis_result, metadata);
+    verify_reported_issues(config.name, config.content, analysis_result, metadata);
 }
 
-fn verify_reported_issues(test_name: &str, mut analysis_result: AnalysisResult, mut codebase: CodebaseMetadata) {
+/// The issues a case expects, by code. Each comment line that starts with `@mago-expect analysis:<code>` names one,
+/// and `<code>(N)` names N, as in `@mago-expect analysis:mixed-operand(2), unused-variable`. The case writes them in
+/// its comments, and only this harness reads them: Mago reads no comment of the code it analyzes.
+fn expected_issue_counts(content: &[u8]) -> BTreeMap<String, usize> {
+    let mut expected = BTreeMap::new();
+    for line in String::from_utf8_lossy(content).lines() {
+        let Some((before, written)) = line.split_once("@mago-expect") else {
+            continue;
+        };
+        // The comment's own text starts with the expectation: after `//`, `#` or `/*` on the line, or after the `*` of
+        // a docblock's line, so a commented-out comment names nothing.
+        let opener =
+            ["//", "/*", "#"].into_iter().filter_map(|opener| Some((before.find(opener)?, opener.len()))).min();
+        let comment = match opener {
+            Some((start, length)) => &before[start + length..],
+            None => match before.trim_start().strip_prefix('*') {
+                Some(comment) => comment,
+                None => continue,
+            },
+        };
+        if !comment.trim_start_matches('*').trim().is_empty() {
+            continue;
+        }
+        let Some((category, codes)) = written.trim_start().split_once(':') else {
+            continue;
+        };
+        if !matches!(category, "analysis" | "analyzer" | "analyser") {
+            continue;
+        }
+
+        for code in expected_codes(codes.trim_start()) {
+            let code = code.split_once(':').map_or(code, |(_, code)| code.trim_start());
+            let (code, count) = match code.strip_suffix(')').and_then(|code| code.rsplit_once('(')) {
+                Some((code, count)) => (code.trim_end(), count.trim().parse().expect("a count is a number")),
+                None => (code, 1),
+            };
+
+            *expected.entry(code.to_owned()).or_insert(0) += count;
+        }
+    }
+
+    expected
+}
+
+/// The codes of an `@mago-expect` line, the comma-separated list before its description: whitespace ends the list
+/// unless a comma or a category's `:` stands beside it.
+fn expected_codes(written: &str) -> impl Iterator<Item = &str> {
+    let mut end = written.len();
+    let mut rest = written;
+    while let Some(space) = rest.find(char::is_whitespace) {
+        let before = written.len() - rest.len() + space;
+        let after = rest[space..].trim_start();
+        if written[..before].ends_with([',', ':']) || after.starts_with(',') {
+            rest = after;
+            continue;
+        }
+
+        end = before;
+        break;
+    }
+
+    written[..end].split(',').map(str::trim).filter(|code| !code.is_empty())
+}
+
+fn verify_reported_issues(
+    test_name: &str,
+    content: &[u8],
+    mut analysis_result: AnalysisResult,
+    mut codebase: CodebaseMetadata,
+) {
+    let expected_issue_counts = expected_issue_counts(content);
     let mut actual_issues_collected = std::mem::take(&mut analysis_result.issues);
 
     actual_issues_collected.extend(codebase.take_issues(true));
@@ -182,15 +252,27 @@ fn verify_reported_issues(test_name: &str, mut analysis_result: AnalysisResult, 
         *actual_issue_counts.entry(issue_code).or_insert(0) += 1;
     }
 
-    if !actual_issue_counts.is_empty() {
-        let mut discrepancies = Vec::new();
-        for (actual_kind, &actual_count) in &actual_issue_counts {
-            discrepancies.push(format!("- Unexpected issue(s) `{}`: found {}.", actual_kind.as_str(), actual_count));
-        }
-
+    if actual_issue_counts != expected_issue_counts {
         let mut panic_message = format!("Test '{test_name}' failed with issue discrepancies:\n");
-        for d in discrepancies {
-            let _ = writeln!(panic_message, "  {d}");
+        let mut codes: Vec<&String> = actual_issue_counts.keys().chain(expected_issue_counts.keys()).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        for code in codes {
+            let actual = actual_issue_counts.get(code).copied().unwrap_or(0);
+            let expected = expected_issue_counts.get(code).copied().unwrap_or(0);
+            if actual != expected {
+                let lines: Vec<String> = actual_issues_collected
+                    .iter()
+                    .filter(|issue| issue.code.as_deref() == Some(code.as_str()))
+                    .filter_map(|issue| issue.primary_span())
+                    .map(|span| content[..span.start.offset as usize].split(|byte| *byte == b'\n').count().to_string())
+                    .collect();
+                let _ = writeln!(
+                    panic_message,
+                    "  - `{code}`: expected {expected}, found {actual}, on lines [{}].",
+                    lines.join(", ")
+                );
+            }
         }
 
         panic!("{}", panic_message);

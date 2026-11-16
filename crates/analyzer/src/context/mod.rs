@@ -293,10 +293,9 @@ where
     /// Drain the collector into the analysis result. Used by
     /// [`crate::Analyzer::analyze_with_artifacts`], which keeps the
     /// [`crate::artifacts::AnalysisArtifacts`] for its caller after analysis completes.
-    pub fn finish_collector(self, analysis_result: &mut AnalysisResult, defer_pragmas: bool) {
-        let (issues, pragmas) = if defer_pragmas { self.collector.defer() } else { (self.collector.finish(), None) };
+    pub fn finish_collector(self, analysis_result: &mut AnalysisResult) {
+        let issues = self.collector.finish();
         analysis_result.issues.extend(explain_lambda_assigned_reads(issues, &self.lambda_assigned_reads));
-        analysis_result.add_deferred_pragmas(pragmas);
     }
 }
 

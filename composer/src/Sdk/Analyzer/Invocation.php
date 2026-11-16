@@ -12,8 +12,6 @@ use function in_array;
 
 /**
  * @api
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:excessive-parameter-list
  */
 final class Invocation
 {

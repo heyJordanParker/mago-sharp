@@ -15,9 +15,6 @@ use function dirname;
 
 require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
 
-/**
- * @mago-expect lint:file-name
- */
 final class EntryPointPlugin implements Plugin
 {
     public function getDefinition(): PluginDefinition

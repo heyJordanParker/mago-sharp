@@ -8,7 +8,6 @@ use Mago\Sdk\Exception\InvalidArgumentException;
 
 /**
  * @api
- * @mago-expect lint:cyclomatic-complexity
  */
 final class IntegerType
 {

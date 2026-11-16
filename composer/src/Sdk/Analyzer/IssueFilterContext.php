@@ -15,7 +15,6 @@ use Mago\Sdk\Reporting\ReportedIssue;
  * need to match a file currently present on disk.
  *
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class IssueFilterContext
 {

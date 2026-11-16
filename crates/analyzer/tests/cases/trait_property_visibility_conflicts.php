@@ -108,7 +108,7 @@ trait T13
 
 class C6
 {
-    // @mago-expect analysis:incompatible-property-visibility
+    // @mago-expect analysis:incompatible-property-visibility(3)
     use T11, T12, T13;
 }
 

@@ -1745,6 +1745,9 @@ where
                 Hint::Readonly(_) => {
                     unreachable!("the formatter refuses a PHP# file, the only one with readonly types")
                 }
+                Hint::KeyOf(_) => {
+                    unreachable!("the formatter refuses a PHP# file, the only one with member name types")
+                }
             }
         })
     }

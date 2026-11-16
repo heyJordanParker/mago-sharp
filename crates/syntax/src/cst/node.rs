@@ -141,6 +141,7 @@ use crate::cst::cst::InterpolatedString;
 use crate::cst::cst::IntersectionHint;
 use crate::cst::cst::Is;
 use crate::cst::cst::IssetConstruct;
+use crate::cst::cst::KeyOfHint;
 use crate::cst::cst::KeyValueArrayElement;
 use crate::cst::cst::Keyword;
 use crate::cst::cst::Label;
@@ -576,6 +577,7 @@ pub enum NodeKind {
     TupleHint,
     TupleElementHint,
     ReadonlyHint,
+    KeyOfHint,
     TypeArgumentList,
     TypeParameterList,
     TypeParameter,
@@ -881,6 +883,7 @@ pub enum Node<'ast, 'arena> {
     TupleHint(&'ast TupleHint<'arena>),
     TupleElementHint(&'ast TupleElementHint<'arena>),
     ReadonlyHint(&'ast ReadonlyHint<'arena>),
+    KeyOfHint(&'ast KeyOfHint<'arena>),
     TypeArgumentList(&'ast TypeArgumentList<'arena>),
     TypeParameterList(&'ast TypeParameterList<'arena>),
     TypeParameter(&'ast TypeParameter<'arena>),
@@ -1288,6 +1291,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::TupleHint(_) => NodeKind::TupleHint,
             Self::TupleElementHint(_) => NodeKind::TupleElementHint,
             Self::ReadonlyHint(_) => NodeKind::ReadonlyHint,
+            Self::KeyOfHint(_) => NodeKind::KeyOfHint,
             Self::TypeArgumentList(_) => NodeKind::TypeArgumentList,
             Self::TypeParameterList(_) => NodeKind::TypeParameterList,
             Self::TypeParameter(_) => NodeKind::TypeParameter,
@@ -2981,7 +2985,19 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 if let Some(namespace) = &node.namespace {
                     f(Node::Keyword(namespace));
                 }
+                if let Some(return_type_hint) = &node.return_type_hint {
+                    f(Node::Hint(return_type_hint));
+                }
                 f(Node::Identifier(&node.target));
+                if let Some(type_parameters) = &node.type_parameters {
+                    f(Node::TypeParameterList(type_parameters));
+                }
+                if let Some(member) = &node.member {
+                    f(Node::LocalIdentifier(member));
+                }
+                if let Some(parameter_list) = &node.parameter_list {
+                    f(Node::FunctionLikeParameterList(parameter_list));
+                }
                 if let Some(namespaced) = &node.namespaced {
                     f(Node::Keyword(&namespaced.r#for));
                     f(Node::Identifier(&namespaced.name));
@@ -3213,6 +3229,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Hint::Function(function_hint) => f(Node::FunctionHint(function_hint)),
                 Hint::Tuple(tuple_hint) => f(Node::TupleHint(tuple_hint)),
                 Hint::Readonly(readonly_hint) => f(Node::ReadonlyHint(readonly_hint)),
+                Hint::KeyOf(key_of_hint) => f(Node::KeyOfHint(key_of_hint)),
             },
             Node::TupleHint(node) => {
                 for element in node.elements.iter() {
@@ -3270,6 +3287,10 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::NullableHint(node) => f(Node::Hint(node.hint)),
             Node::ReadonlyHint(node) => {
                 f(Node::Keyword(&node.readonly));
+                f(Node::Hint(node.hint));
+            }
+            Node::KeyOfHint(node) => {
+                f(Node::Keyword(&node.keyof));
                 f(Node::Hint(node.hint));
             }
             Node::ParenthesizedHint(node) => f(Node::Hint(node.hint)),
@@ -3629,6 +3650,7 @@ impl HasSpan for Node<'_, '_> {
             Self::TupleHint(node) => node.span(),
             Self::TupleElementHint(node) => node.span(),
             Self::ReadonlyHint(node) => node.span(),
+            Self::KeyOfHint(node) => node.span(),
             Self::TypeArgumentList(node) => node.span(),
             Self::TypeParameterList(node) => node.span(),
             Self::TypeParameter(node) => node.span(),

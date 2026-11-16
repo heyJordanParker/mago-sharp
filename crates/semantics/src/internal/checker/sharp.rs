@@ -700,6 +700,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(place)
         }
         (Node::Extern(r#extern), File) if r#extern.event.is_some() => check_extern_event(r#extern, context),
+        (Node::Extern(r#extern), File) if r#extern.parameter_list.is_some() => check_extern_signature(r#extern, context),
         (Node::UseItem(item), File) if imports_error(item) => {
             context.report(
                 Issue::error("PHP's engine class `Error` is a bug, which PHP# catches as `Throwable`, so no import names it.")
@@ -1420,6 +1421,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Hint(Hint::Readonly(_)), FieldOrProperty | Method | Signature | Parameter | Body) => Some(place),
         (Node::ReadonlyHint(readonly), FieldOrProperty | Method | Signature | Parameter | Body) => {
             check_readonly_type(readonly, context).then_some(place)
+        }
+        // Spec section 11: `keyof` before a class or a type parameter, the type of the names of its members.
+        (Node::Hint(Hint::KeyOf(_)) | Node::KeyOfHint(_), FieldOrProperty | Method | Signature | Parameter | Body) => {
+            Some(place)
         }
         // Spec section 13: a `readonly` that can't matter warns, as Rust's `unused_mut` does.
         (Node::Hint(Hint::Readonly(readonly)), Place::Pattern) => {
@@ -2563,7 +2568,7 @@ fn check_attribute_target(list: &AttributeList, context: &mut Context<'_, '_, '_
             Node::Struct(r#struct) if holds(&r#struct.attribute_lists) => Some(("a struct", &["type"])),
             Node::Event(event) if holds(&event.attribute_lists) => Some(("an event", &["type", "event"])),
             Node::Extern(r#extern) if holds(&r#extern.attribute_lists) => Some(
-                if !r#extern.target.is_dotted() && context.names.binding(&r#extern.target) == Some(Binding::Class) {
+                if r#extern.member_name().is_none() && context.names.binding(&r#extern.target) == Some(Binding::Class) {
                     ("a class's `extern` line", &["type"])
                 } else {
                     ("a method's or a function's `extern` line", &["method"])
@@ -3399,6 +3404,36 @@ fn imports_error(item: &UseItem) -> bool {
 
 /// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, whose
 /// effects its `uses` lists.
+/// Spec section 23: an `extern` line states the signature of a method or a function, `Class.method` or
+/// `Namespace.function`, and its types alone: a call passes each parameter it states, and the library's own default
+/// fills each one after them. Its parameters and return type are checked as an interface method's are.
+fn check_extern_signature(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    if r#extern.member_name().is_none() {
+        let issue = Issue::error(format!(
+            "An `extern` line states the signature of a method or a function, and `{}` names neither.",
+            BytesDisplay(r#extern.target.value())
+        ))
+        .with_annotation(Annotation::primary(r#extern.target.span()).with_message("Named here."))
+        .with_help("Name the method, as in `extern string Foundation.route(RouteName name);`.");
+        context.report(issue);
+
+        return None;
+    }
+    for parameter in r#extern.parameter_list.iter().flat_map(|list| list.parameters.iter()) {
+        if let Some(default) = &parameter.default_value {
+            context.report(
+                Issue::error(format!(
+                    "An `extern` line states types alone, so `{}` takes no default: a call passes each parameter the line states, and the library's own default fills each one after them.",
+                    BytesDisplay(parameter.variable.name)
+                ))
+                .with_annotation(Annotation::primary(default.span()).with_message("Written here.")),
+            );
+        }
+    }
+
+    Some(Place::Signature)
+}
+
 fn check_extern_event(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> Option<Place> {
     let Identifier::Dotted(target) = &r#extern.target else {
         return Some(Place::File);

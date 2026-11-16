@@ -7,9 +7,12 @@ use crate::metadata::CodebaseMetadata;
 use crate::ttype::TType;
 use crate::ttype::TypeRef;
 use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::reference::TReference;
 use crate::ttype::get_array_parameters;
 use crate::ttype::union::TUnion;
 
+/// `key-of<T>`: the keys of the array `T`, or, as PHP#'s `keyof Order` writes it, the names of the class `Order`'s
+/// members, spec section 11.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TKeyOf(Arc<TUnion>);
@@ -29,6 +32,22 @@ impl TKeyOf {
     #[inline]
     pub fn get_target_type_mut(&mut self) -> &mut TUnion {
         Arc::make_mut(&mut self.0)
+    }
+
+    /// Whether this holds the names of a class's members, as PHP#'s `keyof Order` and `keyof T` do, spec section 11,
+    /// rather than an array's keys. A member's name is a string only `nameof` gives, so a member name type holds no
+    /// other string, and it is a non-empty `string` wherever a `string` is taken.
+    #[must_use]
+    pub fn names_members(&self) -> bool {
+        self.0.types.iter().all(|target| match target {
+            TAtomic::Object(_) | TAtomic::Reference(TReference::Symbol { .. }) => true,
+            TAtomic::GenericParameter(parameter) => !parameter
+                .constraint
+                .types
+                .iter()
+                .any(|bound| matches!(bound, TAtomic::Array(_) | TAtomic::Iterable(_))),
+            _ => false,
+        })
     }
 
     #[must_use]

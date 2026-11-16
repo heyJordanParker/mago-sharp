@@ -15,8 +15,6 @@ use function strtolower;
  * A Mago extension and the capabilities it contributes.
  *
  * @api
- * @mago-expect lint:cyclomatic-complexity
- * @mago-expect lint:excessive-parameter-list
  */
 final class Extension
 {

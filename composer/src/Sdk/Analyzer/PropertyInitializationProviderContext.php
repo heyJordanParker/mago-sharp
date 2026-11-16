@@ -14,7 +14,6 @@ use Mago\Sdk\PHPVersion;
  * The property metadata name includes its leading `$`; provider target names do not.
  *
  * @api
- * @mago-expect lint:excessive-parameter-list
  */
 final class PropertyInitializationProviderContext
 {
