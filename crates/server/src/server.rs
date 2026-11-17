@@ -18,6 +18,7 @@ use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::ExternAttributes;
+use mago_orchestrator::service::incremental_analysis::compile::ExternEffects;
 use mago_orchestrator::service::incremental_analysis::compile::Family;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_reporting::Issue;
@@ -194,6 +195,13 @@ impl Server {
     #[must_use]
     pub fn extern_attributes(&self) -> Vec<ExternAttributes> {
         self.service.extern_attributes()
+    }
+
+    /// The effects of each plain PHP class, method and function an `extern` line of the last analysis declares, by
+    /// what it declares.
+    #[must_use]
+    pub fn extern_effects(&self) -> Vec<ExternEffects> {
+        self.service.extern_effects()
     }
 
     /// For each of `files`, the source files other than it whose signature edit makes the last analysis's warm path

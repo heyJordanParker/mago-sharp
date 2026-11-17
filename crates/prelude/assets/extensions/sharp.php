@@ -772,6 +772,22 @@ function accessors(string $type, string $name): array {}
 function invoke(?object $receiver, string $class, string $method, array $arguments, string $readOn): mixed {}
 
 /**
+ * A value of the function type the class value `$type` names that calls the method `$method` that `$class` declares, or
+ * the accessor `$name::get` or `$name::set`, as a direct call from the caller's code would: an instance one on the
+ * receiver of the class `$readOn` names it takes first, the one its `Method` was read from, and a static one on that
+ * class. The standard library's `Method.createDelegate` returns it.
+ *
+ * @template T
+ *
+ * @param class-string<T> $type
+ *
+ * @return T
+ *
+ * @throws \ValueError
+ */
+function createDelegate(string $readOn, string $class, string $method, string $type): \Closure {}
+
+/**
  * The value of the property `$property` that `$class` declares, read on `$receiver`, or of the static `$property`, as a
  * direct read from the caller's code would be. The standard library's `Property.get` returns it.
  *

@@ -18,6 +18,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_database::file::FileId;
 use mago_names::ACCEPTS_ANY_EFFECT;
 use mago_names::EMIT_EFFECT;
+use mago_names::binding::php_variable_name;
 use mago_names::display_sharp_member;
 use mago_names::scope::NamespaceScope;
 use mago_reporting::IssueCollection;
@@ -525,8 +526,10 @@ impl Effects {
 
     /// The effects of the PHP# method or lambda `function`, by full class name, each once, as a function type's `uses`
     /// lists them: each effect of the plain PHP and the `foreign` classes it reaches, and `Sharp\Events` when it emits.
-    /// A change of state is no effect. `None` when it calls plain PHP no `extern` declares, which no function type lists,
-    /// and for a function no summary records, such as a plain PHP one or a method without a body.
+    /// A change of state is no effect. A method without a body has the effects its `uses` lists, as a call of it does,
+    /// when it holds each implementation to them, spec section 29. `None` when it calls plain PHP no `extern` declares,
+    /// which no function type lists, and for a function no summary records and no such declaration holds, such as a
+    /// plain PHP one.
     #[must_use]
     pub fn function_effects(
         &self,
@@ -535,6 +538,9 @@ impl Effects {
     ) -> Option<Vec<Word>> {
         let body = match function {
             FunctionLikeIdentifier::Method(class, method) => {
+                if let Some(declaration) = holding_declaration(codebase, *class, *method) {
+                    return Some(declaration.uses.clone());
+                }
                 let class = codebase.class_key(class.as_bytes());
                 Body::Method(class, codebase.method_key(class, method.as_bytes()))
             }
@@ -542,8 +548,39 @@ impl Effects {
             FunctionLikeIdentifier::Function(_) => unreachable!("PHP# declares no function outside a class"),
         };
 
+        self.effects_of(&[*self.index.get(&body)?])
+    }
+
+    /// The effects of the accessor `accessor`, `get` or `set`, of the property `property` of the PHP# class `class`, as
+    /// [`Self::function_effects`] gives a method's: those of its body and, for a `set`, of the observers that run inside
+    /// it, spec section 6.2. An auto accessor runs no body of its own, so it has the effects of the observers alone.
+    /// `None` when one of them calls plain PHP no `extern` declares, and for a property the class neither declares nor
+    /// inherits.
+    #[must_use]
+    pub fn accessor_effects(
+        &self,
+        codebase: &CodebaseMetadata,
+        class: &[u8],
+        property: &[u8],
+        accessor: &[u8],
+    ) -> Option<Vec<Word>> {
+        let property = php_variable_name(property);
+        let declaring = *codebase.get_class_like(class)?.declaring_property_ids.get(&property)?;
+        let declaring = codebase.class_key(declaring.as_bytes());
+        let observers: &[&[u8]] = if accessor == b"set" { &[b"willSet", b"didSet"] } else { &[] };
+        let positions: Vec<usize> = std::iter::once(accessor)
+            .chain(observers.iter().copied())
+            .filter_map(|body| self.index.get(&Body::Accessor(declaring, property, word(body))).copied())
+            .collect();
+
+        self.effects_of(&positions)
+    }
+
+    /// The effects the bodies at `positions` reach, each once, as [`Self::function_effects`] lists them, or `None` when
+    /// one calls plain PHP no `extern` declares.
+    fn effects_of(&self, positions: &[usize]) -> Option<Vec<Word>> {
         let mut effects = Vec::new();
-        for (item, _) in &self.solved[*self.index.get(&body)?] {
+        for (item, _) in positions.iter().flat_map(|position| &self.solved[*position]) {
             let effect = match item {
                 Item::Effect(effect) => effect.named()?,
                 Item::Changed(_) => continue,

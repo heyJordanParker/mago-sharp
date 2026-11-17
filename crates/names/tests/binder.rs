@@ -794,22 +794,25 @@ fn an_effect_name_binds_as_a_class_name() {
     assert_eq!(resolved(&names, CODE, "Payments;", 1), b"App\\Effects\\Payments");
 }
 
-/// Spec section 29: a standard effect's name in a `uses` is that effect, though the file imports or declares a class
-/// under the name, and outside `uses` the name is that class, spec section 23.
+/// Spec section 29: a name in a `uses` resolves as a class name does, spec section 23, with each standard effect a
+/// default class-like: a bare name of one is that effect, and a class the file imports or declares under the name wins
+/// over it, in a `uses` as outside one.
 #[test]
-fn a_standard_effect_name_in_uses_is_the_effect_where_a_class_has_its_name() {
-    const CODE: &str = "namespace App.Stubs;\n\nimport Lib.Http;\n\nextern Http.post uses Http, Clock;\n\nclass Clock\n{\n    private Function<Http(Clock) uses Http, Clock>? send = null;\n}\n";
+fn a_name_in_uses_resolves_as_a_class_name_with_the_standard_effects_by_default() {
+    const CODE: &str = "namespace App.Stubs;\n\nimport Lib.Http;\n\nextern Http.post uses Http, Clock, Cache;\n\nclass Clock\n{\n    private Function<Http(Clock) uses Http, Clock, Cache>? send = null;\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
     for (needle, nth, class) in [
         ("Http.post", 0, "Lib\\Http"),
-        ("Http,", 0, "Sharp\\Net\\Http"),
-        ("Clock;", 0, "Sharp\\Time\\Clock"),
+        ("Http,", 0, "Lib\\Http"),
+        ("Clock,", 0, "App\\Stubs\\Clock"),
+        ("Cache;", 0, "Sharp\\Data\\Cache"),
         ("Http(", 0, "Lib\\Http"),
         ("Clock)", 0, "App\\Stubs\\Clock"),
-        ("Http,", 1, "Sharp\\Net\\Http"),
-        ("Clock>", 0, "Sharp\\Time\\Clock"),
+        ("Http,", 1, "Lib\\Http"),
+        ("Clock,", 1, "App\\Stubs\\Clock"),
+        ("Cache>", 0, "Sharp\\Data\\Cache"),
     ] {
         assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, nth)), class, "`{needle}` #{nth}");
     }

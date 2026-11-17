@@ -27,6 +27,8 @@ use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 
 use clap::ColorChoice;
 use clap::Parser;
@@ -54,6 +56,7 @@ use mago_orchestrator::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::ExternAttributes;
+use mago_orchestrator::service::incremental_analysis::compile::ExternEffects;
 use mago_orchestrator::service::incremental_analysis::compile::Family;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_prelude::Prelude;
@@ -108,8 +111,23 @@ const LISTENERS: &str = "listeners.php";
 const INPUTS: &str = "inputs.json";
 
 /// The file in the `.sharp` folder whose lock the engine holds while it runs `sharp.compile_command`, so a project
-/// compiles once at a time on demand. The compile keeps it, since a lock on a file it deleted would lock nothing.
+/// compiles once at a time on demand, and in the hosts' folder whose lock [`compile_for_hosts`] takes the same way. The
+/// compile keeps it, since a lock on a file it deleted would lock nothing.
 const COMPILE_LOCK: &str = "compile.lock";
+
+/// What this process holds of each hosts' folder it compiled into.
+static HOSTS_FOLDERS: Mutex<BTreeMap<PathBuf, HeldFolder>> = Mutex::new(BTreeMap::new());
+
+/// A hosts' folder as this process last held it.
+struct HeldFolder {
+    /// The lock of the folder's [`COMPILE_LOCK`], shared while the process's hosts may read the folder, and none
+    /// between a watch's analyses. A process holds one descriptor per folder, since two descriptors of one process
+    /// lock each other out.
+    lock: Option<std::fs::File>,
+    /// The hash of the folder's [`INPUTS`] when the process last held the folder, or none when the folder kept no
+    /// record.
+    record: Option<[u8; 16]>,
+}
 
 /// Command that compiles every PHP# file into the `.sharp` folder.
 #[derive(Parser, Debug, Default)]
@@ -144,8 +162,9 @@ const HOST_REPORT: &str = "report.json";
 
 /// Compiles every PHP# file of the project for its extension hosts, so a host loads the project's own classes as on
 /// plain PHP, on a fresh or read-only tree and after any change. Returns the project's hosts, each enabled one given
-/// the folder through [`HOST_ROOT`] and [`HOST_COMPILED`], which every command starts its hosts from, and whether a
-/// file in the folder changed, so a watch knows its hosts' workers may hold classes that changed. The folder is the
+/// the folder through [`HOST_ROOT`] and [`HOST_COMPILED`], which every command starts its hosts from, and whether the
+/// folder's tree changed since this process last held it, whichever run changed it, so a watch knows its hosts'
+/// workers may hold classes that changed. The folder is the
 /// project's in mago's cache, outside the project, and only the hosts' engine reads it, so the project's `.sharp`
 /// folder holds only what `mago compile` accepted.
 ///
@@ -154,6 +173,12 @@ const HOST_REPORT: &str = "report.json";
 /// A file that does not lower is in the folder's [`HOST_REPORT`], so a worker that loads it gets the checker's errors.
 /// It runs only when a file is missing from the folder or out of date, and silences its own thread's log: the run with
 /// the hosts that follows reports the project's errors.
+///
+/// Runs that start together take turns on the folder's [`COMPILE_LOCK`], as requests take turns on the engine's: a run
+/// checks the folder under the shared lock, and one that finds it stale compiles under the exclusive lock, which it
+/// takes once no other run's hosts read the folder. A run that waited for another's compile checks again and reuses
+/// its tree. The process then holds the shared lock while its hosts read the folder, so no other run rewrites it under
+/// them, until it exits or [`release_hosts_folders`] lets it go. The kernel frees the lock of a run that dies.
 ///
 /// # Errors
 ///
@@ -178,7 +203,7 @@ pub(crate) fn compile_for_hosts(
     without_hosts.extension_hosts.clear();
 
     let compiled = tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
-        compile_into(&without_hosts, &root, &folder)
+        compile_in_turn(&without_hosts, &root, &folder)
     })?;
 
     for host in hosts.values_mut().filter(|host| host.enabled) {
@@ -187,6 +212,51 @@ pub(crate) fn compile_for_hosts(
     }
 
     Ok((hosts, compiled))
+}
+
+/// Lets go of the lock of each hosts' folder this process holds, so other runs compile into it while its hosts read
+/// nothing, as a watch's hosts read nothing between its analyses. The next [`compile_for_hosts`] takes it again.
+pub(crate) fn release_hosts_folders() {
+    for held in HOSTS_FOLDERS.lock().unwrap_or_else(PoisonError::into_inner).values_mut() {
+        held.lock = None;
+    }
+}
+
+/// Runs [`compile_into`] under the lock of `folder`'s [`COMPILE_LOCK`], as [`compile_for_hosts`] says, and keeps the
+/// shared lock in [`HOSTS_FOLDERS`]. A project with no PHP# file gives its hosts nothing to read, so it takes no lock.
+/// Returns whether the folder's tree changed since this process last held it: this compile changed a file in it, or
+/// its record differs from the one the process last held, as after another run's compile between a watch's analyses.
+/// A folder that keeps no record can't tell, so it counts as changed.
+fn compile_in_turn(configuration: &Configuration, root: &Path, folder: &Path) -> Result<bool, Error> {
+    let mut filesystems = Filesystems::new();
+    let sources = source_files(configuration, root, &mut filesystems);
+    if !sources.keys().any(|name| name.ends_with(".sharp")) {
+        return Ok(false);
+    }
+
+    let path = folder.join(COMPILE_LOCK);
+    let locking = |error| DatabaseError::io(IOAction::WriteFile, &path, error);
+    let mut held = HOSTS_FOLDERS.lock().unwrap_or_else(PoisonError::into_inner).remove(folder);
+    let lock = match held.as_mut().and_then(|held| held.lock.take()) {
+        Some(lock) => lock,
+        None => mago_database::lock::shared(&path)?,
+    };
+    let compiled = if every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems) {
+        false
+    } else {
+        lock.unlock().and_then(|()| lock.lock()).map_err(locking)?;
+        let compiled = compile_into(configuration, root, folder)?;
+        lock.unlock().and_then(|()| lock.lock_shared()).map_err(locking)?;
+        compiled
+    };
+    let record = std::fs::read(folder.join(INPUTS)).ok().map(|bytes| unit::source_hash(&bytes));
+    let rewritten = held.is_some_and(|held| record.is_none() || held.record != record);
+    HOSTS_FOLDERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(folder.to_path_buf(), HeldFolder { lock: Some(lock), record });
+
+    Ok(compiled || rewritten)
 }
 
 /// Compiles the project at `root` into `folder` for its extension hosts, as [`compile_for_hosts`] says, unless every
@@ -269,8 +339,10 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
         let families: Vec<&Family> = families.iter().filter(|family| accepted.contains(&family.file_id)).collect();
         let accepted: Vec<&Listener> =
             listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
+        let effects = server.extern_effects();
         let table = folder.join(LISTENERS);
-        write(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref(), &externs, &families))?;
+        let dispatcher = server.dispatcher_module();
+        write(&table, &listener_table(&inputs, &accepted, dispatcher.as_ref(), &externs, &effects, &families))?;
         written.insert(table);
     }
 
@@ -289,13 +361,14 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
         },
     )
     .report(refused, None)?;
-    let report = report.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    let report = report.lock().unwrap_or_else(PoisonError::into_inner).clone();
     let path = folder.join(HOST_REPORT);
     write(&path, &report)?;
     written.insert(path);
     // A compile with a file that doesn't lower keeps no record, so the next one tries that file again.
     let record = record.filter(|_| lowered);
     written.extend(record.as_ref().and_then(Record::marker_path));
+    written.insert(folder.join(COMPILE_LOCK));
     let deleted = delete_all_but(folder, &written, &folder.join(PACKAGE_FOLDER))?;
     if let Some(record) = record {
         let listed = inputs.iter().map(|input| recorded(&input.path, Some(input)));
@@ -596,8 +669,10 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         let families: Vec<&Family> = families.iter().filter(|family| accepted.contains(&family.file_id)).collect();
         let accepted: Vec<&Listener> =
             listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
+        let effects = server.extern_effects();
         let table = compiled_folder.join(LISTENERS);
-        let bytes = listener_table(&inputs, &accepted, server.dispatcher_module().as_ref(), &externs, &families);
+        let dispatcher = server.dispatcher_module();
+        let bytes = listener_table(&inputs, &accepted, dispatcher.as_ref(), &externs, &effects, &families);
         write_by_rename(&table, &bytes)?;
         if let Some(record) = record.as_mut() {
             record.output(&table, &bytes);
@@ -1160,10 +1235,15 @@ fn filesystem_of(path: &Path) -> Option<libc::statfs> {
     Some(unsafe { filesystem.assume_init() })
 }
 
-/// The hash of `configuration`, from its debug form, which holds every field, the ones serde skips included: the
-/// deprecated `perform-heuristic-checks` and the formatter's settings.
+/// The hash of the settings of `configuration` that change what a compile writes: the PHP version, the sources, the
+/// extension hosts, and the parser's and the analyzer's settings, from their debug form, which holds every field, the
+/// ones serde skips included, as the deprecated `perform-heuristic-checks`. The threads, the stack size, the version
+/// checks, the linter's, the formatter's and the guard's settings, the editor URL, the configuration file and the
+/// command-line flags change nothing a compile writes, so runs that differ only there share one compile.
 fn configuration_hash(configuration: &Configuration) -> [u8; 16] {
-    unit::source_hash(format!("{configuration:?}").as_bytes())
+    let Configuration { php_version, source, extension_hosts, parser, analyzer, .. } = configuration;
+
+    unit::source_hash(format!("{php_version:?}{source:?}{extension_hosts:?}{parser:?}{analyzer:?}").as_bytes())
 }
 
 /// Each file the loader could read under the configured `paths`, `includes` and `patches` roots, by the name the
@@ -1351,13 +1431,16 @@ fn listener_inputs(root: &Path, database: &impl DatabaseReader) -> Result<Vec<un
 /// or `null`. Its `attributes` are, for each plain PHP class, method and function an `extern` line gives attributes,
 /// the files whose lines do, which the engine compiles when reflection reads its attributes, spec section 29. A class
 /// is keyed by its full name, a method as `class::method`, and a function as `function()`, each in lowercase. Its
-/// `tags` are, for each family, spec section 10, under its full name, the key its `[Tag]` names and each variant's
-/// class under the variant's name, which a family's `parse` and `withTag` read.
+/// `effects` are, keyed the same way, the effects the first `extern` line of each plain PHP class and method declares,
+/// the standard library's included, by their dotted full names, which `Method.createDelegate` holds a plain PHP method
+/// to, spec section 25. Its `tags` are, for each family, spec section 10, under its full name, the key its
+/// `[Tag]` names and each variant's class under the variant's name, which a family's `parse` and `withTag` read.
 fn listener_table(
     inputs: &[unit::Input],
     listeners: &[&Listener],
     dispatcher: Option<&DispatcherModule>,
     externs: &[&ExternAttributes],
+    effects: &[ExternEffects],
     families: &[&Family],
 ) -> Vec<u8> {
     let mut table = b"<?php\n\nreturn [\n    'inputs' => [\n".to_vec();
@@ -1410,6 +1493,19 @@ fn listener_table(
                 table.extend_from_slice(b", ");
             }
             quoted(&mut table, file.as_bytes());
+        }
+        table.extend_from_slice(b"],\n");
+    }
+    table.extend_from_slice(b"    ],\n    'effects' => [\n");
+    for declared in effects {
+        table.extend_from_slice(b"        ");
+        quoted(&mut table, declared.declaration.as_bytes());
+        table.extend_from_slice(b" => [");
+        for (index, effect) in declared.effects.iter().enumerate() {
+            if index > 0 {
+                table.extend_from_slice(b", ");
+            }
+            quoted(&mut table, effect.as_bytes());
         }
         table.extend_from_slice(b"],\n");
     }
@@ -2000,38 +2096,47 @@ mod tests {
         assert!(change_time_records_writes(directory.path()), "the temp folder's filesystem records every write");
     }
 
-    /// Every field of the configuration enters the record's header, the ones serde skips included, so a change to any
-    /// of them makes the next compile run.
+    /// Each setting that changes what a compile writes enters the record's header, the ones serde skips included, so a
+    /// change to any of them makes the next compile run, and a change to any other setting keeps the record current.
     #[test]
-    fn each_configuration_field_changes_the_configuration_hash() {
+    fn only_a_setting_that_changes_what_a_compile_writes_changes_the_configuration_hash() {
         let base = Configuration::from_workspace(PathBuf::from("/project"));
         type Change = fn(&mut Configuration);
-        let changes: [(&str, Change); 17] = [
-            ("version", |changed| changed.version = Some("0.6".to_owned())),
-            ("threads", |changed| changed.threads += 1),
-            ("stack-size", |changed| changed.stack_size += 1),
+        let written: [(&str, Change); 6] = [
             ("php-version", |changed| changed.php_version = PHPVersion::PHP80),
-            ("allow-unsupported-php-version", |changed| changed.allow_unsupported_php_version ^= true),
-            ("no-version-check", |changed| changed.no_version_check ^= true),
-            ("version-drift-fail-level", |changed| changed.version_drift_fail_level = VersionDriftFailLevel::Patch),
             ("source", |changed| changed.source.excludes.push("legacy".to_owned())),
             ("extension-hosts", |changed| {
                 changed.extension_hosts.insert("acme".to_owned(), ExtensionHostConfiguration::default());
             }),
-            ("linter", |changed| changed.linter.excludes.push("legacy".to_owned())),
             ("parser", |changed| changed.parser.enable_short_tags ^= true),
-            ("formatter", |changed| changed.formatter.settings.print_width += 1),
             ("analyzer", |changed| changed.analyzer.find_unused_definitions ^= true),
             ("analyzer.perform-heuristic-checks", |changed| changed.analyzer.perform_heuristic_checks = Some(false)),
+        ];
+        let unwritten: [(&str, Change); 12] = [
+            ("version", |changed| changed.version = Some("0.6".to_owned())),
+            ("threads", |changed| changed.threads += 1),
+            ("stack-size", |changed| changed.stack_size += 1),
+            ("allow-unsupported-php-version", |changed| changed.allow_unsupported_php_version ^= true),
+            ("no-version-check", |changed| changed.no_version_check ^= true),
+            ("version-drift-fail-level", |changed| changed.version_drift_fail_level = VersionDriftFailLevel::Patch),
+            ("linter", |changed| changed.linter.excludes.push("legacy".to_owned())),
+            ("formatter", |changed| changed.formatter.settings.print_width += 1),
             ("guard", |changed| changed.guard.excludes.push("legacy".to_owned())),
             ("editor-url", |changed| changed.editor_url = Some("phpstorm://open?file=%file%".to_owned())),
             ("config-file", |changed| changed.config_file = Some(PathBuf::from("/project/mago.toml"))),
+            ("cli-overrides", |changed| changed.cli_overrides.threads = Some(4)),
         ];
 
-        for (field, change) in changes {
+        let hash_after = |change: Change| {
             let mut changed = base.clone();
             change(&mut changed);
-            assert_ne!(configuration_hash(&changed), configuration_hash(&base), "{field}");
+            configuration_hash(&changed)
+        };
+        for (field, change) in written {
+            assert_ne!(hash_after(change), configuration_hash(&base), "{field}");
+        }
+        for (field, change) in unwritten {
+            assert_eq!(hash_after(change), configuration_hash(&base), "{field}");
         }
     }
 }

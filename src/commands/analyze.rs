@@ -68,6 +68,7 @@ use crate::commands::args::substitution::Substitution;
 use crate::commands::args::substitution::SubstitutionArgs;
 use crate::commands::args::substitution::substitute;
 use crate::commands::compile::compile_for_hosts;
+use crate::commands::compile::release_hosts_folders;
 use crate::commands::outcome::CommandOutcome;
 use crate::commands::stdin_input;
 use crate::config::Configuration;
@@ -539,6 +540,8 @@ impl AnalyzeCommand {
                 return Ok(WatchOutcome::Restart(reason));
             }
 
+            // The hosts read nothing until the next analysis, so other runs may compile into their folder meanwhile.
+            release_hosts_folders();
             let changed_file_ids = watcher.wait()?;
             if changed_file_ids.is_empty() {
                 continue;

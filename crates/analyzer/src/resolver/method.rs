@@ -541,7 +541,7 @@ where
                                         class_type: StaticClassType::Object(obj_type.clone()),
                                     });
                                     result.encountered_mixed |= has_incomplete_hierarchy;
-                                } else if has_incomplete_hierarchy {
+                                } else if has_incomplete_hierarchy && !context.dialect.is_sharp() {
                                     result.encountered_mixed = true;
                                 } else {
                                     // Of an intersection, the error names the part that has the method in another

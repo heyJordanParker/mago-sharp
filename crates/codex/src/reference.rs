@@ -47,6 +47,10 @@ pub enum CascadeEdge {
     Signature { from: SymbolIdentifier, to: SymbolIdentifier },
     /// The body of `from` references `to`.
     Body { from: SymbolIdentifier, to: SymbolIdentifier },
+    /// An attribute `from` carries references `to`, its class or its constructor, in `from`'s signature or body. The
+    /// cascade reads it as the signature or the body edge it stands in for. The attribute's constructor never runs as
+    /// part of `from`, so a walk of what code runs skips it.
+    Attribute { from: SymbolIdentifier, to: SymbolIdentifier, signature: bool },
     /// The top-level code of `file` references `to`.
     File { file: Word, to: SymbolIdentifier },
     /// `class` directly extends, implements or uses `parent`.
@@ -85,8 +89,16 @@ pub struct SymbolReferences {
     symbol_references_to_symbols: HashMap<SymbolIdentifier, HashSet<SymbolIdentifier>>,
 
     /// Maps a referencing symbol/member `(RefSymbol, RefMember)` to a set of referenced symbols/members `(Symbol, Member)`
-    /// found within the *signature* (e.g., type hints, attributes) of the referencing context.
+    /// found within the *signature* (e.g., type hints) of the referencing context.
     symbol_references_to_symbols_in_signature: HashMap<SymbolIdentifier, HashSet<SymbolIdentifier>>,
+
+    /// The references an attribute a symbol/member carries makes in its *body*: to the attribute's constructor, and to
+    /// its class. Every reader but [`Self::cascade_edges`] reads them as body references.
+    attribute_references: HashMap<SymbolIdentifier, HashSet<SymbolIdentifier>>,
+
+    /// The references an attribute a symbol/member carries makes in its *signature*: to the attribute's class. Every
+    /// reader but [`Self::cascade_edges`] reads them as signature references.
+    attribute_references_in_signature: HashMap<SymbolIdentifier, HashSet<SymbolIdentifier>>,
 
     /// Maps a referencing symbol/member `(RefSymbol, RefMember)` to a set of *overridden* members `(ParentSymbol, Member)`
     /// that it directly references (e.g., via `parent::method()`).
@@ -136,6 +148,8 @@ impl SymbolReferences {
     pub fn is_empty(&self) -> bool {
         self.symbol_references_to_symbols.is_empty()
             && self.symbol_references_to_symbols_in_signature.is_empty()
+            && self.attribute_references.is_empty()
+            && self.attribute_references_in_signature.is_empty()
             && self.symbol_references_to_overridden_members.is_empty()
             && self.functionlike_references_to_functionlike_returns.is_empty()
             && self.file_references_to_symbols.is_empty()
@@ -150,6 +164,7 @@ impl SymbolReferences {
     #[inline]
     pub fn count_body_references(&self) -> usize {
         self.symbol_references_to_symbols.values().map(std::collections::HashSet::len).sum::<usize>()
+            + self.attribute_references.values().map(std::collections::HashSet::len).sum::<usize>()
             + self.file_references_to_symbols.values().map(std::collections::HashSet::len).sum::<usize>()
     }
 
@@ -157,6 +172,7 @@ impl SymbolReferences {
     #[inline]
     pub fn count_signature_references(&self) -> usize {
         self.symbol_references_to_symbols_in_signature.values().map(std::collections::HashSet::len).sum::<usize>()
+            + self.attribute_references_in_signature.values().map(std::collections::HashSet::len).sum::<usize>()
             + self.file_references_to_symbols_in_signature.values().map(std::collections::HashSet::len).sum::<usize>()
     }
 
@@ -168,6 +184,8 @@ impl SymbolReferences {
     pub fn total_map_entries(&self) -> usize {
         self.symbol_references_to_symbols.len()
             + self.symbol_references_to_symbols_in_signature.len()
+            + self.attribute_references.len()
+            + self.attribute_references_in_signature.len()
             + self.symbol_references_to_overridden_members.len()
             + self.functionlike_references_to_functionlike_returns.len()
             + self.file_references_to_symbols.len()
@@ -189,17 +207,23 @@ impl SymbolReferences {
     #[inline]
     #[must_use]
     pub fn count_referencing_symbols(&self, symbol: &SymbolIdentifier, in_signature: bool) -> usize {
-        let map = if in_signature {
-            &self.symbol_references_to_symbols_in_signature
+        let (map, attributes) = if in_signature {
+            (&self.symbol_references_to_symbols_in_signature, &self.attribute_references_in_signature)
         } else {
-            &self.symbol_references_to_symbols
+            (&self.symbol_references_to_symbols, &self.attribute_references)
         };
 
         let files =
             if in_signature { &self.file_references_to_symbols_in_signature } else { &self.file_references_to_symbols };
 
-        map.values().filter(|referenced_set| referenced_set.contains(symbol)).count()
-            + files.values().filter(|referenced_set| referenced_set.contains(symbol)).count()
+        let referencing: HashSet<&SymbolIdentifier> = map
+            .iter()
+            .chain(attributes)
+            .filter(|(_, referenced_set)| referenced_set.contains(symbol))
+            .map(|(referencing, _)| referencing)
+            .collect();
+
+        referencing.len() + files.values().filter(|referenced_set| referenced_set.contains(symbol)).count()
     }
 
     /// Counts how many symbols have a *read* reference to the given property.
@@ -318,6 +342,36 @@ impl SymbolReferences {
             }
             ReferenceOrigin::File(file) => {
                 self.add_file_reference_to_class_member(file, referenced, in_signature);
+            }
+        }
+    }
+
+    /// Records that an attribute `referencing` carries references `referenced`, its class or its constructor, with the
+    /// same implied references [`Self::add_reference`] records, as [`CascadeEdge::Attribute`] edges. An attribute in
+    /// top-level code records a file reference, as [`Self::add_reference`] does.
+    #[inline]
+    pub fn add_attribute_reference(
+        &mut self,
+        referencing: ReferenceOrigin,
+        referenced: SymbolIdentifier,
+        in_signature: bool,
+    ) {
+        if let ReferenceOrigin::File(_) = referencing {
+            self.add_reference(referencing, referenced, in_signature);
+            return;
+        }
+
+        let mut made = SymbolReferences::new();
+        made.add_reference(referencing, referenced, in_signature);
+        for (from, references) in made.symbol_references_to_symbols_in_signature {
+            self.attribute_references_in_signature.entry(from).or_default().extend(references);
+        }
+        for (from, references) in made.symbol_references_to_symbols {
+            let in_signature = self.attribute_references_in_signature.get(&from);
+            for to in references {
+                if in_signature.is_none_or(|known| !known.contains(&to)) {
+                    self.attribute_references.entry(from).or_default().insert(to);
+                }
             }
         }
     }
@@ -580,6 +634,12 @@ impl SymbolReferences {
         for (k, v) in other.symbol_references_to_symbols_in_signature {
             self.symbol_references_to_symbols_in_signature.entry(k).or_default().extend(v);
         }
+        for (k, v) in other.attribute_references {
+            self.attribute_references.entry(k).or_default().extend(v);
+        }
+        for (k, v) in other.attribute_references_in_signature {
+            self.attribute_references_in_signature.entry(k).or_default().extend(v);
+        }
         for (k, v) in other.symbol_references_to_overridden_members {
             self.symbol_references_to_overridden_members.entry(k).or_default().extend(v);
         }
@@ -615,12 +675,14 @@ impl SymbolReferences {
     /// Visits every recorded reference without materializing a copy of the graph.
     #[inline]
     pub fn for_each_reference(&self, mut visit: impl FnMut(ReferenceOrigin, SymbolIdentifier, SymbolReferenceKind)) {
-        for (source, targets) in &self.symbol_references_to_symbols {
+        for (source, targets) in self.symbol_references_to_symbols.iter().chain(&self.attribute_references) {
             for target in targets {
                 visit(ReferenceOrigin::Symbol(*source), *target, SymbolReferenceKind::Body);
             }
         }
-        for (source, targets) in &self.symbol_references_to_symbols_in_signature {
+        for (source, targets) in
+            self.symbol_references_to_symbols_in_signature.iter().chain(&self.attribute_references_in_signature)
+        {
             for target in targets {
                 visit(ReferenceOrigin::Symbol(*source), *target, SymbolReferenceKind::Signature);
             }
@@ -686,12 +748,13 @@ impl SymbolReferences {
     #[must_use]
     pub fn get_references_to_symbol(&self, target_symbol: SymbolIdentifier) -> HashSet<&SymbolIdentifier> {
         let mut referencing_items = HashSet::default();
-        for (referencing_item, referenced_items) in &self.symbol_references_to_symbols {
-            if referenced_items.contains(&target_symbol) {
-                referencing_items.insert(referencing_item);
-            }
-        }
-        for (referencing_item, referenced_items) in &self.symbol_references_to_symbols_in_signature {
+        for (referencing_item, referenced_items) in self
+            .symbol_references_to_symbols
+            .iter()
+            .chain(&self.symbol_references_to_symbols_in_signature)
+            .chain(&self.attribute_references)
+            .chain(&self.attribute_references_in_signature)
+        {
             if referenced_items.contains(&target_symbol) {
                 referencing_items.insert(referencing_item);
             }
@@ -725,6 +788,14 @@ impl SymbolReferences {
             .symbol_references_to_symbols
             .iter()
             .flat_map(|(from, references)| references.iter().map(move |to| CascadeEdge::Body { from: *from, to: *to }));
+        let attribute = self
+            .attribute_references_in_signature
+            .iter()
+            .map(|(from, references)| (from, references, true))
+            .chain(self.attribute_references.iter().map(|(from, references)| (from, references, false)))
+            .flat_map(|(from, references, signature)| {
+                references.iter().map(move |to| CascadeEdge::Attribute { from: *from, to: *to, signature })
+            });
         let file =
             self.file_references_to_symbols.iter().chain(&self.file_references_to_symbols_in_signature).flat_map(
                 |(file, references)| references.iter().map(move |to| CascadeEdge::File { file: *file, to: *to }),
@@ -738,7 +809,7 @@ impl SymbolReferences {
                 .map(move |parent| CascadeEdge::Inherits { class: *class, parent: *parent })
         });
 
-        signature.chain(body).chain(file).chain(inherits)
+        signature.chain(body).chain(attribute).chain(file).chain(inherits)
     }
 
     /// Calculates sets of invalid symbols and members based on detected code changes (`CodebaseDiff`).
@@ -775,7 +846,7 @@ impl SymbolReferences {
         let mut file_references: Vec<(Word, SymbolIdentifier)> = Vec::new();
         for edge in self.cascade_edges(codebase) {
             match edge {
-                CascadeEdge::Signature { from, to } => {
+                CascadeEdge::Signature { from, to } | CascadeEdge::Attribute { from, to, signature: true } => {
                     if codebase_diff.contains_changed_entry(&(from.0, empty_word())) {
                         invalid_signatures.insert(from);
                         partially_invalid_symbols.insert(from.0);
@@ -784,7 +855,9 @@ impl SymbolReferences {
                     sig_reverse_index.entry(to).or_default().push(from);
                     references.push((from, to));
                 }
-                CascadeEdge::Body { from, to } => references.push((from, to)),
+                CascadeEdge::Body { from, to } | CascadeEdge::Attribute { from, to, signature: false } => {
+                    references.push((from, to));
+                }
                 CascadeEdge::File { file, to } => file_references.push((file, to)),
                 // A class whose parent, interface or trait changed is never safe, since its edge to that parent can
                 // be lost while the parent is deleted and re-added.
@@ -903,6 +976,13 @@ impl SymbolReferences {
             }
         }
 
+        // Restore the body references of the attributes of safe symbols
+        for (key, refs) in &previous.attribute_references {
+            if is_safe(key) && !self.attribute_references.contains_key(key) {
+                self.attribute_references.insert(*key, refs.clone());
+            }
+        }
+
         // Restore overridden member references for safe symbols
         for (key, refs) in &previous.symbol_references_to_overridden_members {
             if is_safe(key) && !self.symbol_references_to_overridden_members.contains_key(key) {
@@ -957,6 +1037,7 @@ impl SymbolReferences {
         // Remove body (not signature) references
         for key in symbols_and_members {
             self.symbol_references_to_symbols.remove(key);
+            self.attribute_references.remove(key);
             self.symbol_references_to_overridden_members.remove(key);
             self.property_write_references.remove(key);
             self.property_read_references.remove(key);
@@ -1016,6 +1097,9 @@ impl SymbolReferences {
             .retain(|referencing_item, _| !invalid_symbols_and_members.contains(referencing_item));
         self.symbol_references_to_symbols_in_signature
             .retain(|referencing_item, _| !invalid_symbols_and_members.contains(referencing_item));
+        self.attribute_references.retain(|referencing_item, _| !invalid_symbols_and_members.contains(referencing_item));
+        self.attribute_references_in_signature
+            .retain(|referencing_item, _| !invalid_symbols_and_members.contains(referencing_item));
         self.symbol_references_to_overridden_members
             .retain(|referencing_item, _| !invalid_symbols_and_members.contains(referencing_item));
         self.property_write_references
@@ -1044,6 +1128,8 @@ impl SymbolReferences {
 
         self.symbol_references_to_symbols.retain(|k, _| is_safe(k));
         self.symbol_references_to_symbols_in_signature.retain(|k, _| is_safe(k));
+        self.attribute_references.retain(|k, _| is_safe(k));
+        self.attribute_references_in_signature.retain(|k, _| is_safe(k));
         self.symbol_references_to_overridden_members.retain(|k, _| is_safe(k));
         self.property_write_references.retain(|k, _| is_safe(k));
         self.property_read_references.retain(|k, _| is_safe(k));
@@ -1068,6 +1154,8 @@ impl SymbolReferences {
         for key in dirty_symbols {
             self.symbol_references_to_symbols.remove(key);
             self.symbol_references_to_symbols_in_signature.remove(key);
+            self.attribute_references.remove(key);
+            self.attribute_references_in_signature.remove(key);
             self.symbol_references_to_overridden_members.remove(key);
             self.property_write_references.remove(key);
             self.property_read_references.remove(key);
@@ -1320,5 +1408,49 @@ mod tests {
         };
         assert!(read_invalid(HashSet::from_iter([(child, empty_word())])));
         assert!(!read_invalid(HashSet::from_iter([(word("other"), empty_word())])));
+    }
+
+    /// An attribute's references are `Attribute` edges, which every other reader takes as the signature and body
+    /// references [`SymbolReferences::add_reference`] records for the same calls.
+    #[test]
+    fn an_attribute_s_references_are_attribute_edges_read_as_the_references_they_stand_for() {
+        let class = (word("order"), empty_word());
+        let method = (word("order"), word("total"));
+        let attribute = (word("tag"), empty_word());
+        let constructor = (word("tag"), word("__construct"));
+        let record = |add: fn(&mut SymbolReferences, ReferenceOrigin, SymbolIdentifier, bool)| {
+            let mut references = SymbolReferences::new();
+            add(&mut references, ReferenceOrigin::Symbol(class), attribute, true);
+            add(&mut references, ReferenceOrigin::Symbol(class), constructor, false);
+            add(&mut references, ReferenceOrigin::Symbol(method), attribute, true);
+            add(&mut references, ReferenceOrigin::Symbol(method), constructor, false);
+            references
+        };
+        let attributes = record(SymbolReferences::add_attribute_reference);
+        let code = record(SymbolReferences::add_reference);
+        let codebase = CodebaseMetadata::default();
+
+        assert!(code.cascade_edges(&codebase).all(|edge| !matches!(edge, CascadeEdge::Attribute { .. })));
+        assert!(attributes.cascade_edges(&codebase).all(|edge| matches!(edge, CascadeEdge::Attribute { .. })));
+        let visited = |references: &SymbolReferences| {
+            let mut visited = HashSet::default();
+            references.for_each_reference(|source, target, kind| {
+                visited.insert((source, target, kind));
+            });
+            visited
+        };
+        assert_eq!(visited(&attributes), visited(&code));
+        assert_eq!(attributes.get_references_to_symbol(attribute), code.get_references_to_symbol(attribute));
+        for in_signature in [true, false] {
+            assert_eq!(
+                attributes.count_referencing_symbols(&attribute, in_signature),
+                code.count_referencing_symbols(&attribute, in_signature)
+            );
+        }
+        let diff = crate::diff::CodebaseDiff::new().with_changed(HashSet::from_iter([attribute]));
+        let invalid = |references: &SymbolReferences| {
+            references.get_invalid_symbols(&codebase, &diff, &HashSet::default()).expect("invalidation completes")
+        };
+        assert_eq!(invalid(&attributes), invalid(&code));
     }
 }

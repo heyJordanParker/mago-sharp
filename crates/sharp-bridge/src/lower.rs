@@ -2225,10 +2225,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(span);
         let mixed = self.php_type(&PhpType::Mixed, line);
         let hint = self.property_hint(mixed, name, line);
-        let name = self.string(0, line, name);
-        let hook = self.hook(b"get", span, span, NULL, body);
+        let property = self.string(0, line, name);
+        let hook = self.get_hook(name, span, span, body);
         let hooks = self.node(SHARP_AST_STMT_LIST, 0, line, &[hook]);
-        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[property, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
 
         self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, NULL])
@@ -2926,9 +2926,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     }
                     None => unreachable!("semantics refuses an extension method without a return type"),
                 };
-                // An extension member carries its result type, which a generator's elements are read from, spec
+                // An extension member carries its result alone, which a generator's elements are read from, spec
                 // section 12, and no function type, since no function value names it.
-                let result = self.types.method_result(self.class, method.name.value);
+                let result = self.types.method_result(self.class, method.name.value).as_deref().map(result_alone);
                 let attr = if crossing { ZEND_SHARP_RESULT_CROSSES } else { 0 };
                 let return_type = self.carried_type(return_type, result, attr, self.line(start));
                 let internal = self.internal_attribute(&method.modifiers);
@@ -3736,7 +3736,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let body =
                         if lazy { lowering.lazy_body(computed) } else { lowering.short_body(b"get", &computed.body) };
 
-                    lowering.hook(b"get", computed.body.arrow, &computed.body, NULL, body)
+                    lowering.get_hook(computed.variable.name, computed.body.arrow, &computed.body, body)
                 });
 
                 (
@@ -3897,8 +3897,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The hook of `accessor` with `parameters` and `body`, which carries the accessor's attributes but those of its
-    /// `param:` target, [`Self::setter_parameters`]'s, and after them those of the `observers` it runs, spec section 1.
-    /// An `init` is the `set` hook, and the property's set visibility keeps it to object creation.
+    /// `param:` target, [`Self::setter_parameters`]'s, and after them those of the `observers` it runs, spec section 1,
+    /// and its whole type, as [`Self::hook_type`] gives it. An `init` is the `set` hook, and the property's set
+    /// visibility keeps it to object creation.
     fn accessor_hook(
         &mut self,
         accessor: &PropertyHook,
@@ -3908,6 +3909,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     ) -> u32 {
         let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
         let attributes = self.accessor_attributes(accessor, observers, false);
+        let property = self.property.clone();
+        let r#type = self.hook_type(&property, name, body, self.line(accessor));
 
         self.declaration(
             SHARP_AST_PROPERTY_HOOK,
@@ -3915,8 +3918,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             accessor.name,
             accessor,
             name,
-            &[parameters, NULL, body, NULL, attributes],
+            &[parameters, NULL, body, r#type, attributes],
         )
+    }
+
+    /// The whole type the `accessor` hook, `get` or `set`, of `property` carries when it has a `body`, as a method
+    /// carries its own, [`Types::accessor_type`], in the slot of its result type, which PHP fills with the property's
+    /// type, or null for an abstract hook, whose implementations each carry their own.
+    fn hook_type(&mut self, property: &[u8], accessor: &[u8], body: u32, line: u32) -> u32 {
+        if body == NULL {
+            return NULL;
+        }
+        let function_type = self.types.accessor_type(self.class, property, accessor);
+
+        self.function_type(NULL, function_type, 0, line)
     }
 
     /// The attributes of `accessor` that go on the value it takes, `param:` ones, when `of_value`, or else the rest,
@@ -3984,10 +3999,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         index
     }
 
-    /// A hook named `get` or `set` with its parameters, null for the one PHP gives it, and its body, as php-src's grammar
-    /// declares every hook.
-    fn hook(&mut self, name: &[u8], start: impl HasSpan, end: impl HasSpan, parameters: u32, body: u32) -> u32 {
-        self.declaration(SHARP_AST_PROPERTY_HOOK, 0, start, end, name, &[parameters, NULL, body, NULL, NULL])
+    /// The `get` hook of `property` with its body, as php-src's grammar declares every hook, carrying its whole type, as
+    /// [`Self::hook_type`] gives it.
+    fn get_hook(&mut self, property: &[u8], start: impl HasSpan, end: impl HasSpan, body: u32) -> u32 {
+        let line = self.line(start.span());
+        let r#type = self.hook_type(property, b"get", body, line);
+
+        self.declaration(SHARP_AST_PROPERTY_HOOK, 0, start, end, b"get", &[NULL, NULL, body, r#type, NULL])
     }
 
     /// The body of `get => expr;`, the short body php-src's grammar builds, on the arrow's line. A `set` with an
@@ -4579,6 +4597,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
             };
             let return_type = lowering.hint(hint);
+            let function_type = lowering.types.accessor_type(lowering.class, variable.name, b"get");
+            let return_type = lowering.function_type(return_type, function_type, 0, line);
             let attributes = getter.map_or(NULL, |getter| lowering.accessor_attributes(getter, &[], false));
 
             lowering.accessor_method(variable, b"get", read_visibility, &[], body, return_type, attributes)
@@ -4616,8 +4636,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let parameter =
                 lowering.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, value_attributes, NULL, NULL]);
             let attributes = lowering.accessor_attributes(setter, &observers, false);
+            let function_type = lowering.types.accessor_type(lowering.class, variable.name, b"set");
+            let return_type = lowering.function_type(NULL, function_type, 0, line);
 
-            lowering.accessor_method(variable, b"set", write_visibility, &[parameter], body, NULL, attributes)
+            lowering.accessor_method(variable, b"set", write_visibility, &[parameter], body, return_type, attributes)
         });
         members.push(set);
         self.static_type_parameters = None;
@@ -7580,18 +7602,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The result type of a PHP# method or lambda declaration: a `SHARP_TYPE_ARGS` of `php_type` and `function_type`'s
-    /// text, which `is` tests a closure of it by, or of its result type alone when no function type takes a closure of
-    /// it, or `php_type` alone when PHP# can't write either, as [`Self::carried_type`] gives it with `attr`. The unit
-    /// lists the function type's fingerprint, or zero without one, since its effects come from other files' bodies.
+    /// text, which `is` tests a closure of it by, or of its result alone, as [`result_alone`] writes it, when no
+    /// function type takes a closure of it, or `php_type` alone when PHP# can't write either, as
+    /// [`Self::carried_type`] gives it with `attr`. The unit lists the function type's fingerprint, or zero without
+    /// one, since its effects come from other files' bodies.
     fn function_type(&mut self, php_type: u32, function_type: FunctionType, attr: u32, line: u32) -> u32 {
         let FunctionType { name, text, result } = function_type;
         self.function_types.push(Read {
             name: name.into_bytes(),
             fingerprint: text.as_ref().map_or(0, |text| xxh3_64(text.as_bytes())),
         });
-        // A function whose effects no function type can say carries its result type alone, which a generator's
-        // elements and a map stage's are read from, spec section 12.
-        self.carried_type(php_type, text.or(result), attr, line)
+
+        self.carried_type(php_type, text.or_else(|| result.as_deref().map(result_alone)), attr, line)
     }
 
     /// A `SHARP_TYPE_ARGS` of `php_type` and the type text `carried`, with `attr`, or `php_type` alone with neither. A
@@ -10030,6 +10052,12 @@ fn modifier_flags_or_private(modifiers: &Sequence<Modifier>) -> u32 {
     } else {
         flags
     }
+}
+
+/// The type text `: R` a function carries for its result `R` alone, when no function type can say its type, which the
+/// engine reads as a result and never as the function's own type, even when `R` is a function type.
+fn result_alone(result: &str) -> String {
+    format!(": {result}")
 }
 
 /// `ZEND_ACC_GENERATOR` for a method whose body yields, as php-src's grammar flags a function whose body holds a

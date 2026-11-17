@@ -396,7 +396,7 @@ where
                             ),
                         });
                         result.encountered_mixed |= has_incomplete_hierarchy;
-                    } else if has_incomplete_hierarchy {
+                    } else if has_incomplete_hierarchy && !context.dialect.is_sharp() {
                         result.encountered_mixed = true;
                     } else {
                         result.has_invalid_target = true;

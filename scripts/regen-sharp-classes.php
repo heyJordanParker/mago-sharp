@@ -165,7 +165,7 @@ echo
     rust(
         'pub(crate)',
         'STANDARD_EFFECTS',
-        "/// The standard effects, spec section 29: each `foreign` class of the standard library, which a name in `uses` names\n/// whatever the file imports. Sorted.",
+        "/// The standard effects, spec section 29: each `foreign` class of the standard library, which a bare name in `uses`\n/// names by default, as a bare name of `Sharp` names its class. Sorted.",
         $effects,
     );
 $emit = str_replace('\\', '\\\\', $marked['EffectOfEmit'][0]);

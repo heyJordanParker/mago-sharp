@@ -9,6 +9,7 @@ use crate::internal::context::NameResolutionContext;
 use crate::internal::walker::NameWalker;
 use crate::scope::trim_start_byte;
 use crate::shadows_a_default_class;
+use crate::standard_effect;
 
 /// Orchestrates the process of resolving names within a PHP Concrete Syntax Tree (CST).
 ///
@@ -90,7 +91,8 @@ pub struct NamespaceClasses {
 
 impl NamespaceClasses {
     /// The class-likes among `names`, each the full name of a project's class-like and whether it is PHP#, whose short
-    /// name `Sharp` imports by default.
+    /// name `Sharp` imports by default or a standard effect has, which a bare name in `uses` names by default, spec
+    /// section 29.
     pub fn new<N>(names: impl IntoIterator<Item = (N, bool)>) -> Self
     where
         N: AsRef<[u8]>,
@@ -99,7 +101,7 @@ impl NamespaceClasses {
         for (name, sharp) in names {
             let name = trim_start_byte(name.as_ref(), b'\\');
             let short = name.rsplit(|byte| *byte == b'\\').next().unwrap_or(name);
-            if sharp && default_class(short).is_some() {
+            if sharp && (default_class(short).is_some() || standard_effect(short).is_some()) {
                 classes.sharp.insert(name.to_vec());
             } else if !sharp && shadows_a_default_class(short) {
                 classes.plain.insert(name.to_ascii_lowercase());

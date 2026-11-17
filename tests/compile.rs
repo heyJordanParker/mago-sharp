@@ -563,6 +563,180 @@ fn a_host_sees_each_php_sharp_file_compiled_from_its_current_source() {
     assert_eq!(std::fs::read(compiled(root, "app/Word.sharp")).unwrap(), compiled_by_compile);
 }
 
+/// An editor's `mago analyze` and a terminal's start together after an edit, and each compiles the project into the one
+/// hosts' folder. One compiles while the others wait and then reuse its tree, so each run passes and each host reads
+/// the file compiled from the current source. Each round edits every source first, so every run finds the folder
+/// stale, and 60 more files keep each compile writing long enough for three runs to meet in the folder.
+#[test]
+fn analyses_that_start_together_after_an_edit_each_give_their_hosts_the_current_tree() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the hosts compile race test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "tools/host.php", HOST_READING_THE_COMPILED_FILE);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let analyze = || {
+        process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never", "analyze"])
+                .env("XDG_CACHE_HOME", cache.path())
+                .current_dir(root),
+        )
+        .unwrap()
+    };
+
+    let class = |namespace: &str, class: &str, word: &str| {
+        format!(
+            "namespace {namespace};\n\npublic class {class}\n{{\n    public static string text() => \"{word}\";\n}}\n"
+        )
+    };
+
+    for round in 0..10 {
+        let word = if round % 2 == 0 { "first" } else { "second" };
+        write(root, "app/Word.sharp", &class("App", "Word", word));
+        for file in 0..60 {
+            write(root, &format!("app/Words/Word{file}.sharp"), &class("App.Words", &format!("Word{file}"), word));
+        }
+        let _ = std::fs::remove_file(root.join("host.log"));
+
+        let outputs: Vec<Output> = std::thread::scope(|scope| {
+            let runs: Vec<_> = (0..3).map(|_| scope.spawn(analyze)).collect();
+            runs.into_iter().map(|run| run.join().unwrap()).collect()
+        });
+
+        for output in &outputs {
+            assert!(output.status.success(), "round {round}: {}", printed(output));
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join("host.log")).unwrap(),
+            format!("{word}\n{word}\n{word}\n"),
+            "round {round}"
+        );
+    }
+}
+
+/// An extension host that reads the word the compiled `app/Word.sharp` holds as its analysis starts, and again once it
+/// is let go, and appends both to `host.log`. The first such host to start makes the folder `held` and waits there
+/// until the file `hold` is gone, as a host whose hooks take long reads its classes over time.
+const HOST_READING_THE_COMPILED_FILE_TWICE: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\BeforeAnalysisContext;
+use Mago\Sdk\Analyzer\BeforeAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class ReadsTheCompiledFileTwice implements Plugin, BeforeAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('reads-twice', 'Reads twice', 'Reads app/Word.sharp compiled, twice.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerBeforeAnalysisHook($this);
+    }
+
+    public function beforeAnalysis(BeforeAnalysisContext $context): void
+    {
+        $first = $this->word();
+        if (@mkdir('held')) {
+            while (file_exists('hold')) {
+                usleep(10000);
+            }
+        }
+        file_put_contents('host.log', "{$first} {$this->word()}\n", FILE_APPEND);
+    }
+
+    private function word(): string
+    {
+        $compiled = (string) @file_get_contents(getenv('SHARP_COMPILED') . '/app/Word.sharpc');
+
+        return str_contains($compiled, 'second') ? 'second' : (str_contains($compiled, 'first') ? 'first' : 'nothing');
+    }
+}
+
+(new Worker(new Extension('reader', 'Reader', '0.0.0', analyzerPlugins: [new ReadsTheCompiledFileTwice()])))->run();
+"#;
+
+/// A run's hosts read the tree the run started them on until the run ends. An edit while they read makes the next run
+/// compile again, and that run waits for them before it rewrites the folder, so the first run's hosts read the first
+/// word both times and the next run's hosts read the second. The test lets the first run's host go once the next run's
+/// host logged, or 10 seconds on, far past the second a compile of this project takes.
+#[test]
+fn a_later_run_rewrites_the_hosts_folder_only_once_the_hosts_reading_it_are_done() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the hosts folder reader test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let word = |word: &str| {
+        format!("namespace App;\n\npublic class Word\n{{\n    public static string text() => \"{word}\";\n}}\n")
+    };
+    write(root, "app/Word.sharp", &word("first"));
+    write(root, "tools/host.php", HOST_READING_THE_COMPILED_FILE_TWICE);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+    write(root, "hold", "");
+    let cache = tempfile::tempdir().unwrap();
+    let analyze = || {
+        process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never", "analyze"])
+                .env("XDG_CACHE_HOME", cache.path())
+                .current_dir(root),
+        )
+        .unwrap()
+    };
+    let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
+    let wait_until = |done: &dyn Fn() -> bool, seconds: u64| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        while !done() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+
+    let (first, next) = std::thread::scope(|scope| {
+        let first = scope.spawn(analyze);
+        wait_until(&|| root.join("held").is_dir(), 120);
+        write(root, "app/Word.sharp", &word("second"));
+        let next = scope.spawn(analyze);
+        wait_until(&|| !log().is_empty(), 10);
+        std::fs::remove_file(root.join("hold")).unwrap();
+        (first.join().unwrap(), next.join().unwrap())
+    });
+
+    assert!(first.status.success(), "{}", printed(&first));
+    assert!(next.status.success(), "{}", printed(&next));
+    let mut reads: Vec<String> = log().lines().map(str::to_owned).collect();
+    reads.sort();
+    assert_eq!(reads, ["first first", "second second"]);
+}
+
 /// A host names none of what it reads, so a compile with a host enabled runs every time.
 #[test]
 fn a_compile_with_a_host_enabled_runs_every_time() {
@@ -819,6 +993,103 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     assert_eq!(runs[0].1, "first", "{failure}");
     assert_eq!(runs[1].1, "second", "{failure}");
     assert_ne!(runs[0].0, runs[1].0, "{failure}");
+}
+
+/// A terminal's run compiles an edit into the hosts' folder while a watch waits for a change, so the watch's own check
+/// then finds the folder current. The folder's record differs from the one the watch last held, so the watch starts its
+/// hosts' workers again, and they run the new class. The test stops the watch once it waits holding no lock of the
+/// folder, so the terminal's run compiles first, and lets it go on once that run is done.
+#[cfg(unix)]
+#[test]
+fn a_watch_starts_the_hosts_again_when_another_run_compiled_an_edit_while_it_waited() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the host watch test after another run") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let word = |word: &str| {
+        format!("namespace App;\n\npublic class Word\n{{\n    public static string text() => \"{word}\";\n}}\n")
+    };
+    write(root, "app/Word.sharp", &word("first"));
+    write(root, "tools/host.php", HOST_LOGGING_ITS_PROCESS);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
+    let within = |done: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            if done() {
+                return true;
+            }
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+
+    let watch_log = tempfile::NamedTempFile::new().unwrap();
+    let mut watch = process::spawn(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "analyze", "--watch"])
+            .env("MAGO_LOG", "info,mago=debug,mago_database=debug")
+            .env("XDG_CACHE_HOME", cache.path())
+            .current_dir(root)
+            .stdout(Stdio::null())
+            .stderr(watch_log.reopen().unwrap()),
+    )
+    .unwrap();
+    let watch_id = libc::pid_t::try_from(watch.id()).unwrap();
+    // SAFETY: `kill` only sends a signal, to the watch alone.
+    let signal = |signal| unsafe { libc::kill(watch_id, signal) } == 0;
+    let lock = || {
+        let hosts = std::fs::read_dir(cache.path().join("mago/hosts")).ok()?.next()?.ok()?.path();
+        std::fs::File::options().write(true).open(hosts.join("compile.lock")).ok()
+    };
+    let started = within(&|| log().lines().count() == 1);
+    // Stopped while it waits for a change, the watch holds no lock of the hosts' folder.
+    let idle = started
+        && within(&|| {
+            let free = signal(libc::SIGSTOP) && lock().is_some_and(|lock| lock.try_lock().is_ok());
+            if !free {
+                signal(libc::SIGCONT);
+            }
+            free
+        });
+    let terminal = idle.then(|| {
+        write(root, "app/Word.sharp", &word("second"));
+        process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never", "analyze"])
+                .env("XDG_CACHE_HOME", cache.path())
+                .current_dir(root),
+        )
+        .unwrap()
+    });
+    signal(libc::SIGCONT);
+    let restarted = idle && within(&|| log().lines().count() == 3);
+    watch.kill().unwrap();
+    watch.wait().unwrap();
+
+    let hosts = log();
+    let runs: Vec<(&str, &str)> = hosts.lines().filter_map(|line| line.split_once(' ')).collect();
+    let failure = format!("{hosts}\n{}", std::fs::read_to_string(watch_log.path()).unwrap());
+    assert!(idle, "the watch never let the hosts' folder go: {failure}");
+    let terminal = terminal.unwrap();
+    assert!(terminal.status.success(), "{}", printed(&terminal));
+    assert!(restarted, "{failure}");
+    assert_eq!(runs[0].1, "first", "{failure}");
+    assert_eq!(runs[1].1, "second", "the terminal's run: {failure}");
+    assert_eq!(runs[2].1, "second", "{failure}");
+    assert_ne!(runs[2].0, runs[0].0, "the watch started its hosts again: {failure}");
 }
 
 /// A host that types the project's code, as one that gives a plain PHP helper its return type does, can load the
@@ -1828,6 +2099,32 @@ fn a_compile_with_nothing_to_do_writes_nothing_and_prints_what_the_last_compile_
     assert_eq!(compiled_at(root, "app/Order.sharp"), written, "the compile wrote nothing");
 }
 
+/// The number of threads changes nothing a compile writes, so runs with their own `--threads`, as an editor's and a
+/// terminal's, share one compile: the second has nothing to do.
+#[test]
+fn compiles_with_different_threads_share_one_compile() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let compile_on = |threads: &str| {
+        process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never", "--threads", threads, "compile"])
+                .env("MAGO_REPORTING_FORMAT", "medium")
+                .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+                .current_dir(root),
+        )
+        .unwrap()
+    };
+    let full = compile_on("1");
+    assert!(full.status.success(), "{}", printed(&full));
+    let written = compiled_at(root, "app/Order.sharp");
+
+    let shared = compile_on("2");
+
+    assert!(shared.status.success(), "{}", printed(&shared));
+    assert_eq!(compiled_at(root, "app/Order.sharp"), written, "the compile on 2 threads wrote nothing");
+}
+
 /// Each message `output` logged, without the time, level, thread and module a debug build's log puts before it.
 fn logged(output: &Output) -> Vec<String> {
     String::from_utf8_lossy(&output.stderr)
@@ -2712,7 +3009,7 @@ fn listener_table(root: &Path, inputs: &[&str], rows: &str, dispatcher: &str) ->
     let inputs: String = inputs.iter().map(|path| input_row(root, path)).collect();
 
     format!(
-        "<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n    'dispatcher' => {dispatcher},\n    'attributes' => [\n    ],\n    'tags' => [\n    ],\n];\n"
+        "<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n    'dispatcher' => {dispatcher},\n    'attributes' => [\n    ],\n    'effects' => [\n    ],\n    'tags' => [\n    ],\n];\n"
     )
 }
 
@@ -2883,8 +3180,36 @@ fn compile_lists_the_files_whose_extern_lines_give_a_declaration_attributes() {
 
     compile_succeeds(root);
     assert!(
+        read(root, ".sharp/listeners.php").contains(
+            "    'attributes' => [\n        'lib\\\\mailer' => ['app/Stubs/First.sharp'],\n        'lib\\\\mailer::sendlater' => ['app/Stubs/First.sharp'],\n        'lib\\\\sentat()' => ['app/Stubs/First.sharp'],\n    ],\n    'effects' => [\n"
+        ),
+        "{}",
+        read(root, ".sharp/listeners.php")
+    );
+}
+
+/// Spec section 29: the listener table gives, for each plain PHP class and method an `extern` line declares, the
+/// effects its `uses` lists by their dotted full names, none for a line that declares it pure, keyed as its attributes
+/// are, which `Method.createDelegate` holds a plain PHP method to, spec section 25. A function is left out, since
+/// reflection gives it no `Method`.
+#[test]
+fn compile_lists_the_effects_each_extern_line_declares_for_a_class_and_a_method() {
+    let mailer = "<?php\n\nnamespace Lib;\n\nfinal class Mailer\n{\n    public function send(): void {}\n\n    public function count(): int\n    {\n        return 0;\n    }\n}\n";
+    let functions = "<?php\n\nnamespace Lib;\n\nfunction sentAt(): int\n{\n    return 1;\n}\n";
+    let smtp = "namespace App.Mail;\n\npublic foreign class Smtp\n{\n}\n";
+    let stubs = "namespace App.Stubs;\n\nimport App.Mail.Smtp;\nimport Lib;\nimport Lib.Mailer;\n\nextern Mailer;\nextern Mailer.send uses Smtp;\nextern Lib.sentAt uses Smtp;\n\npublic class Stubs\n{\n}\n";
+    let directory = lawful_project(&[
+        ("vendor/acme/lib/Mailer.php", mailer),
+        ("vendor/acme/lib/functions.php", functions),
+        ("app/Mail/Smtp.sharp", smtp),
+        ("app/Stubs/Stubs.sharp", stubs),
+    ]);
+    let root = directory.path();
+
+    compile_succeeds(root);
+    assert!(
         read(root, ".sharp/listeners.php").ends_with(
-            "    'attributes' => [\n        'lib\\\\mailer' => ['app/Stubs/First.sharp'],\n        'lib\\\\mailer::sendlater' => ['app/Stubs/First.sharp'],\n        'lib\\\\sentat()' => ['app/Stubs/First.sharp'],\n    ],\n    'tags' => [\n    ],\n];\n"
+            "    'effects' => [\n        'lib\\\\mailer' => [],\n        'lib\\\\mailer::send' => ['App.Mail.Smtp'],\n    ],\n    'tags' => [\n    ],\n];\n"
         ),
         "{}",
         read(root, ".sharp/listeners.php")

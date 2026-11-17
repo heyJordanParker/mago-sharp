@@ -49,6 +49,7 @@ use mago_codex::ttype::get_collection_object;
 use mago_codex::ttype::get_int_or_string;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_sharp_type;
+use mago_codex::ttype::get_void;
 use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::takes_array;
 use mago_codex::ttype::template::variance::Variance;
@@ -907,7 +908,26 @@ impl<'analysis> Types<'analysis> {
     ) -> FunctionType {
         FunctionType {
             name: function.as_string(),
-            text: self.function_type_text(function, parameters, result),
+            text: self.function_type_text(self.effects.function_effects(self.codebase, function), parameters, result),
+            result: self.result_text(result),
+        }
+    }
+
+    /// The whole type of the accessor `accessor`, `get` or `set`, of the property `property` of the PHP# class `class`,
+    /// named `Class::$property::get` as PHP names a property hook: a `get` gives the property's type, and a `set` takes
+    /// it and gives `void`, with the effects [`Effects::accessor_effects`] gives, which `Method.createDelegate` reads,
+    /// spec section 25.
+    pub(crate) fn accessor_type(&self, class: &[u8], property: &[u8], accessor: &[u8]) -> FunctionType {
+        let variable = [b"$", property].concat();
+        let declared = self.declared_property_type(class, &variable);
+        let void = get_void();
+        let (parameters, result) =
+            if accessor == b"set" { (vec![declared], Some(&void)) } else { (Vec::new(), declared) };
+        let effects = self.effects.accessor_effects(self.codebase, class, property, accessor);
+
+        FunctionType {
+            name: String::from_utf8_lossy(&[class, b"::", &variable, b"::", accessor].concat()).into_owned(),
+            text: self.function_type_text(effects, &parameters, result),
             result: self.result_text(result),
         }
     }
@@ -920,27 +940,22 @@ impl<'analysis> Types<'analysis> {
             .map(|result| text(result, self.codebase, Parameter::Index))
     }
 
-    /// The type text `Function<R(P1, P2) uses E1, E2>` of the PHP# function `function`, with `parameters` and `result`,
-    /// each class's type parameter as `$i` and the function's own as `#i`, and the effects it reaches, sorted. A type
-    /// it leaves out is `Any?`, and the result of a function that never returns, as a lambda that always throws, is
-    /// `never`, spec section 8, which the engine fits within every result type. `None`, so a closure of it is of no
-    /// function type, when no function type can say its type: when the effects solve finds an effect no `uses` lists,
-    /// as for plain PHP no `extern` declares, or a type is one PHP# can't write.
+    /// The type text `Function<R(P1, P2) uses E1, E2>` of a PHP# function with `parameters` and `result`, each class's
+    /// type parameter as `$i` and the function's own as `#i`, and the `effects` it reaches, sorted. A type it leaves
+    /// out is `Any?`, and the result of a function that never returns, as a lambda that always throws, is `never`, spec
+    /// section 8, which the engine fits within every result type. `None`, so a closure of it is of no function type,
+    /// when no function type can say its type: when the effects solve finds an effect no `uses` lists, as for plain PHP
+    /// no `extern` declares, and `effects` is `None`, or a type is one PHP# can't write.
     fn function_type_text(
         &self,
-        function: &FunctionLikeIdentifier,
+        effects: Option<Vec<Word>>,
         parameters: &[Option<&TUnion>],
         result: Option<&TUnion>,
     ) -> Option<String> {
         if !parameters.iter().copied().chain([result]).flatten().all(is_written_in_sharp) {
             return None;
         }
-        let mut effects: Vec<String> = self
-            .effects
-            .function_effects(self.codebase, function)?
-            .into_iter()
-            .map(|effect| class_text(effect, self.codebase))
-            .collect();
+        let mut effects: Vec<String> = effects?.into_iter().map(|effect| class_text(effect, self.codebase)).collect();
         effects.sort_unstable();
         effects.dedup();
         let written = |r#type: Option<&TUnion>| {

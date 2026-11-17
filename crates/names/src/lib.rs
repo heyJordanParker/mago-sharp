@@ -127,8 +127,9 @@ pub(crate) fn default_class(name: &[u8]) -> Option<&'static [u8]> {
     default_classes().find(|class| default_short_name(class) == name).map(str::as_bytes)
 }
 
-/// The standard effect whose short name is `name`, as a `uses` in a `.sharp` file writes it: `Sharp\Time\Clock` for
-/// `Clock`, spec section 29, or the [effect of `emit`](EMIT_EFFECT), which no `foreign` class is.
+/// The standard effect whose short name is `name`, which a bare name in a `uses` of a `.sharp` file names by default:
+/// `Sharp\Time\Clock` for `Clock`, spec section 29, or the [effect of `emit`](EMIT_EFFECT), which no `foreign` class
+/// is.
 pub(crate) fn standard_effect(name: &[u8]) -> Option<&'static [u8]> {
     sharp_classes::STANDARD_EFFECTS
         .into_iter()
@@ -137,10 +138,12 @@ pub(crate) fn standard_effect(name: &[u8]) -> Option<&'static [u8]> {
         .map(str::as_bytes)
 }
 
-/// Whether a plain PHP class-like whose short name is `name` wins over a default class-like in its namespace, compared
-/// ignoring case as PHP compares class names.
+/// Whether a plain PHP class-like whose short name is `name` wins over a default class-like or a standard effect in its
+/// namespace, compared ignoring case as PHP compares class names.
 pub(crate) fn shadows_a_default_class(name: &[u8]) -> bool {
-    default_classes().any(|class| default_short_name(class).eq_ignore_ascii_case(name))
+    default_classes()
+        .chain(sharp_classes::STANDARD_EFFECTS)
+        .any(|class| default_short_name(class).eq_ignore_ascii_case(name))
 }
 
 /// The name a `.sharp` file writes the default class-like `class` by: `Math` for `Sharp\Math`.

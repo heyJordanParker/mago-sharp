@@ -449,6 +449,23 @@ where
     Ok(())
 }
 
+/// Records that the attribute the scope's declaration carries references `constructor`, by its class's key, as a
+/// reference of the attribute, which a walk of what the declaration runs skips.
+fn record_constructor<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    constructor: &MethodIdentifier,
+) where
+    A: Arena,
+{
+    artifacts.symbol_references.add_attribute_reference(
+        block_context.scope.get_reference_origin(),
+        (context.codebase.class_key(constructor.get_class_name().as_bytes()), constructor.get_method_name()),
+        false,
+    );
+}
+
 fn analyze_attribute_constructor<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -462,7 +479,7 @@ where
     let constructor_id = MethodIdentifier::new(metadata.original_name, word("__construct"));
     let declaring_constructor_id = context.codebase.get_declaring_method_identifier(&constructor_id);
 
-    artifacts.symbol_references.add_reference_for_method_call(context.codebase, &block_context.scope, &constructor_id);
+    record_constructor(context, block_context, artifacts, &constructor_id);
 
     let Some(constructor) = context.codebase.get_method_by_id(&declaring_constructor_id) else {
         if let Some(argument_list) = &attribute.argument_list {
@@ -494,11 +511,7 @@ where
         return Ok(());
     };
 
-    artifacts.symbol_references.add_reference_for_method_call(
-        context.codebase,
-        &block_context.scope,
-        &declaring_constructor_id,
-    );
+    record_constructor(context, block_context, artifacts, &declaring_constructor_id);
 
     let mut invocation = Invocation {
         target: InvocationTarget::FunctionLike {

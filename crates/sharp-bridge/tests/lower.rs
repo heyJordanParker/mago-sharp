@@ -1780,7 +1780,8 @@ fn an_expression_body_is_the_body_that_returns_its_expression() {
 /// ```
 ///
 /// A computed property is a property with one `get` hook whose body is the short body php-src's grammar builds for
-/// `get => expr;`. The hook's lines are the arrow's.
+/// `get => expr;`. The hook's lines are the arrow's. The hook carries its whole type in the slot of its result type, as
+/// a method does, which `Method.createDelegate` reads its effects from.
 #[test]
 fn a_computed_property_is_a_property_with_a_short_get_hook() {
     let lowered = Lowered::new(
@@ -1809,7 +1810,9 @@ fn a_computed_property_is_a_property_with_a_short_get_hook() {
                               ZVAL "this"
                             ZVAL "name"
                           ZVAL "!"
-                      null
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<string()>"
                       null
               null
         "#}
@@ -1875,7 +1878,9 @@ fn accessor_bodies_are_property_hooks() {
                               VAR
                                 ZVAL "this"
                               ZVAL "name"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<string()>"
                           null
                         PROPERTY_HOOK "set" @3-3
                           null
@@ -1888,7 +1893,9 @@ fn accessor_bodies_are_property_hooks() {
                                 ZVAL "name"
                               VAR
                                 ZVAL "value"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<void(string)>"
                           null
                   null
             "#},
@@ -1914,7 +1921,9 @@ fn accessor_bodies_are_property_hooks() {
                                 VAR
                                   ZVAL "value"
                                 ZVAL 1
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<void(int)>"
                           null
                   null
             "#},
@@ -1936,7 +1945,9 @@ fn accessor_bodies_are_property_hooks() {
                                 VAR
                                   ZVAL "this"
                                 ZVAL "count"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<int()>"
                           null
                   null
             "#},
@@ -1957,7 +1968,9 @@ fn accessor_bodies_are_property_hooks() {
                               VAR
                                 ZVAL "this"
                               ZVAL "size"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<int()>"
                           null
                         PROPERTY_HOOK "set" @6-6
                           null
@@ -1970,7 +1983,9 @@ fn accessor_bodies_are_property_hooks() {
                               ARG_LIST
                                 VAR
                                   ZVAL "value"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<void(int)>"
                           null
                   null
             "#},
@@ -1993,7 +2008,9 @@ fn accessor_bodies_are_property_hooks() {
                                   ZVAL "this"
                                 ZVAL "kept"
                               ZVAL 2
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<int()>"
                           null
                   null
             "#},
@@ -2030,7 +2047,9 @@ fn accessor_bodies_are_property_hooks() {
                                 VAR
                                   ZVAL "value"
                                 ZVAL 2
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<void(int)>"
                           null
                   null
             "#},
@@ -2076,7 +2095,9 @@ fn a_field_getter_is_plain_storage_unless_a_parent_has_a_get_hook() {
                               VAR
                                 ZVAL "this"
                               ZVAL "word"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<string()>"
                           null
                   ATTRIBUTE_LIST
                     ATTRIBUTE_GROUP
@@ -2144,7 +2165,9 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
                                   ZVAL "a"
                         RETURN
                           ZVAL 0
-                      null
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<int()>"
                       null
               null
         "#}]
@@ -2202,7 +2225,7 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 /// initial value fills its storage, spec section 6.2: a constant one is its default, and any other a write of the
 /// storage in `#statics`, which runs when a request first builds the class's statics, so it runs no observer. `run`
 /// uses the statics, so it has the effects of the plain PHP `Words.of(1)`, which no `extern` declares here, and no
-/// function type names it.
+/// function type names it, so it carries its result alone, `: void`.
 #[test]
 fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_methods() {
     let lowered = Lowered::with(
@@ -2231,7 +2254,9 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                     STMT_LIST
                       RETURN
                         ZVAL 2
-                    ZVAL [1] "int"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "int"
+                      ZVAL "Function<int()>"
                     null
                   METHOD [17] "thrice#get" @4-4
                     PARAM_LIST
@@ -2239,7 +2264,9 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                     STMT_LIST
                       RETURN
                         ZVAL 3
-                    ZVAL [1] "int"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "int"
+                      ZVAL "Function<int()>"
                     null
                   PROP_GROUP [20]
                     ZVAL [1] "int"
@@ -2258,7 +2285,9 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                         STATIC_PROP
                           ZVAL [1] "self"
                           ZVAL "hits"
-                    ZVAL [1] "int"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "int"
+                      ZVAL "Function<int()>"
                     null
                   METHOD [17] "hits#set" @5-5
                     PARAM_LIST
@@ -2284,7 +2313,9 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                             ZVAL "hits"
                           VAR
                             ZVAL "value"
-                    null
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "Function<void(int)>"
                     null
                   PROP_GROUP [20]
                     ZVAL [1] "string"
@@ -2303,7 +2334,9 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                         STATIC_PROP
                           ZVAL [1] "self"
                           ZVAL "label"
-                    ZVAL [1] "string"
+                    SHARP_TYPE_ARGS
+                      ZVAL [1] "string"
+                      ZVAL "Function<string()>"
                     null
                   METHOD [20] "label#set" @6-6
                     PARAM_LIST
@@ -2331,7 +2364,9 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                             STATIC_PROP
                               ZVAL [1] "self"
                               ZVAL "label"
-                    null
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "Function<void(string)>"
                     null
                   PROP_GROUP [20]
                     ZVAL [257] "string"
@@ -2350,7 +2385,9 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                         STATIC_PROP
                           ZVAL [1] "self"
                           ZVAL "note"
-                    ZVAL [257] "string"
+                    SHARP_TYPE_ARGS
+                      ZVAL [257] "string"
+                      ZVAL "Function<string?()>"
                     null
                   METHOD [17] "note#set" @7-7
                     PARAM_LIST
@@ -2378,7 +2415,9 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                             STATIC_PROP
                               ZVAL [1] "self"
                               ZVAL "note"
-                    null
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "Function<void(string?)>"
                     null
                   METHOD [17] "log" @9-11
                     PARAM_LIST
@@ -2481,7 +2520,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                           ZVAL "value#1"
                     SHARP_TYPE_ARGS
                       ZVAL [1] "void"
-                      ZVAL "void"
+                      ZVAL ": void"
                     null
                   METHOD [20] "#statics" @6-6
                     PARAM_LIST
@@ -2545,7 +2584,9 @@ fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
                           ZVAL "total#get"
                           ARG_LIST
                         ZVAL 2
-                  ZVAL [1] "int"
+                  SHARP_TYPE_ARGS
+                    ZVAL [1] "int"
+                    ZVAL "Function<int()>"
                   null
                 PROP_GROUP [20]
                   ZVAL [1] "int"
@@ -2564,7 +2605,9 @@ fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
                       STATIC_PROP
                         ZVAL [1] "self"
                         ZVAL "total"
-                  ZVAL [1] "int"
+                  SHARP_TYPE_ARGS
+                    ZVAL [1] "int"
+                    ZVAL "Function<int()>"
                   null
                 METHOD [20] "total#set" @4-4
                   PARAM_LIST
@@ -2585,7 +2628,9 @@ fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
                         VAR
                           ZVAL "value"
                         ZVAL 1
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<void(int)>"
                   null
                 METHOD [17] "run" @6-11
                   PARAM_LIST
@@ -3228,7 +3273,9 @@ fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
                                       VAR
                                         ZVAL "this"
                                       ZVAL "name"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<string()>"
                           null
                         PROPERTY_HOOK "set" @5-5
                           null
@@ -3255,7 +3302,9 @@ fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
                                     ARG_LIST
                                       VAR
                                         ZVAL "value"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<void(string)>"
                           null
                   null
             "#},
@@ -3447,7 +3496,9 @@ fn a_promoted_parameter_s_behaviors_are_filled_before_its_argument_is_set() {
                                   VAR
                                     ZVAL "this"
                                   ZVAL "name"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<string()>"
                           null
                         PROPERTY_HOOK "set" @5-5
                           null
@@ -3467,7 +3518,9 @@ fn a_promoted_parameter_s_behaviors_are_filled_before_its_argument_is_set() {
                                 ARG_LIST
                                   VAR
                                     ZVAL "value"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<void(string)>"
                           null
                   null
             "#},
@@ -3682,7 +3735,9 @@ fn observers_run_inside_the_set_hook_once_the_object_is_built() {
                                           VAR
                                             ZVAL "this"
                                           ZVAL "name"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<void(string)>"
                           null
                   null
             "#},
@@ -3730,7 +3785,9 @@ fn observers_run_inside_the_set_hook_once_the_object_is_built() {
                                       ZVAL "log"
                                       ARG_LIST
                                         ZVAL "count"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<void(int)>"
                           null
                   null
             "#},
@@ -3758,7 +3815,9 @@ fn observers_run_inside_the_set_hook_once_the_object_is_built() {
                                 ARG_LIST
                                   VAR
                                     ZVAL "value"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL ": void"
                           null
                   null
             "#},
@@ -3821,7 +3880,9 @@ fn a_return_in_will_set_jumps_past_it_to_the_write() {
                           VAR
                             ZVAL "this"
                           ZVAL "limit"
-                      null
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<int()>"
                       null
                     PROPERTY_HOOK "set" @3-3
                       null
@@ -3889,7 +3950,9 @@ fn a_return_in_will_set_jumps_past_it_to_the_write() {
                               ZVAL "limit"
                             VAR
                               ZVAL "value"
-                      null
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<void(int)>"
                       null
               null
         "#}
@@ -3959,7 +4022,9 @@ fn an_auto_accessor_beside_a_body_without_field_is_the_hook_over_the_storage() {
                             ZVAL "this"
                           ZVAL "read"
                           ARG_LIST
-                      null
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<int()>"
                       null
                     PROPERTY_HOOK "set" @3-3
                       null
@@ -3972,7 +4037,9 @@ fn an_auto_accessor_beside_a_body_without_field_is_the_hook_over_the_storage() {
                             ZVAL "size"
                           VAR
                             ZVAL "value"
-                      null
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<void(int)>"
                       null
               null
         "#}]
@@ -4028,7 +4095,9 @@ fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() 
                                 ZVAL "price"
                               VAR
                                 ZVAL "value"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL ": void"
                           null
                   null
             "#},
@@ -4051,7 +4120,9 @@ fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() 
                               ZVAL "getAttribute"
                               ARG_LIST
                                 ZVAL "shipping"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL ": Address"
                           null
                         PROPERTY_HOOK "set" @7-7
                           null
@@ -4065,7 +4136,9 @@ fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() 
                                 ZVAL "shipping"
                                 VAR
                                   ZVAL "value"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL ": void"
                           null
                   null
             "#},
@@ -4114,7 +4187,9 @@ fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
                               ZVAL "getAttribute"
                               ARG_LIST
                                 ZVAL "shipping"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL ": Address?"
                           null
                         PROPERTY_HOOK "set" @5-5
                           null
@@ -4128,7 +4203,9 @@ fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
                                 ZVAL "shipping"
                                 VAR
                                   ZVAL "value"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL ": void"
                           null
                   null
             "#},
@@ -4149,7 +4226,9 @@ fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
                               VAR
                                 ZVAL "this"
                               ZVAL "note"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<string?()>"
                           null
                         PROPERTY_HOOK "set" @6-6
                           null
@@ -4162,7 +4241,9 @@ fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
                                 ZVAL "note"
                               VAR
                                 ZVAL "value"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<void(string?)>"
                           null
                   null
             "#},
@@ -4183,7 +4264,9 @@ fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
                               VAR
                                 ZVAL "this"
                               ZVAL "note"
-                          null
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<string?()>"
                           null
                   null
             "#},
@@ -5283,7 +5366,9 @@ fn a_generic_class_runs_its_statics_initial_values_and_accessors_with_its_type_a
                             ZVAL "#0"
                       ZVAL "doubled"
                     ZVAL 2
-              ZVAL [1] "int"
+              SHARP_TYPE_ARGS
+                ZVAL [1] "int"
+                ZVAL "Function<int()>"
               null
         "##}
     );
@@ -5317,7 +5402,9 @@ fn a_generic_class_runs_its_statics_initial_values_and_accessors_with_its_type_a
                               ZVAL "#0"
                         null
                         null
-              ZVAL [1] "string"
+              SHARP_TYPE_ARGS
+                ZVAL [1] "string"
+                ZVAL "Function<Class<#0>()>"
               null
         "##}
     );
@@ -5979,7 +6066,9 @@ fn a_set_body_on_a_union_that_holds_a_set_takes_a_php_array_too() {
                               ZVAL "picked"
                             VAR
                               ZVAL "value"
-                      null
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<void(Set<string>|int)>"
                       null
               ATTRIBUTE_LIST
                 ATTRIBUTE_GROUP
@@ -12401,7 +12490,9 @@ fn an_emptied_list_field_takes_add_as_the_list_method() {
                                 ZVAL "this"
                               ZVAL "tags"
                             ZVAL "x"
-                      null
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<void(List<string>)>"
                       null
               null
         "#}]
@@ -15293,7 +15384,8 @@ fn an_object_type_is_the_object_name() {
 ///
 /// `[64]` is `ZEND_ACC_EXPLICIT_ABSTRACT_CLASS` on the class and `ZEND_ACC_ABSTRACT` on the method, `[32]`
 /// `ZEND_ACC_FINAL`, `[1]` `ZEND_ACC_INTERFACE` on the interface, and an interface method is `ZEND_ACC_PUBLIC`, `[1]`,
-/// as php-src's grammar writes it. An abstract method has no statement list. `[2]` on an interface method's result is
+/// as php-src's grammar writes it. An abstract method has no statement list, and carries the function type its `uses`
+/// gives it, which holds each implementation. `[2]` on an interface method's result is
 /// `ZEND_SHARP_RESULT_CALLER_CHECKED`.
 #[test]
 fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_flags() {
@@ -15314,7 +15406,7 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                     null
                     SHARP_TYPE_ARGS
                       ZVAL [1] "float"
-                      ZVAL "float"
+                      ZVAL "Function<float()>"
                     null
                   SHARP_CLASS_METADATA
                     null
@@ -15367,7 +15459,7 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                     null
                     SHARP_TYPE_ARGS [2]
                       ZVAL [1] "string"
-                      ZVAL "string"
+                      ZVAL "Function<string(int)>"
                     null
                   SHARP_CLASS_METADATA
                     null
@@ -15435,7 +15527,7 @@ fn a_static_class_is_a_final_class_whose_extern_method_calls_its_native_function
                               ZVAL "title"
                     SHARP_TYPE_ARGS
                       ZVAL [1] "string"
-                      ZVAL "string"
+                      ZVAL ": string"
                     null
                   SHARP_CLASS_METADATA
                     null
@@ -15705,7 +15797,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
                     ARG_LIST
               SHARP_TYPE_ARGS
                 ZVAL [1] "string"
-                ZVAL "string"
+                ZVAL ": string"
               null
             METHOD [1] "both" @9-9
               PARAM_LIST
@@ -15743,7 +15835,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
                       ARG_LIST
               SHARP_TYPE_ARGS
                 ZVAL [1] "string"
-                ZVAL "string"
+                ZVAL ": string"
               null
         "#}
     );
@@ -15865,7 +15957,8 @@ fn super_of_an_interface_calls_a_protected_alias_of_its_default_body() {
 /// that already uses them uses none. The `use` gives each default body the protected alias `super<Labeled>` calls,
 /// `[2]` `ZEND_ACC_PROTECTED`. An enum, an event, a struct and the class of an enum with a case that carries data use
 /// them too. The interface's method marks its result `[2]` `ZEND_SHARP_RESULT_CALLER_CHECKED`, and the default body
-/// marks none.
+/// marks none. A method without a body carries the function type its `uses` gives it, which holds each
+/// implementation, so `title` is a `Function<string()>`.
 #[test]
 fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interface_and_its_trait() {
     let files = [
@@ -15931,7 +16024,7 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     null
                     SHARP_TYPE_ARGS [2]
                       ZVAL [1] "string"
-                      ZVAL "string"
+                      ZVAL "Function<string()>"
                     null
                   SHARP_CLASS_METADATA
                     null
@@ -16256,7 +16349,9 @@ fn a_sub_interfaces_default_body_runs_instead_of_its_parents() {
                         ZVAL "this"
                       ZVAL "tag@App\\ShowsMore"
                       ARG_LIST
-                  null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<string()>"
                   null
         "#}
     );
@@ -16398,7 +16493,9 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
                               ZVAL "this"
                             ZVAL "tag@App\\Tagged"
                             ARG_LIST
-                        null
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL "Function<string()>"
                         null
                 null
               SHARP_CLASS_METADATA
@@ -16419,7 +16516,9 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
                       null
                       PROPERTY_HOOK_SHORT_BODY
                         ZVAL "own"
-                      null
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<string()>"
                       null
               ATTRIBUTE_LIST
                 ATTRIBUTE_GROUP
@@ -17539,7 +17638,9 @@ fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks
                               ARG_LIST
                                 VAR
                                   ZVAL "value"
-                        null
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL ": void"
                         null
                 ATTRIBUTE_LIST
                   ATTRIBUTE_GROUP
@@ -17734,7 +17835,9 @@ fn a_lazy_property_keeps_its_first_value_in_its_storage() {
                               VAR
                                 ZVAL "this"
                               ZVAL "doubled"
-                        null
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL "Function<int()>"
                         null
                 null
               PROP_GROUP [4]
@@ -17783,7 +17886,9 @@ fn a_lazy_property_keeps_its_first_value_in_its_storage() {
                               VAR
                                 ZVAL "this"
                               ZVAL "found"
-                        null
+                        SHARP_TYPE_ARGS
+                          null
+                          ZVAL "Function<int?()>"
                         null
                 null
               METHOD [1] "__clone" @1-5
@@ -17974,7 +18079,7 @@ fn a_subclass_method_with_a_union_variadic_spreads_it_into_the_parent_method() {
                       TYPE_UNION
                         ZVAL [1] "int"
                         ZVAL [1] "float"
-                      ZVAL "float|int"
+                      ZVAL ": float|int"
                     ATTRIBUTE_LIST
                       ATTRIBUTE_GROUP
                         ATTRIBUTE
@@ -22555,10 +22660,13 @@ fn an_interface_member_marks_its_return_type_as_checked_by_each_call() {
     );
     let marked = |name: &str| lowered.render(lowered.child(lowered.method_named(name), 3));
 
-    assert_eq!(marked("relate"), "SHARP_TYPE_ARGS [2]\n  ZVAL \"Lib\\\\Relation\"\n  ZVAL \"Lib.Relation\"\n");
-    assert_eq!(marked("ids"), "SHARP_TYPE_ARGS [2]\n  TYPE [7]\n  ZVAL \"List<int>\"\n");
-    assert_eq!(marked("touch"), "SHARP_TYPE_ARGS [2]\n  ZVAL [1] \"void\"\n  ZVAL \"void\"\n");
-    assert_eq!(marked("fail"), "SHARP_TYPE_ARGS [2]\n  ZVAL [1] \"never\"\n  null\n");
+    assert_eq!(
+        marked("relate"),
+        "SHARP_TYPE_ARGS [2]\n  ZVAL \"Lib\\\\Relation\"\n  ZVAL \"Function<Lib.Relation(string)>\"\n"
+    );
+    assert_eq!(marked("ids"), "SHARP_TYPE_ARGS [2]\n  TYPE [7]\n  ZVAL \"Function<List<int>()>\"\n");
+    assert_eq!(marked("touch"), "SHARP_TYPE_ARGS [2]\n  ZVAL [1] \"void\"\n  ZVAL \"Function<void()>\"\n");
+    assert_eq!(marked("fail"), "SHARP_TYPE_ARGS [2]\n  ZVAL [1] \"never\"\n  ZVAL \"Function<never(string)>\"\n");
 }
 
 /// ```php
@@ -31478,6 +31586,39 @@ fn the_unit_names_each_function_type_with_the_hash_of_its_text() {
     );
 }
 
+/// Spec sections 25 and 29: each accessor with a body carries its whole type as a method does, which
+/// `Method.createDelegate` reads its effects from: a `get` gives the property's type, and a `set` takes it and gives
+/// `void`, with the effects of its body and of the observers that run inside it, and a static property's hidden `get`
+/// and `set` carry theirs too. A method without a body carries the effects its `uses` lists, which hold each
+/// implementation, and an abstract accessor carries none, since each implementation carries its own.
+#[test]
+fn each_accessor_and_each_method_without_a_body_names_its_function_type() {
+    let meter = (
+        "src/App/Tenant/Meter.sharp",
+        "namespace App.Tenant;\n\npublic foreign class Meter\n{\n    public int now() => 7;\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\npublic abstract class Report\n{\n    public Report(private Meter meter) { }\n\n    public int doubled => this.meter.now() * 2;\n\n    public int total { get; set => field = value; didSet => this.meter.now(); } = 0;\n\n    public static int stock { get => field; set => field = value; } = 5;\n\n    public abstract int read() uses Meter;\n\n    public abstract string kind { get; }\n}\n";
+    let lowered = Lowered::with(code, &[meter]);
+    let function_types: Vec<(String, u64)> = lowered
+        .unit()
+        .expect("the source lowers")
+        .function_types()
+        .iter()
+        .map(|read| (String::from_utf8_lossy(&read.name).into_owned(), read.fingerprint))
+        .collect();
+
+    assert_eq!(
+        function_types,
+        [
+            ("App\\Tenant\\Report::$doubled::get".to_owned(), xxh3_64(b"Function<int() uses App.Tenant.Meter>")),
+            ("App\\Tenant\\Report::$stock::get".to_owned(), xxh3_64(b"Function<int()>")),
+            ("App\\Tenant\\Report::$stock::set".to_owned(), xxh3_64(b"Function<void(int)>")),
+            ("App\\Tenant\\Report::$total::set".to_owned(), xxh3_64(b"Function<void(int) uses App.Tenant.Meter>")),
+            ("App\\Tenant\\Report::read".to_owned(), xxh3_64(b"Function<int() uses App.Tenant.Meter>")),
+        ]
+    );
+}
+
 /// Each node an inlined form copies takes the line of its call, as the call's own nodes would, and each value keeps
 /// its own line.
 #[test]
@@ -32712,7 +32853,7 @@ fn equality_of_two_collections_compares_each_element_with_its_own_equality() {
 ///
 /// Spec section 26: an extension's method is the public static method of its static class that takes the receiver
 /// first, and a computed property is the one that takes only the receiver and returns its expression. The method
-/// carries its result type, which a generator's elements are read from, spec section 12.
+/// carries its result alone, `: string`, which a generator's elements are read from, spec section 12.
 #[test]
 fn an_extension_member_is_the_static_method_that_takes_the_receiver_first() {
     let lowered = Lowered::new(
@@ -32749,7 +32890,7 @@ fn an_extension_member_is_the_static_method_that_takes_the_receiver_first() {
                           ZVAL "separator"
                   SHARP_TYPE_ARGS
                     ZVAL [1] "string"
-                    ZVAL "string"
+                    ZVAL ": string"
                   null
             "#}
             .to_owned(),
@@ -32863,7 +33004,7 @@ fn a_generic_extension_member_takes_the_type_arguments_of_its_block_and_its_own(
                   ARRAY [3]
               SHARP_TYPE_ARGS [1]
                 TYPE [7]
-                ZVAL "List<#1>"
+                ZVAL ": List<#1>"
               null
         "#}
     );
@@ -34210,7 +34351,9 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
                                   VAR
                                     ZVAL "this"
                                   ZVAL "y"
-                            null
+                            SHARP_TYPE_ARGS
+                              null
+                              ZVAL "Function<float()>"
                             null
                     null
                   METHOD [1] "moved" @11-11
@@ -34906,7 +35049,9 @@ fn an_enum_computed_property_is_a_virtual_property() {
                             null
                             PROPERTY_HOOK_SHORT_BODY
                               ZVAL "active"
-                            null
+                            SHARP_TYPE_ARGS
+                              null
+                              ZVAL "Function<string()>"
                             null
                     null
                   SHARP_CLASS_METADATA

@@ -5,6 +5,7 @@ use mago_reporting::Issue;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
+use mago_word::empty_word;
 use mago_word::word;
 
 use crate::identifier::method::MethodIdentifier;
@@ -12,6 +13,7 @@ use crate::metadata::CodebaseMetadata;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::ttype::TypeMetadata;
+use crate::reference::ReferenceOrigin;
 use crate::reference::ReferenceSource;
 use crate::reference::SymbolReferences;
 use crate::ttype::TType;
@@ -153,9 +155,9 @@ pub fn populate_class_like_metadata_iterative(
     let metadata: &mut ClassLikeMetadata = &mut entry;
 
     for attribute_metadata in &metadata.attributes {
-        symbol_references.add_symbol_reference_to_symbol(
-            metadata.name,
-            codebase.class_key(attribute_metadata.name.as_bytes()),
+        symbol_references.add_attribute_reference(
+            ReferenceOrigin::Symbol((metadata.name, empty_word())),
+            (codebase.class_key(attribute_metadata.name.as_bytes()), empty_word()),
             true,
         );
     }
@@ -623,9 +625,9 @@ pub fn populate_class_like_types(
         let constant_reference_source = ReferenceSource::ClassLikeMember(true, name, *constant_name);
 
         for attribute_metadata in &constant.attributes {
-            symbol_references.add_class_member_reference_to_symbol(
-                (name, *constant_name),
-                codebase_symbols.class_key(attribute_metadata.name.as_bytes()),
+            symbol_references.add_attribute_reference(
+                ReferenceOrigin::Symbol((name, *constant_name)),
+                (codebase_symbols.class_key(attribute_metadata.name.as_bytes()), empty_word()),
                 true,
             );
         }
@@ -655,9 +657,9 @@ pub fn populate_class_like_types(
         let enum_case_reference_source = ReferenceSource::ClassLikeMember(true, name, *enum_case_name);
 
         for attribute_metadata in &enum_case.attributes {
-            symbol_references.add_class_member_reference_to_symbol(
-                (name, *enum_case_name),
-                codebase_symbols.class_key(attribute_metadata.name.as_bytes()),
+            symbol_references.add_attribute_reference(
+                ReferenceOrigin::Symbol((name, *enum_case_name)),
+                (codebase_symbols.class_key(attribute_metadata.name.as_bytes()), empty_word()),
                 true,
             );
         }

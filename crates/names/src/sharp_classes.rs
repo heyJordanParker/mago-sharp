@@ -130,8 +130,8 @@ pub const STANDARD_ROOT_CLASSES: [&str; 70] = [
     "mysqli_sql_exception",
 ];
 
-/// The standard effects, spec section 29: each `foreign` class of the standard library, which a name in `uses` names
-/// whatever the file imports. Sorted.
+/// The standard effects, spec section 29: each `foreign` class of the standard library, which a bare name in `uses`
+/// names by default, as a bare name of `Sharp` names its class. Sorted.
 pub(crate) const STANDARD_EFFECTS: [&str; 12] = [
     "Sharp\\Data\\Cache",
     "Sharp\\Data\\Database",

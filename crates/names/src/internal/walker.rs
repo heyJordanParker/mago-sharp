@@ -405,14 +405,28 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         self.locals.exit_block();
     }
 
-    /// Resolves a name written where a class goes, as [`class_meaning`](Self::class_meaning) does. The class-like of
-    /// the file's namespace that would win over a default one is recorded whether the namespace holds it or not, since
-    /// adding or removing it changes what the name means.
+    /// Resolves a name written where a class goes, as [`class_meaning`](Self::class_meaning) does with the default
+    /// class-likes of spec section 23.
     fn resolve_class<A>(&mut self, context: &NameResolutionContext<'arena, A>, name: &[u8]) -> (&'arena [u8], bool)
     where
         A: Arena,
     {
-        let (meaning, namespace_class) = self.class_meaning(context, name);
+        self.resolve_with_default(context, name, default_class)
+    }
+
+    /// Resolves `name` as [`class_meaning`](Self::class_meaning) does with `default`. The class-like of the file's
+    /// namespace that would win over a default one is recorded whether the namespace holds it or not, since adding or
+    /// removing it changes what the name means.
+    fn resolve_with_default<A>(
+        &mut self,
+        context: &NameResolutionContext<'arena, A>,
+        name: &[u8],
+        default: fn(&[u8]) -> Option<&'static [u8]>,
+    ) -> (&'arena [u8], bool)
+    where
+        A: Arena,
+    {
+        let (meaning, namespace_class) = self.class_meaning(context, name, default);
         if let Some(namespace_class) = namespace_class {
             self.resolved_names.add_namespace_class(namespace_class);
         }
@@ -420,14 +434,15 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         meaning
     }
 
-    /// What a name written where a class goes means, and whether it was imported. In a PHP# file a bare name of the
-    /// standard library is the class in the `Sharp` namespace, unless the file imports or declares a class-like of that
-    /// name or its namespace holds one, spec section 23. Also returns the class-like of the file's namespace that would
-    /// win over the default one, held or not.
+    /// What a name written where a class goes means, and whether it was imported. In a PHP# file a bare name `default`
+    /// gives a class-like, as one of the standard library, is that class-like, unless the file imports or declares a
+    /// class-like of that name or its namespace holds one, spec section 23. Also returns the class-like of the file's
+    /// namespace that would win over the default one, held or not.
     fn class_meaning<A>(
         &self,
         context: &NameResolutionContext<'arena, A>,
         name: &[u8],
+        default: fn(&[u8]) -> Option<&'static [u8]>,
     ) -> ((&'arena [u8], bool), Option<&'arena [u8]>)
     where
         A: Arena,
@@ -436,7 +451,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         // 20 and 31.
         if self.sharp
             && let Some(separator) = name.iter().position(|byte| *byte == b'\\').filter(|separator| *separator > 0)
-            && let ((enum_class, false), _) = self.class_meaning(context, &name[..separator])
+            && let ((enum_class, false), _) = self.class_meaning(context, &name[..separator], default_class)
             && default_class(&name[..separator]).is_some_and(|class| class == enum_class)
         {
             return ((context.intern(&[enum_class, &name[separator..]].concat()), false), None);
@@ -460,7 +475,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
             return ((fqn, imported), None);
         }
 
-        let Some(class) = default_class(name) else {
+        let Some(class) = default(name) else {
             return ((fqn, imported), None);
         };
         // A default class-like is the class-like of its own namespace, so no other one wins over it there.
@@ -752,14 +767,14 @@ where
         }
     }
 
-    /// A name in `uses` names an effect, spec section 29. A standard effect's name is that effect even where the file
-    /// imports or declares a class under it, as Laravel's `Http` facade, and any other name resolves as a class.
+    /// A name in `uses` names an effect, spec section 29, and resolves as a name where a class goes does, with each
+    /// standard effect a default class-like, so a bare `Database` is `Sharp.Data.Database` unless the file imports or
+    /// declares a class-like of the name or its namespace holds one.
     fn walk_in_uses(&mut self, uses: &'ast Uses<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         for name in &uses.names {
-            let (fqn, imported) = match standard_effect(name.value) {
-                Some(effect) => (effect, false),
-                None => self.resolve_class(context, name.value),
-            };
+            let (fqn, imported) = self.resolve_with_default(context, name.value, |name| {
+                standard_effect(name).or_else(|| default_class(name))
+            });
 
             self.resolved_names.insert_at(name.span, fqn, imported);
             self.resolved_names.bind(name.span, Binding::Class);

@@ -562,6 +562,40 @@ fn a_class_with_an_exported_method_is_used() {
     );
 }
 
+/// Spec section 5: a use from plain PHP counts, and plain PHP names the class it writes, whichever class declares the
+/// member it reaches. So a PHP# class whose only use is plain PHP's, through a constructor and a static method it
+/// inherits from a plain PHP parent, is used by each form plain PHP names it in.
+#[test]
+fn a_class_plain_php_names_is_used_whichever_class_declares_the_member_it_reaches() {
+    let widget =
+        ("src/App/Shop/Widget.sharp", "namespace App.Shop;\n\nimport Lib.Base;\n\npublic class Widget : Base\n{\n}\n");
+    let base = (
+        "src/Lib/Base.php",
+        "<?php\n\nnamespace Lib;\n\nclass Base\n{\n    public const LIMIT = 3;\n\n    public static int $count = 0;\n\n    public function __construct()\n    {\n    }\n\n    public static function make(): static\n    {\n        return new static();\n    }\n}\n",
+    );
+    let forms = [
+        ("a static call", "<?php\n\n\\App\\Shop\\Widget::make();\n"),
+        ("a constant", "<?php\n\n$limit = \\App\\Shop\\Widget::LIMIT;\n"),
+        ("a static property", "<?php\n\n$count = \\App\\Shop\\Widget::$count;\n"),
+        ("`new`", "<?php\n\n$widget = new \\App\\Shop\\Widget();\n"),
+        (
+            "`instanceof`",
+            "<?php\n\nfunction is_widget(object $value): bool\n{\n    return $value instanceof \\App\\Shop\\Widget;\n}\n\nis_widget(new \\stdClass());\n",
+        ),
+        ("`::class`", "<?php\n\n$name = \\App\\Shop\\Widget::class;\n"),
+        ("a type", "<?php\n\nfunction take(\\App\\Shop\\Widget $widget): void\n{\n}\n"),
+        ("an import", "<?php\n\nuse App\\Shop\\Widget;\n\nWidget::make();\n"),
+    ];
+
+    let refused: Vec<&str> = forms
+        .iter()
+        .filter(|(_, boot)| !unused_classes(&[widget, base, ("src/boot.php", boot)]).is_empty())
+        .map(|(form, _)| *form)
+        .collect();
+
+    assert_eq!(refused, Vec::<&str>::new());
+}
+
 /// Spec section 5: a `public` member of a project's class that nothing outside its namespace and the namespaces below
 /// it uses is too wide. A use from the namespace or from the class itself is no outside use, and a use from code
 /// outside any class is, since its namespace is unknown. A member that implements an interface keeps the
@@ -12863,6 +12897,32 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
     ] {
         assert_eq!(worded(("src/App/Report.sharp", code), &others), expected, "{code}");
     }
+}
+
+/// A class whose base class is missing may have members the analysis can't see, so a PHP file's call, read or write of
+/// a member the analysis can't find on it reports nothing, as in Mago. A PHP# file runs only the member its analysis
+/// resolved, so there each one is the error a member the class lacks is.
+#[test]
+fn a_member_of_a_class_whose_base_class_is_missing_is_an_error_in_php_sharp() {
+    let sharp = "namespace Demo;\n\npublic final class Reader\n{\n    public Any? called(Lost lost) => lost.key();\n\n    public Any? safe(Lost? lost) => lost?.key();\n\n    public Any? made() => Lost.make();\n\n    public Any? read(Lost lost) => lost.key;\n\n    public void written(Lost lost)\n    {\n        lost.key = 1;\n    }\n\n    public Any? shared() => Lost.count;\n\n    public Any? limit() => Lost.LIMIT;\n\n    public const int SIZE = Lost.LIMIT;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Reader\n{\n    const SIZE = Lost::LIMIT;\n\n    public function called(Lost $lost): void\n    {\n        $lost->key();\n        $lost?->key();\n        Lost::make();\n        echo $lost->key;\n        $lost->key = 1;\n        echo Lost::$count;\n        echo Lost::LIMIT;\n    }\n}\n";
+    let lost = |name| [(name, "namespace Demo;\n\npublic class Lost : Missing\n{\n}\n")];
+
+    assert_eq!(
+        issues(("src/Demo/Reader.sharp", sharp), &lost("src/Demo/Lost.sharp")),
+        [
+            "5:43 non-existent-method",
+            "7:43 non-existent-method",
+            "9:32 non-existent-method",
+            "11:41 non-existent-property",
+            "15:14 non-existent-property",
+            "18:34 non-existent-property",
+            "20:33 non-existent-property",
+            "22:34 non-existent-class-constant",
+        ]
+    );
+    let php_issues = issues(("src/Demo/Reader.php", php), &lost("src/Demo/Lost.sharp"));
+    assert!(!codes(&php_issues).iter().any(|code| code.starts_with("non-existent")), "{php_issues:?}");
 }
 
 /// A value whose type comes from an error already reported starts no second error, as C# reports one error for one
@@ -25204,7 +25264,7 @@ fn only_the_module_of_module_sharp_is_analyzed_and_a_class_holding_its_name_make
 /// declares under it.
 #[test]
 fn an_effect_name_a_file_imports_or_declares_is_that_class() {
-    for name in sharp_effect_names() {
+    for (name, _) in sharp_effects() {
         let store = leak(format!(
             "namespace App.Shop;\n\nimport Lib.{name};\n\npublic class Store\n{{\n    public {name} make() => new {name}();\n\n    public bool holds(Any value) => value is {name};\n\n    public int size() => {name}.size();\n}}\n"
         ));
@@ -25227,20 +25287,40 @@ fn an_effect_name_a_file_imports_or_declares_is_that_class() {
     }
 }
 
-/// Spec section 29: a standard effect's name in a `uses` is that effect, even in a file that declares a class under the
-/// name, as it is in a file that imports one.
+/// Spec section 29: a name in a `uses` resolves as a class name does, spec section 23, so an effect class of the file's
+/// namespace wins over the standard effect of its name, as `App.Math` wins over `Math`: an interface method of
+/// `App.Shop` that `uses Database` takes `App.Shop.Database`, which an implementation reading it fits, and a bare name
+/// no class of the namespace holds stays the standard effect, which the same implementation doesn't fit.
 #[test]
-fn a_uses_takes_a_standard_effect_in_a_file_that_declares_a_class_of_its_name() {
-    for name in sharp_effect_names() {
-        let declared = (
-            leak(format!("src/App/Shop/{name}.sharp")),
-            leak(format!(
-                "namespace App.Shop;\n\npublic class {name}\n{{\n    public int run(Function<int() uses {name}> tick) => tick();\n}}\n"
-            )),
-        );
+fn a_uses_takes_the_effect_class_of_the_files_namespace_over_the_standard_effect_of_its_name() {
+    let database = (
+        "src/App/Shop/Database.sharp",
+        "namespace App.Shop;\n\npublic foreign class Database\n{\n    public int rows() => 3;\n}\n",
+    );
+    let counter = (
+        "src/App/Shop/Counter.sharp",
+        "namespace App.Shop;\n\npublic interface Counter\n{\n    int count() uses Database;\n}\n",
+    );
+    let store = (
+        "src/App/Shop/Store.sharp",
+        "namespace App.Shop;\n\npublic class Store : Counter\n{\n    public Store(private Database database) { }\n\n    public int count() => this.database.rows();\n}\n",
+    );
+    let ledger = (
+        "src/App/Books/Ledger.sharp",
+        "namespace App.Books;\n\npublic interface Ledger\n{\n    int count() uses Database;\n}\n",
+    );
+    let books = (
+        "src/App/Books/Books.sharp",
+        "namespace App.Books;\n\nimport App.Shop.Database;\n\npublic class Books : Ledger\n{\n    public Books(private Database database) { }\n\n    public int count() => this.database.rows();\n}\n",
+    );
 
-        assert_eq!(issues(declared, &[]), Vec::<String>::new(), "{name}");
-    }
+    assert_eq!(issues(store, &[database, counter]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[books, database, ledger]),
+        [
+            "src/App/Books/Books.sharp:9:27 incompatible-effects: `Books.count` calls `Database.rows`, which has the effect `Database`, so `uses Database` on `Ledger.count` cannot accept it."
+        ]
+    );
 }
 
 /// Spec section 23: a class of the file's own namespace wins over the class `Sharp` imports by default, as a class of
@@ -25278,24 +25358,22 @@ fn the_result_of_a_process_is_imported_from_its_namespace() {
     assert_eq!(issues(runner, &[]), Vec::<String>::new());
 }
 
-/// The names of the standard effects, short as a file writes them, spec section 29.
-fn sharp_effect_names() -> Vec<String> {
+/// The standard effects, spec section 29, each by its short name, as a file writes it, and its full name.
+fn sharp_effects() -> [(&'static str, &'static str); 12] {
     [
-        "Database",
-        "Http",
-        "Files",
-        "Console",
-        "Process",
-        "Clock",
-        "Random",
-        "Cache",
-        "Mail",
-        "Dns",
-        "Environment",
-        "Events",
+        ("Database", "Sharp.Data.Database"),
+        ("Http", "Sharp.Net.Http"),
+        ("Files", "Sharp.IO.Files"),
+        ("Console", "Sharp.IO.Console"),
+        ("Process", "Sharp.System.Process"),
+        ("Clock", "Sharp.Time.Clock"),
+        ("Random", "Sharp.Random"),
+        ("Cache", "Sharp.Data.Cache"),
+        ("Mail", "Sharp.Net.Mail"),
+        ("Dns", "Sharp.Net.Dns"),
+        ("Environment", "Sharp.System.Environment"),
+        ("Events", "Sharp.Events"),
     ]
-    .map(String::from)
-    .to_vec()
 }
 
 fn leak(code: String) -> &'static str {
@@ -29532,15 +29610,16 @@ fn a_lambda_with_an_effect_in_either_branch_of_a_conditional_is_refused() {
 }
 
 /// Spec section 29: a file that imports a plain PHP class named like a standard effect, as Laravel's `Http` facade,
-/// still writes the effect in `uses`, and a function type that lists it holds a lambda calling a class an `extern`
-/// gives that effect, the facade too, and refuses one calling a class with no `extern`.
+/// writes the effect in `uses` under the name it imports the effect as, since its bare name is the facade, and a
+/// function type that lists it holds a lambda calling a class an `extern` gives that effect, the facade too, and
+/// refuses one calling a class with no `extern`.
 #[test]
-fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect() {
-    for name in sharp_effect_names() {
+fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect_by_its_import() {
+    for (name, effect) in sharp_effects() {
         let checkout = (
             "app/Shop/Checkout.sharp",
             leak(format!(
-                "namespace App.Shop;\n\nimport Lib.Client;\nimport Lib.{name};\nimport Lib.Store;\n\npublic class Checkout\n{{\n    private Function<int(int) uses {name}> step;\n\n    public Checkout(private Client client)\n    {{\n        this.step = n => this.client.get(n);\n        this.step = n => {name}.post(n);\n        this.step = n => Store.get(n);\n    }}\n\n    public int size => this.client.get(1);\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => this.step(1) + Checkout.apply(this.client.get);\n\n    law positive(Client client) => client.get(1) > 0;\n}}\n"
+                "namespace App.Shop;\n\nimport Lib.Client;\nimport Lib.{name};\nimport Lib.Store;\nimport {effect} as Effect;\n\npublic class Checkout\n{{\n    private Function<int(int) uses Effect> step;\n\n    public Checkout(private Client client)\n    {{\n        this.step = n => this.client.get(n);\n        this.step = n => {name}.post(n);\n        this.step = n => Store.get(n);\n    }}\n\n    public int size => this.client.get(1);\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => this.step(1) + Checkout.apply(this.client.get);\n\n    law positive(Client client) => client.get(1) > 0;\n}}\n"
             )),
         );
         let services = (
@@ -29559,20 +29638,18 @@ fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect(
         );
         let facade_stub = (
             "app/Stubs/Facade.sharp",
-            leak(format!("namespace App.Stubs;\n\nimport Lib.{name};\n\nextern {name} uses {name};\n")),
+            leak(format!(
+                "namespace App.Stubs;\n\nimport Lib.{name};\nimport {effect} as Effect;\n\nextern {name} uses Effect;\n"
+            )),
         );
-        let files = [checkout, services, facade, client_stub, facade_stub];
+        let files = [checkout, services, facade, client_stub, facade_stub, EVENTS];
 
         assert_eq!(issues(checkout, &files[1..]), Vec::<String>::new(), "{name}");
         assert_eq!(
             effect_issues(&files),
             [
-                format!(
-                    "app/Shop/Checkout.sharp:24:36 impure-law: Law `positive` calls `Client.get`, which has the effect `{name}`. Laws hold only over pure code."
-                ),
-                format!(
-                    "app/Shop/Checkout.sharp:15:21 invalid-property-assignment-value: This lambda calls `Store.get`, which has no `extern` declaration, so a `Function<int(int) uses {name}>` cannot hold it. Help: Declare its effect in a .sharp file, such as `extern Store uses {name};`."
-                ),
+                "app/Shop/Checkout.sharp:25:36 impure-law: Law `positive` calls `Client.get`, which has the effect `Effect`. Laws hold only over pure code.",
+                "app/Shop/Checkout.sharp:16:21 invalid-property-assignment-value: This lambda calls `Store.get`, which has no `extern` declaration, so a `Function<int(int) uses Effect>` cannot hold it. Help: Declare its effect in a .sharp file, such as `extern Store uses Effect;`.",
             ],
             "{name}"
         );
@@ -30694,6 +30771,44 @@ fn a_reflection_call_read_or_write_may_have_every_effect() {
             "app/Shop/Calling.sharp:5:34 incompatible-effects: `Calling.run` reaches `Method.invoke`, which may have every effect, so the pure `Audit.run` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
             "app/Shop/Reading.sharp:5:34 incompatible-effects: `Reading.run` reaches `Property.get`, which may have every effect, so the pure `Audit.run` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
             "app/Shop/Writing.sharp:5:34 incompatible-effects: `Writing.run` reaches `Property.set`, which may have every effect, so the pure `Audit.run` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+}
+
+/// Spec sections 25 and 29: `Method.createDelegate<TFunction>()` gives a value of the function type `TFunction`, whose
+/// `uses` says the effects a call of it has, and whose result type types the call, and making it is pure. So a base
+/// class whose `relations` is held to `uses Database` builds each method it walks by an attribute as a
+/// `Function<Relation(Model) uses Database>` and gives what each call returns as a `Relation`, while the same walk
+/// through `Method.invoke`, which may have every effect, is refused.
+#[test]
+fn a_delegate_has_the_effects_its_function_type_lists() {
+    let related = ("app/Shop/Related.sharp", "namespace App.Shop;\n\n[Attribute]\npublic class Related\n{\n}\n");
+    let relation = (
+        "app/Shop/Relation.sharp",
+        "namespace App.Shop;\n\npublic class Relation\n{\n    public Relation(public string name { get; }) { }\n}\n",
+    );
+    let relations = (
+        "app/Shop/Relations.sharp",
+        "namespace App.Shop;\n\npublic interface Relations\n{\n    List<Relation> relations() uses Database;\n}\n",
+    );
+    let model = (
+        "app/Shop/Model.sharp",
+        "namespace App.Shop;\n\npublic abstract class Model : Relations\n{\n    public List<Relation> relations()\n        => typeof(Self).methods()\n            .filter(method => method.attributes<Related>().count() > 0)\n            .map(method => method.createDelegate<Function<Relation(Model) uses Database>>()(this));\n}\n",
+    );
+    let invoked = (
+        "app/Shop/Invoked.sharp",
+        "namespace App.Shop;\n\npublic abstract class Invoked : Relations\n{\n    public List<Relation> relations()\n        => typeof(Self).methods()\n            .filter(method => method.attributes<Related>().count() > 0)\n            .map(method => method.invoke(this, []) is Relation relation ? relation : new Relation(method.name));\n}\n",
+    );
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(issues(related, &[a, b, c, d, e, f, g]), Vec::<String>::new());
+    assert_eq!(issues(relation, &[a, b, c, d, e, f, g]), Vec::<String>::new());
+    assert_eq!(issues(relations, &[relation, a, b, c, d, e, f, g]), Vec::<String>::new());
+    assert_eq!(issues(model, &[related, relation, relations, a, b, c, d, e, f, g]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[model, invoked, related, relation, relations, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/Invoked.sharp:8:28 incompatible-effects: `Invoked.relations` reaches `Method.invoke`, which may have every effect, so `uses Database` on `Relations.relations` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
         ]
     );
 }

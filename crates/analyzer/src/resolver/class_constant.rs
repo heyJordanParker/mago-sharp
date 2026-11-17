@@ -385,7 +385,7 @@ where
         }
     }
 
-    if metadata.has_incomplete_hierarchy() {
+    if metadata.has_incomplete_hierarchy() && !context.dialect.is_sharp() {
         return Some(ResolvedConstant { const_type: get_mixed() });
     }
 

@@ -124,6 +124,16 @@ pub struct ExternAttributes {
     pub declaration: Word,
 }
 
+/// The effects an `extern` line declares for a plain PHP class or method, spec section 29, which
+/// `Method.createDelegate` holds a plain PHP method to, spec section 25.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExternEffects {
+    /// What the line declares, keyed as [`ExternAttributes::declaration`] is.
+    pub declaration: Word,
+    /// The dotted full name of each effect its `uses` lists, none for a line that declares its target pure.
+    pub effects: Vec<String>,
+}
+
 /// A family, spec section 10: a sealed interface, abstract class or enum marked `[Tag]`, whose `parse` and `withTag`
 /// the engine answers by finding the variant its input names.
 #[derive(Debug, PartialEq, Eq)]
@@ -148,6 +158,16 @@ pub struct DispatcherModule {
     pub namespace: Word,
 }
 
+/// The name the listener table gives what an `extern` line declares, as PHP looks it up: a class's fully qualified
+/// name, `class::method` for a method, and `function()` for a function, from its lowercase key in the codebase.
+fn extern_key((class, member): (Word, Word)) -> Word {
+    match (class, member) {
+        (class, member) if member.is_empty() => class,
+        (class, function) if class.is_empty() => word(format!("{function}()")),
+        (class, method) => word(format!("{class}::{method}")),
+    }
+}
+
 impl IncrementalAnalysisService {
     /// Every `extern` line of the last analysis that gives a class, a method or a function attributes, by what it
     /// declares, then by the file.
@@ -160,11 +180,7 @@ impl IncrementalAnalysisService {
             .flatten()
             .filter(|line| !line.attributes.is_empty())
             .filter_map(|line| {
-                let declaration = match self.codebase.extern_declaration(line)? {
-                    (class, member) if member.is_empty() => class,
-                    (class, function) if class.is_empty() => word(format!("{function}()")),
-                    (class, method) => word(format!("{class}::{method}")),
-                };
+                let declaration = extern_key(self.codebase.extern_declaration(line)?);
 
                 Some(ExternAttributes { file_id: line.span.file_id, file: line.file, declaration })
             })
@@ -174,6 +190,40 @@ impl IncrementalAnalysisService {
         });
 
         lines
+    }
+
+    /// The effects of each plain PHP class and method an `extern` line of the last analysis declares, by what it
+    /// declares: the first line's, as a call's effects take them, spec section 29. A function's are left out, since
+    /// reflection gives no function a `Method`.
+    #[must_use]
+    pub fn extern_effects(&self) -> Vec<ExternEffects> {
+        let mut declared: Vec<ExternEffects> = self
+            .codebase
+            .externs
+            .values()
+            .filter_map(|lines| {
+                let line = lines.first()?;
+                let target = self.codebase.extern_declaration(line).filter(|(class, _)| !class.is_empty())?;
+                let declaration = extern_key(target);
+                let effects = line
+                    .effects
+                    .iter()
+                    .map(|effect| {
+                        let name = self
+                            .codebase
+                            .get_class_like(effect.as_bytes())
+                            .map_or(*effect, |class| class.original_name);
+
+                        name.as_str_lossy().trim_start_matches('\\').replace('\\', ".")
+                    })
+                    .collect();
+
+                Some(ExternEffects { declaration, effects })
+            })
+            .collect();
+        declared.sort_by(|a, b| a.declaration.as_bytes().cmp(b.declaration.as_bytes()));
+
+        declared
     }
 
     /// Every PHP# listener of the last analysis, in the order the engine runs them: by its class's full name, then by
@@ -1040,14 +1090,16 @@ impl<'service> Dependencies<'service> {
 
         for edge in service.native_symbol_references.cascade_edges(&service.codebase) {
             match edge {
-                CascadeEdge::Signature { from, to } => {
+                CascadeEdge::Signature { from, to } | CascadeEdge::Attribute { from, to, signature: true } => {
                     if !dependencies.signature.contains_key(&from) && !from.1.is_empty() {
                         dependencies.signature_members.entry(from.0).or_default().push(from);
                     }
                     dependencies.signature.entry(from).or_default().push(to);
                     dependencies.add_reference(from, to);
                 }
-                CascadeEdge::Body { from, to } => dependencies.add_reference(from, to),
+                CascadeEdge::Body { from, to } | CascadeEdge::Attribute { from, to, signature: false } => {
+                    dependencies.add_reference(from, to);
+                }
                 CascadeEdge::File { file, to } => dependencies.files.entry(file).or_default().push(to),
                 CascadeEdge::Inherits { .. } => {}
             }
@@ -2533,6 +2585,84 @@ mod tests {
             assert!(money.iter().any(|path| path == input), "{input} is missing from {money:?}");
         }
         assert!(!money.iter().any(|path| path == "app/Shared/Money.lean"), "{money:?}");
+    }
+
+    /// A law of `Shelf` reaches `Bag`, whose header names `Iterable<string>`, which names no class, so the translation
+    /// of `Bag` reads the classes of its header as the checker does and both files compile.
+    #[test]
+    fn a_class_a_law_reaches_compiles_with_iterable_in_its_header() {
+        let database = project(&[
+            (
+                "app/Bag.sharp",
+                "namespace App;\n\npublic class Bag : Iterable<string>, Countable\n{\n    public Iterable<string> elements() => [\"tea\"];\n\n    public int count() => 1;\n}\n",
+            ),
+            (
+                "app/Shelf.sharp",
+                "namespace App;\n\npublic class Shelf\n{\n    law holdsOne(Bag bag) => bag.count() == 1;\n}\n",
+            ),
+        ]);
+        let mut service = analyzed(&database);
+
+        let compiled = compile(&mut service, empty_stamp);
+
+        accepted(&compiled, "app/Bag.sharp");
+        accepted(&compiled, "app/Shelf.sharp");
+    }
+
+    /// `Row`'s base class is missing, so the analysis finds no `key` on it, and the call of it in `Reader` is the error
+    /// that refuses `Reader`, never a lowering that panics.
+    #[test]
+    fn a_call_of_a_member_of_a_class_whose_base_class_is_missing_refuses_its_file() {
+        let database = project(&[
+            ("app/Row.sharp", "namespace App;\n\npublic class Row : Missing\n{\n}\n"),
+            (
+                "app/Reader.sharp",
+                "namespace App;\n\npublic class Reader\n{\n    public Any? key(Row row) => row.key();\n}\n",
+            ),
+        ]);
+        let mut service = analyzed(&database);
+
+        let compiled = compile(&mut service, empty_stamp);
+
+        let Some(Compilation::Refused(errors)) = compiled.get("app/Reader.sharp") else {
+            panic!("app/Reader.sharp is not refused: {compiled:?}");
+        };
+        let codes: Vec<Option<&str>> = errors.iter().map(|issue| issue.code.as_deref()).collect();
+        assert_eq!(codes, [Some("non-existent-method")], "{errors:?}");
+    }
+
+    /// A law reaches only what the members it reaches run. An attribute's constructor never runs as part of them, so
+    /// the law of `Level`, whose class and whose `meets` carry `[Tag]`, reaches neither `Tag` nor the `Bag` it holds,
+    /// and its translation names no declaration of their files. `Shelf` and its `count` carry `[Tag]` too, and `count`
+    /// builds a `Tag`, so the law of `Shelf` reaches both files.
+    #[test]
+    fn a_law_reaches_no_attribute_of_what_it_reaches_and_every_class_its_code_builds() {
+        let database = project(&[
+            (
+                "app/Level.sharp",
+                "namespace App;\n\n[Tag]\npublic enum Level\n{\n    case View;\n    case Edit;\n\n    [Tag]\n    public bool meets(Level other) => this == other;\n\n    law meetsItself(Level a) => a.meets(a);\n}\n",
+            ),
+            (
+                "app/Shelf.sharp",
+                "namespace App;\n\n[Tag]\npublic class Shelf\n{\n    [Tag]\n    public int count()\n    {\n        const made = new Tag();\n        return 1;\n    }\n\n    law countsOne(Shelf shelf) => shelf.count() == 1;\n}\n",
+            ),
+            (
+                "app/Tag.sharp",
+                "namespace App;\n\n[Attribute(Attribute.TARGET_CLASS | Attribute.TARGET_METHOD)]\npublic class Tag\n{\n    public Bag bag { get; } = new Bag();\n}\n",
+            ),
+            ("app/Bag.sharp", "namespace App;\n\npublic class Bag\n{\n    public int size() => 1;\n}\n"),
+        ]);
+        let service = analyzed(&database);
+
+        let reach = Reach::new(&service.codebase, &service.native_symbol_references);
+
+        let reached =
+            |law: &str, file: &str| reach.files(FileId::new(law.as_bytes())).contains(&FileId::new(file.as_bytes()));
+        assert!(reached("app/Level.sharp", "app/Level.sharp"));
+        assert!(!reached("app/Level.sharp", "app/Tag.sharp"));
+        assert!(!reached("app/Level.sharp", "app/Bag.sharp"));
+        assert!(reached("app/Shelf.sharp", "app/Tag.sharp"));
+        assert!(reached("app/Shelf.sharp", "app/Bag.sharp"));
     }
 
     /// Spec section 32: a file whose check resolves services through modules names the module files of every folder

@@ -259,8 +259,8 @@ impl Translator<'_, '_> {
         let lean = names::full_name(full);
         let short = names::short_name(full);
         let mut body = Body::new(self.checked, self.reach, full, short.clone());
-        for parent in inheritance.iter().flat_map(|inheritance| inheritance.types.iter()) {
-            let parent = self.checked.names().get(parent);
+        for parent in inheritance.iter().flat_map(|inheritance| inheritance.names()) {
+            let parent = self.checked.names().get(&parent);
             if self.checked.types().class_declaration(parent).kind == DeclarationKind::Class {
                 body.unmodeled(
                     name.span,
@@ -516,8 +516,8 @@ impl Translator<'_, '_> {
     /// them.
     fn coercions(&self, body: &mut Body<'_, '_>, lean: &str, inheritance: Option<&Inheritance>) -> Vec<String> {
         let mut coercions = Vec::new();
-        for (index, name) in inheritance.iter().flat_map(|inheritance| inheritance.types.iter()).enumerate() {
-            let parent = self.checked.names().get(name);
+        for (index, name) in inheritance.iter().flat_map(|inheritance| inheritance.names()).enumerate() {
+            let parent = self.checked.names().get(&name);
             let translated = self.reach.class(parent).is_some_and(|reached| reached.sharp);
             if self.checked.types().class_declaration(parent).kind != DeclarationKind::Interface
                 || !translated

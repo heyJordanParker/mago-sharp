@@ -90,6 +90,7 @@ pub mod exclusion;
 pub mod file;
 #[cfg(feature = "loader")]
 pub mod loader;
+pub mod lock;
 pub mod matcher;
 #[cfg(feature = "loader")]
 pub mod membership;

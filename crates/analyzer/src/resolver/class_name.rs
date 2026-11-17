@@ -1,7 +1,6 @@
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use mago_codex::metadata::CodebaseMetadata;
@@ -226,8 +225,9 @@ impl ResolvedClassname {
 
 /// Resolves a class written by name: a PHP name, or a bare PHP# name the binder bound to a class.
 ///
-/// A bare PHP# name of a class alias in the file's own namespace reads the alias, as an import of it does, since the
-/// codebase resolves the alias to its target and every other reference names the target alone.
+/// The code uses the class it names, spec section 5, whichever class declares the member it reaches through it, as
+/// `Widget::make()` uses `Widget` when its parent declares `make`. A name of a class alias uses the alias, which the
+/// codebase resolves to its target.
 fn resolve_named_class<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -238,12 +238,11 @@ where
     A: Arena,
 {
     let fqcn = word(context.resolved_names.get(name_node));
-    if context.dialect.is_sharp() {
-        let alias = ascii_lowercase_word(fqcn.as_bytes());
-        if context.codebase.class_like_aliases.contains_key(&alias) {
-            artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, alias, false);
-        }
-    }
+    artifacts.symbol_references.add_reference_to_symbol(
+        &block_context.scope,
+        context.codebase.class_key(fqcn.as_bytes()),
+        false,
+    );
 
     crate::utils::casing::check_class_like_casing(context, fqcn, name_node.span());
     crate::utils::experimental::check_experimental_class_like(context, block_context, fqcn, name_node.span());

@@ -58,7 +58,9 @@ pub struct Reach {
 
 impl Reach {
     /// Walks from each law of `codebase` along the signature and body edges of `references`. A law's body records its
-    /// references under the law's own symbol, its class and its name as the class keys a method.
+    /// references under the law's own symbol, its class and its name as the class keys a method. A law reaches only
+    /// what the members it reaches run, so the walk skips each [`CascadeEdge::Attribute`]: an attribute's constructor
+    /// never runs as part of them.
     #[must_use]
     pub fn new(codebase: &CodebaseMetadata, references: &SymbolReferences) -> Reach {
         let mut edges: HashMap<SymbolIdentifier, Vec<SymbolIdentifier>> = HashMap::default();

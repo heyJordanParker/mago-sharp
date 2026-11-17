@@ -422,7 +422,7 @@ where
             }
         }
 
-        if class_metadata.has_incomplete_hierarchy() {
+        if class_metadata.has_incomplete_hierarchy() && !context.dialect.is_sharp() {
             result.has_ambiguous_path = true;
             return None;
         }

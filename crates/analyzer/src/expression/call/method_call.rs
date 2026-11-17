@@ -993,7 +993,7 @@ where
         let mut invocation = Invocation::new(target, arguments, span);
         if apply_callable_signature(context, artifacts, &identifier, &mut invocation) {
             targets.push(invocation.target);
-        } else if !class_like_metadata.has_incomplete_hierarchy() {
+        } else if context.dialect.is_sharp() || !class_like_metadata.has_incomplete_hierarchy() {
             report_non_existent_method(
                 context,
                 unresolved.target_span,

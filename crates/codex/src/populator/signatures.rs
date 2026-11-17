@@ -1,12 +1,15 @@
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeMetadata;
+use crate::reference::ReferenceOrigin;
 use crate::reference::ReferenceSource;
 use crate::reference::SymbolReferences;
+use crate::symbol::SymbolIdentifier;
 use crate::symbol::Symbols;
 use crate::ttype::TType;
 use crate::ttype::atomic::populate_atomic_type;
 use crate::ttype::union::populate_union_type;
 use mago_word::Word;
+use mago_word::empty_word;
 
 /// Populates metadata for a single function or method.
 ///
@@ -25,11 +28,25 @@ pub fn populate_function_like_metadata(
     }
 
     for attribute_metadata in metadata.get_attributes() {
-        add_class_reference(codebase_symbols, symbol_references, reference_source, attribute_metadata.name, Some(true));
+        add_class_reference(
+            codebase_symbols,
+            symbol_references,
+            reference_source,
+            attribute_metadata.name,
+            Some(true),
+            SymbolReferences::add_attribute_reference,
+        );
     }
 
     for class in &metadata.uses {
-        add_class_reference(codebase_symbols, symbol_references, reference_source, *class, Some(true));
+        add_class_reference(
+            codebase_symbols,
+            symbol_references,
+            reference_source,
+            *class,
+            Some(true),
+            SymbolReferences::add_reference,
+        );
     }
 
     for listened in &mut metadata.listens {
@@ -75,7 +92,14 @@ pub fn populate_function_like_metadata(
         }
 
         for attribute_metadata in &parameter_metadata.attributes {
-            add_class_reference(codebase_symbols, symbol_references, reference_source, attribute_metadata.name, None);
+            add_class_reference(
+                codebase_symbols,
+                symbol_references,
+                reference_source,
+                attribute_metadata.name,
+                None,
+                SymbolReferences::add_attribute_reference,
+            );
         }
     }
 
@@ -157,32 +181,29 @@ pub fn populate_function_like_metadata(
     metadata.flags |= MetadataFlags::POPULATED;
 }
 
-/// Records that the function-like names the class `name`, as an attribute or in an `on` clause, by its key.
+/// Records with `record` that the function-like names the class `name`, as an attribute or in its `uses`, by its key.
 fn add_class_reference(
     symbols: &Symbols,
     symbol_references: &mut SymbolReferences,
     reference_source: &ReferenceSource,
     name: Word,
     in_signature_override: Option<bool>,
+    record: fn(&mut SymbolReferences, ReferenceOrigin, SymbolIdentifier, bool),
 ) {
-    let name = symbols.class_key(name.as_bytes());
-    match reference_source {
-        ReferenceSource::Symbol(in_signature, a) => {
-            symbol_references.add_symbol_reference_to_symbol(*a, name, in_signature_override.unwrap_or(*in_signature));
+    let (origin, in_signature) = match *reference_source {
+        ReferenceSource::Symbol(in_signature, symbol) => {
+            (ReferenceOrigin::Symbol((symbol, empty_word())), in_signature)
         }
-        ReferenceSource::ClassLikeMember(in_signature, a, b) => {
-            symbol_references.add_class_member_reference_to_symbol(
-                (*a, *b),
-                name,
-                in_signature_override.unwrap_or(*in_signature),
-            );
+        ReferenceSource::ClassLikeMember(in_signature, class, member) => {
+            (ReferenceOrigin::Symbol((class, member)), in_signature)
         }
-        ReferenceSource::File(in_signature, file) => {
-            symbol_references.add_file_reference_to_class_member(
-                *file,
-                (name, mago_word::empty_word()),
-                in_signature_override.unwrap_or(*in_signature),
-            );
-        }
-    }
+        ReferenceSource::File(in_signature, file) => (ReferenceOrigin::File(file), in_signature),
+    };
+
+    record(
+        symbol_references,
+        origin,
+        (symbols.class_key(name.as_bytes()), empty_word()),
+        in_signature_override.unwrap_or(in_signature),
+    );
 }

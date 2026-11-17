@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
+use mago_database::lock;
 use mago_database::process;
 use mago_extension::ProcessGroup;
 use sha2::Digest;
@@ -373,15 +374,7 @@ pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
 /// or a package file, as a cache cleaner leaves it, is deleted and built again. A finished build deletes every other
 /// folder in `builds`: older builds and any staging folder a dead build left.
 pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
-    fs::create_dir_all(builds).map_err(|error| DatabaseError::io(IOAction::CreateFolder, builds, error))?;
-    let lock_file = builds.join("build.lock");
-    let _lock = fs::File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_file)
-        .and_then(|lock| lock.lock().map(|()| lock))
-        .map_err(|error| DatabaseError::io(IOAction::WriteFile, &lock_file, error))?;
+    let _lock = lock::exclusive(&builds.join("build.lock"))?;
     let toolchain = builds.join("lean-toolchain");
     if !fs::read(&toolchain).is_ok_and(|bytes| bytes == TOOLCHAIN.as_bytes()) {
         fs::write(&toolchain, TOOLCHAIN).map_err(|error| DatabaseError::io(IOAction::WriteFile, &toolchain, error))?;
@@ -487,17 +480,7 @@ pub(crate) fn first_call(command: &mut Command) -> io::Result<Output> {
 
 /// The exclusive lock on `elan.lock` in `cache`, held across threads and processes alike until it is dropped.
 fn install_lock(cache: &Path) -> io::Result<fs::File> {
-    fs::create_dir_all(cache).map_err(|error| DatabaseError::io(IOAction::CreateFolder, cache, error))?;
-    let lock_file = cache.join("elan.lock");
-    let lock = fs::File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_file)
-        .and_then(|lock| lock.lock().map(|()| lock))
-        .map_err(|error| DatabaseError::io(IOAction::WriteFile, &lock_file, error))?;
-
-    Ok(lock)
+    Ok(lock::exclusive(&cache.join("elan.lock"))?)
 }
 
 /// The SHA-256 of `bytes` in lowercase hex, as an archive's pinned `sha256` is written.

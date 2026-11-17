@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
+use mago_word::empty_word;
 
 use crate::metadata::CodebaseMetadata;
 use crate::metadata::class_like::ClassLikeMetadata;
@@ -15,6 +16,7 @@ use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::shared::Shared;
 use crate::misc::GenericParent;
+use crate::reference::ReferenceOrigin;
 use crate::reference::ReferenceSource;
 use crate::reference::SymbolReferences;
 use crate::symbol::SymbolIdentifier;
@@ -658,9 +660,9 @@ fn populate_constant(
     force_repopulation: bool,
 ) {
     for attribute_metadata in &constant.attributes {
-        symbol_references.add_symbol_reference_to_symbol(
-            name,
-            symbols.class_key(attribute_metadata.name.as_bytes()),
+        symbol_references.add_attribute_reference(
+            ReferenceOrigin::Symbol((name, empty_word())),
+            (symbols.class_key(attribute_metadata.name.as_bytes()), empty_word()),
             true,
         );
     }
