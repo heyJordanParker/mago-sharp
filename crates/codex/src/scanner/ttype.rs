@@ -430,9 +430,9 @@ fn union_from_intersection(left: TUnion, right: TUnion) -> TUnion {
 }
 
 /// The type a name in a hint writes. A PHP# type parameter is the template of the same name in `type_context`, as a
-/// docblock's `@template` name is. PHP#'s `Equatable` is `Any?` marked [`UnionFlags::EQUATABLE`], the bound alone, and
-/// the checker refuses it anywhere else. PHP's `Closure` is its function type, and a `dialect` PHP# file, whose function
-/// types all go by one name, spec section 14.1, reads it as the class it names, which is no PHP# type.
+/// docblock's `@template` name is. PHP#'s `Sharp\Equatable` is `Any?` marked [`UnionFlags::EQUATABLE`], the bound
+/// alone, and the checker refuses it anywhere else. PHP's `Closure` is its function type, and a `dialect` PHP# file,
+/// whose function types all go by one name, spec section 14.1, reads it as the class it names, which is no PHP# type.
 #[inline]
 fn get_union_from_identifier_hint(
     identifier: &Identifier<'_>,
@@ -448,8 +448,9 @@ fn get_union_from_identifier_hint(
         return wrap_atomic(builder::get_template_atomic(definitions, word(name)));
     }
 
-    // Spec section 11: `Equatable` bounds a type parameter by the `==` its values have, and adds no type of its own.
-    if dialect.is_sharp() && matches!(identifier, Identifier::Local(local) if local.value == EQUATABLE.as_bytes()) {
+    // Spec section 11: a name that resolves to the default class `Sharp\Equatable` bounds a type parameter by the `==`
+    // its values have, and adds no type of its own. A class-like `Equatable` of the file's namespace wins, as over `Math`.
+    if dialect.is_sharp() && name.strip_prefix(b"Sharp\\") == Some(EQUATABLE.as_bytes()) {
         let mut equatable = get_mixed();
         equatable.flags.insert(UnionFlags::EQUATABLE);
 

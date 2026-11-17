@@ -5,7 +5,7 @@ public final class Sizes
 {
     private Map<string, int> sizes = ['small': 1];
 
-    public int size(string name)
+    internal int size(string name)
     {
         return this.sizes[name] ?? 0;
     }

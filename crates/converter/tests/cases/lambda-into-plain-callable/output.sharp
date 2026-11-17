@@ -5,7 +5,7 @@ namespace App;
 // passes none, and a lambda of no parameters goes where one is declared.
 public final class Setup
 {
-    public void run(Hooks hooks)
+    internal void run(Hooks hooks)
     {
         hooks.add('expiry', () => 60);
     }

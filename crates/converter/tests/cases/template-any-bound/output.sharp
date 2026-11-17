@@ -5,7 +5,7 @@ namespace App;
  */
 public final class Pair<TFirst, TSecond>
 {
-    public Pair(public TFirst first { get; }, public TSecond second { get; })
+    public Pair(internal TFirst first { get; }, internal TSecond second { get; })
     {
     }
 }

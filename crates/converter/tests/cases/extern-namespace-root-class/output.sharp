@@ -6,12 +6,12 @@ import Acme.Legacy.Legacy_Order;
 // the line the conversion adds gives its folder (spec section 23).
 public final class Orders
 {
-    public string reference(Legacy_Order order)
+    internal string reference(Legacy_Order order)
     {
         return order.reference;
     }
 
-    public Legacy_Order blank()
+    internal Legacy_Order blank()
     {
         return new Legacy_Order();
     }

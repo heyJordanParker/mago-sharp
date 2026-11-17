@@ -1230,9 +1230,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The `#fields` of the struct or PHP# class being lowered, at `span`, with `members` its declared members, which the
     /// engine's reader calls to build the type, spec section 10: a row per field `struct_parse_fields` gives, of its
     /// name, its key, its type text, whether the main constructor takes it, and whether a missing key leaves it to its
-    /// default, then, for a field whose declaration writes more than one class, those classes in the order it writes
-    /// them, which a union of them tries in that order. None for a type with a field whose type has no type text, a
-    /// function, which no input holds. No PHP# or plain PHP code can call a method whose name holds `#`.
+    /// default, then, for a field whose declaration writes more than one class or scalar type, those in the order it
+    /// writes them, which a union of them tries in that order. None for a type with a field whose type has no type
+    /// text, a function, which no input holds. No PHP# or plain PHP code can call a method whose name holds `#`.
     ///
     /// ```php
     /// public static function '#fields'(): array
@@ -1263,7 +1263,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             ];
             let mut order = Vec::new();
             if let Some(hint) = written_hint(members, field.name) {
-                self.written_classes(hint, &mut order);
+                self.written_order(hint, false, &mut order);
             }
             if order.len() > 1 {
                 parts.push(self.string(0, line, order.join(", ").as_bytes()));
@@ -1288,31 +1288,38 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         ))
     }
 
-    /// Adds to `classes` each class the written type `hint` names, at any depth, in the order it writes them, by its full
-    /// dotted name as it is declared, `App.Card`, once.
-    fn written_classes(&self, hint: &Hint, classes: &mut Vec<String>) {
-        let mut add = |name: Option<&[u8]>| {
+    /// Adds to `order` each class the written type `hint` names, and each scalar type a union in it holds, at any depth,
+    /// in the order it writes them, once each: a class by its full dotted name as it is declared, `App.Card`, and a
+    /// scalar type as the type text writes it, `int`. `in_union` tells whether `hint` is a union's member.
+    fn written_order(&self, hint: &Hint, in_union: bool, order: &mut Vec<String>) {
+        let mut add = |written: String| {
+            if !order.contains(&written) {
+                order.push(written);
+            }
+        };
+        let mut add_class = |name: Option<&[u8]>| {
             if let Some(class) = name.and_then(|name| self.types.codebase().get_class_like(name)) {
-                let dotted = class.original_name.as_str_lossy().trim_start_matches('\\').replace('\\', ".");
-                if !classes.contains(&dotted) {
-                    classes.push(dotted);
-                }
+                add(class.original_name.as_str_lossy().trim_start_matches('\\').replace('\\', "."));
             }
         };
         match hint {
-            Hint::Identifier(name) => add(self.names.resolve(name)),
+            Hint::Identifier(name) => add_class(self.names.resolve(name)),
+            Hint::String(_) if in_union => add("string".to_owned()),
+            Hint::Integer(_) if in_union => add("int".to_owned()),
+            Hint::Float(_) if in_union => add("float".to_owned()),
+            Hint::Bool(_) if in_union => add("bool".to_owned()),
             Hint::Generic(generic) => {
-                add(self.names.resolve(&generic.name));
+                add_class(self.names.resolve(&generic.name));
                 for argument in generic.type_arguments.arguments.iter() {
-                    self.written_classes(argument, classes);
+                    self.written_order(argument, false, order);
                 }
             }
             Hint::Union(union) => {
-                self.written_classes(union.left, classes);
-                self.written_classes(union.right, classes);
+                self.written_order(union.left, true, order);
+                self.written_order(union.right, true, order);
             }
-            Hint::Nullable(nullable) => self.written_classes(nullable.hint, classes),
-            Hint::Parenthesized(parenthesized) => self.written_classes(parenthesized.hint, classes),
+            Hint::Nullable(nullable) => self.written_order(nullable.hint, in_union, order),
+            Hint::Parenthesized(parenthesized) => self.written_order(parenthesized.hint, in_union, order),
             _ => {}
         }
     }

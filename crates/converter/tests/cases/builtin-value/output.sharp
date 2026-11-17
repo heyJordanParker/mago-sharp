@@ -4,22 +4,22 @@ namespace App;
 // the function type it lands in passes, since PHP calls the built-in with each of them (spec section 14.2).
 public final class Rules
 {
-    public string apply(Function<string(string)> rule, string text)
+    private string apply(Function<string(string)> rule, string text)
     {
         return rule(text);
     }
 
-    public bool test(Function<bool(string, string)> rule, string text)
+    private bool test(Function<bool(string, string)> rule, string text)
     {
         return rule(text, 'a');
     }
 
-    public string cleaned(string text)
+    internal string cleaned(string text)
     {
         return this.apply((string value) => value.trim(), text);
     }
 
-    public bool prefixed(string text)
+    internal bool prefixed(string text)
     {
         return this.test((string haystack, string needle) => haystack.startsWith(needle), text);
     }

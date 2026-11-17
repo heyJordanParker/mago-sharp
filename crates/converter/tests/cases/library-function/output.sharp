@@ -7,17 +7,17 @@ import Acme.Pdf;
 // the namespace its `extern namespace` line gives it, so `use function` and `use const` leave no line (spec section 23).
 public final class Printer
 {
-    public string loud(string text)
+    internal string loud(string text)
     {
         return Format.shout(text);
     }
 
-    public string page(string html)
+    internal string page(string html)
     {
         return Pdf.render(html);
     }
 
-    public int size()
+    internal int size()
     {
         return Pdf.SIZE;
     }

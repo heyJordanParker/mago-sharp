@@ -11,8 +11,8 @@ final class Basket
      * @param list<string> $items
      * @return list<bool>
      */
-    public function flags(int $count, ?string $note, array $items): array
+    public function flags(int $count, ?float $rate, array $items): array
     {
-        return [(bool) $count, (bool) $note, (bool) $items];
+        return [(bool) $count, (bool) $rate, (bool) $items];
     }
 }

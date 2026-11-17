@@ -4,7 +4,7 @@ namespace App;
 // count of 1 is the innermost loop, which a plain `break` leaves (spec section 17).
 public final class Grid
 {
-    public int first(List<List<int>> rows)
+    internal int first(List<List<int>> rows)
     {
         let found = 0;
         outer: for (const row of rows) {

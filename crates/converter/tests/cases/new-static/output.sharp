@@ -4,11 +4,11 @@ namespace App;
 // constructor `required`, which `new Self(…)` calls on it and on every subclass.
 public class Money
 {
-    public required Money(public int cents { get; })
+    public required Money(private int cents { get; })
     {
     }
 
-    public virtual Self doubled()
+    internal virtual Self doubled()
     {
         return new Self(this.cents * 2);
     }

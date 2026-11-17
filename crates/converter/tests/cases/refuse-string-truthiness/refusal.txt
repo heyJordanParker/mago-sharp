@@ -1,0 +1,2 @@
+at line 9 of its PHP#: error invalid-operand: `!=` compares `name` with `""`, a string fixed at compile time.
+at line 9 of its PHP#: error invalid-operand: `!=` compares `name` with `"0"`, a string fixed at compile time, so it selects one of a closed set of values.

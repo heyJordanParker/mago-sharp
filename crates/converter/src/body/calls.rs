@@ -419,8 +419,8 @@ impl<'input> Converter<'input, '_> {
     }
 
     /// `$class::find(7)` of a class value held at run time as the call through reflection PHP# makes it with,
-    /// `class.methods().first(method => method.name == "find").invoke(null, [7])`, which runs the `find` of the class the
-    /// value holds as PHP's call does, the class's own before one it inherits (spec section 25). `invoke` gives `Any?`,
+    /// `class.methods().first(method => method.name == nameof(Order.find)).invoke(null, [7])`, which runs the `find` of
+    /// the class the value holds as PHP's call does, the class's own before one it inherits (spec section 25). `invoke` gives `Any?`,
     /// which [`Converter::checked`] takes into the type the analysis gives the call where the code reads it, as `used`
     /// says. It keeps the file plain PHP for a value that may hold something other than a class value, as an object or
     /// null, where the analysis knows no `method` the call runs, which would type its arguments and its result, and for
@@ -447,7 +447,7 @@ impl<'input> Converter<'input, '_> {
                 format!("`{shown}` calls a static method through `{held}`, which holds no class value, and has no PHP# form: {HELD_CLASS}, which reads a class value"),
             );
         }
-        let Some(method) = method else {
+        let (Some(method), Some(held_class)) = (method, self.held_class(call.class)) else {
             return self.refuse(
                 call.span(),
                 format!("`{shown}` is a static call through a class held at run time, which PHP# makes through reflection, and the analysis finds no method `{}` of `{held}` to type it by (spec section 25)", String::from_utf8_lossy(name.value)),
@@ -460,9 +460,12 @@ impl<'input> Converter<'input, '_> {
                 format!("a named argument of `{shown}` has no PHP# form: it is a static call through a class held at run time, which PHP# makes through reflection, whose `invoke` takes its arguments as a `List` (spec section 25)"),
             );
         }
+        let Some(declared) = self.member_name(call.span(), held_class, &method.original_name.as_str_lossy()) else {
+            return;
+        };
         self.expression(call.class, None);
         self.arguments(&call.argument_list, Some(method));
-        self.plain_call(call.span(), Some(method), self.held_class(call.class));
+        self.plain_call(call.span(), Some(method), Some(held_class));
         let class = self.render(call.class);
         let class = if is_primary(call.class) { class } else { format!("({class})") };
         let arguments: Vec<String> = call
@@ -475,11 +478,10 @@ impl<'input> Converter<'input, '_> {
             })
             .collect();
         let found = self.unused_name("method", &[]);
-        let declared = method.original_name.as_str_lossy();
         self.edits.replace(
             call.span(),
             format!(
-                "{class}.methods().first({found} => {found}.name == \"{declared}\").invoke(null, [{}])",
+                "{class}.methods().first({found} => {found}.name == {declared}).invoke(null, [{}])",
                 arguments.join(", ")
             ),
         );

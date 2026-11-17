@@ -6,7 +6,7 @@ namespace App;
 [DynamicallyAccessed]
 public final class Action
 {
-    public Action(public string name { get; private set; })
+    public Action(internal string name { get; private set; })
     {
     }
 }

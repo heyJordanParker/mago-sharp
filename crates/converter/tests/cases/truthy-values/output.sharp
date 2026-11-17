@@ -5,27 +5,27 @@ namespace App;
 // through a `match` on the values PHP reads as false (spec section 21).
 public final class Truthy
 {
-    public bool never(Truthy other)
+    internal bool never(Truthy other)
     {
         return false;
     }
 
-    public bool made()
+    internal bool made()
     {
         return (match (this.other()) { default => true }) ? true : false;
     }
 
-    public bool unknown(Any? value)
+    internal bool unknown(Any? value)
     {
         return (match (value) { null or false or 0 or 0.0 or "" or "0" or [] => false, default => true }) ? true : false;
     }
 
-    public bool either(int|string value)
+    internal bool either(int|float value)
     {
-        return (match (value) { 0 or "" or "0" => true, default => false });
+        return (match (value) { 0 or 0.0 => true, default => false });
     }
 
-    public Truthy kept(Truthy other, Truthy fallback)
+    internal Truthy kept(Truthy other, Truthy fallback)
     {
         return other;
     }

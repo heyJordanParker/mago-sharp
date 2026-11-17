@@ -19,18 +19,18 @@ final class Truthy
         return !isset($this->stock[$sku]) || !empty($this->lines);
     }
 
-    public function named(string $name): string
+    public function named(int $count): int
     {
-        if ($name) {
-            return $name;
+        if ($count) {
+            return $count;
         }
 
-        return 'blank';
+        return 1;
     }
 
-    public function shown(string $name): string
+    public function shown(?float $ratio): string
     {
-        return $name ? 'named' : 'blank';
+        return $ratio ? 'named' : 'blank';
     }
 
     public function both(?Truthy $other, bool $flag): bool

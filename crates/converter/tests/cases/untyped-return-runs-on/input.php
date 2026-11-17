@@ -45,10 +45,10 @@ final class Inviter
         }
     }
 
-    public function pick(string $name)
+    public function pick(string $name, int $count)
     {
-        switch ($name) {
-            case 'a':
+        switch ($count) {
+            case 1:
                 $this->notify($name);
                 break;
         }

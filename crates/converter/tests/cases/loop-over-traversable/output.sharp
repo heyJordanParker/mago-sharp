@@ -4,7 +4,7 @@ namespace App;
 // generator, is PHP's own `foreach` over it in PHP# too (spec section 17).
 public final class Order
 {
-    public int total(Lines lines)
+    internal int total(Lines lines)
     {
         let total = 0;
         for (const line of lines) {

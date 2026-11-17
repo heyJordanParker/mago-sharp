@@ -8,19 +8,19 @@ namespace App;
  * A value the analysis types wider than a type parameter whose bound excludes null is checked as that type
  * parameter, which `as` tests while the code runs and gives null for a value that is no `T` (spec section 21).
  *
- * @template T of object
+ * @template T of Item
  */
 final class Holder
 {
     /** @var list<T> */
     private array $kept = [];
 
-    public function __construct(private object $found)
+    public function __construct(private Item $found)
     {
     }
 
     /** @return T */
-    public function item(): object
+    public function item(): Item
     {
         return $this->found;
     }
@@ -31,7 +31,7 @@ final class Holder
     }
 
     /** @param T $item */
-    private function keep(object $item): void
+    private function keep(Item $item): void
     {
         $this->kept[] = $item;
     }
@@ -42,7 +42,7 @@ final class Holder
      *
      * @return T
      */
-    public function same(object $item): object
+    public function same(Item $item): Item
     {
         return $item;
     }

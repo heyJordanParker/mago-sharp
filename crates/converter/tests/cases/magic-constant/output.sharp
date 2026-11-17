@@ -5,21 +5,21 @@ namespace App;
 // compiles in their place, which the class's own declarations fix, in a lambda too for the namespace.
 public final class Paths
 {
-    public string stubs()
+    internal string stubs()
     {
         const file = Position.current().file;
 
         return Position.current().directory + '/stubs:' + file;
     }
 
-    public string traced()
+    internal string traced()
     {
         const named = () => 'in ' + "App";
 
         return "App\\Paths::traced" + ' ' + "traced" + ' ' + named() + "";
     }
 
-    public Class<Paths> kind()
+    internal Class<Paths> kind()
     {
         return typeof(Paths);
     }

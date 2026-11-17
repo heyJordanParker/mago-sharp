@@ -1,22 +1,22 @@
 namespace App;
 
-// PHP's truthiness of a string is a test of several parts, and so is `?:`, which tests a value and gives it. Each reads
-// the value again, which gives what PHP's one read gives for a variable, and for a property its class declares with no
-// `get` hook and no `__get` (spec section 21).
+// PHP's truthiness of a value that may be null is a test of several parts, and so is `?:`, which tests a value and
+// gives it. Each reads the value again, which gives what PHP's one read gives for a variable, and for a property its
+// class declares with no `get` hook and no `__get` (spec section 21).
 public final class Customer
 {
-    private string? nickname = null;
+    private int? visits = null;
 
-    public Customer(private string name)
+    public Customer(private int? points)
     {
     }
 
-    public string greeting(string? title)
+    internal int? score(int? bonus)
     {
-        if (this.nickname != null && this.nickname != "" && this.nickname != "0") {
-            return 'Hi ' + this.nickname;
+        if (this.visits != null && this.visits != 0) {
+            return this.visits;
         }
 
-        return ((title != null && title != "" && title != "0") ? title : 'Dear') + ' ' + ((this.name != "" && this.name != "0") ? this.name : 'customer');
+        return ((bonus != null && bonus != 0) ? bonus : 1) + ((this.points != null && this.points != 0) ? this.points : 0);
     }
 }

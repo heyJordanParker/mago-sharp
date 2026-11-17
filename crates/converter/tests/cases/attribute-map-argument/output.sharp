@@ -6,11 +6,11 @@ public final class Order
 {
     [Rule(anyOf: ['paid', 'shipped'])]
     [Rule(of: new Rule(anyOf: [0: 'paid', 1: 'shipped']))]
-    public string status { get; private set; } = 'paid';
+    internal string status { get; private set; } = 'paid';
 
     public Order(
         [Rule(of: new Rule(anyOf: [0: typeof(Order), 1: typeof(Rule)]))]
-        public string payment { get; private set; } = 'card',
+        internal string payment { get; private set; } = 'card',
     ) {
     }
 }

@@ -4,7 +4,7 @@ namespace App;
 // each assignment of it writes it (spec section 3).
 public final class Pricing
 {
-    public int price(bool member)
+    private int price(bool member)
     {
         int? price = null;
         if (member) {
@@ -16,7 +16,7 @@ public final class Pricing
         return price;
     }
 
-    public string label(int count)
+    internal string label(int count)
     {
         let suffix = '';
         if (count > 1) {
@@ -29,7 +29,7 @@ public final class Pricing
 
     // A PHP local lives for the whole method, so one a loop's pass assigns keeps its value into the next pass, and
     // its declaration goes first in the method's body.
-    public int carried(List<int> values)
+    internal int carried(List<int> values)
     {
         int? last = null;
         let sum = 0;
@@ -44,7 +44,7 @@ public final class Pricing
     }
 
     // The local's type joins those of the values assigned to it, which a declaration or a literal gives.
-    public int chosen(bool wide)
+    internal int chosen(bool wide)
     {
         int? size = null;
         if (wide) {
@@ -57,7 +57,7 @@ public final class Pricing
     }
 
     // A `@var` tag on any assignment of the local declares its type, which every value assigned to it has.
-    public int tagged(bool wide, int count)
+    internal int tagged(bool wide, int count)
     {
         int? size = null;
         if (wide) {

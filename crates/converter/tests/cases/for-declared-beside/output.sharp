@@ -4,7 +4,7 @@ namespace App;
 // runs each initialization as a statement of its own before the loop, in its order (spec section 17).
 public final class Pairs
 {
-    public int sum(int count)
+    internal int sum(int count)
     {
         let total = 0;
         let index = 0;
@@ -17,7 +17,7 @@ public final class Pairs
     }
 
     // The loop keeps the name a `break` of its body gives it, after the initializations.
-    public int firstNegative(List<List<int>> rows)
+    internal int firstNegative(List<List<int>> rows)
     {
         let row = 0;
         let found = -1;

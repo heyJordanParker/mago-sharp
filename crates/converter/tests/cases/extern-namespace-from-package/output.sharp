@@ -7,7 +7,7 @@ import Acme.StringHelpers;
 // its folder (spec section 23).
 public final class Greeter
 {
-    public string greet(string name)
+    internal string greet(string name)
     {
         return StringHelpers.str_shout(name);
     }

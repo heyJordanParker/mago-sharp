@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 /**
  * Prints the class-likes a `.sharp` file names with no import, read from php-sharp's standard library,
- * `sharp/composer/library`, and the prelude's `crates/prelude/assets/extensions/sharp.php`, which the engine declares:
+ * `sharp/composer/library`, and the prelude's `crates/prelude/assets/extensions/sharp.php`:
  *
  * - the class-likes declared directly in `Sharp`, spec section 23: each public one of `Sharp/*.sharp`, and each one of
  *   the prelude;
@@ -149,7 +149,7 @@ echo
     rust(
         'pub(crate)',
         'SHARP_CLASSES',
-        "/// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the\n/// prelude, which the engine declares. Sorted.",
+        "/// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the\n/// prelude. Sorted.",
         $classes,
     );
 echo "\n";

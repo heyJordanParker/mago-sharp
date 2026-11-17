@@ -3,26 +3,26 @@ namespace App;
 // `->` and `::` are `.`, and `?->` is `?.` (spec section 4).
 public final class Route
 {
-    public Route? next { get; private set; } = null;
+    private Route? next = null;
 
-    public string name { get; private set; } = 'home';
+    private string name = 'home';
 
-    public string? nextName()
+    internal string? nextName()
     {
         return this.next?.name;
     }
 
-    public string? nextLabel()
+    internal string? nextLabel()
     {
         return this.next?.label();
     }
 
-    public string label()
+    private string label()
     {
         return this.name;
     }
 
-    public int counted()
+    internal int counted()
     {
         return Counts.zero() + Counts.LIMIT + Counts.total;
     }

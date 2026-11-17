@@ -3,8 +3,8 @@
 //! Do not edit.
 
 /// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the
-/// prelude, which the engine declares. Sorted.
-pub(crate) const SHARP_CLASSES: [&str; 44] = [
+/// prelude. Sorted.
+pub(crate) const SHARP_CLASSES: [&str; 45] = [
     "Sharp\\Behavior",
     "Sharp\\BigInteger",
     "Sharp\\Bool",
@@ -19,6 +19,7 @@ pub(crate) const SHARP_CLASSES: [&str; 44] = [
     "Sharp\\Dispatcher",
     "Sharp\\DynamicallyAccessed",
     "Sharp\\EnumCase",
+    "Sharp\\Equatable",
     "Sharp\\Error",
     "Sharp\\Events",
     "Sharp\\Field",

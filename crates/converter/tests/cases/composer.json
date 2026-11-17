@@ -1,0 +1,4 @@
+{
+    "description": "Each case is an application, as the projects users convert are, unless a composer.json of its own says otherwise.",
+    "type": "project"
+}

@@ -4,12 +4,12 @@ namespace App;
 // (spec section 25). The engine gives both the same class name.
 public final class Ledger
 {
-    public string kind(Order order)
+    internal string kind(Order order)
     {
         return Class.of(order);
     }
 
-    public string own()
+    internal string own()
     {
         return typeof(Ledger);
     }

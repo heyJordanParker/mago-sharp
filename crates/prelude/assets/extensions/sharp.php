@@ -261,6 +261,12 @@ final class Listening
     private function __construct() {}
 }
 
+/**
+ * The bound of every type that has `==`, as in `<T : Equatable>`. A type satisfies it with no declaration, and it is
+ * never a value's type, so the engine declares nothing for it.
+ */
+interface Equatable {}
+
 namespace Sharp\Internal;
 
 /**
@@ -373,6 +379,21 @@ function includeGlobal(string $path): void {}
  */
 #[\Attribute(\Attribute::TARGET_PARAMETER)]
 final class ComparedByEquality {}
+
+/**
+ * Marks a standard library collection member that searches its receiver for the value of its parameter marked
+ * `ComparedByEquality`, as `List.contains` does and `Set.add` does not, so the checker refuses a search for a string
+ * fixed at compile time in an application.
+ */
+#[\Attribute(\Attribute::TARGET_METHOD)]
+final class SearchesElements {}
+
+/**
+ * Marks a standard library member that tests its receiver and its first parameter for equality, as `==` does, as
+ * `string.equals` does, so the checker refuses a test against a string fixed at compile time in an application.
+ */
+#[\Attribute(\Attribute::TARGET_METHOD)]
+final class TestsEquality {}
 
 /**
  * Marks the parameter of a standard library collection member whose function gives the keys the member orders the

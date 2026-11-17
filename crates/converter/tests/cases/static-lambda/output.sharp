@@ -4,12 +4,12 @@ namespace App;
 // lambda gives the result PHP's gives (spec section 14.2).
 public final class Pricing
 {
-    public Function<int(int)> taxed(int rate)
+    internal Function<int(int)> taxed(int rate)
     {
         return (int amount) => amount + amount * rate;
     }
 
-    public Function<int(int)> discounted(int off)
+    internal Function<int(int)> discounted(int off)
     {
         return (int amount) => {
             return amount - off;

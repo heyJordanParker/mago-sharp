@@ -4,20 +4,20 @@ namespace App;
  * A value the analysis types wider than a type parameter whose bound excludes null is checked as that type
  * parameter, which `as` tests while the code runs and gives null for a value that is no `T` (spec section 21).
  */
-public final class Holder<T : Object>
+public final class Holder<T : Item>
 {
     private List<T> kept = [];
 
-    public Holder(private Object found)
+    public Holder(private Item found)
     {
     }
 
-    public T item()
+    internal T item()
     {
         return this.found as T ?? throw new TypeError("Return value must be of type T");
     }
 
-    public void keepFound()
+    internal void keepFound()
     {
         this.keep(this.found as T ?? throw new TypeError("Argument #1 ($item) must be of type T"));
     }
@@ -28,7 +28,7 @@ public final class Holder<T : Object>
     }
 
     // A `T` lands in a `T` as it is.
-    public T same(T item)
+    internal T same(T item)
     {
         return item;
     }

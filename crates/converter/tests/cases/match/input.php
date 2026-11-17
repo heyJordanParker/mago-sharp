@@ -19,10 +19,10 @@ final class Router
         };
     }
 
-    public function count(string $method): void
+    public function count(int $status): void
     {
-        match ($method) {
-            'GET' => $this->hits++,
+        match ($status) {
+            200 => $this->hits++,
             default => $this->hits += 2,
         };
     }

@@ -4,12 +4,12 @@ namespace App;
 // passes (spec section 14.1), so the lambda gains each one it ignores, named `unused` where the type names none.
 public final class Report
 {
-    public List<string> marked(Lines lines)
+    internal List<string> marked(Lines lines)
     {
         return lines.map((string line, int unused) => line + '!');
     }
 
-    public void touch(Lines lines)
+    internal void touch(Lines lines)
     {
         lines.each((Lines unused, int unused2) => {
         });

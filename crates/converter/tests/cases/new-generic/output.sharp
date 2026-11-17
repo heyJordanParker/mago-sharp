@@ -14,17 +14,17 @@ public final class Crate
         this.box = new Box<Spec>(spec);
     }
 
-    public Spec open()
+    internal Spec open()
     {
         return this.box.get();
     }
 
-    public Box<Special> special()
+    internal Box<Special> special()
     {
         return new Box<Special>(new Special('crated'));
     }
 
-    public Object loose()
+    internal Object loose()
     {
         return new Box<Spec>(new Spec('loose'));
     }

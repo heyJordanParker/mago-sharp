@@ -8,13 +8,13 @@ namespace App;
 // it (spec section 21).
 final class Sizes
 {
-    public function size(string $kind): int
+    public function size(int $weight): int
     {
-        switch ($kind):
-            case 'large':
+        switch ($weight):
+            case 30:
                 return 3;
-            case 'small':
-            case 'tiny':
+            case 20:
+            case 10:
             default:
                 return 1;
         endswitch;

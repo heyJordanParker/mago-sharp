@@ -4,7 +4,7 @@ namespace App;
 // `switch` without `default` gains an empty arm for the cases no `case` names, `null` included (spec section 21).
 public final class Board
 {
-    public string label(Status status)
+    internal string label(Status status)
     {
         return match (status) {
             Status.Open => 'open',
@@ -12,7 +12,7 @@ public final class Board
         };
     }
 
-    public int count(Status status)
+    internal int count(Status status)
     {
         let total = 0;
         match (status) {
@@ -27,7 +27,7 @@ public final class Board
         return total;
     }
 
-    public int mark(Status? status)
+    internal int mark(Status? status)
     {
         let total = 0;
         match (status) {

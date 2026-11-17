@@ -870,6 +870,26 @@ fn node_hooks_see_a_sharp_call_of_a_namespace_function_as_a_call_of_that_functio
     Ok(())
 }
 
+/// `Equatable` is the built-in bound in every namespace, spec section 11, so a hook reads a bound written `Equatable`
+/// as the compile resolves it, `Sharp\Equatable`, never as a class of the file's own namespace.
+#[test]
+fn node_hooks_read_a_built_in_bound_as_the_compile_resolves_it() -> Result<(), Box<dyn std::error::Error>> {
+    if !php_sdk_is_available() {
+        return Ok(());
+    }
+
+    const SHARP: (&str, &str) = (
+        "src/FieldMapping.sharp",
+        "namespace App.Tenant.WordPress.Bricks.Mappings;\n\npublic static class FieldMapping\n{\n    public static List<TKey> optionPairs<TKey : Equatable>(List<TKey> keys) => keys;\n}\n",
+    );
+
+    let bounds = analyze_files_with_fixture(&[SHARP], &["MAGO_INVOCATION_BOUND_NAMES"])?;
+    assert_eq!(bounds.issues, []);
+    assert_eq!(bounds.invocations, ["bound-Sharp\\Equatable"]);
+
+    Ok(())
+}
+
 /// A method search names each attribute as the hook writes it, and the host keys it as the codebase does, spec section
 /// 24: the PHP# `Marked` by its exact name, and the plain PHP `Tagged` in any case. So a search for either finds the
 /// method that carries it.

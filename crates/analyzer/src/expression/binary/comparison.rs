@@ -77,6 +77,7 @@ use crate::utils::names::article;
 use crate::utils::names::display_bool;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
+use crate::utils::names::display_variable_name;
 use crate::utils::quoted_source;
 use crate::utils::template::class_type_arguments;
 
@@ -1396,7 +1397,13 @@ pub(crate) fn report_selection<A>(
     if !context.dialect.is_sharp() || !context.source_file.is_project {
         return;
     }
-    let (compared, fixed_text) = (quoted_source(context, compared.span()), quoted_source(context, fixed.span()));
+    // A pattern reads the value its `match` tests through a variable that spans nothing: the local itself, or the
+    // hidden variable that holds a value the first arm read, each named as the `.sharp` file writes the value.
+    let compared = match compared {
+        Expression::Variable(Variable::Direct(variable)) => display_variable_name(context, variable.name),
+        compared => quoted_source(context, compared.span()),
+    };
+    let fixed_text = quoted_source(context, fixed.span());
     let issue = match empty_test {
         Some(test) => {
             Issue::error(format!("{selection} compares `{compared}` with `\"\"`, a string fixed at compile time."))

@@ -18,11 +18,11 @@ final class Tally
     }
 
     /** @return array<string, int> */
-    public function counts(): array
+    public function counts(string $name): array
     {
         /** @var array<string, int> $counts */
         $counts = [];
-        $counts['a'] = 1;
+        $counts[$name] = 1;
 
         return $counts;
     }

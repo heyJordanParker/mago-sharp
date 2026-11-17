@@ -356,7 +356,8 @@ impl Converter<'_, '_> {
     }
 
     /// `$kind::find(...)`, a static method of a class held at run time as a value, as the lambda that calls it through
-    /// reflection, `(int id) => kind.methods().first(method => method.name == "find").invoke(null, [id]) as Order`,
+    /// reflection, `(int id) => kind.methods().first(method => method.name == nameof(Order.find)).invoke(null, [id]) as
+    /// Order`,
     /// which runs the `find` of the class the value holds, as PHP's method value does (spec sections 14.3 and 25). The
     /// lambda takes the method's parameters, and `as` gives `invoke`'s `Any?` the type the method declares, which PHP
     /// checks where the method returns, so `?? throw` never throws. A method with an optional, a variadic or a
@@ -380,8 +381,9 @@ impl Converter<'_, '_> {
             );
         }
         let codebase = self.input.codebase;
-        let Some(method) =
-            self.held_class(class).and_then(|held| codebase.get_declaring_method(held.as_bytes(), name.value))
+        let Some((held_class, method)) = self
+            .held_class(class)
+            .and_then(|held| codebase.get_declaring_method(held.as_bytes(), name.value).map(|method| (held, method)))
         else {
             let held = self.shown(class);
             return self.refuse(
@@ -435,15 +437,17 @@ impl Converter<'_, '_> {
                 );
             }
         };
+        let Some(declared) = self.member_name(span, held_class, &method.original_name.as_str_lossy()) else {
+            return;
+        };
         self.expression(class, None);
         let held = self.render(class);
         let held = if super::is_primary(class) { held } else { format!("({held})") };
         let found = self.unused_name("method", &chosen);
-        let declared = method.original_name.as_str_lossy();
         self.edits.replace(
             span,
             format!(
-                "({}) => {held}.methods().first({found} => {found}.name == \"{declared}\").invoke(null, [{}]){check}",
+                "({}) => {held}.methods().first({found} => {found}.name == {declared}).invoke(null, [{}]){check}",
                 written.join(", "),
                 chosen.join(", ")
             ),

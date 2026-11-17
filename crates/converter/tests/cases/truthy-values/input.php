@@ -24,7 +24,7 @@ final class Truthy
         return $value ? true : false;
     }
 
-    public function either(int|string $value): bool
+    public function either(int|float $value): bool
     {
         return !$value;
     }

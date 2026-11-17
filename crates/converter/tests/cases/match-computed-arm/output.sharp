@@ -4,14 +4,14 @@ namespace App;
 // chain of ternaries that ends in `default`, or in PHP's `UnhandledMatchError` for an `int` with none (spec section 21).
 public final class Limits
 {
-    public string at(int code, int limit)
+    internal string at(int code, int limit)
     {
         return code == limit ? 'at the limit'
             : code == 0 ? 'none'
             : 'under';
     }
 
-    public string exact(int code, int limit)
+    internal string exact(int code, int limit)
     {
         return code == limit ? 'at the limit'
             : throw new UnhandledMatchError(`Unhandled match case ${code}`);

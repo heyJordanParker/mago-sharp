@@ -27,6 +27,8 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::combine_union_types;
+use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::get_int;
@@ -202,7 +204,7 @@ impl<'input> Converter<'input, '_> {
                 }
             }
             Statement::Return(r#return) => {
-                let returned = r#return.value.and_then(|value| self.type_of(value)).cloned();
+                let returned = r#return.value.and_then(|value| self.read_type(value));
                 if let Some(method) = self.method.as_mut() {
                     method.returned.push(returned);
                 }
@@ -639,36 +641,66 @@ impl<'input> Converter<'input, '_> {
         self.mixed(expression, operation)
     }
 
-    /// Refuses each property read that `value`, a value that lands in the declared type `place`, as a method returns
-    /// it or a call passes it, gives as itself or as a branch of `?:`, where the analysis narrows the property past
-    /// its declared type and `place` holds only the narrowed one, as `$this->owner` after `$this->owner instanceof
-    /// Page`. PHP# reads a property by its declared type wherever it is read, since it may change between a test and a
-    /// read (spec section 21).
+    /// Refuses each property read of `value`'s `narrowed_reads` where `value` lands in the declared type `place`, as a
+    /// method returns it or a call passes it, and `place` holds only the narrowed type.
     pub(crate) fn narrowed(&mut self, value: &Expression<'_>, place: &TUnion) {
+        let codebase = self.input.codebase;
+        for (span, read, declared) in self.narrowed_reads(value) {
+            if is_contained_by(codebase, declared, place, false, false, false, &mut ComparisonResult::new()) {
+                continue;
+            }
+            let shown = String::from_utf8_lossy(self.text(span)).into_owned();
+            self.refuse(
+                span,
+                format!(
+                    "`{shown}` reads as `{}` here, which PHP narrows it to, and PHP# reads a property by its declared type `{}`, since it may change between a test and a read (spec section 21)",
+                    read.get_id(),
+                    declared.get_id()
+                ),
+            );
+        }
+    }
+
+    /// Gives `value`'s type as PHP# reads it: the analysis's, joined with the declared type of each of its
+    /// `narrowed_reads`.
+    fn read_type(&self, value: &Expression<'_>) -> Option<TUnion> {
+        let codebase = self.input.codebase;
+        let read = self.type_of(value)?.clone();
+
+        Some(self.narrowed_reads(value).into_iter().fold(read, |joined, (_, _, declared)| {
+            combine_union_types(&joined, declared, codebase, CombinerOptions::default())
+        }))
+    }
+
+    /// Gives each property read that `value` gives as itself or as a branch of `?:`, with the type the analysis
+    /// narrows it to and the type its class declares, where the analysis narrows it past that declared type, as
+    /// `$this->owner` after `$this->owner instanceof Page`. PHP# reads a property by its declared type wherever it is
+    /// read, since it may change between a test and a read (spec section 21).
+    fn narrowed_reads(&self, value: &Expression<'_>) -> Vec<(Span, &'input TUnion, &'input TUnion)> {
         let (object, property) = match value {
-            Expression::Parenthesized(parenthesized) => return self.narrowed(parenthesized.expression, place),
+            Expression::Parenthesized(parenthesized) => return self.narrowed_reads(parenthesized.expression),
             Expression::Conditional(conditional) => {
-                if let Some(then) = conditional.then {
-                    self.narrowed(then, place);
-                }
-                return self.narrowed(conditional.r#else, place);
+                let mut reads = conditional.then.map(|then| self.narrowed_reads(then)).unwrap_or_default();
+                reads.extend(self.narrowed_reads(conditional.r#else));
+
+                return reads;
             }
             Expression::Access(Access::Property(access)) => (access.object, &access.property),
-            _ => return,
+            _ => return Vec::new(),
         };
         let (Some(read), ClassLikeMemberSelector::Identifier(name)) = (self.type_of(value), property) else {
-            return;
+            return Vec::new();
         };
         // An accessor's own storage is its `field`, which no other code writes.
         if self.method.as_ref().and_then(|method| method.storage.as_deref()) == Some(name.value) {
-            return;
+            return Vec::new();
         }
         let classes: Vec<&TAtomic> = self
             .type_of(object)
             .map(|union| union.types.iter().filter(|atomic| !atomic.is_null()).collect())
             .unwrap_or_default();
         let [TAtomic::Object(TObject::Named(class))] = classes.as_slice() else {
-            return;
+            return Vec::new();
         };
         let property = [b"$".as_slice(), name.value].concat();
         let codebase = self.input.codebase;
@@ -678,23 +710,13 @@ impl<'input> Converter<'input, '_> {
             .map(|metadata| &metadata.type_union)
             .filter(|declared| !declared.has_template_types() && !declared.types.iter().any(TAtomic::is_mixed))
         else {
-            return;
+            return Vec::new();
         };
-        let holds = |wider: &TUnion, narrower: &TUnion| {
-            is_contained_by(codebase, narrower, wider, false, false, false, &mut ComparisonResult::new())
-        };
-        if holds(read, declared) || holds(place, declared) {
-            return;
+        if is_contained_by(codebase, declared, read, false, false, false, &mut ComparisonResult::new()) {
+            return Vec::new();
         }
-        let shown = String::from_utf8_lossy(self.text(value.span())).into_owned();
-        self.refuse(
-            value.span(),
-            format!(
-                "`{shown}` reads as `{}` here, which PHP narrows it to, and PHP# reads a property by its declared type `{}`, since it may change between a test and a read (spec section 21)",
-                read.get_id(),
-                declared.get_id()
-            ),
-        );
+
+        vec![(value.span(), read, declared)]
     }
 
     /// Writes `value`, converted already, as `value as T ?? throw new TypeError("…")`, where the analysis types it wider

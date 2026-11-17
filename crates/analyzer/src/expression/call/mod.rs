@@ -78,7 +78,6 @@ use crate::reconciler::assertion_reconciler;
 use crate::resolver::extension::CollectionKind;
 use crate::resolver::extension::collection_member_kind;
 use crate::resolver::extension::is_collection_member;
-use crate::resolver::extension::is_text_member;
 use crate::utils::is_compile_time_string;
 use crate::utils::names::collection_type_parameters;
 use crate::utils::names::display_function_like_identifier;
@@ -687,15 +686,17 @@ where
             report_fixed_map_key(context, value);
         }
         let method = metadata.original_name.as_str_lossy();
-        if matches!(method.as_ref(), "contains" | "indexOf" | "remove")
+        if metadata.has_attribute(context.codebase, SEARCHES_ELEMENTS)
             && parameter.has_attribute(context.codebase, COMPARED_BY_EQUALITY)
-            && collection_member_kind(class, metadata).is_some_and(|kind| kind != CollectionKind::Map)
             && !argument.is_unpacked()
         {
             report_collection_selection(context, artifacts, &method, receiver, value, span);
         }
-        if method == "equals" && is_text_member(class, metadata) && parameter.get_name().0.as_bytes() == b"$other" {
-            report_text_selection(context, artifacts, receiver, value, span);
+        // A member that tests equality compares its receiver with its first parameter, the one after the receiver.
+        if metadata.has_attribute(context.codebase, TESTS_EQUALITY)
+            && metadata.parameters.get(1).is_some_and(|compared| compared.get_name() == parameter.get_name())
+        {
+            report_text_selection(context, artifacts, &method, receiver, value, span);
         }
         // A collection member orders by the keys the function in a parameter marked `ComparedByOrder` returns, as
         // `sortedBy` does, so a key type `<` cannot order is refused, and the bridge passes the engine how to order it.
@@ -774,11 +775,12 @@ fn report_collection_selection<A>(
     }
 }
 
-/// Spec section 24: `equals` of two strings, one fixed at compile time, selects one of a closed set of values as `==`
-/// does, whichever of `receiver` and `other` is fixed.
+/// Spec section 24: `method`, a member that tests equality as `equals` does, of two strings, one fixed at compile time,
+/// selects one of a closed set of values as `==` does, whichever of `receiver` and `other` is fixed.
 fn report_text_selection<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
+    method: &str,
     receiver: &Expression<'_>,
     other: &Expression<'_>,
     span: Span,
@@ -793,7 +795,7 @@ fn report_text_selection<A>(
     };
     let empty_test = artifacts.get_expression_type(fixed).is_some_and(is_empty_text).then_some("isEmpty");
 
-    report_selection(context, "`equals`", compared, fixed, empty_test, span);
+    report_selection(context, &format!("`{method}`"), compared, fixed, empty_test, span);
 }
 
 /// `receiver_type` as the collection member `metadata` reads its receiver, spec section 12: a member whose receiver is
@@ -946,6 +948,14 @@ pub(crate) fn can_compare_elements(
 
 /// The prelude attribute that marks a collection member's parameter compared with the elements by `==`.
 const COMPARED_BY_EQUALITY: &[u8] = b"Sharp\\Internal\\ComparedByEquality";
+
+/// The prelude attribute that marks a collection member that searches its receiver for the value of its parameter
+/// marked `ComparedByEquality`, as `contains` does.
+const SEARCHES_ELEMENTS: &[u8] = b"Sharp\\Internal\\SearchesElements";
+
+/// The prelude attribute that marks a member that tests its receiver and its first parameter for equality, as
+/// `string.equals` does.
+const TESTS_EQUALITY: &[u8] = b"Sharp\\Internal\\TestsEquality";
 
 /// The prelude attribute that marks a collection member's parameter whose function gives the keys it orders by.
 const COMPARED_BY_ORDER: &[u8] = b"Sharp\\Internal\\ComparedByOrder";

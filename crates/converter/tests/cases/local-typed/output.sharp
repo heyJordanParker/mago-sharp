@@ -3,7 +3,7 @@ namespace App;
 // A local whose first value says nothing of what it holds takes the type its `@var` tag declares.
 public final class Tally
 {
-    public List<string> names()
+    internal List<string> names()
     {
         List<string> names = [];
         names.add('a');
@@ -11,15 +11,15 @@ public final class Tally
         return names;
     }
 
-    public Map<string, int> counts()
+    internal Map<string, int> counts(string name)
     {
         Map<string, int> counts = [:];
-        counts['a'] = 1;
+        counts[name] = 1;
 
         return counts;
     }
 
-    public string? first()
+    internal string? first()
     {
         string? first = null;
 

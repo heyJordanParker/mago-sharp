@@ -5,12 +5,12 @@ namespace App;
 // its `?`.
 public class Kinds
 {
-    public string kind()
+    internal string kind()
     {
         return 'kind';
     }
 
-    public virtual string? open()
+    internal virtual string? open()
     {
         return 'open';
     }
@@ -20,7 +20,7 @@ public class Kinds
         return value + 1;
     }
 
-    public virtual int? shown()
+    internal virtual int? shown()
     {
         return this.hidden(1);
     }

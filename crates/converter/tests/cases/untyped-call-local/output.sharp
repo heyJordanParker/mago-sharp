@@ -4,7 +4,7 @@ namespace App;
 // block or appended to a `[]` (decision 2).
 public final class Sizes
 {
-    public int guessed(bool wide)
+    internal int guessed(bool wide)
     {
         Any? copy = null;
         if (wide) {
@@ -17,7 +17,7 @@ public final class Sizes
         return copy as int ?? throw new TypeError("Return value must be of type int");
     }
 
-    public int listed()
+    internal int listed()
     {
         List<Any?> values = [];
         values.add(this.guess());
@@ -25,7 +25,7 @@ public final class Sizes
         return values.count();
     }
 
-    public int nulled(bool wide)
+    internal int nulled(bool wide)
     {
         Any? size = null;
         if (wide) {

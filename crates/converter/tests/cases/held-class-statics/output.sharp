@@ -1,28 +1,24 @@
 namespace App;
 
-// A static property, a constant and a static method value of a class held at run time, which PHP# reaches through
-// reflection: a read and a write through `kind.properties()`, a read through `kind.constants()`, and a lambda over
-// `kind.methods()` (spec sections 14.3 and 25).
+// A static property and a static method value of a class held at run time, which PHP# reaches through reflection by
+// the member's `nameof`: a read and a write through `kind.properties()`, and a lambda over `kind.methods()` (spec
+// sections 6.3, 14.3 and 25). A constant has no `nameof`, so an application reads none through reflection, as
+// library-fixed-strings shows.
 public final class Reader
 {
-    public int count(Class<Order> kind)
+    internal int count(Class<Order> kind)
     {
-        return (kind.properties().first(property => property.name == "count").get(null) as int ?? throw new TypeError("Value must be of type int")) + 1;
+        return (kind.properties().first(property => property.name == nameof(Order.count)).get(null) as int ?? throw new TypeError("Value must be of type int")) + 1;
     }
 
-    public int limit(Class<Order> kind)
+    internal void reset(Class<Order> kind)
     {
-        return (kind.constants().first(constant => constant.name == "MAX").value() as int ?? throw new TypeError("Value must be of type int")) * 2;
+        kind.properties().first(property => property.name == nameof(Order.count)).set(null, 0);
     }
 
-    public void reset(Class<Order> kind)
+    internal Order? first(Class<Order> kind)
     {
-        kind.properties().first(property => property.name == "count").set(null, 0);
-    }
-
-    public Order? first(Class<Order> kind)
-    {
-        const find = (int id) => kind.methods().first(method => method.name == "find").invoke(null, [id]) as Order;
+        const find = (int id) => kind.methods().first(method => method.name == nameof(Order.find)).invoke(null, [id]) as Order;
 
         return find(1);
     }

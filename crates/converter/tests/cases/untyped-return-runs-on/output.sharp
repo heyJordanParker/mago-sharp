@@ -4,7 +4,7 @@ namespace App;
 // method returns on every path, so its body ends with `return null;` there (spec section 7).
 public final class Inviter
 {
-    public Any? send(string name)
+    internal Any? send(string name)
     {
         try {
             this.notify(name);
@@ -14,7 +14,7 @@ public final class Inviter
         return null;
     }
 
-    public Any? some(string name)
+    internal Any? some(string name)
     {
         if (name.isEmpty()) {
             return 1;
@@ -23,12 +23,12 @@ public final class Inviter
         return null;
     }
 
-    public Any? nothing()
+    internal Any? nothing()
     {
         return null;
     }
 
-    public Any? each(List<string> names)
+    internal Any? each(List<string> names)
     {
         for (const name of names) {
             this.notify(name);
@@ -36,7 +36,7 @@ public final class Inviter
         return null;
     }
 
-    public Any? countdown(int count)
+    internal Any? countdown(int count)
     {
         let left = count;
         while (left > 0) {
@@ -45,10 +45,10 @@ public final class Inviter
         return null;
     }
 
-    public Any? pick(string name)
+    internal Any? pick(string name, int count)
     {
-        match (name) {
-            'a' => {
+        match (count) {
+            1 => {
                 this.notify(name);
             },
             default => {},
@@ -57,7 +57,7 @@ public final class Inviter
     }
 
     // A body that returns or throws on every path ends as it is.
-    public Any? either(string name)
+    internal Any? either(string name)
     {
         if (name.isEmpty()) {
             return 1;
@@ -66,7 +66,7 @@ public final class Inviter
         }
     }
 
-    public Any? fail()
+    internal Any? fail()
     {
         throw new RuntimeException('no');
     }

@@ -25,23 +25,23 @@ final class Router
         return $label;
     }
 
-    public function kind(string $method): int
+    public function kind(int $status): int
     {
-        switch ($method) {
-            case 'get':
+        switch ($status) {
+            case 10:
                 return 1;
-            case 'post':
+            case 20:
                 return 2;
         }
 
         return 0;
     }
 
-    // PHP's `null == 'get'` doesn't hold, so a `null` subject meets no case, as it matches no pattern.
-    public function verb(?string $method): int
+    // PHP's `null == 10` doesn't hold, so a `null` subject meets no case, as it matches no pattern.
+    public function verb(?int $status): int
     {
-        switch ($method) {
-            case 'get':
+        switch ($status) {
+            case 10:
                 return 1;
         }
 

@@ -5,17 +5,17 @@ namespace App;
 // runtime, as a PHP# cast converts a number (spec section 24).
 public final class Same
 {
-    public string text(string value)
+    internal string text(string value)
     {
         return value + '!';
     }
 
-    public int whole(int value)
+    internal int whole(int value)
     {
         return (int) (value + 1);
     }
 
-    public float real(float value)
+    internal float real(float value)
     {
         return (float) value;
     }

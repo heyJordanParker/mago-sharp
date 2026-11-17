@@ -60,9 +60,11 @@ const WRITTEN_TAGS: [&str; 16] = [
 /// The accessors PHP# writes after a property's name: none for a field, which is storage, `get` alone for a
 /// `readonly` one, and a `private set` for PHP's `private(set)` (spec sections 6 and 13). Any other `set` reaches the
 /// property's namespace at most, PHP's `protected(set)` and `public(set)` too (spec section 6.1), and is `private`
-/// where `setters` says the class alone sets the property.
+/// where `setters` says the class alone sets the property. A `set` is narrower than its property, so PHP's
+/// `private(set)` on a property an application narrows to `private`, `is_private`, adds nothing, and it is storage.
 fn accessors(
     is_public: bool,
+    is_private: bool,
     is_readonly: bool,
     modifiers: &Sequence<'_, Modifier<'_>>,
     setters: Setters,
@@ -70,7 +72,7 @@ fn accessors(
     let set = modifiers.iter().find(|modifier| modifier.is_write_visibility());
     match (is_public, is_readonly, set) {
         (_, true, _) => " { get; }",
-        (_, false, Some(Modifier::PrivateSet(_))) => " { get; private set; }",
+        (_, false, Some(Modifier::PrivateSet(_))) if !is_private => " { get; private set; }",
         (true, false, _) if setters == Setters::Class => " { get; private set; }",
         (true, false, _) => " { get; set; }",
         (false, false, _) => "",

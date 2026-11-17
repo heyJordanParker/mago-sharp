@@ -555,17 +555,38 @@ fn bump_spec(slot: &mut Option<usize>, s: usize) {
 const STANDARD_LIBRARY_PACKAGE: &str = "heyjordanparker/php-sharp-composer";
 
 /// The nearest `composer.json` of each directory already looked up, so each one is read once.
-pub(crate) type Manifests = HashMap<PathBuf, Option<Arc<Manifest>>>;
+pub type Manifests = HashMap<PathBuf, Option<Arc<Manifest>>>;
 
-/// What a PHP# file's nearest `composer.json` says about it.
+/// What a file's nearest `composer.json` says about it.
 #[derive(Debug, Default)]
-pub(crate) struct Manifest {
+pub struct Manifest {
+    /// The package it names.
+    name: Option<String>,
     /// Whether it names the standard library's package.
     is_standard_library: bool,
     /// Whether it says `"type": "project"`.
     is_project: bool,
     /// Its PSR-4 folders, `autoload`'s and `autoload-dev`'s.
     folders: Vec<Psr4Folder>,
+}
+
+impl Manifest {
+    /// The package it names, as `acme/format`.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Whether its package is a project, an application, whose `composer.json` says `"type": "project"`.
+    #[must_use]
+    pub fn is_project(&self) -> bool {
+        self.is_project
+    }
+
+    /// The namespace of each PSR-4 folder `autoload` maps, dot-separated, in the order `composer.json` writes them.
+    pub fn namespaces(&self) -> impl Iterator<Item = &str> {
+        self.folders.iter().filter(|folder| !folder.is_test).map(|folder| folder.namespace.as_str())
+    }
 }
 
 /// A PSR-4 folder, the namespace it holds, dot-separated, and whether `autoload-dev` maps it.
@@ -615,7 +636,9 @@ pub(crate) fn mark_package(file: &mut File, workspace: &Path, manifests: &mut Ma
         });
 }
 
-fn nearest_manifest(directory: &Path, manifests: &mut Manifests) -> Option<Arc<Manifest>> {
+/// The facts of the nearest `composer.json` at or above `directory`, each directory's looked up once in `manifests`.
+/// `None` when no folder above it holds one.
+pub fn nearest_manifest(directory: &Path, manifests: &mut Manifests) -> Option<Arc<Manifest>> {
     if let Some(manifest) = manifests.get(directory) {
         return manifest.clone();
     }
@@ -670,8 +693,11 @@ fn read_manifest(directory: &Path, package: &serde_json::Value) -> Manifest {
         }
     }
 
+    let name = package.get("name").and_then(serde_json::Value::as_str);
+
     Manifest {
-        is_standard_library: package.get("name").and_then(serde_json::Value::as_str) == Some(STANDARD_LIBRARY_PACKAGE),
+        name: name.map(str::to_owned),
+        is_standard_library: name == Some(STANDARD_LIBRARY_PACKAGE),
         is_project: package.get("type").and_then(serde_json::Value::as_str) == Some("project"),
         folders,
     }
@@ -1328,6 +1354,27 @@ mod tests {
             db.files().filter(|file| file.is_project).map(|file| name_str(&file.name).into_owned()).collect();
 
         assert_eq!(in_project, ["src/App/Page.sharp"]);
+    }
+
+    /// `mago convert` reads a folder's package as the loader reads a file's: from the nearest `composer.json` at or
+    /// above it, its name, its kind and the namespaces of `autoload`'s PSR-4 folders, `autoload-dev`'s left out.
+    #[test]
+    fn the_nearest_composer_json_of_a_folder_gives_its_package() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(
+            &temp_dir,
+            "composer.json",
+            r#"{"type": "project", "autoload": {"psr-4": {"": "lib/", "App\\Shop\\": "src/"}}, "autoload-dev": {"psr-4": {"Tests\\": "tests/"}}}"#,
+        );
+        create_test_file(&temp_dir, "vendor/acme/format/composer.json", r#"{"name": "acme/format"}"#);
+        let mut manifests = Manifests::default();
+
+        let project = nearest_manifest(&temp_dir.path().join("src/Shop/Orders"), &mut manifests).unwrap();
+        let library = nearest_manifest(&temp_dir.path().join("vendor/acme/format/src"), &mut manifests).unwrap();
+
+        assert_eq!((project.name(), project.is_project()), (None, true));
+        assert_eq!(project.namespaces().collect::<Vec<_>>(), ["", "App.Shop"]);
+        assert_eq!((library.name(), library.is_project()), (Some("acme/format"), false));
     }
 
     /// Spec section 5: an `autoload` PSR-4 folder maps a `.sharp` file's folder to the namespace it declares, the most

@@ -1,0 +1,4 @@
+{
+    "description": "A library, which compares strings fixed at compile time, since its callers are in the projects that install it.",
+    "type": "library"
+}

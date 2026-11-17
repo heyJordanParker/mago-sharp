@@ -8,12 +8,12 @@ import Lib.Routing.Any as RoutingAny;
 public final class Controller
 {
     [RoutingAny('/ping')]
-    public string ping()
+    internal string ping()
     {
         return 'pong';
     }
 
-    public PaymentsError declined()
+    internal PaymentsError declined()
     {
         return new PaymentsError('declined');
     }

@@ -4,7 +4,7 @@ namespace App;
 // the `if`, as PHP runs it before the rest of the condition, and the comparison reads the local.
 public final class Orders
 {
-    public int total(int id)
+    internal int total(int id)
     {
         let total = 0;
         const count = this.count(id);

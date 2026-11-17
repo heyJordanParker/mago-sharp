@@ -4,7 +4,7 @@ namespace App;
 // the `int` (spec section 21).
 public final class Codes
 {
-    public string name(int code)
+    internal string name(int code)
     {
         return match (code) {
             1 => 'one',
@@ -13,7 +13,7 @@ public final class Codes
         };
     }
 
-    public string short(int code)
+    internal string short(int code)
     {
         return match (code) { 1 => 'one', 2 => 'two', default => throw new UnhandledMatchError(`Unhandled match case ${code}`) };
     }

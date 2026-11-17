@@ -5,7 +5,7 @@ namespace App;
 // it is the `else`, and before other cases, the branch where none of them holds (spec sections 19 and 21).
 public final class Limits
 {
-    public string label(int code, int limit)
+    internal string label(int code, int limit)
     {
         let label = 'none';
         if (code == limit) {
@@ -22,7 +22,7 @@ public final class Limits
         return label;
     }
 
-    public string level(int code, int low, int high)
+    internal string level(int code, int low, int high)
     {
         if (!(code == low || code == high)) {
             return 'middle';

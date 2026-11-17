@@ -70,8 +70,8 @@ struct Source {
     is_sharp: bool,
     /// The file's namespace, with `\` between its parts, and the span of its name in the `namespace` line.
     namespace: Option<(String, Span)>,
-    /// Where a new import goes: after the last `import` or `use` line, or after the `namespace` line.
-    imports_end: Option<u32>,
+    /// The offset just after the `namespace` line, where a new import goes when no `import` or `use` line stays.
+    namespace_end: Option<u32>,
     /// The full name of each class-like the file declares.
     classes: Vec<String>,
     imports: Vec<Import>,
@@ -197,7 +197,7 @@ fn read(configuration: &Configuration, file: Arc<File>) -> Source {
         is_sharp: file.name.ends_with(b".sharp"),
         file: Arc::clone(&file),
         namespace: None,
-        imports_end: None,
+        namespace_end: None,
         classes: Vec::new(),
         imports: Vec::new(),
         names: Vec::new(),
@@ -212,7 +212,7 @@ fn read(configuration: &Configuration, file: Arc<File>) -> Source {
             if let Some(name) = &namespace.name {
                 source.namespace = Some((String::from_utf8_lossy(name.value()).replace('.', "\\"), name.span()));
             }
-            source.imports_end = Some(namespace_line_end(namespace));
+            source.namespace_end = Some(namespace_line_end(namespace));
             statements.extend(namespace.statements().iter());
         } else {
             statements.push(statement);
@@ -230,7 +230,6 @@ fn read(configuration: &Configuration, file: Arc<File>) -> Source {
             Statement::Struct(r#struct) => Some(r#struct.name.value),
             Statement::Use(r#use) => {
                 source.imports.push(import(r#use, &full_name_at));
-                source.imports_end = Some(r#use.span().end.offset);
                 None
             }
             Statement::Module(module) => {
@@ -401,16 +400,25 @@ fn edits(
         }
     }
 
+    // A new import goes after the last import line that stays, so it never lands inside a line the move deletes.
+    let mut kept_end = None;
     for import in &source.imports {
+        // PHP# imports a class of another namespace only, spec section 23.
+        if let [(_, _, full)] = import.items.as_slice()
+            && source.is_sharp
+            && import.group.is_none()
+            && in_namespace(&new_name(full).unwrap_or_else(|| full.clone()))
+        {
+            let (start, end) = whole_lines(contents, import.span);
+            edits.push((start, end, String::new()));
+            continue;
+        }
+
+        kept_end = Some(import.span.end.offset);
         match import.group {
             None => {
                 for (_, name, full) in &import.items {
-                    let class = new_name(full).unwrap_or_else(|| full.clone());
-                    // PHP# imports a class of another namespace only, spec section 23.
-                    if source.is_sharp && in_namespace(&class) && import.items.len() == 1 {
-                        let (start, end) = whole_lines(contents, import.span);
-                        edits.push((start, end, String::new()));
-                    } else if new_name(full).is_some() {
+                    if let Some(class) = new_name(full) {
                         let root = if contents.get(name.start.offset as usize) == Some(&b'\\') { "\\" } else { "" };
                         edits.push((name.start.offset, name.end.offset, format!("{root}{}", written(&class))));
                     }
@@ -456,10 +464,10 @@ fn edits(
     }
 
     if !added.is_empty()
-        && let Some(end) = source.imports_end
+        && let Some(end) = kept_end.into_iter().chain(source.namespace_end).max()
     {
         let keyword = if source.is_sharp { "import" } else { "use" };
-        let first = if source.imports.is_empty() { "\n" } else { "" };
+        let first = if kept_end.is_none() { "\n" } else { "" };
         let lines: Vec<String> = added.iter().map(|class| format!("\n{keyword} {};", written(class))).collect();
         edits.push((end, end, format!("{first}{}", lines.concat())));
     }

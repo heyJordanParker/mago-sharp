@@ -4,27 +4,27 @@ namespace App;
 // PHP#'s method value `this.name` (spec section 14.3).
 public final class Pricing
 {
-    public int apply(Function<int(int)> rule, int amount)
+    private int apply(Function<int(int)> rule, int amount)
     {
         return rule(amount);
     }
 
-    public int run(Function<int(int)> rule, int amount)
+    private int run(Function<int(int)> rule, int amount)
     {
         return rule(amount);
     }
 
-    public int discounted(int amount)
+    private int discounted(int amount)
     {
         return amount - 1;
     }
 
-    public static int doubled(int amount)
+    private static int doubled(int amount)
     {
         return amount * 2;
     }
 
-    public int total(int amount)
+    internal int total(int amount)
     {
         const first = this.apply(this.discounted, amount);
         const second = this.apply(Pricing.doubled, first);

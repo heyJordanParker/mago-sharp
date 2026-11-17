@@ -4,21 +4,16 @@ declare(strict_types=1);
 
 namespace App;
 
-// A static property, a constant and a static method value of a class held at run time, which PHP# reaches through
-// reflection: a read and a write through `kind.properties()`, a read through `kind.constants()`, and a lambda over
-// `kind.methods()` (spec sections 14.3 and 25).
+// A static property and a static method value of a class held at run time, which PHP# reaches through reflection by
+// the member's `nameof`: a read and a write through `kind.properties()`, and a lambda over `kind.methods()` (spec
+// sections 6.3, 14.3 and 25). A constant has no `nameof`, so an application reads none through reflection, as
+// library-fixed-strings shows.
 final class Reader
 {
     /** @param class-string<Order> $kind */
     public function count(string $kind): int
     {
         return $kind::$count + 1;
-    }
-
-    /** @param class-string<Order> $kind */
-    public function limit(string $kind): int
-    {
-        return $kind::MAX * 2;
     }
 
     /** @param class-string<Order> $kind */

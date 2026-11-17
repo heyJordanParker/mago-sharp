@@ -5,7 +5,7 @@ namespace App;
 // declares it first in the body (spec sections 2, 3 and 12, decision 2).
 public final class Basket
 {
-    public int upper(List<string> names)
+    internal int upper(List<string> names)
     {
         List<string> found = [];
         for (const name of names) {
@@ -15,7 +15,7 @@ public final class Basket
         return found.count();
     }
 
-    public Map<string, int> prices(string sku, int price)
+    internal Map<string, int> prices(string sku, int price)
     {
         Map<string, int> prices = [:];
         prices[sku] = price;
@@ -23,7 +23,7 @@ public final class Basket
         return prices;
     }
 
-    public string last(bool wide, string name)
+    internal string last(bool wide, string name)
     {
         string? chosen = null;
         if (wide) {
@@ -34,7 +34,7 @@ public final class Basket
     }
 
     // One first assigned inside a block is declared first in the body, where each pass of the loop assigns it.
-    public int longest(List<string> names)
+    internal int longest(List<string> names)
     {
         List<string> letters = [];
         let most = 0;

@@ -4,7 +4,7 @@ namespace App;
 // PHP shows `null` as nothing, which `?? ""` gives.
 public final class Greeter
 {
-    public string greet(string name, int count, float share)
+    internal string greet(string name, int count, float share)
     {
         const first = `Hi ${name}, you have ${count} items`;
         const second = `Share ${share} of \$5`;
@@ -12,7 +12,7 @@ public final class Greeter
         return first + second;
     }
 
-    public string signed(string? title, int rank)
+    internal string signed(string? title, int rank)
     {
         return `${`Dear ${title ?? ""} #${rank}, `}${title ?? ""}.`;
     }

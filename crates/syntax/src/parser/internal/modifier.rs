@@ -48,29 +48,27 @@ where
     }
 
     /// Whether the word here is a member's modifier and the `(` after it opens a type, as `override (int|string)?
-    /// key()` writes one, spec section 24. The group is a type when a `?`, a `|`, an `&` or the member's name follows its
-    /// `)`, which follows no call and no lambda's parameter. `ref` goes on a parameter, where the word is its name.
+    /// key()` writes one, spec section 24. The group is a type when it holds a `|` or an `&`, as the union or the
+    /// intersection it groups does, and a `?`, a `|`, an `&` or the member's name follows its `)`, which follows no call
+    /// and no lambda's parameter. So `internal(App.Tenant) int count()` names a reach. `ref` goes on a parameter, where
+    /// the word is its name.
     fn is_at_modifier_before_grouped_type(&self) -> Result<bool, ParseError<'arena>> {
         let mut tokens = self.stream.peek_tokens();
-        let is_member_modifier = tokens.next().transpose()?.is_some_and(|token| {
-            matches!(
-                token.value,
-                b"virtual" | b"override" | b"required" | b"extern" | b"lazy" | b"late" | b"internal" | b"foreign"
-            )
-        });
-        if !is_member_modifier {
+        if !tokens.next().transpose()?.is_some_and(|token| is_member_modifier_word(token.value)) {
             return Ok(false);
         }
         let mut depth: usize = 0;
+        let mut groups_types = false;
         while let Some(token) = tokens.next().transpose()? {
             match token.kind {
                 T!["("] => depth += 1,
                 // The word is followed by no `(`.
                 _ if depth == 0 => return Ok(false),
+                T!["|" | "&"] if depth == 1 => groups_types = true,
                 T![")"] if depth == 1 => {
                     let after = tokens.next().transpose()?.map(|token| token.kind);
 
-                    return Ok(matches!(after, Some(T!["?" | "|" | "&" | Identifier])));
+                    return Ok(groups_types && matches!(after, Some(T!["?" | "|" | "&" | Identifier])));
                 }
                 T![")"] => depth -= 1,
                 _ => {}
@@ -118,8 +116,13 @@ where
             Some(T!["protected(set)"]) => Modifier::ProtectedSet(self.expect_any_keyword()?),
             Some(T!["public(set)"]) => Modifier::PublicSet(self.expect_any_keyword()?),
             // Spec section 5 has no named reach, so `internal(App.Tenant)` fails as a typo does at its parentheses, and
-            // the declaration parses on as `internal`.
-            Some(T![Identifier]) if self.is_internal_token_at(0)? && self.stream.peek_kind(1)? == Some(T!["("]) => {
+            // the declaration parses on as `internal`. A group that starts the member's type, as in `internal
+            // (int|string)? key()`, is no reach.
+            Some(T![Identifier])
+                if self.is_internal_token_at(0)?
+                    && self.stream.peek_kind(1)? == Some(T!["("])
+                    && !self.is_at_modifier_before_grouped_type()? =>
+            {
                 let internal = self.expect_any_keyword()?;
                 let reach = self.skip_parenthesized()?;
                 self.report_unexpected_in_sharp(reach);
@@ -158,4 +161,10 @@ where
             _ => return Ok(None),
         }))
     }
+}
+
+/// Whether `word` is a PHP# member's modifier written as a word rather than a keyword, as `virtual` and `internal` are,
+/// which a `(` that opens the member's type may follow.
+pub(crate) fn is_member_modifier_word(word: &[u8]) -> bool {
+    matches!(word, b"virtual" | b"override" | b"required" | b"extern" | b"lazy" | b"late" | b"internal" | b"foreign")
 }

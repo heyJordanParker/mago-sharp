@@ -5,28 +5,28 @@ namespace App;
 // runs once, as PHP runs it (spec section 21). The arms name a variable no other code of the file names.
 public final class Ledger
 {
-    public string? note()
+    internal string? note()
     {
         return match (this.raw()) { string value2 => value2, null => null, default => throw new TypeError("Return value must be of type ?string") };
     }
 
-    public void record()
+    internal void record()
     {
         this.log(match (this.raw()) { Loggable value2 => value2, string value2 => value2, default => throw new TypeError("Argument #1 ($detail) must be of type App\\Loggable|string") });
     }
 
-    public int limited()
+    internal int limited()
     {
         return this.limit(match (this.raw()) { int value2 => value2, null => null, default => throw new TypeError("Argument #1 ($value) must be of type ?int") });
     }
 
     // PHP returns an `int` where a `float` is declared as that number.
-    public float ratio()
+    internal float ratio()
     {
         return match (this.raw()) { float value2 => value2, int value2 => (float) value2, default => throw new TypeError("Return value must be of type float") };
     }
 
-    public Entry? entry(Loggable? item)
+    internal Entry? entry(Loggable? item)
     {
         return match (item) { Entry value2 => value2, null => null, default => throw new TypeError("Return value must be of type ?App\\Entry") };
     }

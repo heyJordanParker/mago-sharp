@@ -22,9 +22,9 @@ final class Input
 
     public function email(array $input): string
     {
-        $input['source'] = 'form';
+        $input[0] = 'form';
 
-        return isset($input['email']) ? 'given' : 'missing';
+        return isset($input[1]) ? 'given' : 'missing';
     }
 
     /**

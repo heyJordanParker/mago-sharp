@@ -29,8 +29,8 @@ final class Router
     }
 
     /** @param array-key $key */
-    public function isId(int|string $key): bool
+    public function isWanted(int|string $key, string $wanted): bool
     {
-        return $key === 'id';
+        return $key === $wanted;
     }
 }

@@ -942,6 +942,29 @@ final class InvocationBareCallHook implements NodeAnalysisHook
     }
 }
 
+/**
+ * Records each name a type parameter's bound resolves, as the source gives it.
+ */
+final class InvocationBoundNamesHook implements NodeAnalysisHook
+{
+    public function getTargets(): array
+    {
+        return [NodeKind::TypeParameterBound];
+    }
+
+    public function getRequirements(): array
+    {
+        return [FileAnalysisRequirement::TargetSubtree];
+    }
+
+    public function analyze(NodeAnalysisContext $context): void
+    {
+        foreach ($context->source->getResolvedNames($context->node) as $name) {
+            InvocationAudit::record('bound-' . $name->name);
+        }
+    }
+}
+
 final class InvocationMethodCallHook implements MethodCallAnalysisHook
 {
     public function getTargets(): array
@@ -1130,6 +1153,9 @@ if (getenv('MAGO_INVOCATION_BARE_CALL_HOOKS') === '1') {
 }
 if (getenv('MAGO_INVOCATION_ATTRIBUTED_METHODS') === '1') {
     $nodeAnalysisHooks[] = new InvocationAttributedMethodsHook();
+}
+if (getenv('MAGO_INVOCATION_BOUND_NAMES') === '1') {
+    $nodeAnalysisHooks[] = new InvocationBoundNamesHook();
 }
 
 (new Worker(new Extension(

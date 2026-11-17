@@ -5,11 +5,11 @@ namespace App;
 public final class Badge
 {
     public Badge(
-        public string label {
+        internal string label {
             get; private set => field = value + '!';
         } = 'guest',
-        public int level {
-            get => field * 10; private set;
+        private int level {
+            get => field * 10; set;
         } = 1,
     ) {
     }

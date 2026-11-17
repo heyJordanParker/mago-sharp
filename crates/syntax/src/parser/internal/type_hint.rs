@@ -25,6 +25,7 @@ use crate::cst::sequence::TokenSeparatedSequence;
 use crate::error::ParseError;
 use crate::error::SyntaxError;
 use crate::parser::Parser;
+use crate::parser::internal::modifier::is_member_modifier_word;
 use crate::token::Token;
 use crate::token::TokenKind;
 use mago_allocator::prelude::*;
@@ -305,13 +306,16 @@ where
     /// list: a `[` whose closing `]`, and an optional `?` written right after it, are followed by a name and then by
     /// `(`, `,`, `)`, `=`, `;` or `{`, as in `[Money, int] totals()` or `[Money, int] pair = …`. After an attribute list,
     /// a type and a name follow, as in `[Searchable] string name`, the class's own name and `(`, as in
-    /// `[Deprecated] Report(…)`, its constructor, or a modifier, as in `[Field] public (int|string)? key`, whose type
-    /// starts with `(`. After a list an operator or `.` follows.
+    /// `[Deprecated] Report(…)`, its constructor, or a modifier, a keyword or a word, as in `[Field] public (int|string)?
+    /// key` and `[Field] internal (int|string)? key`, whose type starts with `(`. After a list an operator or `.`
+    /// follows.
     pub(crate) fn is_at_tuple_hint(&self) -> Result<bool, ParseError<'arena>> {
         let Some((name, after)) = self.peek_after_tuple_hint()? else {
             return Ok(false);
         };
-        if after.kind == T!["("] && (self.state.members_name == Some(name.value) || name.kind.is_modifier()) {
+        let is_modifier =
+            name.kind.is_modifier() || (name.kind == T![Identifier] && is_member_modifier_word(name.value));
+        if after.kind == T!["("] && (self.state.members_name == Some(name.value) || is_modifier) {
             return Ok(false);
         }
 

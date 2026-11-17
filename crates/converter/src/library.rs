@@ -25,7 +25,8 @@ use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by_with_erased_template_arguments;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
-use mago_composer::ComposerPackage;
+use mago_database::loader::Manifests;
+use mago_database::loader::nearest_manifest;
 use mago_sharp_bridge::FixedArgument;
 use mago_sharp_bridge::InlineForms;
 use mago_sharp_bridge::PhpCall;
@@ -243,11 +244,15 @@ fn folder_namespaces(codebase: &CodebaseMetadata, workspace: &Path) -> HashMap<W
         }
     }
 
+    let mut manifests = Manifests::default();
+
     roots
         .into_iter()
         .filter_map(|folder| {
-            let namespace =
-                beside.get(&folder).cloned().or_else(|| package_namespace(workspace, &folder.as_str_lossy()))?;
+            let namespace = beside
+                .get(&folder)
+                .cloned()
+                .or_else(|| package_namespace(&workspace.join(&*folder.as_str_lossy()), &mut manifests))?;
 
             Some((folder, namespace))
         })
@@ -264,47 +269,30 @@ fn project_folders(codebase: &CodebaseMetadata, workspace: &Path) -> HashSet<Wor
         .filter_map(|class| codebase.folder(class.span.file_id))
         .collect();
 
+    let mut manifests = Manifests::default();
+
     folders
         .into_iter()
         .filter(|folder| {
-            package(workspace, &folder.as_str_lossy())
-                .and_then(|package| package.r#type)
-                .is_some_and(|kind| kind.0 == "project")
+            nearest_manifest(&workspace.join(&*folder.as_str_lossy()), &mut manifests)
+                .is_some_and(|manifest| manifest.is_project())
         })
         .collect()
 }
 
-/// The Composer package whose `composer.json` is the nearest one at or above `folder`, and no higher than `workspace`
-/// for a folder in it.
-fn package(workspace: &Path, folder: &str) -> Option<ComposerPackage> {
-    let folder = workspace.join(folder);
-    let inside = folder.starts_with(workspace);
-    let contents = folder
-        .ancestors()
-        .take_while(|at| !inside || at.starts_with(workspace))
-        .find_map(|at| std::fs::read_to_string(at.join("composer.json")).ok())?;
-
-    contents.parse().ok()
-}
-
-/// The namespace of the Composer package that holds `folder`: its name's, as `Acme\StringHelpers` for
-/// `acme/string-helpers`, or, for a `composer.json` that names no package, as a project's may not, the first PSR-4
-/// namespace it lists.
-fn package_namespace(workspace: &Path, folder: &str) -> Option<String> {
-    let package = package(workspace, folder)?;
-    if let Some(name) = package.name {
+/// The namespace of the Composer package whose `composer.json` is the nearest one at or above `folder`: its name's, as
+/// `Acme\StringHelpers` for `acme/string-helpers`, or, for a `composer.json` that names no package, as a project's may
+/// not, the first PSR-4 namespace it lists.
+fn package_namespace(folder: &Path, manifests: &mut Manifests) -> Option<String> {
+    let manifest = nearest_manifest(folder, manifests)?;
+    if let Some(name) = manifest.name() {
         let parts: Vec<String> =
-            name.0.split('/').map(|part| String::from_utf8_lossy(&to_pascal_case(part)).into_owned()).collect();
+            name.split('/').map(|part| String::from_utf8_lossy(&to_pascal_case(part)).into_owned()).collect();
 
         return Some(parts.join("\\"));
     }
 
-    package
-        .autoload?
-        .psr_4
-        .into_keys()
-        .map(|prefix| prefix.trim_matches('\\').to_owned())
-        .find(|prefix| !prefix.is_empty())
+    manifest.namespaces().find(|namespace| !namespace.is_empty()).map(|namespace| namespace.replace('.', "\\"))
 }
 
 /// The last part of a full PHP name.

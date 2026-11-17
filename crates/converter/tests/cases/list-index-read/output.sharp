@@ -4,7 +4,7 @@ namespace App;
 // fails where PHP warned and so loses no correct behavior (spec section 12).
 public final class Queue
 {
-    public string first(List<string> jobs)
+    internal string first(List<string> jobs)
     {
         return jobs[0];
     }

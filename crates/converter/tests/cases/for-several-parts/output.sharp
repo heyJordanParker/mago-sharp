@@ -4,7 +4,7 @@ namespace App;
 // locals declared before it (spec section 17).
 public final class Pairs
 {
-    public int sum(int count)
+    internal int sum(int count)
     {
         let total = 0;
         let index = 0;

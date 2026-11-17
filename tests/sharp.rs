@@ -1946,3 +1946,43 @@ fn move_takes_a_namespace_with_its_module_and_deletes_the_folder_it_empties() {
     );
     analyzes_clean(root);
 }
+
+/// `Y : X` names `Z`, all three of `App.Parts`, and two moves take `X` and `Y` into `App` in either order. Whichever
+/// moves second turns an import the first move gave `Y` into one of `Y`'s own namespace, which goes with its whole
+/// line, while `Y` keeps importing `Z`, so the file parses and the project compiles.
+#[test]
+fn two_moves_leave_each_import_line_whole_in_either_order() {
+    for order in [["App.Parts.X", "App.Parts.Y"], ["App.Parts.Y", "App.Parts.X"]] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write(root, "mago.toml", include_str!("fixtures/sharp/mago.toml"));
+        write(root, "composer.json", r#"{"autoload": {"psr-4": {"App\\": "src/App/"}}}"#);
+        write(root, "src/App/Parts/X.sharp", "namespace App.Parts;\n\npublic class X\n{\n}\n");
+        write(root, "src/App/Parts/Z.sharp", "namespace App.Parts;\n\npublic class Z\n{\n}\n");
+        write(
+            root,
+            "src/App/Parts/Y.sharp",
+            "namespace App.Parts;\n\npublic class Y : X\n{\n    public Z? zone() => null;\n}\n",
+        );
+        analyzes_clean(root);
+
+        for class in order {
+            let output = run(root, "move", &[class, "App"]);
+
+            assert!(output.status.success(), "{order:?}: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        let compiled = run(root, "compile", &[]);
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/App/Y.sharp")).unwrap(),
+            "namespace App;\n\nimport App.Parts.Z;\n\npublic class Y : X\n{\n    public Z? zone() => null;\n}\n",
+            "{order:?}"
+        );
+        assert!(
+            compiled.status.success(),
+            "{order:?}: {}{}",
+            String::from_utf8_lossy(&compiled.stdout),
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+    }
+}

@@ -7,14 +7,14 @@ public final class Account
 
     protected string label = 'none';
 
-    public string name { get; private set; } = '';
+    internal string name { get; private set; } = '';
 
-    public int id { get; }
+    private int id { get; }
 
     private Any? loose = null;
 
-    public int first { get; private set; } = 1;
-    public int second { get; private set; } = 2;
+    internal int first { get; private set; } = 1;
+    internal int second { get; private set; } = 2;
 
     private float rate = 1.0;
 

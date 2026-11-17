@@ -12,23 +12,23 @@ public class Shelf<T : Spec, out TLabel>
     /**
      * Adds an item under its number.
      */
-    public virtual void add(T item, int number)
+    internal virtual void add(T item, int number)
     {
         this.items.add(item);
         this.byNumber[number] = item;
     }
 
-    public virtual List<T> all()
+    internal virtual List<T> all()
     {
         return this.items;
     }
 
-    public virtual Map<int, T> numbered()
+    internal virtual Map<int, T> numbered()
     {
         return this.byNumber;
     }
 
-    public virtual List<TLabel> labels()
+    internal virtual List<TLabel> labels()
     {
         return [];
     }

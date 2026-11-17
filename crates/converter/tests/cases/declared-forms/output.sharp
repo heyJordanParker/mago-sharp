@@ -4,29 +4,29 @@ namespace App;
 // and a `return` whose value first assigns a local (spec sections 2, 3, 21 and 24).
 public final class Forms
 {
-    private string name = '';
+    private int? count = null;
 
-    public bool flag(bool on)
+    internal bool flag(bool on)
     {
         return on;
     }
 
-    public string named()
+    private int? counted()
     {
-        return this.name;
+        return this.count;
     }
 
-    public bool shown()
+    internal bool shown()
     {
-        return (match (this.named()) { "" or "0" => false, default => true }) && true;
+        return (match (this.counted()) { null or 0 => false, default => true }) && true;
     }
 
-    public bool hidden()
+    internal bool hidden()
     {
-        return (match (this.named()) { "" or "0" => true, default => false });
+        return (match (this.counted()) { null or 0 => true, default => false });
     }
 
-    public int computed(bool wide, int count)
+    internal int computed(bool wide, int count)
     {
         int? size = null;
         if (wide) {
@@ -38,7 +38,7 @@ public final class Forms
         return size;
     }
 
-    public string inside(string? text)
+    internal string inside(string? text)
     {
         const found = text;
         return (found) != null ? found : '';

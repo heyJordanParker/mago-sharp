@@ -3,7 +3,7 @@ namespace App;
 // A `List` spreads into a `...` parameter and into a literal (spec sections 7 and 12).
 public final class Prices
 {
-    public int sum(int ...amounts)
+    private int sum(int ...amounts)
     {
         let total = 0;
         for (const amount of amounts) {
@@ -13,7 +13,7 @@ public final class Prices
         return total;
     }
 
-    public List<int> join(List<int> first, List<int> second)
+    internal List<int> join(List<int> first, List<int> second)
     {
         const all = [...first, ...second];
         const count = this.sum(...all);
@@ -22,7 +22,7 @@ public final class Prices
     }
 
     // Each argument past the first lands in the `...` parameter too.
-    public int pair()
+    internal int pair()
     {
         return this.sum(1, 2);
     }

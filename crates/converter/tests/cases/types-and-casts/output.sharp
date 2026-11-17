@@ -4,32 +4,32 @@ namespace App;
 // become them (spec section 24).
 public final class Convert
 {
-    public Any? any(Any? value)
+    internal Any? any(Any? value)
     {
         return value;
     }
 
-    public int? maybe(int? value)
+    internal int? maybe(int? value)
     {
         return value;
     }
 
-    public Object thing(Object value)
+    internal Object thing(Object value)
     {
         return value;
     }
 
-    public int whole(float value)
+    internal int whole(float value)
     {
         return (int) value + (int) value;
     }
 
-    public float real(int value)
+    internal float real(int value)
     {
         return (float) value * 1.5;
     }
 
-    public string text(int value)
+    internal string text(int value)
     {
         return (string) value;
     }

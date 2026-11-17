@@ -63,11 +63,6 @@ final class Check
         return $answer === 'yes' || $answer === true;
     }
 
-    public function names(?string $name): bool
-    {
-        return $name === Spec::class || self::class !== $name;
-    }
-
     public function blank(string $text): bool
     {
         return $text === '';

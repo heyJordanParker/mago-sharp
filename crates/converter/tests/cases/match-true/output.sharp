@@ -4,9 +4,9 @@ namespace App;
 // conditions it is a chain of ternaries, or `if … else if … else` as a statement (spec section 21).
 public final class Shipping
 {
-    public string note { get; private set; } = '';
+    private string note = '';
 
-    public string rate(int weight, bool express, bool abroad)
+    internal string rate(int weight, bool express, bool abroad)
     {
         return weight > 30 ? 'freight'
             : express || abroad ? 'priority'
@@ -15,7 +15,7 @@ public final class Shipping
 
     // An operator around the chain binds tighter than `?:`, so the chain takes parentheses, and a local's value takes
     // none.
-    public int fee(bool express, int extra)
+    internal int fee(bool express, int extra)
     {
         const base = express ? 5
             : 0;
@@ -24,7 +24,7 @@ public final class Shipping
             : 0) + extra + base;
     }
 
-    public void mark(bool fragile, bool heavy)
+    internal void mark(bool fragile, bool heavy)
     {
         if (fragile) {
             this.note = 'fragile';

@@ -6,7 +6,7 @@ public final class Router
 {
     private int hits = 0;
 
-    public string size(int code)
+    internal string size(int code)
     {
         return match (code) {
             200 or 201 => 'ok',
@@ -15,10 +15,10 @@ public final class Router
         };
     }
 
-    public void count(string method)
+    internal void count(int status)
     {
-        match (method) {
-            'GET' => { this.hits++; },
+        match (status) {
+            200 => { this.hits++; },
             default => { this.hits += 2; },
         }
     }

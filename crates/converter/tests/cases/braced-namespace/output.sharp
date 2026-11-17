@@ -5,7 +5,7 @@ import App.Shop.Item;
 
 public final class Braced
 {
-    public string name(Item item)
+    internal string name(Item item)
     {
         return item.name;
     }

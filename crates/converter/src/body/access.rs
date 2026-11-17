@@ -18,6 +18,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::MagicConstant;
 use mago_syntax::cst::StaticPropertyAccess;
 use mago_syntax::cst::Variable;
+use mago_word::Word;
 
 use super::Kind;
 use super::builtins::runs_nothing;
@@ -263,9 +264,10 @@ impl<'input> Converter<'input, '_> {
     }
 
     /// The reflection of the static property `access` names, through the class value it is reached through, as
-    /// `kind.properties().first(property => property.name == "count")`, which finds the property of the class the
-    /// value holds, as PHP's `$kind::$count` does (spec section 25), with the property's declaration. A refusal at
-    /// `span` where the value may hold something other than a class value, or the analysis finds no such property.
+    /// `kind.properties().first(property => property.name == nameof(Order.count))`, which finds the property of the
+    /// class the value holds, as PHP's `$kind::$count` does (spec section 25), with the property's declaration. A
+    /// refusal at `span` where the value may hold something other than a class value, or the analysis finds no such
+    /// property.
     fn held_property(
         &mut self,
         span: Span,
@@ -279,18 +281,31 @@ impl<'input> Converter<'input, '_> {
             return None;
         }
         let codebase = self.input.codebase;
-        let Some(declared) = self
-            .held_class(access.class)
-            .and_then(|class| codebase.get_declaring_property(class.as_bytes(), variable.name))
-        else {
+        let Some((held, declared)) = self.held_class(access.class).and_then(|held| {
+            codebase.get_declaring_property(held.as_bytes(), variable.name).map(|declared| (held, declared))
+        }) else {
             self.unknown_member(span, access.class, "static property", variable.name);
             return None;
         };
+        let name = self.member_name(span, held, &String::from_utf8_lossy(&variable.name[1..]))?;
         let class = self.held_class_text(access.class);
         let found = self.unused_name("property", &[]);
-        let name = String::from_utf8_lossy(&variable.name[1..]);
 
-        Some((format!("{class}.properties().first({found} => {found}.name == \"{name}\")"), declared))
+        Some((format!("{class}.properties().first({found} => {found}.name == {name})"), declared))
+    }
+
+    /// `nameof(Order.count)`, the name of `member`, a static property or method of `held`, the class a value holds at
+    /// run time, which reflection finds the member by. It is a `keyof Order`, a member's name, which an application
+    /// compares where a string fixed at compile time would select (spec sections 6.3 and 24). A constant has no
+    /// `nameof`. A refusal at `span` where PHP# can't name `held`.
+    pub(super) fn member_name(&mut self, span: Span, held: Word, member: &str) -> Option<String> {
+        match self.imports.name_of(&held.as_str_lossy()) {
+            Ok(class) => Some(format!("nameof({class}.{member})")),
+            Err(reason) => {
+                self.refuse(span, reason);
+                None
+            }
+        }
     }
 
     /// Whether `class`, which `span` reaches a static through, holds a class value a second read gives again, which

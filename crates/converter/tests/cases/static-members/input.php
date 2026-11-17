@@ -5,7 +5,8 @@ declare(strict_types=1);
 namespace App;
 
 // Static methods and properties keep `static`, a class constant writes its type, and PHP's `private(set)` is the
-// `set` accessor's own visibility (spec sections 2, 6 and 11).
+// `set` accessor's own visibility, under a `public` property and under a `protected` one, which only a subclass reads
+// (spec sections 2, 5, 6 and 11).
 class Counter
 {
     public const int LIMIT = 10;
@@ -15,6 +16,8 @@ class Counter
     private static int $count = 0;
 
     public private(set) int $value = 0;
+
+    public private(set) int $steps = 0;
 
     public function __construct(public private(set) string $label)
     {
@@ -28,6 +31,7 @@ class Counter
 
     public function step(): string
     {
+        $this->steps++;
         if ($this->value < self::LIMIT) {
             $this->value++;
         }

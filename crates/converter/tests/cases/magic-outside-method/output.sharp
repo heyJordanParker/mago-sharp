@@ -4,9 +4,9 @@ namespace App;
 // accessor the accessor's name, as `$label::get` (spec section 6).
 public final class Named
 {
-    public string where { get; private set; } = "" + "";
+    internal string where { get; private set; } = "" + "";
 
-    public string label {
+    internal string label {
         get => "$label::get";
     }
 }

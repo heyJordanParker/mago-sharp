@@ -3,7 +3,7 @@ namespace App;
 // A local's first assignment declares it: `const` when nothing writes it again, `let` when something does.
 public final class Ledger
 {
-    public int total(int base)
+    internal int total(int base)
     {
         const @let = 2;
         let sum = base + @let;

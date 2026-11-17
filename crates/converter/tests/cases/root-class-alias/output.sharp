@@ -7,12 +7,12 @@ import App.Errors.OutOfRangeException as ErrorsOutOfRangeException;
 // throws where PHP warns (spec sections 12 and 23).
 public final class Ledger
 {
-    public int named(Map<string, int> totals)
+    internal int named(Map<string, int> totals, string name)
     {
-        return (totals['rent'] ?? throw new OutOfRangeException("Undefined array key \"rent\""));
+        return (totals[name] ?? throw new OutOfRangeException("Undefined array key"));
     }
 
-    public ErrorsOutOfRangeException failure()
+    internal ErrorsOutOfRangeException failure()
     {
         return new ErrorsOutOfRangeException();
     }

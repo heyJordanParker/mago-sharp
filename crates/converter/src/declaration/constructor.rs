@@ -95,6 +95,8 @@ impl Converter<'_, '_> {
             .then(|| self.property_access(&parameter.variable));
         // A property `internal` or wider has accessors, as a public one does, and a narrower one is storage.
         let is_public = access.is_some_and(|access| !matches!(access, "private " | "protected "));
+        let is_private =
+            access == Some("private ") || visibility.is_some_and(|modifier| matches!(modifier, Modifier::Private(_)));
         let shown = union.get_id();
         let untyped = match member {
             Some(member) => Some(format!("`{member}` takes `{shown}` as `{name}`")),
@@ -136,11 +138,12 @@ impl Converter<'_, '_> {
                 self.write_access(&parameter.modifiers, parameter.variable.span, access);
             }
             if let Some(list) = &parameter.hooks {
-                return self.hooked_parameter(parameter, list, &union, is_public && setters == Setters::Class, method);
+                let set_by_class = is_public && setters == Setters::Class;
+                return self.hooked_parameter(parameter, list, &union, is_private, set_by_class, method);
             }
             let in_readonly_class = self.class.as_ref().is_some_and(|class| class.metadata.flags.is_readonly());
-            let accessors =
-                accessors(is_public, readonly.is_some() || in_readonly_class, &parameter.modifiers, setters);
+            let is_readonly = readonly.is_some() || in_readonly_class;
+            let accessors = accessors(is_public, is_private, is_readonly, &parameter.modifiers, setters);
             if !accessors.is_empty() {
                 self.edits.insert(parameter.variable.span.end.offset, accessors);
             }
@@ -155,12 +158,14 @@ impl Converter<'_, '_> {
     /// body is (spec sections 6 and 9), of the type `union`. The constructor's argument and the default are writes
     /// through the `set` hook in PHP, as a PHP# parameter's `set` runs on them, and PHP writes the default before the
     /// hooks, where PHP# writes it after the accessors. A public property the class alone sets, `set_by_class`, has a
-    /// `private set`, and the static fields of a hook's `static` locals go before `constructor`.
+    /// `private set`, as PHP's `private(set)` gives one but on a `private` property, `is_private`, and the static fields
+    /// of a hook's `static` locals go before `constructor`.
     fn hooked_parameter(
         &mut self,
         parameter: &FunctionLikeParameter<'_>,
         list: &PropertyHookList<'_>,
         union: &TUnion,
+        is_private: bool,
         set_by_class: bool,
         constructor: Span,
     ) {
@@ -171,7 +176,7 @@ impl Converter<'_, '_> {
         };
         let variable = &parameter.variable;
         let hooks = Hooks { list, union, declared, variable, member: constructor };
-        self.hook_list(&hooks, &parameter.modifiers, !declared.flags.is_virtual_property(), set_by_class);
+        self.hook_list(&hooks, &parameter.modifiers, !declared.flags.is_virtual_property(), is_private, set_by_class);
         let Some(default) = &parameter.default_value else {
             return;
         };

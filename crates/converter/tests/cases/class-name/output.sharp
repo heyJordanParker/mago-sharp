@@ -8,27 +8,27 @@ import Lib.Chat.Message as ChatMessage;
 // root class of `Builtins.sharp`, or a new import, renamed when its short name is taken (spec section 23).
 public final class Mailer
 {
-    public Doc document()
+    internal Doc document()
     {
         return new Doc();
     }
 
-    public Message message()
+    internal Message message()
     {
         return new Message();
     }
 
-    public ChatMessage chat()
+    internal ChatMessage chat()
     {
         return new ChatMessage();
     }
 
-    public Draft draft()
+    internal Draft draft()
     {
         return new Draft();
     }
 
-    public RuntimeException failure()
+    internal RuntimeException failure()
     {
         return new UnexpectedValueException('no');
     }

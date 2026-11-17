@@ -8,7 +8,7 @@ namespace App;
 // and a `return` whose value first assigns a local (spec sections 2, 3, 21 and 24).
 final class Forms
 {
-    private string $name = '';
+    private ?int $count = null;
 
     /** @param bool $on */
     public function flag($on): bool
@@ -16,19 +16,19 @@ final class Forms
         return (bool) $on;
     }
 
-    public function named(): string
+    public function counted(): ?int
     {
-        return $this->name;
+        return $this->count;
     }
 
     public function shown(): bool
     {
-        return $this->named() && true;
+        return $this->counted() && true;
     }
 
     public function hidden(): bool
     {
-        return !$this->named();
+        return !$this->counted();
     }
 
     public function computed(bool $wide, int $count): int

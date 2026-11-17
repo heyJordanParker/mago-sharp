@@ -4,27 +4,27 @@ namespace App;
 // PHP's truthiness of the value, and through `??` for an object, which is truthy where it is not null (spec section 21).
 public final class Header
 {
-    public string title()
+    internal float rate()
     {
-        return match (this.find()) { string value when value != "" && value != "0" => value, default => 'untitled' };
+        return match (this.find()) { float value when value != 0.0 => value, default => 1.5 };
     }
 
-    public int counted()
+    internal int counted()
     {
         return match (this.count()) { int value when value != 0 => value, default => 1 };
     }
 
-    public List<string> names()
+    internal List<string> names()
     {
         return match (this.all()) { List<string> value when !value.isEmpty() => value, default => ['none'] };
     }
 
-    public Header owner()
+    internal Header owner()
     {
         return this.parent() ?? this;
     }
 
-    private string? find()
+    private float? find()
     {
         return null;
     }

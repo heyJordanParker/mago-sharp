@@ -1,0 +1,4 @@
+{
+    "description": "A library, whose public members stay public and may hold `Any?`, since its callers are in the projects that install it.",
+    "type": "library"
+}

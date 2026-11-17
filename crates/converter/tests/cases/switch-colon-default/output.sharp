@@ -4,10 +4,10 @@ namespace App;
 // it (spec section 21).
 public final class Sizes
 {
-    public int size(string kind)
+    internal int size(int weight)
     {
-        match (kind) {
-            'large' => {
+        match (weight) {
+            30 => {
                 return 3;
             },
             default => {

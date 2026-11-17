@@ -4,12 +4,12 @@ namespace App;
 // its digits, and a hex one digit by digit (spec section 24).
 public final class Big
 {
-    public float huge()
+    internal float huge()
     {
         return 18446744073709551616.0;
     }
 
-    public float hex()
+    internal float hex()
     {
         return 1.8446744073709552e19;
     }

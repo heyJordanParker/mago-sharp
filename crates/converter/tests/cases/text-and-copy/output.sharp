@@ -4,7 +4,7 @@ namespace App;
 // (spec sections 10 and 18). `with` runs as PHP's `clone`, so a class's `__clone` runs on the copy.
 public class Sku
 {
-    public Sku(public string code { get; private set; })
+    public Sku(private string code)
     {
     }
 
@@ -13,12 +13,12 @@ public class Sku
         return 'SKU ' + this.code;
     }
 
-    public virtual Sku copy()
+    internal virtual Sku copy()
     {
         return this with { };
     }
 
-    public virtual Stamp stamped(Stamp stamp)
+    internal virtual Stamp stamped(Stamp stamp)
     {
         return stamp with { };
     }

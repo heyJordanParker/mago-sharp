@@ -10,7 +10,7 @@ public final class Ticket
         this.code = prefix + '-1';
     }
 
-    public string label()
+    internal string label()
     {
         return this.code;
     }

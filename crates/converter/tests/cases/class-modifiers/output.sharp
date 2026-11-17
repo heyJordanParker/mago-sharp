@@ -4,7 +4,7 @@ namespace App;
 // and 22).
 public abstract class Shape
 {
-    public Shape(public int sides { get; })
+    public Shape(internal int sides { get; })
     {
     }
 }

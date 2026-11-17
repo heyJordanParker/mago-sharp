@@ -8,7 +8,7 @@ public class Repository
     /**
      * Saves an entity, and gives it back as its own type.
      */
-    public virtual TEntity save<TEntity : Entity>(TEntity entity)
+    internal virtual TEntity save<TEntity : Entity>(TEntity entity)
     {
         return entity;
     }
@@ -16,12 +16,12 @@ public class Repository
     /**
      * The analysis types the value as wider than `TEntity`, which only a `TEntity` is.
      */
-    public virtual TEntity saved<TEntity : Entity>(TEntity entity)
+    internal virtual TEntity saved<TEntity : Entity>(TEntity entity)
     {
         return (entity.saved ? entity : new Entity()) as TEntity ?? throw new TypeError("Return value must be of type TEntity");
     }
 
-    public virtual List<TFound> listed<TFound>(TFound found)
+    internal virtual List<TFound> listed<TFound>(TFound found)
     {
         return [found];
     }

@@ -5,13 +5,13 @@ public final class Order
 {
     public Order(
         private Spec spec,
-        public string reference { get; private set; },
-        public int quantity { get; } = 1,
+        internal string reference { get; private set; },
+        internal int quantity { get; } = 1,
         string note = '',
     ) {
     }
 
-    public Spec current()
+    internal Spec current()
     {
         return this.spec;
     }

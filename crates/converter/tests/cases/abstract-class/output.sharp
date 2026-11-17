@@ -4,9 +4,9 @@ namespace App;
 // definition (spec section 22).
 public abstract class Shape
 {
-    abstract public float area();
+    abstract protected float area();
 
-    public virtual string describe()
+    internal virtual string describe()
     {
         return `area ${this.area()}`;
     }

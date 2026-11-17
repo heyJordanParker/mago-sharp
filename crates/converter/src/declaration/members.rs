@@ -154,6 +154,19 @@ pub(super) struct Hooks<'list, 'arena> {
     pub(super) member: Span,
 }
 
+/// The start of a property's declaration in the class body, as [`Converter::property_head`] gives it.
+struct PropertyHead {
+    /// `public override string name`, which the declaration starts with.
+    head: String,
+    /// The property's type.
+    union: TUnion,
+    /// Whether it is a property with accessors rather than a field: a public one, or one that replaces its parent's.
+    has_accessors: bool,
+    /// Whether it is `private`, so no `set` is narrower than it.
+    is_private: bool,
+    setters: Setters,
+}
+
 impl Converter<'_, '_> {
     /// A property, written again whole, as a field when it is private or protected storage, or a property with
     /// accessors otherwise. Two names in one declaration become one declaration each, on its own line (spec section
@@ -179,14 +192,15 @@ impl Converter<'_, '_> {
 
         let mut declarations = Vec::new();
         for item in property.items.iter() {
-            let Some((head, union, has_accessors, setters)) = self.property_head(&property.modifiers, item.variable())
+            let Some(PropertyHead { head, union, has_accessors, is_private, setters }) =
+                self.property_head(&property.modifiers, item.variable())
             else {
                 continue;
             };
             let Some(value) = self.initial_value(item, &union, property.hint.is_none(), is_static) else {
                 continue;
             };
-            let accessors = accessors(has_accessors, is_readonly, &property.modifiers, setters);
+            let accessors = accessors(has_accessors, is_private, is_readonly, &property.modifiers, setters);
             // A property's accessors end it, unless an initial value follows them (spec section 6).
             let end = if accessors.is_empty() || !value.is_empty() { ";" } else { "" };
             declarations.push(format!("{attributes}{head}{accessors}{value}{end}"));
@@ -217,7 +231,9 @@ impl Converter<'_, '_> {
             );
         }
         self.attributes(&property.attribute_lists);
-        let Some((head, union, is_public, setters)) = self.property_head(&property.modifiers, variable) else {
+        let Some(PropertyHead { head, union, has_accessors: is_public, is_private, setters }) =
+            self.property_head(&property.modifiers, variable)
+        else {
             return;
         };
         let Some(declared) = metadata.properties.get(&word(variable.name)) else {
@@ -245,7 +261,7 @@ impl Converter<'_, '_> {
             .offset;
         self.edits.replace_range(start, property.item.span().end.offset, head);
         let hooks = Hooks { list: &property.hook_list, union: &union, declared, variable, member: property.span() };
-        self.hook_list(&hooks, &property.modifiers, has_storage, is_public && setters == Setters::Class);
+        self.hook_list(&hooks, &property.modifiers, has_storage, is_private, is_public && setters == Setters::Class);
         if !value.is_empty() {
             self.edits.insert(property.hook_list.right_brace.end.offset, format!("{value};"));
         }
@@ -256,16 +272,18 @@ impl Converter<'_, '_> {
     /// sections 6 and 9). A property with storage, `has_storage`, gains the accessor it declares no hook for. PHP's
     /// `private(set)` among `modifiers` is a `private set`, as is the `set` of a public property the class alone sets,
     /// `set_by_class`, and any other `set` reaches the property's namespace at most, PHP's `protected(set)` too (spec
-    /// section 6.1).
+    /// section 6.1). A `set` is narrower than its property, so on a property an application narrows to `private`,
+    /// `is_private`, the `set` takes the property's access.
     pub(super) fn hook_list(
         &mut self,
         hooks: &Hooks<'_, '_>,
         modifiers: &Sequence<'_, Modifier<'_>>,
         has_storage: bool,
+        is_private: bool,
         set_by_class: bool,
     ) {
         let set_access = match modifiers.iter().find(|modifier| modifier.is_write_visibility()) {
-            Some(Modifier::PrivateSet(_)) => "private ",
+            Some(Modifier::PrivateSet(_)) if !is_private => "private ",
             _ if set_by_class => "private ",
             _ => "",
         };
@@ -406,14 +424,14 @@ impl Converter<'_, '_> {
         self.edits.insert(line, declared);
     }
 
-    /// `public override string name`, which the declaration of the property `variable` names starts with, its type,
-    /// whether it is a property with accessors rather than a field: a public one, or one that replaces its parent's
-    /// (spec sections 6 and 22), and who sets it. An interface's property takes no access modifier (spec section 5).
+    /// The start of the declaration of the property `variable` names: its access, modifiers, type and name, whether it
+    /// has accessors (spec sections 6 and 22), whether it is `private`, and who sets it. An interface's property takes
+    /// no access modifier (spec section 5).
     fn property_head(
         &mut self,
         modifiers: &Sequence<'_, Modifier<'_>>,
         variable: &DirectVariable<'_>,
-    ) -> Option<(String, TUnion, bool, Setters)> {
+    ) -> Option<PropertyHead> {
         let metadata = self.class.as_ref()?.metadata;
         // A type the codex marks `inferred` here is inherited: declared in the parent, which the override rules need.
         let Some(declared) = metadata.properties.get(&word(variable.name)) else {
@@ -497,7 +515,15 @@ impl Converter<'_, '_> {
             opening.push_str("virtual ");
         }
 
-        Some((format!("{visibility}{opening}{written} {name}"), union, is_public || overrides, setters))
+        let head = format!("{visibility}{opening}{written} {name}");
+
+        Some(PropertyHead {
+            head,
+            union,
+            has_accessors: is_public || overrides,
+            is_private: visibility == "private ",
+            setters,
+        })
     }
 
     /// Refuses the property `variable` names, a declared or a promoted one, when the class inherits a method of its

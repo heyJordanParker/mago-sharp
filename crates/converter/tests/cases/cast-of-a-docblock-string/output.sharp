@@ -5,7 +5,7 @@ namespace App;
 // `null` as `""` once `?? ""` gives it (spec sections 18 and 24).
 public final class Labels
 {
-    public string label(Row row)
+    internal string label(Row row)
     {
         return `${row.label}` + ' ' + `${row.note ?? ""}`;
     }

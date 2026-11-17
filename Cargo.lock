@@ -1603,7 +1603,6 @@ dependencies = [
  "mago-analyzer",
  "mago-casing",
  "mago-codex",
- "mago-composer",
  "mago-database",
  "mago-names",
  "mago-phpdoc-syntax",

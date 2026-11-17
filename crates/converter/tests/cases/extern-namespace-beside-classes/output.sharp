@@ -6,12 +6,12 @@ import Acme.Foundation;
 // them, which one `extern namespace` line the conversion adds gives their folder (spec section 23).
 public final class Orders
 {
-    public void missing()
+    internal void missing()
     {
         Foundation.abort(404);
     }
 
-    public string version()
+    internal string version()
     {
         return Foundation.ACME_VERSION;
     }

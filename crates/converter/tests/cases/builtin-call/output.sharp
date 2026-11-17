@@ -8,43 +8,43 @@ public final class Words
 {
     private List<string> names = [];
 
-    public int size()
+    internal int size()
     {
         return this.names.count();
     }
 
-    public string joined()
+    internal string joined()
     {
         return this.names.join(', ');
     }
 
-    public bool prefixed(string text)
+    internal bool prefixed(string text)
     {
         return text.startsWith('a');
     }
 
-    public string digest(string data)
+    internal string digest(string data)
     {
         return Hash.md5(data);
     }
 
-    public float rounded(float value)
+    internal float rounded(float value)
     {
         return value.round(2);
     }
 
     // An argument the call leaves out is the member's parameter whose default is PHP's own.
-    public float whole(float value)
+    internal float whole(float value)
     {
         return value.round();
     }
 
-    public string trimmed(string text)
+    internal string trimmed(string text)
     {
         return text.trim();
     }
 
-    public string unslashed(string text)
+    internal string unslashed(string text)
     {
         return text.trim('/');
     }

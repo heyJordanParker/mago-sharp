@@ -8,7 +8,7 @@ public enum Topic: string
 {
     case Billing = 'Billing';
 
-    public string slug()
+    internal string slug()
     {
         return Slug.slugify(this.value);
     }

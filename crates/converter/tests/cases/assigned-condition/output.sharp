@@ -7,12 +7,12 @@ public final class Orders
 {
     private Map<string, Order> orders = [:];
 
-    public Order? find(string reference)
+    private Order? find(string reference)
     {
         return this.orders[reference] ?? null;
     }
 
-    public int total(string reference, string fallback)
+    internal int total(string reference, string fallback)
     {
         let order = this.find(reference);
         if (order != null) {

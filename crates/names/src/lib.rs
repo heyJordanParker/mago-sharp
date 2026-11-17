@@ -98,8 +98,8 @@ pub const LEAN_FUNCTION: &str = "Sharp\\Internal\\LeanFunction";
 
 /// The built-in bound of every type that has `==`, spec section 11, as a `.sharp` file writes it.
 ///
-/// It is a bound alone and names no class-like, so the checker reserves it and the scanner reads it as no type the
-/// running code checks.
+/// It resolves as a default class to the prelude's `Sharp\Equatable`, a bound alone that the engine declares nothing
+/// for, so the checker reserves the name and the scanner reads it as no type the running code checks.
 pub const EQUATABLE: &str = "Equatable";
 
 /// How PHP# writes PHP's `object`, spec section 24.

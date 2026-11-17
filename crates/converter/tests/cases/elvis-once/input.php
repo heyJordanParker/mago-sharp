@@ -8,9 +8,9 @@ namespace App;
 // PHP's truthiness of the value, and through `??` for an object, which is truthy where it is not null (spec section 21).
 final class Header
 {
-    public function title(): string
+    public function rate(): float
     {
-        return $this->find() ?: 'untitled';
+        return $this->find() ?: 1.5;
     }
 
     public function counted(): int
@@ -29,7 +29,7 @@ final class Header
         return $this->parent() ?: $this;
     }
 
-    private function find(): ?string
+    private function find(): ?float
     {
         return null;
     }

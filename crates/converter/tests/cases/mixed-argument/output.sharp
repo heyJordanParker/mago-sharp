@@ -4,12 +4,12 @@ namespace App;
 // throws a `TypeError` for any other value (spec section 21).
 public final class Greeter
 {
-    public string greet(Any? name)
+    internal string greet(Any? name)
     {
         return this.hello(name as string ?? throw new TypeError("Argument #1 ($name) must be of type string"));
     }
 
-    public string welcome(Any? guest, int times)
+    internal string welcome(Any? guest, int times)
     {
         return this.visit(guest as Greeter ?? throw new TypeError("Argument #1 ($guest) must be of type App\\Greeter"), times);
     }

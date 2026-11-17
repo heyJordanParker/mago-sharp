@@ -4,22 +4,22 @@ namespace App;
 // the argument lands and throws a `TypeError` for any other value (spec section 21).
 public final class Drawing
 {
-    public string draw(Shape shape)
+    internal string draw(Shape shape)
     {
         return this.square(shape as Square ?? throw new TypeError("Argument #1 ($square) must be of type App\\Square"));
     }
 
-    public string describe(Shape shape)
+    internal string describe(Shape shape)
     {
         return Square.describe(square: shape as Square ?? throw new TypeError("Argument #1 ($square) must be of type ?App\\Square"));
     }
 
-    public string title()
+    internal string title()
     {
         return this.shout(this.translated('title') as string ?? throw new TypeError("Argument #1 ($text) must be of type string"));
     }
 
-    public string|Map<string, string> translated(string key)
+    private string|Map<string, string> translated(string key)
     {
         return key;
     }

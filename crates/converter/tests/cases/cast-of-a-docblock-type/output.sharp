@@ -4,7 +4,7 @@ namespace App;
 // and PHP#'s `(int)` converts it as PHP's does (spec section 24).
 public final class Totals
 {
-    public int quantity(Row row)
+    internal int quantity(Row row)
     {
         return (int) row.quantity + 1;
     }

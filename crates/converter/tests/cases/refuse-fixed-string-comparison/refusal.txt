@@ -1,0 +1,3 @@
+at line 10 of its PHP#: error invalid-operand: `==` compares `answer` with `'yes'`, a string fixed at compile time, so it selects one of a closed set of values.
+at line 15 of its PHP#: error invalid-operand: `==` compares `name` with `"App\\Reply"`, a string fixed at compile time, so it selects one of a closed set of values.
+at line 21 of its PHP#: error invalid-operand: A pattern compares `method` with `'GET'`, a string fixed at compile time, so it selects one of a closed set of values.

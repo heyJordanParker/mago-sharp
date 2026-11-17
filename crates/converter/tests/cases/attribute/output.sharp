@@ -6,7 +6,7 @@ import Lib.Route;
 public final class Endpoint
 {
     [Route('/orders', name: 'orders')]
-    public int orders([Route('/one')] int one)
+    internal int orders([Route('/one')] int one)
     {
         return one;
     }

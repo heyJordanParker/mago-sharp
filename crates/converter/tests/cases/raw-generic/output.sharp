@@ -4,12 +4,12 @@ namespace App;
 // each type parameter is covariant, since those hold every such object (spec section 11).
 public final class Post : Model
 {
-    public Relation<Model, Model> author()
+    internal Relation<Model, Model> author()
     {
         return this.belongsTo(typeof(User));
     }
 
-    public string describe(Relation<Model, Model> relation)
+    internal string describe(Relation<Model, Model> relation)
     {
         return 'relation';
     }

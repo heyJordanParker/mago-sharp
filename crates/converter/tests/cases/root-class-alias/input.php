@@ -12,9 +12,9 @@ use App\Errors\OutOfRangeException;
 final class Ledger
 {
     /** @param array<string, int> $totals */
-    public function named(array $totals): int
+    public function named(array $totals, string $name): int
     {
-        return $totals['rent'];
+        return $totals[$name];
     }
 
     public function failure(): OutOfRangeException

@@ -1,0 +1,40 @@
+namespace App;
+
+// A library compares strings fixed at compile time and reads a `Map` at one, which an application refuses, so it keeps
+// each form: a string's truthiness, `==` with a literal and with a class's name, a `match` arm, a fixed `Map` key, and
+// a constant of a class held at run time, which reflection finds by its name (spec sections 21, 24 and 25).
+public final class Matcher
+{
+    public string named(string name)
+    {
+        return (name != "" && name != "0") ? name : 'guest';
+    }
+
+    public bool agreed(string answer)
+    {
+        return answer == 'yes';
+    }
+
+    public bool special(string? name)
+    {
+        return name == "App\\Matcher";
+    }
+
+    public int routed(string method)
+    {
+        return match (method) {
+            'GET' => 1,
+            default => 0,
+        };
+    }
+
+    public int small(Map<string, int> sizes)
+    {
+        return (sizes['small'] ?? throw new OutOfRangeException("Undefined array key \"small\""));
+    }
+
+    public int limit(Class<Order> kind)
+    {
+        return (kind.constants().first(constant => constant.name == "MAX").value() as int ?? throw new TypeError("Value must be of type int")) * 2;
+    }
+}

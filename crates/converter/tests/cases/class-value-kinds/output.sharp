@@ -3,7 +3,7 @@ namespace App;
 // `class-string<T>` is a `Class<T>` (spec section 25).
 public final class Kinds
 {
-    public Class<T> same<T : Kinds>(Class<T> kind)
+    internal Class<T> same<T : Kinds>(Class<T> kind)
     {
         return kind;
     }

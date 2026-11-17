@@ -14,7 +14,7 @@ public class SalesReport : Report, Titled, Countable
         return 1;
     }
 
-    public int total()
+    internal int total()
     {
         return 2;
     }

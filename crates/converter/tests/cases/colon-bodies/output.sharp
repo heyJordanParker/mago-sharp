@@ -3,7 +3,7 @@ namespace App;
 // A body PHP writes between `:` and an end keyword is a body in braces, as PHP# writes every body (spec section 17).
 public final class Tally
 {
-    public int sum(List<int> numbers)
+    internal int sum(List<int> numbers)
     {
         let total = 0;
         for (const number of numbers) {
@@ -19,7 +19,7 @@ public final class Tally
         return total;
     }
 
-    public string size(int count)
+    internal string size(int count)
     {
         if (count > 10) {
             return 'large';

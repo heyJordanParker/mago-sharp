@@ -9,7 +9,7 @@ public final class Tally
 
     private Map<int, int> prices = [:];
 
-    public int total()
+    internal int total()
     {
         let total = 0;
         for (const count of this.counts) {
@@ -30,7 +30,7 @@ public final class Tally
         return total;
     }
 
-    public int countdown(int from)
+    internal int countdown(int from)
     {
         let steps = 0;
         for (let i = from; i > 0; i--) {
@@ -47,7 +47,7 @@ public final class Tally
         return steps;
     }
 
-    public void drop(int id)
+    internal void drop(int id)
     {
         this.prices.remove(id);
     }

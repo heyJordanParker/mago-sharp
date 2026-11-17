@@ -5,7 +5,7 @@ namespace App;
 // string PHP keeps a string.
 public final class Input
 {
-    public int count(Map<int|string, string> fields)
+    internal int count(Map<int|string, string> fields)
     {
         let count = 0;
         for (const [name, value] of fields) {
@@ -15,14 +15,14 @@ public final class Input
         return count;
     }
 
-    public string email(Map<int|string, Any?> input)
+    internal string email(Map<int|string, Any?> input)
     {
-        input['source'] = 'form';
+        input[0] = 'form';
 
-        return input.get('email') != null ? 'given' : 'missing';
+        return input.get(1) != null ? 'given' : 'missing';
     }
 
-    public int|string same(int|string id)
+    internal int|string same(int|string id)
     {
         return id;
     }

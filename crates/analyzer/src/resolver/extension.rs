@@ -720,13 +720,6 @@ pub fn collection_member_kind(class: Word, metadata: &FunctionLikeMetadata) -> O
     .then_some(kind)
 }
 
-/// Whether `metadata` of the static class `class` is one of the standard library's members of a `string`, spec section
-/// 18, as `StringMembers.equals` is.
-#[must_use]
-pub fn is_text_member(class: Word, metadata: &FunctionLikeMetadata) -> bool {
-    metadata.flags.is_extension_method() && is_standard_library_member_on(class, metadata, TAtomic::is_string)
-}
-
 /// The standard library's member `name` of the collection `kind`.
 ///
 /// An operation on a `List` or a `Map` runs it, as Kotlin runs an operator member: `list[i] = v` and `map[key] = value`

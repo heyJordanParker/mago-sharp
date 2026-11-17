@@ -10570,6 +10570,23 @@ fn an_application_selects_by_a_backed_enum_never_by_a_string_fixed_at_compile_ti
     );
 }
 
+/// Spec section 24: a pattern that compares with a string fixed at compile time names the value its `match` tests in
+/// every arm, a local each arm reads again, and a call whose value the first arm holds for the arms after it.
+#[test]
+fn a_pattern_that_selects_names_the_value_its_match_tests_in_every_arm() {
+    let checks = "namespace Shop;\n\npublic class Checks\n{\n    public string named() => \"GET\";\n\n    public int run(string method)\n    {\n        int verb = match (method) { \"GET\" => 1, \"POST\" => 2, default => 0 };\n        int name = match (this.named()) { \"\" => 1, \"0\" => 2, default => 0 };\n        return verb + name;\n    }\n}\n";
+
+    assert_eq!(
+        package_errors(&[("src/Shop/Checks.sharp", checks)]),
+        [
+            "A pattern compares `method` with `\"GET\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "A pattern compares `method` with `\"POST\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "A pattern compares `this.named()` with `\"\"`, a string fixed at compile time.",
+            "A pattern compares `this.named()` with `\"0\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+        ]
+    );
+}
+
 /// Spec section 24: in an application, `equals` with a string fixed at compile time on either side selects as `==`
 /// does, and so does a `List`'s or a `Set`'s search for one, `contains`, `indexOf` or `remove`, or for a string in a
 /// literal of them. Each is a compile error that names both sides, and `equals("")` names `isEmpty()`. A `Set`'s `add`
@@ -10602,6 +10619,28 @@ fn an_application_selects_by_no_string_fixed_at_compile_time_through_equals_or_a
             "`indexOf` compares `statuses` with `\"paid\"`, a string fixed at compile time, so it selects one of a closed set of values.",
             "`contains` compares `tags` with `\"new\"`, a string fixed at compile time, so it selects one of a closed set of values.",
             "`remove` compares `kept` with `\"old\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+        ]
+    );
+}
+
+/// Spec section 24: a member marked `SearchesElements` searches its receiver for the value of its parameter marked
+/// `ComparedByEquality`, and one marked `TestsEquality` compares its receiver with its first parameter as `==` does, so
+/// a call of either with a string fixed at compile time selects in an application, as `contains`'s and `equals`'s do,
+/// whatever the member's name. A member without the mark, as a `Set`'s `add`, selects nothing.
+#[test]
+fn a_member_marked_as_a_search_or_an_equality_test_selects_by_a_string_fixed_at_compile_time() {
+    let shelf = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ShelfMembers.sharp",
+        "namespace Sharp;\n\nimport Sharp.Internal.ComparedByEquality;\nimport Sharp.Internal.SearchesElements;\nimport Sharp.Internal.TestsEquality;\n\npublic static class ShelfMembers\n{\n    extension<T>(List<T> items)\n    {\n        [SearchesElements]\n        public bool shelves([ComparedByEquality] T value) => false;\n\n        public bool stocks([ComparedByEquality] T value) => false;\n    }\n\n    extension(string text)\n    {\n        [TestsEquality]\n        public bool matches(string other) => false;\n\n        public bool rhymes(string other) => false;\n    }\n}\n",
+    );
+    let checks = "namespace Shop;\n\npublic class Checks\n{\n    public bool run(List<string> statuses, string status) => statuses.shelves(\"paid\") || statuses.shelves(status) || statuses.stocks(\"paid\") || status.matches(\"paid\") || status.matches(\"\") || status.rhymes(\"paid\");\n}\n";
+
+    assert_eq!(
+        package_errors(&[("src/Shop/Checks.sharp", checks), shelf]),
+        [
+            "`shelves` compares `statuses` with `\"paid\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "`matches` compares `status` with `\"paid\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "`matches` compares `status` with `\"\"`, a string fixed at compile time.",
         ]
     );
 }
@@ -16895,6 +16934,16 @@ fn a_class_parses_as_a_struct_does() {
             "7:59 invalid-struct `Holder.parse` can't read `thing`: `Object` is no type `parse` reads.",
         ]
     );
+}
+
+/// Spec section 10: a field whose type is a union of scalars holds plain data, which JSON and a stored row carry, so
+/// `parse` and `Json.decode<T>` read it, trying each member in the order the field writes them: every one of `string`,
+/// `int`, `float` and `bool`, nullable, and `int` with `string`.
+#[test]
+fn a_struct_parse_reads_a_field_of_a_union_of_scalars() {
+    let property = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\npublic struct ComponentProperty\n{\n    public ComponentProperty(public (string|int|float|bool)? default { get; }, public int|string size { get; } = 0) { }\n\n    public static ComponentProperty read(Map<string, Any?> input) => ComponentProperty.parse(input);\n\n    public static ComponentProperty decoded(string json) => Json.decode<ComponentProperty>(json);\n}\n";
+
+    assert_eq!(reported(("src/Demo/ComponentProperty.sharp", property), &[JSON]), Vec::<String>::new());
 }
 
 /// `\Sharp\Struct` is the engine interface the bridge gives each struct, spec section 10, and no PHP# type, so a
@@ -23366,6 +23415,21 @@ fn equality_on_a_type_parameter_needs_a_bound_that_has_it() {
             format!("11:47 invalid-operand {refusal}"),
             format!("15:43 invalid-operand {refusal}"),
         ]
+    );
+}
+
+/// Spec sections 11 and 23: a bare `Equatable` names the default class `Sharp\Equatable`, the built-in bound, so a
+/// plain PHP `Equatable` of the file's namespace wins over it, as `App\Math` wins over `Math`. The bound is then that
+/// interface, which declares no `operator ==`.
+#[test]
+fn a_plain_php_equatable_of_the_files_namespace_wins_over_the_built_in_bound() {
+    let compare = "namespace App;\n\npublic class Compare\n{\n    public static bool same<T : Equatable>(T a, T b) => a == b;\n}\n";
+    let equatable = ("src/App/Equatable.php", "<?php\n\nnamespace App;\n\ninterface Equatable\n{\n}\n");
+
+    assert_eq!(reported(("src/App/Compare.sharp", compare), &[]), Vec::<String>::new());
+    assert_eq!(
+        reported(("src/App/Compare.sharp", compare), &[equatable]),
+        ["5:57 invalid-operand `==` cannot compare `T` with `T`: `T` declares no `operator ==`."]
     );
 }
 

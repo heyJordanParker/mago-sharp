@@ -4,7 +4,7 @@ namespace App;
 // section 18).
 public final class Page
 {
-    public string render(string title)
+    internal string render(string title)
     {
         const raw = `cost: \$5 \`code\``;
 

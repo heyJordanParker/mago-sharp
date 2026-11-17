@@ -528,7 +528,7 @@ where
 }
 
 /// The part of `r#type` `parse` can't read from a value, with why: an enum with no backing value, a function, a class
-/// no `parse` builds, or any other type but `Any`, `int`, `float`, `string`, `bool` and a collection, which the bridge
+/// no `parse` builds, or any other type but `Any`, a scalar or a union of them, and a collection, which the bridge
 /// writes no `parse` for, also inside a collection or a struct or class `parse` reads through, which `visiting` holds
 /// while it is read. A family, an interface or an abstract class included, reads through each of its variants, and a
 /// value as text, as `Decimal`, and a class whose `parse` reads any value, as `JsonValue`, read through their own.
@@ -588,9 +588,17 @@ fn unreadable_part(
 
             unreadable_part(codebase, &key, visiting).or_else(|| unreadable_part(codebase, &value, visiting))
         }
+        // A union of scalars combines into `scalar` or `array-key`, which `parse` reads member by member.
         TAtomic::Mixed(_)
         | TAtomic::Null
-        | TAtomic::Scalar(TScalar::Integer(_) | TScalar::Float(_) | TScalar::String(_) | TScalar::Bool(_)) => None,
+        | TAtomic::Scalar(
+            TScalar::Integer(_)
+            | TScalar::Float(_)
+            | TScalar::String(_)
+            | TScalar::Bool(_)
+            | TScalar::Generic
+            | TScalar::ArrayKey,
+        ) => None,
         _ => Some((atomic.clone(), "is no type `parse` reads")),
     })
 }

@@ -6,10 +6,10 @@ public final class Entry
 {
     public Entry(
         [Tag(list: 'key')]
-        public string key { get; private set; },
+        internal string key { get; private set; },
         [Tag(list: 'value')]
         [Tag(anyOf: [Tag.Text, new Tag(list: Tag.Text)])]
-        public (int|string)? value { get; private set; } = null,
+        internal (int|string)? value { get; private set; } = null,
     ) {
     }
 }

@@ -33298,8 +33298,9 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
 ///
 /// Spec section 10 and generics R3c: each row of `#fields` holds the field's type text, which the engine's reader
 /// builds the value as and checks it against through the one walk, with the field's key as its path. A field whose
-/// declaration writes more than one class lists them in the order it writes them, so a union of structs takes the
-/// first that builds in that order, at any depth, which a method's parameter of the same name doesn't change. A
+/// declaration writes more than one class, or a union of scalars as `int|string`, lists them in the order it writes
+/// them, so a union of structs takes the first that builds in that order, at any depth, which a method's parameter of
+/// the same name doesn't change. A
 /// private field, a get-only property and one whose `init` is private are no field, and a property the main
 /// constructor sets may be left out.
 #[test]
@@ -33476,6 +33477,9 @@ fn parse_reads_each_field_as_its_type() {
                           null
                         ARRAY_ELEM
                           ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "int, string"
                           null
                       null
                     ARRAY_ELEM
@@ -35106,6 +35110,29 @@ fn an_extern_line_with_attributes_lowers_to_the_declaration_and_its_attributes()
 /// return [['inner', 'inner', 'App.Pair<int, string>', true, false]];
 /// ```
 ///
+/// Spec section 10: a field of a union of scalars writes them in the order its declaration writes them, as a field of a
+/// union of classes does, so the reader tries `string` before `int`, while a scalar a generic type takes, as the `int`
+/// of `List<int>`, is no union's member and adds no order.
+#[test]
+fn a_field_of_a_union_of_scalars_writes_the_order_it_declares() {
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic struct Setting\n{\n    public Setting(public (string|int|float|bool)? default { get; }, public int|string size { get; }, public List<int> counts { get; }) { }\n}\n",
+        &[],
+    );
+    let fields = lowered.declared("#fields");
+
+    for written in [
+        "ZVAL \"(bool|float|int|string)?\"",
+        "ZVAL \"string, int, float, bool\"",
+        "ZVAL \"int|string\"",
+        "ZVAL \"int, string\"",
+        "ZVAL \"List<int>\"",
+    ] {
+        assert!(fields.contains(written), "{written}\n{fields}");
+    }
+    assert_eq!(fields.matches(", ").count(), 4, "{fields}");
+}
+
 /// Spec section 10: a field of a generic struct's type writes the type with its arguments, so the reader builds the
 /// struct with them, and its own fields of a type parameter read as those arguments.
 #[test]

@@ -11,9 +11,9 @@ final class Sizes
     /** @var array<string, int> */
     private array $sizes = ['small' => 1];
 
-    public function small(): int
+    public function size(string $name): int
     {
-        return $this->sizes['small'];
+        return $this->sizes[$name];
     }
 
     public function bigger(string $name): int

@@ -4,7 +4,7 @@ namespace App;
 // one by its name, so each takes its camel case name wherever the method names it, its lambdas included.
 public final class Invoice
 {
-    public string total(List<int> prices, int tax)
+    internal string total(List<int> prices, int tax)
     {
         let sumSoFar = 0;
         for (const unitPrice of prices) {

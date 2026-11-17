@@ -5,12 +5,12 @@ namespace App;
 // which is `int|string`, with a string. A class value is always truthy, so its test is its null check.
 public final class Router
 {
-    public bool same(Class<Router> handler, Class<Router>? fallback)
+    internal bool same(Class<Router> handler, Class<Router>? fallback)
     {
         return handler == fallback;
     }
 
-    public bool routed(Class<Object>? fallback)
+    internal bool routed(Class<Object>? fallback)
     {
         if (fallback != null) {
             return fallback != typeof(Router);
@@ -19,8 +19,8 @@ public final class Router
         return false;
     }
 
-    public bool isId(int|string key)
+    internal bool isWanted(int|string key, string wanted)
     {
-        return key == 'id';
+        return key == wanted;
     }
 }

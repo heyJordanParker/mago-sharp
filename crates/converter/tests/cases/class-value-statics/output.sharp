@@ -5,7 +5,7 @@ namespace App;
 // `as` checks into the call's type (spec sections 11 and 25).
 public final class Finder
 {
-    public int total<T : Order>(Class<T> kind)
+    internal int total<T : Order>(Class<T> kind)
     {
         const found = T.find(7);
         const make = T.find;
@@ -14,8 +14,8 @@ public final class Finder
         return T.count + T.MAX + (found == null ? 0 : found.id);
     }
 
-    public string label(Class<Order> kind)
+    internal string label(Class<Order> kind)
     {
-        return kind.methods().first(method => method.name == "label").invoke(null, [7]) as string ?? throw new TypeError("Return value must be of type string");
+        return kind.methods().first(method => method.name == nameof(Order.label)).invoke(null, [7]) as string ?? throw new TypeError("Return value must be of type string");
     }
 }

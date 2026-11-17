@@ -1,9 +1,13 @@
 //! Runs each fixture pair of `tests/cases/<construct>/` through the converter, against a project of the case's own
 //! `.php` files, analyzed as `mago convert` analyzes a project. `input.php` is the file it converts, and every other
-//! `.php` file, or `.sharp` file but `output.sharp`, is a class it reaches. The converted text must equal
-//! `output.sharp` byte for byte, or the refusals, each `line:column: reason`, the lines of `refusal.txt`. The
-//! `extern namespace` lines the conversion adds must equal the lines of `extern-namespaces.txt`, or be none when the
-//! case has no such file, and the PHP# checker reads the converted text with them.
+//! `.php` file, or `.sharp` file but `output.sharp`, is a class it reaches. A case is an application, as
+//! `tests/cases/composer.json` says, unless a `composer.json` of its own says otherwise. As `mago convert` does, the
+//! case analyzes the converted text as its package's, with the `extern namespace` lines the conversion adds, and an
+//! issue the command keeps the file plain PHP for refuses it. The converted text must equal `output.sharp` byte for
+//! byte, or the refusals the lines of `refusal.txt`: the converter's, each `line:column: reason`, or else the
+//! analysis's, each as the command reports it, `at line <n> of its PHP#: <level> <code>: <message>`. The
+//! `extern namespace` lines of a conversion must equal the lines of `extern-namespaces.txt`, or be none when the case
+//! has no such file.
 
 #![allow(
     clippy::unwrap_used,
@@ -156,26 +160,24 @@ fn analyzed(folder: &Path, converted: Option<&Converted>) -> Server {
     server
 }
 
-/// Each issue the PHP# checker finds in `converted`, the conversion of the case at `folder`, as `line: level code:
-/// message`, but the warnings decision 9 expects.
+/// Each issue the analysis finds in `converted`, the conversion of the case at `folder`, that keeps the file plain PHP,
+/// as `mago convert` reports it: an error or a warning, but the warnings decision 9 expects, each once.
 fn checked(folder: &Path, converted: &Converted) -> String {
     let server = analyzed(folder, Some(converted));
     let input = FileId::new(format!("{}.sharp", declared(folder)).as_bytes());
     let file = server.database().get(&input).unwrap();
+    let (issues, _) = server.analyze_file_with_artifacts(input).expect("the analysis holds the converted file");
+    let mut lines: Vec<String> = Vec::new();
+    for issue in issues.iter().filter(|issue| issue.level >= Level::Warning) {
+        let code = issue.code.as_deref().unwrap_or_default();
+        let line = issue.primary_span().map_or(0, |span| file.line_number(span.start.offset) + 1);
+        let shown = format!("at line {line} of its PHP#: {} {code}: {}\n", issue.level, issue.message);
+        if code != "redundant-docblock-type" && !lines.contains(&shown) {
+            lines.push(shown);
+        }
+    }
 
-    server
-        .analyze_file_with_artifacts(input)
-        .expect("the analysis holds the converted file")
-        .0
-        .iter()
-        .filter(|issue| issue.level >= Level::Warning)
-        .filter(|issue| issue.code.as_deref() != Some("redundant-docblock-type"))
-        .map(|issue| {
-            let line = issue.primary_span().map_or(0, |span| file.line_number(span.start.offset) + 1);
-            format!("{line}: {} {}: {}\n", issue.level, issue.code.as_deref().unwrap_or_default(), issue.message)
-        })
-        .collect::<Vec<_>>()
-        .concat()
+    lines.concat()
 }
 
 /// What the converter gives for the case at `folder`: the PHP# text and its `extern namespace` lines, or each refusal
@@ -221,36 +223,38 @@ fn run(folder: &Path) -> Result<(), Failed> {
         _ => panic!("{} holds one of output.sharp and refusal.txt", folder.display()),
     };
     let expected = std::fs::read_to_string(&expected_file).unwrap();
-    let (actual, conversion) = match converted(folder) {
-        Ok(converted) => (String::from_utf8(converted.text.clone()).unwrap(), Some(converted)),
-        Err(refusals) => (refusals, None),
-    };
-    let actual_ok = conversion.is_some();
-    if let Some(converted) = &conversion {
-        let lines = converted.extern_namespaces.iter().map(ExternNamespace::line).collect::<Vec<_>>().join("\n");
-        let expected_lines = std::fs::read_to_string(folder.join("extern-namespaces.txt")).unwrap_or_default();
-        let expected_lines = expected_lines.trim_end();
-        if lines != expected_lines {
-            return Err(format!(
-                "{} adds the extern namespace lines:\n{lines}\n--- expected, from extern-namespaces.txt:\n{expected_lines}",
-                folder.display()
-            )
-            .into());
-        }
-    }
-    if actual_ok == expected_ok && actual == expected {
-        // A pair holds the text the PHP# checker accepts, so a conversion that compares equal but fails it fails.
-        let issues = conversion.map(|converted| checked(folder, &converted)).unwrap_or_default();
-        if issues.is_empty() {
-            return Ok(());
-        }
+    // The text the analysis refuses follows a failure, since its refusals name lines of it.
+    let (actual, actual_ok, refused_text) = match converted(folder) {
+        Ok(converted) => {
+            let text = String::from_utf8(converted.text.clone()).unwrap();
+            match checked(folder, &converted) {
+                issues if issues.is_empty() => {
+                    let lines = converted.extern_namespaces.iter().map(ExternNamespace::line).collect::<Vec<_>>();
+                    let expected_lines =
+                        std::fs::read_to_string(folder.join("extern-namespaces.txt")).unwrap_or_default();
+                    let (lines, expected_lines) = (lines.join("\n"), expected_lines.trim_end());
+                    if lines != expected_lines {
+                        return Err(format!(
+                            "{} adds the extern namespace lines:\n{lines}\n--- expected, from extern-namespaces.txt:\n{expected_lines}",
+                            folder.display()
+                        )
+                        .into());
+                    }
 
-        return Err(format!("{} converts to text the PHP# checker refuses:\n{issues}", folder.display()).into());
+                    (text, true, String::new())
+                }
+                issues => (issues, false, format!("\n--- the conversion the analysis refuses:\n{text}")),
+            }
+        }
+        Err(refusals) => (refusals, false, String::new()),
+    };
+    if actual_ok == expected_ok && actual == expected {
+        return Ok(());
     }
 
     let kind = if actual_ok { "converted to" } else { "refused with" };
-    Err(format!("{} {kind}:\n{actual}\n--- expected, from {}:\n{expected}", folder.display(), expected_file.display())
-        .into())
+    let (folder, expected_file) = (folder.display(), expected_file.display());
+    Err(format!("{folder} {kind}:\n{actual}\n--- expected, from {expected_file}:\n{expected}{refused_text}").into())
 }
 
 fn main() {

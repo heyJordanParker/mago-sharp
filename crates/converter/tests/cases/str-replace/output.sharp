@@ -4,7 +4,7 @@ namespace App;
 // new text before each character for an empty one, where PHP leaves the text as it is.
 public final class Slug
 {
-    public string make(string title)
+    internal string make(string title)
     {
         return title.replace(' ', '-');
     }

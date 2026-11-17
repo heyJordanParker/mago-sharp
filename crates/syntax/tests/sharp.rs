@@ -4414,6 +4414,39 @@ fn a_modifier_before_a_parenthesized_type_modifies_the_member() {
     );
 }
 
+/// `internal` before a parenthesized type is the member's access, as `public` is, and the group starts its type, on a
+/// method and on a constructor's promoted parameter after its attributes, whose brackets open no tuple type, spec
+/// sections 1, 5 and 24. Only a group that holds no union is a named reach.
+#[test]
+fn internal_before_a_parenthesized_type_is_the_members_access() {
+    const CODE: &str = "class Entry\n{\n    public Entry([Tag] internal (int|string)? value = null)\n    {\n    }\n\n    internal (int|string)? key() => null;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Entry.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let members: Vec<(Vec<String>, &str)> = class_members(program)
+        .iter()
+        .map(|member| match member {
+            ClassLikeMember::Method(method) if method.return_type_hint.is_none() => {
+                let parameter = method.parameter_list.parameters.first().expect("a promoted parameter");
+                let hint = parameter.hint.as_ref().expect("a type");
+
+                (parameter.modifiers.iter().map(ToString::to_string).collect(), source(CODE, hint))
+            }
+            ClassLikeMember::Method(method) => {
+                let returned = method.return_type_hint.as_ref().expect("a return type");
+
+                (method.modifiers.iter().map(ToString::to_string).collect(), source(CODE, &returned.hint))
+            }
+            member => panic!("expected a method, got {member:#?}"),
+        })
+        .collect();
+    assert_eq!(
+        members,
+        [(vec!["Internal".to_owned()], "(int|string)?"), (vec!["Internal".to_owned()], "(int|string)?")]
+    );
+}
+
 #[test]
 fn super_before_a_dot_is_the_parent_class() {
     const CODE: &str =

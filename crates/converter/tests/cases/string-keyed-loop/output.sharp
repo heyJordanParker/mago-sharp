@@ -5,7 +5,7 @@ namespace App;
 // entry (spec section 12).
 public final class Prices
 {
-    public string shown(Map<string, int> prices)
+    internal string shown(Map<string, int> prices)
     {
         let shown = '';
         for (const [sku, price] of prices) {
@@ -15,7 +15,7 @@ public final class Prices
         return shown;
     }
 
-    public Map<string, int> kept(Map<string, int> prices, Map<string, bool> wanted)
+    internal Map<string, int> kept(Map<string, int> prices, Map<string, bool> wanted)
     {
         Map<string, int> kept = [:];
         for (const [sku, price] of prices) {
