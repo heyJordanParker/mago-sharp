@@ -253,7 +253,7 @@ impl Impurity {
             (None, Some(Effect::Emit)) => {
                 format!("emits `{cause}`, which has the effect `{}`", effect_name(events()))
             }
-            (None, None) => format!("changes `{cause}`"),
+            (_, None) => self.describe_change(class_name),
             (Some(body), Some(Effect::Foreign(effect))) => {
                 format!("reaches `{body}`, which calls `{cause}` with the effect `{}`", effect_name(effect))
             }
@@ -263,7 +263,16 @@ impl Impurity {
             (Some(body), Some(Effect::Emit)) => {
                 format!("reaches `{body}`, which emits `{cause}` with the effect `{}`", effect_name(events()))
             }
-            (Some(body), None) => format!("reaches `{body}`, which changes `{cause}`"),
+        }
+    }
+
+    /// The reason of an impurity that changes a place, which has no effect, as [`Self::describe`] gives it, such as
+    /// "changes `this.count`", with each class named by `class_name`.
+    pub(crate) fn describe_change(&self, class_name: &dyn Fn(Word) -> String) -> String {
+        let cause = written(self.cause, class_name);
+        match self.path.last() {
+            Some(body) => format!("reaches `{}`, which changes `{cause}`", written(*body, class_name)),
+            None => format!("changes `{cause}`"),
         }
     }
 

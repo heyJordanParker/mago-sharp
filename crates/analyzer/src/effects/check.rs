@@ -102,11 +102,10 @@ pub(crate) fn getters_never_write_this(effects: &Effects, codebase: &CodebaseMet
         .filter(|(body, ..)| matches!(body, Body::Accessor(_, _, accessor) if accessor.as_bytes() == b"get"))
         .map(|(_, member, imports, _, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, class);
-            let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
 
             Issue::error(format!(
                 "Getter `{member}` {}. A getter never writes `this`.",
-                impurity.describe(&class_name, &effect_name)
+                impurity.describe_change(&class_name)
             ))
             .with_code(IssueCode::GetterWritesThis.as_str())
             .with_annotation(Annotation::primary(impurity.span))
