@@ -52,6 +52,7 @@ use mago_codex::reference::SymbolReferences;
 use mago_database::Database;
 use mago_database::DatabaseConfiguration;
 use mago_database::DatabaseReader;
+use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_database::membership::WorkspaceMatcher;
 use mago_database::watcher::DatabaseWatcher;
@@ -342,7 +343,7 @@ impl AnalyzeCommand {
             server = server.scan_only();
         }
         if let Some(scope) = scope {
-            server = server.scoped_to(scope);
+            server = server.scoped_to(named_by(scope));
         }
         let mut issues = server.analyze()?.issues;
         let service_run_duration = service_run_start.map(|s| s.elapsed());
@@ -504,7 +505,7 @@ impl AnalyzeCommand {
     ) -> Result<WatchOutcome, Error> {
         let mut server = Server::new(watcher.database().clone(), self.prelude(), server_settings(&orchestrator));
         if let Some(scope) = scope {
-            server = server.scoped_to(scope);
+            server = server.scoped_to(named_by(scope));
         }
 
         tracing::info!("Watching {} for changes...", configuration.source.workspace.display());
@@ -627,6 +628,11 @@ fn scope_to(
     orchestrator.config.paths.extend(named.iter().map(|path| path.to_string_lossy().into_owned()));
 
     Ok(scope)
+}
+
+/// Whether `scope`, the paths `mago analyze` names, names `file`.
+fn named_by(scope: WorkspaceMatcher) -> impl Fn(&File) -> bool + Send + Sync + 'static {
+    move |file| file.path.as_deref().is_some_and(|path| scope.contains(path))
 }
 
 /// Decodes the embedded prelude's codebase and symbol references.

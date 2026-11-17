@@ -11,12 +11,10 @@ use mago_analyzer::external::ExternalAnalyzerHandle;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings as AnalyzerSettings;
 use mago_database::Database;
-use mago_database::DatabaseConfiguration;
 use mago_database::DatabaseReader;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
-use mago_database::membership::WorkspaceMatcher;
 use mago_extension::WorkerCommand;
 use mago_extension::WorkerPool;
 use mago_extension::WorkerPoolOptions;
@@ -837,15 +835,7 @@ fn compiled_report(repository: &Path, invoice: &str) -> (Vec<String>, [u8; 16], 
             Cow::Owned(contents.into_bytes()),
         ));
     }
-    let scope = WorkspaceMatcher::from_configuration(&DatabaseConfiguration::new(
-        Path::new("/server-proof"),
-        vec![b"app/Report.sharp"],
-        vec![],
-        vec![],
-        vec![b"sharp"],
-    ))
-    .expect("the scope compiles");
-    let mut server = server(repository, database).scoped_to(scope);
+    let mut server = server(repository, database).scoped_to(|file| file.name.as_ref() == b"app/Report.sharp");
     let reports = owners(&server.analyze().expect("the analysis runs").issues);
     let (inputs, bytes) = compiled(&mut server);
 

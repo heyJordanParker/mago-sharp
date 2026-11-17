@@ -11,8 +11,8 @@ use mago_codex::reference::SymbolReferences;
 use mago_database::Database;
 use mago_database::DatabaseReader;
 use mago_database::error::DatabaseError;
+use mago_database::file::File;
 use mago_database::file::FileId;
-use mago_database::membership::WorkspaceMatcher;
 use mago_orchestrator::error::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
@@ -39,8 +39,11 @@ use crate::settings::Settings;
 pub struct Server {
     database: Database<'static>,
     service: IncrementalAnalysisService,
-    scope: Option<WorkspaceMatcher>,
+    scope: Option<Scope>,
 }
+
+/// Whether a file is one [`Server::scoped_to`] reports in.
+type Scope = Box<dyn Fn(&File) -> bool + Send + Sync>;
 
 impl Server {
     /// Build a server for one workspace from an already-loaded file database,
@@ -71,13 +74,13 @@ impl Server {
         self
     }
 
-    /// Analyze the whole workspace, but report only the issues in files `scope` contains, plus the
+    /// Analyze the whole workspace, but report only the issues in the files `scope` holds, plus the
     /// issues that name no file. An issue is reported in its primary annotation's file, else in its
     /// first annotation's. The node-analysis hooks report only in the file they inspect, so they run
-    /// only in the files `scope` contains.
+    /// only in the files `scope` holds.
     #[must_use]
-    pub fn scoped_to(mut self, scope: WorkspaceMatcher) -> Self {
-        self.scope = Some(scope);
+    pub fn scoped_to(mut self, scope: impl Fn(&File) -> bool + Send + Sync + 'static) -> Self {
+        self.scope = Some(Box::new(scope));
         self
     }
 
@@ -217,13 +220,10 @@ impl Server {
         &mut self,
         analyze: impl FnOnce(&mut IncrementalAnalysisService) -> Result<AnalysisResult, OrchestratorError>,
     ) -> Result<AnalysisResult, ServerError> {
-        let files = self.scope.as_ref().map(|scope| {
-            self.database
-                .files()
-                .filter(|file| file.path.as_deref().is_some_and(|path| scope.contains(path)))
-                .map(|file| file.id)
-                .collect::<HashSet<_>>()
-        });
+        let files = self
+            .scope
+            .as_ref()
+            .map(|scope| self.database.files().filter(|file| scope(file)).map(|file| file.id).collect::<HashSet<_>>());
         self.service.set_node_analysis_files(files.clone());
 
         analyze(&mut self.service)
@@ -268,7 +268,6 @@ mod tests {
     use mago_analyzer::plugin::PluginRegistry;
     use mago_analyzer::settings::Settings as AnalyzerSettings;
     use mago_database::DatabaseConfiguration;
-    use mago_database::file::File;
     use mago_database::file::FileType;
     use mago_reporting::Annotation;
     use mago_syntax::settings::ParserSettings;
@@ -305,15 +304,12 @@ mod tests {
         let (mut server, _, b) = two_file_server();
         let all = server.analyze().expect("analysis").issues;
 
-        let scope = WorkspaceMatcher::from_configuration(&DatabaseConfiguration::new(
-            Path::new("/scope"),
-            vec![b"src/b.php"],
-            vec![],
-            vec![],
-            vec![b"php"],
-        ))
-        .expect("the scope compiles");
-        let scoped = two_file_server().0.scoped_to(scope).analyze().expect("scoped analysis").issues;
+        let scoped = two_file_server()
+            .0
+            .scoped_to(|file| file.name.as_ref() == b"src/b.php")
+            .analyze()
+            .expect("scoped analysis")
+            .issues;
 
         let primary_file = |issue: &Issue| {
             issue
