@@ -146,7 +146,7 @@ editor-url = "phpstorm://open?file=%file%&line=%line%&column=%column%"
 Trois niveaux d'épinglage :
 
 - **Épinglage majeur** (`version = "0"`) : tout `0.x.y` satisfait l'épinglage. Une montée vers `1.x` est une erreur fatale, car une nouvelle version majeure peut introduire des défauts incompatibles, des changements de schéma ou de comportement de règles. À partir de 1.0, c'est ce que `mago init` écrit par défaut.
-- **Épinglage mineur** (`version = "0.6"`) : tout `0.6.y` satisfait l'épinglage. Une divergence vers un mineur différent émet un avertissement ; une divergence majeure reste fatale. Avant 1.0, une nouvelle version mineure peut casser la configuration, comme dans la règle caret de Cargo, donc c'est ce que `mago init` écrit par défaut.
+- **Épinglage mineur** (`version = "0.6"`) : tout `0.6.y` satisfait l'épinglage. Une divergence vers un mineur différent émet un avertissement ; une divergence majeure reste fatale. Avant 1.0, une nouvelle version mineure peut casser la configuration, donc c'est ce que `mago init` écrit par défaut.
 - **Épinglage exact** (`version = "0.6.23"`) : toute divergence émet un avertissement ; une divergence majeure reste fatale.
 
 L'avertissement peut être désactivé avec `--no-version-check`, la variable d'environnement `MAGO_NO_VERSION_CHECK`, ou `no-version-check = true` dans la configuration. Aucun de ces moyens n'affecte la divergence de version majeure, qui est tout l'intérêt de l'épinglage.

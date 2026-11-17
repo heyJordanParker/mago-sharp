@@ -149,7 +149,7 @@ Pinning the version surfaces drift between the installed binary and the project'
 Three pin levels:
 
 - **Major pin** (`version = "0"`): any `0.x.y` satisfies the pin. A bump to `1.x` is a hard error because a new major may ship with incompatible defaults, schema changes, or rule behaviour. From 1.0 on, this is the default `mago init` writes.
-- **Minor pin** (`version = "0.6"`): any `0.6.y` satisfies the pin. Drift to a different minor warns; drift across majors is still fatal. Before 1.0 a new minor release may break the configuration, as in Cargo's caret rule, so this is the default `mago init` writes.
+- **Minor pin** (`version = "0.6"`): any `0.6.y` satisfies the pin. Drift to a different minor warns; drift across majors is still fatal. Before 1.0 a new minor release may break the configuration, so this is the default `mago init` writes.
 - **Exact pin** (`version = "0.6.23"`): any drift warns; drift across majors is still fatal.
 
 The warning can be silenced with `--no-version-check`, the `MAGO_NO_VERSION_CHECK` environment variable, or `no-version-check = true` in the config. None of those affect major-version drift, which is the entire point of pinning.
