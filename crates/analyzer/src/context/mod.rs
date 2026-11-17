@@ -1,4 +1,3 @@
-use std::cell::OnceCell;
 use std::sync::Arc;
 
 use foldhash::HashMap;
@@ -86,8 +85,6 @@ where
     /// and a local's because a lambda assigns it, with the note and the help an error at the read adds, as Kotlin names
     /// why a smart cast is impossible.
     pub(super) unnarrowed_reads: HashMap<Span, (String, String)>,
-    /// How many class-likes of the codebase have each lowercase short name, counted the first time a message asks.
-    pub(super) short_name_counts: OnceCell<HashMap<String, u32>>,
 }
 
 impl<'ctx, 'arena, A> Context<'ctx, 'arena, A>
@@ -128,7 +125,6 @@ where
             hidden_variables: HashMap::default(),
             class_initializers: WordMap::default(),
             unnarrowed_reads: HashMap::default(),
-            short_name_counts: OnceCell::new(),
         }
     }
 

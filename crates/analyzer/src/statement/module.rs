@@ -6,9 +6,6 @@
 //! A module also lists the namespaces its namespace imports from, as Java's `module-info.java` lists what a module
 //! `requires`, and the checker refuses an import outside the list and two lists that name each other.
 
-use std::collections::VecDeque;
-
-use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_allocator::Arena;
 use mago_codex::metadata::CodebaseMetadata;
@@ -19,7 +16,6 @@ use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::metadata::module::Lifetime;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
-use mago_codex::metadata::module::NamespaceImportMetadata;
 use mago_codex::metadata::module::service_id;
 use mago_codex::metadata::module::top_dispatcher_namespaces;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
@@ -94,7 +90,7 @@ where
         };
 
         let key = (
-            service_id(service, context.codebase),
+            binding_metadata.service_id,
             binding_metadata.target.map(|target| context.codebase.class_key(target.as_bytes())),
         );
         if let Some((_, first)) = bound.iter().find(|(earlier, _)| *earlier == key) {
@@ -201,7 +197,7 @@ where
         .filter(|(module, binding)| {
             std::ptr::eq(*module, metadata)
                 || services
-                    .binding_for(module.namespace.as_bytes(), &binding.service.type_union, binding.target)
+                    .binding_for(module.namespace.as_bytes(), binding.service_id, binding.target)
                     .is_some_and(|(_, found)| std::ptr::eq(found, *binding))
         });
     let mut reported: Vec<(IssueCode, *const BindingMetadata)> = Vec::new();
@@ -416,7 +412,9 @@ impl<'ctx> Services<'ctx> {
             return Some(Missing::NoService(Some(service)));
         }
 
-        self.binding_for(namespace, service, requester).is_none().then_some(Missing::Unbound(service))
+        self.binding_for(namespace, service_id(service, self.codebase), requester)
+            .is_none()
+            .then_some(Missing::Unbound(service))
     }
 
     /// The set of services `module` belongs to: the base set for a base module, the base set under every module of
@@ -432,15 +430,15 @@ impl<'ctx> Services<'ctx> {
         Self { codebase, overrides }
     }
 
-    /// The binding that serves `service` to `requester`, a class of `namespace`: the nearest namespace's module first,
-    /// an override before its base module, and in one module a binding `for` the requester before one for any class.
+    /// The binding that serves the service of the id `service` to `requester`, a class of `namespace`: the nearest
+    /// namespace's module first, an override before its base module, and in one module a binding `for` the requester
+    /// before one for any class.
     fn binding_for(
         &self,
         namespace: &[u8],
-        service: &TUnion,
+        service: Word,
         requester: Option<Word>,
     ) -> Option<(&'ctx ModuleMetadata, &'ctx BindingMetadata)> {
-        let key = service_id(service, self.codebase);
         let mut namespace = namespace;
         loop {
             let modules = self
@@ -449,7 +447,7 @@ impl<'ctx> Services<'ctx> {
                 .copied()
                 .chain(self.codebase.modules.iter().filter(|module| module.kind == ModuleKind::Base));
             for module in modules.filter(|module| module.namespace.as_bytes() == namespace) {
-                let serves = |binding: &&BindingMetadata| service_id(&binding.service.type_union, self.codebase) == key;
+                let serves = |binding: &&BindingMetadata| binding.service_id == service;
                 let targeted = module.bindings.iter().filter(serves).find(|binding| {
                     binding.target.zip(requester).is_some_and(|(target, requester)| {
                         self.codebase.class_key(target.as_bytes()) == self.codebase.class_key(requester.as_bytes())
@@ -545,6 +543,7 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
     /// Visits the binding that serves `service` to `requester`. A service no binding serves is reported at the
     /// binding of the class that takes it, so the walk stops there.
     fn visit(&mut self, namespace: &[u8], requester: Option<Word>, service: &TUnion, held: bool) {
+        let service = service_id(service, self.services.codebase);
         let Some((module, binding)) = self.services.binding_for(namespace, service, requester) else {
             return;
         };
@@ -772,50 +771,20 @@ where
 
 /// Spec section 23: reports the import at `span` when its namespace leads back to the importing file's, directly or
 /// through other namespaces, a parent and its child among them, as Go refuses every import cycle between packages. The
-/// edges are the project's imports, which [`NamespaceImportMetadata`] records, and the namespace is the unit: the
-/// error names the namespaces of the cycle, the other file's import that closes it, and the two ways out.
+/// edges are the project's imports, and the namespace is the unit. The codebase's population finds each cycle once,
+/// [`CodebaseMetadata::import_cycle`], and the error names the namespaces of the cycle, the other file's import that
+/// closes it, and the two ways out.
 pub(crate) fn check_import_cycle<A>(context: &mut Context<'_, '_, A>, span: Span)
 where
     A: Arena,
 {
-    let codebase = context.codebase;
-    let Some(own) = codebase.namespace_imports.iter().find(|import| import.span == span) else {
+    let Some(cycle) = context.codebase.import_cycle(span) else {
         return;
     };
-    let key = |namespace: &[u8]| word(namespace.to_ascii_lowercase());
-    let from = key(own.namespace.as_bytes());
-    let start = key(imported_namespace(codebase, own.name.as_bytes()));
-
-    // The shortest path of imports from the imported namespace back to the importing one.
-    let mut previous: HashMap<Word, &NamespaceImportMetadata> = HashMap::default();
-    let mut pending = VecDeque::from([start]);
-    let mut seen = HashSet::from_iter([start]);
-    while let Some(namespace) = pending.pop_front() {
-        if namespace == from {
-            break;
-        }
-        for import in codebase.namespace_imports.iter().filter(|import| key(import.namespace.as_bytes()) == namespace) {
-            let next = key(imported_namespace(codebase, import.name.as_bytes()));
-            if seen.insert(next) {
-                previous.insert(next, import);
-                pending.push_back(next);
-            }
-        }
-    }
-    let Some(closing) = previous.get(&from).copied() else {
+    let Some(closing) = cycle.last() else {
         return;
     };
-
-    // The namespaces of the cycle: the importing one, then each the path passes, from the imported one on.
-    let mut through = Vec::new();
-    let mut at = from;
-    while at != start {
-        let import = previous[&at];
-        through.push(word(dotted(import.namespace.as_bytes())));
-        at = key(import.namespace.as_bytes());
-    }
-    through.push(word(dotted(own.namespace.as_bytes())));
-    through.reverse();
+    let through: Vec<Word> = cycle.iter().map(|import| word(dotted(import.namespace.as_bytes()))).collect();
 
     let file = closing.file.as_bytes().rsplit(|byte| *byte == b'/').next().unwrap_or_default();
     let name = closing.name.as_bytes().rsplit(|byte| *byte == b'\\').next().unwrap_or_default();
@@ -914,13 +883,6 @@ pub(crate) fn enclosing_binding(codebase: &CodebaseMetadata, span: Span) -> Opti
             && binding.span.file_id == span.file_id
             && binding.span.contains(&span.start)
     })
-}
-
-/// The namespace an import of `name` reaches: the namespace of the class-like, function or constant it names, or the
-/// namespace it names itself.
-fn imported_namespace<'name>(codebase: &CodebaseMetadata, name: &'name [u8]) -> &'name [u8] {
-    let parent = name.iter().rposition(|byte| *byte == b'\\').map_or(&name[..0], |separator| &name[..separator]);
-    if !codebase.class_like_exists(name) && codebase.namespace_exists(name) { name } else { parent }
 }
 
 /// Spec section 32: whether the PHP# code of the analyzed file imports `name`, the full name of a class-like, of a

@@ -13,6 +13,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;
 
+use foldhash::HashMap;
 use foldhash::HashSet;
 use globset::GlobSet;
 
@@ -35,9 +36,11 @@ pub struct WorkspaceMatcher {
     extensions: HashSet<OsString>,
     glob_excludes: GlobSet,
     path_excludes: Vec<PathBuf>,
-    host_bases: Vec<(PathBuf, usize)>,
-    include_bases: Vec<(PathBuf, usize)>,
-    patch_bases: Vec<(PathBuf, usize)>,
+    /// Each configured root, with the highest specificity of the patterns it is the root of, so a file finds its
+    /// roots among its own ancestors whatever the number of roots.
+    host_bases: HashMap<PathBuf, usize>,
+    include_bases: HashMap<PathBuf, usize>,
+    patch_bases: HashMap<PathBuf, usize>,
 }
 
 impl WorkspaceMatcher {
@@ -79,21 +82,25 @@ impl WorkspaceMatcher {
             })
             .collect();
 
-        let make_bases = |patterns: &[Cow<'_, [u8]>]| -> Vec<(PathBuf, usize)> {
-            patterns
-                .iter()
-                .map(|pattern| {
-                    let specificity = calculate_pattern_specificity(pattern.as_ref());
-                    let base = extract_base_path(pattern.as_ref());
-                    let absolute = if base.is_absolute() { base } else { workspace.join(base) };
-                    (absolute.canonicalize().unwrap_or(absolute), specificity)
-                })
-                .collect()
+        let make_bases = |patterns: &[Cow<'_, [u8]>]| -> HashMap<PathBuf, usize> {
+            let mut bases = HashMap::default();
+            for pattern in patterns {
+                let specificity = calculate_pattern_specificity(pattern.as_ref());
+                let base = extract_base_path(pattern.as_ref());
+                let absolute = if base.is_absolute() { base } else { workspace.join(base) };
+                let highest = bases.entry(absolute.canonicalize().unwrap_or(absolute)).or_insert(specificity);
+                *highest = specificity.max(*highest);
+            }
+
+            bases
         };
 
         // An empty `paths` means "scan the whole workspace", matching the loader.
         let host_bases = if configuration.paths.is_empty() {
-            vec![(workspace.clone(), calculate_pattern_specificity(workspace.to_string_lossy().as_bytes()))]
+            HashMap::from_iter([(
+                workspace.clone(),
+                calculate_pattern_specificity(workspace.to_string_lossy().as_bytes()),
+            )])
         } else {
             make_bases(&configuration.paths)
         };
@@ -122,12 +129,9 @@ impl WorkspaceMatcher {
         }
 
         let extension_ok = canonical.extension().is_some_and(|ext| self.extensions.contains(ext));
-        let exact_base = self
-            .host_bases
+        let exact_base = [&self.host_bases, &self.include_bases, &self.patch_bases]
             .iter()
-            .chain(self.include_bases.iter())
-            .chain(self.patch_bases.iter())
-            .any(|(base, _)| base == &canonical);
+            .any(|bases| bases.contains_key(&canonical));
         if !extension_ok && !exact_base {
             return None;
         }
@@ -158,8 +162,8 @@ impl WorkspaceMatcher {
     }
 }
 
-fn max_specificity(bases: &[(PathBuf, usize)], path: &Path) -> Option<usize> {
-    bases.iter().filter(|(base, _)| path.starts_with(base)).map(|(_, specificity)| *specificity).max()
+fn max_specificity(bases: &HashMap<PathBuf, usize>, path: &Path) -> Option<usize> {
+    path.ancestors().filter_map(|ancestor| bases.get(ancestor)).copied().max()
 }
 
 /// Extracts the literal directory portion of a path pattern, dropping any
@@ -229,6 +233,30 @@ mod tests {
         let matcher = matcher(&config(&dir, &["src"], &[], vec![]));
 
         assert_eq!(matcher.classify(&dir.path().join("src/Foo.php")), Some(FileType::Host));
+    }
+
+    #[test]
+    fn a_root_two_patterns_name_keeps_the_more_specific_one() {
+        let dir = TempDir::new().unwrap();
+        touch(&dir, "src/Foo.php");
+        let matcher = matcher(&config(&dir, &["src/**/*.php", "src/"], &["src/**/*.php"], vec![]));
+
+        assert_eq!(matcher.classify(&dir.path().join("src/Foo.php")), Some(FileType::Host));
+    }
+
+    #[test]
+    fn each_of_many_file_roots_tracks_only_its_own_file() {
+        let dir = TempDir::new().unwrap();
+        let files: Vec<String> = (0..500).map(|index| format!("app/Area{index}/Thing.php")).collect();
+        for file in &files {
+            touch(&dir, file);
+        }
+        touch(&dir, "app/Other.php");
+        let roots: Vec<&str> = files.iter().map(String::as_str).collect();
+        let matcher = matcher(&config(&dir, &roots, &[], vec![]));
+
+        assert!(files.iter().all(|file| matcher.classify(&dir.path().join(file)) == Some(FileType::Host)));
+        assert_eq!(matcher.classify(&dir.path().join("app/Other.php")), None);
     }
 
     #[test]

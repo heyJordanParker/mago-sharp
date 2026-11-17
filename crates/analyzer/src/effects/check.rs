@@ -1,10 +1,8 @@
 //! The rules effects decide: an `extern` declaration's own checks, what a `uses` names, what a static holds and where
 //! a function parameter goes, and the rules over solved effects.
 
-use std::cell::OnceCell;
 use std::sync::Arc;
 
-use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
@@ -98,17 +96,13 @@ use crate::utils::quoted_source;
 /// write of a field of `this` nor a call of a method that writes one. Unlike a method marked `readonly` (section 13),
 /// it may call a plain PHP method and an unmarked PHP# one. A `lazy` property keeps its value through the bridge's
 /// write, which is the language's, not the body's.
-pub(crate) fn getters_never_write_this(
-    effects: &Effects,
-    codebase: &CodebaseMetadata,
-    short_name_counts: &OnceCell<HashMap<String, u32>>,
-) -> IssueCollection {
+pub(crate) fn getters_never_write_this(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
     effects
         .bodies_changing_this()
         .filter(|(body, ..)| matches!(body, Body::Accessor(_, _, accessor) if accessor.as_bytes() == b"get"))
         .map(|(_, member, imports, _, impurity)| {
-            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
-            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
+            let class_name = |class| sharp_class_like_name(codebase, imports, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
 
             Issue::error(format!(
                 "Getter `{member}` {}. A getter never writes `this`.",
@@ -126,11 +120,7 @@ pub(crate) fn getters_never_write_this(
 /// effects, as a Swift value type's computed members are pure by convention and Rust's `Copy` values carry no I/O. A
 /// data case is its enum's. A change of state is no effect, so only an effect is refused, naming the member and the
 /// effect: "`Money.inEuros` has the effect `Http`, and a struct has no effects".
-pub(crate) fn values_have_no_effects(
-    effects: &Effects,
-    codebase: &CodebaseMetadata,
-    short_name_counts: &OnceCell<HashMap<String, u32>>,
-) -> IssueCollection {
+pub(crate) fn values_have_no_effects(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
     effects
         .effectful_bodies()
         .filter_map(|(body, member, imports, impurity)| {
@@ -152,8 +142,8 @@ pub(crate) fn values_have_no_effects(
                 ("an enum", data_enum(codebase, metadata)?)
             };
 
-            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
-            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
+            let class_name = |class| sharp_class_like_name(codebase, imports, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
             let member = display_sharp_member(class_name(value_class), member);
             let effect = effect_name(impurity.effect.and_then(Effect::named)?);
 
@@ -173,11 +163,7 @@ pub(crate) fn values_have_no_effects(
 /// included, so reading a PHP# class's attributes with `attributes<T>()` is pure. A change of state is no effect. The
 /// refusal names the code and the effect: "The constructor of `Column` calls `Store.load`, which has the effect
 /// `Database`, and an attribute has no effects".
-pub(crate) fn attributes_have_no_effects(
-    effects: &Effects,
-    codebase: &CodebaseMetadata,
-    short_name_counts: &OnceCell<HashMap<String, u32>>,
-) -> IssueCollection {
+pub(crate) fn attributes_have_no_effects(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
     effects
         .bodies_with_effects()
         .filter_map(|(body, member, imports, _, impurity)| {
@@ -189,8 +175,8 @@ pub(crate) fn attributes_have_no_effects(
             let declaring = codebase.get_class_like(class.as_bytes())?;
             let attribute = created_attribute(codebase, declaring, code == "constructor")?;
 
-            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
-            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
+            let class_name = |class| sharp_class_like_name(codebase, imports, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
             let written = if code == "constructor" {
                 format!("`{}`", class_name(declaring.original_name))
             } else {
@@ -243,11 +229,7 @@ fn created_attribute(codebase: &CodebaseMetadata, declaring: &ClassLikeMetadata,
 }
 
 /// Spec section 28: a law holds only over pure code, which is the code Lean reads.
-pub(crate) fn laws_must_be_pure(
-    effects: &Effects,
-    codebase: &CodebaseMetadata,
-    short_name_counts: &OnceCell<HashMap<String, u32>>,
-) -> IssueCollection {
+pub(crate) fn laws_must_be_pure(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
     effects
         .impure_bodies()
         .filter(|(body, ..)| {
@@ -255,8 +237,8 @@ pub(crate) fn laws_must_be_pure(
                 if codebase.get_class_like(class.as_bytes()).is_some_and(|class| class.laws.contains_key(method)))
         })
         .map(|(_, member, imports, scope, impurity)| {
-            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
-            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
+            let class_name = |class| sharp_class_like_name(codebase, imports, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
 
@@ -284,16 +266,12 @@ pub(crate) fn laws_must_be_pure(
 /// Spec section 29: every implementation is held to what its declaration allows, so a lambda or a method value that a
 /// place's function type holds has only the effects that type lists. The refusal has the code a value of the wrong
 /// type gets in that place.
-pub(crate) fn function_values_must_fit_their_types(
-    effects: &Effects,
-    codebase: &CodebaseMetadata,
-    short_name_counts: &OnceCell<HashMap<String, u32>>,
-) -> IssueCollection {
+pub(crate) fn function_values_must_fit_their_types(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
     effects
         .unfit_function_values(codebase)
         .map(|(value, name, imports, scope, impurity)| {
-            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
-            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
+            let class_name = |class| sharp_class_like_name(codebase, imports, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
             // A plain PHP function's value has no class, spec section 14.3.
@@ -348,13 +326,12 @@ pub(crate) fn function_values_must_fit_their_types(
 pub(crate) fn implementations_must_fit_their_declarations(
     effects: &Effects,
     codebase: &CodebaseMetadata,
-    short_name_counts: &OnceCell<HashMap<String, u32>>,
 ) -> IssueCollection {
     effects
         .unfit_implementations(codebase)
         .map(|((class, member), ancestor, declaration, imports, scope, impurity)| {
-            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
-            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
+            let class_name = |class| sharp_class_like_name(codebase, imports, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
             let ancestor =
@@ -422,9 +399,8 @@ pub(crate) fn check_declaration_uses<A>(
         return;
     };
 
-    let class_name =
-        |class| sharp_class_like_name(codebase, &context.imported_names, &context.short_name_counts, class);
-    let effect_name = |effect| sharp_effect_name(codebase, &context.imported_names, &context.short_name_counts, effect);
+    let class_name = |class| sharp_class_like_name(codebase, &context.imported_names, class);
+    let effect_name = |effect| sharp_effect_name(codebase, &context.imported_names, effect);
     let declared = display_sharp_member(
         class_name(codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |ancestor| ancestor.original_name)),
         declaration.original_name,
@@ -447,15 +423,11 @@ pub(crate) fn check_declaration_uses<A>(
 
 /// Spec section 13: through a readonly value only methods marked `readonly` run, so a call of an unmarked one is an
 /// error that names the fix: the marker, when the method changes nothing in `this`, or the write that keeps it off.
-pub(crate) fn readonly_values_call_readonly_methods(
-    effects: &Effects,
-    codebase: &CodebaseMetadata,
-    short_name_counts: &OnceCell<HashMap<String, u32>>,
-) -> IssueCollection {
+pub(crate) fn readonly_values_call_readonly_methods(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
     effects
         .readonly_calls()
         .map(|(call, imports, change)| {
-            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let class_name = |class| sharp_class_like_name(codebase, imports, class);
             let fix = match &change {
                 None => format!(
                     "{} does not change {}, so declare it `{} readonly`.",
@@ -1066,14 +1038,7 @@ pub(crate) fn check_uses<A>(
         let mut effects: Vec<String> = nameable
             .into_iter()
             .filter(|class| class.flags.is_foreign())
-            .map(|class| {
-                sharp_effect_name(
-                    context.codebase,
-                    &context.imported_names,
-                    &context.short_name_counts,
-                    class.original_name,
-                )
-            })
+            .map(|class| sharp_effect_name(context.codebase, &context.imported_names, class.original_name))
             .collect();
         effects.sort_unstable();
         effects.push(short_name(events()));
@@ -1215,12 +1180,7 @@ fn report_foreign_in_static<A>(
         return;
     };
 
-    let held = sharp_class_like_name(
-        context.codebase,
-        &context.imported_names,
-        &context.short_name_counts,
-        held.original_name,
-    );
+    let held = sharp_class_like_name(context.codebase, &context.imported_names, held.original_name);
     let property_name = display_member(context, class, property);
     context.collector.report_with_code(
         IssueCode::ForeignInStatic,

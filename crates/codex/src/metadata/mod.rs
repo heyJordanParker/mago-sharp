@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::collections::hash_map::Entry;
 
 use foldhash::HashMap;
@@ -23,6 +24,7 @@ use mago_word::word;
 use crate::DEFAULTS_TRAIT_SUFFIX;
 use crate::defaults_trait_name;
 use crate::diff::CodebaseDiff;
+use crate::graph::strongly_connected_parts;
 use crate::identifier::method::MethodIdentifier;
 use crate::issue::ScanningIssueKind;
 use crate::metadata::attribute::AttributeMetadata;
@@ -100,6 +102,10 @@ pub struct CodebaseMetadata {
     /// Map from class-like FQCN (`Word`) to its detailed metadata (`ClassLikeMetadata`), which each copy of the
     /// codebase shares until it changes the entry.
     pub class_likes: WordMap<Shared<ClassLikeMetadata>>,
+    /// How many class-likes of the project, its vendors and the standard library have each short name, by the short
+    /// name in lowercase. Made again on each population.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    short_names: WordMap<u32>,
     #[cfg_attr(feature = "serde", serde(default))]
     pub class_like_aliases: WordMap<Word>,
     #[cfg_attr(feature = "serde", serde(default))]
@@ -133,6 +139,10 @@ pub struct CodebaseMetadata {
     /// Every name a PHP# file of the project imports from another namespace, spec section 23, sorted.
     #[cfg_attr(feature = "serde", serde(default))]
     pub namespace_imports: Vec<NamespaceImportMetadata>,
+    /// Each import of `namespace_imports` that closes a cycle, by its span: the import, then the shortest chain of
+    /// imports that leads from the namespace it imports back to its file's. Made again on each population.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    import_cycles: HashMap<Span, Vec<NamespaceImportMetadata>>,
     /// Map from the lowercase name of a PHP# extension member, spec section 26, to every extension member of that name:
     /// its span and the static method it runs as, in span order.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -251,6 +261,92 @@ impl CodebaseMetadata {
 
         self.class_like_aliases_dirty = false;
         aliases_changed
+    }
+
+    /// Counts the class-likes of each short name that [`Self::shares_short_name`] reads.
+    pub(crate) fn populate_short_names(&mut self) {
+        let mut short_names = WordMap::default();
+        for (name, metadata) in &self.class_likes {
+            let name = name.as_bytes();
+            if !metadata.flags.is_built_in() || (name.len() > 6 && name[..6].eq_ignore_ascii_case(b"Sharp\\")) {
+                *short_names.entry(short_name_key(name)).or_insert(0) += 1;
+            }
+        }
+
+        self.short_names = short_names;
+    }
+
+    /// Finds each import that closes a cycle of imports between namespaces, spec section 23. The namespaces of one
+    /// strongly connected part of the import graph lead to each other, so an import closes a cycle when the namespace
+    /// it imports is another one of its own namespace's part, and one walk breadth first from that namespace, over the
+    /// imports in their order, finds the shortest chain back to every namespace of the part.
+    pub(crate) fn populate_import_cycles(&mut self) {
+        let mut nodes = WordMap::default();
+        let mut node = |namespace: &[u8]| {
+            let next = nodes.len();
+            *nodes.entry(ascii_lowercase_word(namespace)).or_insert(next)
+        };
+        let edges: Vec<(usize, usize)> = self
+            .namespace_imports
+            .iter()
+            .map(|import| (node(import.namespace.as_bytes()), node(self.imported_namespace(import.name.as_bytes()))))
+            .collect();
+        let mut outgoing = vec![Vec::new(); nodes.len()];
+        for (import, &(from, _)) in edges.iter().enumerate() {
+            outgoing[from].push(import);
+        }
+        let successors: Vec<Vec<usize>> =
+            outgoing.iter().map(|imports| imports.iter().map(|&import| edges[import].1).collect()).collect();
+        let mut parts = vec![0; nodes.len()];
+        for (part, members) in strongly_connected_parts(&successors).into_iter().enumerate() {
+            for member in members {
+                parts[member] = part;
+            }
+        }
+
+        let mut walks: HashMap<usize, Vec<Option<usize>>> = HashMap::default();
+        let mut cycles = HashMap::default();
+        for (own, &(from, start)) in edges.iter().enumerate() {
+            if from == start || parts[from] != parts[start] {
+                continue;
+            }
+
+            let reached_by = walks.entry(start).or_insert_with(|| {
+                let mut reached_by = vec![None; outgoing.len()];
+                let mut pending = VecDeque::from([start]);
+                while let Some(namespace) = pending.pop_front() {
+                    for &import in &outgoing[namespace] {
+                        let next = edges[import].1;
+                        if next != start && reached_by[next].is_none() {
+                            reached_by[next] = Some(import);
+                            pending.push_back(next);
+                        }
+                    }
+                }
+
+                reached_by
+            });
+            let mut chain = Vec::new();
+            let mut at = from;
+            while at != start
+                && let Some(import) = reached_by[at]
+            {
+                chain.push(self.namespace_imports[import]);
+                at = edges[import].0;
+            }
+            chain.push(self.namespace_imports[own]);
+            chain.reverse();
+            cycles.insert(self.namespace_imports[own].span, chain);
+        }
+
+        self.import_cycles = cycles;
+    }
+
+    /// The namespace an import of `name` reaches: the namespace of the class-like, function or constant it names, or
+    /// the namespace it names itself.
+    fn imported_namespace<'name>(&self, name: &'name [u8]) -> &'name [u8] {
+        let parent = name.iter().rposition(|byte| *byte == b'\\').map_or(&name[..0], |separator| &name[..separator]);
+        if !self.class_like_exists(name) && self.namespace_exists(name) { name } else { parent }
     }
 
     /// The class-like `alias` names in the end, by its key: a `class_alias()` declaration names its target as written,
@@ -375,6 +471,22 @@ impl CodebaseMetadata {
     #[must_use]
     pub fn namespace_exists(&self, name: &[u8]) -> bool {
         self.symbols.contains_namespace(ascii_lowercase_word(name))
+    }
+
+    /// The import at `span`, then the shortest chain of imports that leads from the namespace it imports back to its
+    /// file's namespace, spec section 23, or `None` when no chain leads back.
+    #[must_use]
+    pub fn import_cycle(&self, span: Span) -> Option<&[NamespaceImportMetadata]> {
+        self.import_cycles.get(&span).map(Vec::as_slice)
+    }
+
+    /// Whether another class-like of the project or its vendors has the short name of the class-like `name`, compared
+    /// without case as PHP compares class names. PHP's built-in class-likes don't count: a `.sharp` file reaches one,
+    /// like `Dom\Text`, only through an import, and one file can't import two classes of one short name without an
+    /// alias. The prelude's `Sharp\` class-likes do count, as a `.sharp` file reaches them with no import.
+    #[must_use]
+    pub fn shares_short_name(&self, name: &[u8]) -> bool {
+        self.short_names.get(&short_name_key(name)).is_some_and(|count| *count > 1)
     }
 
     /// Checks if a class or trait exists in the codebase, by [`Self::class_key`].
@@ -1164,14 +1276,8 @@ impl CodebaseMetadata {
             return false;
         };
 
-        let matches = |parent| {
-            metadata.name == parent
-                || metadata.all_parent_classes.contains(&parent)
-                || metadata.all_parent_interfaces.contains(&parent)
-                || metadata.used_traits.contains(&parent)
-                || metadata.require_extends.contains(&parent)
-                || metadata.require_implements.contains(&parent)
-        };
+        let matches =
+            |parent| metadata.name == parent || metadata.instance_of().iter().any(|classes| classes.contains(&parent));
 
         if matches(parent_key) {
             return true;
@@ -2412,6 +2518,11 @@ fn should_replace_metadata(
     declared_at(new_span) < declared_at(existing_span)
 }
 
+/// The lowercase short name of the class-like `name`, the part after its last `\`.
+fn short_name_key(name: &[u8]) -> Word {
+    ascii_lowercase_word(name.rsplit(|byte| *byte == b'\\').next().unwrap_or(name))
+}
+
 #[cfg(test)]
 mod should_replace_metadata_tests {
     use super::*;
@@ -2639,5 +2750,65 @@ mod get_constant_or_global_tests {
 
         assert_eq!(found(&codebase, "Lib\\LIMIT", "LIMIT").as_deref(), Some("LIMIT"));
         assert_eq!(found(&codebase, "Lib\\OTHER", "OTHER"), None);
+    }
+}
+
+#[cfg(test)]
+mod import_cycle_tests {
+    use super::*;
+
+    /// A codebase whose file `{namespace}\File{index}.sharp` imports each of `imports`, a class of another namespace.
+    fn importing(files: &[(&str, &[&str])]) -> CodebaseMetadata {
+        let mut codebase = CodebaseMetadata::new();
+        for (index, (namespace, imports)) in files.iter().enumerate() {
+            let file = word(format!("{namespace}\\File{index}.sharp").replace('\\', "/"));
+            for (offset, import) in (0u32..).zip(imports.iter()) {
+                let span = Span::new(FileId::new(file.as_bytes()), (offset * 10).into(), (offset * 10 + 5).into());
+                codebase.namespace_imports.push(NamespaceImportMetadata::new(
+                    file,
+                    span,
+                    word(namespace),
+                    word(import),
+                ));
+            }
+        }
+        codebase.namespace_imports.sort_unstable();
+        codebase.populate_import_cycles();
+
+        codebase
+    }
+
+    fn cycle(codebase: &CodebaseMetadata, import: &str) -> Option<Vec<String>> {
+        let own = codebase.namespace_imports.iter().find(|own| own.name.as_bytes() == import.as_bytes())?;
+
+        Some(codebase.import_cycle(own.span)?.iter().map(|import| import.name.to_string()).collect())
+    }
+
+    /// Each import of a cycle names the shortest chain back, and an import into the cycle from outside it, or out of
+    /// it, closes none.
+    #[test]
+    fn each_import_of_a_cycle_names_the_shortest_chain_back_and_no_other_import_names_one() {
+        let codebase = importing(&[
+            ("App\\Shop", &["App\\Billing\\Ledger", "App\\Stock\\Shelf"]),
+            ("App\\Billing", &["App\\Shop\\Cart", "App\\Stock\\Count"]),
+            ("App\\Stock", &["App\\Shop\\Order"]),
+            ("App\\Web", &["App\\Shop\\Basket"]),
+            ("App\\Shop", &["Lib\\Clock"]),
+        ]);
+
+        assert_eq!(
+            cycle(&codebase, "App\\Billing\\Ledger"),
+            Some(vec!["App\\Billing\\Ledger".to_string(), "App\\Shop\\Cart".to_string()])
+        );
+        assert_eq!(
+            cycle(&codebase, "App\\Stock\\Count"),
+            Some(vec![
+                "App\\Stock\\Count".to_string(),
+                "App\\Shop\\Order".to_string(),
+                "App\\Billing\\Ledger".to_string()
+            ])
+        );
+        assert_eq!(cycle(&codebase, "App\\Shop\\Basket"), None);
+        assert_eq!(cycle(&codebase, "Lib\\Clock"), None);
     }
 }

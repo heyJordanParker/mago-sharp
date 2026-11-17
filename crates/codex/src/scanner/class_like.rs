@@ -675,6 +675,7 @@ where
             mago_syntax::cst::Lifetime::Transient => Lifetime::Transient,
         },
         service,
+        service_id: empty_word(),
         target: binding.target.as_ref().map(|target| class(&target.class).0),
         value,
     }

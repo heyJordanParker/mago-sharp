@@ -551,6 +551,20 @@ impl ClassLikeMetadata {
         if self.exact_names { mago_word::word(name) } else { mago_word::ascii_lowercase_word(name) }
     }
 
+    /// The class-likes it is an instance of besides itself, by key: its parent classes, its interfaces, its traits, and
+    /// what it requires its users to extend and implement.
+    #[inline]
+    #[must_use]
+    pub fn instance_of(&self) -> [&WordSet; 5] {
+        [
+            &self.all_parent_classes,
+            &self.all_parent_interfaces,
+            &self.used_traits,
+            &self.require_extends,
+            &self.require_implements,
+        ]
+    }
+
     /// Whether an attribute of the class-like the full name `name` names marks the class-like, by `codebase`'s key,
     /// spec section 24: a PHP# attribute only as written, and a plain PHP one in any case.
     #[inline]

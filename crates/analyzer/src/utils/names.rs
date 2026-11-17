@@ -1,8 +1,5 @@
 //! Helpers for rendering symbol names in user-facing diagnostics.
 
-use std::cell::OnceCell;
-
-use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
@@ -71,7 +68,7 @@ where
     A: Arena,
 {
     if context.dialect.is_sharp() {
-        word(sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, name))
+        word(sharp_class_like_name(context.codebase, &context.imported_names, name))
     } else {
         context.codebase.get_class_like(name.as_bytes()).map_or(name, |m| m.original_name)
     }
@@ -81,13 +78,8 @@ where
 /// the file: the name the file's import gives it, as in `Rx` for `import Sharp.Text.Regex as Rx;` and `Order` for
 /// `import App.Orders.Order;`. A class the file doesn't import is named by its short name, or, when another class-like
 /// of `codebase` has the same short name, by its full name with `.` between its parts, so `Billing.Order` and
-/// `App.Orders.Order` stay apart. `short_name_counts` keeps the count of each short name once it is first needed.
-pub(crate) fn sharp_class_like_name(
-    codebase: &CodebaseMetadata,
-    imported_names: &WordMap<Word>,
-    short_name_counts: &OnceCell<HashMap<String, u32>>,
-    name: Word,
-) -> String {
+/// `App.Orders.Order` stay apart.
+pub(crate) fn sharp_class_like_name(codebase: &CodebaseMetadata, imported_names: &WordMap<Word>, name: Word) -> String {
     // Spec section 22: the trait that holds an interface's default bodies is named by the interface, which PHP# code
     // writes, as in `HasLabel.label`.
     let name = codebase
@@ -97,7 +89,7 @@ pub(crate) fn sharp_class_like_name(
 
     if let Some(imported_name) = imported_names.get(&ascii_lowercase_word(full_name)) {
         imported_name.to_string()
-    } else if shares_short_name(codebase, short_name_counts, name) {
+    } else if codebase.shares_short_name(name.as_bytes()) {
         String::from_utf8_lossy(full_name).replace('\\', ".")
     } else {
         short_name(name)
@@ -109,42 +101,12 @@ pub(crate) fn sharp_class_like_name(
 /// `Post` for `import Sharp.Net.Mail as Post;`, or else its own name, which is that effect in every `uses` whatever
 /// class the file imports or declares under it, spec section 29. Any other effect is named as [`sharp_class_like_name`]
 /// names a class.
-pub(crate) fn sharp_effect_name(
-    codebase: &CodebaseMetadata,
-    imported_names: &WordMap<Word>,
-    short_name_counts: &OnceCell<HashMap<String, u32>>,
-    effect: Word,
-) -> String {
+pub(crate) fn sharp_effect_name(codebase: &CodebaseMetadata, imported_names: &WordMap<Word>, effect: Word) -> String {
     if !effect.as_bytes().get(..6).is_some_and(|namespace| namespace.eq_ignore_ascii_case(b"Sharp\\")) {
-        return sharp_class_like_name(codebase, imported_names, short_name_counts, effect);
+        return sharp_class_like_name(codebase, imported_names, effect);
     }
 
     imported_names.get(&ascii_lowercase_word(effect.as_bytes())).map_or_else(|| short_name(effect), ToString::to_string)
-}
-
-/// Whether another class-like of the project or its vendors has the short name of the class-like `name`, compared
-/// without case as PHP compares class names. PHP's built-in class-likes don't count: a `.sharp` file reaches one,
-/// like `Dom\Text`, only through an import, and one file can't import two classes of one short name without an
-/// alias. The prelude's `Sharp\` class-likes do count, as a `.sharp` file reaches them with no import.
-fn shares_short_name(
-    codebase: &CodebaseMetadata,
-    short_name_counts: &OnceCell<HashMap<String, u32>>,
-    name: Word,
-) -> bool {
-    let counts = short_name_counts.get_or_init(|| {
-        let mut counts = HashMap::default();
-        for (class_like, metadata) in &codebase.class_likes {
-            // php-sharp#60: the prelude's `Sharp\` class-likes are built-in, yet a `.sharp` file reaches them with no
-            // import.
-            if !metadata.flags.is_built_in() || is_prelude_stub(*class_like) {
-                *counts.entry(short_name(class_like).to_ascii_lowercase()).or_insert(0) += 1;
-            }
-        }
-
-        counts
-    });
-
-    counts.get(&short_name(name).to_ascii_lowercase()).is_some_and(|count| *count > 1)
 }
 
 /// Returns the sentence that names the `import` lines the analyzed file needs, as [`sharp_missing_imports`] writes it,
@@ -433,12 +395,8 @@ where
                     && !matches!(class_start.checked_sub(1).map(|before| id[before]), Some(b'$' | b'>'))
                 {
                     written.truncate(written.len() - (index - class_start));
-                    let class_name = sharp_class_like_name(
-                        context.codebase,
-                        &context.imported_names,
-                        &context.short_name_counts,
-                        word(&id[class_start..index]),
-                    );
+                    let class_name =
+                        sharp_class_like_name(context.codebase, &context.imported_names, word(&id[class_start..index]));
                     written.extend_from_slice(class_name.as_bytes());
                 }
 
@@ -799,8 +757,7 @@ where
             let Some(name) = object.get_name() else {
                 return atomic.get_id().to_string();
             };
-            let name =
-                sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, name);
+            let name = sharp_class_like_name(context.codebase, &context.imported_names, name);
             let readonly = if matches!(object, TObject::Named(named) if named.is_readonly) { "readonly " } else { "" };
             match object.get_type_parameters() {
                 Some(parameters) if !parameters.is_empty() => {
@@ -815,12 +772,7 @@ where
                     match case_of {
                         Some(r#enum) => format!(
                             "{readonly}{}<{}>.{name}",
-                            sharp_class_like_name(
-                                context.codebase,
-                                &context.imported_names,
-                                &context.short_name_counts,
-                                r#enum
-                            ),
+                            sharp_class_like_name(context.codebase, &context.imported_names, r#enum),
                             parameters.join(", ")
                         ),
                         None => format!("{readonly}{name}<{}>", parameters.join(", ")),
@@ -831,8 +783,7 @@ where
         }
         TAtomic::Reference(TReference::Symbol { name, is_readonly, .. }) => {
             let readonly = if *is_readonly { "readonly " } else { "" };
-            let name =
-                sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, *name);
+            let name = sharp_class_like_name(context.codebase, &context.imported_names, *name);
 
             format!("{readonly}{name}")
         }
@@ -850,9 +801,7 @@ where
                 .effects
                 .iter()
                 .flatten()
-                .map(|effect| {
-                    sharp_effect_name(context.codebase, &context.imported_names, &context.short_name_counts, *effect)
-                })
+                .map(|effect| sharp_effect_name(context.codebase, &context.imported_names, *effect))
                 .collect();
             let uses = match (effects.is_empty(), parameter && signature.effects.is_some()) {
                 (false, _) => format!(" uses {}", effects.join(", ")),
@@ -866,10 +815,9 @@ where
             format!("keyof {}", display_sharp_type(context, key_of.get_target_type()))
         }
         TAtomic::Scalar(TScalar::ClassLikeString(class_string)) => match class_string {
-            TClassLikeString::Literal { value } => format!(
-                "Class<{}>",
-                sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, *value)
-            ),
+            TClassLikeString::Literal { value } => {
+                format!("Class<{}>", sharp_class_like_name(context.codebase, &context.imported_names, *value))
+            }
             TClassLikeString::OfType { constraint, .. } => {
                 format!("Class<{}>", display_sharp_type(context, constraint))
             }
@@ -920,7 +868,7 @@ where
     A: Arena,
 {
     display_sharp_member(
-        sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, class_name),
+        sharp_class_like_name(context.codebase, &context.imported_names, class_name),
         format_args!("{property_name}.{hook_name}"),
     )
 }
@@ -981,10 +929,7 @@ where
     A: Arena,
 {
     if context.dialect.is_sharp() {
-        display_sharp_member(
-            sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, class_name),
-            member_name,
-        )
+        display_sharp_member(sharp_class_like_name(context.codebase, &context.imported_names, class_name), member_name)
     } else {
         format!("{class_name}::{member_name}")
     }

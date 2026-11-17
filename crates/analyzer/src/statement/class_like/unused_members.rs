@@ -14,8 +14,6 @@
 //! [`too_wide_members`] refuses, once the whole project is analyzed, a PHP# `public`
 //! member that nothing outside its namespace uses, which spec section 5 calls too wide.
 
-use std::cell::OnceCell;
-
 use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_allocator::Arena;
@@ -602,18 +600,30 @@ where
 /// reaches the member through reflection, which no use records, so none of them is refused.
 #[must_use]
 pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferences) -> IssueCollection {
-    // Each use of a member name: the class the code names it on, and the class or function the code is in, `None`
-    // for code outside both.
-    let mut member_uses = HashMap::<Word, Vec<(Word, Option<Word>)>>::default();
+    // The class or function the code of each use of a member is in, `None` for code outside both, by the member and
+    // the class the code names it on.
+    let mut uses_on = HashMap::<(Word, Word), Vec<Option<Word>>>::default();
     references.for_each_reference(|origin, (class, member), _| {
         let code_in = match origin {
             ReferenceOrigin::Symbol((symbol, _)) => Some(symbol),
             ReferenceOrigin::File(_) => None,
         };
-        member_uses.entry(member).or_default().push((class, code_in));
+        uses_on.entry((member, class)).or_default().push(code_in);
     });
+    // The same uses by the member and each class-like the class the code names it on is an instance of, as
+    // `CodebaseMetadata::is_instance_of` decides.
+    let mut member_uses = HashMap::<(Word, Word), Vec<&[Option<Word>]>>::default();
+    for ((member, on), code_in) in &uses_on {
+        let on = codebase.class_key(on.as_bytes());
+        let metadata = codebase.get_class_like(on.as_bytes());
+        let instance_of = metadata.into_iter().flat_map(|metadata| {
+            std::iter::once(metadata.name).chain(metadata.instance_of().into_iter().flatten().copied())
+        });
+        for class in std::iter::once(on).chain(instance_of) {
+            member_uses.entry((*member, class)).or_default().push(code_in);
+        }
+    }
 
-    let short_name_counts = OnceCell::new();
     let mut issues = IssueCollection::default();
     for (class_name, class) in &codebase.class_likes {
         if !class.flags.is_user_defined()
@@ -630,11 +640,11 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
         }
 
         let namespace = namespace_of(class.original_name.as_bytes());
+        let class_key = codebase.class_key(class_name.as_bytes());
         let is_used_outside = |member: Word| {
-            member_uses.get(&member).is_some_and(|uses| {
-                uses.iter().any(|(on, code_in)| {
-                    (on == class_name || codebase.is_instance_of(on.as_bytes(), class_name.as_bytes()))
-                        && code_in.is_none_or(|symbol| !is_within_namespace(namespace_of(symbol.as_bytes()), namespace))
+            member_uses.get(&(member, class_key)).is_some_and(|uses| {
+                uses.iter().copied().flatten().any(|code_in| {
+                    code_in.is_none_or(|symbol| !is_within_namespace(namespace_of(symbol.as_bytes()), namespace))
                 })
             })
         };
@@ -644,7 +654,7 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
                 continue;
             }
 
-            let class_label = sharp_class_like_name(codebase, &WordMap::default(), &short_name_counts, *class_name);
+            let class_label = sharp_class_like_name(codebase, &WordMap::default(), *class_name);
             let namespace = String::from_utf8_lossy(namespace).replace('\\', ".");
             issues.push(
                 Issue::error(format!(
@@ -698,7 +708,6 @@ pub fn unused_classes(
         }
     });
 
-    let short_name_counts = OnceCell::new();
     let mut issues = IssueCollection::default();
     for (class_name, class) in &codebase.class_likes {
         if !class.flags.is_user_defined()
@@ -712,7 +721,7 @@ pub fn unused_classes(
         {
             continue;
         }
-        let class_label = sharp_class_like_name(codebase, &WordMap::default(), &short_name_counts, *class_name);
+        let class_label = sharp_class_like_name(codebase, &WordMap::default(), *class_name);
         issues.push(
             Issue::error(format!("Nothing uses `{class_label}`, so it never runs."))
                 .with_code(IssueCode::UnusedClass)

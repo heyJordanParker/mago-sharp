@@ -679,9 +679,7 @@ where
         let display = display_for_parameter(parameter);
         let effects: Vec<Word> = outside
             .into_iter()
-            .map(|effect| {
-                word(sharp_effect_name(context.codebase, &context.imported_names, &context.short_name_counts, effect))
-            })
+            .map(|effect| word(sharp_effect_name(context.codebase, &context.imported_names, effect)))
             .collect();
         let has = if effects.len() == 1 { "the effect" } else { "the effects" };
         let holder = display_function_holder(parameter_type, &|union| display(context, union));

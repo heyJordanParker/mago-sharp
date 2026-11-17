@@ -17,6 +17,7 @@ pub mod context;
 pub mod diff;
 pub mod differ;
 pub mod flags;
+pub mod graph;
 pub mod identifier;
 pub mod issue;
 pub mod metadata;

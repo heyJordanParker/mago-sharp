@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use foldhash::HashMap;
 use foldhash::HashSet;
-use mago_analyzer::graph::strongly_connected_parts;
+use mago_codex::graph::strongly_connected_parts;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
 use mago_database::file::FileId;

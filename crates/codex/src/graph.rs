@@ -1,4 +1,4 @@
-//! Graph walks the analyzer and the checker's back ends share.
+//! Graph walks the codebase, the analyzer and the checker's back ends share.
 
 /// The strongly connected parts of a graph, each after every part it reaches.
 ///

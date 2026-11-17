@@ -808,8 +808,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         for (binding, binding_metadata) in written.zip(&metadata.bindings) {
             let line = self.line(binding);
             let namespace = self.string(0, line, metadata.namespace.as_bytes());
-            let id = service_id(&binding_metadata.service.type_union, self.types.codebase());
-            let service = self.string(0, line, id.as_bytes());
+            let service = self.string(0, line, binding_metadata.service_id.as_bytes());
             let target = match binding_metadata.target {
                 Some(target) => self.string(0, line, target.as_bytes()),
                 None => self.zval(line, sharp_value::SHARP_NULL, |_| {}),

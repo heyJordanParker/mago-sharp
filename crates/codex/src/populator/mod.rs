@@ -14,6 +14,7 @@ use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::constant::ConstantMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeMetadata;
+use crate::metadata::module::populate_service_ids;
 use crate::metadata::shared::Shared;
 use crate::misc::GenericParent;
 use crate::reference::ReferenceOrigin;
@@ -366,6 +367,9 @@ fn populate_codebase_inner(
         docblock::inherit_property_docblocks(codebase, &safe_symbols, dirty_classes);
     }
     populate_extern_signatures(codebase, symbol_references);
+    codebase.populate_import_cycles();
+    codebase.populate_short_names();
+    populate_service_ids(codebase);
 
     codebase.safe_symbols = safe_symbols;
     codebase.safe_symbol_members = safe_symbol_members;

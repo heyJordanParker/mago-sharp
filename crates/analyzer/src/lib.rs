@@ -42,7 +42,6 @@ pub mod code;
 pub mod effects;
 pub mod error;
 pub mod external;
-pub mod graph;
 pub mod plugin;
 pub mod settings;
 pub mod smaller;

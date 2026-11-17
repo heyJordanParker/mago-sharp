@@ -76,6 +76,9 @@ pub struct BindingMetadata {
     pub lifetime: Lifetime,
     /// The service it binds, as its type.
     pub service: TypeMetadata,
+    /// The [`service_id`] of `service`, which the codebase's class keys decide. Made again on each population.
+    #[cfg_attr(feature = "serde", serde(skip, default = "mago_word::empty_word"))]
+    pub service_id: Word,
     /// The full name of the one class it serves, when it says `for`.
     pub target: Option<Word>,
     pub value: BindingValueMetadata,
@@ -126,6 +129,19 @@ pub fn service_id(r#type: &TUnion, codebase: &CodebaseMetadata) -> Word {
     }
 
     word(&keyed)
+}
+
+/// Gives each binding of the modules of `codebase` the [`service_id`] of its service.
+pub(crate) fn populate_service_ids(codebase: &mut CodebaseMetadata) {
+    let ids: Vec<Word> = codebase
+        .modules
+        .iter()
+        .flat_map(|module| &module.bindings)
+        .map(|binding| service_id(&binding.service.type_union, codebase))
+        .collect();
+    for (binding, id) in codebase.modules.iter_mut().flat_map(|module| &mut module.bindings).zip(ids) {
+        binding.service_id = id;
+    }
 }
 
 /// The namespaces of the app's top modules that bind the dispatcher, spec section 15.

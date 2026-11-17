@@ -4,12 +4,12 @@
 //! analyzed. Each body records what it does by itself in an [`EffectSummary`] during its file's analysis, and
 //! [`Effects::solve`] combines every summary once all files are analyzed.
 
-use std::cell::OnceCell;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use foldhash::HashMap;
 use foldhash::HashSet;
+use mago_codex::graph::strongly_connected_parts;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
@@ -30,7 +30,6 @@ use mago_word::empty_word;
 use mago_word::word;
 
 use crate::code::IssueCode;
-use crate::graph::strongly_connected_parts;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_effect_name;
 
@@ -515,11 +514,10 @@ impl Effects {
         let class = codebase.class_key(class.as_bytes());
         let body = Body::Method(class, codebase.method_key(class, method.as_bytes()));
         let imports = &self.imports[*self.index.get(&body)?];
-        let short_name_counts = OnceCell::new();
 
         self.body_impurity(body).map(|impurity| {
-            impurity.describe(&|class| sharp_class_like_name(codebase, imports, &short_name_counts, class), &|effect| {
-                sharp_effect_name(codebase, imports, &short_name_counts, effect)
+            impurity.describe(&|class| sharp_class_like_name(codebase, imports, class), &|effect| {
+                sharp_effect_name(codebase, imports, effect)
             })
         })
     }
@@ -597,14 +595,13 @@ impl Effects {
     /// laws from `codebase`. Each message names classes as the file of the getter or law it refuses does.
     #[must_use]
     pub fn issues(&self, codebase: &CodebaseMetadata) -> IssueCollection {
-        let short_name_counts = OnceCell::new();
-        let mut issues = check::getters_never_write_this(self, codebase, &short_name_counts);
-        issues.extend(check::laws_must_be_pure(self, codebase, &short_name_counts));
-        issues.extend(check::function_values_must_fit_their_types(self, codebase, &short_name_counts));
-        issues.extend(check::implementations_must_fit_their_declarations(self, codebase, &short_name_counts));
-        issues.extend(check::readonly_values_call_readonly_methods(self, codebase, &short_name_counts));
-        issues.extend(check::values_have_no_effects(self, codebase, &short_name_counts));
-        issues.extend(check::attributes_have_no_effects(self, codebase, &short_name_counts));
+        let mut issues = check::getters_never_write_this(self, codebase);
+        issues.extend(check::laws_must_be_pure(self, codebase));
+        issues.extend(check::function_values_must_fit_their_types(self, codebase));
+        issues.extend(check::implementations_must_fit_their_declarations(self, codebase));
+        issues.extend(check::readonly_values_call_readonly_methods(self, codebase));
+        issues.extend(check::values_have_no_effects(self, codebase));
+        issues.extend(check::attributes_have_no_effects(self, codebase));
 
         issues
     }
