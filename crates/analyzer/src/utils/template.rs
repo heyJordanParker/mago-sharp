@@ -640,7 +640,9 @@ where
     // A refused type argument past the class's count stays out of the comparison, so `Holder<Order, int>` compares its
     // `Order` alone. Each entry is a differing type argument's index, and whether it widens and narrows the wanted one.
     let mut blocked = Vec::new();
-    for (index, (given_argument, wanted_argument)) in given_arguments.iter().zip(wanted_arguments).enumerate() {
+    for (index, (given_argument, wanted_argument)) in
+        given_arguments.iter().zip(wanted_arguments).take(class.template_types.len()).enumerate()
+    {
         let widens = contains(given_argument, wanted_argument);
         let narrows = contains(wanted_argument, given_argument);
         if widens && narrows {
@@ -661,7 +663,7 @@ where
     if !class.flags.is_sharp() {
         for &(index, ..) in &blocked {
             let Some((name, _)) = class.template_types.get_index(index) else {
-                continue;
+                unreachable!("a blocked type argument is one of the class's");
             };
             issue = issue.with_note(format!(
                 "The type argument `{name}` is `{}` here, and `{}` in `{}`.",

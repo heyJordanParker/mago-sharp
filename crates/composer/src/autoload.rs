@@ -266,12 +266,20 @@ fn evaluate(expression: &Expression<'_>, variables: &[(&[u8], Vec<u8>)], directo
         }
         Expression::Call(Call::Function(call)) if matches!(call.function, Expression::Identifier(name) if name.value().eq_ignore_ascii_case(b"dirname")) =>
         {
-            let [Argument::Positional(argument)] = call.argument_list.arguments.as_slice() else {
-                return Err(expression.span());
+            let (argument, levels) = match call.argument_list.arguments.as_slice() {
+                [Argument::Positional(argument)] => (argument, 1),
+                [Argument::Positional(argument), Argument::Positional(levels)] => match levels.value {
+                    Expression::Literal(Literal::Integer(levels)) => (argument, levels.value.ok_or(levels.span)?),
+                    _ => return Err(levels.value.span()),
+                },
+                _ => return Err(expression.span()),
             };
-            let path = PathBuf::from(String::from_utf8_lossy(&string(argument.value)?).into_owned());
+            let mut path = PathBuf::from(String::from_utf8_lossy(&string(argument.value)?).into_owned());
+            for _ in 0..levels {
+                path = path.parent().ok_or_else(|| expression.span())?.to_path_buf();
+            }
 
-            Value::String(path.parent().ok_or_else(|| expression.span())?.as_os_str().as_encoded_bytes().to_vec())
+            Value::String(path.into_os_string().into_encoded_bytes())
         }
         Expression::Array(array) => entries(array.elements.iter(), variables, directory)?,
         Expression::LegacyArray(array) => entries(array.elements.iter(), variables, directory)?,
@@ -409,5 +417,35 @@ mod tests {
         let error = Autoload::read(&root.path().join("vendor")).unwrap_err();
 
         assert!(matches!(error, AutoloadError::Unsupported { line: 4, .. }), "{error}");
+    }
+
+    /// A map reads `dirname` as PHP runs it, its levels included, so `dirname(__DIR__, 2)` is the folder above the vendor
+    /// folder, and a level count that isn't an integer literal, or a third argument, is refused with its line.
+    #[test]
+    fn a_map_reads_dirname_with_its_levels() {
+        let root = vendor();
+        let vendor = root.path().join("vendor");
+        write(
+            root.path(),
+            "vendor/composer/autoload_psr4.php",
+            "<?php\n\nreturn ['App\\\\' => [dirname(__DIR__, 2) . '/app']];\n",
+        );
+        write(root.path(), "app/Order.php", "<?php\n");
+
+        assert_eq!(
+            Autoload::read(&vendor).unwrap().unwrap().locate(b"App\\Order"),
+            Some(root.path().join("app/Order.php"))
+        );
+
+        for (levels, line) in [("$levels", 3), ("2, 3", 3)] {
+            write(
+                root.path(),
+                "vendor/composer/autoload_psr4.php",
+                &format!("<?php\n\nreturn ['App\\\\' => [dirname(__DIR__, {levels}) . '/app']];\n"),
+            );
+            let error = Autoload::read(&vendor).unwrap_err();
+
+            assert!(matches!(error, AutoloadError::Unsupported { line: l, .. } if l == line), "{levels}: {error}");
+        }
     }
 }
