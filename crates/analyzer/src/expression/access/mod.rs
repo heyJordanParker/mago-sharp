@@ -4,6 +4,7 @@ use std::rc::Rc;
 use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
@@ -52,10 +53,15 @@ use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::StaticPropertyName;
 use crate::statement::module::check_listed_import;
 use crate::utils::expression::get_block_expression_id;
+use crate::utils::expression::get_expression_id;
 use crate::utils::expression::get_non_nullsafe_expression_id;
 use crate::utils::expression::get_nullsafe_base_expressions;
+use crate::utils::expression::is_this;
 use crate::utils::names::and_list;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_sharp_type;
+use crate::utils::names::display_value_type;
+use crate::utils::names::display_variable_name;
 use crate::utils::names::member_namespace;
 use crate::utils::names::namespace_member;
 use crate::visibility::report_private_self_member;
@@ -836,6 +842,63 @@ pub(crate) fn refuse_static_through_class_value<A>(
         .with_annotation(Annotation::primary(object.span()).with_message("A class value here.")),
     );
     artifacts.set_expression_type(&span, TUnion::from_atomic(TAtomic::Error));
+}
+
+/// Whether a read of the property `name`, as `$total`, of `object` takes the property's declared type, whatever a test
+/// or an assignment narrowed it to. A PHP# property never narrows, spec section 21, but the storage an accessor reads
+/// as `field`, which only that accessor names, keeps what its assignment gives it, as a local does.
+pub(super) fn reads_declared_type<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    object: &Expression<'_>,
+    name: Option<Word>,
+) -> bool
+where
+    A: Arena,
+{
+    let reads_own_storage = (matches!(object, Expression::Self_(_)) || is_this(object, context.resolved_names))
+        && name.is_some_and(|name| block_context.scope.get_property_hook().is_some_and(|(hooked, _)| hooked == name));
+
+    context.dialect.is_sharp() && !reads_own_storage
+}
+
+/// Spec section 21: a PHP# property never narrows, a stored one included, because each read may give another value, as
+/// Kotlin refuses a smart cast on a mutable property. So the read `id` at `span` takes `declared`, the property's
+/// declared type. When a test or an assignment narrowed it, or the hidden variable a pattern's PHP tests it through, an
+/// error at the read says so and binds the tested value to a name, as it does at a read of a local a lambda assigns.
+pub(super) fn explain_unnarrowed_property<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    id: Word,
+    span: Span,
+    declared: &TUnion,
+) where
+    A: Arena,
+{
+    let narrowed_type = |held: Word| {
+        block_context.locals.get(&held).filter(|narrowed| narrowed.get_id() != declared.get_id()).map(Rc::clone)
+    };
+    let this_class = block_context.scope.get_class_like_name();
+    let Some(narrowed) = narrowed_type(id).or_else(|| {
+        context.hidden_variables.iter().find_map(|(hidden, value)| {
+            (get_expression_id(value, this_class, context.resolved_names, Some(context.codebase)) == Some(id))
+                .then(|| narrowed_type(word(hidden)))
+                .flatten()
+        })
+    }) else {
+        return;
+    };
+
+    let read = display_variable_name(context, id.as_bytes());
+    let bound = read.rsplit('.').next().unwrap_or(&read);
+    let explained = (
+        format!(
+            "`{read}` is `{}`: a property never narrows, because each read may give another value.",
+            display_sharp_type(context, declared)
+        ),
+        format!("Bind the tested value, as `{read} is {} {bound}`.", display_value_type(context, &narrowed, declared)),
+    );
+    context.unnarrowed_reads.insert(span, explained);
 }
 
 /// Whether PHP# `Class.name` reads the static method `name`: the class has no static property of that name, which the

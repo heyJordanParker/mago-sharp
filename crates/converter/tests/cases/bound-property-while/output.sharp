@@ -1,0 +1,22 @@
+namespace App;
+
+// A property never narrows, since each read may give another value (spec section 21). A `while` that tests a
+// property its body reads binds it, and PHP tests it again before each pass, which binds it again. A write of the
+// property after the body's reads writes the property itself.
+public final class Walker
+{
+    public Walker(private Node? node = null)
+    {
+    }
+
+    internal int sum()
+    {
+        let sum = 0;
+        while (this.node is Node node) {
+            sum += node.value;
+            this.node = node.next;
+        }
+
+        return sum;
+    }
+}

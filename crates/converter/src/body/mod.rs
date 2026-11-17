@@ -55,6 +55,7 @@ use mago_syntax::cst::YieldValue;
 use crate::Converter;
 use crate::types::narrowing;
 use crate::types::type_text;
+use conditions::walk_guarded;
 use matching::MatchPlace;
 
 /// What a value of an atomic type is to the operators PHP and PHP# share.
@@ -165,11 +166,22 @@ impl<'input> Converter<'input, '_> {
             locals.blocks.push(block.span());
             locals.body.get_or_insert(block.span());
         }
-        for statement in &block.statements {
+        self.statements(block.statements.as_slice());
+        if let Some(locals) = self.locals() {
+            locals.blocks.pop();
+        }
+    }
+
+    /// `statements`, one after another. An `if` among them that leaves where a property holds no value binds it for
+    /// the statements after it, as [`Converter::bind_left`] does.
+    fn statements(&mut self, statements: &[Statement<'_>]) {
+        let mut bound = 0;
+        for (at, statement) in statements.iter().enumerate() {
+            bound += usize::from(self.bind_left(statement, &statements[at + 1..]));
             self.statement(statement);
         }
         if let Some(locals) = self.locals() {
-            locals.blocks.pop();
+            locals.bound.truncate(locals.bound.len() - bound);
         }
     }
 
@@ -312,21 +324,15 @@ impl<'input> Converter<'input, '_> {
         if let Some(locals) = self.locals() {
             locals.blocks.push(scope);
         }
-        for statement in statements {
-            self.statement(statement);
-        }
+        self.statements(statements);
         if let Some(locals) = self.locals() {
             locals.blocks.pop();
         }
     }
 
-    /// `if`, whose condition may assign the local it tests unless the `if` follows an `else`.
+    /// `if`, whose condition may assign the local it tests unless the `if` follows an `else`. Each condition binds a
+    /// property it tests that its body reads, as [`Converter::guarded`] does.
     fn if_statement(&mut self, statement: &Statement<'_>, r#if: &If<'_>, follows_else: bool) {
-        if follows_else {
-            self.chained_condition(r#if.condition);
-        } else if !self.assigned_condition(statement, r#if) && !self.compared_assignment(statement, r#if) {
-            self.condition(r#if.condition, true);
-        }
         let body = match &r#if.body {
             IfBody::Statement(body) => body,
             // `if (…): … elseif (…): … else: … endif;` in braces, as PHP# writes every body.
@@ -335,13 +341,18 @@ impl<'input> Converter<'input, '_> {
                 let branch = |colon: Span, statements: &[Statement<'_>]| {
                     statements.last().map_or(colon, |last| colon.join(last.span()))
                 };
-                self.edits.replace(body.colon, " {");
-                self.scoped(branch(body.colon, body.statements.as_slice()), body.statements.as_slice());
+                self.guarded(r#if.condition, walk_guarded(body.statements.as_slice()), |this| {
+                    this.if_condition(statement, r#if, follows_else);
+                    this.edits.replace(body.colon, " {");
+                    this.scoped(branch(body.colon, body.statements.as_slice()), body.statements.as_slice());
+                });
                 for clause in &body.else_if_clauses {
                     self.edits.replace(clause.elseif.span, "} else if");
-                    self.chained_condition(clause.condition);
-                    self.edits.replace(clause.colon, " {");
-                    self.scoped(branch(clause.colon, clause.statements.as_slice()), clause.statements.as_slice());
+                    self.guarded(clause.condition, walk_guarded(clause.statements.as_slice()), |this| {
+                        this.chained_condition(clause.condition);
+                        this.edits.replace(clause.colon, " {");
+                        this.scoped(branch(clause.colon, clause.statements.as_slice()), clause.statements.as_slice());
+                    });
                 }
                 if let Some(clause) = &body.else_clause {
                     self.edits.replace(clause.r#else.span, "} else");
@@ -352,17 +363,31 @@ impl<'input> Converter<'input, '_> {
                 return;
             }
         };
-        self.braced(body.statement);
+        self.guarded(r#if.condition, walk_guarded(std::slice::from_ref(body.statement)), |this| {
+            this.if_condition(statement, r#if, follows_else);
+            this.braced(body.statement);
+        });
         for clause in &body.else_if_clauses {
             self.edits.replace(clause.elseif.span, "else if");
-            self.chained_condition(clause.condition);
-            self.braced(clause.statement);
+            self.guarded(clause.condition, walk_guarded(std::slice::from_ref(clause.statement)), |this| {
+                this.chained_condition(clause.condition);
+                this.braced(clause.statement);
+            });
         }
         if let Some(clause) = &body.else_clause {
             match clause.statement {
                 Statement::If(nested) => self.if_statement(clause.statement, nested, true),
                 statement => self.braced(statement),
             }
+        }
+    }
+
+    /// The condition of `if`, which may assign the local it tests unless the `if` follows an `else`.
+    fn if_condition(&mut self, statement: &Statement<'_>, r#if: &If<'_>, follows_else: bool) {
+        if follows_else {
+            self.chained_condition(r#if.condition);
+        } else if !self.assigned_condition(statement, r#if) && !self.compared_assignment(statement, r#if) {
+            self.condition(r#if.condition, true);
         }
     }
 
@@ -675,48 +700,52 @@ impl<'input> Converter<'input, '_> {
     /// Gives each property read that `value` gives as itself or as a branch of `?:`, with the type the analysis
     /// narrows it to and the type its class declares, where the analysis narrows it past that declared type, as
     /// `$this->owner` after `$this->owner instanceof Page`. PHP# reads a property by its declared type wherever it is
-    /// read, since it may change between a test and a read (spec section 21).
+    /// read, since it may change between a test and a read (spec section 21). A read of a value a condition binds
+    /// reads the name, which holds the narrowed type.
     fn narrowed_reads(&self, value: &Expression<'_>) -> Vec<(Span, &'input TUnion, &'input TUnion)> {
-        let (object, property) = match value {
-            Expression::Parenthesized(parenthesized) => return self.narrowed_reads(parenthesized.expression),
+        match value {
+            Expression::Parenthesized(parenthesized) => self.narrowed_reads(parenthesized.expression),
             Expression::Conditional(conditional) => {
                 let mut reads = conditional.then.map(|then| self.narrowed_reads(then)).unwrap_or_default();
                 reads.extend(self.narrowed_reads(conditional.r#else));
 
-                return reads;
+                reads
             }
-            Expression::Access(Access::Property(access)) => (access.object, &access.property),
-            _ => return Vec::new(),
+            _ if self.bound_name(value).is_some() => Vec::new(),
+            _ => self.narrowed_read(value).into_iter().collect(),
+        }
+    }
+
+    /// The read `value` of a property, with the type the analysis narrows it to and the type its class declares, where
+    /// the analysis narrows it past that declared type.
+    pub(super) fn narrowed_read(&self, value: &Expression<'_>) -> Option<(Span, &'input TUnion, &'input TUnion)> {
+        let Expression::Access(Access::Property(access)) = value else {
+            return None;
         };
-        let (Some(read), ClassLikeMemberSelector::Identifier(name)) = (self.type_of(value), property) else {
-            return Vec::new();
+        let (Some(read), ClassLikeMemberSelector::Identifier(name)) = (self.type_of(value), &access.property) else {
+            return None;
         };
         // An accessor's own storage is its `field`, which no other code writes.
         if self.method.as_ref().and_then(|method| method.storage.as_deref()) == Some(name.value) {
-            return Vec::new();
+            return None;
         }
         let classes: Vec<&TAtomic> = self
-            .type_of(object)
+            .type_of(access.object)
             .map(|union| union.types.iter().filter(|atomic| !atomic.is_null()).collect())
             .unwrap_or_default();
         let [TAtomic::Object(TObject::Named(class))] = classes.as_slice() else {
-            return Vec::new();
+            return None;
         };
         let property = [b"$".as_slice(), name.value].concat();
         let codebase = self.input.codebase;
-        let Some(declared) = codebase
+        let declared = codebase
             .get_declaring_property(class.name.as_bytes(), &property)
             .and_then(|metadata| metadata.type_metadata.as_ref())
             .map(|metadata| &metadata.type_union)
-            .filter(|declared| !declared.has_template_types() && !declared.types.iter().any(TAtomic::is_mixed))
-        else {
-            return Vec::new();
-        };
-        if is_contained_by(codebase, declared, read, false, false, false, &mut ComparisonResult::new()) {
-            return Vec::new();
-        }
+            .filter(|declared| !declared.has_template_types() && !declared.types.iter().any(TAtomic::is_mixed))?;
 
-        vec![(value.span(), read, declared)]
+        (!is_contained_by(codebase, declared, read, false, false, false, &mut ComparisonResult::new()))
+            .then(|| (value.span(), read, declared))
     }
 
     /// Writes `value`, converted already, as `value as T ?? throw new TypeError("…")`, where the analysis types it wider

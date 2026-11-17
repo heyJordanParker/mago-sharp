@@ -9,18 +9,42 @@ use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
+use mago_syntax::cst::ArrowFunction;
+use mago_syntax::cst::Assignment;
+use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Clone;
+use mago_syntax::cst::Closure;
+use mago_syntax::cst::Construct;
+use mago_syntax::cst::DoWhile;
 use mago_syntax::cst::EmptyConstruct;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::For;
+use mago_syntax::cst::Foreach;
+use mago_syntax::cst::ForeachTarget;
 use mago_syntax::cst::If;
+use mago_syntax::cst::IfBody;
+use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::IssetConstruct;
+use mago_syntax::cst::Literal;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::TryCatchClause;
+use mago_syntax::cst::UnaryPostfix;
+use mago_syntax::cst::UnaryPrefix;
+use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::cst::Unset;
 use mago_syntax::cst::Variable;
+use mago_syntax::cst::While;
+use mago_syntax::cst::Yield;
+use mago_syntax::token::is_sharp_keyword;
+use mago_syntax::walker::MutWalker;
 
 use super::Kind;
 use super::atomic_kinds;
 use super::is_primary;
 use super::kinds;
+use super::locals::Bound;
 use crate::Converter;
 use crate::types::type_text;
 
@@ -83,6 +107,318 @@ fn is_scalar(union: &TUnion) -> bool {
     !bare.is_empty() && bare.iter().all(|kind| matches!(kind, Kind::Bool | Kind::Int | Kind::Float | Kind::String))
 }
 
+/// The variable and the name of the property `expression` reads, as `$this` and `pages` for `$this->pages`.
+fn property_place<'arena>(expression: &Expression<'arena>) -> Option<(&'arena [u8], &'arena [u8])> {
+    let Expression::Access(Access::Property(access)) = expression else {
+        return None;
+    };
+    let (Expression::Variable(Variable::Direct(object)), ClassLikeMemberSelector::Identifier(name)) =
+        (access.object, &access.property)
+    else {
+        return None;
+    };
+
+    Some((object.name, name.value))
+}
+
+/// How a condition tests a property.
+enum Test<'ast, 'arena> {
+    /// PHP's truthiness of it.
+    Truthy,
+    /// `!== null`.
+    NotNull,
+    /// `instanceof` the class this names.
+    Instance(&'ast Expression<'arena>),
+    /// `=== null`, which holds where the property holds no value.
+    Null,
+    /// `!(… instanceof …)` of the class this names, which holds where the property is no instance of it.
+    NotInstance(&'ast Expression<'arena>),
+}
+
+impl Test<'_, '_> {
+    /// Whether the test holds where the property holds no value it binds, as `=== null` does, so the code after an
+    /// `if` of it that always leaves reads the binding, and never the code the `if` guards.
+    fn holds_unbound(&self) -> bool {
+        matches!(self, Test::Null | Test::NotInstance(_))
+    }
+}
+
+/// The property `condition` tests, and how: `$this->pages`, `$this->pages !== null`, `null !== $this->pages`,
+/// `$this->owner instanceof Page`, `$this->pages === null` or `!$this->owner instanceof Page`.
+fn tested_property<'ast, 'arena>(
+    condition: &'ast Expression<'arena>,
+) -> Option<(&'ast Expression<'arena>, Test<'ast, 'arena>)> {
+    let is_null = |side: &Expression<'_>| matches!(side.unparenthesized(), Expression::Literal(Literal::Null(_)));
+    let names_class = |class: &Expression<'_>| matches!(class, Expression::Identifier(_) | Expression::Self_(_));
+    let (read, test) = match condition.unparenthesized() {
+        read @ Expression::Access(Access::Property(_)) => (read, Test::Truthy),
+        Expression::Binary(binary) => match binary.operator {
+            BinaryOperator::NotIdentical(_) if is_null(binary.rhs) => (binary.lhs.unparenthesized(), Test::NotNull),
+            BinaryOperator::NotIdentical(_) if is_null(binary.lhs) => (binary.rhs.unparenthesized(), Test::NotNull),
+            BinaryOperator::Identical(_) if is_null(binary.rhs) => (binary.lhs.unparenthesized(), Test::Null),
+            BinaryOperator::Identical(_) if is_null(binary.lhs) => (binary.rhs.unparenthesized(), Test::Null),
+            BinaryOperator::Instanceof(_) if names_class(binary.rhs) => {
+                (binary.lhs.unparenthesized(), Test::Instance(binary.rhs))
+            }
+            _ => return None,
+        },
+        Expression::UnaryPrefix(unary) if matches!(unary.operator, UnaryPrefixOperator::Not(_)) => {
+            let Expression::Binary(binary) = unary.operand.unparenthesized() else {
+                return None;
+            };
+            if !matches!(binary.operator, BinaryOperator::Instanceof(_)) || !names_class(binary.rhs) {
+                return None;
+            }
+            (binary.lhs.unparenthesized(), Test::NotInstance(binary.rhs))
+        }
+        _ => return None,
+    };
+
+    property_place(read).map(|_| (read, test))
+}
+
+/// Whether `statement` always leaves the code after it: a `return`, a `throw`, a `break` or a `continue`, or a block
+/// that ends in one.
+fn leaves(statement: &Statement<'_>) -> bool {
+    match statement {
+        Statement::Return(_) | Statement::Break(_) | Statement::Continue(_) => true,
+        Statement::Expression(expression) => matches!(expression.expression, Expression::Throw(_)),
+        Statement::Block(block) => block.statements.last().is_some_and(leaves),
+        _ => false,
+    }
+}
+
+/// The parts `condition` joins with `&&`, each of which holds when the code it guards runs.
+fn conjuncts<'ast, 'arena>(condition: &'ast Expression<'arena>) -> Vec<&'ast Expression<'arena>> {
+    let joined = |expression: &Expression<'_>| matches!(expression, Expression::Binary(binary) if matches!(binary.operator, BinaryOperator::And(_)));
+    match condition {
+        Expression::Binary(binary) if joined(condition) => {
+            let mut parts = conjuncts(binary.lhs);
+            parts.extend(conjuncts(binary.rhs));
+            parts
+        }
+        Expression::Parenthesized(parenthesized) if joined(parenthesized.expression) => {
+            conjuncts(parenthesized.expression)
+        }
+        _ => vec![condition],
+    }
+}
+
+/// Walks the code that runs after a condition tests the property `object->property` and while the test holds, and
+/// finds each read of the property there, and whether code may change the property between the test and a read: a
+/// call or a write of the property or of `object` before the read, a loop that reads it and runs either, or a lambda
+/// that reads it, which runs later. A write after the last read changes nothing the binding gives.
+pub(super) struct GuardedReads<'ast, 'arena> {
+    object: &'arena [u8],
+    property: &'arena [u8],
+    reads: Vec<&'ast Expression<'arena>>,
+    /// Each place a write names the property at, which writes the property itself and never the binding.
+    writes: Vec<Span>,
+    /// Whether the walk is past a call or a write that may change the property.
+    after_change: bool,
+    /// Whether each loop around the walk reads the property and whether it may change it, innermost last.
+    loops: Vec<(bool, bool)>,
+    lambdas: usize,
+    changed: bool,
+}
+
+impl<'ast, 'arena> GuardedReads<'ast, 'arena> {
+    fn new(object: &'arena [u8], property: &'arena [u8]) -> Self {
+        Self {
+            object,
+            property,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            after_change: false,
+            loops: Vec::new(),
+            lambdas: 0,
+            changed: false,
+        }
+    }
+
+    /// The reads of the property that read its value, past the places that write it.
+    fn values(&self) -> impl Iterator<Item = &'ast Expression<'arena>> {
+        self.reads.iter().copied().filter(|read| !self.writes.contains(&read.span()))
+    }
+
+    /// Notes that `place` is written, which may change the property where it is the property, `object`, an element of
+    /// either, or a destructuring.
+    fn written(&mut self, place: &Expression<'_>) {
+        let mut base = place;
+        loop {
+            base = match base {
+                Expression::ArrayAccess(access) => access.array,
+                Expression::ArrayAppend(append) => append.array,
+                _ => break,
+            };
+        }
+        let rebound = matches!(base, Expression::Variable(Variable::Direct(variable)) if variable.name == self.object);
+        let property = property_place(base) == Some((self.object, self.property));
+        if property {
+            self.writes.push(base.span());
+        }
+        if rebound || property || super::locals::destructured(base).is_some() {
+            self.may_change();
+        }
+    }
+
+    fn may_change(&mut self) {
+        self.after_change = true;
+        if let Some(innermost) = self.loops.last_mut() {
+            innermost.1 = true;
+        }
+    }
+
+    fn left_loop(&mut self) {
+        let Some((read, changes)) = self.loops.pop() else {
+            return;
+        };
+        self.changed |= read && changes;
+        if let Some(outer) = self.loops.last_mut() {
+            outer.0 |= read;
+            outer.1 |= changes;
+        }
+    }
+}
+
+impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for GuardedReads<'ast, 'arena> {
+    fn walk_in_expression(&mut self, expression: &'ast Expression<'arena>, _: &mut ()) {
+        if property_place(expression) != Some((self.object, self.property)) {
+            return;
+        }
+        self.changed |= self.after_change || self.lambdas > 0;
+        if let Some(innermost) = self.loops.last_mut() {
+            innermost.0 = true;
+        }
+        self.reads.push(expression);
+    }
+
+    // A write happens after PHP reads the value it writes, so a read in that value reads what the test read.
+    fn walk_out_assignment(&mut self, assignment: &'ast Assignment<'arena>, _: &mut ()) {
+        self.written(assignment.lhs);
+    }
+
+    fn walk_out_unary_prefix(&mut self, unary: &'ast UnaryPrefix<'arena>, _: &mut ()) {
+        if matches!(unary.operator, UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_)) {
+            self.written(unary.operand);
+        }
+    }
+
+    fn walk_out_unary_postfix(&mut self, unary: &'ast UnaryPostfix<'arena>, _: &mut ()) {
+        self.written(unary.operand);
+    }
+
+    fn walk_out_unset(&mut self, unset: &'ast Unset<'arena>, _: &mut ()) {
+        for value in unset.values.iter() {
+            self.written(value);
+        }
+    }
+
+    fn walk_in_foreach_target(&mut self, target: &'ast ForeachTarget<'arena>, _: &mut ()) {
+        match target {
+            ForeachTarget::Value(target) => self.written(target.value),
+            ForeachTarget::KeyValue(target) => {
+                self.written(target.key);
+                self.written(target.value);
+            }
+        }
+    }
+
+    fn walk_in_try_catch_clause(&mut self, clause: &'ast TryCatchClause<'arena>, _: &mut ()) {
+        if clause.variable.as_ref().is_some_and(|variable| variable.name == self.object) {
+            self.may_change();
+        }
+    }
+
+    fn walk_out_call(&mut self, _: &'ast Call<'arena>, _: &mut ()) {
+        self.may_change();
+    }
+
+    fn walk_out_instantiation(&mut self, _: &'ast Instantiation<'arena>, _: &mut ()) {
+        self.may_change();
+    }
+
+    fn walk_out_clone(&mut self, _: &'ast Clone<'arena>, _: &mut ()) {
+        self.may_change();
+    }
+
+    fn walk_out_yield(&mut self, _: &'ast Yield<'arena>, _: &mut ()) {
+        self.may_change();
+    }
+
+    fn walk_out_construct(&mut self, construct: &'ast Construct<'arena>, _: &mut ()) {
+        if !matches!(construct, Construct::Isset(_) | Construct::Empty(_)) {
+            self.may_change();
+        }
+    }
+
+    fn walk_in_closure(&mut self, _: &'ast Closure<'arena>, _: &mut ()) {
+        self.lambdas += 1;
+    }
+
+    fn walk_out_closure(&mut self, _: &'ast Closure<'arena>, _: &mut ()) {
+        self.lambdas -= 1;
+    }
+
+    fn walk_in_arrow_function(&mut self, _: &'ast ArrowFunction<'arena>, _: &mut ()) {
+        self.lambdas += 1;
+    }
+
+    fn walk_out_arrow_function(&mut self, _: &'ast ArrowFunction<'arena>, _: &mut ()) {
+        self.lambdas -= 1;
+    }
+
+    fn walk_in_foreach(&mut self, _: &'ast Foreach<'arena>, _: &mut ()) {
+        self.loops.push((false, false));
+    }
+
+    fn walk_out_foreach(&mut self, _: &'ast Foreach<'arena>, _: &mut ()) {
+        self.left_loop();
+    }
+
+    fn walk_in_for(&mut self, _: &'ast For<'arena>, _: &mut ()) {
+        self.loops.push((false, false));
+    }
+
+    fn walk_out_for(&mut self, _: &'ast For<'arena>, _: &mut ()) {
+        self.left_loop();
+    }
+
+    fn walk_in_while(&mut self, _: &'ast While<'arena>, _: &mut ()) {
+        self.loops.push((false, false));
+    }
+
+    fn walk_out_while(&mut self, _: &'ast While<'arena>, _: &mut ()) {
+        self.left_loop();
+    }
+
+    fn walk_in_do_while(&mut self, _: &'ast DoWhile<'arena>, _: &mut ()) {
+        self.loops.push((false, false));
+    }
+
+    fn walk_out_do_while(&mut self, _: &'ast DoWhile<'arena>, _: &mut ()) {
+        self.left_loop();
+    }
+}
+
+/// Whether a test of `expression` may read it again and find the type it tested: a variable. A property never narrows,
+/// because each read may give another value (spec section 21), so a test of one reads it once, and the code a test
+/// guards reads the value the test binds, as [`Converter::guarded`] writes it.
+fn rereads(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::Parenthesized(parenthesized) => rereads(parenthesized.expression),
+        Expression::Variable(Variable::Direct(_)) => true,
+        _ => false,
+    }
+}
+
+/// The walk of `statements`, the code a condition guards, for [`Converter::guarded`].
+pub(super) fn walk_guarded<'ast, 'arena>(
+    statements: &'ast [Statement<'arena>],
+) -> impl Fn(&mut GuardedReads<'ast, 'arena>) {
+    move |reads| statements.iter().for_each(|statement| reads.walk_statement(statement, &mut ()))
+}
+
 /// Why a condition of `shown`, a scalar no native declaration types, has no PHP# form.
 pub(super) fn unproven_scalar(shown: &str) -> String {
     format!(
@@ -111,6 +447,9 @@ impl Converter<'_, '_> {
     /// A condition, which PHP# takes only as a `bool` (spec section 21). `top` says it stands alone, as an `if`'s does,
     /// so a comparison of several parts needs no parentheses.
     pub(super) fn condition(&mut self, condition: &Expression<'_>, top: bool) {
+        if self.binding(condition) {
+            return;
+        }
         // A `bool` condition compiles to a test of the value itself, which reads PHP's truthiness of whatever the value
         // holds at runtime, as `1` where only PHPDoc says `bool`, so it needs no proof of the type.
         if self.is(condition, &[Kind::Bool]) {
@@ -119,6 +458,187 @@ impl Converter<'_, '_> {
         if let Some(test) = self.truthiness(condition, false, top) {
             self.edits.replace(condition.span(), test);
         }
+    }
+
+    /// Converts what `convert` converts, a condition and the code it guards, which reads a property the condition
+    /// tests by the name the test binds it to, where the analysis narrows the read past the property's declared type
+    /// and nothing changes the property between the test and the read, which `walk` walks. PHP# never narrows a
+    /// property, since each read may give another value (spec section 21), and a binding holds the value it tested:
+    /// `if ($this->pages) { return $this->pages; }` is `if (this.pages is int pages && pages != 0) { return pages; }`.
+    pub(super) fn guarded<'ast, 'arena>(
+        &mut self,
+        condition: &'ast Expression<'arena>,
+        walk: impl Fn(&mut GuardedReads<'ast, 'arena>),
+        convert: impl FnOnce(&mut Self),
+    ) {
+        let bound = self.bind_tested(condition, walk);
+        convert(self);
+        if bound && let Some(locals) = self.locals() {
+            locals.bound.pop();
+        }
+    }
+
+    /// Binds the first property a part of `condition` tests to hold a value, by truthiness, `!== null` or `instanceof`,
+    /// for the rest of the condition and the code `walk` walks, as [`Converter::bind`] does, and gives whether it did.
+    fn bind_tested<'ast, 'arena>(
+        &mut self,
+        condition: &'ast Expression<'arena>,
+        walk: impl Fn(&mut GuardedReads<'ast, 'arena>),
+    ) -> bool {
+        let parts = conjuncts(condition);
+        parts.iter().enumerate().any(|(at, part)| {
+            tested_property(part).is_some_and(|(_, test)| !test.holds_unbound())
+                && self.bind(part, part.span().end.offset, |reads| {
+                    for later in &parts[at + 1..] {
+                        reads.walk_expression(later, &mut ());
+                    }
+                    walk(reads);
+                })
+        })
+    }
+
+    /// Binds the property `statement` tests to hold no value, by `=== null` or `!… instanceof`, for `rest`, the
+    /// statements after it, where `statement` is an `if` with no `else` whose body always leaves, as [`Converter::bind`]
+    /// does, and gives whether it did. `if ($this->logger === null) { return; }` is `if (this.logger is not Logger
+    /// logger) { return; }`, as the standard library writes it, and the statements after it read `logger`.
+    pub(super) fn bind_left<'ast, 'arena>(
+        &mut self,
+        statement: &'ast Statement<'arena>,
+        rest: &'ast [Statement<'arena>],
+    ) -> bool {
+        let Statement::If(r#if) = statement else {
+            return false;
+        };
+        let IfBody::Statement(body) = &r#if.body else {
+            return false;
+        };
+        body.else_if_clauses.is_empty()
+            && body.else_clause.is_none()
+            && leaves(body.statement)
+            && tested_property(r#if.condition).is_some_and(|(_, test)| test.holds_unbound())
+            && self.bind(r#if.condition, statement.span().end.offset, walk_guarded(rest))
+    }
+
+    /// Binds the property `test` tests where the code `walk` walks reads it, from the offset `from` on, at a type the
+    /// analysis narrows past the property's declared type, and nothing may change the property before the read, which
+    /// [`GuardedReads`] decides. Gives whether it did. An accessor's own storage, `field`, narrows, and a property a
+    /// binding around holds already reads that binding.
+    fn bind<'ast, 'arena>(
+        &mut self,
+        test: &'ast Expression<'arena>,
+        from: u32,
+        walk: impl FnOnce(&mut GuardedReads<'ast, 'arena>),
+    ) -> bool {
+        let Some((object, property)) = tested_property(test).and_then(|(read, _)| property_place(read)) else {
+            return false;
+        };
+        let storage = self.method.as_ref().and_then(|method| method.storage.as_deref());
+        let held = tested_property(test).is_some_and(|(read, _)| self.bound_name(read).is_some());
+        if (object == b"$this" && storage == Some(property)) || held {
+            return false;
+        }
+        let mut reads = GuardedReads::new(object, property);
+        walk(&mut reads);
+        if reads.changed || !reads.values().any(|read| self.narrowed_read(read).is_some()) {
+            return false;
+        }
+        let name = self.binding_name(property);
+        let Some(locals) = self.locals() else {
+            return false;
+        };
+        let (object, property, test, kept) = (object.to_vec(), property.to_vec(), test.span(), reads.writes);
+        locals.bound.push(Bound { object, property, name, test, from, kept });
+
+        true
+    }
+
+    /// The name a binding of `property` takes: the property's own name in camel case, `pages`, or the first of
+    /// `pages2`, `pages3` and on where the method has a variable or a parameter of that name, a local it renames takes
+    /// it, or a binding around holds it. Each of them takes one name, so one of the first that many numbers and one is
+    /// free.
+    fn binding_name(&self, property: &[u8]) -> String {
+        let camel = String::from_utf8_lossy(&mago_casing::to_camel_case(property)).into_owned();
+        let own = if camel.is_empty() { "value".to_owned() } else { camel };
+        let bound = self.method.iter().flat_map(|method| &method.locals.bound);
+        let taken = |candidate: &str| {
+            self.variables.iter().any(|variable| variable.strip_prefix(b"$") == Some(candidate.as_bytes()))
+                || self.renamed.iter().any(|(_, renamed)| renamed == candidate)
+                || bound.clone().any(|bound| bound.name == candidate)
+        };
+        let names = self.variables.len() + self.renamed.len() + bound.clone().count();
+        let name = (1..=names + 1)
+            .map(|n| if n == 1 { own.clone() } else { format!("{own}{n}") })
+            .find(|candidate| !taken(candidate))
+            .unwrap_or_default();
+
+        if is_sharp_keyword(name.as_bytes()) { format!("@{name}") } else { name }
+    }
+
+    /// The name a condition binds the property `expression` reads to, where `expression` reads it in the code the
+    /// binding covers, and writes no value to it.
+    pub(super) fn bound_name(&self, expression: &Expression<'_>) -> Option<String> {
+        let (object, property) = property_place(expression)?;
+        let span = expression.span();
+        self.method.as_ref()?.locals.bound.iter().rev().find_map(|bound| {
+            (bound.object == object
+                && bound.property == property
+                && span.start.offset >= bound.from
+                && !bound.kept.contains(&span))
+            .then(|| bound.name.clone())
+        })
+    }
+
+    /// Writes `condition` as the binding of the property it tests, where [`Converter::bind`] binds it, and gives
+    /// whether it did: `this.pages is int pages && pages != 0` for PHP's truthiness, `this.owner is Page owner` for
+    /// `!== null` and `instanceof`, and `this.owner is not Page owner` for `=== null` and `!… instanceof`.
+    fn binding(&mut self, condition: &Expression<'_>) -> bool {
+        let Some(name) = self.method.as_ref().and_then(|method| {
+            method.locals.bound.last().filter(|bound| bound.test == condition.span()).map(|bound| bound.name.clone())
+        }) else {
+            return false;
+        };
+        let Some((read, test)) = tested_property(condition) else {
+            return false;
+        };
+        let Some(union) = self.type_of(read) else {
+            self.refuse(read.span(), "the analysis gives this condition no type");
+            return true;
+        };
+        let held = TUnion::from_vec(union.get_non_nullable_types());
+        let is = if test.holds_unbound() { "is not" } else { "is" };
+        let (pattern, then) = match test {
+            Test::Instance(class) | Test::NotInstance(class) => {
+                self.expression(class, None);
+                (self.render(class), String::new())
+            }
+            Test::Truthy | Test::NotNull | Test::Null => {
+                let truthy = matches!(test, Test::Truthy);
+                if truthy && is_scalar(union) && !self.proven(read) {
+                    return true;
+                }
+                let written = match type_text(&held, self.input.codebase, &mut self.imports) {
+                    Ok(written) => written,
+                    Err(reason) => {
+                        self.refuse(read.span(), reason);
+                        return true;
+                    }
+                };
+                let then = if !truthy || always_truthy(&held) {
+                    String::new()
+                } else {
+                    let Some((then, _)) = self.test_of(&held, read.span(), |_| name.clone(), true, false, true) else {
+                        return true;
+                    };
+                    format!(" && {then}")
+                };
+                (written, then)
+            }
+        };
+        self.expression(read, None);
+        let read = self.render(read);
+        self.edits.replace(condition.span(), format!("{read} {is} {pattern} {name}{then}"));
+
+        true
     }
 
     /// The condition of an `else if`, which refuses an assignment of a local: PHP runs it only when the conditions
@@ -206,15 +726,15 @@ impl Converter<'_, '_> {
 
     /// The `bool` test of PHP's truthiness of `expression`, or of its falsiness when `negated`, which is what `!` and
     /// `empty` read (spec section 21). A test of several parts reads the value more than once, so it is written only
-    /// for a value [`Converter::rereads`] gives again, and in parentheses unless `top`. Refuses the type where PHP# has
+    /// for a value [`rereads`] gives again, and in parentheses unless `top`. Refuses the type where PHP# has
     /// no such test.
     pub(super) fn truthiness(&mut self, expression: &Expression<'_>, negated: bool, top: bool) -> Option<String> {
         self.tested(expression, negated, top).map(|(test, _)| test)
     }
 
     /// PHP's `$value ?: $other` as `test ? value : other`, where `test` is the truthiness of `value`, which reads it
-    /// again, so `value` is one [`Converter::rereads`] gives again (spec section 21). Any other value is read once, by
-    /// [`Converter::elvis_once`].
+    /// again, so `value` is a variable, or a value that is never null that [`Converter::gives_again`] gives again at
+    /// the type the test read (spec section 21). Any other value is read once, by [`Converter::elvis_once`].
     pub(super) fn elvis(&mut self, expression: &Expression<'_>, value: &Expression<'_>, other: &Expression<'_>) {
         // PHP gives a value it always reads as true, and never reads `other`.
         if self.type_of(value).is_some_and(always_truthy) {
@@ -222,7 +742,9 @@ impl Converter<'_, '_> {
             let value = self.render(value);
             return self.edits.replace(expression.span(), value);
         }
-        if !self.rereads(value) {
+        let never_null = self.type_of(value).is_some_and(|union| !union.can_be_null());
+        let reads_again = rereads(value) || (never_null && self.gives_again(value));
+        if !reads_again {
             return self.elvis_once(expression, value, other);
         }
         // A `bool` tests itself, as a condition of it does.
@@ -288,13 +810,13 @@ impl Converter<'_, '_> {
         );
     }
 
-    /// Whether reading `expression` a second time gives what the first read gave: a variable, or a property of one that
-    /// is never null, which every class it may be declares with no `get` hook, and no class it may be declares `__get`
-    /// for. PHP runs no code between the two reads of one test, so nothing changes the value between them.
-    pub(super) fn rereads(&self, expression: &Expression<'_>) -> bool {
+    /// Whether reading `expression` a second time gives the value and the type the first read gave: a variable, or a
+    /// property the analysis reads at its declared type, of one that is never null, which every class it may be
+    /// declares with no `get` hook, and no class it may be declares `__get` for. PHP runs no code between two reads of
+    /// one computation, so nothing changes the value between them.
+    pub(super) fn gives_again(&self, expression: &Expression<'_>) -> bool {
         match expression {
-            Expression::Parenthesized(parenthesized) => self.rereads(parenthesized.expression),
-            Expression::Variable(Variable::Direct(_)) => true,
+            Expression::Parenthesized(parenthesized) => self.gives_again(parenthesized.expression),
             Expression::Access(Access::Property(access)) => {
                 let ClassLikeMemberSelector::Identifier(name) = &access.property else {
                     return false;
@@ -311,14 +833,15 @@ impl Converter<'_, '_> {
                             .chain(descendants.iter().map(|descendant| descendant.as_bytes()))
                             .all(|class| codebase.get_declaring_method(class, b"__get").is_none())
                 };
-                self.rereads(access.object)
+                self.gives_again(access.object)
+                    && self.narrowed_read(expression).is_none()
                     && self.type_of(access.object).is_some_and(|union| {
                         union.types.iter().all(|atomic| {
                             matches!(atomic, TAtomic::Object(TObject::Named(named)) if plain(named.name.as_bytes()))
                         })
                     })
             }
-            _ => false,
+            expression => rereads(expression),
         }
     }
 
@@ -337,8 +860,7 @@ impl Converter<'_, '_> {
             let rendered = this.render(expression);
             if is_primary(expression) { rendered } else { format!("({rendered})") }
         };
-        let rereads = self.rereads(expression);
-        self.test_of(union, expression.span(), rendered, rereads, negated, top)
+        self.test_of(union, expression.span(), rendered, rereads(expression), negated, top)
     }
 
     /// The test of PHP's truthiness of a value of type `union`, at `span`, whose PHP# text `rendered` gives once the

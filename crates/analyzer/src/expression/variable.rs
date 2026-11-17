@@ -5,6 +5,7 @@ use std::rc::Rc;
 use mago_word::word;
 
 use mago_bytes::BytesDisplay;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_null;
 use mago_codex::ttype::union::TUnion;
@@ -258,7 +259,8 @@ where
 
                 context.collector.report_with_code(IssueCode::UndefinedVariable, issue.with_help(help_message));
 
-                Rc::new(get_mixed())
+                // A PHP# read the error refused, as `this` in a static method, reports nothing again.
+                Rc::new(if context.dialect.is_sharp() { TUnion::from_atomic(TAtomic::Error) } else { get_mixed() })
             }
         }
     };

@@ -1,0 +1,28 @@
+namespace App;
+
+// A property never narrows, since each read may give another value (spec section 21). An `if` that always leaves
+// where a property holds no value binds it with `is not`, and the statements after it read the name.
+public final class Job
+{
+    public Job(private Logger? logger = null, private Job? next = null)
+    {
+    }
+
+    internal string log(string message)
+    {
+        if (this.logger is not Logger logger) {
+            return '';
+        }
+
+        return logger.info(message);
+    }
+
+    internal Job after()
+    {
+        if (this.next is not Job next) {
+            throw new LogicException('no job after this one');
+        }
+
+        return next;
+    }
+}

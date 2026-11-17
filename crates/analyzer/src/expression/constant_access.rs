@@ -67,7 +67,7 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
                 if resulting_type.get_id() != declared_type.get_id() {
                     let explained =
                         explain_unnarrowed_read(context, variable_id, lambda, &resulting_type, &declared_type);
-                    context.lambda_assigned_reads.insert(self.span(), explained);
+                    context.unnarrowed_reads.insert(self.span(), explained);
                 }
                 resulting_type = declared_type.into();
             }

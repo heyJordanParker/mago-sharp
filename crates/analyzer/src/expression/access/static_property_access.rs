@@ -16,6 +16,8 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::access::explain_unnarrowed_property;
+use crate::expression::access::reads_declared_type;
 use crate::expression::is_refused_type;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::record_statics_type_arguments;
@@ -67,7 +69,10 @@ where
         })
         .flatten();
 
+    // A read that takes its declared type is resolved again.
+    let reads_declared_type = reads_declared_type(context, block_context, access.class, access.name.direct_name());
     if context.settings.memoize_properties
+        && !reads_declared_type
         && let Some(property_access_id) = &property_access_id
         && let Some(existing_type) = block_context.locals.get(property_access_id).cloned()
     {
@@ -128,6 +133,9 @@ where
         }
     }));
     if let Some(property_access_id) = property_access_id {
+        if reads_declared_type {
+            explain_unnarrowed_property(context, block_context, property_access_id, access.span, &resulting_type);
+        }
         block_context.locals.insert(property_access_id, Rc::clone(&resulting_type));
     }
 

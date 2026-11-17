@@ -25,6 +25,8 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::access::explain_unnarrowed_property;
+use crate::expression::access::reads_declared_type;
 use crate::expression::access::refuse_static_through_class_value;
 use crate::expression::call::analyze_extension_access;
 use crate::expression::call::method_call::with_receiver_type;
@@ -102,9 +104,16 @@ where
         context.resolved_names,
         Some(context.codebase),
     );
+    let name = match property_selector {
+        ClassLikeMemberSelector::Identifier(name) => Some(concat_word!("$", name.value)),
+        _ => None,
+    };
+    let reads_declared_type = reads_declared_type(context, block_context, object, name);
 
-    // A read the code takes as a function may be a method's value, spec section 14.3, so it is resolved again.
+    // A read the code takes as a function may be a method's value, spec section 14.3, so it is resolved again, as is a
+    // read that takes its declared type.
     if context.settings.memoize_properties
+        && !reads_declared_type
         && !artifacts.get_expected_type(&span).is_some_and(|expected| expected.to_non_nullable().is_callable())
         && let Some(property_access_id) = &property_access_id
         && let Some(existing_type) = block_context.locals.get(property_access_id).cloned()
@@ -206,6 +215,7 @@ where
     }
 
     let narrowed_from_non_nullsafe = if is_null_safe
+        && !reads_declared_type
         && let Some(object_type) = artifacts.get_rc_expression_type(object)
         && !object_type.can_be_null()
         && !object_type.possibly_undefined()
@@ -241,9 +251,14 @@ where
         return Ok(());
     }
 
-    let refused_object = artifacts.get_expression_type(object).filter(|object_type| is_refused_type(object_type));
+    let refused_object =
+        artifacts.get_expression_type(object).filter(|object_type| is_refused_type(object_type)).cloned();
+    // A read through a refused `this`, as in a static method, still names its class's property.
+    if refused_object.is_some() {
+        add_memoized_property_reference(context, block_context, artifacts, object, property_selector)?;
+    }
     // A PHP# read the resolution refused reported itself, so what it gives reports nothing again.
-    let mut resulting_type = refused_object.cloned().or(resulting_expression_type).unwrap_or_else(|| {
+    let mut resulting_type = refused_object.or(resulting_expression_type).unwrap_or_else(|| {
         if context.dialect.is_sharp() && resolution_result.has_error_path {
             TUnion::from_atomic(TAtomic::Error)
         } else {
@@ -276,6 +291,9 @@ where
 
     let resulting_type = Rc::new(resulting_type);
     if let Some(property_access_id) = property_access_id {
+        if reads_declared_type {
+            explain_unnarrowed_property(context, block_context, property_access_id, span, &resulting_type);
+        }
         block_context.locals.insert(property_access_id, Rc::clone(&resulting_type));
     }
 
@@ -284,9 +302,9 @@ where
     Ok(())
 }
 
-/// Adds symbol reference for a memoized property access.
+/// Adds symbol reference for a memoized property access, or one through a refused receiver.
 ///
-/// When property access is memoized, we still need to track the symbol reference
+/// When property access is memoized or its receiver refused, we still need to track the symbol reference
 /// so that unused property detection works correctly.
 fn add_memoized_property_reference<'ctx, 'ast, 'arena, A>(
     context: &Context<'ctx, 'arena, A>,

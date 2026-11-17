@@ -543,6 +543,25 @@ fn a_class_in_a_test_folder_needs_no_use() {
     );
 }
 
+/// Spec sections 5 and 23: an `[Export]` method declares a global function plain PHP calls by its name, which the
+/// checker never sees, so a class whose only members are `[Export]` methods is used, as a class with a listener is. The
+/// same class without the mark is refused.
+#[test]
+fn a_class_with_an_exported_method_is_used() {
+    let export = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Interop/Export.sharp",
+        include_str!("../../../../composer/library/Sharp/Interop/Export.sharp"),
+    );
+    let exported = "namespace App.Hooks;\n\nimport Sharp.Interop.Export;\n\npublic static class Overrides\n{\n    [Export(\"app_title\")]\n    public static string title(string text) => text;\n}\n";
+    let unmarked = "namespace App.Hooks;\n\npublic static class Overrides\n{\n    public static string title(string text) => text;\n}\n";
+
+    assert_eq!(unused_classes(&[export, ("src/App/Hooks/Overrides.sharp", exported)]), Vec::<String>::new());
+    assert_eq!(
+        unused_classes(&[export, ("src/App/Hooks/Overrides.sharp", unmarked)]),
+        ["src/App/Hooks/Overrides.sharp 3:21 Nothing uses `Overrides`, so it never runs."]
+    );
+}
+
 /// Spec section 5: a `public` member of a project's class that nothing outside its namespace and the namespaces below
 /// it uses is too wide. A use from the namespace or from the class itself is no outside use, and a use from code
 /// outside any class is, since its namespace is unknown. A member that implements an interface keeps the
@@ -1401,7 +1420,8 @@ fn null_safe_access_skips_the_rest_of_its_chain_through_an_index() {
 
 /// Spec section 14.4: a null receiver skips the rest of its chain, the arguments and indexes after its `?.` and the
 /// value a write through it stores included, so they read the receiver as not null, as C# does, and a `?.` on it there
-/// is redundant. A call in them that may change `this.current` ends that for it. After the chain the receiver may be
+/// is redundant. A property receiver, as `this.current` or `step.spare`, is read again there, and a property never
+/// narrows, spec section 21, so the rest of its chain reads it at its declared type. After the chain the receiver may be
 /// null again, whatever the skipped part tested or wrote. Plain PHP keeps mago's own reading.
 #[test]
 fn a_null_safe_receiver_is_not_null_in_the_rest_of_its_chain() {
@@ -1425,7 +1445,10 @@ fn a_null_safe_receiver_is_not_null_in_the_rest_of_its_chain() {
             ]
         ),
         [
+            "16:51 possible-method-access-on-null",
+            "17:56 possible-method-access-on-null",
             "18:65 possible-method-access-on-null",
+            "19:65 possible-method-access-on-null",
             "21:46 non-documented-method",
             "26:16 invalid-class-string-expression",
             "26:28 invalid-class-string-expression",
@@ -1446,6 +1469,8 @@ fn a_null_safe_receiver_is_not_null_in_the_rest_of_its_chain() {
             "86:16 possibly-null-property-access",
             "86:16 nullable-return-statement",
             "86:16 invalid-return-statement",
+            "91:29 possibly-null-property-access",
+            "91:29 possibly-null-argument",
             "92:16 possibly-null-property-access",
             "92:16 nullable-return-statement",
             "92:16 invalid-return-statement",
@@ -5165,9 +5190,9 @@ fn bitwise_not_of_an_int_is_an_int_in_both_dialects() {
     assert_eq!(messages(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
 }
 
-/// Spec section 21 narrows no property, because it could change between the test and the use, so `order.total` stays
-/// `Any?` after `is int`. The error says so and names the fix, a name bound by the test. PHP narrows the property, and
-/// its error on an untested `mixed` operand keeps its wording.
+/// Spec section 21 narrows no property, because each read may give another value, so `order.total` stays `Any?` after
+/// `is int`. The error names the fix, a name bound by the test. PHP narrows the property, and its error on an untested
+/// `mixed` operand keeps its wording.
 #[test]
 fn an_operand_read_from_a_tested_property_says_properties_are_not_narrowed() {
     let sharp = "namespace Demo;\n\npublic class Order\n{\n    public Any? total { get; set; }\n\n    public Order(Any? total)\n    {\n        this.total = total;\n    }\n\n    public static int next(Order order)\n    {\n        if (order.total is int) {\n            return order.total + 1;\n        }\n        if (order.total is int t) {\n            return t + 1;\n        }\n        return 0;\n    }\n}\n";
@@ -5175,7 +5200,7 @@ fn an_operand_read_from_a_tested_property_says_properties_are_not_narrowed() {
     assert_eq!(
         refusals(("src/Demo/Order.sharp", sharp), &[]),
         [
-            "15:20 mixed-operand `order.total` is `Any?` here: a property is not narrowed, because it could change between the test and the use. | Copy the value into a local first: test it with a name, as in `if (order.total is int t)`, and use `t`.",
+            "15:20 mixed-operand Left operand in binary operation has type `Any?`. | Bind the tested value, as `order.total is int total`.",
             "15:20 mixed-return-statement Could not infer a precise return type for method `Order.next`. Saw type `Any?`. | Add specific type hints to variables, parameters, or properties involved in calculating the return value. Consider adding a specific return type declaration to the method signature to catch potential mismatches earlier.",
         ]
     );
@@ -11891,8 +11916,8 @@ fn a_static_constructor_writes_its_class_s_get_only_statics() {
 }
 
 /// Decision 3: a static property takes a computed body, accessor bodies and observers, as an instance property does.
-/// Its `field` is its static storage, and its accessors have no `this`, as a static method has none. A static computed
-/// property is get-only.
+/// Its `field` is its static storage, and its accessors have no `this`, as a static method has none, so a read through
+/// `this` is refused once, and what it reads reports nothing again. A static computed property is get-only.
 #[test]
 fn a_static_property_runs_its_accessors_as_an_instance_property_does() {
     let sharp = "namespace Demo;\n\nimport Lib.Words;\n\nclass Counter\n{\n    private static int hits = 0;\n    public static int doubled => Counter.hits * 2;\n    public static int total { get => field; set { field = value; Counter.hits = Counter.hits + 1; } } = 0;\n    public static string label { get; set; didSet => Counter.hits = Words.length(field); } = \"\";\n    public static int wrong => this.doubled;\n    public static int typed => \"x\";\n\n    public static int alsoWrong()\n    {\n        return this.doubled;\n    }\n\n    public static void bump()\n    {\n        Counter.total = Counter.total + 1;\n        Counter.total += 2;\n        Counter.total++;\n        Counter.label = \"a\";\n        Counter.doubled = 3;\n    }\n}\n";
@@ -11901,12 +11926,8 @@ fn a_static_property_runs_its_accessors_as_an_instance_property_does() {
         issues(("src/Demo/Counter.sharp", sharp), &[WORDS]),
         [
             "11:32 undefined-variable",
-            "11:37 mixed-property-access",
-            "11:32 mixed-return-statement",
             "12:32 invalid-return-statement",
             "16:16 undefined-variable",
-            "16:21 mixed-property-access",
-            "16:16 mixed-return-statement",
             "25:17 invalid-property-write",
         ]
     );
@@ -11963,7 +11984,7 @@ fn an_init_property_is_set_only_on_this_while_the_object_is_created() {
         ),
         (
             "src/Demo/Peer.sharp",
-            "namespace Demo;\n\nclass Peer\n{\n    public Peer? link { get; init; }\n    public string name\n    {\n        get;\n        init\n        {\n            field = value;\n            if (this.link != null) {\n                this.link.name = value;\n            }\n        }\n    } = \"\";\n\n    public Peer(string name, Peer? link)\n    {\n        this.link = link;\n        this.name = name;\n    }\n}\n",
+            "namespace Demo;\n\nclass Peer\n{\n    public Peer? link { get; init; }\n    public string name\n    {\n        get;\n        init\n        {\n            field = value;\n            if (this.link is Peer link) {\n                link.name = value;\n            }\n        }\n    } = \"\";\n\n    public Peer(string name, Peer? link)\n    {\n        this.link = link;\n        this.name = name;\n    }\n}\n",
         ),
     ];
     let help = "Set it on `this` in a constructor or a named constructor.";
@@ -11976,7 +11997,7 @@ fn an_init_property_is_set_only_on_this_while_the_object_is_created() {
             vec![format!("8:16 {refused}")],
             vec![format!("7:15 {refused}")],
             vec![format!("9:14 invalid-property-write `x` is set only while the object is created. | {help}")],
-            vec![format!("13:27 invalid-property-write `name` is set only while the object is created. | {help}")],
+            vec![format!("13:22 invalid-property-write `name` is set only while the object is created. | {help}")],
         ]
     );
 
@@ -12471,16 +12492,105 @@ fn an_indexer_types_its_reads_and_writes_and_one_without_set_is_read_only() {
     );
 }
 
-/// Spec section 21: a property never narrows, a stored one included, as Kotlin refuses a smart cast on a mutable
-/// property, so its tested value is bound to a name.
+/// Spec section 21: every test that narrows a local or a parameter leaves a property at its declared type, a stored one,
+/// another object's and a static one included, as Kotlin refuses a smart cast on a mutable property, because each read
+/// may give another value. So does an assignment. An error at such a read says so and binds the tested value to a name.
+/// A condition is a `bool`, so truthiness narrows only `true` and `false`, which a second test of the local shows. An
+/// accessor's `field` is its own storage, no property read, so it keeps what its assignment gives it, as a local does.
 #[test]
-fn a_stored_property_never_narrows() {
-    let sharp = (
-        "src/Demo/Tab.sharp",
-        "namespace Demo;\n\npublic class Tab\n{\n    private int? total = null;\n\n    public int next()\n    {\n        if (this.total is int) {\n            return this.total + 1;\n        }\n        if (this.total is int t) {\n            return t + 1;\n        }\n        return 0;\n    }\n}\n",
+fn every_test_narrows_a_local_and_never_a_property() {
+    let sharp = "namespace Demo;\n\npublic class Tab\n{\n    private int? visits = null;\n\n    private bool ready = false;\n\n    private Tab? parent = null;\n\n    private static int? cached = null;\n\n    public int bare(int? local)\n    {\n        if (local is int) {\n            return local;\n        }\n        if (this.visits is int) {\n            return this.visits;\n        }\n        if (this.visits is int visits) {\n            return visits;\n        }\n        return 0;\n    }\n\n    public int notNull(int? local, Tab other)\n    {\n        if (local != null) {\n            return local;\n        }\n        if (other.visits != null) {\n            return other.visits;\n        }\n        return 0;\n    }\n\n    public int earlyExit(int? local)\n    {\n        if (local == null) {\n            return 0;\n        }\n        if (this.visits == null) {\n            return local;\n        }\n        return this.visits;\n    }\n\n    public int negated(int? local)\n    {\n        if (!(local == null)) {\n            return local;\n        }\n        if (!(this.visits == null)) {\n            return this.visits;\n        }\n        return 0;\n    }\n\n    public int truthy(bool flag)\n    {\n        if (flag) {\n            if (flag) {\n                return 1;\n            }\n        }\n        if (this.ready) {\n            if (this.ready) {\n                return 2;\n            }\n        }\n        return 0;\n    }\n\n    public int chained(int? local)\n    {\n        if (local != null && Tab.sum(local, 1) > 0) {\n            return local;\n        }\n        if (this.visits != null && Tab.sum(this.visits, 1) > 0) {\n            return 1;\n        }\n        return 0;\n    }\n\n    public int coalesced(int? start)\n    {\n        let local = start;\n        local ??= 0;\n        this.visits ??= 0;\n        return Tab.sum(local, this.visits);\n    }\n\n    public int matched(int? local)\n    {\n        const kept = match (local) { null => 0, default => Tab.sum(local, 1) };\n        return match (this.visits) { null => kept, default => Tab.sum(this.visits, 1) };\n    }\n\n    public int instance(Tab? local)\n    {\n        if (local is Tab) {\n            return local.bare(null);\n        }\n        if (this.parent is Tab) {\n            return this.parent.bare(null);\n        }\n        return 0;\n    }\n\n    public static int shared(int? local)\n    {\n        if (local != null) {\n            return local;\n        }\n        if (Tab.cached != null) {\n            return Tab.cached;\n        }\n        return 0;\n    }\n\n    public int assigned()\n    {\n        let local = this.visits;\n        local = 1;\n        this.visits = 1;\n        this.ready = true;\n        this.parent = null;\n        Tab.cached = local;\n        return this.visits;\n    }\n\n    public int? count { get { field ??= 0; return Tab.sum(field, 1); } set; } = null;\n\n    public static int sum(int a, int b) => a + b;\n}\n";
+    let analyzed = ("src/Demo/Tab.sharp", sharp);
+
+    // The local's second test of `flag` always holds, and the property's second read of `ready` may not.
+    assert_eq!(
+        issues(analyzed, &[]),
+        [
+            "19:20 nullable-return-statement",
+            "19:20 invalid-return-statement",
+            "33:20 nullable-return-statement",
+            "33:20 invalid-return-statement",
+            "46:16 nullable-return-statement",
+            "46:16 invalid-return-statement",
+            "55:20 nullable-return-statement",
+            "55:20 invalid-return-statement",
+            "63:17 redundant-condition",
+            "80:44 possibly-null-argument",
+            "91:31 possibly-null-argument",
+            "97:71 possibly-null-argument",
+            "106:20 possible-method-access-on-null",
+            "117:20 nullable-return-statement",
+            "117:20 invalid-return-statement",
+            "130:16 nullable-return-statement",
+            "130:16 invalid-return-statement",
+        ]
     );
 
-    assert_eq!(issues(sharp, &[]), ["10:20 possibly-null-operand"]);
+    let explained: Vec<(String, Option<String>)> = analyze(&PLUGIN_REGISTRY, settings(), analyzed, &[])
+        .into_iter()
+        .filter(|issue| issue.level == Level::Error)
+        .map(|issue| (issue.notes.last().cloned().unwrap_or_default(), issue.help))
+        .collect();
+    let never_narrows = |read: &str, declared: &str, bound: &str| {
+        (
+            format!("`{read}` is `{declared}`: a property never narrows, because each read may give another value."),
+            Some(format!("Bind the tested value, as `{read} is {bound}`.")),
+        )
+    };
+    let visits = never_narrows("this.visits", "int?", "int visits");
+    let cached = never_narrows("Tab.cached", "int?", "int cached");
+    assert_eq!(
+        explained,
+        [
+            visits.clone(),
+            visits.clone(),
+            never_narrows("other.visits", "int?", "int visits"),
+            never_narrows("other.visits", "int?", "int visits"),
+            visits.clone(),
+            visits.clone(),
+            visits.clone(),
+            visits.clone(),
+            visits.clone(),
+            visits.clone(),
+            visits.clone(),
+            never_narrows("this.parent", "Tab?", "Tab parent"),
+            cached.clone(),
+            cached,
+            visits.clone(),
+            visits,
+        ]
+    );
+}
+
+/// Spec section 21's `property-narrowing` example compiles as its comments say: the read of `order.total` after `is int`
+/// is `Any?`, a compile error, and the value `is int t` binds compiles.
+#[test]
+fn the_property_narrowing_example_compiles_as_its_comments_say() {
+    let tab =
+        ("src/App/Tab.php", "<?php\n\nnamespace App;\n\nfinal class Tab\n{\n    public mixed $total = null;\n}\n");
+    let example = "namespace App;\n\npublic class ExampleRun\n{\n    private void save() { }\n\n    public void run()\n    {\n        Tab order = new Tab();\n        if (order.total is int) { let next = order.total + 1; }\n        if (order.total is int t) { this.save(); let next = t + 1; }\n    }\n}\n";
+
+    assert_eq!(
+        compile_errors(("src/App/ExampleRun.sharp", example), &[tab]),
+        ["Left operand in binary operation has type `Any?`."]
+    );
+}
+
+/// Spec section 14.4's `null-safe-property-receiver` example compiles as its comments say: the rest of the chain reads
+/// the property receiver `this.current` again, at its declared `Step?`, a compile error, and a local it is read into
+/// once is not null there.
+#[test]
+fn the_null_safe_property_receiver_example_compiles_as_its_comments_say() {
+    let step = (
+        "src/App/Step.sharp",
+        "namespace App;\n\npublic class Step\n{\n    public string label() => \"step\";\n    public string route(string label) => label;\n}\n",
+    );
+    let example = "namespace App;\n\npublic class ExampleRun\n{\n    private Step? current = null;\n\n    public void run()\n    {\n        string? again = this.current?.route(this.current.label());\n        Step? step = this.current;\n        string? routed = step?.route(step.label());\n    }\n}\n";
+
+    assert_eq!(
+        compile_errors(("src/App/ExampleRun.sharp", example), &[step]),
+        ["Attempting to call a method on `null`."]
+    );
 }
 
 /// A `||` narrows its branch to the union of what each operand proves, so after `code == 0 || code == (limit + 1)` the
@@ -14214,7 +14324,7 @@ fn a_method_one_collection_of_a_union_lacks_is_refused_once_naming_it() {
 
 /// A collection property read through a receiver that may also be a scalar is the collection its class declares, beside
 /// the refused read on the scalar: `basket.items.add(1)` on an `int|Basket` whose `items` is a `Set<string>` is refused
-/// for its element, and `basket.items.get(0)` names the `Set` that has no `get`.
+/// for its element, and `basket.items.get(0)` names the `Set` that has no `get`. Each read is refused on the scalar.
 #[test]
 fn a_collection_property_read_through_a_union_with_a_scalar_is_the_declared_collection() {
     let basket = (
@@ -14229,6 +14339,7 @@ fn a_collection_property_read_through_a_union_with_a_scalar_is_the_declared_coll
             "7:16 invalid-property-access Attempting to access a property on a non-object type (`int`). | Cannot access property here | This expression has type `int`",
             "7:9 possible-method-access-on-null Attempting to call a method on `null`. | This expression can be `null` | Use the nullsafe operator (`?.`) if `null` is an expected value.",
             "7:26 invalid-argument Invalid argument type for argument #1 of `Set<string>.add`: expected `string`, but found `int`. | This has type `int` | Arguments to this method are incorrect | The provided type `int` is not compatible with the expected type `string`. | Change the argument value to match `string`, or update the parameter's type declaration.",
+            "8:16 invalid-property-access Attempting to access a property on a non-object type (`int`). | Cannot access property here | This expression has type `int`",
             "8:9 possible-method-access-on-null Attempting to call a method on `null`. | This expression can be `null` | Use the nullsafe operator (`?.`) if `null` is an expected value.",
             "8:22 non-existent-method Method `get` does not exist on `Set<string>`. | This method selection is invalid | This expression has type `Set<string>` | A `Set<string>` has the methods `add`, `any`, `clear`, `contains`, `count`, `filter`, `first`, `firstOrNull`, `intersect`, `isEmpty`, `isNotEmpty`, `isSubsetOf`, `map`, `remove`, `sortedBy`, `subtract`, `sumOf`, `toList`, `union`.",
         ]
@@ -29069,6 +29180,18 @@ fn a_sharp_file_imports_the_html_dom_the_standard_library_names() {
     assert_eq!(issues(legacy, &[]), ["3:8 non-existent-use-import"]);
 }
 
+/// Decision 83: a `.sharp` file reads and writes XML through `Dom.XMLDocument`, which the standard library names beside
+/// `Dom.HTMLDocument`, and an element gives its markup as `innerHTML` and `outerHTML`.
+#[test]
+fn a_sharp_file_imports_the_xml_dom_the_standard_library_names() {
+    let feed = (
+        "app/Feeds/Feed.sharp",
+        "namespace App.Feeds;\n\nimport Dom.Element;\nimport Dom.XMLDocument;\n\npublic class Feed\n{\n    public static string retitled(string xml, string title)\n    {\n        const feed = XMLDocument.createFromString(xml);\n        if (feed.documentElement is Element root) {\n            root.setAttribute(\"title\", title);\n            root.append(feed.createCDATASection(\"<b>new</b>\"));\n        }\n        return feed.saveXml() is string written ? written : \"\";\n    }\n\n    public static string? markup(string xml) => XMLDocument.createFromString(xml).querySelector(\"entry\")?.outerHTML;\n\n    public static string? content(string xml) => XMLDocument.createFromString(xml).querySelector(\"entry\")?.innerHTML;\n}\n",
+    );
+
+    assert_eq!(issues(feed, &[]), Vec::<String>::new());
+}
+
 /// Spec section 23: a bare name of a standard exception class names PHP's own with no import, as `Sharp`'s names do. A
 /// class of the file's namespace, or one it imports, wins over it, so `kind()`, which only those declare, resolves.
 #[test]
@@ -31882,12 +32005,12 @@ fn a_plain_php_property_typed_by_a_template_keeps_an_unchecked_default() {
 #[test]
 fn an_untyped_plain_php_property_without_a_default_arrives_nullable() {
     let php = "<?php\n\nnamespace Lib;\n\nclass Source\n{\n}\n\nclass Store\n{\n    /** @var Source */\n    protected $source;\n\n    /** @var Source */\n    public static $shared;\n\n    protected Source $typed;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Source;\nimport Lib.Store;\n\npublic class Cache : Store\n{\n    public Source loaded()\n    {\n        if (this.source == null) {\n            this.source = new Source();\n        }\n        return this.source;\n    }\n\n    public bool unset() => this.typed == null;\n\n    public bool unshared() => Store.shared == null;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Source;\nimport Lib.Store;\n\npublic class Cache : Store\n{\n    public Source loaded()\n    {\n        if (this.source is Source source) {\n            return source;\n        }\n        const created = new Source();\n        this.source = created;\n        return created;\n    }\n\n    public bool missing() => this.source == null;\n\n    public bool unset() => this.typed == null;\n\n    public bool unshared() => Store.shared == null;\n}\n";
 
     assert_eq!(
         explained(("src/Demo/Cache.sharp", sharp), &[("src/Lib/Store.php", php)]),
         [
-            "16:28 redundant-comparison Redundant `==` comparison: left-hand side is never equal to right-hand side. Consider simplifying or removing this comparison as it always evaluates to `false`."
+            "20:28 redundant-comparison Redundant `==` comparison: left-hand side is never equal to right-hand side. Consider simplifying or removing this comparison as it always evaluates to `false`."
         ]
     );
 }

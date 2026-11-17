@@ -1619,6 +1619,9 @@ namespace Dom {
 
         public string $innerHTML;
 
+        #[Mago\AvailableSince(80500)]
+        public string $outerHTML;
+
         public string $substitutedNodeValue;
 
         /** @return list<NamespaceInfo> */

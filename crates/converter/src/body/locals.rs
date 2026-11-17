@@ -70,6 +70,25 @@ pub(crate) struct Locals {
     written_parameters: Vec<Vec<u8>>,
     /// Each `static` local, which PHP# keeps in a private static field of the class (spec section 6).
     statics: Vec<StaticLocal>,
+    /// Each property a condition around the code tests and binds, as `this.pages is int pages`, innermost last.
+    pub(super) bound: Vec<Bound>,
+}
+
+/// A property `$object->property` a condition tests and binds to `name`, which the code the binding covers reads where
+/// PHP reads the property again (spec section 21).
+#[derive(Debug)]
+pub(super) struct Bound {
+    /// The variable the property is read through, by its PHP name, as `$this`.
+    pub(super) object: Vec<u8>,
+    pub(super) property: Vec<u8>,
+    pub(super) name: String,
+    /// The part of the condition that tests the property, which becomes the binding.
+    pub(super) test: Span,
+    /// The offset the code the binding covers starts at: the end of the test, or the end of an `if` that leaves where
+    /// the property holds no value.
+    pub(super) from: u32,
+    /// Each place in that code that writes the property, which stays the property.
+    pub(super) kept: Vec<Span>,
 }
 
 /// A `static` local of the method, which keeps its value from one call to the next in a private static field.
@@ -632,6 +651,7 @@ impl Converter<'_, '_> {
     /// camel case spec section 24 gives a local, as `$line_total` is `lineTotal`. Code outside the method never reaches
     /// one by its name, since the converter refuses `compact`, `extract` and a variable named by a variable, so the
     /// new name keeps PHP's meaning where no other variable or parameter of the method, its lambdas' included, has it.
+    /// Keeps every such variable and parameter, which a name the conversion adds must be none of.
     pub(crate) fn rename_locals(&mut self, parameters: &[Vec<u8>], walk: impl FnOnce(&mut Names)) {
         let mut names = Names::default();
         walk(&mut names);
@@ -654,6 +674,7 @@ impl Converter<'_, '_> {
             .filter(|(_, camel)| candidates.iter().filter(|(_, other)| other == camel).count() == 1)
             .cloned()
             .collect();
+        self.variables = names.variables.into_iter().chain(parameters.into_iter().map(<[u8]>::to_vec)).collect();
     }
 
     /// Refuses the local or `catch` variable `variable` when its name breaks the camel case spec section 24 gives a

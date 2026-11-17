@@ -8,7 +8,8 @@ final class Note
 {
     private ?int $pages = null;
 
-    // `?:` and the truthiness of a property, whose PHP# tests read it again: `0` and `null` are falsy, as in PHP.
+    // `?:` and the truthiness of a property, which PHP# binds where the body reads it again: `0` and `null` are falsy,
+    // as in PHP.
     public function headed(?int $pages): string
     {
         $this->pages = $pages;

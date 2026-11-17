@@ -33,6 +33,7 @@ use mago_syntax::cst::WhileBody;
 use mago_syntax::walker::MutWalker;
 
 use super::Kind;
+use super::conditions::walk_guarded;
 use super::is_primary;
 use crate::Converter;
 use crate::Loop;
@@ -335,17 +336,25 @@ impl Converter<'_, '_> {
         );
     }
 
+    /// `while`, whose condition binds a property it tests that its body reads, as [`Converter::guarded`] does. PHP
+    /// tests the condition again before each pass, which binds the property again.
     pub(super) fn while_loop(&mut self, statement: &Statement<'_>, r#while: &While<'_>) {
-        self.condition(r#while.condition, true);
-        match &r#while.body {
-            WhileBody::Statement(body) => self.braced(body),
-            WhileBody::ColonDelimited(body) => self.colon_body(
-                statement.span(),
-                body.colon,
-                body.statements.as_slice(),
-                body.end_while.span.join(body.terminator.span()),
-            ),
-        }
+        let body = match &r#while.body {
+            WhileBody::Statement(body) => std::slice::from_ref(*body),
+            WhileBody::ColonDelimited(body) => body.statements.as_slice(),
+        };
+        self.guarded(r#while.condition, walk_guarded(body), |this| {
+            this.condition(r#while.condition, true);
+            match &r#while.body {
+                WhileBody::Statement(body) => this.braced(body),
+                WhileBody::ColonDelimited(body) => this.colon_body(
+                    statement.span(),
+                    body.colon,
+                    body.statements.as_slice(),
+                    body.end_while.span.join(body.terminator.span()),
+                ),
+            }
+        });
     }
 
     pub(super) fn do_while(&mut self, r#do: &DoWhile<'_>) {

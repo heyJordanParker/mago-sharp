@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace App;
 
 // PHP's truthiness of a value that may be null is a test of several parts, and so is `?:`, which tests a value and
-// gives it. Each reads the value again, which gives what PHP's one read gives for a variable, and for a property its
-// class declares with no `get` hook and no `__get` (spec section 21).
+// gives it. Each reads a variable again. A property never narrows, since each read may give another value, so an `if`
+// binds a property it tests that its body reads, and `?:` reads one once, through `match` (spec section 21).
 final class Customer
 {
     private ?int $visits = null;

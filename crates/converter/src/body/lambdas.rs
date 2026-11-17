@@ -221,12 +221,14 @@ impl Converter<'_, '_> {
         true
     }
 
-    /// `name`, or `name2`, `name3` and on, the first that names no variable of the file and none of `chosen`. The
-    /// file names fewer variables than it has bytes, so one of the first that many numbers is free.
+    /// `name`, or `name2`, `name3` and on, the first that names no variable of the file, none of `chosen` and no
+    /// property a condition around binds. The file names fewer variables and bindings than it has bytes, so one of the
+    /// first that many numbers is free.
     pub(super) fn unused_name(&self, name: &str, chosen: &[String]) -> String {
         let taken = |candidate: &str| {
             let variable = format!("${candidate}");
             chosen.iter().any(|chosen| chosen == candidate)
+                || self.method.iter().flat_map(|method| &method.locals.bound).any(|bound| bound.name == candidate)
                 || self.source.windows(variable.len()).enumerate().any(|(at, window)| {
                     window == variable.as_bytes()
                         && self

@@ -27,7 +27,6 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
-use mago_syntax::cst::Access;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
@@ -723,9 +722,7 @@ where
     true
 }
 
-/// Reports the `side` operand of `mixed` type, which a PHP# file names `Any` or `Any?`. In a PHP# file, a property read
-/// is named with the rule that keeps it `Any?`: spec section 21 narrows a local or a parameter after `is`, never a
-/// property.
+/// Reports the `side` operand of `mixed` type, which a PHP# file names `Any` or `Any?`.
 fn report_mixed_operand<A>(
     context: &mut Context<'_, '_, A>,
     operand: &Expression<'_>,
@@ -734,28 +731,6 @@ fn report_mixed_operand<A>(
 ) where
     A: Arena,
 {
-    if context.dialect.is_sharp()
-        && matches!(operand.unparenthesized(), Expression::Access(Access::Property(_) | Access::NullSafeProperty(_)))
-    {
-        let written =
-            String::from_utf8_lossy(&context.source_file.contents[operand.span().to_range_usize()]).into_owned();
-
-        context.collector.report_with_code(
-            IssueCode::MixedOperand,
-            Issue::error(format!(
-                "`{written}` is `{}` here: a property is not narrowed, because it could change between the test and the use.",
-                display_operand(context, operand_type)
-            ))
-            .with_annotation(Annotation::primary(operand.span()).with_message("This property keeps its declared type."))
-            .with_note("PHP# narrows a local or a parameter after `is`, never a property.")
-            .with_help(format!(
-                "Copy the value into a local first: test it with a name, as in `if ({written} is int t)`, and use `t`."
-            )),
-        );
-
-        return;
-    }
-
     let side_name = side.to_ascii_lowercase();
     let (operand_name, note, help) = if context.dialect.is_sharp() {
         (

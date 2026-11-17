@@ -158,6 +158,11 @@ impl<'input> Converter<'input, '_> {
             {
                 self.edits.replace(expression.span(), "field");
             }
+            // A property a condition before the read binds, whose name holds the value the condition tested (spec
+            // section 21).
+            Access::Property(_) if let Some(name) = self.bound_name(expression) => {
+                self.edits.replace(expression.span(), name)
+            }
             Access::Property(access) => {
                 self.member_of(access.object, "a property access");
                 self.edits.replace(access.arrow, ".");

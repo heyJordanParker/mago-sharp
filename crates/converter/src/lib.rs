@@ -119,6 +119,7 @@ pub fn convert(input: &Input<'_, '_>) -> Result<Converted, Vec<Refusal>> {
         class: None,
         method: None,
         renamed: Vec::new(),
+        variables: Vec::new(),
         loops: Vec::new(),
     };
     converter.program();
@@ -222,6 +223,9 @@ struct Converter<'input, 'arena> {
     /// Each local and `catch` variable of the method being converted, by its PHP name, with the camel case name PHP#
     /// gives it (spec section 24). Its lambdas share it, since their captures are its variables.
     renamed: Vec<(Vec<u8>, String)>,
+    /// Each variable and parameter of the method being converted, its lambdas' included, by its PHP name, which a name
+    /// the conversion adds must be none of.
+    variables: Vec<Vec<u8>>,
     /// The loops and `switch` statements around the code being converted, the innermost last, which PHP's `break 2`
     /// counts.
     loops: Vec<Loop>,

@@ -671,8 +671,9 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
 /// A use is any reference to the class or a member of it from code outside the class and its own cases, a plain PHP
 /// file's included. Only a PHP# class-like of a project has none to find: a library's users are in the projects that
 /// install it, which the analysis never sees. A module runs no code, PHP# creates each class that declares an `on`
-/// method, and the code that reads a marked attribute of a class or of one of its members reaches the class through
-/// reflection, which no use records, so none of them is refused. A class in one of `test_files`, the files of an
+/// method, plain PHP calls an `[Export]` method by the name of its global function, and the code that reads a marked
+/// attribute of a class or of one of its members reaches the class through reflection, which no use records, so none
+/// of them is refused. A class in one of `test_files`, the files of an
 /// `autoload-dev` folder, runs under its test runner, as PHPUnit creates a test class, so it is never refused either.
 #[must_use]
 pub fn unused_classes(
@@ -724,16 +725,17 @@ pub fn unused_classes(
     issues
 }
 
-/// Whether the engine or a framework reaches `class` through one of its members: PHP# creates a class that declares an
-/// `on` method, spec section 15, and the code that reads a member's marked attribute reaches the member's class.
+/// Whether the engine, plain PHP or a framework reaches `class` through one of its members: PHP# creates a class that
+/// declares an `on` method, spec section 15, plain PHP calls an `[Export]` method through the global function it
+/// declares, spec section 23, and the code that reads a member's marked attribute reaches the member's class.
 fn is_reached_by_its_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLikeMetadata) -> bool {
     class.properties.values().any(|property| is_dynamically_accessed(codebase, &property.attributes))
         || class.constants.values().any(|constant| is_dynamically_accessed(codebase, &constant.attributes))
-        || class
-            .methods
-            .iter()
-            .filter_map(|name| codebase.function_likes.get(&(class_name, *name)))
-            .any(|method| !method.listens.is_empty() || is_dynamically_accessed(codebase, &method.attributes))
+        || class.methods.iter().filter_map(|name| codebase.function_likes.get(&(class_name, *name))).any(|method| {
+            !method.listens.is_empty()
+                || method.has_attribute(codebase, EXPORT.as_bytes())
+                || is_dynamically_accessed(codebase, &method.attributes)
+        })
 }
 
 /// The `public` members `class` declares that [`too_wide_members`] checks, each as its key in `references`, its name
