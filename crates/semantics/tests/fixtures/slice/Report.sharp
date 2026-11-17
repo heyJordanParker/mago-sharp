@@ -109,7 +109,7 @@ public class Report
     {
         calc.rate = 2.0;
         calc.rate += 1;
-        calc.rate++;
+        calc.price.cents++;
         this.count += 1;
         calc.add(1, 2);
         const made = Calc.make();
