@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Mago\Tests\Sdk\Fixtures;
 
 use LogicException;
+use Mago\Sdk\Analyzer\AfterFileAnalysisContext;
+use Mago\Sdk\Analyzer\AfterFileAnalysisHook;
 use Mago\Sdk\Analyzer\CodebaseScanContext;
 use Mago\Sdk\Analyzer\CodebaseScanFile;
 use Mago\Sdk\Analyzer\CodebaseScanHook;
@@ -33,8 +35,15 @@ use Mago\Sdk\Extension;
 use Mago\Sdk\Reporting\Level;
 use Mago\Sdk\Span;
 use Mago\Sdk\Worker;
+use RuntimeException;
 
 use function dirname;
+use function file_put_contents;
+use function getenv;
+use function is_string;
+
+use const FILE_APPEND;
+use const LOCK_EX;
 
 require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
 
@@ -282,9 +291,45 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
     }
 }
 
+/**
+ * Appends the path of each file whose hooks run to the log the test names, so the test sees which files an
+ * incremental analysis checked again.
+ */
+final class AnalyzedFilesPlugin implements AfterFileAnalysisHook, Plugin
+{
+    public function __construct(private readonly string $log) {}
+
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('analyzed-files', 'Analyzed files', 'Logs each file whose hooks run.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerAfterFileAnalysisHook($this);
+    }
+
+    public function getRequirements(): array
+    {
+        return [];
+    }
+
+    public function afterFileAnalysis(AfterFileAnalysisContext $context): void
+    {
+        if (file_put_contents($this->log, $context->analysis->file . "\n", FILE_APPEND | LOCK_EX) === false) {
+            throw new RuntimeException('Unable to append to the analyzed files log.');
+        }
+    }
+}
+
+$log = getenv('MAGO_ANALYZED_FILES_LOG');
+
 (new Worker(new Extension(
     identifier: 'mago/declaration-refinement-proof',
     name: 'Mago declaration refinement proof',
     version: '1.0.0',
-    analyzerPlugins: [new DeclarationRefinementProofPlugin()],
+    analyzerPlugins: [
+        new DeclarationRefinementProofPlugin(),
+        ...(is_string($log) && $log !== '' ? [new AnalyzedFilesPlugin($log)] : []),
+    ],
 )))->run();

@@ -813,7 +813,9 @@ impl SymbolReferences {
     }
 
     /// Calculates sets of invalid symbols and members based on detected code changes (`CodebaseDiff`).
-    /// Propagates invalidation through the [`Self::cascade_edges`] of these references and `codebase`.
+    /// Propagates invalidation through the [`Self::cascade_edges`] of these references and `codebase`. A method of
+    /// `codebase` that takes its return from its body has a signature its body decides, so its body's references
+    /// propagate as its signature's do.
     /// Limits propagation expense to avoid excessive computation on large changes.
     ///
     /// # Arguments
@@ -856,6 +858,10 @@ impl SymbolReferences {
                     references.push((from, to));
                 }
                 CascadeEdge::Body { from, to } | CascadeEdge::Attribute { from, to, signature: false } => {
+                    if codebase.function_likes.get(&from).is_some_and(|method| method.return_from_body.is_some()) {
+                        sig_reverse_index.entry(to).or_default().push(from);
+                    }
+
                     references.push((from, to));
                 }
                 CascadeEdge::File { file, to } => file_references.push((file, to)),

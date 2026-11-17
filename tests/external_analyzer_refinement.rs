@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
@@ -151,10 +152,17 @@ fn factory_database(returned: &str) -> (Database<'static>, FileId) {
     (database, factory_id)
 }
 
-fn registry(repository: &Path) -> Arc<PluginRegistry> {
-    let command = WorkerCommand::new("php")
+fn worker(repository: &Path) -> WorkerCommand {
+    WorkerCommand::new("php")
         .with_argument(repository.join("composer/tests/Sdk/Fixtures/analyzer-refinement-worker.php"))
-        .with_current_directory(repository);
+        .with_current_directory(repository)
+}
+
+fn registry(repository: &Path) -> Arc<PluginRegistry> {
+    registry_of(worker(repository))
+}
+
+fn registry_of(command: WorkerCommand) -> Arc<PluginRegistry> {
     let pool = WorkerPool::spawn(command, NonZeroUsize::new(2).expect("two workers"), WorkerPoolOptions::default())
         .expect("refinement worker pool should start");
     let analyzer = ExternalAnalyzer::initialize([Arc::new(pool)], PHPVersion::PHP85, &[], false)
@@ -256,6 +264,93 @@ fn a_return_taken_from_the_body_reaches_callers_and_follows_body_edits() {
     let (plain, _) = factory_database("plain");
     incremental.update_database(plain.read_only());
     let edited = codes(&incremental.analyze_incremental(Some(&[factory_id])).expect("incremental analysis").issues);
+    let fresh = codes(&service(&plain, registry(repository)).analyze().expect("fresh analysis").issues);
+    assert!(
+        !fresh.values().flatten().any(|message| message.contains("Proof\\Special")),
+        "the edited body no longer applies the narrower class: {fresh:#?}"
+    );
+    assert_eq!(edited, fresh, "incremental analysis after a body edit matches a fresh analysis");
+}
+
+const CHAINED: &str = r"<?php
+
+namespace Proof;
+
+final class Chained
+{
+    public function unwrap(Relay $relay): Other
+    {
+        return $relay->make()->get();
+    }
+}
+";
+
+const BYSTANDER: &str = r"<?php
+
+namespace Proof;
+
+final class Bystander
+{
+    public function open(Box $box): object
+    {
+        return $box->get();
+    }
+}
+";
+
+/// The factory's files, with `Relay`, whose `make` returns the factory's, `Chained`, which reads the relay's, and
+/// `Bystander`, which reads only `Box`.
+fn chain_database(returned: &str) -> (Database<'static>, FileId) {
+    let (mut database, factory_id) = factory_database(returned);
+    for (name, contents) in [
+        ("src/Relay.php", relay("Relay", "Factory")),
+        ("src/Chained.php", CHAINED.to_owned()),
+        ("src/Bystander.php", BYSTANDER.to_owned()),
+    ] {
+        database.add(File::new(
+            Cow::Owned(name.as_bytes().to_vec()),
+            FileType::Host,
+            None,
+            Cow::Owned(contents.into_bytes()),
+        ));
+    }
+
+    (database, factory_id)
+}
+
+/// The files whose hooks ran since the last call, which the worker logged to `log`, then empties `log`.
+fn analyzed(log: &Path) -> BTreeSet<String> {
+    let files =
+        std::fs::read_to_string(log).expect("the analyzed files log is readable").lines().map(str::to_owned).collect();
+    std::fs::write(log, []).expect("the analyzed files log is emptied");
+
+    files
+}
+
+#[test]
+fn a_body_edit_of_a_return_taken_from_the_body_rechecks_its_callers_along_the_chain_alone() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the body return recheck test") {
+        return;
+    }
+
+    let temporary = tempfile::tempdir().expect("a temporary folder");
+    let log = temporary.path().join("analyzed.log");
+    let logging = registry_of(worker(repository).with_environment("MAGO_ANALYZED_FILES_LOG", &log));
+    let (special, factory_id) = chain_database("special");
+    let mut incremental = service(&special, logging);
+    incremental.analyze().expect("body return analysis should succeed");
+    analyzed(&log);
+
+    let (plain, _) = chain_database("plain");
+    incremental.update_database(plain.read_only());
+    let edited = codes(&incremental.analyze_incremental(Some(&[factory_id])).expect("incremental analysis").issues);
+    assert_eq!(
+        analyzed(&log),
+        BTreeSet::from(["src/Chained.php", "src/Consumer.php", "src/Factory.php", "src/Relay.php"].map(String::from)),
+        "the edit rechecks the factory and the callers of its return, directly or through the relay's, and no other file"
+    );
+
     let fresh = codes(&service(&plain, registry(repository)).analyze().expect("fresh analysis").issues);
     assert!(
         !fresh.values().flatten().any(|message| message.contains("Proof\\Special")),

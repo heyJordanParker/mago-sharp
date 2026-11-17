@@ -35,9 +35,10 @@ use mago_word::Word;
 
 use crate::error::OrchestratorError;
 
-/// Installs the returns marked methods take from their bodies, analyzing the host `files`
-/// that declare them against the populated `codebase`, with their names resolved against
-/// `namespace_classes`, `changing_members` and `extern_namespaces`.
+/// Installs the returns the marked methods of the host `files` take from their bodies, analyzing
+/// the files that declare them against the populated `codebase`, with their names resolved
+/// against `namespace_classes`, `changing_members` and `extern_namespaces`. A marked method of
+/// another file keeps the return it holds.
 ///
 /// # Errors
 ///
@@ -53,10 +54,11 @@ pub(crate) fn resolve_body_returns(
     extern_namespaces: &ExternNamespaces,
     session: Option<&ExternalAnalysisSession>,
 ) -> Result<(), OrchestratorError> {
+    let given = files.iter().map(|file| file.id).collect::<HashSet<_>>();
     let marked = codebase
         .function_likes
         .iter()
-        .filter(|(_, method)| method.return_from_body.is_some())
+        .filter(|(_, method)| method.return_from_body.is_some() && given.contains(&method.span.file_id))
         .map(|(key, method)| (*key, method.span.file_id))
         .collect::<Vec<_>>();
 

@@ -44,6 +44,7 @@ use mago_codex::metadata::r#extern::ExternMetadata;
 use mago_codex::metadata::r#extern::ExternNamespaceMetadata;
 use mago_codex::metadata::r#extern::extern_namespace_classes;
 use mago_codex::metadata::module::ModuleMetadata;
+use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::populator::populate_codebase_targeted;
 use mago_codex::reference::SymbolReferences;
@@ -187,6 +188,9 @@ pub struct IncrementalAnalysisService {
     autoloader: Option<Arc<Autoloader>>,
     /// The files the autoloader served the last analysis from scratch, which every later database of the service holds.
     autoloaded: Vec<Arc<File>>,
+    /// The return each method that takes its return from its body declares, as its file's last scan gave it, which an
+    /// analysis replaces with what the body returns.
+    declared_returns: HashMap<(Word, Word), Option<TypeMetadata>>,
     /// The files the last analysis analyzed, which the fanout tests compare with the inputs.
     #[cfg(test)]
     analyzed_files: HashSet<FileId>,
@@ -222,6 +226,7 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("node_analysis_files", &self.node_analysis_files.as_ref().map(HashSet::len))
             .field("autoloader", &self.autoloader.is_some())
             .field("autoloaded", &self.autoloaded.len())
+            .field("declared_returns", &self.declared_returns.len())
             .finish()
     }
 }
@@ -275,6 +280,7 @@ impl IncrementalAnalysisService {
             node_analysis_files: None,
             autoloader: None,
             autoloaded: Vec::new(),
+            declared_returns: HashMap::default(),
             #[cfg(test)]
             analyzed_files: HashSet::default(),
         }
@@ -331,6 +337,39 @@ impl IncrementalAnalysisService {
         self.changing_members = ChangingMembers::default();
         self.extern_namespaces = ExternNamespaces::default();
         self.autoloaded.clear();
+        self.declared_returns.clear();
+    }
+
+    /// Gives each method of the populated `codebase` that takes its return from its body, unless a file of `skipped`
+    /// declares it, the return it declares, which the analysis then replaces with what its body returns, as an
+    /// analysis from scratch does: a file `scanned` gave it just now, and any other file's comes from its last scan.
+    fn declare_body_returns(
+        &mut self,
+        codebase: &mut CodebaseMetadata,
+        scanned: impl Fn(&FileId) -> bool,
+        skipped: &HashSet<FileId>,
+    ) {
+        let marked: HashMap<(Word, Word), FileId> = codebase
+            .function_likes
+            .iter()
+            .filter(|(_, method)| method.return_from_body.is_some())
+            .map(|(key, method)| (*key, method.span.file_id))
+            .collect();
+        self.declared_returns.retain(|key, _| marked.contains_key(key));
+        for (key, file_id) in marked {
+            if skipped.contains(&file_id) {
+                continue;
+            }
+
+            let Some(method) = codebase.function_likes.get_mut(&key) else {
+                continue;
+            };
+            if scanned(&file_id) {
+                self.declared_returns.insert(key, method.return_type_metadata.clone());
+            } else if let Some(declared) = self.declared_returns.get(&key) {
+                method.return_type_metadata.clone_from(declared);
+            }
+        }
     }
 
     /// Updates the database for a new analysis run.
@@ -686,6 +725,7 @@ impl IncrementalAnalysisService {
                 },
             );
         }
+        self.declare_body_returns(&mut merged_codebase, |_| true, &HashSet::default());
 
         let SelectiveAnalysisOutput {
             result: mut analysis_result,
@@ -990,27 +1030,26 @@ impl IncrementalAnalysisService {
                 .map_err(mago_analyzer::error::AnalysisError::from)?;
         }
 
-        // A return taken from a method body changes with that body, and the signature diff cannot
-        // see it, so its callers in unchanged files would keep the old return.
-        let returns_from_bodies = std::iter::once(&self.codebase)
-            .chain(new_file_scans.iter().map(|(_, metadata)| metadata))
-            .any(|metadata| metadata.function_likes.values().any(|method| method.return_from_body.is_some()));
-        if returns_from_bodies {
-            return self.analyze();
-        }
-
         let mut diff = {
             let mut diff = CodebaseDiff::new();
             let mut old_sigs = CodebaseMetadata::new();
             let mut new_sigs = CodebaseMetadata::new();
             // Both sides name each member by the key the last analysis's references hold it under, so a change meets
             // every reference to what changed. A polyfill of a built-in declares nothing, so a change of it changes no
-            // symbol, and the callers of the built-in stay as they are.
-            let keyed = |signature: &FileSignature| {
+            // symbol, and the callers of the built-in stay as they are. A method that takes its return from its body,
+            // as `declared` marks it, has a signature its body decides, so an edit of its body changes its signature.
+            let keyed = |signature: &FileSignature, declared: &CodebaseMetadata| {
                 let mut signature = signature.clone();
                 signature.ast_nodes.retain(|node| !is_kept_built_in(&self.codebase, node));
                 for node in &mut signature.ast_nodes {
                     for member in &mut node.children {
+                        if member.is_function
+                            && declared
+                                .get_method(node.name.as_bytes(), member.name.as_bytes())
+                                .is_some_and(|method| method.return_from_body.is_some())
+                        {
+                            member.signature_hash = member.hash;
+                        }
                         member.name = member_key(&self.codebase, node.name, member);
                     }
                 }
@@ -1020,10 +1059,10 @@ impl IncrementalAnalysisService {
 
             for (file_id, metadata) in &new_file_scans {
                 if let Some(old_sig) = self.codebase.get_file_signature(file_id) {
-                    old_sigs.set_file_signature(*file_id, keyed(old_sig));
+                    old_sigs.set_file_signature(*file_id, keyed(old_sig, &self.codebase));
                 }
                 if let Some(new_sig) = metadata.file_signatures.get(file_id) {
-                    new_sigs.set_file_signature(*file_id, keyed(new_sig));
+                    new_sigs.set_file_signature(*file_id, keyed(new_sig, metadata));
                 }
             }
 
@@ -1031,7 +1070,7 @@ impl IncrementalAnalysisService {
                 if !current_file_ids.contains(&file_id)
                     && let Some(sig) = self.codebase.get_file_signature(&file_id)
                 {
-                    old_sigs.set_file_signature(file_id, keyed(sig));
+                    old_sigs.set_file_signature(file_id, keyed(sig, &self.codebase));
                 }
             }
 
@@ -1232,6 +1271,7 @@ impl IncrementalAnalysisService {
                 HashSet::default(),
                 declared,
             );
+            self.declare_body_returns(&mut merged_codebase, |_| true, &files_to_skip);
             let SelectiveAnalysisOutput {
                 result: mut analysis_result,
                 native_symbol_references,
@@ -1507,6 +1547,8 @@ impl IncrementalAnalysisService {
                 merged_codebase.safe_symbol_members.remove(&key);
             }
         }
+        let scanned: HashSet<FileId> = new_file_scans.iter().map(|(file_id, _)| *file_id).collect();
+        self.declare_body_returns(&mut merged_codebase, |file_id| scanned.contains(file_id), &files_to_skip);
 
         let SelectiveAnalysisOutput {
             result: mut analysis_result,
@@ -1808,7 +1850,11 @@ impl IncrementalAnalysisService {
                 .map_err(mago_analyzer::error::AnalysisError::from)?;
         let node_analysis_requirements =
             plugin_registry.external_node_analysis_requirements().map_err(mago_analyzer::error::AnalysisError::from)?;
-        let declaring_files = self.database.files().filter(|file| file.file_type == FileType::Host).collect::<Vec<_>>();
+        let declaring_files = self
+            .database
+            .files()
+            .filter(|file| file.file_type == FileType::Host && !skip_files.contains(&file.id))
+            .collect::<Vec<_>>();
         resolve_body_returns(
             codebase,
             &declaring_files,
