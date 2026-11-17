@@ -48,6 +48,7 @@ use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
 use mago_database::loader::ExcludedFolders;
+use mago_database::loader::read_listed;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
@@ -375,12 +376,14 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     Ok(changed || deleted > 0)
 }
 
-/// Where the hosts' compile of the project at `root` into `folder` puts the compiled file of `source`, at its real path
-/// relative to `root` with `.sharp` replaced by `.sharpc`, or none when `source` is a link outside `root`.
+/// Where the hosts' compile of the project at `root` into `folder` puts the compiled file of `source`: where
+/// `unit::compiled_path` puts it in the `.sharp` folder, in `folder` instead, or none when `source` is a link outside
+/// `root`.
 fn host_compiled_path(root: &Path, folder: &Path, source: &Path) -> Result<Option<PathBuf>, DatabaseError> {
-    let real = source.canonicalize().map_err(|error| DatabaseError::io(IOAction::ResolvePath, source, error))?;
+    let compiled_folder = root.join(unit::COMPILED_FOLDER);
 
-    Ok(real.strip_prefix(root).ok().map(|relative| folder.join(relative).with_extension("sharpc")))
+    Ok(unit::compiled_path(root, source)?
+        .and_then(|compiled| compiled.strip_prefix(&compiled_folder).ok().map(|relative| folder.join(relative))))
 }
 
 /// The project's database: every file the analyzer loads with the prelude, and each `.sharp` file of a package as a
@@ -430,11 +433,9 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     if !configuration.extension_hosts.values().any(|host| host.enabled)
         && let Some(mut record) = Record::read(&record_path)
         && every_input_is_current(&record, configuration, &root, &sources, &mut filesystems)
+        && let Some(database) = record.outcome.report_database(&root)?
     {
-        let outcome = std::mem::take(&mut record.outcome);
-        let database = outcome.report_database(&root)?;
-
-        return outcome.print(database, configuration, color_choice);
+        return std::mem::take(&mut record.outcome).print(database, configuration, color_choice);
     }
     // A record the compile can't delete is in a folder it then fails to write its compiled files to.
     let _ = std::fs::remove_file(&record_path);
@@ -515,10 +516,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         }
         let path = folder.join(&php);
         let contents = beside(&declared);
-        if !listing.contains(&php)
-            || std::fs::read(&path).map_err(|error| DatabaseError::io(IOAction::ReadFile, &path, error))?
-                != contents.as_bytes()
-        {
+        if !listing.contains(&php) || read_listed(&path)?.as_deref() != Some(contents.as_bytes()) {
             write_by_rename(&path, contents.as_bytes())?;
         }
         if let Some(record) = record.as_mut() {
@@ -773,28 +771,32 @@ impl Outcome {
     }
 
     /// The files the issues point into, for the report of a compile with nothing to do: each file in the project of
-    /// `root`, as the compile read it, which every input being as it was keeps, and each of the prelude's.
+    /// `root`, as the compile read it, which every input being as it was keeps, and each of the prelude's. None when
+    /// [`read_listed`] finds one of the project's gone since the record was checked, which makes the record stale.
     ///
     /// # Errors
     ///
-    /// Returns the error of reading a file.
-    fn report_database(&self, root: &Path) -> Result<ReadDatabase, Error> {
+    /// Returns the error of [`read_listed`].
+    fn report_database(&self, root: &Path) -> Result<Option<ReadDatabase>, Error> {
         let mut database = Database::new(DatabaseConfiguration::new(root, vec![], vec![], vec![], vec![]));
         let mut prelude = None;
         for name in &self.issue_files {
             let path = root.join(name);
-            if path.is_file() {
-                database.add(File::read(root, &path, FileType::Host)?);
+            if let Some(contents) = read_listed(&path)? {
+                let name = name.as_bytes().to_vec().into();
+                database.add(File::new(name, FileType::Host, Some(path), contents.into()));
                 continue;
             }
             let prelude = prelude.get_or_insert_with(|| {
                 Prelude::decode_database(PRELUDE_BYTES).expect("Failed to decode embedded prelude")
             });
-            let file = prelude.get_by_name(name.as_bytes())?;
+            let Ok(file) = prelude.get_by_name(name.as_bytes()) else {
+                return Ok(None);
+            };
             database.add(File::new(file.name.clone(), file.file_type, file.path.clone(), file.contents.clone()));
         }
 
-        Ok(database.read_only())
+        Ok(Some(database.read_only()))
     }
 
     /// Prints the outcome: the checker's report of each issue, with `configuration`'s editor links and in
@@ -1009,13 +1011,9 @@ impl Record {
         for (name, (found, _)) in std::mem::take(&mut self.files) {
             let hash = match database.get_by_name(name.as_bytes()) {
                 Ok(file) => unit::source_hash(&file.contents),
-                Err(_) => match std::fs::read(self.root.join(&name)) {
-                    Ok(bytes) => unit::source_hash(&bytes),
-                    // Gone since the compile found it, and never read.
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => {
-                        return Err(DatabaseError::io(IOAction::ReadFile, &self.root.join(&name), error).into());
-                    }
+                Err(_) => match read_listed(&self.root.join(&name))? {
+                    Some(bytes) => unit::source_hash(&bytes),
+                    None => continue,
                 },
             };
             files.insert(name, (found, hash));
@@ -2118,5 +2116,21 @@ mod tests {
         for (field, change) in unwritten {
             assert_eq!(hash_after(change), configuration_hash(&base), "{field}");
         }
+    }
+
+    /// The report of a compile with nothing to do reads each file its issues point into, so a file gone since the
+    /// record's check, deleted or moved, makes the record stale and the compile runs in full, while a file still there
+    /// is read.
+    #[test]
+    fn a_file_the_reprinted_issues_point_into_that_is_gone_makes_the_record_stale() {
+        let (_directory, root, _) = project();
+        let outcome = |names: &[&str]| Outcome {
+            issue_files: names.iter().map(|name| (*name).to_owned()).collect(),
+            ..Outcome::default()
+        };
+
+        assert!(outcome(&["app/Order.sharp", "app/Gone.sharp"]).report_database(&root).unwrap().is_none());
+        let read = outcome(&["app/Order.sharp"]).report_database(&root).unwrap().expect("app/Order.sharp is there");
+        assert!(read.get_by_name(b"app/Order.sharp").is_ok());
     }
 }

@@ -768,6 +768,78 @@ fn a_compile_with_a_host_enabled_runs_every_time() {
     assert_ne!(compiled_at(root, "app/Order.sharp"), written);
 }
 
+/// An extension host that deletes `app/Gone.sharp` as its analysis starts, once the compile has read the file, as an
+/// editor deletes a file while a compile runs.
+const HOST_DELETING_A_SOURCE: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\BeforeAnalysisContext;
+use Mago\Sdk\Analyzer\BeforeAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class DeletesASource implements Plugin, BeforeAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('deletes-a-source', 'Deletes a source', 'Deletes app/Gone.sharp.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerBeforeAnalysisHook($this);
+    }
+
+    public function beforeAnalysis(BeforeAnalysisContext $context): void
+    {
+        @unlink('app/Gone.sharp');
+    }
+}
+
+(new Worker(new Extension('deleter', 'Deleter', '0.0.0', analyzerPlugins: [new DeletesASource()])))->run();
+"#;
+
+/// A source deleted after the compile read it is a stale input, which fails nothing, and the next compile leaves the
+/// project as a compile of the project without the source does.
+#[test]
+fn a_source_deleted_while_the_compile_runs_fails_nothing_and_the_next_compile_leaves_it_out() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the deleted source compile test") {
+        return;
+    }
+    let with_host = |root: &Path| {
+        write(root, "tools/host.php", HOST_DELETING_A_SOURCE);
+        write(
+            root,
+            "mago.toml",
+            &format!(
+                "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.deleter]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+                repository.join("vendor/autoload.php").display().to_string()
+            ),
+        );
+    };
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    with_host(root);
+    write(root, "app/Gone.sharp", "namespace App;\n\npublic class Gone\n{\n}\n");
+
+    compile_succeeds(root);
+    assert!(!root.join("app/Gone.sharp").exists(), "the host deleted the source");
+    compile_succeeds(root);
+
+    let without = project(ORDER, MONEY);
+    with_host(without.path());
+    compile_succeeds(without.path());
+    assert_eq!(files_under(&root.join(".sharp")), files_under(&without.path().join(".sharp")));
+    assert_eq!(files_under(&root.join("app")), files_under(&without.path().join("app")));
+}
+
 /// The analysis scans the project's files on its worker threads, whose log the hosts' compile doesn't silence, so a
 /// plain PHP file that doesn't parse warns there. Here 64 such files, so the warnings reach the worker threads whichever
 /// thread scans which file. The warnings are the next run's to report, so the hosts' compile keeps its record and has
@@ -993,6 +1065,83 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     assert_eq!(runs[0].1, "first", "{failure}");
     assert_eq!(runs[1].1, "second", "{failure}");
     assert_ne!(runs[0].0, runs[1].0, "{failure}");
+}
+
+/// A batch of changes that holds a deleted file removes it from the watch's tree: `mago analyze --watch`, with a host
+/// whose compile reads the tree, reports the error of the file that used the deleted one and keeps watching, so it
+/// analyzes the next change too.
+#[test]
+fn a_watch_whose_changes_hold_a_deleted_file_reports_its_dependents_and_keeps_watching() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the deleted file watch test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let price =
+        "namespace App;\n\npublic class Price\n{\n    public int cents()\n    {\n        return 100;\n    }\n}\n";
+    write(root, "app/Price.sharp", price);
+    write(
+        root,
+        "app/Cart.sharp",
+        "namespace App;\n\npublic class Cart\n{\n    public int total(Price price)\n    {\n        return price.cents();\n    }\n}\n",
+    );
+    write(root, "tools/host.php", HOST_LOGGING_ITS_PROCESS);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+
+    // The watch's reports and log, outside the watched project, so a failure shows what the watch saw.
+    let reports = tempfile::NamedTempFile::new().unwrap();
+    let watch_log = tempfile::NamedTempFile::new().unwrap();
+    let mut watch = process::spawn(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "analyze", "--watch"])
+            .env("MAGO_LOG", "info")
+            .env("MAGO_REPORTING_FORMAT", "medium")
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root)
+            .stdout(reports.reopen().unwrap())
+            .stderr(watch_log.reopen().unwrap()),
+    )
+    .unwrap();
+    let seen = || {
+        format!(
+            "{}{}",
+            std::fs::read_to_string(reports.path()).unwrap(),
+            std::fs::read_to_string(watch_log.path()).unwrap()
+        )
+    };
+    let analyses = || seen().matches("nalysis complete").count();
+    let within = |done: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !done() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        done()
+    };
+    let missing = "Cannot find type `App.Price`";
+
+    let started = within(&|| analyses() >= 1);
+    std::fs::remove_file(root.join("app/Price.sharp")).unwrap();
+    let reported = within(&|| seen().contains(missing));
+    let running = watch.try_wait().unwrap().is_none();
+    let before = analyses();
+    write(root, "app/Price.sharp", price);
+    let analyzed_again = within(&|| analyses() > before);
+    watch.kill().unwrap();
+    watch.wait().unwrap();
+
+    let failure = seen();
+    assert!(started, "{failure}");
+    assert!(reported, "{failure}");
+    assert!(running, "{failure}");
+    assert!(analyzed_again, "{failure}");
 }
 
 /// A terminal's run compiles an edit into the hosts' folder while a watch waits for a change, so the watch's own check

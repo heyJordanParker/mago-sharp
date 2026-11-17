@@ -456,13 +456,18 @@ fn source_listing(folder: &Path) -> Result<Vec<u8>, DatabaseError> {
 /// Where the compiled file of `source` lives, or none when `source` is a link to a file outside `root`.
 ///
 /// The compiled file sits in the `.sharp` folder at the canonical `root`, at the real path of `source` relative to
-/// `root`, with `.sharp` replaced by `.sharpc`.
+/// `root`, with `.sharp` replaced by `.sharpc`. A source gone since the run read it, as one deleted or moved while the
+/// run analyzed it, has no real path, so its compiled file sits at its own path, a stale input the next run picks up.
 ///
 /// # Errors
 ///
-/// Returns the error of resolving the real path of `source`.
+/// Returns the error of resolving the real path of `source`, other than its absence.
 pub fn compiled_path(root: &Path, source: &Path) -> Result<Option<PathBuf>, DatabaseError> {
-    let real = source.canonicalize().map_err(|error| DatabaseError::io(IOAction::ResolvePath, source, error))?;
+    let real = match source.canonicalize() {
+        Ok(real) => real,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => source.to_path_buf(),
+        Err(error) => return Err(DatabaseError::io(IOAction::ResolvePath, source, error)),
+    };
 
     Ok(real.strip_prefix(root).ok().map(|relative| root.join(COMPILED_FOLDER).join(relative).with_extension("sharpc")))
 }

@@ -16,6 +16,7 @@ use walkdir::WalkDir;
 use crate::Database;
 use crate::DatabaseConfiguration;
 use crate::error::DatabaseError;
+use crate::error::IOAction;
 use crate::exclusion::Exclusion;
 use crate::file::File;
 use crate::file::FileId;
@@ -25,7 +26,7 @@ use crate::matcher::build_glob_set;
 use crate::utils::bytes_to_os_str;
 use crate::utils::bytes_to_path;
 use crate::utils::bytes_to_string_lossy;
-use crate::utils::read_file;
+use crate::utils::file_from;
 
 /// Holds a file along with the specificity of the pattern that matched it.
 ///
@@ -454,13 +455,31 @@ fn workspace_relative_string(path: &Path, workspace: &Path) -> String {
     }
 }
 
-/// Reads the file a walk listed at `path`, or none when it is a companion or is gone by the time it is read, as a file
-/// deleted during the walk is.
+/// Reads the file a walk listed at `path`, or none when it is a companion or [`read_listed`] finds it gone.
 fn read_listed_file(workspace: &Path, path: &Path, file_type: FileType) -> Option<Result<File, DatabaseError>> {
-    match read_file(workspace, path, file_type) {
+    let bytes = match read_listed(path) {
+        Ok(bytes) => bytes?,
+        Err(error) => return Some(Err(error)),
+    };
+
+    match file_from(workspace, path, file_type, bytes) {
         Ok(file) if file.is_companion() => None,
-        Err(DatabaseError::IOError { error, .. }) if error.kind() == std::io::ErrorKind::NotFound => None,
-        result => Some(result),
+        file => Some(file),
+    }
+}
+
+/// The bytes of the file a listing named at `path`, or none when no file is there any more.
+///
+/// A file deleted or moved since the listing is not part of the run's tree, as if the run started after the delete.
+///
+/// # Errors
+///
+/// Returns a [`DatabaseError::IOError`] naming `path` when a file is there that can't be read.
+pub fn read_listed(path: &Path) -> Result<Option<Vec<u8>>, DatabaseError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(DatabaseError::io(IOAction::ReadFile, path, error)),
     }
 }
 
@@ -854,7 +873,6 @@ mod tests {
     use super::*;
     use crate::DatabaseReader;
     use crate::GlobSettings;
-    use crate::error::IOAction;
     use std::borrow::Cow;
     use tempfile::TempDir;
 

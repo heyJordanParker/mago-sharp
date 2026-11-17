@@ -476,6 +476,23 @@ fn compiled_path_is_none_for_a_link_to_a_file_outside_the_root() {
     assert_eq!(compiled_path(&root, &root.join("app/Money.sharp")).unwrap(), None);
 }
 
+/// A source gone since the run read it, as one deleted or moved while the run analyzed it, has its compiled file at its
+/// own path, a stale input the next run picks up, while any other failure to resolve a source's real path is an error.
+#[test]
+fn compiled_path_of_a_source_gone_since_its_read_is_at_its_own_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    write(&root, "app/Money.sharp", SOURCE);
+
+    assert_eq!(compiled_path(&root, &root.join("app/Gone.sharp")).unwrap(), Some(root.join(".sharp/app/Gone.sharpc")));
+    let under_a_file = root.join("app/Money.sharp/Gone.sharp");
+    let Err(DatabaseError::IOError { action: IOAction::ResolvePath, path, .. }) = compiled_path(&root, &under_a_file)
+    else {
+        panic!("a file is no folder to resolve a path in");
+    };
+    assert_eq!(path, under_a_file);
+}
+
 /// A compiled file of [`SOURCE`] whose inputs are the stamps of `names` in `root`, as `mago compile` writes it.
 fn compiled_with_inputs(root: &Path, names: &[&str]) -> Vec<u8> {
     let inputs: Vec<Input> = names

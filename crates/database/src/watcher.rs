@@ -35,7 +35,6 @@ use crate::DatabaseReader;
 use crate::ReadDatabase;
 use crate::error::DatabaseError;
 use crate::exclusion::Exclusion;
-use crate::file::File;
 use crate::file::FileId;
 use crate::file::FileType;
 use crate::loader::DatabaseLoader;
@@ -43,8 +42,10 @@ use crate::loader::ExcludedFolders;
 use crate::loader::Manifests;
 use crate::loader::calculate_pattern_specificity;
 use crate::loader::mark_package;
+use crate::loader::read_listed;
 use crate::loader::resolve_file_type;
 use crate::utils::bytes_to_path;
+use crate::utils::file_from;
 
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1000;
 const WAIT_INTERNAL_MS: u64 = 100;
@@ -450,12 +451,13 @@ impl<'config> DatabaseWatcher<'config> {
     /// This method blocks until file changes are detected, then updates the database
     /// in place and returns the IDs of changed files. When the operating system dropped
     /// events, each watched file that differs from what the database read counts as changed.
+    /// A changed file [`read_listed`] finds gone is removed from the database.
     ///
     /// # Errors
     ///
     /// Returns a [`DatabaseError`] if:
     /// - The watcher is not currently active ([`DatabaseError::WatcherNotActive`])
-    /// - Updating the database with changed files fails
+    /// - A changed file is there but can't be read, or is too large
     #[inline]
     pub fn wait(&mut self) -> Result<Vec<FileId>, DatabaseError> {
         let Some(receiver) = &self.receiver else {
@@ -511,49 +513,32 @@ impl<'config> DatabaseWatcher<'config> {
                 for changed_file in &all_changed {
                     changed_ids.push(changed_file.id);
 
-                    let Ok(file) = self.database.get(&changed_file.id) else {
-                        if changed_file.path.exists() {
-                            let new_file_type = classify_added_file(
-                                &changed_file.path,
+                    let path = &changed_file.path;
+                    let held = self.database.get(&changed_file.id).is_ok();
+                    let read = if held { Self::read_stable_contents(path)? } else { read_listed(path)? };
+                    match (read, held) {
+                        (None, true) => {
+                            self.database.delete(changed_file.id);
+                            tracing::trace!("Deleted file from database: {}", path.display());
+                        }
+                        (None, false) => {}
+                        (Some(contents), true) => {
+                            self.database.update(changed_file.id, Cow::Owned(contents));
+                            tracing::trace!("Updated file in database: {}", path.display());
+                        }
+                        (Some(contents), false) => {
+                            let file_type = classify_added_file(
+                                path,
                                 &self.host_base_paths,
                                 &self.patch_base_paths,
                                 &self.include_base_paths,
                             );
-                            match File::read(&workspace, &changed_file.path, new_file_type) {
-                                Ok(file) if file.is_companion() => {}
-                                Ok(mut file) => {
-                                    mark_package(&mut file, &workspace, &mut manifests);
-                                    self.database.add(file);
-                                    tracing::debug!("Added new file to database: {}", changed_file.path.display());
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to load a new file: {e}");
-                                }
+                            let mut file = file_from(&workspace, path, file_type, contents)?;
+                            if !file.is_companion() {
+                                mark_package(&mut file, &workspace, &mut manifests);
+                                self.database.add(file);
+                                tracing::debug!("Added new file to database: {}", path.display());
                             }
-                        }
-
-                        continue;
-                    };
-
-                    if !changed_file.path.exists() {
-                        self.database.delete(changed_file.id);
-                        tracing::trace!("Deleted file from database: {}", String::from_utf8_lossy(&file.name));
-                        continue;
-                    }
-
-                    match Self::read_stable_contents(&changed_file.path) {
-                        Ok(contents) => {
-                            if self.database.update(changed_file.id, Cow::Owned(contents)) {
-                                tracing::trace!("Updated file in database: {}", String::from_utf8_lossy(&file.name));
-                            } else {
-                                tracing::warn!(
-                                    "Failed to update file in database (ID not found): {}",
-                                    String::from_utf8_lossy(&file.name)
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to read file {}: {}", changed_file.path.display(), e);
                         }
                     }
                 }
@@ -591,26 +576,27 @@ impl<'config> DatabaseWatcher<'config> {
             .collect()
     }
 
-    /// Reads file contents with a stability check to handle partial writes.
+    /// The contents of the changed file at `path` once they stop changing, or none when [`read_listed`] finds it gone.
     ///
-    /// Some IDEs and formatters write files in multiple steps (save, then format).
-    /// This method reads the file, waits briefly, and re-reads to ensure the content
-    /// has stabilized before returning.
-    fn read_stable_contents(path: &Path) -> std::io::Result<Vec<u8>> {
-        let contents = std::fs::read(path)?;
+    /// Some IDEs and formatters write files in multiple steps (save, then format), so this reads the file, waits
+    /// briefly, and reads it again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of [`read_listed`].
+    fn read_stable_contents(path: &Path) -> Result<Option<Vec<u8>>, DatabaseError> {
+        let Some(contents) = read_listed(path)? else {
+            return Ok(None);
+        };
 
         std::thread::sleep(Duration::from_millis(STABILITY_CHECK_MS));
 
-        if path.exists()
-            && let Ok(reread) = std::fs::read(path)
-            && reread != contents
-        {
+        let reread = read_listed(path)?;
+        if reread.as_ref() != Some(&contents) {
             tracing::debug!("File content changed during stability check: {}", path.display());
-
-            return Ok(reread);
         }
 
-        Ok(contents)
+        Ok(reread)
     }
 
     /// Returns a reference to the database.
@@ -1201,9 +1187,12 @@ mod tests {
 
     use notify::WatcherKind;
     use notify::event::CreateKind;
+    use notify::event::DataChange;
     use notify::event::Flag;
 
     use super::*;
+    use crate::error::IOAction;
+    use crate::file::File;
 
     /// A project folder with an `app` and a `vendor` folder, at its real path.
     fn project() -> (tempfile::TempDir, PathBuf) {
@@ -1768,6 +1757,95 @@ mod tests {
 
         assert_eq!(changed, Vec::new());
         assert!(watcher.database().get_by_name(b"stubs/core.php").is_ok(), "the database should hold the stub");
+    }
+
+    /// A watcher that reports an edit of the `changed.php` of each folder it watches, as it starts on the folder.
+    struct EditsChangedPhp(ReportsCookies<{ usize::MAX }>);
+
+    impl NotifyWatcher for EditsChangedPhp {
+        fn new<F>(handler: F, config: Config) -> notify::Result<Self>
+        where
+            F: EventHandler,
+        {
+            ReportsCookies::<{ usize::MAX }>::new(handler, config).map(Self)
+        }
+
+        fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> notify::Result<()> {
+            self.0.watch(path, recursive_mode)?;
+            let edit = EventKind::Modify(ModifyKind::Data(DataChange::Content));
+            self.0.handler.handle_event(Ok(Event::new(edit).add_path(path.join("changed.php"))));
+
+            Ok(())
+        }
+
+        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+            self.0.unwatch(path)
+        }
+
+        fn kind() -> WatcherKind {
+            ReportsCookies::<{ usize::MAX }>::kind()
+        }
+    }
+
+    /// Reads the files of `app` in `root` into a database, runs `change` on the files, then watches `app` with that
+    /// database by an [`EditsChangedPhp`], and returns the watcher and what its first wait gives.
+    fn wait_after_an_edit_of_changed_php(
+        root: &Path,
+        change: impl FnOnce(),
+    ) -> (DatabaseWatcher<'static>, Result<Vec<FileId>, DatabaseError>) {
+        let configuration = DatabaseConfiguration::new(root, vec![b"app"], vec![], vec![], vec![b"php"]).into_static();
+        let database = DatabaseLoader::new(configuration).load().expect("the database should read the files");
+        change();
+
+        let mut watcher = DatabaseWatcher::new(database);
+        watcher
+            .watch_of::<EditsChangedPhp>(WatchOptions::default(), TEST_COOKIE, Duration::from_millis(50))
+            .expect("the watcher should start");
+        let waited = watcher.wait();
+
+        (watcher, waited)
+    }
+
+    /// A changed file the watcher finds gone when it reads it is removed from the database, as one deleted after the
+    /// edit the watcher reported, and the wait goes on.
+    #[test]
+    fn a_changed_file_found_gone_is_removed_from_the_database() {
+        let (_directory, root) = project();
+        write(&root, "app/changed.php", "<?php echo 1;\n");
+        write(&root, "app/other.php", "<?php echo 2;\n");
+
+        let (watcher, waited) = wait_after_an_edit_of_changed_php(&root, || {
+            std::fs::remove_file(root.join("app/changed.php")).expect("app/changed.php should be removed");
+        });
+
+        assert_eq!(waited.expect("the wait should go on"), vec![FileId::new(b"app/changed.php")]);
+        assert!(watcher.database().get_by_name(b"app/changed.php").is_err(), "the database should not hold it");
+        assert!(watcher.database().get_by_name(b"app/other.php").is_ok(), "the database should hold app/other.php");
+    }
+
+    /// A changed file the watcher can't read for any reason other than its absence fails the wait, naming the file.
+    /// Root reads a file of mode 000, so the test has nothing to show there.
+    #[cfg(unix)]
+    #[test]
+    fn a_changed_file_the_watcher_cannot_read_fails_the_wait() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_directory, root) = project();
+        write(&root, "app/changed.php", "<?php echo 1;\n");
+        let file = root.join("app/changed.php");
+        let mode = |mode| std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).expect("set the mode");
+
+        let (_watcher, waited) = wait_after_an_edit_of_changed_php(&root, || mode(0o000));
+        let readable = std::fs::read(&file).is_ok();
+        mode(0o644);
+        if readable {
+            return;
+        }
+
+        let Err(DatabaseError::IOError { action: IOAction::ReadFile, path, .. }) = waited else {
+            panic!("a changed file that can't be read should fail the wait, not give {waited:?}");
+        };
+        assert_eq!(path, file);
     }
 
     /// A poll of the watch reads no folder the loader skips, as one the watch's own `vendor` exclusion names, and no
