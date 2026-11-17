@@ -1486,10 +1486,11 @@ pub fn get_backing_key_type<'key>(
 
 /// Whether every value of `key_type` keys a PHP# `Map` and joins a `Set`.
 ///
-/// Spec section 12 keys a `Map` by anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`
-/// and an enum case, which section 19 gives `==` with no code, a struct, a `List`, `Set` or `Map` of them, and a class
-/// that declares or inherits `operator ==`, which the checker requires `hash()` beside, and a type parameter bounded by
-/// `Equatable` or by one of them. An intersection keys one when any of its members does,
+/// Spec section 12 keys a `Map` by anything with `==` and `hash()`: an `int`, a `float`, a `string`, which a member
+/// name is, spec section 6.3, a `bool`, `null` and an enum case, which section 19 gives `==` with no code, a struct, a
+/// `List`, `Set` or `Map` of them, and a class that declares or inherits `operator ==`, which the checker requires
+/// `hash()` beside, and a type parameter bounded by `Equatable` or by one of them. An intersection keys one when any of
+/// its members does,
 /// since each of its values is a value of every member. A class value keys one too, through the `==` and the hash of
 /// its whole type, type arguments included, as C#, Java and Kotlin key a map by a type.
 #[must_use]
@@ -1534,6 +1535,7 @@ pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
 
             is_key_type(&key_type, codebase) && is_key_type(&value_type, codebase)
         }
+        atomic if atomic.is_member_name() => true,
         _ => false,
     })
 }

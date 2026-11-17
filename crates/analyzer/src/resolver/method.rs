@@ -1836,10 +1836,11 @@ where
     true
 }
 
-/// `string`, `int`, `float` or `bool`, the PHP# type `atomic` is, when it is one of them.
+/// `string`, `int`, `float` or `bool`, the PHP# type `atomic` is, when it is one of them. A member name is a `string`.
 fn scalar_name(atomic: &TAtomic) -> Option<&'static str> {
     Some(match atomic {
         TAtomic::Scalar(TScalar::String(_)) => "string",
+        atomic if atomic.is_member_name() => "string",
         TAtomic::Scalar(TScalar::Integer(_)) => "int",
         TAtomic::Scalar(TScalar::Float(_)) => "float",
         TAtomic::Scalar(TScalar::Bool(_)) => "bool",

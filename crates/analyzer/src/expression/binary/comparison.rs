@@ -835,6 +835,7 @@ fn comparands(union: &TUnion, codebase: &CodebaseMetadata) -> Vec<Comparand> {
             TAtomic::Callable(_) => found.push(Comparand::Instance),
             TAtomic::Array(_) | TAtomic::Iterable(_) => found.push(Comparand::Collection),
             TAtomic::GenericParameter(parameter) => found.extend(comparands(&parameter.constraint, codebase)),
+            atomic if atomic.is_member_name() => found.push(Comparand::String),
             _ => {}
         }
     }

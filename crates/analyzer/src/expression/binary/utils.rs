@@ -771,6 +771,24 @@ pub fn are_definitely_not_identical(
         return false;
     }
 
+    // Spec section 6.3: a member name is a non-empty string `nameof` fixes at compile time, so it may equal any other
+    // non-empty string. The type comparator keeps the two types apart, since a string never fills a `keyof` parameter.
+    if lhs.types.iter().chain(rhs.types.iter()).any(TAtomic::is_member_name) {
+        let as_string = |union: &TUnion| {
+            let name = TAtomic::Scalar(TScalar::unspecified_literal_string(true));
+
+            TUnion::from_vec(
+                union
+                    .types
+                    .iter()
+                    .map(|atomic| if atomic.is_member_name() { name.clone() } else { atomic.clone() })
+                    .collect(),
+            )
+        };
+
+        return are_definitely_not_identical(codebase, &as_string(lhs), &as_string(rhs), allow_type_coercion);
+    }
+
     if !can_expression_types_be_identical(codebase, lhs, rhs, true, allow_type_coercion) {
         return true;
     }

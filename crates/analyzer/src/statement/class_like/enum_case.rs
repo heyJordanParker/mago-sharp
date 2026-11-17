@@ -252,7 +252,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for EnumCaseBackedItem<'arena> {
             return Ok(());
         };
 
-        if (backing_type.is_int() && !value_type.is_int()) || (backing_type.is_string() && !value_type.is_string()) {
+        // Spec section 6.3: a member name goes wherever a string goes.
+        if (backing_type.is_int() && !value_type.is_int())
+            || (backing_type.is_string()
+                && !value_type.types.iter().all(|atomic| atomic.is_string() || atomic.is_member_name()))
+        {
             let backing_union = TUnion::from_atomic(backing_type.clone());
             let backing_type_str = display_type(context, &backing_union);
             let value_type_str = display_value_type(context, &value_type, &backing_union);

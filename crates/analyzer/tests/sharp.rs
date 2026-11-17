@@ -10740,6 +10740,52 @@ fn a_member_name_is_a_keyof_type_that_only_nameof_gives() {
     );
 }
 
+/// Spec section 6.3: a member name goes wherever a string goes, so `nameof(Order.total)` keys a `Map` literal, fills a
+/// `Set`, keys a `groupBy` and is searched for, and `keyof Order` keys a `Map` or a `Set` type, as each `string` does.
+#[test]
+fn a_member_name_keys_a_map_and_fills_a_set_as_a_string_does() {
+    let order = "namespace Shop;\n\npublic class Order\n{\n    public Order(public int total { get; }, public string status { get; }) { }\n}\n";
+    let report = "namespace Shop;\n\npublic class Report\n{\n    public int run(List<Order> orders, Set<keyof Order> picked, Map<keyof Order, int> widths)\n    {\n        Map<string, int> m = [nameof(Order.total): 1];\n        Set<string> s = [nameof(Order.total), nameof(Order.status)];\n        const byName = orders.groupBy(order => nameof(Order.total));\n        bool found = picked.contains(nameof(Order.status)) || s.contains(nameof(Order.total));\n        return m.count() + s.count() + byName.count() + widths.count() + (found ? 1 : 0);\n    }\n}\n";
+
+    assert_eq!(refusals(("src/Shop/Report.sharp", report), &[("src/Shop/Order.sharp", order)]), Vec::<String>::new());
+}
+
+/// Spec section 6.3: a member name goes wherever a string goes, so it backs a `string` enum case, compares with a string
+/// literal, and is refused as a `string` is: by `==` with an `int`, and at a method a `string` lacks.
+#[test]
+fn a_member_name_compares_and_backs_an_enum_case_as_a_string_does() {
+    let order = "namespace Shop;\n\npublic class Order\n{\n    public Order(public int total { get; }, public string status { get; }) { }\n}\n";
+    let column = "namespace Shop;\n\npublic enum Column : string\n{\n    case Total = nameof(Order.total);\n}\n";
+    let report = "namespace Shop;\n\npublic class Report\n{\n    public int run(keyof Order column)\n    {\n        int hits = nameof(Order.total) == 5 ? 1 : 0;\n        if (column == \"total\") { hits += 1; }\n        if (column != \"status\") { hits += 1; }\n        return hits + nameof(Order.total).shout();\n    }\n}\n";
+
+    assert_eq!(
+        refusals(
+            ("src/Shop/Report.sharp", report),
+            &[("src/Shop/Order.sharp", order), ("src/Shop/Column.sharp", column)]
+        ),
+        [
+            "7:20 invalid-operand `==` cannot compare `keyof Order` with `int`. | Convert one side so both sides have the same type.",
+            "10:43 non-existent-method Method `shout` does not exist on `string`. | A `string` has no methods.",
+        ]
+    );
+}
+
+/// Spec section 11.2: a local takes every type a parameter takes, `keyof Order` included, written alone or after
+/// `const`, so it holds a `nameof` and refuses `"total"` as a `keyof Order` parameter does.
+#[test]
+fn a_local_takes_a_keyof_type_as_a_parameter_does() {
+    let order = "namespace Shop;\n\npublic class Order\n{\n    public Order(public int total { get; }, public string status { get; }) { }\n}\n";
+    let report = "namespace Shop;\n\npublic class Report\n{\n    public bool sorts(keyof Order column) => true;\n\n    public bool run()\n    {\n        keyof Order column = nameof(Order.total);\n        const keyof Order status = nameof(Order.status);\n        keyof Order other = \"total\";\n        return this.sorts(column) && this.sorts(status) && this.sorts(other) && this.sorts(\"total\");\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Shop/Report.sharp", report), &[("src/Shop/Order.sharp", order)]),
+        [
+            "11:29 invalid-local-assignment-value Invalid assignment to `other`: it is declared as `keyof Order`. | Assign a `keyof Order` value, or change the type `other` is declared with.",
+            "12:92 invalid-argument Invalid argument type for argument #1 of `Report.sorts`: expected `keyof Order`, but found `string`. | Change the argument value to match `keyof Order`, or update the parameter's type declaration.",
+        ]
+    );
+}
+
 /// Spec section 11.2: a class inherits its parent's members, so a name of `Entity`'s member is a name of `Order`'s, and
 /// a `keyof Entity` passes where a `keyof Order` is expected. A `keyof Order` may name `Order`'s own member, which is
 /// none of `Entity`'s, so it is refused where a `keyof Entity` is expected.

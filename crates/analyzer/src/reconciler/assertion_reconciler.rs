@@ -1109,6 +1109,10 @@ where
             TAtomic::Scalar(TScalar::String(TString { literal: None | Some(TStringLiteral::Unspecified), .. })) => {
                 acceptable_types.push(literal_asserted_type.clone());
             }
+            // Spec section 6.3: a member name may be any string, and stays a member name, which a string is not.
+            atomic if atomic.is_member_name() => {
+                acceptable_types.push(atomic.clone());
+            }
             TAtomic::Scalar(TScalar::String(TString {
                 literal: Some(TStringLiteral::Value(existing_str)), ..
             })) if existing_str.as_bytes() == assertion_str_val => {

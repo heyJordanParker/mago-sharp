@@ -353,6 +353,11 @@ where
                     }
                 }
             }
+            // Spec section 6.3: a member name is a string whose value the type doesn't know.
+            atomic if atomic.is_member_name() => {
+                did_remove_type |= assertion_type.get_literal_string_value().is_some();
+                acceptable_types.push(existing_atomic_type);
+            }
             TAtomic::Scalar(TScalar::ArrayKey) => {
                 if let TAtomic::Scalar(scalar) = assertion_type
                     && (scalar.is_known_literal_string() || scalar.is_literal_int())
