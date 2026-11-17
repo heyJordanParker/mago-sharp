@@ -619,22 +619,6 @@ impl<'config> DatabaseWatcher<'config> {
         &mut self.database
     }
 
-    /// Provides temporary mutable access to the database through a closure.
-    ///
-    /// This method helps Rust's borrow checker understand that the mutable borrow
-    /// of the database is scoped to just the closure execution, allowing the watcher
-    /// to be used again after the closure returns.
-    ///
-    /// The closure is bounded with for<'x> to explicitly show that the database
-    /// reference lifetime is scoped to the closure execution only.
-    #[inline]
-    pub fn with_database_mut<F, R>(&mut self, f: F) -> R
-    where
-        F: for<'borrow> FnOnce(&'borrow mut Database<'config>) -> R,
-    {
-        f(&mut self.database)
-    }
-
     /// Consumes the watcher and returns the database.
     #[inline]
     #[must_use]

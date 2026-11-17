@@ -1067,6 +1067,76 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     assert_ne!(runs[0].0, runs[1].0, "{failure}");
 }
 
+/// A watch reports what the one-shot command reports where an issue points into a vendor file Composer's autoload maps
+/// served, and keeps watching: the report renders each file the analysis read, and the watch's own tree holds only
+/// the files it watches. 0.6.26 stopped the watch after its first analysis with "Files error: file missing".
+#[test]
+fn a_watch_reports_an_issue_that_points_into_a_vendor_file_the_autoload_maps_served() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
+    write(
+        root,
+        "vendor/composer/autoload_psr4.php",
+        "<?php\n\n$vendorDir = dirname(__DIR__);\n\nreturn array(\n    'Acme\\\\Rate\\\\' => array($vendorDir . '/acme/rate/src'),\n);\n",
+    );
+    write(
+        root,
+        "vendor/acme/rate/src/Rate.php",
+        "<?php\n\nnamespace Acme\\Rate;\n\nfinal class Rate\n{\n    private static function of(int $percent): int\n    {\n        return $percent;\n    }\n}\n",
+    );
+    let order = |percent: u8| {
+        format!(
+            "<?php\n\nnamespace App;\n\nuse Acme\\Rate\\Rate;\n\nfunction total(): int\n{{\n    return Rate::of({percent});\n}}\n"
+        )
+    };
+    write(root, "app/Order.php", &order(5));
+    let analyze = |watch: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mago"));
+        command
+            .args(["--no-version-check", "--colors", "never", "analyze", "--reporting-format", "rich"])
+            .args(watch.then_some("--watch"))
+            .env("MAGO_LOG", "info")
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root);
+        command
+    };
+    let once = process::output(&mut analyze(false)).unwrap();
+    let report = String::from_utf8_lossy(&once.stdout).into_owned();
+    assert!(
+        report.contains("vendor/acme/rate/src/Rate.php"),
+        "the issue points into the vendor file: {}",
+        printed(&once)
+    );
+
+    let reports = tempfile::NamedTempFile::new().unwrap();
+    let watch_log = tempfile::NamedTempFile::new().unwrap();
+    let mut watch =
+        process::spawn(analyze(true).stdout(reports.reopen().unwrap()).stderr(watch_log.reopen().unwrap())).unwrap();
+    let seen = || std::fs::read_to_string(watch_log.path()).unwrap();
+    let within = |done: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !done() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        done()
+    };
+    let started = within(&|| seen().contains("Initial analysis complete") || seen().contains("ERROR"));
+    let first = std::fs::read_to_string(reports.path()).unwrap();
+    write(root, "app/Order.php", &order(6));
+    let rechecked = within(&|| seen().contains("Analysis complete.") || seen().contains("ERROR"));
+    let running = watch.try_wait().unwrap().is_none();
+    watch.kill().unwrap();
+    watch.wait().unwrap();
+
+    let failure = format!("{}{}", std::fs::read_to_string(reports.path()).unwrap(), seen());
+    assert!(started && !seen().contains("ERROR"), "{failure}");
+    assert_eq!(first, report, "the watch's first report is the one-shot command's: {failure}");
+    assert!(rechecked && running, "{failure}");
+    let second = std::fs::read_to_string(reports.path()).unwrap().split_off(first.len());
+    assert!(second.contains("Rate::of(6)") && second.contains("vendor/acme/rate/src/Rate.php"), "{failure}");
+}
+
 /// A batch of changes that holds a deleted file removes it from the watch's tree: `mago analyze --watch`, with a host
 /// whose compile reads the tree, reports the error of the file that used the deleted one and keeps watching, so it
 /// analyzes the next change too.

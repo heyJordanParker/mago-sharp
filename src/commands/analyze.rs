@@ -495,9 +495,10 @@ impl AnalyzeCommand {
 
     /// Runs in watch mode, continuously monitoring for file changes and re-analyzing.
     ///
-    /// `watcher` holds the files the analysis reads and reports each change to them, and `restart_receiver` each change
+    /// `watcher` holds the files the watch watches and reports each change to them, and `restart_receiver` each change
     /// to the configuration, baseline and Composer files, for which it returns `WatchOutcome::Restart` so the caller
-    /// can reload configuration and restart.
+    /// can reload configuration and restart. Each report renders from the server's database, which also holds each
+    /// file the autoload maps served, as the one-shot command's does.
     fn run_watch_mode(
         &self,
         orchestrator: Orchestrator<'_>,
@@ -535,7 +536,7 @@ impl AnalyzeCommand {
             self.staged || !self.path.is_empty() || self.stdin_input,
         );
 
-        watcher.with_database_mut(|database| processor.process_issues(&orchestrator, database, issues).map(|_| ()))?;
+        processor.process_issues(&orchestrator, server.database_mut(), issues)?;
 
         tracing::info!("Initial analysis complete. Watching for changes...");
 
@@ -566,8 +567,7 @@ impl AnalyzeCommand {
                 server.database().get_ref(&file_id).ok().map(|f| String::from_utf8_lossy(&f.name).into_owned())
             });
 
-            watcher
-                .with_database_mut(|database| processor.process_issues(&orchestrator, database, issues).map(|_| ()))?;
+            processor.process_issues(&orchestrator, server.database_mut(), issues)?;
 
             tracing::info!("Analysis complete. Watching for changes...");
         }
