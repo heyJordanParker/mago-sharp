@@ -297,7 +297,9 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
  */
 final class AnalyzedFilesPlugin implements AfterFileAnalysisHook, Plugin
 {
-    public function __construct(private readonly string $log) {}
+    public function __construct(
+        private readonly string $log,
+    ) {}
 
     public function getDefinition(): PluginDefinition
     {
