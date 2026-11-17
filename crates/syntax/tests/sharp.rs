@@ -2319,6 +2319,37 @@ fn a_local_can_be_declared_with_a_union_type_written() {
     assert_eq!(types, ["int|string", "Calc|int?|float", "int|bool"]);
 }
 
+/// Spec section 11.2: a local takes every type a parameter takes, so `keyof T` reads as its type, alone, after
+/// `const`, in parentheses, before type arguments, as a `for` counter's and as a `for … of` variable's.
+#[test]
+fn a_local_can_be_declared_with_a_keyof_type_written() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        keyof Order column = nameof(Order.total);\n        const keyof Order status = nameof(Order.status);\n        (keyof Order)? maybe = null;\n        keyof Query<Order> sorted = nameof(Query.order);\n        for (keyof Order step = column; ; ) {\n        }\n        for (const keyof Order each of columns) {\n        }\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let types: Vec<&str> = method_body(program)
+        .iter()
+        .map(|statement| {
+            let local = match statement {
+                Statement::LocalDeclaration(local) => local,
+                Statement::For(r#for) => r#for.declaration.as_ref().expect("a declaration"),
+                Statement::ForOf(ForOf { target: ForOfTarget::Value(each), .. }) => {
+                    return source(CODE, each.hint.expect("a type"));
+                }
+                _ => panic!("expected a local declaration, got {statement:#?}"),
+            };
+
+            source(CODE, local.hint.as_ref().expect("a type"))
+        })
+        .collect();
+
+    assert_eq!(
+        types,
+        ["keyof Order", "keyof Order", "(keyof Order)?", "keyof Query<Order>", "keyof Order", "keyof Order"]
+    );
+}
+
 /// Each element of a tuple type, as written: its type and its name, when it has one.
 fn tuple_type<'a>(code: &'a str, hint: &Hint) -> Vec<(&'a str, Option<&'a str>)> {
     let Hint::Tuple(tuple) = hint else {
