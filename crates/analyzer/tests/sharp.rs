@@ -22107,6 +22107,50 @@ fn a_binding_of_a_plain_php_generic_class_reads_each_type_argument_as_its_bound(
     );
 }
 
+/// Laravel's relations, as `belongsTo()`'s `BelongsTo<TRelatedModel, $this>`, typed by a non-final plain PHP model.
+const RELATIONS: &str = "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    /**\n     * @template TRelated of Model\n     * @param class-string<TRelated> $related\n     * @return BelongsTo<TRelated, $this>\n     */\n    public function belongsTo(string $related): BelongsTo\n    {\n        return new BelongsTo();\n    }\n\n    /**\n     * @template TRelated of Model\n     * @param class-string<TRelated> $related\n     * @return BelongsToMany<TRelated, $this, Pivot>\n     */\n    public function belongsToMany(string $related): BelongsToMany\n    {\n        return new BelongsToMany();\n    }\n}\n\nclass Pivot extends Model\n{\n}\n\n/**\n * @template TRelated of Model\n * @template TDeclaring of Model\n */\nclass BelongsTo\n{\n}\n\n/**\n * @template TRelated of Model\n * @template TDeclaring of Model\n * @template TPivot of Pivot = Pivot\n * @template TAccessor of string = 'pivot'\n */\nclass BelongsToMany\n{\n}\n";
+
+/// A PHP# call on a value of class `C` gives `$this` and `static` as `C` in its result, its type arguments included,
+/// spec section 25, since the value's type is what the caller knows of it. So a relation of a plain PHP model that isn't
+/// `final` is a `BelongsTo<Offer, Offer>`, with a defaulted `TAccessor` or without one. The PHP twin keeps upstream
+/// Mago's `static` and its issues.
+#[test]
+fn a_call_on_a_value_gives_this_as_the_values_class() {
+    let files = [
+        ("src/Lib/Relations.php", RELATIONS),
+        ("src/App/Offer.php", "<?php\n\nnamespace App;\n\nuse Lib\\Model;\n\nclass Offer extends Model\n{\n}\n"),
+    ];
+    let sharp = "namespace App;\n\nimport Lib.BelongsTo;\nimport Lib.BelongsToMany;\n\npublic class Catalog\n{\n    internal static BelongsTo<Offer, Offer> parent(Offer offer) => offer.belongsTo(typeof(Offer));\n\n    internal static BelongsToMany<Offer, Offer> offers(Offer offer) => offer.belongsToMany(typeof(Offer));\n}\n";
+    let php = "<?php\n\nnamespace App;\n\nuse Lib\\BelongsTo;\nuse Lib\\BelongsToMany;\n\nfinal class Catalog\n{\n    /** @return BelongsTo<Offer, Offer> */\n    public static function parent(Offer $offer): BelongsTo\n    {\n        return $offer->belongsTo(Offer::class);\n    }\n\n    /** @return BelongsToMany<Offer, Offer> */\n    public static function offers(Offer $offer): BelongsToMany\n    {\n        return $offer->belongsToMany(Offer::class);\n    }\n}\n";
+
+    assert_eq!(explained(("src/App/Catalog.sharp", sharp), &files), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/App/Catalog.php", php), &files),
+        [
+            "Returned type `Lib\\BelongsTo<App\\Offer, App\\Offer&static>` is less specific than the declared return type `Lib\\BelongsTo<App\\Offer, App\\Offer>` for function `App\\Catalog::parent`.",
+            "Returned type `Lib\\BelongsToMany<App\\Offer, App\\Offer&static, Lib\\Pivot, string('pivot')>` is less specific than the declared return type `Lib\\BelongsToMany<App\\Offer, App\\Offer, Lib\\Pivot, string('pivot')>` for function `App\\Catalog::offers`.",
+        ]
+    );
+}
+
+/// A PHP# type that refuses a value of a plain PHP generic class shows each literal type argument as written on both
+/// sides, as `"pivot"`, and a note names each type argument that differs, with the type each side holds.
+#[test]
+fn a_refused_plain_php_generic_value_shows_its_literal_type_arguments_and_names_the_one_that_differs() {
+    let files = [
+        ("src/Lib/Relations.php", RELATIONS),
+        ("src/App/Offer.php", "<?php\n\nnamespace App;\n\nuse Lib\\Model;\n\nclass Offer extends Model\n{\n}\n"),
+    ];
+    let sharp = "namespace App;\n\nimport Lib.BelongsToMany;\nimport Lib.Pivot;\n\npublic class Catalog\n{\n    internal static BelongsToMany<Offer, Pivot> pivots(Offer offer) => offer.belongsToMany(typeof(Offer));\n}\n";
+
+    assert_eq!(
+        worded(("src/App/Catalog.sharp", sharp), &files),
+        [
+            "8:72 invalid-return-statement Invalid return type for method `Catalog.pivots`: expected `BelongsToMany<Offer, Pivot, Pivot, \"pivot\">`, but found `BelongsToMany<Offer, Offer, Pivot, \"pivot\">`. | This has type `BelongsToMany<Offer, Offer, Pivot, \"pivot\">` | The type `BelongsToMany<Offer, Offer, Pivot, \"pivot\">` returned here is not compatible with the declared return type `BelongsToMany<Offer, Pivot, Pivot, \"pivot\">`. | The type argument `TDeclaring` is `Offer` here, and `Pivot` in `BelongsToMany<Offer, Pivot, Pivot, \"pivot\">`. | Change the return value to match `BelongsToMany<Offer, Pivot, Pivot, \"pivot\">`, or update the method's return type declaration.",
+        ]
+    );
+}
+
 /// A static member of `Counter<Order>` has `Order` for `TItem`, spec section 11: a static property read, a collection
 /// call on it, a write and a static call's argument and result are checked against `Order`, through the class's own
 /// `Counter<TItem>` too, and against `List<Order>` for a nested type argument. A write by index into it is refused as

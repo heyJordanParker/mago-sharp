@@ -590,7 +590,9 @@ where
 /// Returns `union`, the type of a value a message checks against `expected`, the type it must have, as the analyzed
 /// file writes types. In a `.sharp` file a literal is its general type, `string` for `"text"`, as PHP# writes no
 /// literal type, unless `expected` holds literals of its kind: `"up"` stays `"up"` against `"asc"|"desc"`, as the
-/// literal is what fails. In PHP it is its Mago type id.
+/// literal is what fails. An object's literal type argument is shown as written, as `"pivot"` in
+/// `BelongsToMany<Offer, Offer, Pivot, "pivot">`, since `expected` shows its own type arguments so. In PHP it is its
+/// Mago type id.
 #[must_use]
 pub(crate) fn display_value_type<A>(context: &Context<'_, '_, A>, union: &TUnion, expected: &TUnion) -> String
 where
@@ -608,8 +610,9 @@ where
         .types
         .iter()
         .flat_map(|atomic| {
-            let kept = literal_kind(atomic)
-                .is_some_and(|kind| expected.types.iter().any(|wanted| literal_kind(wanted) == Some(kind)));
+            let kept = matches!(atomic, TAtomic::Object(_))
+                || literal_kind(atomic)
+                    .is_some_and(|kind| expected.types.iter().any(|wanted| literal_kind(wanted) == Some(kind)));
             let mut atomic = TUnion::from_atomic(atomic.clone());
             if !kept {
                 atomic.widen_literals();

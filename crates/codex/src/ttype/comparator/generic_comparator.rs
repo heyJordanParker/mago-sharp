@@ -60,7 +60,7 @@ pub(crate) fn is_contained_by(
         };
 
         // When the input has no explicit type parameters, the specialized type
-        // is only the template's upper bound, not an explicit invariant argument.
+        // is the template's default or bound, not an explicit invariant argument.
         if input_type_parameters.is_none() {
             specialized_template_type.set_from_unspecified_template(true);
         }

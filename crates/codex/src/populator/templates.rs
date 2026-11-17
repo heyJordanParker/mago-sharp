@@ -34,12 +34,9 @@ pub fn extend_template_parameters(metadata: &mut ClassLikeMetadata, parent_metad
             }
 
             for (parameter_name, template) in parent_metadata.template_types.iter().skip(supplied_count) {
-                let Some(default) = &template.default else {
-                    break;
-                };
-
-                metadata.add_template_extended_parameter(parent_name, *parameter_name, default.clone());
-                parent_path.insert(*parameter_name, default.clone());
+                let omitted = template.omitted_type_argument();
+                metadata.add_template_extended_parameter(parent_name, *parameter_name, omitted.clone());
+                parent_path.insert(*parameter_name, omitted);
             }
 
             metadata.record_template_extended_path(parent_name, parent_path);
@@ -70,9 +67,9 @@ pub fn extend_template_parameters(metadata: &mut ClassLikeMetadata, parent_metad
         } else {
             let mut parent_path: IndexMap<Word, TUnion, RandomState> = IndexMap::default();
             for (parameter_name, template) in &parent_metadata.template_types {
-                let value = template.default.clone().unwrap_or_else(|| template.constraint.clone());
-                metadata.add_template_extended_parameter(parent_name, *parameter_name, value.clone());
-                parent_path.insert(*parameter_name, value);
+                let omitted = template.omitted_type_argument();
+                metadata.add_template_extended_parameter(parent_name, *parameter_name, omitted.clone());
+                parent_path.insert(*parameter_name, omitted);
             }
 
             metadata.record_template_extended_path(parent_name, parent_path);

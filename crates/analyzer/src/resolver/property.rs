@@ -1799,7 +1799,9 @@ where
 /// the member on `calling_class`, spec section 11. `expand_member` expands the member's declared type with the options
 /// it is given, which bind `Self` to the receiver's class with its own type parameters, as `get_this_type` builds it,
 /// and the intersection parts the receiver carries, or to `self_parameter`, the type parameter a receiver typed by one
-/// is written as, whose bound `receiver` is, and keep a derived type over a type parameter. One replacement then
+/// is written as, whose bound `receiver` is, and keep a derived type over a type parameter. A receiver that is a value
+/// of its class binds `Self` to that class alone, since the value's type is what the caller knows of it, and only a
+/// `static` receiver keeps `Self` open to the class's subclasses, spec section 25. One replacement then
 /// gives the receiver's class's type parameters the receiver's type arguments, and the declaring class's the type
 /// arguments of the receiver, or of its intersection part that inherits `declaring_class`, beside a call's
 /// `type_arguments`. The last expansion binds no `Self`, so a `Self` that a receiver's type argument holds stays the
@@ -1837,6 +1839,7 @@ where
     let member_type = expand_member(&TypeExpansionOptions {
         self_class: Some(declaring_class.name),
         static_class_type,
+        function_is_final: !matches!(receiver, TObject::Named(named) if named.is_static),
         keep_generic_derived_types: true,
         ..Default::default()
     });

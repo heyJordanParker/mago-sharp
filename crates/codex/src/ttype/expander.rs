@@ -44,6 +44,7 @@ use crate::ttype::atomic::scalar::int::TInteger;
 use crate::ttype::atomic::scalar::string::TString;
 use crate::ttype::atomic::scalar::string::TStringLiteral;
 use crate::ttype::combiner;
+use crate::ttype::template::GenericTemplate;
 use crate::ttype::union::TUnion;
 
 thread_local! {
@@ -941,17 +942,9 @@ fn expand_or_fill_type_parameters(
 
         if supplied_count < template_count {
             let mut params = named.type_parameters.take().unwrap_or_default();
-            params.extend(class_metadata.template_types.values().skip(supplied_count).map(|template| {
-                if let Some(default) = &template.default {
-                    let mut default = default.clone();
-                    default.set_from_template_default(true);
-                    default
-                } else {
-                    let mut constraint = template.constraint.clone();
-                    constraint.set_from_unspecified_template(true);
-                    constraint
-                }
-            }));
+            params.extend(
+                class_metadata.template_types.values().skip(supplied_count).map(GenericTemplate::omitted_type_argument),
+            );
             named.type_parameters = Some(params);
         }
     }
@@ -1935,6 +1928,31 @@ mod tests {
         assert!(parameter.is_string());
         assert!(parameter.from_template_default());
         assert!(!parameter.from_unspecified_template());
+    }
+
+    #[test]
+    fn a_receiver_without_type_arguments_specializes_each_template_to_its_default_or_else_its_bound() {
+        let code = "<?php
+            /**
+             * @template TItem of object
+             * @template TLabel of string = 'pivot'
+             */
+            class Container {}
+        ";
+        let codebase = create_test_codebase(code);
+        let container = codebase.get_class_like(b"container").expect("Container is scanned");
+        let specialized = |template: &str| {
+            crate::ttype::get_specialized_template_type(&codebase, word(template), container.name, container, None)
+                .expect("Container declares the template")
+        };
+
+        let label = specialized("TLabel");
+        assert_eq!(label.get_single_literal_string_value(), Some(&b"pivot"[..]));
+        assert!(label.from_template_default());
+
+        let item = specialized("TItem");
+        assert!(item.is_objecty());
+        assert!(item.from_unspecified_template());
     }
 
     #[test]

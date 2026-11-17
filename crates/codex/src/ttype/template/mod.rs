@@ -77,6 +77,24 @@ impl GenericTemplate {
         self.default = default;
         self
     }
+
+    /// The type argument a type that leaves this type parameter out gives it: its default, or its bound where it has
+    /// none, marked as the one it is.
+    #[must_use]
+    pub fn omitted_type_argument(&self) -> TUnion {
+        match &self.default {
+            Some(default) => {
+                let mut default = default.clone();
+                default.set_from_template_default(true);
+                default
+            }
+            None => {
+                let mut constraint = self.constraint.clone();
+                constraint.set_from_unspecified_template(true);
+                constraint
+            }
+        }
+    }
 }
 
 /// Refuses each bound of one PHP# type parameter list that PHP# refuses, from its written bound, spec section 11.

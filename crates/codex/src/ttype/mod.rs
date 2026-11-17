@@ -2447,8 +2447,7 @@ pub fn get_specialized_template_type(
         let index = instantiated_class_metadata.get_template_index_for_name(template_name)?;
 
         let Some(instantiated_type_parameters) = instantiated_type_parameters else {
-            let template = instantiated_class_metadata.get_template_type(template_name)?;
-            let mut result = template.constraint.clone();
+            let mut result = instantiated_class_metadata.get_template_type(template_name)?.omitted_type_argument();
 
             expander::expand_union(codebase, &mut result, &TypeExpansionOptions::default());
 
