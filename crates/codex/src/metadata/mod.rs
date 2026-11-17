@@ -22,6 +22,7 @@ use mago_word::empty_word;
 use mago_word::word;
 
 use crate::DEFAULTS_TRAIT_SUFFIX;
+use crate::assertion::Assertion;
 use crate::defaults_trait_name;
 use crate::diff::CodebaseDiff;
 use crate::graph::strongly_connected_parts;
@@ -40,6 +41,7 @@ use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::module::ModuleMetadata;
 use crate::metadata::module::NamespaceImportMetadata;
+use crate::metadata::parameter::FunctionLikeParameterMetadata;
 use crate::metadata::property::PropertyMetadata;
 use crate::metadata::shared::Shared;
 use crate::metadata::ttype::TypeMetadata;
@@ -48,8 +50,11 @@ use crate::signature::FileSignature;
 use crate::symbol::SymbolIdentifier;
 use crate::symbol::SymbolKind;
 use crate::symbol::Symbols;
+use crate::ttype::TType;
+use crate::ttype::TypeRef;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::object::TObject;
+use crate::ttype::template::GenericTemplate;
 use crate::ttype::union::TUnion;
 use crate::visibility::Visibility;
 
@@ -207,6 +212,111 @@ impl CodebaseMetadata {
     #[inline]
     pub fn class_like_alias_declarations(&self) -> impl Iterator<Item = (Word, Word, Span)> + '_ {
         self.class_like_alias_declarations.iter().map(|(alias, (target, span, _))| (*alias, *target, *span))
+    }
+
+    /// Every class-like a scan of this codebase's files names, each as written: the parents, interfaces, traits,
+    /// requirements, inheritors, attributes and alias targets of its class-likes, and each class-like a type its
+    /// declarations, docblocks, constants and enum cases give names, which the population resolves.
+    #[must_use]
+    pub fn named_class_likes(&self) -> WordSet {
+        let mut names = WordSet::default();
+        let mut unions: Vec<&TUnion> = Vec::new();
+        let mut atomics: Vec<&TAtomic> = Vec::new();
+        let mut attributes: Vec<&AttributeMetadata> = Vec::new();
+
+        for class_like in self.class_likes.values() {
+            names.extend(class_like.direct_parent_class);
+            names.extend(&class_like.direct_parent_interfaces);
+            names.extend(&class_like.used_traits);
+            names.extend(&class_like.require_extends);
+            names.extend(&class_like.require_implements);
+            names.extend(class_like.permitted_inheritors.iter().flatten());
+            names.extend(class_like.imported_type_aliases.values().map(|(class, _, _)| *class));
+            attributes.extend(&class_like.attributes);
+
+            for property in class_like.properties.values().chain(class_like.magic_properties.values()) {
+                attributes.extend(&property.attributes);
+                unions.extend(
+                    [
+                        &property.type_declaration_metadata,
+                        &property.type_metadata,
+                        &property.write_type_metadata,
+                        &property.default_type_metadata,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(|metadata| &metadata.type_union),
+                );
+                for hook in property.hooks.values() {
+                    attributes.extend(&hook.attributes);
+                    unions.extend(hook.return_type_metadata.iter().map(|metadata| &metadata.type_union));
+                    if let Some(parameter) = &hook.parameter {
+                        parameter_types(parameter, &mut unions, &mut attributes);
+                    }
+                }
+            }
+
+            for template in class_like.template_types.values() {
+                template_types(template, &mut unions);
+            }
+            unions.extend(class_like.template_extended_offsets.values().flatten());
+            unions.extend(class_like.template_extended_parameters.values().flat_map(|parameters| parameters.values()));
+            unions.extend(
+                class_like
+                    .template_extended_parameter_paths
+                    .values()
+                    .flatten()
+                    .flat_map(|parameters| parameters.values()),
+            );
+            unions.extend(class_like.type_aliases.values().map(|alias| &alias.type_union));
+            unions.extend(class_like.mixins.iter().map(|mixin| &mixin.type_union));
+
+            for constant in class_like.constants.values() {
+                attributes.extend(&constant.attributes);
+                unions.extend(
+                    [&constant.type_declaration, &constant.type_metadata]
+                        .into_iter()
+                        .flatten()
+                        .map(|metadata| &metadata.type_union),
+                );
+                atomics.extend(&constant.inferred_type);
+            }
+            for case in class_like.enum_cases.values() {
+                attributes.extend(&case.attributes);
+                atomics.extend(&case.value_type);
+            }
+            atomics.extend(&class_like.enum_type);
+
+            for law in class_like.laws.values() {
+                function_like_types(law, &mut names, &mut unions, &mut atomics, &mut attributes);
+            }
+        }
+
+        for function_like in self.function_likes.values() {
+            function_like_types(function_like, &mut names, &mut unions, &mut atomics, &mut attributes);
+        }
+
+        for constant in self.constants.values() {
+            attributes.extend(&constant.attributes);
+            unions.extend(constant.type_metadata.iter().map(|metadata| &metadata.type_union));
+            unions.extend(&constant.inferred_type);
+        }
+
+        names.extend(self.class_like_alias_declarations().map(|(_, target, _)| target));
+        names.extend(attributes.into_iter().map(|attribute| attribute.name));
+        names.extend(
+            unions
+                .into_iter()
+                .flat_map(TType::get_all_child_nodes)
+                .chain(atomics.into_iter().flat_map(|atomic| {
+                    let mut nodes = atomic.get_all_child_nodes();
+                    nodes.push(TypeRef::Atomic(atomic));
+                    nodes
+                }))
+                .filter_map(TypeRef::named_class_like),
+        );
+
+        names
     }
 
     pub(crate) fn populate_class_like_aliases(&mut self) -> bool {
@@ -2438,6 +2548,69 @@ fn orphan_patch_constant_diagnostic(meta: &ConstantMetadata) -> Issue {
         "The patch may be misnamed or out-of-date relative to the vendored or built-in definition; \
          check the constant name and verify the patch still matches the upstream source.",
     )
+}
+
+/// The types and attributes of `function_like`'s signature, docblock and assertions, and the effects it `uses`, for
+/// [`CodebaseMetadata::named_class_likes`].
+fn function_like_types<'metadata>(
+    function_like: &'metadata FunctionLikeMetadata,
+    names: &mut WordSet,
+    unions: &mut Vec<&'metadata TUnion>,
+    atomics: &mut Vec<&'metadata TAtomic>,
+    attributes: &mut Vec<&'metadata AttributeMetadata>,
+) {
+    names.extend(&function_like.uses);
+    attributes.extend(&function_like.attributes);
+    unions.extend(&function_like.listens);
+    unions.extend(
+        [&function_like.return_type_declaration_metadata, &function_like.return_type_metadata]
+            .into_iter()
+            .flatten()
+            .chain(&function_like.thrown_types)
+            .chain(function_like.method_metadata.iter().flat_map(|method| method.where_constraints.values()))
+            .map(|metadata| &metadata.type_union),
+    );
+    for parameter in &function_like.parameters {
+        parameter_types(parameter, unions, attributes);
+    }
+    for template in function_like.template_types.values() {
+        template_types(template, unions);
+    }
+    atomics.extend(
+        function_like
+            .assertions
+            .values()
+            .chain(function_like.if_true_assertions.values())
+            .chain(function_like.if_false_assertions.values())
+            .flatten()
+            .filter_map(Assertion::get_type),
+    );
+}
+
+fn parameter_types<'metadata>(
+    parameter: &'metadata FunctionLikeParameterMetadata,
+    unions: &mut Vec<&'metadata TUnion>,
+    attributes: &mut Vec<&'metadata AttributeMetadata>,
+) {
+    attributes.extend(&parameter.attributes);
+    unions.extend(
+        [
+            &parameter.type_declaration_metadata,
+            &parameter.type_metadata,
+            &parameter.out_type,
+            &parameter.closure_this_type,
+            &parameter.default_type,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|metadata| &metadata.type_union),
+    );
+}
+
+fn template_types<'metadata>(template: &'metadata GenericTemplate, unions: &mut Vec<&'metadata TUnion>) {
+    unions.push(&template.constraint);
+    unions.extend(&template.default);
+    unions.extend(template.written_bound.iter().map(|bound| &bound.type_union));
 }
 
 /// Determines which metadata value to keep when merging duplicates.

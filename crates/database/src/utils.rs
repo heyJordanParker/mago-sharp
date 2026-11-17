@@ -64,7 +64,7 @@ pub(crate) fn read_file(workspace: &Path, path: &Path, file_type: FileType) -> R
     file_from(workspace, path, file_type, bytes)
 }
 
-/// The [`File`] of `file_type` at `path` that holds `bytes`, named by its path relative to `workspace`.
+/// The [`File`] of `file_type` at `path` that holds `bytes`, named by [`File::logical_name`].
 ///
 /// # Errors
 ///
@@ -79,18 +79,10 @@ pub(crate) fn file_from(
         return Err(DatabaseError::FileTooLarge(path.to_path_buf(), bytes.len(), MAXIMUM_FILE_SIZE));
     }
 
-    // Normalize to forward slashes for cross-platform determinism
-    #[cfg(windows)]
-    let logical_name = path
-        .strip_prefix(workspace)
-        .unwrap_or(path)
-        .as_os_str()
-        .as_encoded_bytes()
-        .iter()
-        .map(|i| if *i == b'\\' { b'/' } else { *i })
-        .collect::<Vec<_>>();
-    #[cfg(not(windows))]
-    let logical_name = path.strip_prefix(workspace).unwrap_or(path).as_os_str().as_encoded_bytes().to_owned();
-
-    Ok(File::new(Cow::Owned(logical_name), file_type, Some(path.to_path_buf()), Cow::Owned(bytes)))
+    Ok(File::new(
+        Cow::Owned(File::logical_name(workspace, path)),
+        file_type,
+        Some(path.to_path_buf()),
+        Cow::Owned(bytes),
+    ))
 }

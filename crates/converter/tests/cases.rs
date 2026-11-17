@@ -153,6 +153,7 @@ fn analyzed(folder: &Path, converted: Option<&Converted>) -> Server {
         analyzer: AnalyzerSettings::default(),
         plugin_registry: Arc::new(PluginRegistry::with_library_providers()),
         use_progress_bars: false,
+        autoloader: None,
     };
     let mut server = Server::new(database.into_static(), prelude, settings);
     server.analyze().expect("the analysis runs");

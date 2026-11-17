@@ -2560,8 +2560,11 @@ where
     let right = decode_type(reader, argument_type, 0)?;
     writer.write_bool(compare_types(operation, &left, &right, codebase)?);
 
-    let mut class_likes: Vec<Word> =
-        [&left, &right].into_iter().flat_map(TUnion::get_all_child_nodes).filter_map(named_class_like).collect();
+    let mut class_likes: Vec<Word> = [&left, &right]
+        .into_iter()
+        .flat_map(TUnion::get_all_child_nodes)
+        .filter_map(TypeRef::named_class_like)
+        .collect();
     class_likes.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     class_likes.dedup();
     writer.write_length(class_likes.len())?;
@@ -2570,23 +2573,6 @@ where
     }
 
     Ok(())
-}
-
-/// The class-like `node` names, if it names one.
-fn named_class_like(node: TypeRef<'_>) -> Option<Word> {
-    let TypeRef::Atomic(atomic) = node else {
-        return None;
-    };
-
-    match atomic {
-        TAtomic::Object(object) => object.get_name(),
-        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Literal { value })) => Some(*value),
-        TAtomic::Reference(TReference::Symbol { name, .. }) => Some(*name),
-        TAtomic::Reference(TReference::Member { class_like_name, .. }) => Some(*class_like_name),
-        TAtomic::Callable(TCallable::Alias(FunctionLikeIdentifier::Method(class_like, _))) => Some(*class_like),
-        TAtomic::Alias(alias) => Some(alias.get_class_name()),
-        _ => None,
-    }
 }
 
 /// Answers a host's `TypeComparator` under PHP's rules, Mago's native type system as the SDK documents it: the request

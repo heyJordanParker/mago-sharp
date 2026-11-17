@@ -166,6 +166,19 @@ impl File {
         read_file(workspace, path, file_type)
     }
 
+    /// The name the database gives the file at `path`: its path relative to `workspace`, or its whole path outside
+    /// `workspace`, with `/` between its folders on every system.
+    #[must_use]
+    pub fn logical_name(workspace: &Path, path: &Path) -> Vec<u8> {
+        let name = path.strip_prefix(workspace).unwrap_or(path).as_os_str().as_encoded_bytes();
+        #[cfg(windows)]
+        let name = name.iter().map(|byte| if *byte == b'\\' { b'/' } else { *byte }).collect::<Vec<_>>();
+        #[cfg(not(windows))]
+        let name = name.to_owned();
+
+        name
+    }
+
     /// Whether `mago compile` wrote this file beside a PHP# source, spec section 27. Its declaration names the PHP#
     /// class to tools that read PHP source, so the database holds the source instead, as `tsc` reads `Order.ts` and
     /// not the `Order.d.ts` beside it.

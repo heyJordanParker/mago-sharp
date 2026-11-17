@@ -177,6 +177,8 @@ Mago distinguishes between your code, third-party code, patches to third-party c
 - **`patches`** are PHP files that override type information for vendored or built-in code. Mago honours their type declarations and PHPDoc — which take precedence over `includes` and built-ins — but never analyses, lints, or formats them. See [Patching vendor types](#patching-vendor-types) for what a patch may change.
 - **`excludes`** are paths or globs Mago ignores entirely. They apply to every tool.
 
+When an `includes` entry is Composer's vendor folder (`composer.json`'s `config.vendor-dir`, else `vendor`) and Composer wrote its autoload maps there, `mago analyze`, `mago compile` and `mago convert` read the folder's plain PHP files as PHP's autoloader does: a file once the code reaches a class it declares, through `autoload_classmap.php`, `autoload_psr4.php` and `autoload_namespaces.php`, and each file `autoload_files.php` lists up front. A class reaches the classes its parents, interfaces, traits and types name, and your code reaches every class it names, docblock `@var` tags included. So a vendor function or constant declared outside `autoload_files.php` is unknown, as it is to PHP. The folder's `.sharp` files, `vendor/composer` itself, and a package that holds a `paths`, `includes` or `patches` entry are read whole, as is a vendor folder without the maps. `mago guard` reads the folder whole.
+
 If a file matches both `paths` and `includes`, the more specific pattern wins. Exact file paths are most specific, then deeper directory paths, then shallow ones, then glob patterns. When patterns are equally specific, `includes` wins, which lets you explicitly mark a path as a dependency.
 
 ```toml

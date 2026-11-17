@@ -1,6 +1,6 @@
 [package]
 name = "mago-composer"
-description = "Parses and models composer.json files"
+description = "Parses and models composer.json files and the autoload maps Composer writes"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -14,6 +14,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 foldhash = { workspace = true }
 indexmap = { workspace = true }
+mago-allocator = { workspace = true }
+mago-database = { workspace = true }
+mago-span = { workspace = true }
+mago-syntax = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

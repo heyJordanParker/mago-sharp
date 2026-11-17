@@ -71,17 +71,16 @@ use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file;
 
 use crate::baseline::unserialize_baseline;
-use crate::commands::analyze::analyze_the_whole_workspace_without_paths;
 use crate::commands::analyze::decode_prelude;
 use crate::commands::analyze::server_settings;
 use crate::commands::compile::compile_for_hosts;
 use crate::commands::compile::project_database;
 use crate::commands::compile::standard_library;
+use crate::commands::compile::whole_workspace;
 use crate::commands::outcome::CommandOutcome;
 use crate::config::Configuration;
 use crate::error::Error;
 use crate::extensions::start_external_analyzer;
-use crate::utils::create_orchestrator;
 use crate::utils::git;
 use crate::utils::should_use_colors;
 use crate::utils::write_by_rename;
@@ -257,7 +256,7 @@ impl ConvertCommand {
         let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.clone(), error))?;
         let roots = psr4_roots(workspace)?;
         let named: Vec<PathBuf> = self.paths.iter().map(|path| relative(workspace, path)).collect();
-        let (database, _) = project_database(&whole_workspace(configuration, color_choice), workspace)?;
+        let (database, _) = project_database(&whole_workspace(configuration, color_choice, false)?, workspace)?;
 
         let mut outcome = Outcome::default();
         let mut refuse = |name: &[u8], reason: String| {
@@ -754,7 +753,7 @@ fn load(
     configuration: &Configuration,
     color_choice: ColorChoice,
 ) -> Result<(Orchestrator<'_>, Database<'static>), Error> {
-    let orchestrator = whole_workspace(configuration, color_choice);
+    let orchestrator = whole_workspace(configuration, color_choice, false)?;
     if let Some(external_analyzer) = start_external_analyzer(
         &configuration.extension_hosts,
         configuration.php_version,
@@ -767,16 +766,6 @@ fn load(
     let (database, _) = project_database(&orchestrator, &configuration.source.workspace)?;
 
     Ok((orchestrator, database))
-}
-
-/// A fresh orchestrator of the whole workspace, as `mago analyze` makes one when no path is named. It starts no
-/// extension host, so the database it loads holds the project's files as [`load`]'s does, without the hosts' own.
-fn whole_workspace(configuration: &Configuration, color_choice: ColorChoice) -> Orchestrator<'_> {
-    let mut orchestrator = create_orchestrator(configuration, color_choice, false, false, false);
-    analyze_the_whole_workspace_without_paths(&mut orchestrator);
-    orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
-
-    orchestrator
 }
 
 /// The text of each lowering of `proof` that panicked, in file name order, each a defect of the checker.

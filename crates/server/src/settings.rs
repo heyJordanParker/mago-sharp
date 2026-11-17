@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings as AnalyzerSettings;
+use mago_orchestrator::Autoloader;
 use mago_syntax::settings::ParserSettings;
 
 /// The resolved settings a [`Server`](crate::Server) runs against.
@@ -27,4 +28,6 @@ pub struct Settings {
     pub plugin_registry: Arc<PluginRegistry>,
     /// Whether analysis passes draw progress bars.
     pub use_progress_bars: bool,
+    /// Composer's autoload maps, which serve each analysis from scratch the plain PHP vendor files it reaches.
+    pub autoloader: Option<Arc<Autoloader>>,
 }

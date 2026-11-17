@@ -28,6 +28,7 @@ mago-codex = { workspace = true }
 mago-analyzer = { workspace = true }
 mago-guard = { workspace = true }
 mago-sharp-bridge = { workspace = true }
+mago-composer = { workspace = true }
 foldhash = { workspace = true }
 tracing = { workspace = true }
 indicatif = { workspace = true }
@@ -39,3 +40,4 @@ mago-sharp-lean = { workspace = true }
 
 [dev-dependencies]
 mago-prelude = { workspace = true, features = ["build"] }
+tempfile = { workspace = true }

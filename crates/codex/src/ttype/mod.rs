@@ -7,6 +7,7 @@ use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 use mago_word::word;
 
+use crate::identifier::function_like::FunctionLikeIdentifier;
 use crate::metadata::CodebaseMetadata;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::misc::GenericParent;
@@ -200,6 +201,27 @@ pub trait TType {
 
     fn get_pretty_id_with_indent(&self, _indent: usize) -> Word {
         self.get_id()
+    }
+}
+
+impl TypeRef<'_> {
+    /// The class-like this node names, if it names one: an object, a class string, an unresolved name, a member of a
+    /// class-like, a method or a type alias of a class-like.
+    #[must_use]
+    pub fn named_class_like(self) -> Option<Word> {
+        let TypeRef::Atomic(atomic) = self else {
+            return None;
+        };
+
+        match atomic {
+            TAtomic::Object(object) => object.get_name(),
+            TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Literal { value })) => Some(*value),
+            TAtomic::Reference(TReference::Symbol { name, .. }) => Some(*name),
+            TAtomic::Reference(TReference::Member { class_like_name, .. }) => Some(*class_like_name),
+            TAtomic::Callable(TCallable::Alias(FunctionLikeIdentifier::Method(class_like, _))) => Some(*class_like),
+            TAtomic::Alias(alias) => Some(alias.get_class_name()),
+            _ => None,
+        }
     }
 }
 

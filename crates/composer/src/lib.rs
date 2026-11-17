@@ -8,6 +8,7 @@ use serde_json::from_str;
 
 pub use crate::schema::*;
 
+pub mod autoload;
 pub mod schema;
 
 impl FromStr for ComposerPackage {

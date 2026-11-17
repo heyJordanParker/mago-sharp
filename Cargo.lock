@@ -1589,8 +1589,13 @@ version = "0.6.25"
 dependencies = [
  "foldhash",
  "indexmap",
+ "mago-allocator",
+ "mago-database",
+ "mago-span",
+ "mago-syntax",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1787,6 +1792,7 @@ dependencies = [
  "mago-analyzer",
  "mago-bytes",
  "mago-codex",
+ "mago-composer",
  "mago-database",
  "mago-formatter",
  "mago-guard",
@@ -1801,6 +1807,7 @@ dependencies = [
  "mago-syntax",
  "mago-word",
  "rayon",
+ "tempfile",
  "tracing",
  "xxhash-rust",
 ]

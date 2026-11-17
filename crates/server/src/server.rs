@@ -1,6 +1,8 @@
 //! The single-workspace [`Server`]: the transport-agnostic core that owns one
 //! workspace's file database and analysis service, and answers queries against them.
 
+use std::sync::Arc;
+
 use foldhash::HashMap;
 use foldhash::HashSet;
 
@@ -57,10 +59,11 @@ impl Server {
         prelude: fn() -> (CodebaseMetadata, SymbolReferences),
         settings: Settings,
     ) -> Self {
-        let Settings { parser, analyzer, plugin_registry, use_progress_bars } = settings;
+        let Settings { parser, analyzer, plugin_registry, use_progress_bars, autoloader } = settings;
 
         let service = IncrementalAnalysisService::new(database.read_only(), prelude, analyzer, parser, plugin_registry)
-            .with_progress_bars(use_progress_bars);
+            .with_progress_bars(use_progress_bars)
+            .with_autoloader(autoloader);
 
         Self { database, service, scope: None }
     }
@@ -215,7 +218,8 @@ impl Server {
     }
 
     /// Run one analysis pass with the node-analysis hooks only in the scope's files, and report
-    /// only their issues. A failed pass resets the service.
+    /// only their issues. A failed pass resets the service. The database then holds each file the
+    /// autoloader served the pass, so an issue's annotation in one renders.
     fn pass(
         &mut self,
         analyze: impl FnOnce(&mut IncrementalAnalysisService) -> Result<AnalysisResult, OrchestratorError>,
@@ -226,10 +230,17 @@ impl Server {
             .map(|scope| self.database.files().filter(|file| scope(file)).map(|file| file.id).collect::<HashSet<_>>());
         self.service.set_node_analysis_files(files.clone());
 
-        analyze(&mut self.service)
+        let result = analyze(&mut self.service)
             .inspect_err(|_| self.service.reset())
             .map(|result| reported_in(result, files.as_ref()))
-            .map_err(ServerError::from)
+            .map_err(ServerError::from)?;
+        for file in self.service.autoloaded() {
+            if self.database.get(&file.id).is_err() {
+                self.database.add(Arc::clone(file));
+            }
+        }
+
+        Ok(result)
     }
 }
 
@@ -263,7 +274,6 @@ fn reported_file(issue: &Issue) -> Option<FileId> {
 mod tests {
     use std::borrow::Cow;
     use std::path::Path;
-    use std::sync::Arc;
 
     use mago_analyzer::plugin::PluginRegistry;
     use mago_analyzer::settings::Settings as AnalyzerSettings;
@@ -294,6 +304,7 @@ mod tests {
             analyzer: AnalyzerSettings::default(),
             plugin_registry: Arc::new(PluginRegistry::with_library_providers()),
             use_progress_bars: false,
+            autoloader: None,
         };
 
         (Server::new(database, Default::default, settings), a, b)

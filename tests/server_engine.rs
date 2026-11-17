@@ -69,6 +69,7 @@ fn server_with(repository: &Path, database: Database<'static>, analyzer_settings
         analyzer: analyzer_settings,
         plugin_registry: Arc::new(registry),
         use_progress_bars: false,
+        autoloader: None,
     };
 
     Server::new(database, Default::default, settings)

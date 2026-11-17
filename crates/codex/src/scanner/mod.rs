@@ -9,6 +9,10 @@ use mago_names::binding::MethodParts;
 use mago_names::scope::NamespaceScope;
 use mago_names::scope::php_name;
 use mago_php_version::PHPVersion;
+use mago_phpdoc_syntax::PHPDocParser;
+use mago_phpdoc_syntax::cst::Element;
+use mago_phpdoc_syntax::cst::Tag;
+use mago_phpdoc_syntax::cst::TagValue;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -53,6 +57,7 @@ use mago_syntax::cst::Statement;
 use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::Trivia;
+use mago_syntax::cst::TriviaKind;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::Use;
@@ -108,10 +113,13 @@ use crate::scanner::property::scan_promoted_property;
 use crate::scanner::ttype::get_type_metadata_from_hint;
 use crate::scanner::ttype::scan_type_parameters;
 use crate::symbol::SymbolKind;
+use crate::ttype::TType;
+use crate::ttype::TypeRef;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::generic::TGenericParameter;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::named::TNamedObject;
+use crate::ttype::builder::get_union_from_type;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
 use crate::ttype::template::TemplateResult;
@@ -213,6 +221,51 @@ fn namespace_imports(file: &File, program: &Program<'_>) -> Vec<NamespaceImportM
     imports.dedup();
 
     imports
+}
+
+/// Each class-like a `@var` tag of `program` names, as written: the tags of its bodies, which the analysis reads and a
+/// scan doesn't, resolved by the names of the namespace that holds the tag.
+pub fn var_tag_class_likes<A>(arena: &A, program: &Program<'_>) -> Vec<Word>
+where
+    A: Arena,
+{
+    let mut global = NamespaceScope::global();
+    let mut namespaces = Vec::new();
+    for statement in program.statements.iter() {
+        match statement {
+            Statement::Namespace(namespace) => {
+                let mut scope = namespace
+                    .name
+                    .as_ref()
+                    .map_or_else(NamespaceScope::global, |name| NamespaceScope::for_namespace(php_name(name)));
+                for statement in namespace.statements().iter() {
+                    if let Statement::Use(r#use) = statement {
+                        scope.populate_from_use(r#use);
+                    }
+                }
+                namespaces.push((namespace.span(), scope));
+            }
+            Statement::Use(r#use) => global.populate_from_use(r#use),
+            _ => {}
+        }
+    }
+
+    let resolution = TypeResolutionContext::new();
+    let mut names = Vec::new();
+    for docblock in program.trivia.iter().filter(|trivia| trivia.kind == TriviaKind::DocBlockComment) {
+        let scope =
+            namespaces.iter().find(|(span, _)| span.contains(&docblock.span)).map_or(&global, |(_, scope)| scope);
+        for element in PHPDocParser::parse_with_span(arena, docblock.value, docblock.span).elements.iter() {
+            let Element::Tag(Tag { value: TagValue::Var(var), .. }) = element else {
+                continue;
+            };
+            if let Ok(union) = get_union_from_type(var.r#type, scope, &resolution, None) {
+                names.extend(union.get_all_child_nodes().into_iter().filter_map(TypeRef::named_class_like));
+            }
+        }
+    }
+
+    names
 }
 
 #[derive(Clone, Debug)]

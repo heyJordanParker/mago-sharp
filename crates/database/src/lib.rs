@@ -287,11 +287,12 @@ impl<'config> Database<'config> {
     }
 
     #[inline]
-    pub fn add(&mut self, file: File) -> FileId {
+    pub fn add(&mut self, file: impl Into<Arc<File>>) -> FileId {
+        let file = file.into();
         let name = file.name.clone();
         let id = file.id;
 
-        if let Some(old_file) = self.files.insert(name.clone(), Arc::new(file)) {
+        if let Some(old_file) = self.files.insert(name.clone(), file) {
             self.id_to_name.remove(&old_file.id);
         }
 
@@ -409,22 +410,7 @@ impl<'config> Database<'config> {
     #[inline]
     #[must_use]
     pub fn read_only(&self) -> ReadDatabase {
-        let mut files_vec: Vec<Arc<File>> = self.files.values().cloned().collect();
-        files_vec.sort_unstable_by_key(|f| f.id);
-
-        let mut id_to_index = HashMap::with_capacity(files_vec.len());
-        let mut name_to_index = HashMap::with_capacity(files_vec.len());
-        let mut path_to_index = HashMap::with_capacity(files_vec.len());
-
-        for (index, file) in files_vec.iter().enumerate() {
-            id_to_index.insert(file.id, index);
-            name_to_index.insert(file.name.clone(), index);
-            if let Some(path) = &file.path {
-                path_to_index.insert(path.clone(), index);
-            }
-        }
-
-        ReadDatabase { files: files_vec, id_to_index, name_to_index, path_to_index }
+        ReadDatabase::sorted(self.files.values().cloned().collect())
     }
 }
 
@@ -463,6 +449,36 @@ impl ReadDatabase {
         }
 
         Self { files: vec![Arc::new(file)], id_to_index, name_to_index, path_to_index }
+    }
+
+    /// Adds `files` the snapshot doesn't hold yet, keeping the order by [`FileId`] that [`Database::read_only`] gives.
+    pub fn extend(&mut self, files: impl IntoIterator<Item = Arc<File>>) {
+        let mut added: Vec<Arc<File>> =
+            files.into_iter().filter(|file| !self.id_to_index.contains_key(&file.id)).collect();
+        if added.is_empty() {
+            return;
+        }
+
+        added.append(&mut self.files);
+        *self = Self::sorted(added);
+    }
+
+    /// The snapshot of `files`, whose ids differ, in the order of their ids.
+    fn sorted(mut files: Vec<Arc<File>>) -> Self {
+        files.sort_unstable_by_key(|file| file.id);
+
+        let mut id_to_index = HashMap::with_capacity(files.len());
+        let mut name_to_index = HashMap::with_capacity(files.len());
+        let mut path_to_index = HashMap::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            id_to_index.insert(file.id, index);
+            name_to_index.insert(file.name.clone(), index);
+            if let Some(path) = &file.path {
+                path_to_index.insert(path.clone(), index);
+            }
+        }
+
+        Self { files, id_to_index, name_to_index, path_to_index }
     }
 }
 

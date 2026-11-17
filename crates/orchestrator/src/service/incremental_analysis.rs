@@ -48,6 +48,7 @@ use mago_codex::populator::populate_codebase;
 use mago_codex::populator::populate_codebase_targeted;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
+use mago_codex::scanner::var_tag_class_likes;
 use mago_codex::signature::DefSignatureNode;
 use mago_codex::signature::FileSignature;
 use mago_codex::signature_builder;
@@ -77,6 +78,7 @@ use mago_syntax::settings::ParserSettings;
 use mago_word::Word;
 use mago_word::WordSet;
 
+use crate::Autoloader;
 use crate::error::OrchestratorError;
 use crate::progress::ProgressBarTheme;
 use crate::progress::create_progress_bar;
@@ -181,6 +183,10 @@ pub struct IncrementalAnalysisService {
     use_progress_bars: bool,
     scan_only: bool,
     node_analysis_files: Option<HashSet<FileId>>,
+    /// Composer's autoload maps, which serve each analysis from scratch the plain PHP vendor files its files reach.
+    autoloader: Option<Arc<Autoloader>>,
+    /// The files the autoloader served the last analysis from scratch, which every later database of the service holds.
+    autoloaded: Vec<Arc<File>>,
     /// The files the last analysis analyzed, which the fanout tests compare with the inputs.
     #[cfg(test)]
     analyzed_files: HashSet<FileId>,
@@ -214,6 +220,8 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("use_progress_bars", &self.use_progress_bars)
             .field("scan_only", &self.scan_only)
             .field("node_analysis_files", &self.node_analysis_files.as_ref().map(HashSet::len))
+            .field("autoloader", &self.autoloader.is_some())
+            .field("autoloaded", &self.autoloaded.len())
             .finish()
     }
 }
@@ -265,9 +273,26 @@ impl IncrementalAnalysisService {
             use_progress_bars: false,
             scan_only: false,
             node_analysis_files: None,
+            autoloader: None,
+            autoloaded: Vec::new(),
             #[cfg(test)]
             analyzed_files: HashSet::default(),
         }
+    }
+
+    /// Serves each analysis from scratch, through `autoloader`, the plain PHP vendor file of each class-like its files
+    /// reach, which the database doesn't hold.
+    #[must_use]
+    pub fn with_autoloader(mut self, autoloader: Option<Arc<Autoloader>>) -> Self {
+        self.autoloader = autoloader;
+        self
+    }
+
+    /// The files the autoloader served the last analysis from scratch, which the service's database holds beside the
+    /// database it was given.
+    #[must_use]
+    pub fn autoloaded(&self) -> &[Arc<File>] {
+        &self.autoloaded
     }
 
     /// Draws a progress bar for each file pass when `use_progress_bars` is set.
@@ -305,6 +330,7 @@ impl IncrementalAnalysisService {
         self.namespace_classes = NamespaceClasses::default();
         self.changing_members = ChangingMembers::default();
         self.extern_namespaces = ExternNamespaces::default();
+        self.autoloaded.clear();
     }
 
     /// Updates the database for a new analysis run.
@@ -313,6 +339,7 @@ impl IncrementalAnalysisService {
     /// updated database that reflects file changes.
     pub fn update_database(&mut self, database: ReadDatabase) {
         self.database = database;
+        self.database.extend(self.autoloaded.iter().cloned());
     }
 
     /// Runs the external node-analysis hooks only in `files` from the next analysis on, or in every
@@ -522,16 +549,19 @@ impl IncrementalAnalysisService {
         let parser_settings = self.parser_settings;
         let php_version = self.settings.version;
         let codebase_scan_plan = self.codebase_scan_plan.clone();
-        let compiling_bar = self
-            .use_progress_bars
-            .then(|| create_progress_bar(source_files.len(), "📚 Compiling", ProgressBarTheme::Blue));
-        // The prelude decodes while the files scan, so no copy of it outlives an analysis.
-        let ((mut merged_codebase, mut symbol_references), per_file_results) = rayon::join(self.prelude, || {
-            source_files
+        let autoloader = self.autoloader.clone();
+        let compiling_bar =
+            self.use_progress_bars.then(|| create_progress_bar(0, "📚 Compiling", ProgressBarTheme::Blue));
+        let scan_files = |files: Vec<Arc<File>>| {
+            if let Some(compiling_bar) = &compiling_bar {
+                compiling_bar.inc_length(files.len() as u64);
+            }
+
+            files
                 .into_par_iter()
                 .map_init(LocalArena::new, |arena, file| {
                     let content_hash = xxhash_rust::xxh3::xxh3_64(file.contents.as_ref());
-                    let (metadata, codebase_scan, namespace_classes) = scan_file(
+                    let (metadata, codebase_scan, namespace_classes, reached) = scan_file(
                         arena,
                         &file,
                         parser_settings,
@@ -539,6 +569,7 @@ impl IncrementalAnalysisService {
                         codebase_scan_plan.as_deref(),
                         &NamespaceClasses::default(),
                         &ExternNamespaces::default(),
+                        autoloader.is_some(),
                     )?;
 
                     arena.reset();
@@ -546,11 +577,19 @@ impl IncrementalAnalysisService {
                         compiling_bar.inc(1);
                     }
 
-                    Ok((file, content_hash, metadata, codebase_scan, namespace_classes))
+                    Ok(((file, content_hash, metadata, codebase_scan, namespace_classes), reached))
                 })
                 .collect::<Result<Vec<_>, ExternalAnalyzerError>>()
-        });
-        let mut per_file_results = per_file_results?;
+        };
+        // The prelude decodes while the files scan, so no copy of it outlives an analysis.
+        let ((mut merged_codebase, mut symbol_references), scans) =
+            rayon::join(self.prelude, || scan_files(source_files));
+        let (mut per_file_results, reached): (Vec<FileScan>, Vec<WordSet>) = scans?.into_iter().unzip();
+        if let Some(autoloader) = &autoloader {
+            self.autoloaded =
+                autoload(autoloader, &self.database, &merged_codebase, &mut per_file_results, reached, scan_files)?;
+            self.database.extend(self.autoloaded.iter().cloned());
+        }
         if let Some(compiling_bar) = compiling_bar {
             remove_progress_bar(&compiling_bar);
         }
@@ -578,7 +617,7 @@ impl IncrementalAnalysisService {
                     || (!extern_namespaces.is_empty() && file.name.ends_with(b".sharp"))
             })
             .try_for_each_init(LocalArena::new, |arena, (file, _, metadata, codebase_scan, _)| {
-                (*metadata, *codebase_scan, _) = scan_file(
+                (*metadata, *codebase_scan, _, _) = scan_file(
                     arena,
                     file,
                     parser_settings,
@@ -586,6 +625,7 @@ impl IncrementalAnalysisService {
                     codebase_scan_plan.as_deref(),
                     namespace_classes,
                     extern_namespaces,
+                    false,
                 )?;
                 arena.reset();
 
@@ -855,10 +895,11 @@ impl IncrementalAnalysisService {
         let codebase_scan_plan = self.codebase_scan_plan.clone();
         let namespace_classes = &self.namespace_classes;
         let extern_namespaces = &self.extern_namespaces;
-        let scanned_files: Vec<(FileId, CodebaseMetadata, Option<CodebaseScanFile>)> = changed_files
+        let reach = self.autoloader.is_some();
+        let (scanned_files, reached): (Vec<_>, Vec<WordSet>) = changed_files
             .into_par_iter()
             .map_init(LocalArena::new, |arena, file| {
-                let (metadata, codebase_scan, _) = scan_file(
+                let (metadata, codebase_scan, _, reached) = scan_file(
                     arena,
                     file,
                     parser_settings,
@@ -866,14 +907,29 @@ impl IncrementalAnalysisService {
                     codebase_scan_plan.as_deref(),
                     namespace_classes,
                     extern_namespaces,
+                    reach,
                 )?;
 
                 arena.reset();
 
-                Ok((file.id, metadata, codebase_scan))
+                Ok(((file.id, metadata, codebase_scan), reached))
             })
             .collect::<Result<Vec<_>, mago_analyzer::external::ExternalAnalyzerError>>()
-            .map_err(mago_analyzer::error::AnalysisError::from)?;
+            .map_err(mago_analyzer::error::AnalysisError::from)?
+            .into_iter()
+            .unzip();
+
+        // A changed file that reaches a class-like no file declares, whose file the autoloader serves, needs the
+        // rounds of an analysis from scratch.
+        if let Some(autoloader) = &self.autoloader {
+            for name in reached.iter().flatten() {
+                if !self.codebase.class_like_exists(name.as_bytes())
+                    && autoloader.load(name.as_bytes())?.is_some_and(|file| self.database.get(&file.id).is_err())
+                {
+                    return self.analyze();
+                }
+            }
+        }
 
         // A patch whose content actually changed requires rebuilding the merged codebase from
         // scratch. Patches that were force-rescanned due to a vendor change (same hash) go
@@ -2179,9 +2235,77 @@ fn names_a_refused_bound_type(codebase: &CodebaseMetadata, declared: &WordSet) -
         })
 }
 
+/// A file's scan: the file, the hash of its contents, the metadata it declares, what the codebase scan plan captures of
+/// it, and each class-like of its namespace that would win over a default class-like it names.
+type FileScan = (Arc<File>, u64, CodebaseMetadata, Option<CodebaseScanFile>, Vec<Word>);
+
+/// Serves `scans`, round by round through `autoloader`, the files Composer loads up front and the plain PHP vendor file
+/// of each class-like a scan reaches, as `reached` holds the first round's, that neither `prelude` nor a scan declares,
+/// scanning them with `scan_files`, until no scan reaches another, as PHP's autoloader reads a class's file once the
+/// code first names the class. Returns the files it served, which `database` doesn't hold.
+fn autoload(
+    autoloader: &Autoloader,
+    database: &ReadDatabase,
+    prelude: &CodebaseMetadata,
+    scans: &mut Vec<FileScan>,
+    mut reached: Vec<WordSet>,
+    scan_files: impl Fn(Vec<Arc<File>>) -> Result<Vec<(FileScan, WordSet)>, ExternalAnalyzerError>,
+) -> Result<Vec<Arc<File>>, OrchestratorError> {
+    let mut declared = prelude.symbols.clone();
+    for (_, _, metadata, _, _) in scans.iter() {
+        declared.extend_ref(&metadata.symbols);
+    }
+
+    let mut tried = WordSet::default();
+    let mut served_ids: HashSet<FileId> = HashSet::default();
+    let mut served = Vec::new();
+    let mut read = autoloader.files()?;
+    loop {
+        let names: Vec<Word> = reached
+            .iter()
+            .flatten()
+            .filter(|name| {
+                !declared.contains(declared.class_key(name.as_bytes()))
+                    && tried.insert(mago_word::ascii_lowercase_word(name.as_bytes()))
+            })
+            .copied()
+            .collect();
+        read.extend(
+            names
+                .par_iter()
+                .filter_map(|name| autoloader.load(name.as_bytes()).transpose())
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let files: Vec<Arc<File>> = std::mem::take(&mut read)
+            .into_iter()
+            .filter(|file| database.get(&file.id).is_err() && served_ids.insert(file.id))
+            .map(Arc::new)
+            .collect();
+        if files.is_empty() {
+            break;
+        }
+
+        let round: Vec<FileScan>;
+        (round, reached) =
+            scan_files(files.clone()).map_err(mago_analyzer::error::AnalysisError::from)?.into_iter().unzip();
+        for (_, _, metadata, _, _) in &round {
+            declared.extend_ref(&metadata.symbols);
+        }
+        scans.extend(round);
+        served.extend(files);
+    }
+    scans.sort_unstable_by_key(|(file, ..)| file.id);
+    tracing::debug!("Composer's autoload maps served {} vendor files.", served.len());
+
+    Ok(served)
+}
+
 /// Scans `file` into the codebase metadata it declares, with its signature and the scan `plan` captures of it, its
 /// names resolved against `namespace_classes` and `extern_namespaces`. Also returns each class-like of the file's
-/// namespace that would win over a default class-like the file names.
+/// namespace that would win over a default class-like the file names, and with `reach` each name of a class-like the
+/// file reaches: those its scan names, and for a host file or a `.sharp` file, whose code the analysis or the engine
+/// reads, every name its code resolves and each class-like a `@var` tag of its bodies names.
+#[allow(clippy::too_many_arguments)]
 fn scan_file(
     arena: &LocalArena,
     file: &Arc<File>,
@@ -2190,7 +2314,8 @@ fn scan_file(
     plan: Option<&CodebaseScanPlan>,
     namespace_classes: &NamespaceClasses,
     extern_namespaces: &ExternNamespaces,
-) -> Result<(CodebaseMetadata, Option<CodebaseScanFile>, Vec<Word>), ExternalAnalyzerError> {
+    reach: bool,
+) -> Result<(CodebaseMetadata, Option<CodebaseScanFile>, Vec<Word>, WordSet), ExternalAnalyzerError> {
     let program = parse_file_with_settings(arena, file, parser_settings);
     if program.has_errors() {
         tracing::warn!(
@@ -2209,8 +2334,16 @@ fn scan_file(
         metadata.convert_partial_to_patch();
     }
     let codebase_scan = plan.map(|plan| plan.capture(file, &metadata)).transpose()?.flatten();
+    let mut reached = WordSet::default();
+    if reach {
+        reached = metadata.named_class_likes();
+        if file.file_type == FileType::Host || program.dialect.is_sharp() {
+            reached.extend(resolved_names.iter().map(|(_, _, name, _)| mago_word::word(name)));
+            reached.extend(var_tag_class_likes(arena, program));
+        }
+    }
 
-    Ok((metadata, codebase_scan, resolved_names.namespace_classes().map(mago_word::word).collect()))
+    Ok((metadata, codebase_scan, resolved_names.namespace_classes().map(mago_word::word).collect(), reached))
 }
 
 /// Writes again the payload of each selected file whose attributes hold a PHP# member read, against the merged scan of

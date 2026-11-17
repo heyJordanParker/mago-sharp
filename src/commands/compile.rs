@@ -37,6 +37,7 @@ use serde::Serialize;
 use mago_allocator::LocalArena;
 use mago_analyzer::code::IssueCode;
 use mago_build_id::BUILD_ID;
+use mago_composer::autoload::MAPS;
 use mago_database::Database;
 use mago_database::DatabaseConfiguration;
 use mago_database::DatabaseReader;
@@ -49,6 +50,7 @@ use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
 use mago_database::loader::ExcludedFolders;
 use mago_database::loader::read_listed;
+use mago_orchestrator::Autoloader;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
@@ -227,7 +229,8 @@ pub(crate) fn release_hosts_folders() {
 /// A folder that keeps no record can't tell, so it counts as changed.
 fn compile_in_turn(configuration: &Configuration, root: &Path, folder: &Path) -> Result<bool, Error> {
     let mut filesystems = Filesystems::new();
-    let sources = source_files(configuration, root, &mut filesystems);
+    let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
+    let sources = source_files(configuration, root, &mut filesystems, orchestrator.autoloader().as_deref());
     if !sources.keys().any(|name| name.ends_with(".sharp")) {
         return Ok(false);
     }
@@ -265,16 +268,15 @@ fn compile_in_turn(configuration: &Configuration, root: &Path, folder: &Path) ->
 fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Result<bool, Error> {
     let record_path = folder.join(INPUTS);
     let mut filesystems = Filesystems::new();
-    let sources = source_files(configuration, root, &mut filesystems);
+    let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
+    let autoloader = orchestrator.autoloader();
+    let sources = source_files(configuration, root, &mut filesystems, autoloader.as_deref());
     if every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems) {
         return Ok(false);
     }
     // A record the compile can't delete is in a folder it then fails to write its compiled files to.
     let _ = std::fs::remove_file(&record_path);
-    let mut record = Record::start(configuration, root, &sources, folder, filesystems);
-    let mut orchestrator = create_orchestrator(configuration, ColorChoice::Never, false, false, false);
-    analyze_the_whole_workspace_without_paths(&mut orchestrator);
-    orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
+    let mut record = Record::start(configuration, root, &sources, folder, filesystems, autoloader.as_deref());
     let (database, _) = project_database(&orchestrator, &configuration.source.workspace)?;
 
     let library = standard_library(root, &database).map_err(OrchestratorError::General)?;
@@ -296,6 +298,7 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     );
     std::panic::set_hook(printing);
     let database = server.database();
+    stamped.extend(served_stamps(root, database, autoloader.as_deref())?);
 
     // Whether a file a host's worker loads changed, so a watch knows to start the workers again.
     let mut changed = false;
@@ -413,6 +416,47 @@ pub(crate) fn project_database(
     Ok((database.into_static(), included))
 }
 
+/// A fresh orchestrator of the whole workspace, as `mago analyze` makes one when no path is named, with Composer's
+/// autoload maps read, which drawing progress bars when `use_progress_bars` is set. It starts no extension host.
+///
+/// # Errors
+///
+/// Returns the error of reading Composer's autoload maps.
+pub(crate) fn whole_workspace(
+    configuration: &Configuration,
+    color_choice: ColorChoice,
+    use_progress_bars: bool,
+) -> Result<Orchestrator<'_>, Error> {
+    let mut orchestrator = create_orchestrator(configuration, color_choice, false, use_progress_bars, false);
+    analyze_the_whole_workspace_without_paths(&mut orchestrator);
+    orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
+    orchestrator.autoload_vendor(&configuration.source.workspace)?;
+
+    Ok(orchestrator)
+}
+
+/// The stamp of each file of `database` that `autoloader`'s maps served the analysis, which the record keeps as an
+/// input, as [`source_files`] leaves out every file the maps serve.
+///
+/// # Errors
+///
+/// Returns the error of reading a file.
+fn served_stamps(
+    root: &Path,
+    database: &impl DatabaseReader,
+    autoloader: Option<&Autoloader>,
+) -> Result<Vec<Stamp>, Error> {
+    let Some(autoloader) = autoloader else {
+        return Ok(Vec::new());
+    };
+
+    database
+        .files()
+        .filter(|file| file.path.as_deref().is_some_and(|path| autoloader.serves(path)))
+        .map(|file| Ok(recorded(&file.name, unit::stamp(root, &file.name)?.as_ref())))
+        .collect()
+}
+
 /// Whether the compile lowers `file`, a PHP# file of the project, which is the scope of its analysis. The compile
 /// refuses a PHP# file for the errors reported in it, and a node-analysis hook reports only in the file it inspects, so
 /// the hooks run only in these files, as they run only in the named files of `mago analyze <paths>`.
@@ -428,7 +472,9 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     let compiled_folder = root.join(unit::COMPILED_FOLDER);
     let record_path = compiled_folder.join(INPUTS);
     let mut filesystems = Filesystems::new();
-    let sources = source_files(configuration, &root, &mut filesystems);
+    let orchestrator = whole_workspace(configuration, color_choice, true)?;
+    let autoloader = orchestrator.autoloader();
+    let sources = source_files(configuration, &root, &mut filesystems, autoloader.as_deref());
     // A host names none of what it reads, so only a compile without hosts can know it has nothing to do.
     if !configuration.extension_hosts.values().any(|host| host.enabled)
         && let Some(mut record) = Record::read(&record_path)
@@ -446,12 +492,9 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     let mut record = sources
         .keys()
         .any(|name| name.ends_with(".sharp"))
-        .then(|| Record::start(configuration, &root, &sources, &compiled_folder, filesystems))
+        .then(|| Record::start(configuration, &root, &sources, &compiled_folder, filesystems, autoloader.as_deref()))
         .flatten();
 
-    let mut orchestrator = create_orchestrator(configuration, color_choice, false, true, false);
-    analyze_the_whole_workspace_without_paths(&mut orchestrator);
-    orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
     if let Some(external_analyzer) = start_external_analyzer(
         &configuration.extension_hosts,
         configuration.php_version,
@@ -591,6 +634,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         },
     )?;
     let database = server.database();
+    stamped.extend(served_stamps(&root, database, autoloader.as_deref())?);
 
     let mut written = BTreeSet::new();
     let mut accepted = HashSet::new();
@@ -903,8 +947,8 @@ impl Record {
     /// reads a file: creates the record's own temp file there and takes its modification time as the marker, keeps
     /// `sources`, and stamps each input the loader and the compile read apart from the analysis. Those are the
     /// `composer.json` of each PHP# source's folder, or of the nearest folder above it that holds one, as the loader
-    /// reads it, each absent one below it, Composer's `installed.json`, the baseline, and the `.sharp` folder of each
-    /// folder that holds a package's PHP# file, absent unless the compile refuses it. `filesystems` tells which
+    /// reads it, each absent one below it, Composer's `installed.json`, the autoload maps of `autoloader`, the baseline,
+    /// and the `.sharp` folder of each folder that holds a package's PHP# file, absent unless the compile refuses it. `filesystems` tells which
     /// filesystems record every write, for the outputs' statuses. Gives none when the temp file can't be created or an
     /// input can't be stamped, and the compile then keeps no record.
     fn start(
@@ -913,6 +957,7 @@ impl Record {
         sources: &BTreeMap<String, Found>,
         folder: &Path,
         mut filesystems: Filesystems,
+        autoloader: Option<&Autoloader>,
     ) -> Option<Self> {
         std::fs::create_dir_all(folder).ok()?;
         let marker_file = temp_file_in(folder).ok()?;
@@ -938,6 +983,12 @@ impl Record {
             }
         }
         inputs.push(stamp(b"vendor/composer/installed.json")?);
+        if let Some(autoloader) = autoloader {
+            let composer = autoloader.vendor().join("composer");
+            for map in MAPS {
+                inputs.push(stamp(source_name(root, &composer.join(map)).as_bytes())?);
+            }
+        }
         if let Some(baseline) = &configuration.analyzer.baseline {
             inputs.push(stamp(baseline.as_os_str().as_encoded_bytes())?);
         }
@@ -1228,13 +1279,19 @@ fn configuration_hash(configuration: &Configuration) -> [u8; 16] {
 /// database gives it, as [`Found`] holds it: a file a root names, whatever its extension, and each file of a configured
 /// extension under a root folder or under the folder a glob pattern starts with, following links as the loader does.
 /// The excludes are ignored, which only adds files, and the `.sharp` folder at `root` is left out, as the loader leaves
-/// it out. `filesystems` tells which filesystems record every write.
-fn source_files(configuration: &Configuration, root: &Path, filesystems: &mut Filesystems) -> BTreeMap<String, Found> {
+/// it out, as is each file `autoloader`'s maps serve, which the record stamps when the analysis reads it.
+/// `filesystems` tells which filesystems record every write.
+fn source_files(
+    configuration: &Configuration,
+    root: &Path,
+    filesystems: &mut Filesystems,
+    autoloader: Option<&Autoloader>,
+) -> BTreeMap<String, Found> {
     let source = &configuration.source;
     let whole_workspace = [".".to_owned()];
     let paths = if source.paths.is_empty() { &whole_workspace[..] } else { &source.paths[..] };
     let is_glob = |text: &str| text.contains(['*', '?', '[', '{']);
-    let mut walk = Walk { root, extensions: &source.extensions, filesystems, files: BTreeMap::new() };
+    let mut walk = Walk { root, extensions: &source.extensions, autoloader, filesystems, files: BTreeMap::new() };
     for configured in paths.iter().chain(&source.includes).chain(&source.patches) {
         let path = root.join(configured);
         if path.exists() {
@@ -1259,6 +1316,7 @@ fn source_files(configuration: &Configuration, root: &Path, filesystems: &mut Fi
 struct Walk<'walk> {
     root: &'walk Path,
     extensions: &'walk [String],
+    autoloader: Option<&'walk Autoloader>,
     filesystems: &'walk mut Filesystems,
     files: BTreeMap<String, Found>,
 }
@@ -1291,6 +1349,7 @@ impl Walk<'_> {
             } else if path
                 .extension()
                 .is_some_and(|extension| self.extensions.iter().any(|known| extension == known.as_str()))
+                && !self.autoloader.is_some_and(|autoloader| autoloader.serves(&path))
             {
                 let named = if by_real_path { real_path.clone() } else { path };
                 self.found(&named, &real_path, &metadata);
@@ -1306,9 +1365,9 @@ impl Walk<'_> {
     }
 }
 
-/// The name the database gives the file at `path`: its path relative to `root`, or its whole path outside `root`.
+/// The name the database gives the file at `path` in the project at `root`, as [`File::logical_name`] gives it.
 fn source_name(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned()
+    String::from_utf8_lossy(&File::logical_name(root, path)).into_owned()
 }
 
 /// The standard library's package name, as its `composer.json` and Composer's `installed.json` give it.
@@ -2034,12 +2093,12 @@ mod tests {
         for path in [&root, folder] {
             forced.insert(std::fs::metadata(path).unwrap().dev(), false);
         }
-        let sources = source_files(&configuration, &root, &mut forced);
-        let mut record = Record::start(&configuration, &root, &sources, folder, forced.clone()).unwrap();
+        let sources = source_files(&configuration, &root, &mut forced, None);
+        let mut record = Record::start(&configuration, &root, &sources, folder, forced.clone(), None).unwrap();
         record.output(&output, b"compiled");
         record.write(&folder.join(INPUTS), Outcome::default(), &ReadDatabase::empty(), []).unwrap();
         let mut current = || {
-            let sources = source_files(&configuration, &root, &mut forced);
+            let sources = source_files(&configuration, &root, &mut forced, None);
             every_compiled_file_is_current(&configuration, &root, folder, &sources, &mut forced)
         };
         assert!(current(), "each file hashes as it did");
