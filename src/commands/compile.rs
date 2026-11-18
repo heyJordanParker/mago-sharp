@@ -46,6 +46,7 @@ use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
 use mago_database::file::COMPANION_START;
 use mago_database::file::File;
+use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
 use mago_database::loader::ExcludedFolders;
@@ -79,6 +80,7 @@ use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file;
 use mago_syntax_core::utils::is_part_of_identifier;
 use mago_word::Word;
+use mago_word::ascii_lowercase_word;
 
 use crate::baseline::unserialize_baseline;
 use crate::commands::analyze::analyze_the_whole_workspace_without_paths;
@@ -169,9 +171,9 @@ const HOST_REPORT: &str = "report.json";
 
 /// Compiles every PHP# file of the project for its extension hosts, so a host loads the project's own classes as on
 /// plain PHP, on a fresh or read-only tree and after any change. Returns the project's hosts, each enabled one given
-/// the folder through [`HOST_ROOT`] and [`HOST_COMPILED`], which every command starts its hosts from, and whether the
-/// folder's tree changed since this process last held it, whichever run changed it, so a watch knows its hosts'
-/// workers may hold classes that changed. The folder is the
+/// the folder through [`HOST_ROOT`] and [`HOST_COMPILED`], which every command starts its hosts from, and what changed
+/// in the folder's tree since this process last held it, whichever run changed it, so a watch starts again the workers
+/// that loaded a class that changed. The folder is the
 /// project's in mago's cache, outside the project, and only the hosts' engine reads it, so the project's `.sharp`
 /// folder holds only what `mago compile` accepted.
 ///
@@ -192,10 +194,10 @@ const HOST_REPORT: &str = "report.json";
 /// Returns the error that stops the compile.
 pub(crate) fn compile_for_hosts(
     configuration: &Configuration,
-) -> Result<(BTreeMap<String, ExtensionHostConfiguration>, bool), Error> {
+) -> Result<(BTreeMap<String, ExtensionHostConfiguration>, HostsChange), Error> {
     let mut hosts = configuration.extension_hosts.clone();
     if !hosts.values().any(|host| host.enabled) {
-        return Ok((hosts, false));
+        return Ok((hosts, HostsChange::Unchanged));
     }
 
     let workspace = configuration.source.workspace.clone();
@@ -229,18 +231,36 @@ pub(crate) fn release_hosts_folders() {
     }
 }
 
+/// The source files whose compiled file in a hosts' folder a compile changed, and the classes they now declare.
+pub(crate) struct Recompiled {
+    /// Each file whose compiled file the compile wrote with other bytes, or refused while one was there.
+    pub(crate) files: HashSet<FileId>,
+    /// The classes those files declare after the compile, each by its lowercase name.
+    pub(crate) classes: HashSet<Word>,
+}
+
+/// What changed in a hosts' folder since this process last held it.
+pub(crate) enum HostsChange {
+    /// No file in the folder changed.
+    Unchanged,
+    /// The compile of this process changed a file in the folder.
+    Recompiled(Recompiled),
+    /// Another run rewrote the folder, or it keeps no record, so any compiled file may have changed.
+    Unknown,
+}
+
 /// Runs [`compile_into`] under the lock of `folder`'s [`COMPILE_LOCK`], as [`compile_for_hosts`] says, and keeps the
 /// shared lock in [`HOSTS_FOLDERS`]. A project with no PHP# file gives its hosts nothing to read, so it takes no lock.
-/// Returns whether the folder's tree changed since this process last held it: this compile changed a file in it, or
-/// its record differs from the one the process last held, as after another run's compile between a watch's analyses.
-/// A folder that keeps no record can't tell, so it counts as changed.
-fn compile_in_turn(configuration: &Configuration, root: &Path, folder: &Path) -> Result<bool, Error> {
+/// Returns what changed in the folder's tree since this process last held it: the files this compile changed, or any,
+/// when its record differs from the one the process last held, as after another run's compile between a watch's
+/// analyses. A folder that keeps no record can't tell, so any file may have changed.
+fn compile_in_turn(configuration: &Configuration, root: &Path, folder: &Path) -> Result<HostsChange, Error> {
     let mut filesystems = Filesystems::new();
     let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
     let excluded = excluded_folders(&orchestrator, configuration)?;
     let sources = source_files(configuration, root, &mut filesystems, orchestrator.autoloader().as_deref(), &excluded);
     if !sources.keys().any(|name| name.ends_with(".sharp")) {
-        return Ok(false);
+        return Ok(HostsChange::Unchanged);
     }
 
     let path = folder.join(COMPILE_LOCK);
@@ -251,7 +271,7 @@ fn compile_in_turn(configuration: &Configuration, root: &Path, folder: &Path) ->
         None => mago_database::lock::shared(&path)?,
     };
     let compiled = if every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems) {
-        false
+        None
     } else {
         lock.unlock().and_then(|()| lock.lock()).map_err(locking)?;
         let compiled = compile_into(configuration, root, folder)?;
@@ -259,21 +279,25 @@ fn compile_in_turn(configuration: &Configuration, root: &Path, folder: &Path) ->
         compiled
     };
     let record = std::fs::read(folder.join(INPUTS)).ok().map(|bytes| unit::source_hash(&bytes));
-    let rewritten = held.is_some_and(|held| record.is_none() || held.record != record);
+    let last = held.map(|held| held.record);
     HOSTS_FOLDERS
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(folder.to_path_buf(), HeldFolder { lock: Some(lock), record });
 
-    Ok(compiled || rewritten)
+    Ok(match (compiled, last) {
+        (Some(recompiled), _) => HostsChange::Recompiled(recompiled),
+        (None, Some(last)) if record.is_none() || last != record => HostsChange::Unknown,
+        (None, _) => HostsChange::Unchanged,
+    })
 }
 
 /// Compiles the project at `root` into `folder` for its extension hosts, as [`compile_for_hosts`] says, unless every
 /// file there is current, and keeps the record of what it read and wrote in `folder`'s [`INPUTS`]. Its log never
 /// decides the record: the loader and the analysis log from their worker threads too, which the main thread's
-/// subscriber doesn't silence, and the run with the hosts that follows reports what they log. Returns whether a file in
-/// `folder` changed.
-fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Result<bool, Error> {
+/// subscriber doesn't silence, and the run with the hosts that follows reports what they log. Returns, when a file in
+/// `folder` changed, the files whose compiled file changed.
+fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Result<Option<Recompiled>, Error> {
     let record_path = folder.join(INPUTS);
     let mut filesystems = Filesystems::new();
     let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
@@ -281,7 +305,7 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     let excluded = excluded_folders(&orchestrator, configuration)?;
     let sources = source_files(configuration, root, &mut filesystems, autoloader.as_deref(), &excluded);
     if every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems) {
-        return Ok(false);
+        return Ok(None);
     }
     // A record the compile can't delete is in a folder it then fails to write its compiled files to.
     let _ = std::fs::remove_file(&record_path);
@@ -320,19 +344,21 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
 
     // Whether a file a host's worker loads changed, so a watch knows to start the workers again.
     let mut changed = false;
-    let mut write = |path: &Path, bytes: &[u8]| -> Result<(), Error> {
-        if std::fs::read(path).ok().as_deref() != Some(bytes) {
+    let mut write = |path: &Path, bytes: &[u8]| -> Result<bool, Error> {
+        let rewritten = std::fs::read(path).ok().as_deref() != Some(bytes);
+        if rewritten {
             write_by_rename(path, bytes)?;
             changed = true;
         }
         if let Some(record) = record.as_mut() {
             record.output(path, bytes);
         }
-        Ok(())
+        Ok(rewritten)
     };
     let mut written = BTreeSet::new();
     let mut refused = IssueCollection::default();
     let mut accepted = HashSet::new();
+    let mut recompiled = HashSet::new();
     let (compilations, compiled_files) = compilations?;
     write(&compiled_files_path, &compiled_files.encode(configuration_hash(configuration))?)?;
     written.insert(compiled_files_path);
@@ -343,13 +369,27 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
         };
         match compilation {
             Compilation::Accepted(bytes) => {
-                write(&compiled, &bytes)?;
+                if write(&compiled, &bytes)? {
+                    recompiled.insert(file_id);
+                }
                 written.insert(compiled);
                 accepted.insert(file_id);
             }
-            Compilation::Refused(errors) => refused.extend(errors),
+            Compilation::Refused(errors) => {
+                if compiled.exists() {
+                    recompiled.insert(file_id);
+                }
+                refused.extend(errors);
+            }
         }
     }
+    let classes = server
+        .codebase()
+        .class_likes
+        .values()
+        .filter(|class| recompiled.contains(&class.span.file_id))
+        .map(|class| ascii_lowercase_word(class.original_name.as_bytes()))
+        .collect();
 
     let inputs = listener_inputs(root, database)?;
     if !inputs.is_empty() {
@@ -396,7 +436,7 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
         record.write(&record_path, Outcome::default(), database, stamped.into_iter().chain(listed))?;
     }
 
-    Ok(changed || deleted > 0)
+    Ok((changed || deleted > 0).then_some(Recompiled { files: recompiled, classes }))
 }
 
 /// Where the hosts' compile of the project at `root` into `folder` puts the compiled file of `source`: where
@@ -2094,17 +2134,20 @@ mod tests {
     fn the_hosts_compile_runs_again_after_an_edit_of_a_vendor_file() {
         let (_directory, root, configuration) = project();
         let folder = tempfile::tempdir().unwrap();
-        assert!(compile_into(&configuration, &root, folder.path()).unwrap(), "a fresh folder is written");
+        assert!(compile_into(&configuration, &root, folder.path()).unwrap().is_some(), "a fresh folder is written");
         // A compile that runs writes its record anew, though every compiled file it writes is the same.
         let recorded = || std::fs::metadata(folder.path().join(INPUTS)).unwrap().modified().unwrap();
         let written = recorded();
-        assert!(!compile_into(&configuration, &root, folder.path()).unwrap(), "nothing changed");
+        assert!(compile_into(&configuration, &root, folder.path()).unwrap().is_none(), "nothing changed");
         assert_eq!(recorded(), written, "the compile had nothing to do");
 
         write(&root, "vendor/acme/rate/src/Rate.php", &rate("string"));
         let paced = std::fs::read(folder.path().join("app/Paced.sharpc")).unwrap();
 
-        assert!(compile_into(&configuration, &root, folder.path()).unwrap(), "the vendor edit compiles again");
+        assert!(
+            compile_into(&configuration, &root, folder.path()).unwrap().is_some(),
+            "the vendor edit compiles again"
+        );
         assert_ne!(std::fs::read(folder.path().join("app/Paced.sharpc")).unwrap(), paced);
     }
 

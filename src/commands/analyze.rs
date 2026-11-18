@@ -55,6 +55,7 @@ use mago_database::Database;
 use mago_database::DatabaseConfiguration;
 use mago_database::DatabaseReader;
 use mago_database::file::File;
+use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_database::membership::WorkspaceMatcher;
 use mago_database::watcher::DatabaseWatcher;
@@ -66,11 +67,15 @@ use mago_reporting::CompiledIgnoreSet;
 use mago_reporting::IssueCollection;
 use mago_server::Server;
 use mago_server::Settings as ServerSettings;
+use mago_word::Word;
+use mago_word::ascii_lowercase_word;
 
 use crate::commands::args::baseline_reporting::BaselineReportingArgs;
 use crate::commands::args::substitution::Substitution;
 use crate::commands::args::substitution::SubstitutionArgs;
 use crate::commands::args::substitution::substitute;
+use crate::commands::compile::HostsChange;
+use crate::commands::compile::Recompiled;
 use crate::commands::compile::compile_for_hosts;
 use crate::commands::compile::release_hosts_folders;
 use crate::commands::outcome::CommandOutcome;
@@ -557,14 +562,28 @@ impl AnalyzeCommand {
 
             tracing::info!("Detected {} file change(s), re-analyzing...", changed_file_ids.len());
 
+            // A host's worker keeps each class it loaded, as PHP declares a class once, so the workers that loaded a
+            // class whose compiled file changed start again, and the files whose hooks read one are checked again. The
+            // classes a recompiled or deleted file declared in the last analysis count too: one it no longer declares
+            // changed.
+            let changed: Vec<Word> = match compile_for_hosts(configuration)?.1 {
+                HostsChange::Unchanged => Vec::new(),
+                HostsChange::Recompiled(Recompiled { files, classes }) => {
+                    let deleted =
+                        |file_id| changed_file_ids.contains(&file_id) && watcher.database().get_ref(&file_id).is_err();
+                    declared_classes(server.codebase(), |file_id| files.contains(&file_id) || deleted(file_id))
+                        .into_iter()
+                        .chain(classes)
+                        .collect()
+                }
+                HostsChange::Unknown => declared_classes(server.codebase(), |_| true),
+            };
             *server.database_mut() = watcher.database().clone().into_static();
-            // A host's worker keeps each class it loaded, as PHP declares a class once, so a change the hosts' compile
-            // takes in starts every worker again, as a dev server restarts a worker when a module it loaded changes.
-            if compile_for_hosts(configuration)?.1 {
-                return Ok(WatchOutcome::Restart("a PHP# file the extension hosts load changed".to_owned()));
+            let mut issues = match server.reload_classes(changed)? {
+                Some(read) => server.analyze_incremental(&[changed_file_ids, read].concat())?,
+                None => server.analyze()?,
             }
-
-            let mut issues = server.analyze_incremental(&changed_file_ids)?.issues;
+            .issues;
             issues.filter_out_ignored(&ignore_set, |file_id| {
                 server.database().get_ref(&file_id).ok().map(|f| String::from_utf8_lossy(&f.name).into_owned())
             });
@@ -574,6 +593,17 @@ impl AnalyzeCommand {
             tracing::info!("Analysis complete. Watching for changes...");
         }
     }
+}
+
+/// The classes `codebase` declares in each file `in_file` accepts, each by its lowercase name, as a worker's class loads
+/// name them.
+fn declared_classes(codebase: &CodebaseMetadata, in_file: impl Fn(FileId) -> bool) -> Vec<Word> {
+    codebase
+        .class_likes
+        .values()
+        .filter(|class| in_file(class.span.file_id))
+        .map(|class| ascii_lowercase_word(class.original_name.as_bytes()))
+        .collect()
 }
 
 /// Reports one watch round's `issues` from `server`'s database. An issue that names a file the database lacks, as one

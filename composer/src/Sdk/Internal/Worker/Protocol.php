@@ -21,13 +21,16 @@ final class Protocol
 {
     public const COLLECT_REQUEST = 1;
     public const REDUCE_REQUEST = 2;
+    public const CLASS_LOADS_REQUEST = 3;
 
     private const MAGIC_U32 = 0x4D45_5854;
     private const VERSION_U32 = 0x0001_0000;
     private const COLLECT_RESPONSE = 0x8001;
     private const REDUCE_RESPONSE = 0x8002;
+    private const CLASS_LOADS_RESPONSE = 0x8003;
     private const MAXIMUM_WORKERS = 0x0001_0000;
     private const MAXIMUM_REDUCERS = 0x0000_4000;
+    private const MAXIMUM_CLASSES = 0x0010_0000;
 
     /**
      * @return array{int<0, 65535>, PayloadReader}
@@ -35,11 +38,39 @@ final class Protocol
     public static function readRequest(string $payload): array
     {
         [$kind, $reader] = self::readMessage($payload);
-        if ($kind !== self::COLLECT_REQUEST && $kind !== self::REDUCE_REQUEST) {
+        if ($kind !== self::COLLECT_REQUEST && $kind !== self::REDUCE_REQUEST && $kind !== self::CLASS_LOADS_REQUEST) {
             throw new ProtocolException("Unknown worker management request kind {$kind}.");
         }
 
         return [$kind, $reader];
+    }
+
+    /**
+     * Reads the classes a class loads request asks after, each a lowercase class name.
+     *
+     * @return list<string>
+     */
+    public static function readClassLoadsRequest(PayloadReader $reader): array
+    {
+        $classes = [];
+        for ($count = $reader->readCount(self::MAXIMUM_CLASSES); $count > 0; --$count) {
+            $classes[] = $reader->readBytes();
+        }
+
+        $reader->finish();
+
+        return $classes;
+    }
+
+    /**
+     * Answers whether the worker's class loads hold one of the classes asked after.
+     */
+    public static function writeClassLoadsResponse(bool $holds): string
+    {
+        $writer = self::createMessage(self::CLASS_LOADS_RESPONSE);
+        $writer->writeBoolean($holds);
+
+        return $writer->finish();
     }
 
     /**

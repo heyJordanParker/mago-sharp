@@ -1472,12 +1472,13 @@ pub(super) fn decode_lifecycle_response(
 
             Some(file_id)
         };
-        reads.push((file_id, ExtensionReads::decode(&mut reader)?));
+        let (file_reads, loads) = ExtensionReads::decode(&mut reader)?;
+        reads.push((file_id, file_reads, loads));
     }
 
     reader.finish()?;
-    for (file_id, file_reads) in reads {
-        session.record_reads(file_id, file_reads);
+    for (file_id, file_reads, loads) in reads {
+        session.record_reads(file_id, file_reads, loads);
     }
 
     Ok(LifecycleEffects { issues, references, references_by_file })
@@ -2219,6 +2220,10 @@ mod tests {
                 writer.write_u8(0);
                 writer.write_bytes(class).expect("the class should fit in a frame");
             }
+            // The worker's class loads, of which it has none.
+            writer.write_u64(1);
+            writer.write_u32(0);
+            writer.write_u32(0);
         }
 
         writer.finish()
@@ -2244,7 +2249,7 @@ mod tests {
             listings: HashSet::default(),
         };
         // A class-like read stays as written, for the codebase to key.
-        let sorted = ExtensionReads { issues: class(b"Issue"), code: class(b"Code") };
+        let sorted = ExtensionReads { issues: class(b"Issue"), code: class(b"Code"), ..ExtensionReads::default() };
 
         let before = decoded_reads(BEFORE_ANALYSIS_REQUEST, &response_with_reads(BEFORE_ANALYSIS_RESPONSE, &[None]))
             .expect("before-analysis hooks may read");

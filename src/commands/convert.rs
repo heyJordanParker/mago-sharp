@@ -74,6 +74,7 @@ use mago_syntax::parser::parse_file;
 use crate::baseline::unserialize_baseline;
 use crate::commands::analyze::decode_prelude;
 use crate::commands::analyze::server_settings;
+use crate::commands::compile::HostsChange;
 use crate::commands::compile::compile_for_hosts;
 use crate::commands::compile::project_database;
 use crate::commands::compile::standard_library;
@@ -617,8 +618,8 @@ impl<'configuration> Prover<'configuration> {
     /// files add, is logged as an error, as git holds their plain PHP.
     fn prove_written(&self, plain: &Proof, written: &[&Candidate]) -> bool {
         match compile_for_hosts(self.configuration) {
-            Ok((_, false)) => return true,
-            Ok((_, true)) => {}
+            Ok((_, HostsChange::Unchanged)) => return true,
+            Ok(_) => {}
             Err(error) => {
                 tracing::error!(
                     "The converted files could not be compiled for the extension hosts, so no hosts that load them proved the project, and git holds their plain PHP: {error}"

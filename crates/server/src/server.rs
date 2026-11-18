@@ -31,6 +31,7 @@ use mago_sharp_bridge::unit::Input;
 use mago_sharp_bridge::unit::Library;
 use mago_sharp_lean::Reach;
 use mago_sharp_lean::Translation;
+use mago_word::Word;
 
 use crate::error::ServerError;
 use crate::settings::Settings;
@@ -145,6 +146,21 @@ impl Server {
         } else {
             self.pass(IncrementalAnalysisService::analyze)
         }
+    }
+
+    /// Take in that the compiled files of `classes`, each a lowercase class name, changed: start again each extension
+    /// worker that loaded one, and give up what the last pass found in each file whose extension callbacks read one.
+    /// Returns those files, for the next [`Self::analyze_incremental`] to analyze again, or `None` when only a pass
+    /// over the whole workspace is exact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when a worker cannot answer whether it loaded one, or cannot start again.
+    pub fn reload_classes(
+        &mut self,
+        classes: impl IntoIterator<Item = Word>,
+    ) -> Result<Option<Vec<FileId>>, ServerError> {
+        Ok(self.service.reload_classes(&classes.into_iter().collect())?)
     }
 
     /// Compile each `.sharp` file of the last analysis into the bytes of its `.sharpc` file, or the errors that

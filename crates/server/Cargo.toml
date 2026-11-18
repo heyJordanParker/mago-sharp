@@ -21,4 +21,5 @@ mago-reporting = { workspace = true }
 mago-sharp-bridge = { workspace = true }
 mago-sharp-lean = { workspace = true }
 mago-syntax = { workspace = true }
+mago-word = { workspace = true }
 foldhash = { workspace = true }

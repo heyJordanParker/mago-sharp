@@ -968,8 +968,9 @@ fn a_linter_host_sees_each_php_sharp_file_compiled_on_a_fresh_tree() {
     assert!(!root.join(".sharp").exists());
 }
 
-/// An extension host that appends its process id and the word the compiled `app/Word.sharp` holds to `host.log` as
-/// each analysis starts.
+/// An extension host that loads `App\Word`, the class of `app/Word.sharp`, and appends its process id and the word the
+/// compiled file holds to `host.log` as each analysis starts. The `php` the tests run is plain PHP, which never declares
+/// a PHP# class, so the worker fails to load it, which counts as loading it.
 const HOST_LOGGING_ITS_PROCESS: &str = r#"<?php
 
 declare(strict_types=1);
@@ -998,6 +999,7 @@ final class LogsItsProcess implements Plugin, BeforeAnalysisHook
 
     public function beforeAnalysis(BeforeAnalysisContext $context): void
     {
+        class_exists('App\Word');
         $compiled = (string) @file_get_contents(getenv('SHARP_COMPILED') . '/app/Word.sharpc');
         $word = str_contains($compiled, 'second') ? 'second' : (str_contains($compiled, 'first') ? 'first' : 'nothing');
         file_put_contents('host.log', getmypid() . " {$word}\n", FILE_APPEND);
@@ -1007,9 +1009,8 @@ final class LogsItsProcess implements Plugin, BeforeAnalysisHook
 (new Worker(new Extension('logger', 'Logger', '0.0.0', analyzerPlugins: [new LogsItsProcess()])))->run();
 "#;
 
-/// A host's worker keeps each class it loaded, as PHP declares a class once, so `mago analyze --watch` starts the
-/// hosts' workers again when a PHP# file they load changes, as a dev server restarts a worker when a module it loaded
-/// changes.
+/// A host's worker keeps each class it loaded, as PHP declares a class once, so `mago analyze --watch` starts a host's
+/// worker again when the compiled file of a class it loaded changes.
 #[test]
 fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1064,6 +1065,181 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     assert_eq!(runs[0].1, "first", "{failure}");
     assert_eq!(runs[1].1, "second", "{failure}");
     assert_ne!(runs[0].0, runs[1].0, "{failure}");
+}
+
+/// An extension host whose worker loads only its own rule class, as a framework's rules do, and appends its process id
+/// to `host.log` as each file's hooks run.
+const HOST_LOADING_ONLY_ITS_RULE: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\AfterFileAnalysisContext;
+use Mago\Sdk\Analyzer\AfterFileAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class LogsEachFile implements Plugin, AfterFileAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('logs-each-file', 'Logs each file', 'Logs its process id for each file.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerAfterFileAnalysisHook($this);
+    }
+
+    public function getRequirements(): array
+    {
+        return [];
+    }
+
+    public function afterFileAnalysis(AfterFileAnalysisContext $context): void
+    {
+        file_put_contents('host.log', getmypid() . " {$context->analysis->file}\n", FILE_APPEND);
+    }
+}
+
+(new Worker(new Extension('rule', 'Rule', '0.0.0', analyzerPlugins: [new LogsEachFile()])))->run();
+"#;
+
+/// A worker that never loaded an app class keeps running through an edit of one: `mago analyze --watch` checks the
+/// edit as any other edit, with no restart of the watch and no new worker, so its hooks run again on the edited file
+/// alone, in the same process.
+#[test]
+fn a_watch_keeps_a_worker_that_never_loaded_the_edited_class() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the worker keeping watch test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let word = |word: &str| {
+        format!("namespace App;\n\npublic class Word\n{{\n    public static string text() => \"{word}\";\n}}\n")
+    };
+    write(root, "app/Word.sharp", &word("first"));
+    write(root, "tools/host.php", HOST_LOADING_ONLY_ITS_RULE);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.rule]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+    let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
+    let watch_log = tempfile::NamedTempFile::new().unwrap();
+    let seen = || std::fs::read_to_string(watch_log.path()).unwrap();
+    let within = |done: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !done() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        done()
+    };
+
+    let mut watch = process::spawn(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "analyze", "--watch"])
+            .env("MAGO_LOG", "info")
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root)
+            .stdout(Stdio::null())
+            .stderr(watch_log.reopen().unwrap()),
+    )
+    .unwrap();
+    let started = within(&|| seen().contains("Initial analysis complete"));
+    let first = log();
+    write(root, "app/Word.sharp", &word("second"));
+    let rechecked = within(&|| seen().contains("Analysis complete."));
+    watch.kill().unwrap();
+    watch.wait().unwrap();
+
+    let failure = format!("{}\n{}", log(), seen());
+    assert!(started && rechecked, "{failure}");
+    assert!(!seen().contains("Restarting analysis"), "{failure}");
+    let after = log();
+    let recheck: Vec<&str> = after.strip_prefix(first.as_str()).unwrap_or_default().lines().collect();
+    let process = first.lines().next().and_then(|line| line.split_once(' ')).map(|(process, _)| process);
+    assert!(process.is_some(), "{failure}");
+    let edited = format!("{} app/Word.sharp", process.unwrap_or_default());
+    assert_eq!(recheck, [edited.as_str()], "the same worker checks the edited file alone: {failure}");
+}
+
+/// A watch reports what the one-shot command reports where an issue points into a vendor file Composer's autoload maps
+/// served, and keeps watching: the report renders each file the analysis read, and the watch's own tree holds only
+/// the files it watches. 0.6.26 stopped the watch after its first analysis with "Files error: file missing".
+#[test]
+fn a_watch_reports_an_issue_that_points_into_a_vendor_file_the_autoload_maps_served() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
+    write(
+        root,
+        "vendor/composer/autoload_psr4.php",
+        "<?php\n\n$vendorDir = dirname(__DIR__);\n\nreturn array(\n    'Acme\\\\Rate\\\\' => array($vendorDir . '/acme/rate/src'),\n);\n",
+    );
+    write(
+        root,
+        "vendor/acme/rate/src/Rate.php",
+        "<?php\n\nnamespace Acme\\Rate;\n\nfinal class Rate\n{\n    private static function of(int $percent): int\n    {\n        return $percent;\n    }\n}\n",
+    );
+    let order = |percent: u8| {
+        format!(
+            "<?php\n\nnamespace App;\n\nuse Acme\\Rate\\Rate;\n\nfunction total(): int\n{{\n    return Rate::of({percent});\n}}\n"
+        )
+    };
+    write(root, "app/Order.php", &order(5));
+    let analyze = |watch: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mago"));
+        command
+            .args(["--no-version-check", "--colors", "never", "analyze", "--reporting-format", "rich"])
+            .args(watch.then_some("--watch"))
+            .env("MAGO_LOG", "info")
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root);
+        command
+    };
+    let once = process::output(&mut analyze(false)).unwrap();
+    let report = String::from_utf8_lossy(&once.stdout).into_owned();
+    assert!(
+        report.contains("vendor/acme/rate/src/Rate.php"),
+        "the issue points into the vendor file: {}",
+        printed(&once)
+    );
+
+    let reports = tempfile::NamedTempFile::new().unwrap();
+    let watch_log = tempfile::NamedTempFile::new().unwrap();
+    let mut watch =
+        process::spawn(analyze(true).stdout(reports.reopen().unwrap()).stderr(watch_log.reopen().unwrap())).unwrap();
+    let seen = || std::fs::read_to_string(watch_log.path()).unwrap();
+    let within = |done: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !done() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        done()
+    };
+    let started = within(&|| seen().contains("Initial analysis complete") || seen().contains("ERROR"));
+    let first = std::fs::read_to_string(reports.path()).unwrap();
+    write(root, "app/Order.php", &order(6));
+    let rechecked = within(&|| seen().contains("Analysis complete.") || seen().contains("ERROR"));
+    let running = watch.try_wait().unwrap().is_none();
+    watch.kill().unwrap();
+    watch.wait().unwrap();
+
+    let failure = format!("{}{}", std::fs::read_to_string(reports.path()).unwrap(), seen());
+    assert!(started && !seen().contains("ERROR"), "{failure}");
+    assert_eq!(first, report, "the watch's first report is the one-shot command's: {failure}");
+    assert!(rechecked && running, "{failure}");
+    let second = std::fs::read_to_string(reports.path()).unwrap().split_off(first.len());
+    assert!(second.contains("Rate::of(6)") && second.contains("vendor/acme/rate/src/Rate.php"), "{failure}");
 }
 
 /// `mago analyze --watch` keeps reporting the issues that point into a vendor file Composer's autoload maps served, round

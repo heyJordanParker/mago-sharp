@@ -55,6 +55,7 @@ use Mago\Sdk\Internal\Analyzer\Protocol as AnalyzerProtocol;
 use Mago\Sdk\Internal\Analyzer\RegisteredPlugin;
 use Mago\Sdk\Internal\Analyzer\RegisteredTargetedCallback;
 use Mago\Sdk\Internal\Analyzer\ReportedIssue;
+use Mago\Sdk\Internal\ClassLoads;
 use Mago\Sdk\Internal\HostClient;
 use Mago\Sdk\Internal\Io\InputTransport;
 use Mago\Sdk\Internal\Io\ResourceReader;
@@ -174,8 +175,11 @@ final class Worker
 
     private ?MetadataCache $metadataCache = null;
 
+    private readonly ClassLoads $classLoads;
+
     public function __construct(Extension $extension, Extension ...$additionalExtensions)
     {
+        $this->classLoads = new ClassLoads();
         $extensions = [$extension, ...array_values($additionalExtensions)];
         $extensionIdentifiers = [];
         $ruleCodes = [];
@@ -669,6 +673,12 @@ final class Worker
         HostClient $host,
         CancellationTokenInterface $cancellation,
     ): string {
+        if ($kind === WorkerProtocol::CLASS_LOADS_REQUEST) {
+            return WorkerProtocol::writeClassLoadsResponse($this->classLoads->holdsAny(WorkerProtocol::readClassLoadsRequest(
+                $reader,
+            )));
+        }
+
         if ($kind === WorkerProtocol::COLLECT_REQUEST) {
             $reader->finish();
             $payloads = [];
@@ -825,7 +835,12 @@ final class Worker
             $codeReads,
         );
 
-        return AnalyzerProtocol::withCodebaseReads($response, $issueReads->take(), $codeReads->take());
+        return AnalyzerProtocol::withCodebaseReads(
+            $response,
+            $issueReads->take(),
+            $codeReads->take(),
+            $this->classLoads,
+        );
     }
 
     /**
@@ -1438,18 +1453,24 @@ final class Worker
                 }
             }
 
-            $issueTaken = $issueReads->take();
-            $codeTaken = $codeReads->take();
-            if ($issueTaken !== [] || $codeTaken !== []) {
+            // A file's hooks read every class their worker had loaded when they finished, so each file names its end.
+            if ($recording) {
                 $recordedReads[] = [
                     $analysis instanceof FileAnalysis ? $analysis->file : null,
-                    $issueTaken,
-                    $codeTaken,
+                    $issueReads->take(),
+                    $codeReads->take(),
+                    $this->classLoads->end(),
                 ];
             }
         }
 
-        return AnalyzerProtocol::writeLifecycleResponse($kind, $reportedIssues, $contributedReferences, $recordedReads);
+        return AnalyzerProtocol::writeLifecycleResponse(
+            $kind,
+            $this->classLoads,
+            $reportedIssues,
+            $contributedReferences,
+            $recordedReads,
+        );
     }
 
     /**

@@ -34,6 +34,8 @@ pub struct SessionReads {
     pub files: HashMap<FileId, ExtensionReads>,
     /// What the before-analysis hooks read, for no one file.
     pub before_analysis: ExtensionReads,
+    /// The entries of each worker's class log the session's responses reported.
+    pub class_logs: ClassLogs,
 }
 
 /// What extension callbacks read from the codebase, kept apart by what a read can change.
@@ -46,22 +48,113 @@ pub struct ExtensionReads {
     pub issues: FileReads,
     /// What plugins with a provider read, which can change the analyzed code too.
     pub code: FileReads,
+    /// How many entries of each worker's class log the callbacks read, by the id the worker drew at its start: a
+    /// callback may keep what any class its worker loaded before it ran left behind.
+    pub classes: HashMap<u64, u32>,
 }
 
 impl ExtensionReads {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.issues.is_empty() && self.code.is_empty()
+        self.issues.is_empty() && self.code.is_empty() && self.classes.is_empty()
     }
 
     pub fn extend(&mut self, other: ExtensionReads) {
         self.issues.extend(other.issues);
         self.code.extend(other.code);
+        for (worker, end) in other.classes {
+            let read = self.classes.entry(worker).or_default();
+            *read = (*read).max(end);
+        }
     }
 
-    /// Reads the two lists of reads the SDK writes: the issue reads, then the code reads.
-    pub(super) fn decode(reader: &mut PayloadReader<'_>) -> Result<Self, ExternalAnalyzerError> {
-        Ok(Self { issues: FileReads::decode(reader)?, code: FileReads::decode(reader)? })
+    /// Reads the two lists of reads the SDK writes, the issue reads then the code reads, and the class loads of the
+    /// worker that follow them, whose end the callbacks read.
+    pub(super) fn decode(reader: &mut PayloadReader<'_>) -> Result<(Self, ClassLoads), ExternalAnalyzerError> {
+        let issues = FileReads::decode(reader)?;
+        let code = FileReads::decode(reader)?;
+        let loads = ClassLoads::decode(reader)?;
+        let end = loads.end();
+        let classes = if end == 0 { HashMap::default() } else { HashMap::from_iter([(loads.worker, end)]) };
+
+        Ok((Self { issues, code, classes }, loads))
+    }
+}
+
+/// The entries of one worker's class log a response reports.
+///
+/// The log holds the classes the worker declared from a `.sharp` file and those it was asked for and never declared, in
+/// the order it met them, each by its lowercase name. The SDK sends the entries Mago has not had yet with each
+/// response's reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClassLoads {
+    /// The id the worker drew at its start.
+    pub worker: u64,
+    /// The place of the first entry in the worker's log.
+    pub from: u32,
+    /// The entries, in their order in the log.
+    pub classes: Vec<Word>,
+}
+
+impl ClassLoads {
+    /// The place after the last entry, which the callbacks that sent them read up to.
+    #[must_use]
+    pub fn end(&self) -> u32 {
+        self.from.saturating_add(u32::try_from(self.classes.len()).unwrap_or(u32::MAX))
+    }
+
+    fn decode(reader: &mut PayloadReader<'_>) -> Result<Self, ExternalAnalyzerError> {
+        let worker = reader.read_u64("class loads worker")?;
+        let from = reader.read_u32("class loads start")?;
+        let count = reader.read_count("class loads", MAXIMUM_READS)?;
+        let classes = std::iter::repeat_with(|| Ok(word(reader.read_bytes("class load")?)))
+            .take(count)
+            .collect::<Result<_, ExternalAnalyzerError>>()?;
+
+        Ok(Self { worker, from, classes })
+    }
+}
+
+/// Each worker's class log, as far as responses reported it, by the id the worker drew at its start.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClassLogs(HashMap<u64, Vec<Word>>);
+
+impl ClassLogs {
+    /// Places the entries `loads` reports in their worker's log.
+    pub fn record(&mut self, loads: ClassLoads) {
+        let log = self.0.entry(loads.worker).or_default();
+        let from = loads.from as usize;
+        let end = from + loads.classes.len();
+        if log.len() < end {
+            log.resize(end, empty_word());
+        }
+        for (entry, class) in log[from..end].iter_mut().zip(loads.classes) {
+            *entry = class;
+        }
+    }
+
+    /// Places every entry of `other`'s logs in these.
+    pub fn extend(&mut self, other: ClassLogs) {
+        for (worker, log) in other.0 {
+            let held = self.0.entry(worker).or_default();
+            if held.len() < log.len() {
+                held.resize(log.len(), empty_word());
+            }
+            for (entry, class) in held.iter_mut().zip(log) {
+                if !class.is_empty() {
+                    *entry = class;
+                }
+            }
+        }
+    }
+
+    /// Whether `reads` read one of `classes`, each a lowercase class name: an entry of a worker's log before the end
+    /// `reads` gives that worker.
+    #[must_use]
+    pub fn read_any(&self, reads: &ExtensionReads, classes: &HashSet<Word>) -> bool {
+        reads.classes.iter().any(|(worker, end)| {
+            self.0.get(worker).is_some_and(|log| log.iter().take(*end as usize).any(|class| classes.contains(class)))
+        })
     }
 }
 
@@ -213,8 +306,9 @@ fn hash_names(hasher: &mut DefaultHasher, names: impl IntoIterator<Item = Word>)
 mod tests {
     use super::*;
 
-    /// Two lists of reads as the SDK writes them, `issues` then `code`, each read an operation and its name.
-    fn written(issues: &[(u8, &[u8])], code: &[(u8, &[u8])]) -> Vec<u8> {
+    /// Two lists of reads as the SDK writes them, `issues` then `code`, each read an operation and its name, then the
+    /// entries `from` on of worker 7's class log.
+    fn written_with(issues: &[(u8, &[u8])], code: &[(u8, &[u8])], from: u32, classes: &[&[u8]]) -> Vec<u8> {
         let mut writer = PayloadWriter::new();
         for reads in [issues, code] {
             writer.write_u32(reads.len() as u32);
@@ -224,17 +318,48 @@ mod tests {
                 writer.write_bytes(name).expect("the name should fit in a frame");
             }
         }
+        writer.write_u64(7);
+        writer.write_u32(from);
+        writer.write_u32(classes.len() as u32);
+        for class in classes {
+            writer.write_bytes(class).expect("the class should fit in a frame");
+        }
 
         writer.finish()
     }
 
-    fn decoded(issues: &[(u8, &[u8])], code: &[(u8, &[u8])]) -> Result<ExtensionReads, ExternalAnalyzerError> {
-        let bytes = written(issues, code);
-        let mut reader = PayloadReader::new(&bytes);
-        let reads = ExtensionReads::decode(&mut reader)?;
+    fn decoded_with(bytes: &[u8]) -> Result<(ExtensionReads, ClassLoads), ExternalAnalyzerError> {
+        let mut reader = PayloadReader::new(bytes);
+        let decoded = ExtensionReads::decode(&mut reader)?;
         reader.finish()?;
 
-        Ok(reads)
+        Ok(decoded)
+    }
+
+    fn decoded(issues: &[(u8, &[u8])], code: &[(u8, &[u8])]) -> Result<ExtensionReads, ExternalAnalyzerError> {
+        Ok(decoded_with(&written_with(issues, code, 0, &[]))?.0)
+    }
+
+    /// The class loads after a response's reads report the entries of the worker's log Mago has not had, and the reads
+    /// read every entry of the log before their end, the ones earlier responses reported too.
+    #[test]
+    fn reads_read_every_class_their_worker_loaded_before_they_ended() {
+        let mut logs = ClassLogs::default();
+        let (first, loads) = decoded_with(&written_with(&[], &[], 0, &[b"app\\rule"])).expect("a first class load");
+        logs.record(loads);
+        let (later, loads) = decoded_with(&written_with(&[], &[], 1, &[b"app\\order"])).expect("a later class load");
+        logs.record(loads);
+        let (none, loads) = decoded_with(&written_with(&[], &[], 0, &[])).expect("no class load");
+        logs.record(loads);
+
+        assert_eq!(first.classes, HashMap::from_iter([(7, 1)]));
+        assert_eq!(later.classes, HashMap::from_iter([(7, 2)]));
+        assert!(none.is_empty(), "reads that end at the log's start read no class");
+        let rule = HashSet::from_iter([word(b"app\\rule")]);
+        let order = HashSet::from_iter([word(b"app\\order")]);
+        assert!(logs.read_any(&later, &rule), "a later file reads the class an earlier file's hooks loaded");
+        assert!(logs.read_any(&later, &order));
+        assert!(!logs.read_any(&first, &order), "a file reads no class its worker loaded after it");
     }
 
     /// A plugin's reads come as two lists, its issue reads and then its code reads, and each keeps its own, so a read

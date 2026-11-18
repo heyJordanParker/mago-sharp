@@ -110,6 +110,7 @@ use crate::external::AnalysisHookRegistration;
 use crate::external::AttributedEntryPoint;
 use crate::external::ClassInitializerProvider;
 use crate::external::ClassLikeAnalysisHookRegistration;
+use crate::external::ClassLoads;
 use crate::external::CodebaseScanHookRegistration;
 use crate::external::EffectivePropertyType;
 use crate::external::EntryPoint;
@@ -140,7 +141,7 @@ use crate::invocation::MethodTargetContext;
 
 pub const ANALYZER_PROTOCOL_MAGIC: [u8; 4] = *b"MANA";
 pub const ANALYZER_PROTOCOL_MAJOR: u16 = 1;
-pub const ANALYZER_PROTOCOL_MINOR: u16 = 14;
+pub const ANALYZER_PROTOCOL_MINOR: u16 = 15;
 /// A method identifier's rule, as the codebase answers it for its class: a PHP# class-like, spec section 24.
 const METHOD_OF_SHARP_CLASS: u8 = 1;
 /// A method identifier's rule: its class keys its methods by their declared names.
@@ -3337,15 +3338,17 @@ pub(super) fn message_reader(payload: &[u8], expected_kind: u16) -> Result<Paylo
     Ok(reader)
 }
 
-/// Splits the codebase reads a provider or issue filter made, which the SDK places right after the header, from the
-/// response they came with.
-pub(super) fn take_codebase_reads(response: &[u8]) -> Result<(ExtensionReads, Vec<u8>), ExternalAnalyzerError> {
+/// Splits the codebase reads a provider or issue filter made, with its worker's class loads, which the SDK places right
+/// after the header, from the response they came with.
+pub(super) fn take_codebase_reads(
+    response: &[u8],
+) -> Result<(ExtensionReads, ClassLoads, Vec<u8>), ExternalAnalyzerError> {
     let header =
         response.get(..HEADER_LENGTH).ok_or_else(|| protocol("analyzer response is shorter than its header"))?;
     let mut reader = PayloadReader::new(&response[HEADER_LENGTH..]);
-    let reads = ExtensionReads::decode(&mut reader)?;
+    let (reads, loads) = ExtensionReads::decode(&mut reader)?;
 
-    Ok((reads, [header, &response[response.len() - reader.remaining()..]].concat()))
+    Ok((reads, loads, [header, &response[response.len() - reader.remaining()..]].concat()))
 }
 
 /// How every SDK release before 0.6.1 starts its refusal of a request of another analyzer protocol. Those releases
@@ -4577,6 +4580,9 @@ pub(super) mod testing {
             kind => unreachable!("no test declines a request of kind {kind}"),
         };
         let mut writer = message_writer(kind);
+        writer.write_u32(0);
+        writer.write_u32(0);
+        writer.write_u64(1);
         writer.write_u32(0);
         writer.write_u32(0);
         writer.write_bool(false);

@@ -20,6 +20,7 @@ use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::effects::EffectSummary;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::external::AFTER_FILE_ANALYSIS_BATCH_SIZE;
+use mago_analyzer::external::ClassLogs;
 use mago_analyzer::external::CodebaseScanFile;
 use mago_analyzer::external::CodebaseScanPlan;
 use mago_analyzer::external::ExtensionReads;
@@ -131,6 +132,8 @@ struct SelectiveAnalysisOutput {
     reads_by_file: HashMap<FileId, AnalysisReads>,
     /// What the before-analysis hooks read, for every file.
     before_analysis_reads: ExtensionReads,
+    /// The entries of the workers' class logs the analysis's responses reported.
+    class_logs: ClassLogs,
     per_file_issues: HashMap<FileId, IssueCollection>,
     snapshots: Vec<Arc<FileAnalysisSnapshot>>,
     codebase_issues: IssueCollection,
@@ -191,6 +194,8 @@ pub struct IncrementalAnalysisService {
     /// The return each method that takes its return from its body declares, as its file's last scan gave it, which an
     /// analysis replaces with what the body returns.
     declared_returns: HashMap<(Word, Word), Option<TypeMetadata>>,
+    /// Each extension worker's class log, as the analyses' responses reported it, which each file's reads index.
+    class_logs: ClassLogs,
     /// The files the last analysis analyzed, which the fanout tests compare with the inputs.
     #[cfg(test)]
     analyzed_files: HashSet<FileId>,
@@ -227,6 +232,7 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("autoloader", &self.autoloader.is_some())
             .field("autoloaded", &self.autoloaded.len())
             .field("declared_returns", &self.declared_returns.len())
+            .field("class_logs", &self.class_logs)
             .finish()
     }
 }
@@ -281,6 +287,7 @@ impl IncrementalAnalysisService {
             autoloader: None,
             autoloaded: Vec::new(),
             declared_returns: HashMap::default(),
+            class_logs: ClassLogs::default(),
             #[cfg(test)]
             analyzed_files: HashSet::default(),
         }
@@ -338,6 +345,48 @@ impl IncrementalAnalysisService {
         self.extern_namespaces = ExternNamespaces::default();
         self.autoloaded.clear();
         self.declared_returns.clear();
+    }
+
+    /// Takes in that the compiled files of `classes`, each a lowercase class name, changed: starts again each extension
+    /// worker that loaded one or failed to, since PHP declares a class once, and gives up what the last analysis found
+    /// in each file whose extension callbacks read one, so the next
+    /// [`analyze_incremental()`](Self::analyze_incremental) given the returned files analyzes them again. A callback
+    /// reads every class its worker loaded before it ran. Returns `None` when the before-analysis hooks read one, which
+    /// every file reads, so only an analysis from scratch is exact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a worker cannot answer whether it loaded one, or cannot start again.
+    pub fn reload_classes(&mut self, classes: &HashSet<Word>) -> Result<Option<Vec<FileId>>, OrchestratorError> {
+        if classes.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let names: Vec<&[u8]> = classes.iter().map(Word::as_bytes).collect();
+        let reloaded = self
+            .plugin_registry
+            .reload_external_workers_holding(&names)
+            .map_err(mago_analyzer::error::AnalysisError::from)?;
+        tracing::debug!(
+            reloaded,
+            classes = classes.len(),
+            "Extension workers that loaded a changed class started again."
+        );
+        if self.class_logs.read_any(&self.before_analysis_reads, classes) {
+            return Ok(None);
+        }
+
+        let logs = &self.class_logs;
+        Ok(Some(
+            self.file_states
+                .iter_mut()
+                .filter(|(_, state)| logs.read_any(&state.reads.extension, classes))
+                .map(|(file_id, state)| {
+                    state.content_hash = 0;
+                    *file_id
+                })
+                .collect(),
+        ))
     }
 
     /// Gives each method of the populated `codebase` that takes its return from its body, unless a file of `skipped`
@@ -744,6 +793,7 @@ impl IncrementalAnalysisService {
             late_symbol_references_by_file,
             mut reads_by_file,
             before_analysis_reads,
+            class_logs,
             per_file_issues,
             snapshots,
             codebase_issues: all_codebase_issues,
@@ -756,6 +806,7 @@ impl IncrementalAnalysisService {
             self.analyzed_files = per_file_issues.keys().copied().collect();
         }
         self.before_analysis_reads = before_analysis_reads;
+        self.class_logs.extend(class_logs);
         self.external_symbol_references = external_symbol_references;
         self.late_symbol_references = late_symbol_references;
         self.native_symbol_references = native_symbol_references;
@@ -1289,6 +1340,7 @@ impl IncrementalAnalysisService {
                 mut late_symbol_references_by_file,
                 mut reads_by_file,
                 before_analysis_reads,
+                class_logs,
                 mut per_file_issues,
                 snapshots,
                 codebase_issues: new_codebase_issues,
@@ -1296,6 +1348,7 @@ impl IncrementalAnalysisService {
                 per_file_project_issues,
             } = self.run_analyzer_selective(&mut merged_codebase, symbol_references, &self.settings, &files_to_skip)?;
             self.before_analysis_reads = before_analysis_reads;
+            self.class_logs.extend(class_logs);
             #[cfg(test)]
             {
                 self.analyzed_files = per_file_issues.keys().copied().collect();
@@ -1567,6 +1620,7 @@ impl IncrementalAnalysisService {
             mut late_symbol_references_by_file,
             mut reads_by_file,
             before_analysis_reads,
+            class_logs,
             mut per_file_issues,
             snapshots,
             codebase_issues: new_codebase_issues,
@@ -1578,6 +1632,7 @@ impl IncrementalAnalysisService {
             self.analyzed_files = per_file_issues.keys().copied().collect();
         }
         self.before_analysis_reads = before_analysis_reads;
+        self.class_logs.extend(class_logs);
         self.external_symbol_references = external_symbol_references;
         self.late_symbol_references = late_symbol_references;
         self.native_symbol_references = native_symbol_references;
@@ -2232,7 +2287,7 @@ impl IncrementalAnalysisService {
         codebase.safe_symbols.clear();
         codebase.safe_symbol_members.clear();
 
-        let SessionReads { files, before_analysis } =
+        let SessionReads { files, before_analysis, class_logs } =
             external_session.map(|session| session.take_reads()).unwrap_or_default();
         for (file_id, reads) in files {
             reads_by_file.entry(file_id).or_default().extension = reads;
@@ -2246,6 +2301,7 @@ impl IncrementalAnalysisService {
             late_symbol_references_by_file,
             reads_by_file,
             before_analysis_reads: before_analysis,
+            class_logs,
             per_file_issues,
             snapshots,
             codebase_issues,

@@ -1,4 +1,5 @@
-//! Terminal worker-state reduction carried over ordinary extension requests.
+//! The worker management protocol carried over ordinary extension requests: terminal worker-state reduction, and the
+//! question whether a worker loaded one of some classes.
 
 use crate::PayloadReader;
 use crate::PayloadWriter;
@@ -11,12 +12,34 @@ const MINOR: u16 = 0;
 const HEADER_LENGTH: usize = 12;
 const COLLECT_REQUEST: u16 = 1;
 const REDUCE_REQUEST: u16 = 2;
+const CLASS_LOADS_REQUEST: u16 = 3;
 const COLLECT_RESPONSE: u16 = 0x8001;
 const REDUCE_RESPONSE: u16 = 0x8002;
+const CLASS_LOADS_RESPONSE: u16 = 0x8003;
 const MAXIMUM_REDUCERS: usize = 0x0000_4000;
 
 pub(crate) fn collect_request() -> Vec<u8> {
     message_writer(COLLECT_REQUEST, HEADER_LENGTH).finish()
+}
+
+/// Asks a worker whether its class loads hold one of `classes`, each a lowercase class name.
+pub(crate) fn class_loads_request(classes: &[&[u8]]) -> Result<Vec<u8>, WorkerError> {
+    let mut writer = message_writer(CLASS_LOADS_REQUEST, HEADER_LENGTH);
+    writer.write_length(classes.len()).map_err(|error| invalid_response(0, error))?;
+    for class in classes {
+        writer.write_bytes(class).map_err(|error| invalid_response(0, error))?;
+    }
+
+    Ok(writer.finish())
+}
+
+/// Whether the worker answered that its class loads hold one of the classes asked after.
+pub(crate) fn decode_class_loads_response(worker: usize, payload: &[u8]) -> Result<bool, WorkerError> {
+    let mut reader = message_reader(worker, payload, CLASS_LOADS_RESPONSE)?;
+    let holds = reader.read_bool("class loads answer").map_err(|error| invalid_response(worker, error))?;
+    reader.finish().map_err(|error| invalid_response(worker, error))?;
+
+    Ok(holds)
 }
 
 pub(crate) fn decode_collect_response(worker: usize, payload: &[u8]) -> Result<bool, WorkerError> {

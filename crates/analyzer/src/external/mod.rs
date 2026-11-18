@@ -50,6 +50,8 @@ pub use error::ExternalAnalyzerError;
 pub use lifecycle::AFTER_FILE_ANALYSIS_BATCH_SIZE;
 pub use lifecycle::FileAnalysisSnapshot;
 use protocol::Registration;
+pub use reads::ClassLoads;
+pub use reads::ClassLogs;
 pub use reads::ExtensionReads;
 pub use reads::FileReads;
 pub use reads::Listing;
@@ -194,13 +196,17 @@ impl ExternalAnalysisSession {
         std::mem::take(&mut self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
-    /// Records what the callbacks read while Mago analyzed `file_id`, or what the before-analysis hooks read.
-    fn record_reads(&self, file_id: Option<FileId>, reads: ExtensionReads) {
+    /// Records what the callbacks read while Mago analyzed `file_id`, or what the before-analysis hooks read, and the
+    /// class loads their worker reported with them.
+    fn record_reads(&self, file_id: Option<FileId>, reads: ExtensionReads, loads: ClassLoads) {
+        let mut session = self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !loads.classes.is_empty() {
+            session.class_logs.record(loads);
+        }
         if reads.is_empty() {
             return;
         }
 
-        let mut session = self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match file_id {
             Some(file_id) => session.files.entry(file_id).or_default().extend(reads),
             None => session.before_analysis.extend(reads),
@@ -208,10 +214,10 @@ impl ExternalAnalysisSession {
     }
 
     /// Records the codebase reads a provider or issue filter made while Mago analyzed `file_id`, which lead its
-    /// `response`, and returns the response without them.
+    /// `response` with its worker's class loads, and returns the response without them.
     fn record_response_reads(&self, file_id: FileId, response: &[u8]) -> Result<Vec<u8>, ExternalAnalyzerError> {
-        let (reads, response) = protocol::take_codebase_reads(response)?;
-        self.record_reads(Some(file_id), reads);
+        let (reads, loads, response) = protocol::take_codebase_reads(response)?;
+        self.record_reads(Some(file_id), reads, loads);
 
         Ok(response)
     }
@@ -808,6 +814,16 @@ pub trait AnalyzerTransport: std::fmt::Debug + Send + Sync {
         payloads.iter().map(|payload| self.broadcast(payload)).collect()
     }
 
+    /// Starts again each worker whose class loads hold one of `classes`, each a lowercase class name, and returns how
+    /// many it started again. A transport with no worker process holds no class.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a worker cannot answer or cannot be started again.
+    fn reload_holding(&self, _classes: &[&[u8]]) -> Result<usize, WorkerError> {
+        Ok(0)
+    }
+
     /// Sends one provider request to an available worker. `running` names what the request runs, for its
     /// deadline's error when the worker names nothing it started.
     ///
@@ -864,6 +880,10 @@ impl AnalyzerTransport for WorkerPool {
 
     fn maximum_payload_size(&self) -> usize {
         Self::maximum_payload_size(self)
+    }
+
+    fn reload_holding(&self, classes: &[&[u8]]) -> Result<usize, WorkerError> {
+        Self::reload_holding(self, classes)
     }
 
     fn broadcast_sequence(&self, group: u64, payloads: &[Vec<u8>]) -> Result<Vec<Vec<Vec<u8>>>, WorkerError> {
@@ -1859,6 +1879,10 @@ where
         files: Vec<CodebaseScanFile>,
     ) -> Result<Vec<DeclarationRefinement>, ExternalAnalyzerError> {
         scan::dispatch(&self.backends, files)
+    }
+
+    pub(crate) fn reload_workers_holding(&self, classes: &[&[u8]]) -> Result<usize, ExternalAnalyzerError> {
+        self.backends.iter().try_fold(0, |reloaded, backend| Ok(reloaded + backend.transport.reload_holding(classes)?))
     }
 
     pub(crate) fn filter_issues(

@@ -418,6 +418,33 @@ impl WorkerPool {
         Ok(responses.pop().unwrap_or_default())
     }
 
+    /// Starts again each running worker whose class loads hold one of `classes`, each a lowercase class name, as a new
+    /// process that replays the pool's initialization, since PHP declares a class once and the worker would keep the
+    /// one it loaded. Returns how many workers it started again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a worker cannot answer or cannot be started again.
+    pub fn reload_holding(&self, classes: &[&[u8]]) -> Result<usize, WorkerError> {
+        if classes.is_empty() || self.state.load(Ordering::Acquire) != STATE_RUNNING {
+            return Ok(0);
+        }
+
+        let request = reduction::class_loads_request(classes)?;
+        let _growth = lock(&self.growth);
+        let mut reloaded = 0;
+        for index in 0..self.active_workers.load(Ordering::Acquire) {
+            let worker = self.ensure_running(index)?;
+            if reduction::decode_class_loads_response(index, &worker.request(request.clone(), None)?)? {
+                tracing::debug!(worker = index, "Starting an extension worker again: a class it loaded changed.");
+                self.restart(index, &worker)?;
+                reloaded += 1;
+            }
+        }
+
+        Ok(reloaded)
+    }
+
     /// Returns the maximum payload accepted by a worker frame.
     #[inline]
     #[must_use]
