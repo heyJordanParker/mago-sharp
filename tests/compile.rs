@@ -112,6 +112,7 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
             Path::new("compiled.bin"),
             Path::new("inputs.json"),
             Path::new("listeners.php"),
+            Path::new("preload.php"),
             Path::new("vendor/acme/money/src/Money.sharpc")
         ]
     );
@@ -122,6 +123,84 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
     }
     assert_eq!(files_under(&root.join("vendor")), vendor, "nothing is written under vendor/");
     assert!(printed(&output).contains("Compiled 2 PHP# files into .sharp/."), "{}", printed(&output));
+}
+
+/// Spec section 27: `.sharp/preload.php`, which `opcache.preload` names, requires the workspace's Composer autoloader
+/// and then each accepted source that declares a type, the package's too, in path order. A refused source, one that
+/// declares no type, as a module's file, and a test in an `autoload-dev` folder stay out, so production never preloads
+/// a test.
+#[test]
+fn compile_writes_a_preload_script_that_requires_the_autoloader_and_every_accepted_type() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "app/Broken.sharp", &BROKEN_ORDER.replace("class Order", "class Broken"));
+    write(root, "app/Module.sharp", "module\n{\n}\n");
+    write(
+        root,
+        "composer.json",
+        "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}, \"autoload-dev\": {\"psr-4\": {\"Tests\\\\\": \"tests/\"}}}\n",
+    );
+    write(root, "tests/Shop/CheckoutTest.sharp", "namespace Tests.Shop;\n\npublic class CheckoutTest\n{\n}\n");
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\", \"tests\"]\nincludes = [\"vendor\"]\n",
+    );
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(compiled(root, "tests/Shop/CheckoutTest.sharp").exists());
+    assert_eq!(
+        read(root, ".sharp/preload.php"),
+        "<?php\n\n// mago compile writes this file. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/../vendor/autoload.php';\nrequire_once __DIR__ . '/../app/Order.sharp';\nrequire_once __DIR__ . '/../vendor/acme/money/src/Money.sharp';\n"
+    );
+}
+
+/// Spec section 27: PHP declares an anonymous class only when its code runs, so `.sharp/preload.php` loads each type
+/// an anonymous class names, PHP's own left out, in a file the preload loads: a file Composer's autoloader loads up
+/// front, as `illuminate/reflection`'s `helpers.php`, and the file of a type a preloaded type extends. Opcache would
+/// warn that it can't preload the class otherwise. A file the preload never loads keeps what its anonymous class names
+/// unloaded.
+#[test]
+fn compile_writes_a_preload_script_that_loads_what_the_anonymous_classes_it_loads_name() {
+    let directory = project("namespace App;\n\nimport Acme.Model.Base;\n\npublic class Order : Base\n{\n}\n", MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "vendor/composer/autoload_psr4.php",
+        "<?php\n\n$vendorDir = dirname(__DIR__);\n\nreturn array(\n    'Acme\\\\Model\\\\' => array($vendorDir . '/acme/model/src'),\n);\n",
+    );
+    write(
+        root,
+        "vendor/composer/autoload_files.php",
+        "<?php\n\n$vendorDir = dirname(__DIR__);\n\nreturn array(\n    'a1' => $vendorDir . '/acme/model/helpers.php',\n);\n",
+    );
+    write(
+        root,
+        "vendor/acme/model/helpers.php",
+        "<?php\n\nfunction lazy(): object\n{\n    return new class implements Stringable\n    {\n        use Acme\\Model\\Reflects;\n\n        public function __toString(): string\n        {\n            return '';\n        }\n    };\n}\n",
+    );
+    write(root, "vendor/acme/model/src/Reflects.php", "<?php\n\nnamespace Acme\\Model;\n\ntrait Reflects\n{\n}\n");
+    write(
+        root,
+        "vendor/acme/model/src/Base.php",
+        "<?php\n\nnamespace Acme\\Model;\n\nclass Base\n{\n    public function contract(): Contract\n    {\n        return new class implements Contract {};\n    }\n\n    public function unused(): Unused\n    {\n        return new Unused();\n    }\n}\n",
+    );
+    write(root, "vendor/acme/model/src/Contract.php", "<?php\n\nnamespace Acme\\Model;\n\ninterface Contract\n{\n}\n");
+    write(
+        root,
+        "vendor/acme/model/src/Unused.php",
+        "<?php\n\nnamespace Acme\\Model;\n\nclass Unused\n{\n    public function shown(): Shown\n    {\n        return new class extends Shown {};\n    }\n}\n",
+    );
+    write(root, "vendor/acme/model/src/Shown.php", "<?php\n\nnamespace Acme\\Model;\n\nclass Shown\n{\n}\n");
+
+    compile_succeeds(root);
+
+    assert_eq!(
+        read(root, ".sharp/preload.php"),
+        "<?php\n\n// mago compile writes this file. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/../vendor/autoload.php';\nrequire_once __DIR__ . '/../app/Order.sharp';\nrequire_once __DIR__ . '/../vendor/acme/money/src/Money.sharp';\ninterface_exists('Acme\\\\Model\\\\Contract');\ntrait_exists('Acme\\\\Model\\\\Reflects');\n"
+    );
 }
 
 /// Each compiled file names the standard library the project installs: the native fingerprint its package's
@@ -1883,6 +1962,7 @@ fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
             Path::new("compiled.bin"),
             Path::new("inputs.json"),
             Path::new("listeners.php"),
+            Path::new("preload.php"),
             Path::new("vendor/acme/money/src/Money.sharpc")
         ]
     );
@@ -1962,7 +2042,8 @@ fn compile_reports_a_link_to_a_file_outside_the_project_and_writes_no_compiled_f
             Path::new("app/Order.sharpc"),
             Path::new("compiled.bin"),
             Path::new("inputs.json"),
-            Path::new("listeners.php")
+            Path::new("listeners.php"),
+            Path::new("preload.php")
         ]
     );
 }
@@ -3222,7 +3303,7 @@ fn compile_keeps_the_php_files_out_of_git_with_no_git_to_run() {
         assert!(checkout.join("app/Order.php").exists());
         assert_eq!(
             untracked(checkout),
-            "?? .sharp/app/Order.sharpc\n?? .sharp/compiled.bin\n?? .sharp/inputs.json\n?? .sharp/listeners.php\n?? .sharp/vendor/acme/money/src/Money.sharpc\n",
+            "?? .sharp/app/Order.sharpc\n?? .sharp/compiled.bin\n?? .sharp/inputs.json\n?? .sharp/listeners.php\n?? .sharp/preload.php\n?? .sharp/vendor/acme/money/src/Money.sharpc\n",
             "{}",
             checkout.display()
         );
@@ -4270,7 +4351,12 @@ fn compile_deletes_the_lean_package_once_no_law_remains() {
     assert!(!root.join(".sharp/.lean").exists());
     assert_eq!(
         files_under(&root.join(".sharp")),
-        [Path::new("app/Order.sharpc"), Path::new("compiled.bin"), Path::new("listeners.php")]
+        [
+            Path::new("app/Order.sharpc"),
+            Path::new("compiled.bin"),
+            Path::new("listeners.php"),
+            Path::new("preload.php")
+        ]
     );
 }
 
