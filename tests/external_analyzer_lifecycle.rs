@@ -14,6 +14,8 @@ use mago_analyzer::external::ExternalAnalyzerHandle;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::reference::ReferenceOrigin;
+use mago_codex::reference::SymbolReferenceKind;
 use mago_codex::reference::SymbolReferences;
 use mago_database::Database;
 use mago_database::DatabaseReader;
@@ -616,6 +618,46 @@ final class LooksUpARoute implements Plugin, AfterFileAnalysisHook
 (new Worker(new Extension('acme/routes', 'Routes', '1.0.0', analyzerPlugins: [new LooksUpARoute()])))->run();
 "#;
 
+/// An extension host whose plugin `routes` says, before the analysis, what a framework's routes file uses: the routes
+/// file `src/routes.php` uses the class `Route`, and the function `home` returns what `Route::make` returns.
+const HOST_REGISTERING_ROUTES: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\BeforeAnalysisContext;
+use Mago\Sdk\Analyzer\BeforeAnalysisHook;
+use Mago\Sdk\Analyzer\Metadata\MemberIdentifier;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Analyzer\ReferenceOrigin;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class RegistersRoutes implements Plugin, BeforeAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('routes', 'Routes', 'References what the routes file registers.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerBeforeAnalysisHook($this);
+    }
+
+    public function beforeAnalysis(BeforeAnalysisContext $context): void
+    {
+        $context->references->add(ReferenceOrigin::file('src/routes.php'), 'Route');
+        $context->references->addFunctionLikeReturn('home', new MemberIdentifier('Route', 'make'));
+    }
+}
+
+(new Worker(new Extension('acme/routes', 'Routes', '1.0.0', analyzerPlugins: [new RegistersRoutes()])))->run();
+"#;
+
 /// The plugin registry of an extension host `acme` of one worker that runs `source`, a PHP worker script written into
 /// `directory`, with `DEADLINE` as its `request-timeout-ms`.
 fn deadline_registry(source: &str, directory: &Path) -> PluginRegistry {
@@ -781,4 +823,52 @@ fn a_file_whose_hook_looked_up_a_class_is_analyzed_again_when_the_class_changes(
     assert_eq!(ordered, Some(vec![order]), "only the hook that looked it up read the later class");
     let route: HashSet<FileId> = route.expect("no before-analysis hook read it").into_iter().collect();
     assert_eq!(route, HashSet::from([order, FileId::new(b"src/Route.php")]), "the later hook read the earlier class");
+}
+
+/// A before-analysis hook says what a framework's code uses beyond what it writes: a file that uses a class, and a
+/// function that returns what a method returns. The analysis keeps each reference it names, as it keeps the ones the
+/// code writes, so a change to the class or the method reaches the file and the function. The code writes no reference
+/// from a file's top level and none to a result it returns, so each of those the analysis keeps is the hook's, and it
+/// keeps a plain PHP class and its method by the lowercase names the codebase keys them by.
+#[test]
+fn the_references_a_before_analysis_hook_names_to_a_class_and_a_method_are_kept() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the contributed references test") {
+        return;
+    }
+
+    let temporary = tempfile::tempdir().expect("temporary host directory should be created");
+    let registry = deadline_registry(HOST_REGISTERING_ROUTES, temporary.path());
+    let mut database = Database::new(common::database_configuration("/routes-proof", vec![Cow::Borrowed(b"src")]));
+    for (name, code) in [
+        (
+            "src/Route.php",
+            "<?php\n\nfinal class Route\n{\n    public static function make(): self\n    {\n        return new self();\n    }\n}\n",
+        ),
+        ("src/routes.php", "<?php\n\nfunction home(): Route\n{\n    return new Route();\n}\n"),
+    ] {
+        database.add(File::new(Cow::Borrowed(name.as_bytes()), FileType::Host, None, Cow::Borrowed(code.as_bytes())));
+    }
+    let mut service = IncrementalAnalysisService::new(
+        database.read_only(),
+        Default::default,
+        Settings::new(PHPVersion::PHP85),
+        ParserSettings::default(),
+        Arc::new(registry),
+    );
+    service.analyze().expect("the analysis keeps the hook's references");
+
+    let mut kept = Vec::new();
+    service.symbol_references().for_each_reference(|origin, (symbol, member), kind| {
+        let origin = match origin {
+            ReferenceOrigin::File(file) => file,
+            ReferenceOrigin::Symbol(_) if kind != SymbolReferenceKind::FunctionLikeReturn => return,
+            ReferenceOrigin::Symbol((symbol, _)) => symbol,
+        };
+        let target = if member.is_empty() { symbol.to_string() } else { format!("{symbol}::{member}") };
+        kept.push(format!("{origin} -> {target} {kind:?}"));
+    });
+    kept.sort();
+
+    assert_eq!(kept, ["home -> route::make FunctionLikeReturn", "src/routes.php -> route Body"]);
 }

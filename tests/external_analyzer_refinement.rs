@@ -578,6 +578,37 @@ fn a_host_refines_a_parent_in_any_case_a_traits_required_parent_and_an_anonymous
     );
 }
 
+/// A host binds a closure to the object it runs with, as a framework binds the closures a routes file registers to its
+/// router, so `$this` in the closure's body is that object: it calls the router's methods, and one the router lacks is
+/// reported on the router. This codebase loads no PHP stubs, so `Refined` can't declare `#[\Attribute]`.
+#[test]
+fn a_closure_a_host_binds_runs_its_body_with_this_as_the_object_it_names() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the closure receiver refinement test") {
+        return;
+    }
+
+    let refined = "<?php\n\nnamespace Proof;\n\nfinal class Refined {}\n";
+    let router =
+        "<?php\n\nnamespace Proof;\n\nfinal class Router\n{\n    public function get(string $path): void {}\n}\n";
+    let routes = "<?php\n\nnamespace Proof;\n\n#[Refined]\nfinal class Routes\n{\n    public function register(): \\Closure\n    {\n        return function (): void {\n            $this->get('/orders');\n            $this->post('/orders');\n        };\n    }\n}\n";
+    let mut database = Database::new(common::database_configuration("/refinement-proof", vec![Cow::Borrowed(b".")]));
+    for (name, code) in [("src/Refined.php", refined), ("src/Router.php", router), ("src/Routes.php", routes)] {
+        database.add(File::new(Cow::Borrowed(name.as_bytes()), FileType::Host, None, Cow::Borrowed(code.as_bytes())));
+    }
+    let issues = service(&database, registry(repository)).analyze().expect("the analysis goes on").issues;
+    let messages: Vec<(String, String)> = issues
+        .iter()
+        .map(|issue| (issue.code.clone().unwrap_or_default(), issue.message.clone()))
+        .filter(|(code, _)| code != "class-not-marked-as-attribute")
+        .collect();
+
+    assert_eq!(
+        messages,
+        [("non-existent-method".to_owned(), "Method `post` does not exist on type `Proof\\Router`.".to_owned())]
+    );
+}
+
 /// A refined class whose `make` returns what the `make` of class `inner` returns, which the worker takes from its body.
 /// Only the body names `inner`, so no signature edge leads from this class to it.
 fn relay(class: &str, inner: &str) -> String {

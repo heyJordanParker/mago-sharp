@@ -268,6 +268,81 @@ fn a_hook_that_listed_classes_sees_a_new_class_on_the_next_run_and_does_not_run_
     assert_eq!(reads(&removed, "listing"), ["Run 3: classes Box."]);
 }
 
+/// A hook that read a class's children, its descendants and whether a namespace exists runs again once a new file
+/// adds a child, a grandchild and the namespace they live in, and sees them. The codebase answers a plain PHP class's
+/// relatives by the lowercase names it keys them by.
+#[test]
+fn a_hook_that_read_the_descendants_of_a_class_and_a_namespace_sees_a_new_child_on_the_next_run() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the descendant reads test") {
+        return;
+    }
+
+    let mut server = server(
+        repository,
+        database(&[
+            ("src/kin.php", "<?php\n// lists: kin of Shapes\\Circle and namespace Shapes\\Round\n"),
+            ("src/shapes.php", "<?php\nnamespace Shapes;\ninterface Shape {}\nclass Circle implements Shape {}\n"),
+        ]),
+    );
+    let first = server.analyze().expect("initial analysis").issues;
+    assert_eq!(
+        reads(&first, "kin"),
+        [
+            "Run 1: `Shapes\\Circle` has children none, descendants none and ancestors shapes\\shape; `Shapes\\Round` is missing."
+        ]
+    );
+
+    let round = FileId::new(b"src/round.php");
+    server.database_mut().add(File::new(
+        Cow::Borrowed(b"src/round.php"),
+        FileType::Host,
+        None,
+        Cow::Borrowed(b"<?php\nnamespace Shapes\\Round;\nclass Disc extends \\Shapes\\Circle {}\nfinal class Coin extends Disc {}\n"),
+    ));
+    let added = server.analyze_incremental(&[round]).expect("analysis after a new child").issues;
+    assert_eq!(
+        reads(&added, "kin"),
+        [
+            "Run 2: `Shapes\\Circle` has children shapes\\round\\disc, descendants shapes\\round\\coin, shapes\\round\\disc and ancestors shapes\\shape; `Shapes\\Round` exists."
+        ]
+    );
+}
+
+/// A hook asks whether a symbol or a member exists as one kind, and the answer is yes only for that kind: a trait is
+/// a trait and a class or trait, not an interface. It reads the property a child inherits from where its parent
+/// declares it, and an interface, a trait or an enum by its name, as none when the name is of another kind.
+#[test]
+fn a_hook_reads_whether_each_symbol_and_member_exists_as_the_kind_it_asks_for() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the existence reads test") {
+        return;
+    }
+
+    let shapes = "<?php\nnamespace Shapes;\n\nconst SIDES = 0;\n\ninterface Shape {}\n\ntrait Sided {}\n\nenum Suit\n{\n    case Hearts;\n}\n\nclass Circle implements Shape\n{\n    use Sided;\n\n    public const PI = 3.14;\n\n    public float $radius = 1.0;\n\n    public function area(): float\n    {\n        return self::PI * $this->radius ** 2;\n    }\n}\n\nfunction area(Shape $shape): float\n{\n    return $shape instanceof Circle ? $shape->area() : 0.0;\n}\n";
+    let mut server = server(
+        repository,
+        database(&[
+            ("src/kinds.php", "<?php\n// checks: kinds\n"),
+            ("src/shapes.php", shapes),
+            ("src/disc.php", "<?php\nnamespace Shapes;\nfinal class Disc extends Circle {}\n"),
+        ]),
+    );
+    let issues = server.analyze().expect("the analysis reads every kind").issues;
+
+    assert_eq!(
+        reads(&issues, "kinds"),
+        [concat!(
+            "Run 1: interface Shapes\\Shape, trait Shapes\\Sided, enum Shapes\\Suit, no interface Shapes\\Sided, ",
+            "class or trait Shapes\\Sided, no class or interface Shapes\\Sided, function Shapes\\area, ",
+            "constant Shapes\\SIDES, method Shapes\\Circle::area, class constant Shapes\\Circle::PI, ",
+            "enum case Shapes\\Suit::Hearts, no enum case Shapes\\Suit::Stars, ",
+            "Shapes\\Disc::$radius declared in src/shapes.php, interface Shapes\\Shape, trait Shapes\\Sided, ",
+            "enum Shapes\\Suit, interface named missing."
+        )]
+    );
+}
+
 /// The messages reported under `code`, sorted, since files analyzed together report in any order.
 fn reported(issues: &IssueCollection, code: &str) -> Vec<String> {
     let mut messages: Vec<String> =

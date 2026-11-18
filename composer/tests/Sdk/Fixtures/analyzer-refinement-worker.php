@@ -134,6 +134,7 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
                             'Proof\Unpacking',
                             requiredExtends: ['Proof\Bin'],
                         ),
+                        'Proof\Routes' => self::routes($context, $file),
                         default => throw new LogicException("Unexpected refined class `{$classLike->originalName}`."),
                     });
                 }
@@ -266,6 +267,32 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
                 'latest' => new SignatureRefinement(return: new RefinedType(self::symbol('Proof\Special'), $span)),
             ],
         );
+    }
+
+    /**
+     * A class whose closures each run with a `Proof\Router` as `$this`, as a framework binds the closures a routes file
+     * registers to its router.
+     */
+    private static function routes(CodebaseScanContext $context, CodebaseScanFile $file): ClassLikeRefinement
+    {
+        foreach ($file->functionLikes as $closure) {
+            if ($closure->kind !== FunctionLikeKind::Closure) {
+                continue;
+            }
+
+            $context->refine(
+                new FunctionLikeRefinement(
+                    $file->path,
+                    '',
+                    new SignatureRefinement(
+                        receiver: new RefinedType(Type::namedObject('Proof\Router'), $closure->location->span),
+                    ),
+                    declaredAt: $closure->location->span->start,
+                ),
+            );
+        }
+
+        return new ClassLikeRefinement($file->path, 'Proof\Routes');
     }
 
     private static function relay(CodebaseScanFile $file, string $class): ClassLikeRefinement
