@@ -600,7 +600,7 @@ fn a_file_whose_type_a_provider_read_from_a_class_is_analyzed_again_when_the_cla
 /// Each input `server` names for its one compiled PHP# file, stamped from the database, and the file's bytes.
 fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
     let database = server.database().read_only();
-    let mut inputs = BTreeMap::new();
+    let inputs = std::sync::Mutex::new(BTreeMap::new());
     let (compiled, _) = server
         .compile(
             &CompiledFiles::default(),
@@ -612,7 +612,7 @@ fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
                     mtime_ns: 0,
                     hash: source_hash(&file.contents),
                 });
-                inputs.insert(String::from_utf8_lossy(path).into_owned(), input.clone());
+                inputs.lock().unwrap().insert(String::from_utf8_lossy(path).into_owned(), input.clone());
                 Ok(input)
             },
             |_, _| Ok(Default::default()),
@@ -624,7 +624,7 @@ fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
         panic!("the PHP# file is not accepted: {compiled:?}");
     };
 
-    (inputs, bytes.clone())
+    (inputs.into_inner().unwrap(), bytes.clone())
 }
 
 #[test]

@@ -166,10 +166,11 @@ impl Server {
     /// Compile each `.sharp` file of the last analysis into the bytes of its `.sharpc` file, or the errors that
     /// refuse it, and give the [`CompiledFiles`] the next compile keeps files by. A file whose key `last` holds keeps
     /// its compiled file, which `compiled` gives, and is not lowered again. `stamp` gives the size, modification time
-    /// and hash of the file at a workspace-relative path, or none when no file is there. `check` gets the Lean
-    /// translation of each file whose laws are checked again and of each file they reach, with the reach, and returns
-    /// the issues of each file whose law is not proved. Each compiled file's header names `standard_library`, the
-    /// standard library the workspace compiles against. `refusing` keeps the analysis's errors that refuse their file.
+    /// and hash of the file at a workspace-relative path, or none when no file is there, once for each path, called
+    /// from several threads at once. `check` gets the Lean translation of each file whose laws are checked again and
+    /// of each file they reach, with the reach, and returns the issues of each file whose law is not proved. Each
+    /// compiled file's header names `standard_library`, the standard library the workspace compiles against.
+    /// `refusing` keeps the analysis's errors that refuse their file.
     ///
     /// # Errors
     ///
@@ -179,7 +180,7 @@ impl Server {
         &mut self,
         last: &CompiledFiles,
         compiled: impl FnMut(&File) -> Result<Option<Vec<u8>>, DatabaseError>,
-        stamp: impl FnMut(&[u8]) -> Result<Option<Input>, DatabaseError>,
+        stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         check: impl FnOnce(Vec<Translation>, &Reach) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,

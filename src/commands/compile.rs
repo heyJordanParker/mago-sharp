@@ -349,7 +349,7 @@ fn compile_into(
     // A file whose errors the lowering does not survive is refused, whatever panic message its lowering printed.
     let printing = std::panic::take_hook();
     std::panic::set_hook(Box::new(|panic| tracing::debug!("{panic}")));
-    let mut stamped = Vec::new();
+    let stamped = Mutex::new(Vec::new());
     let compiled_files_path = folder.join(COMPILED_FILES);
     let compilations = server.compile(
         &CompiledFiles::decode(
@@ -360,17 +360,14 @@ fn compile_into(
             Some(compiled) => read_listed(&compiled),
             None => Ok(None),
         },
-        |path| {
-            let input = unit::stamp(root, path)?;
-            stamped.push(recorded(path, input.as_ref()));
-            Ok(input)
-        },
+        recording_stamp(root, &stamped),
         |_, _| Ok(Default::default()),
         &library,
         |_| IssueCollection::default(),
     );
     std::panic::set_hook(printing);
     let database = server.database();
+    let mut stamped = in_path_order(stamped);
     stamped.extend(served_stamps(root, database, autoloader.as_deref())?);
 
     // Whether a file a host's worker loads changed, so a watch knows to start the workers again.
@@ -750,7 +747,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     };
     let read_database = server.database().read_only();
     let lean = Lean::new(&root);
-    let mut stamped = Vec::new();
+    let stamped = Mutex::new(Vec::new());
     let compiled_files_path = compiled_folder.join(COMPILED_FILES);
     let (compilations, compiled_files) = server.compile(
         &CompiledFiles::decode(
@@ -761,11 +758,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
             Some(compiled) => read_listed(&compiled),
             None => Ok(None),
         },
-        |path| {
-            let input = unit::stamp(&root, path)?;
-            stamped.push(recorded(path, input.as_ref()));
-            Ok(input)
-        },
+        recording_stamp(&root, &stamped),
         |translations, reach| lean.check(translations, reach),
         &library,
         |mut issues| {
@@ -779,6 +772,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         },
     )?;
     let database = server.database();
+    let mut stamped = in_path_order(stamped);
     stamped.extend(served_stamps(&root, database, autoloader.as_deref())?);
 
     let mut written = BTreeSet::new();
@@ -1330,6 +1324,28 @@ fn every_input_is_current(
 
 /// An input as [`Record`] holds it: its path, size and hash, both zero when no file is there.
 type Stamp = (String, u64, [u8; 16]);
+
+/// The `stamp` a compile of the project at `root` takes, which stamps each input it is given and keeps the stamp in
+/// `stamped`, from whichever thread stamps it.
+fn recording_stamp<'a>(
+    root: &'a Path,
+    stamped: &'a Mutex<Vec<Stamp>>,
+) -> impl Fn(&[u8]) -> Result<Option<unit::Input>, DatabaseError> + Sync + 'a {
+    move |path| {
+        let input = unit::stamp(root, path)?;
+        stamped.lock().unwrap_or_else(PoisonError::into_inner).push(recorded(path, input.as_ref()));
+
+        Ok(input)
+    }
+}
+
+/// The stamps [`recording_stamp`] kept, in path order, which no order of the threads that took them changes.
+fn in_path_order(stamped: Mutex<Vec<Stamp>>) -> Vec<Stamp> {
+    let mut stamped = stamped.into_inner().unwrap_or_else(PoisonError::into_inner);
+    stamped.sort_unstable();
+
+    stamped
+}
 
 /// The stamp of the input at `path`, as `unit::stamp` gave it.
 fn recorded(path: &[u8], input: Option<&unit::Input>) -> Stamp {

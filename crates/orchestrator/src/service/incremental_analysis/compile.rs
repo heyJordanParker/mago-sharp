@@ -429,8 +429,9 @@ impl IncrementalAnalysisService {
     /// or baseline the analysis honors.
     ///
     /// `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or none when no
-    /// file is there. It is called once per input. An input no file is at is stored absent: its size, modification
-    /// time and hash are all zero. No file has that stamp, because the hash of an empty file is not zero.
+    /// file is there. It is called once per input, from several threads at once. An input no file is at is stored
+    /// absent: its size, modification time and hash are all zero. No file has that stamp, because the hash of an empty
+    /// file is not zero.
     ///
     /// Each compiled file's header names `standard_library`, the standard library the project compiles against.
     ///
@@ -447,7 +448,7 @@ impl IncrementalAnalysisService {
         &mut self,
         last: &CompiledFiles,
         mut compiled: impl FnMut(&File) -> Result<Option<Vec<u8>>, DatabaseError>,
-        mut stamp: impl FnMut(&[u8]) -> Result<Option<Input>, DatabaseError>,
+        stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         check: impl FnOnce(Vec<Translation>, &Reach) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
@@ -644,28 +645,28 @@ impl IncrementalAnalysisService {
             counts.last().copied().unwrap_or_default(),
         );
 
-        let mut stamps: HashMap<Vec<u8>, Input> = HashMap::default();
-        let mut stamped = |paths: Vec<Vec<u8>>| -> Result<Vec<Input>, OrchestratorError> {
-            let mut inputs = Vec::with_capacity(paths.len());
-            for path in paths {
-                let input = match stamps.get(&path) {
-                    Some(input) => input.clone(),
-                    None => {
-                        let input = stamp(&path)?.unwrap_or_else(|| Input {
-                            path: path.clone(),
-                            size: 0,
-                            mtime_ns: 0,
-                            hash: [0; 16],
-                        });
-                        stamps.insert(path, input.clone());
-                        input
-                    }
-                };
-                inputs.push(input);
-            }
-
-            Ok(inputs)
+        // Each input of an accepted file is read once, all at once, and the first in the order the files name them that
+        // can't be read fails the compile, as reading them one after another did.
+        let named: Vec<Vec<u8>> = {
+            let mut seen: HashSet<&[u8]> = HashSet::default();
+            files
+                .iter()
+                .filter(|file| {
+                    !refused.contains_key(&file.id)
+                        && (kept.contains_key(&file.id) || matches!(lowered.get(&file.id), Some(Ok(_))))
+                })
+                .flat_map(|file| input_paths.get(&file.id).into_iter().flatten())
+                .filter(|path| seen.insert(path.as_slice()))
+                .cloned()
+                .collect()
         };
+        let stamped: Vec<Result<Option<Input>, DatabaseError>> = named.par_iter().map(|path| stamp(path)).collect();
+        let mut stamps: HashMap<Vec<u8>, Input> = HashMap::default();
+        for (path, input) in named.into_iter().zip(stamped) {
+            let input = input?.unwrap_or_else(|| Input { path: path.clone(), size: 0, mtime_ns: 0, hash: [0; 16] });
+            stamps.insert(path, input);
+        }
+        let stamped = |paths: Vec<Vec<u8>>| -> Vec<Input> { paths.iter().map(|path| stamps[path].clone()).collect() };
         let mut next = CompiledFiles::default();
         let mut compilations = Vec::with_capacity(files.len());
         for file in &files {
@@ -674,7 +675,7 @@ impl IncrementalAnalysisService {
                 match issues {
                     Some(issues) => Compilation::Refused(issues),
                     None => {
-                        let inputs = stamped(input_paths.remove(&file.id).unwrap_or_default())?;
+                        let inputs = stamped(input_paths.remove(&file.id).unwrap_or_default());
                         let Some(bytes) = unit::restamp(&bytes, &inputs, standard_library) else {
                             unreachable!("a compiled file the compile keeps is one `unit::is_stale` read");
                         };
@@ -694,7 +695,7 @@ impl IncrementalAnalysisService {
                         reads.inlined = unit.inlined().to_vec();
                         reads.function_types = unit.function_types().to_vec();
                         let key = key(source_hash(&file.contents), &reads);
-                        let inputs = stamped(input_paths.remove(&file.id).unwrap_or_default())?;
+                        let inputs = stamped(input_paths.remove(&file.id).unwrap_or_default());
                         next.files.insert(
                             file.name.to_vec(),
                             CompiledFile { key, reads, forms, namespace_classes, reaches_extension },
@@ -1531,7 +1532,7 @@ mod tests {
     }
 
     /// Stamps each file of `database` with its size and hash, and `composer.lock` as an empty file.
-    fn database_stamp(database: &Database<'static>) -> impl FnMut(&[u8]) -> Result<Option<Input>, DatabaseError> {
+    fn database_stamp(database: &Database<'static>) -> impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync {
         let database = database.read_only();
 
         move |path| {
@@ -1561,7 +1562,7 @@ mod tests {
     /// Each compilation of a compile of `service` that keeps no file, as the first compile of a project runs.
     fn fresh(
         service: &mut IncrementalAnalysisService,
-        stamp: impl FnMut(&[u8]) -> Result<Option<Input>, DatabaseError>,
+        stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         check: impl FnOnce(Vec<Translation>, &Reach) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
@@ -1574,7 +1575,7 @@ mod tests {
     /// Each compiled file of `service` by its name.
     fn compile(
         service: &mut IncrementalAnalysisService,
-        stamp: impl FnMut(&[u8]) -> Result<Option<Input>, DatabaseError>,
+        stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
     ) -> std::collections::BTreeMap<String, Compilation> {
         let compiled = fresh(service, stamp, proved, &Library::default(), |issues| issues).expect("the compile runs");
         let database = service.database();
@@ -1818,7 +1819,7 @@ mod tests {
     #[test]
     fn an_input_no_file_is_at_is_stored_absent_as_an_all_zero_stamp() {
         let database = project(&[("app/Order.sharp", ORDER)]);
-        let mut stamp = database_stamp(&database);
+        let stamp = database_stamp(&database);
 
         let compiled =
             compile(&mut analyzed(&database), |path| if path == b"composer.lock" { Ok(None) } else { stamp(path) });
@@ -2092,12 +2093,13 @@ mod tests {
     fn each_input_is_stamped_once_however_many_files_name_it() {
         let database = shop_project(&shop(MONEY, RATE));
         let mut service = analyzed(&database);
-        let mut stamped: std::collections::BTreeMap<Vec<u8>, usize> = std::collections::BTreeMap::new();
+        let stamped: std::sync::Mutex<std::collections::BTreeMap<Vec<u8>, usize>> = std::sync::Mutex::default();
 
         compile(&mut service, |path| {
-            *stamped.entry(path.to_vec()).or_default() += 1;
+            *stamped.lock().unwrap().entry(path.to_vec()).or_default() += 1;
             empty_stamp(path)
         });
+        let stamped = stamped.into_inner().unwrap();
 
         assert!(stamped.contains_key(b"app/Money.sharp".as_slice()), "{stamped:?}");
         assert!(stamped.values().all(|count| *count == 1), "{stamped:?}");
@@ -2487,7 +2489,7 @@ mod tests {
         service: &mut IncrementalAnalysisService,
         last: &CompiledFiles,
         previous: &BTreeMap<String, Compilation>,
-        stamp: impl FnMut(&[u8]) -> Result<Option<Input>, DatabaseError>,
+        stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
     ) -> (BTreeMap<String, Compilation>, CompiledFiles, BTreeSet<String>) {
         let mut asked = BTreeSet::new();
         let (compiled, kept) = service

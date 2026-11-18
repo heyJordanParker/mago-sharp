@@ -628,13 +628,13 @@ fn compiled_consumer(
     let mut incremental = service(&database, registry(repository));
     incremental.analyze().expect("body return analysis should succeed");
 
-    let mut inputs = Vec::new();
+    let inputs = std::sync::Mutex::new(Vec::new());
     let (compiled, _) = incremental
         .compile(
             &CompiledFiles::default(),
             |_| Ok(None),
             |path| {
-                inputs.push(String::from_utf8_lossy(path).into_owned());
+                inputs.lock().unwrap().push(String::from_utf8_lossy(path).into_owned());
                 Ok(None)
             },
             |_, _| Ok(Default::default()),
@@ -646,7 +646,7 @@ fn compiled_consumer(
         panic!("src/SharpConsumer.sharp is not accepted: {compiled:?}");
     };
 
-    (header(bytes).expect("the header is valid").key, inputs)
+    (header(bytes).expect("the header is valid").key, inputs.into_inner().unwrap())
 }
 
 #[test]
