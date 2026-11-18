@@ -14,12 +14,11 @@ use serde::Serialize;
 use crate::library;
 use crate::library::Stop;
 use crate::package::Module;
-use crate::package::Package;
 use crate::package::Refusal;
 
 const LAW_PROTOCOL_MAGIC: [u8; 4] = *b"MLAW";
-const LAW_PROTOCOL_MAJOR: u16 = 2;
-const LAW_PROTOCOL_MINOR: u16 = 1;
+const LAW_PROTOCOL_MAJOR: u16 = 3;
+const LAW_PROTOCOL_MINOR: u16 = 0;
 const CHECK_REQUEST: u16 = 1;
 const CHECKED_RESPONSE: u16 = 2;
 
@@ -43,6 +42,8 @@ pub(crate) enum Judgment {
     Through(String),
     /// Lean rejected the theorem, with its first error: a bug of the checker's translation.
     Rejected(String),
+    /// The theorem ran out of the time budget the runner gives each one outside the steps of its proof.
+    OutOfTime,
 }
 
 /// A step of a proof whose goal stayed open: the case or the call of its index, whether its steps ran out of their
@@ -72,66 +73,88 @@ pub(crate) enum Answer {
     Refused(String, Refusal),
 }
 
-/// Runs runners of `library` in `package` until each of `checks` has its answer, with the generated `modules` in each
-/// request. A runner answers the checks it gets in turn: it elaborates the generated modules a check reaches, which
-/// refuse it when Lean rejects one, then each of its theorems in order, and judges each judged one. Mago stops a runner
-/// at its processor-time limit or its deadline, which each runner has whole, as each file's runner had. A runner
-/// stopped in a check after its first keeps the answers it wrote before that check, and the next runner starts at that
-/// check, since the checks before it spent part of the limit. A runner stopped in its first check while it elaborates a
-/// generated module refuses that check with the module and how it stopped, and the module joins `stopped`, which each
-/// later runner refuses without elaborating it again. One stopped in its first check's theorems, or one that fails,
-/// fails the compile. Returns the answer of each check, in order.
+/// Runs runners of `library` until each of `checks` has its answer, with the generated `modules` in each request. A
+/// runner imports Lean once and answers the checks on `threads` threads, which share every generated module it
+/// elaborates, and gives each theorem `heartbeats` thousand heartbeats. It elaborates the generated modules a check
+/// reaches, which refuse it when Lean rejects one, then each of its theorems in order, and judges each judged one.
+///
+/// Mago stops a runner that writes nothing for its deadline, or that runs past the processor-time limit Mago itself
+/// runs under. The answers it wrote before count. When one check is left unanswered, or the runner ran on one thread,
+/// which answers the checks in order, the first check left is the one it stopped in, and its progress names the
+/// generated module it stopped in. That check is refused with the module and how it stopped, and the module joins
+/// `stopped`, which each later runner refuses without elaborating it again. Otherwise the checks left were in flight
+/// together, so a runner on one thread answers them in turn to find the one that stops it, and the checks after that
+/// one go back to `threads` threads. A runner stopped in a check's theorems, or one that fails, fails the compile.
+/// Returns the answer of each check, in order.
 pub(crate) fn check(
     library: &Path,
-    package: &Package,
     modules: &[&Module],
     checks: &[Check<'_>],
+    threads: usize,
+    heartbeats: u32,
     stopped: &mut Vec<(String, Stop)>,
 ) -> io::Result<Vec<Answer>> {
-    let mut answers: Vec<Answer> = Vec::with_capacity(checks.len());
-    while answers.len() < checks.len() {
-        let left = &checks[answers.len()..];
-        let (output, waited) = run(library, package, &encode(stopped, modules, left)?)?;
-        if !waited && output.status.success() {
-            answers.extend(decode(&output.stdout, left, left.len(), stopped).map_err(io::Error::other)?);
+    let mut answers: Vec<Option<Answer>> = checks.iter().map(|_| None).collect();
+    let mut one_thread = false;
+    loop {
+        let left: Vec<usize> = (0..checks.len()).filter(|index| answers[*index].is_none()).collect();
+        if left.is_empty() {
+            break;
+        }
+        let asked: Vec<&Check<'_>> = left.iter().map(|index| &checks[*index]).collect();
+        let request = encode(if one_thread { 1 } else { threads }, heartbeats, stopped, modules, &asked)?;
+        let (output, waited) = run(library, &request)?;
+        let finished = !waited && output.status.success();
+        for (index, answer) in decode(&output.stdout, &asked, finished, stopped).map_err(io::Error::other)? {
+            answers[left[index]] = Some(answer);
+        }
+        if finished {
             continue;
+        }
+        if !waited && !library::stopped(output.status) {
+            return Err(failure(&output, waited));
         }
 
-        let reached = progress(&output.stderr)
-            .filter(|(index, _)| *index < left.len() && (waited || library::stopped(output.status)));
-        let Some((index, module)) = reached else {
+        let unanswered: Vec<usize> = (0..left.len()).filter(|index| answers[left[*index]].is_none()).collect();
+        let [first, others @ ..] = unanswered.as_slice() else {
             return Err(failure(&output, waited));
         };
-        answers.extend(decode(&output.stdout, left, index, stopped).map_err(io::Error::other)?);
-        if index > 0 {
+        if !one_thread && !others.is_empty() {
+            one_thread = true;
             continue;
         }
-        let Some(module) = module else {
+        let Some(module) = progress(&output.stderr, *first) else {
             return Err(failure(&output, waited));
         };
         let stop = if waited { Stop::Waited } else { Stop::Processor };
-        answers.push(Answer::Refused(module.clone(), Refusal::Stopped(stop)));
+        answers[left[*first]] = Some(Answer::Refused(module.clone(), Refusal::Stopped(stop)));
         stopped.push((module, stop));
+        one_thread = false;
     }
 
-    Ok(answers)
+    Ok(answers.into_iter().flatten().collect())
 }
 
-/// The check the runner was in when it ended, and the generated module it was elaborating there, if any: the last line
-/// of its progress on standard error, `module <check> <module>` or `theorems <check>`.
-fn progress(stderr: &[u8]) -> Option<(usize, Option<String>)> {
+/// The generated module the runner was elaborating for its check `check` when it ended: the module of the check's
+/// last line of progress on standard error, `module <check> <module>`. None when that line is `theorems <check>`, or
+/// when the check has no progress.
+fn progress(stderr: &[u8], check: usize) -> Option<String> {
     let stderr = String::from_utf8_lossy(stderr);
-    let last = stderr.lines().rev().find(|line| line.starts_with("module ") || line.starts_with("theorems "))?;
-    if let Some(index) = last.strip_prefix("theorems ") {
-        return Some((index.parse().ok()?, None));
-    }
-    let (index, module) = last.strip_prefix("module ")?.split_once(' ')?;
+    let mut lines = stderr.lines().rev().filter_map(|line| {
+        if let Some(index) = line.strip_prefix("theorems ") {
+            return Some((index.parse::<usize>().ok()?, None));
+        }
+        let (index, module) = line.strip_prefix("module ")?.split_once(' ')?;
 
-    Some((index.parse().ok()?, Some(module.to_owned())))
+        Some((index.parse::<usize>().ok()?, Some(module)))
+    });
+    let (_, module) = lines.find(|(index, _)| *index == check)?;
+
+    module.map(str::to_owned)
 }
 
-/// The error of a runner that failed, or that Mago stopped in its first check's theorems or before its progress began.
-/// The debug log holds its standard error.
+/// The error of a runner that failed, or that Mago stopped in a check's theorems or before its progress began. The
+/// debug log holds its standard error.
 fn failure(output: &Output, waited: bool) -> io::Error {
     tracing::debug!(
         "The law checker's runner exited with {}: {}",
@@ -141,7 +164,7 @@ fn failure(output: &Output, waited: bool) -> io::Error {
     let failure = if waited {
         format!("did not finish within {} seconds", library::deadline().as_secs())
     } else if library::stopped(output.status) {
-        format!("ran past {} processor seconds, the limit the checker sets on each check", library::processor_seconds())
+        format!("ran past {} processor seconds, the limit Mago runs under", library::processor_seconds())
     } else {
         format!("failed with {}", output.status)
     };
@@ -149,30 +172,30 @@ fn failure(output: &Output, waited: bool) -> io::Error {
     io::Error::other(format!("the law checker {failure}. Run vendor/bin/mago compile with MAGO_LOG=debug to see why"))
 }
 
-/// Runs the runner on one request, under `library::processor_seconds()` of processor time, and returns how it exited,
-/// what it wrote, and whether Mago ended it at `library::deadline()`, which counts from the last thing it wrote.
-///
-/// One runner answers the checks of a compile, since Lean cannot free an imported environment in a process that
-/// elaborated with it, so each runner imports Lean and the runtime library once. `lake env` gives the runner the
-/// package's search path, and on Windows the folder of Lean's shared libraries, which an executable that interprets
-/// Lean links to there.
-fn run(library: &Path, package: &Package, request: &[u8]) -> io::Result<(Output, bool)> {
-    library::output_before_deadline(
-        package.lake.command().arg("env").arg(library::runner(library)).current_dir(&package.directory),
-        request,
-    )
+/// Runs the runner on one request and returns how it exited, what it wrote, and whether Mago ended it at
+/// `library::deadline()`, which counts from the last thing it wrote.
+fn run(library: &Path, request: &[u8]) -> io::Result<(Output, bool)> {
+    library::output_before_deadline(&mut library::runner_command(library)?, request)
 }
 
-/// A `Check` request: each module an earlier runner of the compile stopped in, each generated module's name and
-/// source, then for each check, each module to import, then each theorem's statement, text, and whether the answer
-/// judges it.
-fn encode(stopped: &[(String, Stop)], modules: &[&Module], checks: &[Check<'_>]) -> io::Result<Vec<u8>> {
+/// A `Check` request: the threads to answer on, the heartbeats of each theorem in thousands, each module an earlier
+/// runner of the compile stopped in, each generated module's name and source, then for each check, each module to
+/// import, then each theorem's statement, text, and whether the answer judges it.
+fn encode(
+    threads: usize,
+    heartbeats: u32,
+    stopped: &[(String, Stop)],
+    modules: &[&Module],
+    checks: &[&Check<'_>],
+) -> io::Result<Vec<u8>> {
     let mut writer = PayloadWriter::new();
     writer.write_raw(&LAW_PROTOCOL_MAGIC);
     writer.write_u16(LAW_PROTOCOL_MAJOR);
     writer.write_u16(LAW_PROTOCOL_MINOR);
     writer.write_u16(CHECK_REQUEST);
     writer.write_u16(0);
+    writer.write_u32(u32::try_from(threads.max(1)).unwrap_or(u32::MAX));
+    writer.write_u32(heartbeats);
     writer.write_length(stopped.len()).map_err(io::Error::other)?;
     for (module, _) in stopped {
         writer.write_string(module).map_err(io::Error::other)?;
@@ -199,23 +222,44 @@ fn encode(stopped: &[(String, Stop)], modules: &[&Module], checks: &[Check<'_>])
     Ok(writer.finish())
 }
 
-/// The answers of the first `answered` of `checks` in a `Checked` answer. It holds the answer of every check when
-/// `answered` is all of them, and when Mago stopped its runner, it may end anywhere after those. `stopped` holds how
-/// each module the request named stopped.
+/// The answers of a `Checked` answer to `checks`, each with the index of its check, in the order the runner wrote them.
+/// A `finished` runner answered every check once and wrote nothing after. One Mago stopped may end anywhere, so its
+/// answers are those it wrote whole. `stopped` holds how each module the request named stopped.
 fn decode(
     payload: &[u8],
-    checks: &[Check<'_>],
-    answered: usize,
+    checks: &[&Check<'_>],
+    finished: bool,
     stopped: &[(String, Stop)],
-) -> Result<Vec<Answer>, String> {
-    if answered == 0 {
-        return Ok(Vec::new());
-    }
-    let Some(answered_checks) = checks.get(..answered) else {
-        return Err(format!("the runner was stopped in check {answered} of {}", checks.len()));
+) -> Result<Vec<(usize, Answer)>, String> {
+    let mut reader = PayloadReader::new(payload);
+    let error = |error: mago_extension::PayloadError| error.to_string();
+    let count = match header(&mut reader, checks.len()) {
+        Ok(count) => count,
+        // A runner Mago stopped before it wrote its header, as in a module whose code writes first, answered nothing.
+        Err(_) if !finished => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     };
 
-    let mut reader = PayloadReader::new(payload);
+    let mut answers: Vec<(usize, Answer)> = Vec::with_capacity(count);
+    while answers.len() < count && (finished || reader.remaining() > 0) {
+        match answer(&mut reader, checks, stopped, &answers) {
+            Ok(answer) => answers.push(answer),
+            Err(_) if !finished => break,
+            Err(error) => return Err(error),
+        }
+    }
+    if finished {
+        if answers.len() != count {
+            return Err(format!("the runner answered {} checks of {count}", answers.len()));
+        }
+        reader.finish().map_err(error)?;
+    }
+
+    Ok(answers)
+}
+
+/// The header of a `Checked` answer to `checks` checks, and the count of checks it answers, which is `checks`.
+fn header(reader: &mut PayloadReader<'_>, checks: usize) -> Result<usize, String> {
     let error = |error: mago_extension::PayloadError| error.to_string();
     if reader.read_array::<4>("law message magic").map_err(error)? != LAW_PROTOCOL_MAGIC {
         return Err("the runner's answer does not start with MLAW".to_owned());
@@ -230,44 +274,51 @@ fn decode(
         return Err(format!("the runner answered with the unknown law message kind {kind}"));
     }
     reader.read_u16("law message reserved header").map_err(error)?;
-
-    // A stopped runner's answer may end before its count of checks, so the count is bounded by the checks asked.
-    let count = reader.read_count("check count", checks.len()).map_err(error)?;
-    if count != checks.len() {
-        return Err(format!("the runner answered {count} checks of {}", checks.len()));
-    }
-    let mut answers = Vec::with_capacity(answered);
-    for check in answered_checks {
-        let answer = match reader.read_u8("check answer").map_err(error)? {
-            0 => {
-                let judged = check.theorems.iter().filter(|theorem| theorem.judged).count();
-                let count = reader.read_count("judgment count", reader.remaining()).map_err(error)?;
-                if count != judged {
-                    return Err(format!("the runner judged {count} laws of {judged}"));
-                }
-                Answer::Judged(judgments(&mut reader, count)?)
-            }
-            1 => {
-                let module = reader.read_string("rejected module").map_err(error)?;
-                let line = reader.read_u32("rejected line").map_err(error)?;
-                Answer::Refused(module, Refusal::Rejected(line))
-            }
-            2 => {
-                let module = reader.read_string("stopped module").map_err(error)?;
-                let Some((_, stop)) = stopped.iter().find(|(known, _)| *known == module) else {
-                    return Err(format!("the runner refused a check through {module}, which stopped no runner"));
-                };
-                Answer::Refused(module, Refusal::Stopped(*stop))
-            }
-            code => return Err(format!("the runner answered a check with the unknown answer {code}")),
-        };
-        answers.push(answer);
-    }
-    if answered == checks.len() {
-        reader.finish().map_err(error)?;
+    let count = reader.read_count("check count", checks).map_err(error)?;
+    if count != checks {
+        return Err(format!("the runner answered {count} checks of {checks}"));
     }
 
-    Ok(answers)
+    Ok(count)
+}
+
+/// The next answer of `reader`, with the index of the check it answers, which none of `answered` answers.
+fn answer(
+    reader: &mut PayloadReader<'_>,
+    checks: &[&Check<'_>],
+    stopped: &[(String, Stop)],
+    answered: &[(usize, Answer)],
+) -> Result<(usize, Answer), String> {
+    let error = |error: mago_extension::PayloadError| error.to_string();
+    let index = reader.read_u32("answered check").map_err(error)? as usize;
+    let Some(check) = checks.get(index).filter(|_| answered.iter().all(|(known, _)| *known != index)) else {
+        return Err(format!("the runner answered check {index} of {} twice or out of range", checks.len()));
+    };
+    let answer = match reader.read_u8("check answer").map_err(error)? {
+        0 => {
+            let judged = check.theorems.iter().filter(|theorem| theorem.judged).count();
+            let count = reader.read_count("judgment count", reader.remaining()).map_err(error)?;
+            if count != judged {
+                return Err(format!("the runner judged {count} laws of {judged}"));
+            }
+            Answer::Judged(judgments(reader, count)?)
+        }
+        1 => {
+            let module = reader.read_string("rejected module").map_err(error)?;
+            let line = reader.read_u32("rejected line").map_err(error)?;
+            Answer::Refused(module, Refusal::Rejected(line))
+        }
+        2 => {
+            let module = reader.read_string("stopped module").map_err(error)?;
+            let Some((_, stop)) = stopped.iter().find(|(known, _)| *known == module) else {
+                return Err(format!("the runner refused a check through {module}, which stopped no runner"));
+            };
+            Answer::Refused(module, Refusal::Stopped(*stop))
+        }
+        code => return Err(format!("the runner answered a check with the unknown answer {code}")),
+    };
+
+    Ok((index, answer))
 }
 
 /// The next `count` judgments of `reader`.
@@ -296,6 +347,7 @@ fn judgments(reader: &mut PayloadReader<'_>, count: usize) -> Result<Vec<Judgmen
             }
             2 => Judgment::Through(reader.read_string("unproven law").map_err(error)?),
             3 => Judgment::Rejected(reader.read_string("Lean error").map_err(error)?),
+            4 => Judgment::OutOfTime,
             code => return Err(format!("the runner answered with the unknown judgment {code}")),
         };
         judgments.push(judgment);
@@ -321,15 +373,9 @@ mod tests {
         library::build_in(&std::env::temp_dir().join("mago-sharp-lean-tests"), &Lake::on_path())
     }
 
-    /// A package in a new folder under `root` whose runner uses `library`.
-    fn package(root: &Path, library: &Path) -> io::Result<Package> {
-        let package = Package::new(root);
-        std::fs::create_dir_all(&package.directory)?;
-        std::fs::write(package.directory.join("lean-toolchain"), library::TOOLCHAIN)?;
-        package.write(library)?;
-
-        Ok(package)
-    }
+    /// The threads and the heartbeats of each theorem, in thousands, the tests' runners use.
+    const THREADS: usize = 4;
+    const HEARTBEATS: u32 = 200_000;
 
     /// The generated module `name` with the source `text`.
     fn module(name: &str, text: &str) -> Module {
@@ -346,8 +392,6 @@ mod tests {
     #[test]
     fn a_module_that_lost_an_import_is_rejected_alone_and_beside_the_module_it_needs() -> io::Result<()> {
         let library = library()?;
-        let root = tempfile::tempdir()?;
-        let package = package(root.path(), &library)?;
         let modules = [
             module("Code.App.Base", "import Sharp.Lean.Law\n\ndef App.Base.one : Nat := 1\n"),
             module("Code.App.Uses", "import Sharp.Lean.Law\n\ndef App.Uses.two : Nat := App.Base.one + 1\n"),
@@ -355,17 +399,13 @@ mod tests {
         ];
         let rejected = || Answer::Refused("Code.App.Uses".to_owned(), Refusal::Rejected(3));
 
-        let beside = check(
-            &library,
-            &package,
-            &modules.each_ref(),
-            &[elaborating(&["Code.App.Base", "Code.App.Uses"])],
-            &mut Vec::new(),
-        )?;
-        let alone =
-            check(&library, &package, &modules.each_ref(), &[elaborating(&["Code.App.Uses"])], &mut Vec::new())?;
-        let imported =
-            check(&library, &package, &modules.each_ref(), &[elaborating(&["Code.App.Imports"])], &mut Vec::new())?;
+        let checking = |modules_of: &[&str]| {
+            check(&library, &modules.each_ref(), &[elaborating(modules_of)], THREADS, HEARTBEATS, &mut Vec::new())
+        };
+
+        let beside = checking(&["Code.App.Base", "Code.App.Uses"])?;
+        let alone = checking(&["Code.App.Uses"])?;
+        let imported = checking(&["Code.App.Imports"])?;
 
         assert_eq!(beside, [rejected()]);
         assert_eq!(alone, [rejected()]);
@@ -379,8 +419,6 @@ mod tests {
     #[test]
     fn an_import_of_no_module_refuses_only_the_check_that_reaches_it() -> io::Result<()> {
         let library = library()?;
-        let root = tempfile::tempdir()?;
-        let package = package(root.path(), &library)?;
         let modules = [
             module("Code.App.Base", "import Sharp.Lean.Law\n\ndef App.Base.one : Nat := 1\n"),
             module("Code.App.Lost", "import Code.App.Gone\n\ndef App.Lost.one : Nat := 1\n"),
@@ -389,7 +427,7 @@ mod tests {
         let checks =
             [elaborating(&["Code.App.Lost"]), elaborating(&["Code.App.Missing"]), elaborating(&["Code.App.Base"])];
 
-        let answers = check(&library, &package, &modules.each_ref(), &checks, &mut Vec::new())?;
+        let answers = check(&library, &modules.each_ref(), &checks, THREADS, HEARTBEATS, &mut Vec::new())?;
 
         assert_eq!(
             answers,
@@ -403,15 +441,15 @@ mod tests {
         Ok(())
     }
 
-    /// The real runner, under a processor-time limit of a few seconds, proves the law of its first check, then runs
-    /// forever in its second check's module, so Mago stops it there. That check's answer is not refused: the next
-    /// runner starts at it with a limit of its own, stops in it again, now its first check, and refuses it through the
-    /// module, which joins the stopped ones. The test runs `stopping` in a process of its own, since the limit is the
-    /// one Mago runs under.
+    /// The real runner, under a processor-time limit of a few seconds, answers its checks on several threads: it proves
+    /// the laws of two checks while a third runs forever in its module, so Mago stops it. The checks it answered keep
+    /// their answers, and the next runner answers the rest on one thread, stops in that module again, and refuses its
+    /// check through it, which joins the stopped modules. The test runs `stopping` in a process of its own, since the
+    /// limit is the one Mago runs under.
     #[cfg(unix)]
     #[test]
-    fn the_real_runner_answers_the_check_before_a_stop_and_the_next_runner_refuses_the_module_that_stopped_it()
-    -> io::Result<()> {
+    fn a_runner_stopped_in_one_check_keeps_the_others_and_the_next_refuses_the_module_that_stopped_it() -> io::Result<()>
+    {
         use std::os::unix::process::CommandExt;
 
         let library = library()?;
@@ -435,38 +473,74 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[ignore = "the_real_runner_answers_the_check_before_a_stop_and_the_next_runner_refuses_the_module_that_stopped_it runs it under a processor-time limit"]
+    #[ignore = "a_runner_stopped_in_one_check_keeps_the_others_and_the_next_refuses_the_module_that_stopped_it runs it under a processor-time limit"]
     fn stopping() -> io::Result<()> {
         let library = PathBuf::from(std::env::var_os(LIBRARY).ok_or_else(|| io::Error::other("no library to use"))?);
-        let root = tempfile::tempdir()?;
-        let package = package(root.path(), &library)?;
         let modules = [
             module("Code.App.Fine", "import Sharp.Lean.Law\n\ndef App.Fine.one : Nat := 1\n"),
+            module("Code.App.Also", "import Sharp.Lean.Law\n\ndef App.Also.two : Nat := 2\n"),
             module(
                 "Code.App.Spin",
                 "import Sharp.Lean.Law\n\npartial def App.Spin.spin (n : Nat) : Nat := App.Spin.spin (n + 1)\n\n#eval App.Spin.spin 0\n",
             ),
         ];
-        let fine = Check {
-            modules: vec!["Code.App.Fine".to_owned()],
-            theorems: vec![Theorem {
-                statement: "App.Fine.isOne",
-                text: "theorem App.Fine.isOne.proof : App.Fine.one = 1 := rfl",
-                judged: true,
-            }],
+        let proving = |module: &str, statement: &'static str, text: &'static str| Check {
+            modules: vec![module.to_owned()],
+            theorems: vec![Theorem { statement, text, judged: true }],
         };
+        let checks = [
+            proving("Code.App.Fine", "App.Fine.isOne", "theorem App.Fine.isOne.proof : App.Fine.one = 1 := rfl"),
+            elaborating(&["Code.App.Spin"]),
+            proving("Code.App.Also", "App.Also.isTwo", "theorem App.Also.isTwo.proof : App.Also.two = 2 := rfl"),
+        ];
         let mut stopped = Vec::new();
 
-        let answers =
-            check(&library, &package, &modules.each_ref(), &[fine, elaborating(&["Code.App.Spin"])], &mut stopped)?;
+        let answers = check(&library, &modules.each_ref(), &checks, THREADS, HEARTBEATS, &mut stopped)?;
 
-        assert_eq!(answers.first(), Some(&Answer::Judged(vec![Judgment::Proved])));
         let Some(Answer::Refused(module, Refusal::Stopped(stop))) = answers.get(1) else {
             return Err(io::Error::other(format!("the second check was answered {answers:?}")));
         };
         assert_eq!(module, "Code.App.Spin");
         assert_eq!(stopped, [("Code.App.Spin".to_owned(), *stop)]);
-        assert_eq!(answers.len(), 2);
+        assert_eq!(
+            answers,
+            [
+                Answer::Judged(vec![Judgment::Proved]),
+                Answer::Refused("Code.App.Spin".to_owned(), Refusal::Stopped(*stop)),
+                Answer::Judged(vec![Judgment::Proved]),
+            ]
+        );
+
+        Ok(())
+    }
+
+    /// A theorem that runs past the heartbeats each theorem gets is judged out of time alone: the other theorems of its
+    /// check and the checks beside it still prove.
+    #[test]
+    fn a_theorem_past_its_heartbeats_is_out_of_time_and_the_others_still_prove() -> io::Result<()> {
+        let library = library()?;
+        let modules = [module("Code.App.Fine", "import Sharp.Lean.Law\n\ndef App.Fine.one : Nat := 1\n")];
+        let proved = || Theorem {
+            statement: "App.Fine.isOne",
+            text: "theorem App.Fine.isOne.proof : App.Fine.one = 1 := rfl",
+            judged: true,
+        };
+        let slow = Theorem {
+            statement: "App.Fine.slow",
+            text: "theorem App.Fine.slow.proof : (List.range 120).foldl (· + ·) 0 = 7140 := by decide",
+            judged: true,
+        };
+        let checks = [
+            Check { modules: vec!["Code.App.Fine".to_owned()], theorems: vec![slow, proved()] },
+            Check { modules: vec!["Code.App.Fine".to_owned()], theorems: vec![proved()] },
+        ];
+
+        let answers = check(&library, &modules.each_ref(), &checks, THREADS, 100, &mut Vec::new())?;
+
+        assert_eq!(
+            answers,
+            [Answer::Judged(vec![Judgment::OutOfTime, Judgment::Proved]), Answer::Judged(vec![Judgment::Proved]),]
+        );
 
         Ok(())
     }
@@ -483,44 +557,51 @@ mod tests {
         writer
     }
 
-    /// The runner's progress names the check it was in when Mago stopped it, and the generated module it was
-    /// elaborating there, which is none in a check's theorems. A runner stopped before its progress began was in no
-    /// check.
+    /// A check's last line of progress names the generated module the runner was elaborating for it when Mago stopped
+    /// it, among the lines of the checks beside it, and none in the check's theorems. A check whose progress never began
+    /// was in no module.
     #[test]
-    fn a_stopped_runner_was_in_the_check_and_the_module_its_last_progress_line_names() {
-        let lines = b"module 0 Code.App.Fine\ntheorems 0\nmodule 1 Code.App.Shared\nmodule 1 Code.App.Store\n";
+    fn a_stopped_runner_was_in_the_module_its_check_s_last_progress_line_names() {
+        let lines = b"module 0 Code.App.Fine\nmodule 1 Code.App.Shared\nmodule 1 Code.App.Store\nmodule 0 Code.App.Base\ntheorems 0\n";
 
-        assert_eq!(progress(lines), Some((1, Some("Code.App.Store".to_owned()))));
-        assert_eq!(progress(b"module 0 Code.App.Fine\ntheorems 0\n"), Some((0, None)));
-        assert_eq!(progress(b"uncaught exception: the payload ends early\n"), None);
+        assert_eq!(progress(lines, 1), Some("Code.App.Store".to_owned()));
+        assert_eq!(progress(lines, 0), None);
+        assert_eq!(progress(lines, 2), None);
+        assert_eq!(progress(b"uncaught exception: the payload ends early\n", 0), None);
     }
 
-    /// A runner Mago stopped in its third check leaves the answers of the two before it, which count, and whatever it
-    /// wrote after them, which does not. A check refused through a module an earlier runner stopped in is refused with
-    /// how that runner stopped, and one refused through a module Lean rejected with the line of its first error.
+    /// The runner writes each answer as its check ends, tagged with the check's index, so a runner Mago stopped leaves
+    /// the answers it wrote whole, in any order, which count, and whatever it wrote after them, which does not. A check
+    /// refused through a module an earlier runner stopped in is refused with how that runner stopped, and one refused
+    /// through a module Lean rejected with the line of its first error. A stopped runner whose output never began an
+    /// answer, as Lean work that writes before the header, answered nothing.
     #[test]
-    fn a_stopped_runner_keeps_the_answers_it_wrote_before_the_check_it_stopped_in() {
+    fn a_stopped_runner_keeps_the_answers_it_wrote_whole_in_any_order() {
         let check = || Check {
             modules: vec!["Code.App.Shared.Money".to_owned()],
             theorems: vec![Theorem { statement: "App.Shared.Money.addKeepsCurrency", text: "", judged: true }],
         };
         let checks = [check(), check(), check()];
+        let checks: Vec<&Check<'_>> = checks.iter().collect();
         let stopped = [("Code.App.Tenant.Store.Module".to_owned(), Stop::Waited)];
         let mut writer = answer_header(3);
+        writer.write_u32(2);
         writer.write_u8(2);
         let _ = writer.write_string("Code.App.Tenant.Store.Module");
+        writer.write_u32(0);
         writer.write_u8(1);
         let _ = writer.write_string("Code.App.Shared.Money");
         writer.write_u32(26);
-        writer.write_raw(b"1000000\n");
+        writer.write_u32(1);
+        writer.write_u8(0);
 
         assert_eq!(
-            decode(&writer.finish(), &checks, 2, &stopped),
+            decode(&writer.finish(), &checks, false, &stopped),
             Ok(vec![
-                Answer::Refused("Code.App.Tenant.Store.Module".to_owned(), Refusal::Stopped(Stop::Waited)),
-                Answer::Refused("Code.App.Shared.Money".to_owned(), Refusal::Rejected(26)),
+                (2, Answer::Refused("Code.App.Tenant.Store.Module".to_owned(), Refusal::Stopped(Stop::Waited))),
+                (0, Answer::Refused("Code.App.Shared.Money".to_owned(), Refusal::Rejected(26))),
             ])
         );
-        assert_eq!(decode(b"1000000\n", &checks, 0, &stopped), Ok(Vec::new()));
+        assert_eq!(decode(b"1000000\n2000000\n3000000\n", &checks, false, &stopped), Ok(Vec::new()));
     }
 }

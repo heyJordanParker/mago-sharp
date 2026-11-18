@@ -50,10 +50,17 @@ const PROOF_STEPS: &str = "Sharp.Lean.Proof";
 /// The record in the `.sharp` folder of how each law's proof ended, by the proof's key.
 pub const PROOFS: &str = "proofs.json";
 
+/// The heartbeats, in thousands, each law's theorem may use, as Lean counts the work it does: Lean's own default for a
+/// command, `maxHeartbeats`. On the M2 Max it was measured on, 1,000 of them took 0.72 processor seconds, so a theorem
+/// that never ends stops after about 140, near the 120 each file's check had before. Each of the 10 heavier laws of a
+/// 20-law bench ran out of time at 35,000 and proved at 50,000, and each of the other 10 proved at 2,000.
+const HEARTBEATS: u32 = 200_000;
+
 /// The Lean step of one workspace.
 #[derive(Debug)]
 pub struct Lean {
     root: PathBuf,
+    threads: usize,
 }
 
 /// Every law of the translations, in an order where each comes after each law it calls.
@@ -177,10 +184,10 @@ fn build() -> String {
 }
 
 impl Lean {
-    /// The Lean step of the workspace at `root`.
+    /// The Lean step of the workspace at `root`, which proves laws on `threads` threads.
     #[must_use]
-    pub fn new(root: &Path) -> Lean {
-        Lean { root: root.to_path_buf() }
+    pub fn new(root: &Path, threads: usize) -> Lean {
+        Lean { root: root.to_path_buf(), threads }
     }
 
     /// Proves the laws of `translations` and returns the issues that refuse each file whose law is not proven.
@@ -188,9 +195,9 @@ impl Lean {
     /// them.
     ///
     /// A law's proof ends once per key, [`proof_key`]: [`PROOFS`] keeps how it ended, passed or failed, and a law whose
-    /// key it holds gets that outcome again without Lean. The rest are proved by one runner, sent only the generated
-    /// modules its checks reach. No Lean process starts when every law's key is
-    /// kept. When no file states a law, `.sharp/.lean/` and [`PROOFS`] are deleted.
+    /// key it holds gets that outcome again without Lean. The rest are proved by one runner on the compile's threads,
+    /// sent only the generated modules its checks reach. No Lean process starts when every law's key is kept. When no
+    /// file states a law, `.sharp/.lean/` and [`PROOFS`] are deleted.
     ///
     /// # Errors
     ///
@@ -315,7 +322,7 @@ impl Lean {
         }
 
         let library = library::build(&package.lake)?;
-        package.write(&library)?;
+        package.remove_stale()?;
         let proved: HashSet<FileId> = work.iter().map(|(translation, _)| translation.file).collect();
         let reached: HashSet<&str> = work
             .iter()
@@ -325,8 +332,8 @@ impl Lean {
             .collect();
         let modules = program.modules(&proved, &reached);
         let proofs = Proofs {
-            package: &package,
             library: &library,
+            threads: self.threads,
             program: &program,
             laws: &laws,
             modules: modules.iter().map(|module| (module.name.as_str(), module)).collect(),
@@ -387,11 +394,11 @@ fn proof_key(law: &Law, program: &Program<'_>, laws: &Laws<'_>) -> String {
     })
 }
 
-/// What proving the laws of the stale files reads: the package the runners run in, the runtime library, every
+/// What proving the laws of the stale files reads: the runtime library, the threads a runner proves them on, every
 /// declaration and law of the translations, and the generated modules by name.
 struct Proofs<'proofs> {
-    package: &'proofs Package,
     library: &'proofs Path,
+    threads: usize,
     program: &'proofs Program<'proofs>,
     laws: &'proofs Laws<'proofs>,
     modules: HashMap<&'proofs str, &'proofs package::Module>,
@@ -417,11 +424,12 @@ impl Proofs<'_> {
         let mut ended: Vec<Proven<'work>> = Vec::new();
         let mut pending = work;
         while !pending.is_empty() {
-            // One runner answers the check of every file, so Lean and the runtime library are imported once per compile.
+            // One runner answers the checks of every file at once, so Lean and the runtime library are imported once per
+            // compile.
             let (blocked, checks): (Vec<_>, Vec<_>) =
                 pending.iter().map(|(translation, laws)| self.check(translation, laws)).unzip();
             let modules = self.reached_modules(&checks);
-            let answers = runner::check(self.library, self.package, &modules, &checks, &mut stopped)?;
+            let answers = runner::check(self.library, &modules, &checks, self.threads, HEARTBEATS, &mut stopped)?;
             let mut left = Vec::new();
             for ((((translation, laws), check), blocked), answer) in
                 pending.into_iter().zip(&checks).zip(blocked).zip(answers)
@@ -559,6 +567,7 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
     match judgment {
         Judgment::Proved => Vec::new(),
         Judgment::Through(called) => vec![issues::through(law, &called)],
+        Judgment::OutOfTime => vec![issues::theorem_out_of_time(law)],
         Judgment::Rejected(error) => {
             tracing::debug!("The law checker rejected the proof of law {}: {error}", law.name);
 

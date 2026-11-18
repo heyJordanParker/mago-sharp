@@ -746,7 +746,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         None => None,
     };
     let read_database = server.database().read_only();
-    let lean = Lean::new(&root);
+    let lean = Lean::new(&root, configuration.threads);
     let stamped = Mutex::new(Vec::new());
     let compiled_files_path = compiled_folder.join(COMPILED_FILES);
     let (compilations, compiled_files) = server.compile(

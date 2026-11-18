@@ -46,9 +46,14 @@ const ELAN_VERSION: &str = "4.2.4";
 /// The largest elan archive Mago downloads. The pinned ones are about 5 MB.
 const ELAN_LIMIT: u64 = 64 * 1024 * 1024;
 
-/// The processor seconds each Lean process Mago starts may use: far above any real proof or rule, so that ordinary load
-/// never reaches it, and a proof or rule that never ends stops instead of holding the compile.
+/// The processor seconds each `lake` process Mago starts may use: far above any real build, so that ordinary load never
+/// reaches it, and a build that never ends stops instead of holding the compile. The runner has none: each theorem it
+/// proves has a time budget of its own.
 const PROCESSOR_SECONDS: u64 = 120;
+
+/// The file in a library's build that names the folder of the Lean that built it, which the runner reads Lean's own
+/// modules from.
+const SYSROOT: &str = "sysroot";
 
 /// elan's release archive for one platform, and the size of the Lean archive elan then downloads there.
 struct Archive {
@@ -326,6 +331,45 @@ pub(crate) fn runner(library: &Path) -> PathBuf {
     library.join(".lake/build/bin").join(format!("sharp-lean{}", std::env::consts::EXE_SUFFIX))
 }
 
+/// A command that runs the runner of `library` with the search path `lake env` gives it: the library's build and the
+/// Lean that built it, which [`build_in`] records, so no `lake` starts for a compile. On Windows the runner links Lean's
+/// shared libraries from that Lean's `bin` folder.
+pub(crate) fn runner_command(library: &Path) -> io::Result<Command> {
+    let recorded = library.join(SYSROOT);
+    let sysroot =
+        fs::read_to_string(&recorded).map_err(|error| DatabaseError::io(IOAction::ReadFile, &recorded, error))?;
+    let sysroot = PathBuf::from(sysroot.trim());
+    let mut command = Command::new(runner(library));
+    command.env("LEAN_SYSROOT", &sysroot).env("LEAN_PATH", library.join(".lake/build/lib/lean"));
+    if cfg!(windows) {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let folders = std::iter::once(sysroot.join("bin")).chain(std::env::split_paths(&path));
+        command.env("PATH", std::env::join_paths(folders).map_err(io::Error::other)?);
+    }
+
+    Ok(command)
+}
+
+/// Records in `library` the folder of the Lean that built it, as `lake` names it there, unless the build already names
+/// a folder that holds Lean's modules.
+fn record_sysroot(library: &Path, lake: &Lake) -> io::Result<()> {
+    let recorded = library.join(SYSROOT);
+    if fs::read_to_string(&recorded).is_ok_and(|sysroot| Path::new(sysroot.trim()).join("lib/lean").is_dir()) {
+        return Ok(());
+    }
+    let output = process::output(lake.command().args(["env", "lean", "--print-prefix"]).current_dir(library))?;
+    if !output.status.success() {
+        return Err(unbuilt(format!(
+            "lake env lean --print-prefix in {} printed:\n{}",
+            library.display(),
+            printed(&output)
+        )));
+    }
+
+    fs::write(&recorded, &output.stdout)
+        .map_err(|error| DatabaseError::io(IOAction::WriteFile, &recorded, error).into())
+}
+
 /// Whether `library` holds the runner and every package file with the bytes Mago embeds.
 fn is_built(library: &Path) -> bool {
     runner(library).is_file()
@@ -372,7 +416,8 @@ pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
 /// library's Lean as the staging folder in it does, so it names the Lean that builds the library. Builds take turns
 /// under an exclusive lock on `build.lock` in `builds`, across threads and processes alike. A build that lost its runner
 /// or a package file, as a cache cleaner leaves it, is deleted and built again. A finished build deletes every other
-/// folder in `builds`: older builds and any staging folder a dead build left.
+/// folder in `builds`: older builds and any staging folder a dead build left. A build records the folder of the Lean that
+/// built it, which the runner starts with, once.
 pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
     let _lock = lock::exclusive(&builds.join("build.lock"))?;
     let toolchain = builds.join("lean-toolchain");
@@ -385,6 +430,8 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
     }
     let library = builds.join(key(String::from_utf8_lossy(&version.stdout).trim(), &PACKAGE));
     if is_built(&library) {
+        record_sysroot(&library, lake)?;
+
         return Ok(library);
     }
 
@@ -405,6 +452,7 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
     }
 
     fs::rename(&staging, &library).map_err(unbuilt)?;
+    record_sysroot(&library, lake)?;
 
     for entry in fs::read_dir(builds).map_err(|error| DatabaseError::io(IOAction::OpenFolder, builds, error))? {
         let old = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, builds, error))?.path();

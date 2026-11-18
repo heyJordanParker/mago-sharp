@@ -15,7 +15,6 @@ use mago_database::error::IOAction;
 use mago_database::file::FileId;
 use mago_database::process;
 use mago_sharp_bridge::unit::COMPILED_FOLDER;
-use serde::Serialize;
 
 use crate::issues;
 use crate::library;
@@ -355,18 +354,6 @@ pub(crate) fn place_of(key: &str) -> String {
     }
 }
 
-#[derive(Serialize)]
-struct Lakefile<'lakefile> {
-    name: &'lakefile str,
-    require: [Require<'lakefile>; 1],
-}
-
-#[derive(Serialize)]
-struct Require<'lakefile> {
-    name: &'lakefile str,
-    path: &'lakefile Path,
-}
-
 /// Why Lean did not elaborate a generated module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refusal {
@@ -432,24 +419,18 @@ impl Package {
         })
     }
 
-    /// Writes `lakefile.toml`, which requires the runtime library by path, so `lake env` gives the runner its search
-    /// path. A changed `lakefile.toml` drops Lake's manifest, so Lake resolves the library again. The runner gets the
-    /// generated modules in its request, so the package holds none: the sources and the build of them an older Mago
-    /// left are deleted.
-    pub(crate) fn write(&self, library: &Path) -> io::Result<()> {
-        let lakefile = toml::to_string(&Lakefile { name: "laws", require: [Require { name: "sharp", path: library }] })
-            .map_err(io::Error::other)?;
-        if write_if_changed(&self.directory.join("lakefile.toml"), lakefile.as_bytes())? {
-            let manifest = self.directory.join("lake-manifest.json");
-            match fs::remove_file(&manifest) {
+    /// Deletes what an older Mago left in the package: the generated sources and their build, and the `lakefile.toml`
+    /// and Lake's manifest that gave its runner the search path the runner now starts with.
+    pub(crate) fn remove_stale(&self) -> io::Result<()> {
+        for stale in ["lakefile.toml", "lake-manifest.json"].map(|file| self.directory.join(file)) {
+            match fs::remove_file(&stale) {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                    return Err(DatabaseError::io(IOAction::DeleteFile, &manifest, error).into());
+                    return Err(DatabaseError::io(IOAction::DeleteFile, &stale, error).into());
                 }
                 _ => {}
             }
         }
-
-        for stale in [self.directory.join("Code"), self.directory.join(".lake").join("build")] {
+        for stale in [self.directory.join("Code"), self.directory.join(".lake")] {
             match fs::remove_dir_all(&stale) {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => {
                     return Err(DatabaseError::io(IOAction::DeleteFolder, &stale, error).into());

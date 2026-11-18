@@ -10,9 +10,9 @@ stands, with each definition the claim calls unfolded once, or with those defini
 every definition they reach that does not recurse as one too. The facts
 are the law calls of the body before it, each `sharp_call%` of the theorem of the law it calls, which proves the called
 law's `when` condition first. A step that cannot close its goal reports the goal, as the law reads it, in an error that starts with `sharp-case` or `sharp-condition` and its index, then admits the goal, so
-every theorem is declared and each failure is reported once. Each step has a time budget of its own, so a case whose
-steps run out of theirs is reported as `sharp-case-out-of-time` or `sharp-condition-out-of-time`, and the cases after
-it still run. A law without a body that proves case by case over an enum it takes reports each case left open with the
+every theorem is declared and each failure is reported once. The steps of each case run within half of the time budget
+the runner gives the law's theorem, so a case whose steps run out of it is reported as `sharp-case-out-of-time` or
+`sharp-condition-out-of-time`, and the cases after it still run. A law without a body that proves case by case over an enum it takes reports each case left open with the
 case it is. The runner reads those errors, and Mago prints each goal in PHP#.
 -/
 
@@ -181,14 +181,11 @@ private def auto (definitions : Array Name) : TacticM Unit := do
        first | done | omega | grind)
     | decide))
 
-/-- The time budget of each step, in thousands of heartbeats: Lean's default budget for a whole command, which a law's
-whole proof had before each step had its own. The runner gives a law's theorem no budget of its own. -/
-private def budget : Nat := 200000
-
-/-- Runs `step` with a time budget of its own, so a step that runs out of it leaves each step after it its whole
-budget. -/
-private def budgeted (step : TacticM α) : TacticM α :=
-  withCurrHeartbeats <| withTheReader Core.Context (fun context => { context with maxHeartbeats := budget * 1000 }) step
+/-- Runs `steps`, the steps of one case, within half of its theorem's time budget, counted from where the case starts, so
+a case whose steps run out of it leaves the cases after it the rest of the theorem's. -/
+private def withinCaseBudget (steps : TacticM α) : TacticM α := do
+  let budget := maxHeartbeats.get (← getOptions) * 1000 / 2
+  withCurrHeartbeats <| withTheReader Core.Context (fun context => { context with maxHeartbeats := budget }) steps
 
 /-- How a step left the goal it ran on. -/
 private inductive Outcome where
@@ -196,17 +193,17 @@ private inductive Outcome where
   | closed
   /-- It left a goal open. -/
   | unclosed
-  /-- It ran out of its time budget before it finished. -/
+  /-- It ran out of its case's time budget before it finished. -/
   | outOfTime
   deriving BEq
 
-/-- Runs `step` on the proof state with its own budget, and returns `.closed` when it closes every goal, or the state as
-it was with `.outOfTime` when the step ran out of its budget and `.unclosed` otherwise. A step that reaches Lean's
+/-- Runs `step` on the proof state, and returns `.closed` when it closes every goal, or the state as it was with
+`.outOfTime` when the step ran out of its case's time budget and `.unclosed` otherwise. A step that reaches Lean's
 recursion limit, as `simp` does on a definition that calls itself on any value, is `.unclosed`. -/
 private def attempt (step : TacticM Unit) : TacticM Outcome := do
   let saved ← saveState
   tryCatchRuntimeEx
-    (budgeted do
+    (do
       step
       if (← getUnsolvedGoals).isEmpty then return .closed
       saved.restore
@@ -216,7 +213,7 @@ private def attempt (step : TacticM Unit) : TacticM Outcome := do
       return if error.isMaxHeartbeat then .outOfTime else .unclosed
 
 /-- Runs each of `steps` with `attempt` until one closes the goal: `.closed` when one does, and else `.outOfTime` when
-one ran out of its budget, or `.unclosed`. -/
+one ran out of its case's time budget, or `.unclosed`. -/
 private def firstClosing (steps : List (TacticM Unit)) : TacticM Outcome := do
   let mut outcome := Outcome.unclosed
   for step in steps do
@@ -228,13 +225,13 @@ private def firstClosing (steps : List (TacticM Unit)) : TacticM Outcome := do
 
 /-- The main goal as the law reads it, as a tree: each definition the claim calls unfolded once, each of `conditions`
 applied, and each value a step binds written where it is used. The goal as it stands when that runs out of its
-budget. -/
+theorem's time budget. -/
 private def presented (conditions : Array Ident) : TacticM Json := do
   let saved ← saveState
   let goal ← getMainGoal
   let whole : TacticM Json := goal.withContext do tree (← goal.getType)
   let presented ← tryCatchRuntimeEx
-    (budgeted do
+    (do
       for definition in ← definitionsIn (← getMainTarget) do unfoldOnce definition
       for condition in conditions do
         try evalTactic (← `(tactic| simp only [pure_inj, Bool.not_eq_true] at $condition:ident)) catch _ => pure ()
@@ -305,7 +302,7 @@ elab_rules : tactic
       for definition in recursive do unfoldOnce definition
       auto ((definitions.filter (!recursive.contains ·)) ++ laws)
     let ended : TacticM Unit := auto (definitions ++ laws)
-    let proven : TacticM Outcome := firstClosing (once :: if recursive.isEmpty then [] else [ended])
+    let proven : TacticM Outcome := withinCaseBudget <| firstClosing (once :: if recursive.isEmpty then [] else [ended])
     let whole ← proven
     if whole == .closed then return
     if enums.isEmpty then
@@ -333,17 +330,17 @@ elab_rules : tactic
     let unfolded : TacticM Unit := do
       for definition in definitions do unfoldOnce definition
       auto laws
-    let outcome ← firstClosing ([auto laws, unfolded, auto (definitions ++ laws)] ++
+    let outcome ← withinCaseBudget <| firstClosing ([auto laws, unfolded, auto (definitions ++ laws)] ++
       if reaching.isEmpty then [] else [auto (definitions ++ reaching ++ laws)])
     unless outcome == .closed do report index conditions.getElems outcome
 
 /-- Proves the condition of the law the call `index` calls with the automatic steps. Each part of a condition joined by
 `&&` that stays open is reported, as one goal of the call, and admitted, and the call ran out of time when a part's
-steps ran out of their budget. -/
+steps ran out of the call's time budget, half of its theorem's. -/
 syntax "sharp_condition " num : tactic
 
 elab_rules : tactic
-  | `(tactic| sharp_condition $index) => do
+  | `(tactic| sharp_condition $index) => withinCaseBudget do
     if (← attempt (do auto (← lawsInScope))) == .closed then return
     try evalTactic (← `(tactic| simp only [pure_inj, Bool.and_eq_true])) catch _ => pure ()
     try evalTactic (← `(tactic| repeat' apply And.intro)) catch _ => pure ()
@@ -359,7 +356,7 @@ elab_rules : tactic
     let kind := if outOfTime then "sharp-condition-out-of-time" else "sharp-condition"
     unless open_.isEmpty do logError m!"{kind} {index.getNat} {(Json.arr open_).compress}"
 
-/-- Runs `tactics` as one step with its own budget, and keeps what they did only when they close every goal, as
+/-- Runs `tactics` as one step, and keeps what they did only when they close every goal, as
 `try (tactics; done)` does for steps that fail. -/
 syntax "sharp_attempt " "(" tacticSeq ")" : tactic
 

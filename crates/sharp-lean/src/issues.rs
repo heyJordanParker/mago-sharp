@@ -147,6 +147,11 @@ pub(crate) fn out_of_time(issue: Issue) -> Issue {
     issue.with_note("the proof ran out of time before it finished")
 }
 
+/// A law whose theorem ran out of its time budget outside the steps of its proof.
+pub(crate) fn theorem_out_of_time(law: &Law) -> Issue {
+    unproven(law, format!("Law {} is not proven: its proof ran out of time before it finished.", law.name))
+}
+
 /// A law whose proof calls the law `called` states, which is not proven.
 pub(crate) fn through(law: &Law, called: &str) -> Issue {
     Issue::error(format!("law {} is not proven", law.name))
@@ -202,7 +207,7 @@ fn when(conditions: &[String]) -> String {
 fn stopped(stop: Stop, what: &str) -> String {
     match stop {
         Stop::Processor => format!(
-            "it ran past {} processor seconds, the limit the checker sets on each check. Make {what} end sooner",
+            "it ran past {} processor seconds, the processor-time limit Mago runs under. Make {what} end sooner",
             library::processor_seconds()
         ),
         Stop::Waited => {
