@@ -4861,12 +4861,13 @@ fn stalling_lake(folder: &Path, work: &str) -> std::ffi::OsString {
 /// Lean work that runs past the processor-time limit, or waits until the deadline, stops there once instead of holding
 /// the compile, and refuses the law whose code it was checking with what stopped it. Each row runs after a compile that
 /// built the runtime library. Work that never ends runs under a limit of 2 seconds, and costs the compile less than two
-/// limits, which leaves room for the rest of the compile on a slow machine. It writes a line every million steps, as
-/// the runner reports each module and check it starts, so the deadline, which counts from the last thing written, never
-/// stops it: on a machine busy enough to give it less than a quarter of a core, it would reach the deadline of 8 seconds
-/// before its 2 processor seconds. Work that waits runs under a limit of 2 seconds, so its deadline is 8 seconds. It
-/// uses almost no processor time, so it runs on its own thread meanwhile. Each limit holds the whole compile too, so it
-/// stays above the processor seconds the compile itself uses.
+/// limits, which leaves room for the rest of the compile on a slow machine. It writes a line in each second of the clock
+/// it runs in, as the runner reports each module and check it starts, so the deadline, which counts from the last thing
+/// written, never stops it, however little of a core a busy machine gives it. It ends with no answer once it has used 10
+/// processor seconds, so a limit that no longer stops it fails the row. Work that waits runs under a limit of 2
+/// seconds, so its deadline is 8 seconds, and it ends with no answer after 60 seconds, so a deadline that no longer
+/// stops it fails the row. It uses almost no processor time, so it runs on its own thread meanwhile. Each limit holds
+/// the whole compile too, so it stays above the processor seconds the compile itself uses.
 #[cfg(unix)]
 #[test]
 fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline() {
@@ -4889,10 +4890,10 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline() {
     };
 
     std::thread::scope(|scope| {
-        let waits = scope.spawn(|| stops(2, "sleep 4000", &refused("it did not finish within 8 seconds")));
+        let waits = scope.spawn(|| stops(2, "sleep 60", &refused("it did not finish within 8 seconds")));
         stops(
             2,
-            "exec awk 'BEGIN { while (1) if (++step % 1000000 == 0) { print step; fflush() } }'",
+            "exec perl -e '$| = 1; while ((times)[0] + (times)[1] < 10) { $now = time; print \"$now\\n\" if $now != $last; $last = $now }'",
             &refused("it ran past 2 processor seconds, the limit the checker sets on each check"),
         );
         waits.join().unwrap();
