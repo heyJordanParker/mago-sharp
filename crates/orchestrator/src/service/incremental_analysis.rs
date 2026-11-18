@@ -77,6 +77,7 @@ use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_semantics::SemanticsChecker;
 use mago_semantics::drop_follow_on_issues;
+use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file_with_settings;
 use mago_syntax::settings::ParserSettings;
 use mago_word::Word;
@@ -1953,7 +1954,7 @@ impl IncrementalAnalysisService {
             .collect()
     }
 
-    /// Runs the analyzer on host files.
+    /// Runs the analyzer on host files, and on each package's `.sharp` file for its effect summaries alone.
     ///
     /// Returns `(aggregated_result, per_file_issues)` where `per_file_issues` contains
     /// only the files that were actually analyzed (not skipped).
@@ -2017,10 +2018,22 @@ impl IncrementalAnalysisService {
             codebase.safe_symbols.clear();
             codebase.safe_symbol_members.clear();
         }
+        // The effects solve reads the body of every PHP# file `mago compile` checks, a package's `.sharp` files among
+        // them, so a call into a package has the effects of what it runs, spec section 29. Such a file is only
+        // summarized: its issues, its uses and the hooks' view of it stay out of the project's analysis.
+        let summarized_files: HashSet<FileId> = self
+            .database
+            .files()
+            .filter(|file| file.file_type == FileType::Vendored && Dialect::of(file).is_sharp())
+            .map(|file| file.id)
+            .collect();
         let host_files: Vec<_> = self
             .database
             .files()
-            .filter(|file| file.file_type == FileType::Host && !effective_skip_files.contains(&file.id))
+            .filter(|file| {
+                (file.file_type == FileType::Host || summarized_files.contains(&file.id))
+                    && !effective_skip_files.contains(&file.id)
+            })
             .map(|file| self.database.get(&file.id))
             .collect::<Result<Vec<_>, _>>()?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -2086,6 +2099,22 @@ impl IncrementalAnalysisService {
                 }
                 if !external_symbol_references.is_empty() {
                     analyzer = analyzer.with_additional_symbol_references(&external_symbol_references);
+                }
+                if summarized_files.contains(&file_id) {
+                    let mut artifacts = analyzer.analyze_with_artifacts(program, &mut analysis_result)?;
+                    arena.reset();
+                    if let Some(analyzing_bar) = &analyzing_bar {
+                        analyzing_bar.inc(1);
+                    }
+
+                    return Ok((
+                        file_id,
+                        AnalysisResult::new(SymbolReferences::new()),
+                        None,
+                        std::mem::take(&mut artifacts.effect_summaries),
+                        HashSet::default(),
+                        None,
+                    ));
                 }
 
                 let semantic_issues = semantics_checker.check(&source_file, program, &resolved_names);
@@ -2190,12 +2219,15 @@ impl IncrementalAnalysisService {
         let mut lowering_inputs: HashMap<FileId, (LoweringInput, bool)> = HashMap::default();
 
         for (file_id, result, snapshot, effect_summaries, listings, lowering_input) in results {
+            per_file_effect_summaries.insert(file_id, effect_summaries);
+            if summarized_files.contains(&file_id) {
+                continue;
+            }
             if let Some(lowering_input) = lowering_input {
                 lowering_inputs.insert(file_id, lowering_input);
             }
             aggregated_result.symbol_references.extend(result.symbol_references);
             per_file_issues.insert(file_id, result.issues);
-            per_file_effect_summaries.insert(file_id, effect_summaries);
             if !listings.is_empty() {
                 reads_by_file.insert(file_id, AnalysisReads { listings, ..AnalysisReads::default() });
             }
@@ -4273,6 +4305,60 @@ mod tests {
         service.analyze_incremental(None).expect("Incremental failed.");
         assert_eq!(missing(&service), 1);
         assert_matches_full(&service, &db, "removed member");
+    }
+
+    /// Spec section 29: a call into a package's `.sharp` file has the effects of the body it runs, as `mago compile`,
+    /// which checks each package's `.sharp` files as the project's, solves them. So `Writing.run`, which implements the
+    /// pure `Audit.run`, is refused for the vendored `Writer.write`, which reads the clock, though the package's file
+    /// reports nothing of its own. An edit of another file keeps the refusal, and analyzes neither the package's file
+    /// nor `Writing` again.
+    #[test]
+    fn test_a_call_into_a_vendored_sharp_body_has_its_effects() {
+        let writer = "namespace Tools;\n\nimport Acme.Chrono;\n\npublic class Writer\n{\n    public int write() => Chrono.now();\n}\n";
+        let clock = "namespace App.Stubs;\n\nimport Acme.Chrono;\n\nextern Chrono.now uses Clock;\n";
+        let now = "<?php\nnamespace Acme\\Chrono;\nfunction now(): int { return time(); }\n";
+        let audit =
+            "namespace App;\n\nimport Tools.Writer;\n\npublic interface Audit\n{\n    void run(Writer writer);\n}\n";
+        let writing = "namespace App;\n\nimport Tools.Writer;\n\npublic class Writing : Audit\n{\n    public void run(Writer writer) { writer.write(); }\n}\n";
+        let note = |text: &str| {
+            format!("namespace App;\n\npublic class Note\n{{\n    public string text() => \"{text}\";\n}}\n")
+        };
+        let note_id = FileId::new(b"src/Note.sharp");
+        let mut db = make_database(vec![
+            ("src/Audit.sharp", audit),
+            ("src/Writing.sharp", writing),
+            ("src/Note.sharp", note("a").as_str()),
+            ("src/Clock.sharp", clock),
+            ("src/Acme/Chrono/now.php", now),
+        ]);
+        db.add(File::new(
+            Cow::Borrowed(&b"vendor/acme/tools/Tools/Writer.sharp"[..]),
+            FileType::Vendored,
+            None,
+            Cow::Owned(writer.as_bytes().to_vec()),
+        ));
+        let refused = |service: &IncrementalAnalysisService| {
+            service
+                .collect_all_issues()
+                .iter()
+                .filter(|issue| issue.code.as_deref() == Some("incompatible-effects"))
+                .map(|issue| issue.message.clone())
+                .collect::<Vec<_>>()
+        };
+        let expected = [
+            "`Writing.run` reaches `Writer.write`, which calls `Chrono.now` with the effect `Clock`, so the pure `Audit.run` cannot accept it.",
+        ];
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(refused(&service), expected);
+
+        db.update(note_id, Cow::Owned(note("b").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[note_id])).expect("Incremental analysis failed.");
+        assert_eq!(refused(&service), expected);
+        assert_eq!(service.analyzed_files, HashSet::from_iter([note_id]));
+        assert_matches_full(&service, &db, "Note.text returns b");
     }
 
     /// A plain class that implements a PHP# interface keys its methods by their exact names, spec section 24, so an edit
