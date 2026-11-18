@@ -70,6 +70,7 @@ use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::names::hidden_php_class_in;
 use crate::utils::names::sharp_effect_name;
 use crate::utils::quoted_source;
 use crate::utils::report_int_for_float;
@@ -868,8 +869,14 @@ where
     let issue = with_set_conversion_help(context, Some(input_expression), (parameter_type, input_type), issue);
     let issue = with_function_fit_message(context, Some(input_expression), (parameter_type, input_type), issue);
 
-    let (kind, issue) =
+    let (kind, mut issue) =
         explain_blocked_substitution(context, input_type, parameter_type, IssueCode::InvalidArgument, (kind, issue));
+    // Decision 83: the file cannot write a value of a type that holds a class it cannot name, so plain PHP makes the call.
+    if let Some(class) = hidden_php_class_in(context, &shown_parameter_type) {
+        issue = issue.with_help(format!(
+            "`{parameter_type_str}` holds `{class}`, which a `.sharp` file cannot name, so make this call to `{target_name_str}` from plain PHP."
+        ));
+    }
     context.collector.report_with_code(kind, issue);
 
     false

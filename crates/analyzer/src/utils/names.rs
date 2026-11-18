@@ -10,6 +10,7 @@ use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -301,6 +302,26 @@ where
         && context.codebase.get_class_like(word(name)).is_some_and(|class| class.flags.is_built_in())
         && !name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| is_sharp_namespace(&name[..end]))
         && !STANDARD_ROOT_CLASSES.iter().any(|class| class.as_bytes().eq_ignore_ascii_case(name))
+}
+
+/// The first class-like `union` holds, at any depth, that the `.sharp` file `context` analyzes cannot name, as
+/// [`is_hidden_php_class`] says, by the name a message shows: `PDO` for `Function<PDO()>`. A message whose fix would
+/// write `union` names that class instead, so it never asks the file for code it cannot hold.
+pub(crate) fn hidden_php_class_in<A>(context: &Context<'_, '_, A>, union: &TUnion) -> Option<String>
+where
+    A: Arena,
+{
+    union.get_all_child_nodes().into_iter().find_map(|node| {
+        let name = match node {
+            TypeRef::Atomic(TAtomic::Object(object)) => object.get_name()?,
+            TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) => *name,
+            TypeRef::Atomic(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Literal { value }))) => *value,
+            _ => return None,
+        };
+
+        is_hidden_php_class(context, name.as_bytes())
+            .then(|| sharp_class_like_name(context.codebase, &context.imported_names, name))
+    })
 }
 
 /// Whether the full name `name` is `Sharp\Internal`, the namespace of the engine's functions that only the standard

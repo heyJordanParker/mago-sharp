@@ -85,6 +85,7 @@ use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::names::hidden_php_class_in;
 use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
 use crate::utils::report_int_for_float;
@@ -932,13 +933,19 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
             let issue = with_set_conversion_help(context, source_expression, (&local_type, &assigned_type), issue);
             let issue = with_function_fit_message(context, source_expression, (&local_type, &assigned_type), issue);
 
-            let (code, issue) = explain_blocked_substitution(
+            let (code, mut issue) = explain_blocked_substitution(
                 context,
                 &assigned_type,
                 &local_type,
                 IssueCode::InvalidLocalAssignmentValue,
                 (IssueCode::InvalidLocalAssignmentValue, issue),
             );
+            // Decision 83: the file cannot write a type that holds a class it cannot name, so the value takes its own local.
+            if let Some(class) = hidden_php_class_in(context, &local_type) {
+                issue = issue.with_help(format!(
+                    "`{local_type_str}` holds `{class}`, which a `.sharp` file cannot name, so give this value a local of its own."
+                ));
+            }
             context.collector.report_with_code(code, issue);
         }
 

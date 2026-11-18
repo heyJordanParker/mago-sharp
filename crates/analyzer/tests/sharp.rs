@@ -29389,6 +29389,30 @@ fn a_php_built_in_class_is_the_name_a_misspelled_class_is() {
     assert_eq!(issues(library, &[]), Vec::<String>::new());
 }
 
+/// Decision 83: a `.sharp` file names no PHP built-in class outside the standard library, so a message never asks it to
+/// write one. A plain PHP parameter of a type that holds one, as `\Closure(): \PDO`, refuses a wrong argument with
+/// plain PHP as the place for the call, where any other type asks for a value of that type, and a local that holds
+/// such a value refuses another value with a local of its own as the fix. The value itself passes on unnamed.
+#[test]
+fn a_message_never_asks_for_a_type_php_sharp_cannot_name() {
+    let pool = (
+        "src/Lib/Pool.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Pool\n{\n    /** @param \\Closure(): \\PDO $connect */\n    public static function using(\\Closure $connect): void\n    {\n    }\n\n    /** @return \\Closure(): \\PDO */\n    public static function connector(): \\Closure\n    {\n        return static fn (): \\PDO => new \\PDO('sqlite::memory:');\n    }\n}\n",
+    );
+    let sharp = "namespace App.Shop;\n\nimport Lib.Pool;\n\npublic class Store\n{\n    public static void open() => Pool.using(1);\n\n    public static void swap()\n    {\n        let connect = Pool.connector();\n        connect = 1;\n        Pool.using(connect);\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("app/Shop/Store.sharp", sharp), &[pool]),
+        [
+            "7:45 invalid-argument Invalid argument type for argument #1 of `Pool.using`: expected `Function<PDO()>`, but found `int`. | `Function<PDO()>` holds `PDO`, which a `.sharp` file cannot name, so make this call to `Pool.using` from plain PHP.",
+            "12:19 invalid-local-assignment-value Invalid assignment to `connect`: it is declared as `Function<PDO()>`. | `Function<PDO()>` holds `PDO`, which a `.sharp` file cannot name, so give this value a local of its own.",
+        ]
+    );
+
+    let fixed = "namespace App.Shop;\n\nimport Lib.Pool;\n\npublic class Store\n{\n    public static int swap()\n    {\n        let connect = Pool.connector();\n        let count = 1;\n        Pool.using(connect);\n        return count;\n    }\n}\n";
+    assert_eq!(refusals(("app/Shop/Store.sharp", fixed), &[pool]), Vec::<String>::new());
+}
+
 /// Decision 83: the standard library names the interfaces a PHP# class implements for a plain PHP library, the root of
 /// every exception and the class that makes a class an attribute, as it names the standard exceptions, so a bare
 /// `Countable`, `JsonSerializable`, `Throwable` and `Attribute` name PHP's with no import.
