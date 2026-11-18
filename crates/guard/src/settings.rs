@@ -489,11 +489,13 @@ mod tests {
         );
     }
 
-    #[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+    #[cfg(feature = "serde")]
+    #[derive(serde::Deserialize)]
     struct Wrapper {
         constraint: StructuralInheritanceConstraint,
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn it_deserializes_none_keyword() {
         let toml = r#"constraint = "@nothing""#;
@@ -501,6 +503,7 @@ mod tests {
         assert_eq!(wrapped.constraint, StructuralInheritanceConstraint::Nothing);
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn it_deserializes_valid_single_string() {
         let toml = r#"constraint = "App\\Domain\\MyInterface""#;
@@ -508,6 +511,7 @@ mod tests {
         assert_eq!(wrapped.constraint, StructuralInheritanceConstraint::Single("App\\Domain\\MyInterface".to_string()));
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn it_deserializes_valid_array_of_strings() {
         let toml = r#"constraint = ["App\\InterfaceA", "App\\InterfaceB"]"#;
@@ -518,6 +522,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn it_deserializes_valid_array_of_arrays() {
         let toml = r#"constraint = [["App\\A", "App\\B"], ["App\\C"]]"#;
@@ -531,18 +536,21 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn it_fails_on_invalid_identifier_in_single_string() {
         let toml = r#"constraint = "Invalid-Interface""#;
         assert!(toml::from_str::<Wrapper>(toml).is_err());
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn it_fails_on_invalid_identifier_in_array() {
         let toml = r#"constraint = ["App\\InterfaceA", "Invalid-Interface"]"#;
         assert!(toml::from_str::<Wrapper>(toml).is_err());
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn it_fails_on_invalid_identifier_in_nested_array() {
         let toml = r#"constraint = [["App\\A", "Invalid-B"], ["App\\C"]]"#;
