@@ -89,6 +89,10 @@ where
     /// A PHP# keyword written in another case reads as the keyword where its construct follows and the name could not
     /// stand, as [`Self::miscased_construct_follows`] decides.
     fn read_php_keyword(&mut self, head: Head) -> Result<(), ParseError<'arena>> {
+        if !self.dialect.is_sharp() {
+            return Ok(());
+        }
+
         let n = usize::from(self.stream.is_at(T!["static"])?);
         let Some(token) = self.stream.lookahead(n)? else {
             return Ok(());
@@ -259,11 +263,12 @@ where
     /// The PHP keyword a name in a `.sharp` file spells, as PHP code writes it: lowercase, or a magic constant such as
     /// `__CLASS__`. PHP#'s names are case-sensitive, so `Print` names a class and never reads as `print`.
     pub(crate) fn php_keyword(&self, token: Token<'_>) -> Option<TokenKind> {
-        lookup_keyword(token.value).filter(|keyword| {
-            self.dialect.is_sharp()
-                && token.kind == T![Identifier]
-                && (keyword.is_magic_constant() || !token.value.iter().any(u8::is_ascii_uppercase))
-        })
+        if !self.dialect.is_sharp() || token.kind != T![Identifier] {
+            return None;
+        }
+
+        lookup_keyword(token.value)
+            .filter(|keyword| keyword.is_magic_constant() || !token.value.iter().any(u8::is_ascii_uppercase))
     }
 
     /// Optionally consumes a keyword token if present.
