@@ -137,9 +137,7 @@ impl ClassLogs {
     pub fn extend(&mut self, other: ClassLogs) {
         for (worker, log) in other.0 {
             let held = self.0.entry(worker).or_default();
-            if held.len() < log.len() {
-                held.resize(log.len(), empty_word());
-            }
+            held.resize(held.len().max(log.len()), empty_word());
             for (entry, class) in held.iter_mut().zip(log) {
                 if !class.is_empty() {
                     *entry = class;
