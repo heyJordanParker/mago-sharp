@@ -685,6 +685,30 @@ fn an_event_s_parameters_are_never_too_wide() {
     );
 }
 
+/// Spec sections 5 and 10: `Json.encode` writes a struct by the fields its `parse` reads, and `parse` and `Json.decode`
+/// read them, so each uses every field of the struct from the namespace of the code that encodes or parses it, inside a
+/// `List` too. `Row`, encoded, `Line`, parsed, and `Item`, decoded as a `List`, report nothing for their fields. A field
+/// the wire never holds and nothing reads by name, as `Row`'s get-only `unused`, is still too wide.
+#[test]
+fn a_struct_s_fields_are_used_where_it_is_encoded_or_parsed() {
+    let row = "namespace Demo;\n\npublic struct Row\n{\n    public int id { get; init; }\n    public string name { get; init; }\n    public int unused { get; } = 0;\n}\n";
+    let line = "namespace Demo;\n\npublic struct Line\n{\n    public int amount { get; init; }\n}\n";
+    let item = "namespace Demo;\n\npublic struct Item\n{\n    public int cents { get; init; }\n}\n";
+    let wire = "namespace Other;\n\nimport Demo.Item;\nimport Demo.Line;\nimport Demo.Row;\nimport Sharp.Encoding.Json;\n\npublic class Wire\n{\n    internal string sent(Row row) => Json.encode(row);\n\n    internal Line got(Map<string, Any?> input) => Line.parse(input);\n\n    internal List<Item> items(string text) => Json.decode<List<Item>>(text);\n}\n";
+
+    assert_eq!(
+        too_wide(&[
+            JSON,
+            JSON_VALUE,
+            ("src/Demo/Row.sharp", row),
+            ("src/Demo/Line.sharp", line),
+            ("src/Demo/Item.sharp", item),
+            ("src/Other/Wire.sharp", wire),
+        ]),
+        ["src/Demo/Row.sharp 7:16 `Row.unused` is public, and nothing outside `Demo` uses it."]
+    );
+}
+
 /// Spec section 5: a member is too wide only on the class that declares it. A PHP# class that inherits a constant from
 /// a plain PHP parent declares no such member, whatever file the constant is in, and a plain PHP class's member is no
 /// PHP# report at all. The PHP# class's own constant still warns.

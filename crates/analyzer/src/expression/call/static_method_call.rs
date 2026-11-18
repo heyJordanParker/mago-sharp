@@ -1,5 +1,6 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::atomic::TAtomic;
@@ -208,6 +209,7 @@ where
                 method_name.as_bytes() == b"parse",
                 call.span,
             );
+            record_parse_fields(context.codebase, block_context, artifacts, metadata.name, &mut Vec::new());
         }
 
         // Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`. PHP calls the static
@@ -383,47 +385,53 @@ where
             .and_then(|t| t.first())
         && (type_arguments.is_some() || !parsed.is_mixed())
     {
-        check_parsed_type_argument(context, &parser, &parsed.clone(), call.span);
+        let parsed = parsed.clone();
+        check_parsed_type_argument(context, &parser, &parsed, call.span);
+        record_parse_fields_in(context.codebase, block_context, artifacts, &parsed, &mut Vec::new());
     }
 
     if let Some((encoder, position)) = json_encoder
         && let Some(argument) = call.argument_list.arguments.get(position)
-        && let Some(value) = artifacts.get_expression_type(argument.value())
-        && let Some(unwritable) = unwritable_json(context, value, &mut Vec::new())
+        && let Some(value) = artifacts.get_rc_expression_type(argument.value()).cloned()
     {
-        let (code, message, help) = match unwritable {
-            UnwritableJson::KeyClass(class) => {
-                let class = display_class_like_name(context, class);
-                (
+        record_parse_fields_in(context.codebase, block_context, artifacts, &value, &mut Vec::new());
+
+        if let Some(unwritable) = unwritable_json(context, &value, &mut Vec::new()) {
+            let (code, message, help) = match unwritable {
+                UnwritableJson::KeyClass(class) => {
+                    let class = display_class_like_name(context, class);
+                    (
+                        IssueCode::InvalidJsonKey,
+                        format!("`{encoder}` writes each `Map` key as JSON text, and `{class}` has no `toString()`."),
+                        format!("Declare `public string toString()` on `{class}`, or encode a `Map` keyed by text."),
+                    )
+                }
+                UnwritableJson::KeyScalar(scalar) => (
                     IssueCode::InvalidJsonKey,
-                    format!("`{encoder}` writes each `Map` key as JSON text, and `{class}` has no `toString()`."),
-                    format!("Declare `public string toString()` on `{class}`, or encode a `Map` keyed by text."),
-                )
-            }
-            UnwritableJson::KeyScalar(scalar) => (
-                IssueCode::InvalidJsonKey,
-                format!("`{encoder}` writes each `Map` key as JSON text, and a `{scalar}` key has none."),
-                "Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
-            ),
-            UnwritableJson::UnheldParameter(class, parameter) => {
-                let class = display_class_like_name(context, class);
-                (
-                    IssueCode::InvalidStruct,
-                    format!(
-                        "`{encoder}` writes `{class}` from the properties its `parse` reads, and the main constructor parameter `{parameter}` holds no property."
-                    ),
-                    format!(
-                        "Declare `{parameter}` with `{{ get; }}` in the main constructor of `{class}`, so it is a property."
-                    ),
-                )
-            }
-        };
-        context.collector.report_with_code(
-            code,
-            Issue::error(message)
-                .with_annotation(Annotation::primary(argument.span()).with_message("Encoded here."))
-                .with_help(help),
-        );
+                    format!("`{encoder}` writes each `Map` key as JSON text, and a `{scalar}` key has none."),
+                    "Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`."
+                        .to_owned(),
+                ),
+                UnwritableJson::UnheldParameter(class, parameter) => {
+                    let class = display_class_like_name(context, class);
+                    (
+                        IssueCode::InvalidStruct,
+                        format!(
+                            "`{encoder}` writes `{class}` from the properties its `parse` reads, and the main constructor parameter `{parameter}` holds no property."
+                        ),
+                        format!(
+                            "Declare `{parameter}` with `{{ get; }}` in the main constructor of `{class}`, so it is a property."
+                        ),
+                    )
+                }
+            };
+            context.collector.report_with_code(
+                code,
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(argument.span()).with_message("Encoded here."))
+                    .with_help(help),
+            );
+        }
     }
 
     if !method_resolution.undocumented_methods.is_empty() {
@@ -538,6 +546,72 @@ where
         }
         _ => None,
     })
+}
+
+/// Records, as uses from the code `block_context` runs, the fields `parse` reads of each PHP# struct or class `value`
+/// holds, wherever it holds one: in a collection's elements, keys and values, and in those fields. `Json.encode` writes
+/// a value by those fields and `parse` and `Json.decode` read them, spec section 10, so a public field that only the
+/// JSON holds is used where the code encodes or parses it, spec section 5. `recorded` holds the classes already done.
+fn record_parse_fields_in(
+    codebase: &CodebaseMetadata,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    value: &TUnion,
+    recorded: &mut Vec<Word>,
+) {
+    for atomic in value.types.iter() {
+        match get_sharp_type(atomic) {
+            Some(SharpType::List(element) | SharpType::Set(element) | SharpType::Iterable(element)) => {
+                record_parse_fields_in(codebase, block_context, artifacts, element, recorded);
+            }
+            Some(SharpType::Map(key, value)) => {
+                record_parse_fields_in(codebase, block_context, artifacts, key, recorded);
+                record_parse_fields_in(codebase, block_context, artifacts, value, recorded);
+            }
+            Some(SharpType::Class(class, _)) => {
+                record_parse_fields(codebase, block_context, artifacts, class, recorded);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Records, as uses from the code `block_context` runs, each field the `parse` of `class` reads, as
+/// [`record_parse_fields_in`] does: the fields of each variant for a family, spec section 10.
+fn record_parse_fields(
+    codebase: &CodebaseMetadata,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    class: Word,
+    recorded: &mut Vec<Word>,
+) {
+    let Some(class) = codebase.get_class_like(class).filter(|class| class.flags.is_sharp()) else {
+        return;
+    };
+    if recorded.contains(&class.name) {
+        return;
+    }
+    recorded.push(class.name);
+
+    if class.tag_key().is_some() {
+        for (_, variant) in codebase.variants(class) {
+            record_parse_fields(codebase, block_context, artifacts, variant.name, recorded);
+        }
+
+        return;
+    }
+    if !codebase.parses(class.name) {
+        return;
+    }
+    for field in codebase.struct_parse_fields(class.name) {
+        let property = word([b"$".as_slice(), field.name].concat());
+        artifacts.symbol_references.add_reference_to_class_member(
+            &block_context.scope,
+            (codebase.class_key(class.name), property),
+            false,
+        );
+        record_parse_fields_in(codebase, block_context, artifacts, field.r#type, recorded);
+    }
 }
 
 #[cfg(test)]
