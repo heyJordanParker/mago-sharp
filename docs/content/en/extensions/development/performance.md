@@ -88,9 +88,9 @@ The SDK caches supported immutable lookups and preserves batch input order. `com
 
 ## Worker pools
 
-The default `workers = 0` is adaptive. Mago starts at most three processes and may grow the pool toward the global thread count when sustained request contention and observed callback time justify more processes. An analyzer host with parallel after-file or targeted work may proactively reach half of that capacity, rounded up, before dispatch. This avoids eagerly starting every language runtime for sparse callbacks.
+The default `workers = 0` starts as many processes as Mago's thread count, all at once, so the analysis waits on no worker that a busier pool would have started.
 
-A positive worker count fixes the pool size. Use it for measured constraints, not as a default tuning ritual. While Mago threads wait for responses, the operating system can schedule worker processes on the same CPUs.
+A positive worker count sets the pool size. Use it for measured constraints, not as a default tuning ritual. While Mago threads wait for responses, the operating system can schedule worker processes on the same CPUs.
 
 Each worker serves one request at a time, so parallelism comes only from multiple processes. A worker in any language should avoid starting threads that compete for the CPUs Mago uses.
 

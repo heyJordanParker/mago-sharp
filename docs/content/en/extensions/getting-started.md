@@ -147,7 +147,7 @@ command = ["php", ".mago/acme-worker.php"]
 
 The table name, `acme`, is a local host-pool name. It is separate from the globally unique identifier advertised by the extension.
 
-With no `workers` value, the pool is adaptive: it starts small and may grow up to Mago's configured thread count. The default working directory is the configuration file's directory, so `.mago/acme-worker.php` resolves from there.
+With no `workers` value, the pool starts as many workers as Mago's configured thread count. The default working directory is the configuration file's directory, so `.mago/acme-worker.php` resolves from there.
 
 ## 5. Validate registration
 

@@ -790,9 +790,6 @@ impl ProviderIndices {
 
 /// Request transport used by worker-backed analyzer providers.
 pub trait AnalyzerTransport: std::fmt::Debug + Send + Sync {
-    /// Starts preparing additional transport capacity for a sustained parallel workload.
-    fn prepare_capacity(self: &Arc<Self>) {}
-
     /// Sends initialization data to every worker process.
     ///
     /// # Errors
@@ -870,10 +867,6 @@ pub trait AnalyzerTransport: std::fmt::Debug + Send + Sync {
 }
 
 impl AnalyzerTransport for WorkerPool {
-    fn prepare_capacity(self: &Arc<Self>) {
-        Self::prepare_capacity(self);
-    }
-
     fn broadcast(&self, payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
         Self::broadcast(self, payload)
     }
@@ -3664,10 +3657,6 @@ where
                     elapsed = ?start.elapsed(),
                     "External analyzer backend registered."
                 );
-            }
-
-            if !registration.after_file_analysis_plugins.is_empty() || !registration.node_analysis_plugins.is_empty() {
-                transport.prepare_capacity();
             }
 
             backends.push(Backend::new(transport, registration));

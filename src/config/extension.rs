@@ -36,8 +36,7 @@ pub struct ExtensionHostConfiguration {
 
     /// Number of worker processes.
     ///
-    /// Zero uses an adaptive pool that can grow to Mago's global thread count.
-    /// A non-zero value starts exactly that many workers.
+    /// Zero starts as many as Mago's thread count. A non-zero value starts exactly that many workers.
     pub workers: usize,
 
     /// Working directory for workers.
@@ -113,7 +112,7 @@ impl ExtensionHostConfiguration {
         Ok(())
     }
 
-    /// Returns the fixed pool size or the adaptive pool's worker ceiling.
+    /// Returns how many workers the host starts: `workers`, or Mago's thread count when it is zero.
     #[must_use]
     pub fn worker_count(&self, mago_threads: usize) -> NonZeroUsize {
         NonZeroUsize::new(if self.workers == 0 { mago_threads } else { self.workers }).unwrap_or(NonZeroUsize::MIN)

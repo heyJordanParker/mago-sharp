@@ -42,19 +42,12 @@ pub(crate) fn initialize_external_linter(
                 host = %name,
                 command = ?command,
                 workers = size.get(),
-                adaptive = host.workers == 0,
                 "Starting external linter host."
             );
 
-            let pool = if host.workers == 0 {
-                WorkerPool::spawn_adaptive(command, size, options)
-            } else {
-                WorkerPool::spawn(command, size, options)
-            };
-
-            let pool = pool.map(Arc::new).map_err(ExternalLintError::from)?;
+            let pool = WorkerPool::spawn(command, size, options).map(Arc::new).map_err(ExternalLintError::from)?;
             if let Some(start) = host_start {
-                tracing::trace!(host = %name, active_workers = pool.len(), elapsed = ?start.elapsed(), "External linter host started.");
+                tracing::trace!(host = %name, workers = pool.len(), elapsed = ?start.elapsed(), "External linter host started.");
             }
 
             Ok::<Arc<WorkerPool>, ExternalLintError>(pool)
@@ -113,19 +106,12 @@ pub(crate) fn initialize_external_analyzer(
                 host = %name,
                 command = ?command,
                 workers = size.get(),
-                adaptive = host.workers == 0,
                 "Starting external analyzer host."
             );
 
-            let pool = if host.workers == 0 {
-                WorkerPool::spawn_adaptive(command, size, options)
-            } else {
-                WorkerPool::spawn(command, size, options)
-            };
-
-            let pool = pool.map(Arc::new).map_err(ExternalAnalyzerError::from)?;
+            let pool = WorkerPool::spawn(command, size, options).map(Arc::new).map_err(ExternalAnalyzerError::from)?;
             if let Some(start) = host_start {
-                tracing::trace!(host = %name, active_workers = pool.len(), elapsed = ?start.elapsed(), "External analyzer host started.");
+                tracing::trace!(host = %name, workers = pool.len(), elapsed = ?start.elapsed(), "External analyzer host started.");
             }
 
             Ok::<Arc<WorkerPool>, ExternalAnalyzerError>(pool)

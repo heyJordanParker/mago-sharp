@@ -60,44 +60,6 @@ fn worker_reducers_merge_every_process_on_the_last_survivor() -> Result<(), Box<
     Ok(())
 }
 
-#[test]
-fn adaptive_reduction_includes_only_workers_that_were_spawned() -> Result<(), Box<dyn std::error::Error>> {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sdk_available = repository.join("vendor/autoload.php").is_file()
-        && process::output(Command::new("php").arg("--version")).is_ok_and(|output| output.status.success());
-    assert!(
-        sdk_available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
-        "PHP and vendor dependencies are required for the external worker-reduction test"
-    );
-    if !sdk_available {
-        return Ok(());
-    }
-
-    let temporary = tempfile::tempdir()?;
-    let command = WorkerCommand::new("php")
-        .with_argument(repository.join("composer/tests/Sdk/Fixtures/worker-reducer.php"))
-        .with_current_directory(repository)
-        .with_environment("MAGO_REDUCTION_AUDIT_DIRECTORY", temporary.path());
-    let pool = Arc::new(WorkerPool::spawn_adaptive(
-        command,
-        NonZeroUsize::new(5).expect("five is non-zero"),
-        WorkerPoolOptions::default(),
-    )?);
-    let linter = ExternalLinter::initialize([Arc::clone(&pool)], PHPVersion::PHP85)?;
-    let spawned_workers = pool.len();
-    assert!(spawned_workers < 5, "the adaptive pool must retain unspawned capacity");
-    drop(linter);
-    pool.shutdown();
-
-    let alpha = read_audit(&temporary.path().join("alpha.txt"), "alpha")?;
-    let beta = read_audit(&temporary.path().join("beta.txt"), "beta")?;
-    assert_eq!(alpha.worker_ids.len(), spawned_workers, "unspawned adaptive capacity must not contribute empty data");
-    assert_eq!(alpha.worker_ids, beta.worker_ids);
-    assert_eq!(alpha.leader, beta.leader);
-
-    Ok(())
-}
-
 struct Audit {
     leader: String,
     worker_ids: Vec<String>,

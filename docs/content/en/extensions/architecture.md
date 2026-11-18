@@ -20,7 +20,7 @@ flowchart TB
     subgraph Host["Configured extension host"]
         direction TB
         Pool["Worker pool"]
-        Mode["workers = 0: adaptive, ceiling T<br/>workers = N: fixed at N"]
+        Mode["workers = 0: T workers<br/>workers = N: N workers"]
         Pool --> Mode
         Pool --> W1["Worker 1"]
         Pool --> WN["Worker N"]
@@ -43,7 +43,7 @@ One worker may host multiple extensions. Every worker in a pool must construct e
 
 Each command starts the enabled hosts it needs. The linter registration exchange describes extension identity, linter rule definitions, and worker-reduction support. `mago analyze` performs a separate analyzer registration exchange for extension identity, plugin definitions, targets, data requirements, and worker-reduction support.
 
-Mago rejects conflicting or inconsistent registration before the corresponding lint or semantic-analysis work is dispatched. Adaptive workers started later replay the successful bootstrap exchanges before serving ordinary requests.
+Mago rejects conflicting or inconsistent registration before the corresponding lint or semantic-analysis work is dispatched. A worker started again after it fails replays the successful bootstrap exchanges before serving ordinary requests.
 
 Use `mago extension validate` to validate host startup and linter registration without linting files. Analyzer registration and plugin selection are exercised by `mago analyze`.
 
@@ -63,7 +63,7 @@ A worker pool provides parallelism by running multiple processes. Each worker se
 
 In the PHP SDK, a request that waits on a nested codebase query keeps its turn. The worker keeps reading frames, so the query's answer and any cancellation still reach it, but no other request starts until it responds, fails, or is cancelled.
 
-With `workers = 0`, an adaptive pool starts at the smaller of three processes and Mago's configured thread count. It may grow to that thread count when sustained request contention and observed callback time justify more processes. An analyzer host with parallel after-file or targeted work may proactively reach half of that capacity, rounded up. A positive `workers` value creates a fixed pool and starts exactly that many processes immediately, even when the value exceeds Mago's thread count.
+A pool starts all its processes at once, before its first request: as many as Mago's configured thread count with `workers = 0`, and exactly `workers` with a positive value, even when the value exceeds Mago's thread count.
 
 ## Data minimization
 

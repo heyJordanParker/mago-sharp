@@ -28,7 +28,7 @@ stderr-tail-size = 65536
 | :--- | :--- | :--- | :--- |
 | `enabled` | boolean | `true` | Whether Mago starts this host. A disabled host may omit `command`. |
 | `command` | string list | `[]` | Executable followed by literal arguments. No shell parsing is performed. Required when enabled. The program reads a relative argument, such as its script, from `working-directory`, so an inherited host's script resolves from the directory of the configuration file Mago loaded, not from the file `extends` names. With `--config /tmp/x.toml` and `extends = "/app/mago.toml"`, the inherited `command = ["php", "tools/mago/worker.php"]` runs in `/tmp` and fails with `Could not open input file: tools/mago/worker.php`. |
-| `workers` | non-negative integer | `0` | `0` selects an adaptive pool with Mago's thread count as its ceiling. A positive value starts exactly that many processes. |
+| `workers` | non-negative integer | `0` | `0` starts as many processes as Mago's thread count. A positive value starts exactly that many processes. |
 | `working-directory` | path | config directory | Working directory inherited by every worker process. The default, and a relative path, resolve from the directory of the configuration file Mago loaded, whether `--config` names it or Mago finds it, for an inherited host too. With no configuration file, they resolve from the workspace. With `--config /tmp/x.toml` and `extends = "/app/mago.toml"`, the hosts of `/app/mago.toml` run in `/tmp`: give `/tmp/x.toml` its own `working-directory = "/app"` for each host it inherits, or keep it beside `/app/mago.toml`. |
 | `environment` | string map | `{}` | Variables added to, or replacing values in, the worker environment. |
 | `inherit-environment` | boolean | `true` | Whether workers inherit Mago's process environment before `environment` is applied. |
@@ -48,11 +48,11 @@ command = ["php", ".mago/worker.php", "--project=storefront"]
 
 A bare executable name such as `php`, `node`, or `my-extension-host` is resolved through `PATH`. A relative executable containing a directory component, such as `./tools/extension-host`, resolves from the effective configuration file's directory. Remaining arguments are passed literally; the selected program interprets relative arguments from `working-directory`.
 
-## Adaptive and fixed pools
+## Pool size
 
-The default `workers = 0` uses an adaptive pool. It starts at most three processes to avoid unnecessary PHP startup and memory costs, then may grow toward the global Mago thread count when sustained request contention and observed callback time justify more processes. An analyzer host with parallel after-file or targeted work may proactively reach half of that capacity, rounded up, before dispatch.
+A pool starts all its processes at once, before Mago sends its first request, so every thread of the analysis has a worker from the start. The default `workers = 0` starts as many as Mago's thread count.
 
-Use a fixed pool when an extension has a known external constraint:
+Set `workers` when an extension has a known external constraint:
 
 ```toml
 [extension-hosts.database-aware]
@@ -60,7 +60,7 @@ command = ["php", ".mago/database-worker.php"]
 workers = 2
 ```
 
-A fixed pool does not grow or shrink. Avoid configuring more workers than Mago threads.
+A pool does not grow or shrink. Avoid configuring more workers than Mago threads.
 
 ## Worker processes
 
