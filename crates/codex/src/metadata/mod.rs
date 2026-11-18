@@ -187,6 +187,10 @@ pub struct CodebaseMetadata {
     /// through `global`, spec section 23.
     #[cfg_attr(feature = "serde", serde(default))]
     standard_library_files: HashSet<FileId>,
+    /// Each user-defined class-like population filled, as its scan gave it, by its key. Population fills such a
+    /// class-like again from it, as a full analysis does, so nothing an earlier fill derived stays.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) scanned_class_likes: WordMap<Shared<ClassLikeMetadata>>,
 }
 
 impl CodebaseMetadata {
@@ -2317,6 +2321,7 @@ impl CodebaseMetadata {
 
         for k in &keys.class_like_names {
             self.class_likes.remove(k);
+            self.scanned_class_likes.remove(k);
             self.symbols.remove(*k);
         }
 

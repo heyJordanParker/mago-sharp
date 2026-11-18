@@ -6701,4 +6701,58 @@ mod tests {
             result.issues.iter().map(|i| i.code.clone()).collect::<Vec<_>>()
         );
     }
+
+    /// A framework model whose interface and trait take type arguments, as Eloquent's `Model` does, under a PHP# base
+    /// class that several PHP# subclasses of one shape extend. Each edit of the base class's members fills the
+    /// subclasses again, and after each one every class-like holds what a full analysis gives it, the type arguments
+    /// it passes up and the methods it inherits included, and each analysis reports what a full one does, on one thread
+    /// and on many.
+    #[test]
+    fn test_watch_base_class_edits_give_each_subclass_of_a_generic_model_the_full_analysis() {
+        const MODEL: &[u8] = b"<?php\nnamespace Framework;\n\n/**\n * @template TKey of array-key\n * @template TValue\n */\ninterface Arrayable\n{\n    /** @return array<TKey, TValue> */\n    public function toArray(): array;\n}\n\n/**\n * @template TKey of array-key\n * @template TItem\n */\nclass Collection\n{\n    /** @param array<TKey, TItem> $items */\n    public function __construct(public array $items = []) {}\n}\n\n/** @template TCollection of Collection */\ntrait HasCollection\n{\n    /**\n     * @param array<array-key, static> $models\n     * @return TCollection\n     */\n    public function newCollection(array $models = []): Collection\n    {\n        return new Collection($models);\n    }\n}\n\n/** @implements Arrayable<string, mixed> */\nabstract class Model implements Arrayable\n{\n    /** @use HasCollection<Collection<int, static>> */\n    use HasCollection;\n\n    /** @return array<string, mixed> */\n    public function toArray(): array\n    {\n        return [];\n    }\n\n    /** @param array<string, mixed> $attributes */\n    public function fill(array $attributes): static\n    {\n        return $this;\n    }\n}\n";
+        let base = |version: usize| {
+            format!(
+                "namespace App.Shop;\n\nimport Framework.Model;\n\npublic abstract class Record : Model\n{{\n    public int version{version}() => {version};\n}}\n"
+            )
+        };
+        let subclass = |name: &str| format!("namespace App.Shop;\n\npublic class {name} : Record\n{{\n}}\n");
+        let names = ["Order", "Line", "Refund", "Invoice", "Payment", "Shipment"];
+        let files: Vec<(String, FileType, Vec<u8>)> =
+            std::iter::once(("vendor/framework/Model.php".to_owned(), FileType::Vendored, MODEL.to_vec()))
+                .chain(std::iter::once(("src/App/Shop/Record.sharp".to_owned(), FileType::Host, base(1).into_bytes())))
+                .chain(
+                    names.iter().map(|name| {
+                        (format!("src/App/Shop/{name}.sharp"), FileType::Host, subclass(name).into_bytes())
+                    }),
+                )
+                .collect();
+        let record = FileId::new(b"src/App/Shop/Record.sharp");
+
+        for threads in [1, 8] {
+            rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("the pool builds").install(|| {
+                let mut db = make_db_with_types(
+                    files.iter().map(|(name, kind, code)| (name.as_bytes(), *kind, code.as_slice())).collect(),
+                );
+                let mut service = make_watch_service(&db);
+                service.analyze().expect("Initial analysis failed.");
+                assert_matches_full(&service, &db, &format!("{threads} threads, before an edit"));
+
+                for version in 2..=6 {
+                    db.update(record, Cow::Owned(base(version).into_bytes()));
+                    service.update_database(db.read_only());
+                    service.analyze_incremental(Some(&[record])).expect("Incremental analysis failed.");
+                    assert_matches_full(&service, &db, &format!("{threads} threads, edit {version}"));
+                    let mut fresh = make_watch_service(&db);
+                    fresh.analyze().expect("Full analysis failed.");
+                    for name in names.iter().chain(&["Record"]) {
+                        let key = mago_word::word(format!("App\\Shop\\{name}").as_bytes());
+                        assert!(
+                            service.codebase().class_likes.get(&key) == fresh.codebase().class_likes.get(&key),
+                            "{threads} threads, edit {version}: `{name}` differs from a full analysis"
+                        );
+                    }
+                }
+            });
+        }
+    }
 }

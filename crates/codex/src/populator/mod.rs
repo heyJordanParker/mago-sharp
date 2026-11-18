@@ -88,7 +88,6 @@ fn populate_codebase_inner(
     mut dirty_symbols: Option<HashSet<SymbolIdentifier>>,
 ) {
     codebase.drop_modules_named_like_plain_classes();
-    codebase.apply_extern_attributes();
     if codebase.populate_class_like_aliases() {
         safe_symbols.clear();
         safe_symbol_members.clear();
@@ -132,19 +131,29 @@ fn populate_codebase_inner(
         }
     }
 
+    // A class-like population filled before starts again from its scan, with the aliases the codebase gives it now,
+    // and a user-defined one fresh from its scan keeps the scan to start from the next time. Only a user-defined
+    // class-like is ever filled again.
     for class_like_name in &class_likes_to_repopulate {
-        if let Some(classlike_info) = codebase.class_likes.get_mut(class_like_name) {
-            classlike_info.key_header_names(&codebase.symbols);
-            classlike_info.flags &= !MetadataFlags::POPULATED;
-            classlike_info.declaring_property_ids.clear();
-            classlike_info.appearing_property_ids.clear();
-            classlike_info.declaring_method_ids.clear();
-            classlike_info.appearing_method_ids.clear();
-            classlike_info.overridden_method_ids.clear();
-            classlike_info.overridden_property_ids.clear();
-            classlike_info.invalid_dependencies.clear();
+        let Some(classlike_info) = codebase.class_likes.get_mut(class_like_name) else {
+            continue;
+        };
+        if classlike_info.flags.is_populated() {
+            let Some(scanned) = codebase.scanned_class_likes.get(class_like_name) else {
+                unreachable!(
+                    "population keeps the scan of each user-defined class-like it fills, `{class_like_name}` too"
+                );
+            };
+            let aliases = std::mem::take(&mut classlike_info.aliases);
+            *classlike_info = scanned.clone();
+            classlike_info.aliases = aliases;
+        } else if classlike_info.flags.is_user_defined() {
+            codebase.scanned_class_likes.insert(*class_like_name, classlike_info.clone());
         }
+        classlike_info.key_header_names(&codebase.symbols);
     }
+    // An `extern` line's attributes join each class-like after it starts again from its scan.
+    codebase.apply_extern_attributes();
 
     populate_sealed_interfaces(codebase);
 
