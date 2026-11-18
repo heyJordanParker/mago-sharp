@@ -585,7 +585,8 @@ where
 /// every file, so it runs once the whole project is analyzed, beside [`Effects::solve`](crate::effects::Effects::solve).
 /// A use from the namespace, the member's own class included, is no outside use, so a member nothing uses is refused
 /// too. A use from code outside any
-/// class or function counts as outside, because its namespace is not known here.
+/// class or function counts as outside, because its namespace is not known here. A method must be visible to each
+/// class that overrides or implements it, so an override from a class outside the namespace is an outside use.
 ///
 /// Only a public PHP# class of a project has such members, a file whose nearest `composer.json` says `"type":
 /// "project"`, of the files analyzed: a library's uses are in the projects that install it, which the analysis never
@@ -607,6 +608,18 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
         };
         uses_on.entry((member, class)).or_default().push(code_in);
     });
+    // A method must be visible to each class that overrides or implements it, so each override uses the method it
+    // replaces from the class that declares the override.
+    for (class_name, class) in &codebase.class_likes {
+        for (method, replaced) in &class.overridden_method_ids {
+            if class.methods.contains(method) {
+                for replaced in replaced.values() {
+                    let (on, member) = replaced.get_key();
+                    uses_on.entry((member, on)).or_default().push(Some(*class_name));
+                }
+            }
+        }
+    }
     // The same uses by the member and each class-like the class the code names it on is an instance of, as
     // `CodebaseMetadata::is_instance_of` decides.
     let mut member_uses = HashMap::<(Word, Word), Vec<&[Option<Word>]>>::default();

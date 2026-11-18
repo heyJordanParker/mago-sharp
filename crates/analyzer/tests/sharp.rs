@@ -730,6 +730,28 @@ fn a_member_inherited_from_a_plain_php_parent_is_not_too_wide() {
     );
 }
 
+/// Spec sections 5 and 22: a member must be visible to each class that overrides or implements it, so an override from
+/// outside the namespace is an outside use, as a call from there is. `Base`'s abstract `name` and `invoke` and its
+/// virtual `label`, which `One` replaces from `App.Web`, report nothing, though only `App.Shop` calls them. `title`,
+/// which only `Two` replaces, from `App.Shop.Deep` below the namespace, is still too wide.
+#[test]
+fn a_member_a_class_outside_its_namespace_overrides_is_not_too_wide() {
+    let base = "namespace App.Shop;\n\npublic abstract class Base\n{\n    public abstract string name();\n    public abstract string invoke();\n    public virtual string label() => \"base\";\n    public virtual string title() => \"base\";\n}\n";
+    let runner = "namespace App.Shop;\n\ninternal class Runner\n{\n    internal string run(Base base) => base.name() + base.invoke() + base.label() + base.title();\n}\n";
+    let one = "namespace App.Web;\n\nimport App.Shop.Base;\n\npublic class One : Base\n{\n    public override string name() => \"one\";\n    public override string invoke() => \"one\";\n    public override string label() => \"one\";\n}\n";
+    let two = "namespace App.Shop.Deep;\n\nimport App.Shop.Base;\n\ninternal abstract class Two : Base\n{\n    public override string title() => \"two\";\n}\n";
+
+    assert_eq!(
+        too_wide(&[
+            ("src/App/Shop/Base.sharp", base),
+            ("src/App/Shop/Runner.sharp", runner),
+            ("src/App/Web/One.sharp", one),
+            ("src/App/Shop/Deep/Two.sharp", two),
+        ]),
+        ["src/App/Shop/Base.sharp 8:27 `Base.title` is public, and nothing outside `App.Shop` uses it."]
+    );
+}
+
 /// Spec section 5: a member whose attribute's class is marked `[DynamicallyAccessed]` is reached by the framework that
 /// reads the attribute, through reflection, which no checker sees, so it counts as used. So are a plain PHP `[Listen]`
 /// method and `[Field]` property, and a PHP# `[Route]` method. Any other attribute, as PHP's `[Deprecated]`, says
