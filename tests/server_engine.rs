@@ -612,6 +612,7 @@ fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
                     size: file.contents.len() as u64,
                     mtime_ns: 0,
                     hash: source_hash(&file.contents),
+                    declarations_hash: [0; 16],
                 });
                 inputs.lock().unwrap().insert(String::from_utf8_lossy(path).into_owned(), input.clone());
                 Ok(input)

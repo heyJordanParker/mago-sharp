@@ -1,6 +1,7 @@
 //! Compiles each `.sharp` file of the last analysis into the `.sharpc` file the engine runs.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use foldhash::HashMap;
@@ -20,6 +21,7 @@ use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::FileReads;
 use mago_analyzer::external::Listing;
 use mago_build_id::BUILD_ID;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::module::top_dispatcher_namespaces;
@@ -87,8 +89,9 @@ pub enum Compilation {
     Accepted(Vec<u8>),
     /// Its error-level issues, which stop it from running.
     Refused(IssueCollection),
-    /// Its `.sharpc` file holds the bytes this compile would write: the caller vouched it is the one the last compile
-    /// wrote, its key held, and its inputs kept the stamps it holds, so the compile neither read it nor gives its bytes.
+    /// Its `.sharpc` file holds the bytes this compile would write, or bytes the engine treats the same: the caller
+    /// vouched it is the one the last compile wrote, its key held, and each input kept the stamp it holds, or the hash
+    /// of the declarations it names, so the compile neither read it nor gives its bytes.
     Kept,
 }
 
@@ -170,17 +173,30 @@ fn compiled_with(configuration: [u8; 16]) -> Vec<u8> {
     bytes
 }
 
-/// The hash of what a compiled file holds beside its code: the stamp of each of its `inputs`, in their order, and the
-/// standard `library` it names. A compile keeps a compiled file unread while this hash holds.
+/// The workspace path of an input of a compiled file, with the hash of the declarations the compiled file reads there,
+/// spec section 27, or all zero for an input that holds while its stamp does.
+type InputPath = (Vec<u8>, [u8; 16]);
+
+/// The hash of what a compiled file holds beside its code that decides whether the engine runs it: the
+/// `declarations_hash` of its source, each of its `inputs` in their order, and the standard `library` it names. An input
+/// that names the hash of an import's declarations counts by that hash alone, since the engine keeps the compiled file
+/// current while the import's compiled file names it, whatever stamp the import has. A compile keeps a compiled file
+/// unread while this hash holds.
 #[allow(clippy::little_endian_bytes)]
-fn stamps_hash(inputs: &[Input], library: &Library) -> [u8; 16] {
-    let mut bytes = Vec::new();
-    for Input { path, size, mtime_ns, hash } in inputs {
+fn stamps_hash(declarations_hash: [u8; 16], inputs: &[Input], library: &Library) -> [u8; 16] {
+    let mut bytes = declarations_hash.to_vec();
+    for Input { path, size, mtime_ns, hash, declarations_hash } in inputs {
         bytes.extend((path.len() as u64).to_le_bytes());
         bytes.extend(path);
-        bytes.extend(size.to_le_bytes());
-        bytes.extend(mtime_ns.to_le_bytes());
-        bytes.extend(hash);
+        if *declarations_hash == [0; 16] {
+            bytes.push(0);
+            bytes.extend(size.to_le_bytes());
+            bytes.extend(mtime_ns.to_le_bytes());
+            bytes.extend(hash);
+        } else {
+            bytes.push(1);
+            bytes.extend(declarations_hash);
+        }
     }
     bytes.extend(library.native_fingerprint);
     bytes.extend(&library.version);
@@ -448,6 +464,11 @@ impl IncrementalAnalysisService {
     /// the answer, and names no input. What a plugin with no provider read decides only which issues the analysis
     /// reports, never the code, so it enters the key and no input.
     ///
+    /// Spec section 27: such an input that is a `.sharp` file of the workspace, other than the file itself and a source
+    /// its laws reach, names the hash of its declarations beside its stamp, so the engine and the next compile count it
+    /// by that hash: a body edit to it changes no other compiled file, since the key holds what the file read of its
+    /// bodies. A file that states an `extern` line or whose signature holds no declaration keeps its stamp alone.
+    ///
     /// A file that states a law also lists every source its laws reach. A file that declares a module or a listener
     /// also lists the module files its check resolves services through, each folder's `Module.sharp` whether or not a
     /// file is at it, as [`Self::module_inputs`] gives them. A file outside `vendor/` lists the `Module.sharp` of its
@@ -602,7 +623,19 @@ impl IncrementalAnalysisService {
         for file in &files {
             folder_files.entry(folder_of(&file.name)).or_default().push(&file.name);
         }
-        let mut input_paths: HashMap<FileId, Vec<Vec<u8>>> = HashMap::default();
+        let accepted = |file: &File| {
+            !refused.contains_key(&file.id)
+                && (kept.contains_key(&file.id) || matches!(lowered.get(&file.id), Some(Ok(_))))
+        };
+        // Spec section 27: each file this compile writes a compiled file for whose declarations hash is not all zero is
+        // read through its declarations, which its compiled file's header names.
+        let read_by_declarations: HashMap<FileId, [u8; 16]> = files
+            .iter()
+            .filter(|file| accepted(file))
+            .map(|file| (file.id, declarations_hash(&self.codebase, file)))
+            .filter(|(_, declarations_hash)| *declarations_hash != [0; 16])
+            .collect();
+        let mut input_paths: HashMap<FileId, Vec<InputPath>> = HashMap::default();
         for (file, namespace_classes, reaches_extension) in files.iter().filter_map(|file| {
             if let Some((_, record)) = kept.get(&file.id) {
                 return Some((file, &record.namespace_classes, record.reaches_extension));
@@ -622,13 +655,28 @@ impl IncrementalAnalysisService {
                     }
                 }
             }
-            let mut sources: HashSet<FileId> = read_by_every_file.clone();
-            for source in std::iter::once(file.id).chain(body_files.iter().copied()) {
-                sources.extend(dependencies.reached_by(source));
+            let mut reached: HashSet<FileId> = body_files.clone();
+            for source in std::iter::once(file.id).chain(body_files) {
+                reached.extend(dependencies.reached_by(source));
             }
-            sources.extend(body_files);
+            let mut sources: HashSet<FileId> = read_by_every_file.clone();
             sources.extend(reach.files(file.id));
             sources.insert(file.id);
+            // A file this one reaches through declarations or bodies names the hash of its declarations beside its
+            // stamp, so an edit to its bodies leaves this file current: the key holds the returns and effects it read
+            // from them. Every other source keeps its stamp alone.
+            let mut imports: Vec<InputPath> = Vec::new();
+            for reached in reached {
+                if sources.contains(&reached) {
+                    continue;
+                }
+                match (read_by_declarations.get(&reached), self.database.get(&reached)) {
+                    (Some(declarations_hash), Ok(import)) => imports.push((import.name.to_vec(), *declarations_hash)),
+                    _ => {
+                        sources.insert(reached);
+                    }
+                }
+            }
 
             // Spec section 32: the `imports` line of the module of the file's folder or of a folder above it limits
             // what the file imports.
@@ -657,7 +705,7 @@ impl IncrementalAnalysisService {
             } else {
                 Vec::new()
             };
-            let mut paths: Vec<Vec<u8>> = sources
+            let mut paths: Vec<InputPath> = sources
                 .into_iter()
                 .filter_map(|source| self.database.get(&source).ok())
                 .filter(|source| source.id == file.id || is_source(source))
@@ -667,9 +715,12 @@ impl IncrementalAnalysisService {
                 .chain(namespace_files)
                 .chain(self.module_inputs(file, &dependencies, &listening))
                 .chain(std::iter::once(COMPOSER_LOCK.to_vec()))
+                .map(|path| (path, [0; 16]))
+                .chain(imports)
                 .collect();
+            // A path another rule also names keeps its stamp alone, which sorts first.
             paths.sort_unstable();
-            paths.dedup();
+            paths.dedup_by(|later, first| later.0 == first.0);
             input_paths.insert(file.id, paths);
         }
         let mut counts: Vec<usize> = input_paths.values().map(Vec::len).collect();
@@ -688,11 +739,9 @@ impl IncrementalAnalysisService {
             let mut seen: HashSet<&[u8]> = HashSet::default();
             files
                 .iter()
-                .filter(|file| {
-                    !refused.contains_key(&file.id)
-                        && (kept.contains_key(&file.id) || matches!(lowered.get(&file.id), Some(Ok(_))))
-                })
+                .filter(|file| accepted(file))
                 .flat_map(|file| input_paths.get(&file.id).into_iter().flatten())
+                .map(|(path, _)| path)
                 .filter(|path| seen.insert(path.as_slice()))
                 .cloned()
                 .collect()
@@ -700,10 +749,21 @@ impl IncrementalAnalysisService {
         let stamped: Vec<Result<Option<Input>, DatabaseError>> = named.par_iter().map(|path| stamp(path)).collect();
         let mut stamps: HashMap<Vec<u8>, Input> = HashMap::default();
         for (path, input) in named.into_iter().zip(stamped) {
-            let input = input?.unwrap_or_else(|| Input { path: path.clone(), size: 0, mtime_ns: 0, hash: [0; 16] });
+            let input = input?.unwrap_or_else(|| Input {
+                path: path.clone(),
+                size: 0,
+                mtime_ns: 0,
+                hash: [0; 16],
+                declarations_hash: [0; 16],
+            });
             stamps.insert(path, input);
         }
-        let stamped = |paths: Vec<Vec<u8>>| -> Vec<Input> { paths.iter().map(|path| stamps[path].clone()).collect() };
+        let stamped = |paths: Vec<InputPath>| -> Vec<Input> {
+            paths
+                .into_iter()
+                .map(|(path, declarations_hash)| Input { declarations_hash, ..stamps[&path].clone() })
+                .collect()
+        };
         let mut next = CompiledFiles::default();
         let mut compilations = Vec::with_capacity(files.len());
         for file in &files {
@@ -713,7 +773,8 @@ impl IncrementalAnalysisService {
                     Some(issues) => Compilation::Refused(issues),
                     None => {
                         let inputs = stamped(input_paths.remove(&file.id).unwrap_or_default());
-                        let stamps = stamps_hash(&inputs, standard_library);
+                        let declarations_hash = read_by_declarations.get(&file.id).copied().unwrap_or_default();
+                        let stamps = stamps_hash(declarations_hash, &inputs, standard_library);
                         next.files.insert(file.name.to_vec(), CompiledFile { stamps, ..record.clone() });
                         match bytes {
                             None if stamps == record.stamps => Compilation::Kept,
@@ -729,7 +790,8 @@ impl IncrementalAnalysisService {
                                             ))
                                         })?,
                                 };
-                                let Some(bytes) = unit::restamp(&bytes, &inputs, standard_library) else {
+                                let Some(bytes) = unit::restamp(&bytes, declarations_hash, &inputs, standard_library)
+                                else {
                                     unreachable!("a compiled file the compile keeps is one `unit::is_stale` read");
                                 };
 
@@ -750,13 +812,21 @@ impl IncrementalAnalysisService {
                         reads.function_types = unit.function_types().to_vec();
                         let key = key(source_hash(&file.contents), &reads);
                         let inputs = stamped(input_paths.remove(&file.id).unwrap_or_default());
-                        let stamps = stamps_hash(&inputs, standard_library);
+                        let declarations_hash = read_by_declarations.get(&file.id).copied().unwrap_or_default();
+                        let stamps = stamps_hash(declarations_hash, &inputs, standard_library);
                         next.files.insert(
                             file.name.to_vec(),
                             CompiledFile { key, reads, forms, namespace_classes, reaches_extension, stamps },
                         );
 
-                        Compilation::Accepted(encode(&unit, &file.contents, key, &inputs, standard_library))
+                        Compilation::Accepted(encode(
+                            &unit,
+                            &file.contents,
+                            key,
+                            declarations_hash,
+                            &inputs,
+                            standard_library,
+                        ))
                     }
                 }
             };
@@ -1319,6 +1389,30 @@ fn is_source(file: &File) -> bool {
     file.file_type != FileType::Builtin && !file.name.starts_with(VENDOR)
 }
 
+/// The hash of the declarations of the PHP# file `file`, spec section 27, from its signature in `codebase`.
+///
+/// It is the hash [`unit::declarations_hash`] gives, which the file's compiled file's header names, and each file that
+/// reads its declarations or bodies names for it beside its stamp. It is all zero, so every file that reads
+/// it keeps its stamp, for a file in `vendor/`, which `composer.lock` stands for, a file outside the workspace, a file
+/// that states an `extern` line, and a file whose signature holds no declaration, as one of an event or a struct: no
+/// signature holds an `extern` line, an event or a struct.
+fn declarations_hash(codebase: &CodebaseMetadata, file: &File) -> [u8; 16] {
+    let states_extern = codebase.externs.values().flatten().any(|line| line.span.file_id == file.id)
+        || codebase.extern_namespaces.iter().any(|line| line.span.file_id == file.id);
+    if !Dialect::of(file).is_sharp()
+        || !is_source(file)
+        || Path::new(String::from_utf8_lossy(&file.name).as_ref()).is_absolute()
+        || states_extern
+    {
+        return [0; 16];
+    }
+
+    codebase
+        .get_file_signature(&file.id)
+        .filter(|signature| !signature.ast_nodes.is_empty())
+        .map_or([0; 16], unit::declarations_hash)
+}
+
 /// The workspace-relative folder of the file `name`, with its trailing `/`, or nothing for a file at the root.
 fn folder_of(name: &[u8]) -> &[u8] {
     &name[..name.iter().rposition(|byte| *byte == b'/').map_or(0, |slash| slash + 1)]
@@ -1629,7 +1723,12 @@ mod tests {
 
     /// Stamps every input as an empty file, so a test sees which inputs a file has.
     fn empty_stamp(path: &[u8]) -> Result<Option<Input>, DatabaseError> {
-        Ok(Some(Input { path: path.to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] }))
+        Ok(Some(absent(path)))
+    }
+
+    /// The input of `path` stamped absent, as one no file is at.
+    fn absent(path: &[u8]) -> Input {
+        Input { path: path.to_vec(), size: 0, mtime_ns: 0, hash: [0; 16], declarations_hash: [0; 16] }
     }
 
     /// Stamps each file of `database` with its size and hash, and `composer.lock` as an empty file.
@@ -1646,6 +1745,7 @@ mod tests {
                 size: file.contents.len() as u64,
                 mtime_ns: 0,
                 hash: source_hash(&file.contents),
+                declarations_hash: [0; 16],
             }))
         }
     }
@@ -1712,11 +1812,11 @@ mod tests {
         let word = |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         let (count, nodes, children) = (word(80), word(84), word(88));
         let header = size_of::<sharp_unit_header>();
-        let texts = header + 40 * count + 56 * nodes + 4 * children;
+        let texts = header + 56 * count + 56 * nodes + 4 * children;
 
         (0..count)
             .map(|index| {
-                let input = header + 40 * index;
+                let input = header + 56 * index;
                 let (offset, length) = (word(input), word(input + 4));
 
                 Input {
@@ -1724,6 +1824,7 @@ mod tests {
                     size: u64::from_le_bytes(bytes[input + 8..input + 16].try_into().unwrap()),
                     mtime_ns: i64::from_le_bytes(bytes[input + 16..input + 24].try_into().unwrap()),
                     hash: bytes[input + 24..input + 40].try_into().unwrap(),
+                    declarations_hash: bytes[input + 40..input + 56].try_into().unwrap(),
                 }
             })
             .collect()
@@ -1928,15 +2029,16 @@ mod tests {
         assert_eq!(
             inputs(accepted(&compiled, "app/Order.sharp")),
             [
-                Input { path: b"Module.sharp".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] },
-                Input { path: b"app/Module.sharp".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] },
+                absent(b"Module.sharp"),
+                absent(b"app/Module.sharp"),
                 Input {
                     path: b"app/Order.sharp".to_vec(),
                     size: ORDER.len() as u64,
                     mtime_ns: 0,
                     hash: source_hash(ORDER.as_bytes()),
+                    declarations_hash: [0; 16],
                 },
-                Input { path: b"composer.lock".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] },
+                absent(b"composer.lock"),
             ]
         );
     }
@@ -1967,6 +2069,7 @@ mod tests {
                 size: edited.len() as u64,
                 mtime_ns: 0,
                 hash: source_hash(edited.as_bytes()),
+                declarations_hash: [0; 16],
             }]
         );
     }
@@ -2806,7 +2909,7 @@ mod tests {
     #[test]
     fn a_compile_keeps_unread_each_intact_file_whose_inputs_kept_their_stamps() {
         let base = shop_project(&shop(MONEY, RATE));
-        let edited = shop_project(&shop(&MONEY.replace("return 1;", "return 2;"), RATE));
+        let edited = shop_project(&shop(MONEY, &RATE.replace("return 5;", "return 6;")));
         let mut warm = analyzed(&base);
         let (before, last, _) =
             compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), database_stamp(&base), |_| false);
@@ -2817,7 +2920,7 @@ mod tests {
 
         assert!(matches!(after.get("app/Unrelated.sharp"), Some(Compilation::Kept)), "{after:?}");
         assert!(!read.contains("app/Unrelated.sharp"), "{read:?}");
-        assert!(read.contains("app/Order.sharp"), "Order lists the edited Money as an input: {read:?}");
+        assert!(read.contains("app/Order.sharp"), "Order lists the edited plain PHP Rate as an input: {read:?}");
         let clean = compile(&mut analyzed(&edited), database_stamp(&edited));
         let resolved: BTreeMap<String, Compilation> = after
             .into_iter()
@@ -2829,7 +2932,74 @@ mod tests {
                 compilation => (name, compilation),
             })
             .collect();
-        assert_eq!(whole(&resolved), whole(&clean));
+        assert_eq!(whole(&engine_view(&resolved)), whole(&engine_view(&clean)));
+    }
+
+    /// Spec section 27: a body edit to a file leaves unread and unwritten each compiled file that reads its declarations
+    /// or calls its bodies, which names the hash of those declarations, and a signature edit rewrites it with the new
+    /// hash.
+    #[test]
+    fn a_body_edit_keeps_unread_each_file_that_reads_the_edited_file() {
+        let base = shop_project(&shop(MONEY, RATE));
+        let mut warm = analyzed(&base);
+        let (before, last, _) =
+            compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), database_stamp(&base), |_| false);
+        let money = |compiled: &BTreeMap<String, Compilation>, name: &str| {
+            inputs(accepted(compiled, name)).into_iter().find(|input| input.path == b"app/Money.sharp")
+        };
+        let money_declarations = header(accepted(&before, "app/Money.sharp")).unwrap().declarations_hash;
+        assert_ne!(money_declarations, [0; 16]);
+        assert_eq!(money(&before, "app/Rates.sharp").map(|input| input.declarations_hash), Some(money_declarations));
+        assert_eq!(money(&before, "app/Order.sharp").map(|input| input.declarations_hash), Some(money_declarations));
+
+        let edited = shop_project(&shop(&MONEY.replace("return 1;", "return 2;"), RATE));
+        warm.update_database(edited.read_only());
+        warm.analyze_incremental(None).expect("the warm path runs");
+        let (after, last, read) = compile_keeping(&mut warm, &last, &before, database_stamp(&edited), |_| true);
+
+        assert_eq!(header(accepted(&after, "app/Money.sharp")).unwrap().declarations_hash, money_declarations);
+        for name in ["app/Order.sharp", "app/Rates.sharp", "app/Cash.sharp", "app/Unrelated.sharp"] {
+            assert!(matches!(after.get(name), Some(Compilation::Kept)), "{name}: {after:?}");
+            assert!(!read.contains(name), "{name}: {read:?}");
+        }
+
+        let signature = shop_project(&shop(&MONEY.replace("int amount()", "int amount(int scale = 1)"), RATE));
+        warm.update_database(signature.read_only());
+        warm.analyze_incremental(None).expect("the warm path runs");
+        let (changed, _, _) = compile_keeping(&mut warm, &last, &before, database_stamp(&signature), |_| true);
+
+        let changed_declarations = header(accepted(&changed, "app/Money.sharp")).unwrap().declarations_hash;
+        assert_ne!(changed_declarations, money_declarations);
+        assert_eq!(money(&changed, "app/Rates.sharp").map(|input| input.declarations_hash), Some(changed_declarations));
+    }
+
+    /// Each compiled file of `compiled` as the engine decides whether to run it: an input that names the hash of an
+    /// import's declarations counts by that hash, whatever stamp it holds, so a file the compile keeps unread after a
+    /// body edit to such an import compares equal to the file a clean compile writes.
+    fn engine_view(compiled: &BTreeMap<String, Compilation>) -> BTreeMap<String, Compilation> {
+        compiled
+            .iter()
+            .map(|(name, compilation)| match compilation {
+                Compilation::Accepted(bytes) => {
+                    let header = header(bytes).expect("the header is valid");
+                    let inputs: Vec<Input> = inputs(bytes)
+                        .into_iter()
+                        .map(|input| {
+                            if input.declarations_hash == [0; 16] {
+                                input
+                            } else {
+                                Input { size: 0, mtime_ns: 0, hash: [0; 16], ..input }
+                            }
+                        })
+                        .collect();
+                    let bytes = unit::restamp(bytes, header.declarations_hash, &inputs, &header.library)
+                        .expect("a compiled file restamps");
+                    (name.clone(), Compilation::Accepted(bytes))
+                }
+                Compilation::Refused(issues) => (name.clone(), Compilation::Refused(issues.clone())),
+                Compilation::Kept => (name.clone(), Compilation::Kept),
+            })
+            .collect()
     }
 
     fn declarations(codebase: &CodebaseMetadata, signature: &FileSignature) -> Vec<SymbolIdentifier> {

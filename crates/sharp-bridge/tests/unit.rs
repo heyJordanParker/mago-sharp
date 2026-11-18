@@ -58,21 +58,31 @@ fn lowered(source: &str) -> Unit {
     common::checked("src/Report.sharp", source, &[], lower).expect("the checker accepts the source")
 }
 
-/// The compiled file of `source`, with the test key, inputs and standard library.
+/// The compiled file of `source`, with the test key, declarations hash, inputs and standard library.
 fn encoded(source: &str) -> Vec<u8> {
-    encode(&lowered(source), source.as_bytes(), KEY, &inputs(), &library())
+    encode(&lowered(source), source.as_bytes(), KEY, DECLARATIONS, &inputs(), &library())
 }
 
 const KEY: [u8; 16] = *b"0123456789abcdef";
+
+const DECLARATIONS: [u8; 16] = *b"declarations0123";
 
 fn library() -> Library {
     Library { native_fingerprint: *b"fedcba9876543210", version: b"0.3.2".to_vec() }
 }
 
+/// The file's own source, an import read through its declarations, and `composer.lock`.
 fn inputs() -> Vec<Input> {
     vec![
-        Input { path: b"src/Report.sharp".to_vec(), size: 98, mtime_ns: 1_700_000_000_123_456_789, hash: [7; 16] },
-        Input { path: b"composer.lock".to_vec(), size: 4096, mtime_ns: -5, hash: [9; 16] },
+        Input {
+            path: b"src/Report.sharp".to_vec(),
+            size: 98,
+            mtime_ns: 1_700_000_000_123_456_789,
+            hash: [7; 16],
+            declarations_hash: [0; 16],
+        },
+        Input { path: b"src/Money.sharp".to_vec(), size: 60, mtime_ns: 3, hash: [4; 16], declarations_hash: [5; 16] },
+        Input { path: b"composer.lock".to_vec(), size: 4096, mtime_ns: -5, hash: [9; 16], declarations_hash: [0; 16] },
     ]
 }
 
@@ -166,20 +176,21 @@ fn every_text_of_a_lowered_unit_is_an_offset_into_its_texts() {
 
 #[test]
 fn an_absent_input_reads_back_as_an_all_zero_stamp_that_no_existing_file_has() {
-    let absent = Input { path: b"composer.lock".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] };
+    let absent =
+        Input { path: b"composer.lock".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16], declarations_hash: [0; 16] };
 
-    let decoded = Decoded::new(&encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, &[absent], &library()));
+    let decoded = Decoded::new(&encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, DECLARATIONS, &[absent], &library()));
 
     let [input] = decoded.inputs[..] else { panic!("one input: {:?}", decoded.inputs.len()) };
     assert_eq!(decoded.text(input.path), b"composer.lock");
-    assert_eq!((input.size, input.mtime_ns, input.hash), (0, 0, [0; 16]));
+    assert_eq!((input.size, input.mtime_ns, input.hash, input.declarations_hash), (0, 0, [0; 16], [0; 16]));
     assert_ne!(source_hash(b""), [0; 16], "an empty file that exists is never stamped as absent");
 }
 
 #[test]
 fn a_compiled_file_reads_back_through_the_c_layout() {
     let lowered = lowered(SOURCE);
-    let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, &inputs(), &library()));
+    let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, DECLARATIONS, &inputs(), &library()));
     let header = decoded.header;
 
     assert_eq!(header.magic, *b"SHARPC\0\0");
@@ -192,14 +203,19 @@ fn a_compiled_file_reads_back_through_the_c_layout() {
     assert_eq!(header.root, lowered.root());
     assert_eq!(header.native_fingerprint, *b"fedcba9876543210");
     assert_eq!(decoded.text(header.library_version), b"0.3.2");
+    assert_eq!(header.declarations_hash, DECLARATIONS);
 
-    let read_inputs: Vec<(&[u8], u64, i64, [u8; 16])> =
-        decoded.inputs.iter().map(|input| (decoded.text(input.path), input.size, input.mtime_ns, input.hash)).collect();
+    let read_inputs: Vec<_> = decoded
+        .inputs
+        .iter()
+        .map(|input| (decoded.text(input.path), input.size, input.mtime_ns, input.hash, input.declarations_hash))
+        .collect();
     assert_eq!(
         read_inputs,
         [
-            (&b"src/Report.sharp"[..], 98, 1_700_000_000_123_456_789, [7; 16]),
-            (&b"composer.lock"[..], 4096, -5, [9; 16]),
+            (&b"src/Report.sharp"[..], 98, 1_700_000_000_123_456_789, [7; 16], [0; 16]),
+            (&b"src/Money.sharp"[..], 60, 3, [4; 16], [5; 16]),
+            (&b"composer.lock"[..], 4096, -5, [9; 16], [0; 16]),
         ]
     );
 
@@ -282,7 +298,8 @@ fn every_header_field_and_section_starts_aligned_for_its_type() {
 
     let lowered = lowered(SOURCE);
     for count in 0..=inputs().len() {
-        let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, &inputs()[..count], &library()));
+        let decoded =
+            Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, DECLARATIONS, &inputs()[..count], &library()));
         let [inputs_at, nodes_at, children_at, ..] = decoded.offsets;
 
         assert_eq!(inputs_at % align_of::<sharp_input>(), 0, "{count} inputs");
@@ -298,7 +315,7 @@ fn encoding_one_lowering_twice_gives_the_same_bytes_with_zero_padding() {
     assert_eq!(first, second);
 
     let decoded = Decoded::new(&first);
-    let after_header = offset_of!(sharp_unit_header, sections_hash) + 16..size_of::<sharp_unit_header>();
+    let after_header = offset_of!(sharp_unit_header, declarations_hash) + 16..size_of::<sharp_unit_header>();
     assert!(first[after_header].iter().all(|&byte| byte == 0), "the header ends in zero padding");
     let after_kind = offset_of!(sharp_node, kind) + size_of::<u16>()..offset_of!(sharp_node, attr);
     let after_value = offset_of!(sharp_node, value) + size_of::<u8>()..offset_of!(sharp_node, long_value);
@@ -322,6 +339,7 @@ fn header_reads_the_fields_of_a_current_file() {
     assert_eq!(header.source_hash, xxh3_128(SOURCE.as_bytes()).to_be_bytes());
     assert_eq!(header.source_size, SOURCE.len() as u64);
     assert_eq!(header.library, library());
+    assert_eq!(header.declarations_hash, DECLARATIONS);
 }
 
 #[test]
@@ -504,11 +522,12 @@ fn compiled_with_inputs(root: &Path, names: &[&str]) -> Vec<u8> {
                 size: 0,
                 mtime_ns: 0,
                 hash: [0; 16],
+                declarations_hash: [0; 16],
             })
         })
         .collect();
 
-    encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, &inputs, &library())
+    encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, DECLARATIONS, &inputs, &library())
 }
 
 /// The engine checks a compiled file's inputs before it runs it: the file is out of date once one changed.
@@ -537,6 +556,43 @@ fn a_compiled_file_is_current_until_one_of_its_inputs_changes() {
     assert!(inputs_changed(root, &bytes).unwrap(), "an input that was there is gone");
 }
 
+/// An input that names the hash of an import's declarations stays current after any edit of the import while the
+/// import's compiled file names that hash, as the engine reads it from the header alone, and goes stale once that
+/// compiled file names another hash, is gone, or the import is.
+#[test]
+fn a_declaration_input_is_current_while_the_compiled_file_of_its_import_names_its_hash() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let money = "namespace App;\n\npublic class Money\n{\n    public int amount() => 1;\n}\n";
+    write(&root, "app/Report.sharp", SOURCE);
+    write(&root, "app/Money.sharp", money);
+    let declarations = |hash: [u8; 16]| {
+        let compiled = root.join(".sharp/app/Money.sharpc");
+        fs::create_dir_all(compiled.parent().unwrap()).unwrap();
+        fs::write(compiled, encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, hash, &[], &library())).unwrap();
+    };
+    declarations([5; 16]);
+    let mut imported = stamp(&root, b"app/Money.sharp").unwrap().unwrap();
+    imported.declarations_hash = [5; 16];
+    let inputs = [stamp(&root, b"app/Report.sharp").unwrap().unwrap(), imported];
+    let bytes = encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, DECLARATIONS, &inputs, &library());
+
+    assert!(!inputs_changed(&root, &bytes).unwrap(), "every input is as it was stamped");
+
+    write(&root, "app/Money.sharp", &money.replace("=> 1", "=> 2"));
+    assert!(!inputs_changed(&root, &bytes).unwrap(), "a body edit leaves the import's declarations as they were");
+
+    declarations([6; 16]);
+    assert!(inputs_changed(&root, &bytes).unwrap(), "the import's compiled file names other declarations");
+
+    fs::remove_file(root.join(".sharp/app/Money.sharpc")).unwrap();
+    assert!(inputs_changed(&root, &bytes).unwrap(), "an import with no compiled file is no current import");
+
+    declarations([5; 16]);
+    fs::remove_file(root.join("app/Money.sharp")).unwrap();
+    assert!(inputs_changed(&root, &bytes).unwrap(), "an import that is gone declares nothing");
+}
+
 /// A compile keeps a compiled file while it names the key the compile computes for its source, whatever its inputs'
 /// bytes, and not once another checker build wrote it, its sections changed, or it is no compiled file.
 #[test]
@@ -559,24 +615,31 @@ fn a_compiled_file_is_stale_once_its_key_changes_or_another_checker_build_wrote_
     assert!(is_stale(b"not a compiled file", KEY));
 }
 
-/// A compiled file restamped with new inputs and a new standard library is the file the encoder writes for the same
-/// unit with them, and a restamp of no compiled file is none.
+/// A compiled file restamped with a new declarations hash, new inputs and a new standard library is the file the encoder
+/// writes for the same unit with them, and a restamp of no compiled file is none.
 #[test]
 fn a_restamped_compiled_file_is_the_one_the_encoder_writes_with_its_new_inputs() {
     let unit = lowered(SOURCE);
     let other_inputs = vec![
-        Input { path: b"src/Report.sharp".to_vec(), size: 99, mtime_ns: 1_700_000_000_999_999_999, hash: [8; 16] },
-        Input { path: b"app/Money.sharp".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] },
-        Input { path: b"composer.lock".to_vec(), size: 4096, mtime_ns: -5, hash: [9; 16] },
+        Input {
+            path: b"src/Report.sharp".to_vec(),
+            size: 99,
+            mtime_ns: 1_700_000_000_999_999_999,
+            hash: [8; 16],
+            declarations_hash: [0; 16],
+        },
+        Input { path: b"app/Money.sharp".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16], declarations_hash: [2; 16] },
+        Input { path: b"composer.lock".to_vec(), size: 4096, mtime_ns: -5, hash: [9; 16], declarations_hash: [0; 16] },
     ];
     let other_library =
         Library { native_fingerprint: *b"0000000000000001", version: b"v0.4.0-with-a-longer-name".to_vec() };
 
-    let restamped = restamp(&encoded(SOURCE), &other_inputs, &other_library).expect("a compiled file restamps");
+    let restamped =
+        restamp(&encoded(SOURCE), [1; 16], &other_inputs, &other_library).expect("a compiled file restamps");
 
-    assert_eq!(restamped, encode(&unit, SOURCE.as_bytes(), KEY, &other_inputs, &other_library));
-    assert_eq!(restamp(&restamped, &inputs(), &library()), Some(encoded(SOURCE)));
-    assert_eq!(restamp(b"not a compiled file", &inputs(), &library()), None);
+    assert_eq!(restamped, encode(&unit, SOURCE.as_bytes(), KEY, [1; 16], &other_inputs, &other_library));
+    assert_eq!(restamp(&restamped, DECLARATIONS, &inputs(), &library()), Some(encoded(SOURCE)));
+    assert_eq!(restamp(b"not a compiled file", DECLARATIONS, &inputs(), &library()), None);
 }
 
 /// The engine checks a compiled file's inputs whichever checker build wrote it, so a file another build wrote keeps its
@@ -709,10 +772,12 @@ fn the_c_header_lays_out_every_type_as_the_bridge_does() {
         ("offsetof(sharp_unit_header, native_fingerprint)", offset_of!(sharp_unit_header, native_fingerprint)),
         ("offsetof(sharp_unit_header, library_version)", offset_of!(sharp_unit_header, library_version)),
         ("offsetof(sharp_unit_header, sections_hash)", offset_of!(sharp_unit_header, sections_hash)),
+        ("offsetof(sharp_unit_header, declarations_hash)", offset_of!(sharp_unit_header, declarations_hash)),
         ("sizeof(sharp_input)", size_of::<sharp_input>()),
         ("offsetof(sharp_input, size)", offset_of!(sharp_input, size)),
         ("offsetof(sharp_input, mtime_ns)", offset_of!(sharp_input, mtime_ns)),
         ("offsetof(sharp_input, hash)", offset_of!(sharp_input, hash)),
+        ("offsetof(sharp_input, declarations_hash)", offset_of!(sharp_input, declarations_hash)),
         ("sizeof(sharp_node)", size_of::<sharp_node>()),
         ("offsetof(sharp_node, attr)", offset_of!(sharp_node, attr)),
         ("offsetof(sharp_node, value)", offset_of!(sharp_node, value)),

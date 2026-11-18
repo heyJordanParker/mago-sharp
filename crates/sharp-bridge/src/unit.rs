@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 use mago_build_id::BUILD_ID;
+use mago_codex::signature::FileSignature;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
 use xxhash_rust::xxh3::Xxh3;
@@ -71,6 +72,9 @@ pub struct sharp_unit_header {
     /// The hash of every byte after the header: the inputs, the tree and the texts. The engine refuses a file whose
     /// sections changed after it was written, as a damaged or partly written one.
     pub sections_hash: [u8; 16],
+    /// The hash of the file's declarations, as [`declarations_hash`] gives it, which each file that reads this one
+    /// records and the engine compares instead of the source's stamp.
+    pub declarations_hash: [u8; 16],
 }
 
 /// A file whose edit makes the compiled file's source due for a check.
@@ -82,10 +86,14 @@ pub struct sharp_input {
     pub size: u64,
     pub mtime_ns: i64,
     pub hash: [u8; 16],
+    /// For a `.sharp` file of the project whose declarations or bodies the compiled file reads, the
+    /// `declarations_hash` of that file's compiled file, so an edit that changes none of its declarations leaves the
+    /// input current. All zero for every other input, which holds while its stamp does.
+    pub declarations_hash: [u8; 16],
 }
 
 const _: () = {
-    assert!(size_of::<sharp_unit_header>() == 144, "the header is 144 bytes");
+    assert!(size_of::<sharp_unit_header>() == 160, "the header is 160 bytes");
     assert!(offset_of!(sharp_unit_header, abi) == 8, "abi is at 8");
     assert!(offset_of!(sharp_unit_header, checker) == 24, "checker is at 24");
     assert!(offset_of!(sharp_unit_header, key) == 40, "key is at 40");
@@ -99,10 +107,12 @@ const _: () = {
     assert!(offset_of!(sharp_unit_header, native_fingerprint) == 100, "native_fingerprint is at 100");
     assert!(offset_of!(sharp_unit_header, library_version) == 116, "library_version is at 116");
     assert!(offset_of!(sharp_unit_header, sections_hash) == 124, "sections_hash is at 124");
-    assert!(size_of::<sharp_input>() == 40, "an input is 40 bytes");
+    assert!(offset_of!(sharp_unit_header, declarations_hash) == 140, "declarations_hash is at 140");
+    assert!(size_of::<sharp_input>() == 56, "an input is 56 bytes");
     assert!(offset_of!(sharp_input, size) == 8, "an input's size is at 8");
     assert!(offset_of!(sharp_input, mtime_ns) == 16, "an input's mtime_ns is at 16");
     assert!(offset_of!(sharp_input, hash) == 24, "an input's hash is at 24");
+    assert!(offset_of!(sharp_input, declarations_hash) == 40, "an input's declarations_hash is at 40");
     assert!(size_of::<sharp_node>() == 56, "a node is 56 bytes");
 };
 
@@ -117,6 +127,9 @@ pub struct Input {
     pub size: u64,
     pub mtime_ns: i64,
     pub hash: [u8; 16],
+    /// As `sharp_input` holds it: the `declarations_hash` of the compiled file of a `.sharp` file the compiled file
+    /// reads, or all zero.
+    pub declarations_hash: [u8; 16],
 }
 
 /// One declaration a check read, and the fingerprint of what it read.
@@ -166,6 +179,7 @@ pub struct Header {
     pub source_hash: [u8; 16],
     pub source_size: u64,
     pub library: Library,
+    pub declarations_hash: [u8; 16],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,14 +232,44 @@ fn key_of(compiler: &[&[u8]], source_hash: [u8; 16], reads: &Reads) -> [u8; 16] 
     hasher.digest128().to_be_bytes()
 }
 
-/// The bytes of the `.sharpc` file for `unit`, lowered from `source` against `library`. The same arguments always give
-/// the same bytes.
+/// The hash of the declarations of a file whose signature is `signature`.
+///
+/// It covers each top-level declaration's name and `signature_hash`, with each member's, in the order the file
+/// declares them. A body edit leaves it as it was, and an edit of a name, a parameter, a type, a modifier, an
+/// attribute or a constant's value changes it.
+#[must_use]
+pub fn declarations_hash(signature: &FileSignature) -> [u8; 16] {
+    let mut hasher = Xxh3::new();
+    for node in &signature.ast_nodes {
+        hasher.update(&size("members", node.children.len()).to_le_bytes());
+        for declaration in std::iter::once(node).chain(&node.children) {
+            let name = declaration.name.as_bytes();
+            hasher.update(&size("a declaration's name", name.len()).to_le_bytes());
+            hasher.update(name);
+            hasher.update(&declaration.signature_hash.to_le_bytes());
+        }
+    }
+
+    hasher.digest128().to_be_bytes()
+}
+
+/// The bytes of the `.sharpc` file for `unit`, lowered from `source` against `library`.
+///
+/// Its header names `declarations_hash`, the hash of the source's declarations. The same arguments always give the
+/// same bytes.
 ///
 /// # Panics
 ///
 /// Panics when a section holds more than a 32-bit size can say.
 #[must_use]
-pub fn encode(unit: &Unit, source: &[u8], key: [u8; 16], inputs: &[Input], library: &Library) -> Vec<u8> {
+pub fn encode(
+    unit: &Unit,
+    source: &[u8],
+    key: [u8; 16],
+    declarations_hash: [u8; 16],
+    inputs: &[Input],
+    library: &Library,
+) -> Vec<u8> {
     let mut nodes =
         Vec::with_capacity(size_of::<sharp_node>() * unit.nodes.len() + size_of::<u32>() * unit.children.len());
     for node in &unit.nodes {
@@ -245,22 +289,23 @@ pub fn encode(unit: &Unit, source: &[u8], key: [u8; 16], inputs: &[Input], libra
         texts: &unit.texts,
     };
 
-    code.encode(inputs, library)
+    code.encode(declarations_hash, inputs, library)
 }
 
-/// The bytes of the compiled file `bytes` with `inputs` as its inputs and `library` as its standard library.
+/// The bytes of the compiled file `bytes` with `declarations_hash` as the hash of its source's declarations, `inputs`
+/// as its inputs and `library` as its standard library.
 ///
 /// They are the bytes [`encode`] gives the unit `bytes` holds, with its key and its source. None when `bytes` is no
 /// compiled file this bridge reads.
 ///
-/// A compile keeps the code of each file whose key holds, and only an input's stamp or the standard library can differ
-/// from the compile that wrote it.
+/// A compile keeps the code of each file whose key holds, and only what the file holds beside its code can differ from
+/// the compile that wrote it.
 ///
 /// # Panics
 ///
 /// Panics when a section holds more than a 32-bit size can say.
 #[must_use]
-pub fn restamp(bytes: &[u8], inputs: &[Input], library: &Library) -> Option<Vec<u8>> {
+pub fn restamp(bytes: &[u8], declarations_hash: [u8; 16], inputs: &[Input], library: &Library) -> Option<Vec<u8>> {
     let header = header(bytes).ok()?;
     let word = |offset: usize| -> u32 {
         let mut word = [0; 4];
@@ -287,11 +332,12 @@ pub fn restamp(bytes: &[u8], inputs: &[Input], library: &Library) -> Option<Vec<
         texts: &bytes[texts..texts + own_texts],
     };
 
-    Some(code.encode(inputs, library))
+    Some(code.encode(declarations_hash, inputs, library))
 }
 
-/// The code a compiled file holds apart from its inputs and its standard library: its key, its source's hash and size,
-/// and its tree, the nodes then the children as the file lays them out, with the texts they point into.
+/// The code a compiled file holds apart from its declarations' hash, its inputs and its standard library: its key, its
+/// source's hash and size, and its tree, the nodes then the children as the file lays them out, with the texts they
+/// point into.
 struct Code<'code> {
     key: [u8; 16],
     source_hash: [u8; 16],
@@ -304,8 +350,8 @@ struct Code<'code> {
 }
 
 impl Code<'_> {
-    /// The compiled file of this code, written by this checker build, with `inputs` and `library`.
-    fn encode(&self, inputs: &[Input], library: &Library) -> Vec<u8> {
+    /// The compiled file of this code, written by this checker build, with `declarations_hash`, `inputs` and `library`.
+    fn encode(&self, declarations_hash: [u8; 16], inputs: &[Input], library: &Library) -> Vec<u8> {
         let mut texts = self.texts.to_vec();
         let library_version = store_text(&mut texts, &library.version);
         let inputs: Vec<sharp_input> = inputs
@@ -315,6 +361,7 @@ impl Code<'_> {
                 size: input.size,
                 mtime_ns: input.mtime_ns,
                 hash: input.hash,
+                declarations_hash: input.declarations_hash,
             })
             .collect();
 
@@ -333,6 +380,7 @@ impl Code<'_> {
             native_fingerprint: library.native_fingerprint,
             library_version,
             sections_hash: [0; 16],
+            declarations_hash,
         };
 
         let mut bytes = Vec::with_capacity(length(&header) as usize);
@@ -401,6 +449,7 @@ pub fn header(bytes: &[u8]) -> Result<Header, FormatError> {
             len: word(offset_of!(sharp_unit_header, library_version) + offset_of!(sharp_str, len)),
         },
         sections_hash: hash(offset_of!(sharp_unit_header, sections_hash)),
+        declarations_hash: hash(offset_of!(sharp_unit_header, declarations_hash)),
     };
     if header.abi != SHARP_UNIT_ABI {
         return Err(FormatError::Abi);
@@ -429,6 +478,7 @@ pub fn header(bytes: &[u8]) -> Result<Header, FormatError> {
         source_hash: header.source_hash,
         source_size: header.source_size,
         library: Library { native_fingerprint: header.native_fingerprint, version: version.to_vec() },
+        declarations_hash: header.declarations_hash,
     })
 }
 
@@ -454,6 +504,7 @@ pub fn stamp(root: &Path, path: &[u8]) -> Result<Option<Input>, DatabaseError> {
             size: listing.len() as u64,
             mtime_ns: 0,
             hash: source_hash(&listing),
+            declarations_hash: [0; 16],
         }));
     }
 
@@ -476,7 +527,13 @@ pub fn stamp(root: &Path, path: &[u8]) -> Result<Option<Input>, DatabaseError> {
         Err(before) => i64::try_from(before.duration().as_nanos()).map_or(i64::MIN, |nanos| -nanos),
     };
 
-    Ok(Some(Input { path: path.to_vec(), size: contents.len() as u64, mtime_ns, hash: source_hash(&contents) }))
+    Ok(Some(Input {
+        path: path.to_vec(),
+        size: contents.len() as u64,
+        mtime_ns,
+        hash: source_hash(&contents),
+        declarations_hash: [0; 16],
+    }))
 }
 
 /// Whether the folder of the file at `full` holds a file of exactly its name, case included. A disk that ignores case,
@@ -563,11 +620,12 @@ pub fn is_stale(bytes: &[u8], key: [u8; 16]) -> bool {
 ///
 /// An input under `root` changed when it differs from its stamp, as the engine checks a compiled file's inputs before
 /// it runs one, whichever checker build wrote it: when its size or hash changed, when it is gone, or when a file
-/// appeared where it was absent.
+/// appeared where it was absent. An input that names a `declarations_hash` stays current while its file is there and
+/// the compiled file of that file, in the `.sharp` folder at `root`, names the same hash.
 ///
 /// # Errors
 ///
-/// Returns the error of reading an input.
+/// Returns the error of reading an input or the compiled file of one.
 pub fn inputs_changed(root: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
     if header(bytes).is_err() {
         return Ok(true);
@@ -591,17 +649,37 @@ pub fn inputs_changed(root: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> 
         let mut size = [0; 8];
         size.copy_from_slice(&bytes[input + offset_of!(sharp_input, size)..][..8]);
         let hash = &bytes[input + offset_of!(sharp_input, hash)..][..16];
+        let declarations = &bytes[input + offset_of!(sharp_input, declarations_hash)..][..16];
 
-        let current = match stamp(root, path)? {
+        let stamped = stamp(root, path)?;
+        let current = match &stamped {
             Some(stamped) => (stamped.size, stamped.hash),
             None => (0, [0; 16]),
         };
-        if current != (u64::from_le_bytes(size), hash.try_into().unwrap_or([0; 16])) {
+        if current == (u64::from_le_bytes(size), hash.try_into().unwrap_or([0; 16])) {
+            continue;
+        }
+        if stamped.is_none() || declarations == [0; 16] || compiled_declarations(root, path)? != declarations {
             return Ok(true);
         }
     }
 
     Ok(false)
+}
+
+/// The `declarations_hash` the compiled file of the source `path`, under `root`, names, or all zero when it has no
+/// compiled file this bridge reads, as the engine reads it from the header alone.
+fn compiled_declarations(root: &Path, path: &[u8]) -> Result<[u8; 16], DatabaseError> {
+    let Some(compiled) = compiled_path(root, &root.join(String::from_utf8_lossy(path).as_ref()))? else {
+        return Ok([0; 16]);
+    };
+    let bytes = match std::fs::read(&compiled) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok([0; 16]),
+        Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &compiled, error)),
+    };
+
+    Ok(header(&bytes).map_or([0; 16], |header| header.declarations_hash))
 }
 
 /// The length of the file `header` describes.
@@ -634,6 +712,7 @@ fn header_bytes(header: &sharp_unit_header) -> [u8; size_of::<sharp_unit_header>
     put(&mut bytes, offset_of!(sharp_unit_header, native_fingerprint), &header.native_fingerprint);
     put_text(&mut bytes, offset_of!(sharp_unit_header, library_version), header.library_version);
     put(&mut bytes, offset_of!(sharp_unit_header, sections_hash), &header.sections_hash);
+    put(&mut bytes, offset_of!(sharp_unit_header, declarations_hash), &header.declarations_hash);
 
     bytes
 }
@@ -644,6 +723,7 @@ fn input_bytes(input: &sharp_input) -> [u8; size_of::<sharp_input>()] {
     put(&mut bytes, offset_of!(sharp_input, size), &input.size.to_le_bytes());
     put(&mut bytes, offset_of!(sharp_input, mtime_ns), &input.mtime_ns.to_le_bytes());
     put(&mut bytes, offset_of!(sharp_input, hash), &input.hash);
+    put(&mut bytes, offset_of!(sharp_input, declarations_hash), &input.declarations_hash);
 
     bytes
 }
