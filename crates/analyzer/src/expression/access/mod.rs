@@ -481,12 +481,62 @@ pub(crate) fn report_member_of_mixed_kinds<A>(
     let ClassLikeMemberSelector::Identifier(name) = member else {
         return;
     };
-    if !context.dialect.is_sharp() {
-        return;
-    }
-    let Some(receiver) = artifacts.get_expression_type(object) else {
+    let Some(kinds) = member_kinds(context, artifacts, object, name, is_call) else {
         return;
     };
+
+    let (code, kind_names) = if is_call {
+        (IssueCode::AmbiguousObjectMethodAccess, ["method", "function in a property"])
+    } else {
+        (IssueCode::AmbiguousObjectPropertyAccess, ["method", "property"])
+    };
+    let Some(issue) = mixed_kinds_issue(context, object, name, is_call, &kind_names, kinds) else {
+        return;
+    };
+    let (receiver, class) = (receiver_text(context, object), issue.1);
+    let local = class.to_lowercase();
+
+    context.collector.report_with_code(
+        code,
+        issue
+            .0
+            .with_help(format!("Narrow `{receiver}` to one class first, as in `if ({receiver} is {class} {local})`.")),
+    );
+}
+
+/// Whether the PHP# call `object.name(…)` is refused by [`report_member_of_mixed_kinds`], as a method on some classes
+/// the receiver can be and a property on others.
+pub(crate) fn is_call_of_mixed_kinds<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    object: &Expression<'_>,
+    name: &LocalIdentifier<'_>,
+) -> bool
+where
+    A: Arena,
+{
+    member_kinds(context, artifacts, object, name, true).is_some_and(|kinds| {
+        kinds.split_first().is_some_and(|((first, _), rest)| rest.iter().any(|(kind, _)| kind != first))
+    })
+}
+
+/// The kind of member `name` is on each class the PHP# receiver `object` can be, paired with that class: 0 for a method
+/// and 1 for a property. None when the receiver can be a value that is no object. `is_call` says whether
+/// `object.name(…)` calls it.
+fn member_kinds<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    object: &Expression<'_>,
+    name: &LocalIdentifier<'_>,
+    is_call: bool,
+) -> Option<Vec<(usize, Word)>>
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return None;
+    }
+    let receiver = artifacts.get_expression_type(object)?;
 
     // The lowering's order: a read takes a property before a method, and a call a declared method before a property,
     // with `__call` last. A class that has `__get`, which only plain PHP defines, has the properties it reads, and a
@@ -496,9 +546,7 @@ pub(crate) fn report_member_of_mixed_kinds<A>(
     let read = object.span().join(name.span);
     let mut kinds = Vec::new();
     for atomic in receiver.types.iter().filter(|atomic| !atomic.is_null()) {
-        let Some(class) = atomic.get_object_or_enum_name() else {
-            return;
-        };
+        let class = atomic.get_object_or_enum_name()?;
         let declares_property = codebase.get_declaring_property(class, property).is_some();
         // Spec section 18: a plain PHP class's `__toString()` is its `toString()`.
         let declares_method = codebase.get_declaring_method(class, word(name.value)).is_some()
@@ -518,23 +566,7 @@ pub(crate) fn report_member_of_mixed_kinds<A>(
         kinds.push((usize::from(!is_method), class));
     }
 
-    let (code, kind_names) = if is_call {
-        (IssueCode::AmbiguousObjectMethodAccess, ["method", "function in a property"])
-    } else {
-        (IssueCode::AmbiguousObjectPropertyAccess, ["method", "property"])
-    };
-    let Some(issue) = mixed_kinds_issue(context, object, name, is_call, &kind_names, kinds) else {
-        return;
-    };
-    let (receiver, class) = (receiver_text(context, object), issue.1);
-    let local = class.to_lowercase();
-
-    context.collector.report_with_code(
-        code,
-        issue
-            .0
-            .with_help(format!("Narrow `{receiver}` to one class first, as in `if ({receiver} is {class} {local})`.")),
-    );
+    Some(kinds)
 }
 
 /// The error for a member that is not one kind on every class the receiver can be, with the short name of the first

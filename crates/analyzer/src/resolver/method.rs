@@ -59,6 +59,7 @@ use crate::context::block::BlockContext;
 use crate::effects::Body;
 use crate::effects::ReadonlyCall;
 use crate::error::AnalysisError;
+use crate::expression::access::is_call_of_mixed_kinds;
 use crate::expression::binary::utils::display_operand;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
@@ -486,13 +487,28 @@ where
             );
 
             for &method_name in &method_names {
-                // A PHP# call of a declared property holding a function runs it, ahead of the class's `__call`.
+                // A PHP# call of a declared property holding a function runs it, ahead of the class's `__call`, spec
+                // section 14. An enum's property, a case's `name` or `value`, holds a string or an int and never a
+                // function, so the call is of a method the enum lacks, or, on a receiver that may be a class with a
+                // method of that name, the call `report_member_of_mixed_kinds` refuses once as ambiguous.
                 if let Some(classname) = obj_type.get_name()
                     && !context.codebase.method_exists(classname, method_name)
                     && let Some(property) = resolve_called_property(context, block_context, classname, selector)
                 {
-                    result.called_properties.push(property);
-                    continue;
+                    if !context
+                        .codebase
+                        .get_class_like(property.declaring_class)
+                        .is_some_and(|class| class.kind.is_enum())
+                    {
+                        result.called_properties.push(property);
+                        continue;
+                    }
+                    if let ClassLikeMemberSelector::Identifier(name) = selector
+                        && is_call_of_mixed_kinds(context, artifacts, object, name)
+                    {
+                        result.has_invalid_target = true;
+                        continue;
+                    }
                 }
 
                 let mut resolved_methods = resolve_method_from_object(

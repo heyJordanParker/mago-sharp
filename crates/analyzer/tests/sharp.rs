@@ -8295,6 +8295,23 @@ fn a_branch_that_leaves_on_a_type_test_narrows_the_rest_of_the_block_to_the_othe
     assert_eq!(issues(("src/App/Shop.sharp", sharp), &[INTERACTION, POPUP_INTERACTION, level]), Vec::<String>::new());
 }
 
+/// Spec section 14 calls only a property holding a function like a method, and a case's `name` holds a string. So
+/// `name()` on a value that may be an enum case or a class with a `name()` method is refused once, as an ambiguous call,
+/// and on a case alone it is a call of a method the enum lacks. Neither looks a case's name up as a function.
+#[test]
+fn a_call_of_a_case_s_name_never_runs_the_name_as_a_function() {
+    let level = ("src/App/Level.sharp", "namespace App;\n\npublic enum Level\n{\n    case Low;\n    case High;\n}\n");
+    let sharp = "namespace App;\n\npublic class Shop\n{\n    public static string either(Level|Interaction audience) => audience.name();\n\n    public static string alone(Level level) => level.name();\n}\n";
+
+    assert_eq!(
+        refusals(("src/App/Shop.sharp", sharp), &[INTERACTION, POPUP_INTERACTION, level]),
+        [
+            "5:73 ambiguous-object-method-access `audience.name()` calls a method on `Interaction` but a function in a property on `Level`, so PHP# cannot tell how to call it. | Narrow `audience` to one class first, as in `if (audience is Interaction interaction)`.",
+            "7:54 non-existent-method Method `Level.name` does not exist. | Ensure the method `Level.name` is defined.",
+        ]
+    );
+}
+
 /// Spec section 20.1: a sealed interface's implementers sit in its namespace. A class of another namespace that
 /// implements it is an error that names the namespace, and an implementer in it is not.
 #[test]
