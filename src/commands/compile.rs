@@ -34,6 +34,8 @@ use std::sync::PoisonError;
 
 use clap::ColorChoice;
 use clap::Parser;
+use rayon::iter::IntoParallelIterator;
+use rayon::iter::ParallelIterator;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -1449,88 +1451,109 @@ fn source_files(
     let whole_workspace = [".".to_owned()];
     let paths = if source.paths.is_empty() { &whole_workspace[..] } else { &source.paths[..] };
     let is_glob = |text: &str| text.contains(['*', '?', '[', '{']);
-    let mut walk =
-        Walk { root, extensions: &source.extensions, autoloader, excluded, filesystems, files: BTreeMap::new() };
+    let walk = Walk { root, extensions: &source.extensions, autoloader, excluded };
+    let mut files = BTreeMap::new();
+    let mut keep = |Kept { path, real, metadata }: Kept| {
+        let name = source_name(root, &path);
+        let real = Some(source_name(root, &real)).filter(|real| *real != name);
+        files.insert(name, Found(Status::of(&path, &metadata, filesystems), real));
+    };
     for configured in paths.iter().chain(&source.includes).chain(&source.patches) {
         let path = root.join(configured);
         if path.exists() {
             let path = path.canonicalize().unwrap_or(path);
             match std::fs::metadata(&path) {
-                Ok(metadata) if metadata.is_file() => walk.found(&path, &path, &metadata),
-                Ok(_) => walk.folder(&path, &mut vec![path.clone()], false),
+                Ok(metadata) if metadata.is_file() => keep(Kept { path: path.clone(), real: path, metadata }),
+                Ok(_) => walk.folder(&path, std::slice::from_ref(&path), false).into_iter().for_each(&mut keep),
                 Err(_) => {}
             }
         } else if is_glob(configured) {
             let start: PathBuf =
                 path.components().take_while(|part| !is_glob(&part.as_os_str().to_string_lossy())).collect();
             let start = start.canonicalize().unwrap_or(start);
-            walk.folder(&start, &mut vec![start.clone()], true);
+            walk.folder(&start, std::slice::from_ref(&start), true).into_iter().for_each(&mut keep);
         }
     }
 
-    walk.files
+    files
 }
 
-/// The walk of [`source_files`] under `root`, which keeps each file of one of `extensions` it finds in `files`.
+/// The walk of [`source_files`] under `root`, which finds each file of one of `extensions`.
 struct Walk<'walk> {
     root: &'walk Path,
     extensions: &'walk [String],
     autoloader: Option<&'walk Autoloader>,
     excluded: &'walk ExcludedFolders,
-    filesystems: &'walk mut Filesystems,
-    files: BTreeMap<String, Found>,
+}
+
+/// A file the walk of [`source_files`] keeps: the path it is named by, its real path, and its metadata.
+struct Kept {
+    path: PathBuf,
+    real: PathBuf,
+    metadata: std::fs::Metadata,
+}
+
+/// An entry of a folder the walk of [`source_files`] reaches: a file it keeps, or a folder below, by its path and its
+/// real path.
+enum Reached {
+    File(Kept),
+    Folder(PathBuf, PathBuf),
 }
 
 impl Walk<'_> {
-    /// Walks `folder`, whose real path is the last of `real`, as the real paths of the folders above it in the walk
-    /// come before it. A folder whose real path `real` holds is a link back to one of them, which the walk skips as the
-    /// loader does. Each file is kept by its name, or by the name of its real path when `by_real_path` is set, as the
-    /// loader names a file a glob pattern matches.
-    fn folder(&mut self, folder: &Path, real: &mut Vec<PathBuf>, by_real_path: bool) {
+    /// The files the walk keeps under `folder`, whose real path is the last of `real`, as the real paths of the folders
+    /// above it in the walk come before it, in the order a walk of one entry after another finds them. The folders below
+    /// `folder` are walked at once. A folder whose real path `real` holds is a link back to one of them, which the walk
+    /// skips as the loader does. Each file is kept by its name, or by the name of its real path when `by_real_path` is
+    /// set, as the loader names a file a glob pattern matches.
+    fn folder(&self, folder: &Path, real: &[PathBuf], by_real_path: bool) -> Vec<Kept> {
         let Ok(entries) = std::fs::read_dir(folder) else {
-            return;
+            return Vec::new();
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            // The listing gives each entry's kind, so only a link's target and a kept file are read from the disk.
-            let (is_folder, real_path) = if kind.is_symlink() {
-                // A link whose target is gone is no file, as the loader skips it.
-                let Ok(target) = std::fs::metadata(&path) else {
-                    continue;
+        let reached: Vec<Reached> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let kind = entry.file_type().ok()?;
+                // The listing gives each entry's kind, so only a link's target and a kept file are read from the disk.
+                let (is_folder, real_path) = if kind.is_symlink() {
+                    // A link whose target is gone is no file, as the loader skips it.
+                    let target = std::fs::metadata(&path).ok()?;
+                    (target.is_dir(), path.canonicalize().unwrap_or_else(|_| path.clone()))
+                } else {
+                    (kind.is_dir(), real.last().map_or_else(|| path.clone(), |parent| parent.join(entry.file_name())))
                 };
-                (target.is_dir(), path.canonicalize().unwrap_or_else(|_| path.clone()))
-            } else {
-                (kind.is_dir(), real.last().map_or_else(|| path.clone(), |parent| parent.join(entry.file_name())))
-            };
-            if is_folder {
-                if path != self.root.join(unit::COMPILED_FOLDER)
-                    && !self.excluded.contains(&path)
-                    && !real.contains(&real_path)
-                {
-                    real.push(real_path);
-                    self.folder(&path, real, by_real_path);
-                    real.pop();
+                if is_folder {
+                    return (path != self.root.join(unit::COMPILED_FOLDER)
+                        && !self.excluded.contains(&path)
+                        && !real.contains(&real_path))
+                    .then_some(Reached::Folder(path, real_path));
                 }
-            } else if path
-                .extension()
-                .is_some_and(|extension| self.extensions.iter().any(|known| extension == known.as_str()))
-                && !self.autoloader.is_some_and(|autoloader| autoloader.serves(&path))
-                && let Ok(metadata) = std::fs::metadata(&path)
-            {
+                if !path
+                    .extension()
+                    .is_some_and(|extension| self.extensions.iter().any(|known| extension == known.as_str()))
+                    || self.autoloader.is_some_and(|autoloader| autoloader.serves(&path))
+                {
+                    return None;
+                }
+                let metadata = std::fs::metadata(&path).ok()?;
                 let named = if by_real_path { real_path.clone() } else { path };
-                self.found(&named, &real_path, &metadata);
-            }
-        }
-    }
 
-    /// Keeps the file the walk reached at `path`, whose real path is `real`.
-    fn found(&mut self, path: &Path, real: &Path, metadata: &std::fs::Metadata) {
-        let name = source_name(self.root, path);
-        let real = Some(source_name(self.root, real)).filter(|real| *real != name);
-        self.files.insert(name, Found(Status::of(path, metadata, self.filesystems), real));
+                Some(Reached::File(Kept { path: named, real: real_path, metadata }))
+            })
+            .collect();
+
+        reached
+            .into_par_iter()
+            .flat_map_iter(|reached| match reached {
+                Reached::File(kept) => vec![kept],
+                Reached::Folder(path, real_path) => {
+                    let below: Vec<PathBuf> = real.iter().cloned().chain([real_path]).collect();
+
+                    self.folder(&path, &below, by_real_path)
+                }
+            })
+            .collect()
     }
 }
 
