@@ -30,7 +30,7 @@ step() { printf '\n$ %s\n' "${*/#$build\//}" >&2; "$@"; }
 fail() { printf '\nFAILED: %s\n' "$*"; exit 1; }
 commit() { git -c user.name=proof -c user.email=proof@localhost commit --quiet "$@"; }
 
-# The refinement worker loads the SDK through sharp/mago's own Composer packages, as sharp/bin/coverage installs them.
+# The refinement worker loads the SDK through sharp/mago's own Composer packages.
 composer install --no-interaction --no-progress --quiet --working-dir="$root/sharp/mago" || fail "composer install of the SDK"
 cp -R "$(dirname "$0")/project/." "$project"
 cd "$project" || exit 1

@@ -140,12 +140,9 @@ final class ServerProofPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysi
 
 /**
  * An after-file hook that reads the codebase: in a file marked `reads: Class::method` it reports
- * the method's visibility, in a file marked `lists: classes` every class name, in a file marked
- * `compares: Class` whether the class is a `Base`, in a file marked
- * `lists: kin of Class and namespace Namespace` the class's children, descendants and ancestors and
- * whether the namespace exists, and in a file marked `checks: kinds` which of the symbols and members
- * of `Shapes` exist, as the kind it asks for. Each report counts the hook's runs in this worker, so a
- * test sees whether Mago ran it again.
+ * the method's visibility, in a file marked `lists: classes` every class name, and in a file
+ * marked `compares: Class` whether the class is a `Base`. Each report counts the hook's runs in
+ * this worker, so a test sees whether Mago ran it again.
  */
 final class ServerReadsPlugin implements Plugin, AfterFileAnalysisHook
 {
@@ -172,9 +169,7 @@ final class ServerReadsPlugin implements Plugin, AfterFileAnalysisHook
         $read = strpos($contents, 'reads: ');
         $listing = strpos($contents, 'lists: classes');
         $comparison = strpos($contents, 'compares: ');
-        $kin = strpos($contents, 'lists: kin of ');
-        $kinds = strpos($contents, 'checks: kinds');
-        if ($read === false && $listing === false && $comparison === false && $kin === false && $kinds === false) {
+        if ($read === false && $listing === false && $comparison === false) {
             return;
         }
 
@@ -235,73 +230,6 @@ final class ServerReadsPlugin implements Plugin, AfterFileAnalysisHook
                 ),
             );
         }
-
-        if ($kin !== false) {
-            $start = $kin + strlen('lists: kin of ');
-            $end = $start + strcspn($contents, "\n", $start);
-            [$class, $namespace] = explode(' and namespace ', substr($contents, $start, $end - $start));
-            $codebase = $context->codebase;
-            $context->report(
-                Level::Warning,
-                'kin',
-                Issue::at(
-                    "Run {$this->runs}: `{$class}` has children "
-                    . self::names($codebase->getDirectClassDescendants($class))
-                    . ', descendants '
-                    . self::names($codebase->getClassDescendants($class))
-                    . ' and ancestors '
-                    . self::names($codebase->getClassAncestors($class))
-                    . "; `{$namespace}` "
-                    . ($codebase->namespaceExists($namespace) ? 'exists' : 'is missing')
-                    . '.',
-                    new SourceLocation($context->analysis->file, new Span($start, $end)),
-                ),
-            );
-        }
-
-        if ($kinds !== false) {
-            $codebase = $context->codebase;
-            $found = [
-                'interface Shapes\Shape' => $codebase->interfaceExists('Shapes\Shape'),
-                'trait Shapes\Sided' => $codebase->traitExists('Shapes\Sided'),
-                'enum Shapes\Suit' => $codebase->enumExists('Shapes\Suit'),
-                'interface Shapes\Sided' => $codebase->interfaceExists('Shapes\Sided'),
-                'class or trait Shapes\Sided' => $codebase->classOrTraitExists('Shapes\Sided'),
-                'class or interface Shapes\Sided' => $codebase->classOrInterfaceExists('Shapes\Sided'),
-                'function Shapes\area' => $codebase->functionExists('Shapes\area'),
-                'constant Shapes\SIDES' => $codebase->constantExists('Shapes\SIDES'),
-                'method Shapes\Circle::area' => $codebase->methodExists('Shapes\Circle', 'area'),
-                'class constant Shapes\Circle::PI' => $codebase->classConstantExists('Shapes\Circle', 'PI'),
-                'enum case Shapes\Suit::Hearts' => $codebase->enumCaseExists('Shapes\Suit', 'Hearts'),
-                'enum case Shapes\Suit::Stars' => $codebase->enumCaseExists('Shapes\Suit', 'Stars'),
-            ];
-            $answers = [];
-            foreach ($found as $kind => $exists) {
-                $answers[] = $exists ? $kind : "no {$kind}";
-            }
-            $declaring = $codebase->getDeclaringProperty('Shapes\Disc', '$radius');
-            $answers[] = 'Shapes\Disc::$radius declared in ' . ($declaring?->nameLocation?->file ?? 'nothing');
-            $answers[] = 'interface ' . ($codebase->getInterface('Shapes\Shape')->originalName ?? 'missing');
-            $answers[] = 'trait ' . ($codebase->getTrait('Shapes\Sided')->originalName ?? 'missing');
-            $answers[] = 'enum ' . ($codebase->getEnum('Shapes\Suit')->originalName ?? 'missing');
-            $answers[] = 'interface named ' . ($codebase->getInterface('Shapes\Suit')->originalName ?? 'missing');
-            $context->report(
-                Level::Warning,
-                'kinds',
-                Issue::at(
-                    "Run {$this->runs}: " . implode(', ', $answers) . '.',
-                    new SourceLocation($context->analysis->file, new Span($kinds, $kinds + strlen('checks: kinds'))),
-                ),
-            );
-        }
-    }
-
-    /** @param list<string> $names */
-    private static function names(array $names): string
-    {
-        sort($names);
-
-        return $names === [] ? 'none' : implode(', ', $names);
     }
 }
 

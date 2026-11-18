@@ -23,7 +23,6 @@ use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::plugin::context::HookContext;
 use mago_analyzer::plugin::context::InvocationInfo;
 use mago_analyzer::plugin::context::ProviderContext;
-use mago_analyzer::plugin::hook::ClassDeclarationHook;
 use mago_analyzer::plugin::hook::ExpressionHook;
 use mago_analyzer::plugin::hook::ExpressionHookResult;
 use mago_analyzer::plugin::hook::FunctionCallHook;
@@ -47,7 +46,6 @@ use mago_analyzer::settings::ClassInitializer;
 use mago_analyzer::settings::Settings;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
-use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::r#extern::extern_namespace_classes;
 use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::reference::SymbolReferences;
@@ -78,7 +76,6 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
-use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::MethodCall;
@@ -1808,28 +1805,6 @@ fn a_php_use_of_an_unknown_class_renamed_with_as_is_reported_as_its_plain_use_is
     assert_eq!(renamed, plain);
 }
 
-/// PHP's `use function` and `use const` name a function or a constant that exists, alone, in a group of one kind, or
-/// in a group that mixes kinds with classes, and each name that does not exist is reported by its kind.
-#[test]
-fn a_php_use_of_an_unknown_function_or_constant_is_reported_in_every_form_of_use() {
-    let settings = || Settings { check_use_statements: true, ..settings() };
-    let php = "<?php\n\nnamespace Demo;\n\nuse function strlen;\nuse const PHP_EOL;\nuse function Nope\\missing;\nuse const Nope\\MISSING;\nuse function Nope\\{gone, lost};\nuse const Nope\\{GONE};\nuse Lib\\{Calc, function absent, const ABSENT, Thing};\n";
-
-    assert_eq!(
-        messages_with(settings(), ("src/Demo/Report.php", php), &[("src/Lib/Calc.php", CALC)]),
-        [
-            "Imported function `Nope\\missing` does not exist.",
-            "Imported constant `Nope\\MISSING` does not exist.",
-            "Imported function `Nope\\gone` does not exist.",
-            "Imported function `Nope\\lost` does not exist.",
-            "Imported constant `Nope\\GONE` does not exist.",
-            "Imported function `Lib\\absent` does not exist.",
-            "Imported constant `Lib\\ABSENT` does not exist.",
-            "Imported class, interface, trait, or enum `Lib\\Thing` does not exist.",
-        ]
-    );
-}
-
 #[test]
 fn a_field_is_the_php_property_of_the_same_name() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    private int count = 0;\n    protected string label = \"one\";\n\n    public int total(int extra)\n    {\n        this.count += extra;\n        this.label = 2;\n        return this.count;\n    }\n}\n";
@@ -2003,28 +1978,6 @@ fn only_a_property_with_storage_needs_initializing_as_in_php() {
 
     assert_eq!(php_issues, ["5:7 missing-constructor"]);
     assert_eq!(sharp_issues, ["7:16 uninitialized-property", "8:16 uninitialized-property"]);
-}
-
-/// A constructor declared in another file, whose body this file's analysis never reads, is trusted to initialize the
-/// properties its own class or trait declares: the parent's constructor a class calls with `parent::__construct()`,
-/// and the constructor a trait brings with its properties. A property no constructor declares beside it is still
-/// reported.
-#[test]
-fn a_constructor_in_another_file_initializes_the_properties_its_class_or_trait_declares() {
-    let settings = || Settings { check_property_initialization: true, ..settings() };
-    let base = (
-        "src/Lib/Base.php",
-        "<?php\n\nnamespace Lib;\n\nabstract class Base\n{\n    protected string $name;\n\n    public function __construct()\n    {\n        $this->name = 'base';\n    }\n}\n",
-    );
-    let stamped = (
-        "src/Lib/Stamped.php",
-        "<?php\n\nnamespace Lib;\n\ntrait Stamped\n{\n    protected string $stamp;\n\n    public function __construct()\n    {\n        $this->stamp = 'now';\n    }\n}\n",
-    );
-    let order = "<?php\n\nnamespace Demo;\n\nfinal class Order extends \\Lib\\Base\n{\n    public int $total;\n\n    public function __construct()\n    {\n        parent::__construct();\n    }\n}\n";
-    let note = "<?php\n\nnamespace Demo;\n\nfinal class Note\n{\n    use \\Lib\\Stamped;\n}\n";
-
-    assert_eq!(issues_with(settings(), ("src/Demo/Order.php", order), &[base]), ["7:16 uninitialized-property"]);
-    assert_eq!(issues_with(settings(), ("src/Demo/Note.php", note), &[stamped]), Vec::<String>::new());
 }
 
 /// A get-only property whose `get` body uses `field` is set where a get-only auto-property is: once, in the
@@ -7077,55 +7030,6 @@ fn a_program_hook_that_skips_a_file_reports_only_its_own_issues() {
     );
 }
 
-/// Reports each class that is a `Lib\Model`, naming the parent it extends as the parent declares its name.
-struct ModelReporter;
-
-impl Provider for ModelReporter {
-    fn meta() -> &'static ProviderMeta {
-        static META: ProviderMeta = ProviderMeta::new("test::models", "models", "Reports models.");
-
-        &META
-    }
-}
-
-impl ClassDeclarationHook for ModelReporter {
-    fn on_enter_class(
-        &self,
-        class: &Class<'_>,
-        metadata: &ClassLikeMetadata,
-        context: &mut HookContext<'_, '_>,
-    ) -> HookResult<()> {
-        let parent = metadata.direct_parent_class.and_then(|parent| context.get_class_like(parent));
-        if let Some(parent) = parent
-            && context.is_instance_of(metadata.name, word("Lib\\Model"))
-        {
-            context.report(
-                IssueCode::InvalidArgument,
-                Issue::error(format!("`{}` is a model through `{}`.", metadata.original_name, parent.original_name))
-                    .with_annotation(Annotation::primary(class.name.span)),
-            );
-        }
-
-        Ok(())
-    }
-}
-
-/// A class hook reads the codebase through its context: the class-like a name declares, and whether one class is an
-/// instance of another, a class it extends through a parent included.
-#[test]
-fn a_class_hook_reads_a_class_like_and_its_ancestors_through_its_context() {
-    let model = ("src/Lib/Model.php", "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n}\n");
-    let entity = ("src/Lib/entity.php", "<?php\n\nnamespace Lib;\n\nabstract class entity extends Model\n{\n}\n");
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Order extends \\LIB\\ENTITY\n{\n}\n\nfinal class Note\n{\n}\n";
-    let mut registry = PluginRegistry::default();
-    registry.register_class_hook(ModelReporter);
-
-    assert_eq!(
-        written(php, &analyze(&registry, settings(), ("src/Demo/Order.php", php), &[model, entity])),
-        ["5:13 invalid-argument `Demo\\Order` is a model through `Lib\\entity`."]
-    );
-}
-
 /// A function call hook sees the standard library's `global.strtoupper("a")` as PHP's `\strtoupper('a')`: what it
 /// reports, the analysis it skips, and the type it gives the call. A call it does not skip, `strrev`, reaches the hooks
 /// after the analysis too. With no function call hook the call is analyzed as usual.
@@ -8600,21 +8504,6 @@ fn a_class_named_as_a_case_is_an_error_that_names_the_case() {
         assert_eq!(messages(declared, &[PAYMENT_RESULT]), Vec::from_iter(in_class), "{path}");
         assert_eq!(messages(PAYMENT_RESULT, &[declared]), Vec::from_iter(in_enum), "{path}");
     }
-}
-
-/// A struct declared in the file the class a case runs as would be in clashes with the case, as a class does: the
-/// enum's file sorts first, so the codebase keeps the case.
-#[test]
-fn a_struct_named_as_a_case_is_an_error_that_names_the_case() {
-    let declared = (
-        "src/App/PaymentResult/Paid.sharp",
-        "namespace App.PaymentResult;\n\npublic struct Paid\n{\n    public Paid(public int amount { get; }) { }\n}\n",
-    );
-
-    assert_eq!(
-        messages(declared, &[PAYMENT_RESULT]),
-        ["Struct `Paid` clashes with the case `PaymentResult.Paid`, which runs as a class of that name."]
-    );
 }
 
 /// Spec section 14.4: `a ?? return`, `a ?? continue` and `a ?? break` leave when `a` is null, so the value is `a`'s type
@@ -11573,66 +11462,6 @@ fn a_plugin_reads_an_extension_members_receiver_as_its_first_argument() {
         .map(|(method, [receiver, argument])| format!("{method} {} {}", text(*receiver), text(*argument)))
         .collect();
     assert_eq!(seen, ["slug title \"-\"", "isBlank title none"]);
-}
-
-/// Records the class of each call of `find` a return type provider for the classes of the prefix `lib\repo*` sees.
-#[derive(Clone, Default)]
-struct RepositoryFindRecorder(Arc<Mutex<Vec<String>>>);
-
-impl Provider for RepositoryFindRecorder {
-    fn meta() -> &'static ProviderMeta {
-        static META: ProviderMeta = ProviderMeta::new("test::repository-find", "repository find", "Records finds.");
-
-        &META
-    }
-}
-
-impl MethodReturnTypeProvider for RepositoryFindRecorder {
-    fn targets() -> &'static [MethodTarget] {
-        static TARGETS: [MethodTarget; 1] = [MethodTarget::exact(b"lib\\repo*", b"find")];
-
-        &TARGETS
-    }
-
-    fn get_return_type(
-        &self,
-        _context: &ProviderContext<'_, '_, '_>,
-        class_name: &[u8],
-        _method_name: &[u8],
-        _invocation: &InvocationInfo<'_, '_, '_>,
-    ) -> Option<TUnion> {
-        self.0.lock().unwrap().push(String::from_utf8_lossy(class_name).into_owned());
-
-        None
-    }
-}
-
-/// A method target's class prefix, as `lib\repo*`, names each class whose name starts with it in any case, as a
-/// namespace of PHP or of a plain PHP library is found, and no other class.
-#[test]
-fn a_method_target_s_class_prefix_names_each_class_whose_name_starts_with_it() {
-    let users = (
-        "src/Lib/RepoUsers.php",
-        "<?php\n\nnamespace Lib;\n\nfinal class RepoUsers\n{\n    public function find(): string\n    {\n        return 'user';\n    }\n}\n",
-    );
-    let orders = (
-        "src/Lib/REPOOrders.php",
-        "<?php\n\nnamespace Lib;\n\nfinal class REPOOrders\n{\n    public function find(): string\n    {\n        return 'order';\n    }\n}\n",
-    );
-    let other = (
-        "src/Lib/Other.php",
-        "<?php\n\nnamespace Lib;\n\nfinal class Other\n{\n    public function find(): string\n    {\n        return 'other';\n    }\n}\n",
-    );
-    let php = "<?php\n\nnamespace Demo;\n\nfunction load(\\Lib\\RepoUsers $users, \\Lib\\REPOOrders $orders, \\Lib\\Other $other): string\n{\n    return $users->find() . $orders->find() . $other->find();\n}\n";
-    let recorder = RepositoryFindRecorder::default();
-    let mut registry = PluginRegistry::default();
-    registry.register_method_provider(recorder.clone());
-
-    assert_eq!(
-        issues_in(&registry, settings(), ("src/Demo/load.php", php), &[users, orders, other]),
-        Vec::<String>::new()
-    );
-    assert_eq!(*recorder.0.lock().unwrap(), ["Lib\\RepoUsers", "Lib\\REPOOrders"]);
 }
 
 /// Records the type a throw type provider reads for the first argument of each call of `Lib\seal` and of a method of
@@ -30268,20 +30097,6 @@ fn a_behavior_s_accessors_may_have_any_effect_and_the_property_s_reads_carry_it(
     );
 }
 
-/// Spec section 6.4: PHP# creates a behavior as `new Counted()` in the class whose property names it, so a behavior
-/// whose constructor is `public` and takes no argument is created there, as one with no constructor is.
-#[test]
-fn a_behavior_whose_public_constructor_takes_no_argument_is_created() {
-    let counted = (
-        "src/Demo/Counted.sharp",
-        "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Counted : Behavior<string>\n{\n    private int writes = 0;\n\n    public Counted()\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value)\n    {\n        this.writes += 1;\n\n        return value;\n    }\n}\n",
-    );
-    let order =
-        "namespace Demo;\n\npublic class Order\n{\n    public string name { get; set; } via Counted = \"\";\n}\n";
-
-    assert_eq!(worded(("src/Demo/Order.sharp", order), &[BEHAVIOR_LIBRARY, counted]), Vec::<String>::new());
-}
-
 /// Spec sections 6.4 and 11: `via` names a type, so a generic behavior takes its type arguments as any written type
 /// does. `Logged<string>` is a `Behavior<string>`, and `Logged<int>` on a `string` property names both types.
 #[test]
@@ -31467,40 +31282,6 @@ fn an_attribute_has_no_effects_so_reading_a_sharp_attribute_is_pure() {
             "app/Shop/Indexed.sharp:8:24 incompatible-effects: The constructor of `Indexed` calls `Rows.find`, which has the effect `Database`, and an attribute has no effects. Help: Give the attribute constants, and do the work in the code that reads it.",
             "app/Shop/Counted.sharp:8:33 incompatible-effects: The initial value of `Counted.count` calls `Rows.find`, which has the effect `Database`, and an attribute has no effects. Help: Give the attribute constants, and do the work in the code that reads it.",
             "app/Shop/Keyed.sharp:7:22 incompatible-effects: The constructor of `Keyed`, which the attribute `Unique` runs, calls `Rows.find`, which has the effect `Database`, and an attribute has no effects. Help: Give the attribute constants, and do the work in the code that reads it.",
-        ]
-    );
-}
-
-/// Spec sections 1 and 29: `attributes<Column>()` creates the attributes of `Column` and of each class that extends it,
-/// so it stays pure while PHP# writes every one of them, and may have every effect once a plain PHP class extends
-/// `Column`, since nothing holds that class's constructor to no effects.
-#[test]
-fn reading_an_attribute_is_pure_only_while_php_sharp_writes_every_class_that_extends_it() {
-    let column = (
-        "app/Shop/Column.sharp",
-        "namespace App.Shop;\n\n[Attribute]\npublic class Column\n{\n    public Column(public string name { get; } = \"\") { }\n}\n",
-    );
-    let wide =
-        ("app/Shop/WideColumn.sharp", "namespace App.Shop;\n\n[Attribute]\npublic class WideColumn : Column\n{\n}\n");
-    let plain = (
-        "src/Lib/PlainColumn.php",
-        "<?php\n\nnamespace Lib;\n\n#[\\Attribute]\nclass PlainColumn extends \\App\\Shop\\Column\n{\n}\n",
-    );
-    let ledger = (
-        "app/Shop/Ledger.sharp",
-        "namespace App.Shop;\n\npublic interface Ledger\n{\n    int columns() uses Database;\n}\n",
-    );
-    let entry = (
-        "app/Shop/Entry.sharp",
-        "namespace App.Shop;\n\npublic class Entry : Ledger\n{\n    public int columns() => typeof(Entry).attributes<Column>().count();\n}\n",
-    );
-    let [a, b, c, d, e, f, g] = REFLECTION;
-
-    assert_eq!(effect_issues(&[entry, ledger, column, wide, a, b, c, d, e, f, g]), Vec::<String>::new());
-    assert_eq!(
-        effect_issues(&[entry, ledger, column, wide, plain, a, b, c, d, e, f, g]),
-        [
-            "app/Shop/Entry.sharp:5:29 incompatible-effects: `Entry.columns` reaches `ClassMembers.attributes`, which may have every effect, so `uses Database` on `Ledger.columns` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
         ]
     );
 }

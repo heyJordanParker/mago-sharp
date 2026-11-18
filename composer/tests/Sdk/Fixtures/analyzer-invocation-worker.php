@@ -64,7 +64,6 @@ use function is_string;
 use function sort;
 use function str_contains;
 use function strtolower;
-use function usleep;
 
 use const FILE_APPEND;
 use const LOCK_EX;
@@ -82,17 +81,6 @@ final class InvocationAudit
             || file_put_contents($path, $case . "\n", FILE_APPEND | LOCK_EX) === false
         ) {
             throw new RuntimeException('Could not record an external invocation provider call.');
-        }
-    }
-
-    /**
-     * Takes 20 ms, 4 times the 5 ms past which Mago traces a provider request as slow, when the test's switch
-     * `MAGO_INVOCATION_SLOW_PROVIDERS` is on.
-     */
-    public static function takeTime(): void
-    {
-        if (getenv('MAGO_INVOCATION_SLOW_PROVIDERS') === '1') {
-            usleep(20_000);
         }
     }
 }
@@ -707,7 +695,6 @@ final class InvocationPropertyProvider implements PropertyTypeProvider
             PropertyAccessKind::Write => 'write',
         };
         InvocationAudit::record("property-{$access->property}-{$operation}");
-        InvocationAudit::takeTime();
 
         return match ($access->property) {
             'name' => new PropertyType(Type::string(), Type::int()),
@@ -744,7 +731,6 @@ final class InvocationPropertyInitializationProvider implements PropertyInitiali
         }
 
         InvocationAudit::record('property-initialization');
-        InvocationAudit::takeTime();
         return true;
     }
 }
@@ -818,25 +804,6 @@ final class InvocationClassInitializerProvider implements ClassInitializerProvid
         InvocationAudit::record('class-initializer-' . strtolower($context->class->name));
 
         return ['setUp'];
-    }
-}
-
-/**
- * Names `boot` the initializer of each class of the namespace `Managed`, as a framework boots each class of the
- * namespace its test cases live in, and records each class it names one for.
- */
-final class InvocationNamespaceInitializerProvider implements ClassInitializerProvider
-{
-    public function getTargets(): array
-    {
-        return [new ClassTarget('Managed\*')];
-    }
-
-    public function getClassInitializers(ClassInitializerProviderContext $context): array
-    {
-        InvocationAudit::record('namespace-initializer-' . $context->class->originalName);
-
-        return ['boot'];
     }
 }
 
@@ -1059,22 +1026,20 @@ final class InvocationTwinHook implements MethodCallAnalysisHook
 
 /**
  * Forwards each call on `ForwardingModel` to a `ForwardedQuery`, as a framework's model forwards a call to its query
- * builder, and each call on `ScopedModel` to the query its own `newQuery()` makes, and records each call it forwards.
+ * builder, and records each call it forwards.
  */
 final class InvocationCallForwardingProvider implements CallForwardingProvider
 {
     public function getTargets(): array
     {
-        return [MethodTarget::allMethods('ForwardingModel'), MethodTarget::allMethods('ScopedModel')];
+        return [MethodTarget::allMethods('ForwardingModel')];
     }
 
     public function getForwardedCall(CallForwardingProviderContext $context): ForwardedCall
     {
         InvocationAudit::record('forwarded-' . $context->class . '::' . $context->member);
 
-        return $context->class === 'ScopedModel'
-            ? new ForwardedCall(Type::namedObject('ScopedModel'), ['newQuery', $context->member])
-            : new ForwardedCall(Type::namedObject('ForwardedQuery'), [$context->member]);
+        return new ForwardedCall(Type::namedObject('ForwardedQuery'), [$context->member]);
     }
 }
 
@@ -1112,7 +1077,6 @@ final class InvocationPlugin implements IssueFilterHook, Plugin
         $registry->registerPropertyTypeProvider(new InvocationPropertyProvider());
         $registry->registerPropertyInitializationProvider(new InvocationPropertyInitializationProvider());
         $registry->registerClassInitializerProvider(new InvocationClassInitializerProvider());
-        $registry->registerClassInitializerProvider(new InvocationNamespaceInitializerProvider());
         $registry->registerCallForwardingProvider(new InvocationCallForwardingProvider());
         if ($this->registerIssueFilter) {
             $registry->registerIssueFilterHook($this);

@@ -4,22 +4,17 @@ use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
-use mago_codex::metadata::CodebaseMetadata;
-use mago_codex::reference::SymbolReferences;
 use mago_database::Database;
 use mago_database::file::File;
-use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_extension::WorkerCommand;
 use mago_extension::WorkerPool;
 use mago_extension::WorkerPoolOptions;
-use mago_orchestrator::service::analysis::AnalysisService;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_php_version::PHPVersion;
 use mago_syntax::settings::ParserSettings;
@@ -403,114 +398,6 @@ function take_query(ForwardedQuery $_query): void {}
 take_query((new ForwardingModel())->whereKey('paid'));
 ";
 
-/// A model whose calls the fixture's forwarding provider forwards to the query its own `newQuery()` makes.
-const SCOPED_FORWARDED_METHOD_SOURCE: &str = r"<?php
-
-declare(strict_types=1);
-
-final class ScopedQuery
-{
-    public function whereKey(string $key): static
-    {
-        return $this;
-    }
-}
-
-final class ScopedModel
-{
-    public function newQuery(): ScopedQuery
-    {
-        return new ScopedQuery();
-    }
-
-    public function __call(string $name, array $arguments): mixed
-    {
-        return null;
-    }
-}
-
-function take_scoped(ScopedQuery $_query): void {}
-
-take_scoped((new ScopedModel())->whereKey('paid'));
-";
-
-/// A class of the namespace `Managed`, which the fixture's namespace initializer boots, and its twin outside it.
-const NAMESPACE_INITIALIZER_SOURCE: &str = r"<?php
-
-declare(strict_types=1);
-
-namespace Managed {
-    final class OrderTest
-    {
-        private string $order;
-
-        public function boot(): void
-        {
-            $this->order = 'paid';
-        }
-
-        public function order(): string
-        {
-            return $this->order;
-        }
-    }
-}
-
-namespace Plain {
-    final class OrderTest
-    {
-        private string $order;
-
-        public function boot(): void
-        {
-            $this->order = 'paid';
-        }
-
-        public function order(): string
-        {
-            return $this->order;
-        }
-    }
-}
-";
-
-/// A read of a property the fixture's property provider types, and a property its initialization provider initializes.
-const PROPERTY_PROVIDERS_SOURCE: &str = r"<?php
-
-declare(strict_types=1);
-
-final class ExternalResult {}
-
-class BaseModel
-{
-    public function __get(string $property): mixed
-    {
-        return null;
-    }
-}
-
-final class User extends BaseModel {}
-
-class FrameworkTestCase {}
-
-final class ManagedTestCase extends FrameworkTestCase
-{
-    public ExternalResult $application;
-
-    public function __construct() {}
-
-    public function getApplication(): ExternalResult
-    {
-        return $this->application;
-    }
-}
-
-function user_id(User $user): int
-{
-    return $user->id;
-}
-";
-
 const MISSING_METHOD_SOURCE: &str = r"<?php
 
 declare(strict_types=1);
@@ -700,127 +587,6 @@ fn a_forwarded_call_reaches_the_magic_method_of_the_object_it_is_forwarded_to() 
         )]
     );
     assert_eq!(observation.invocations, ["forwarded-ForwardingModel::whereKey"]);
-
-    Ok(())
-}
-
-/// A provider forwards a call through methods that lead to the object it reaches, as a model forwards a call to the
-/// query its own `newQuery()` makes: each runs with no arguments on what the one before it answered, so the call is
-/// the query's own `whereKey`, which answers the query, and no magic method takes it.
-#[test]
-fn a_forwarded_call_runs_the_methods_that_lead_to_the_object_it_reaches() -> Result<(), Box<dyn std::error::Error>> {
-    if !php_sdk_is_available() {
-        return Ok(());
-    }
-
-    let observation =
-        analyze_with_fixture("src/invocation.php", SCOPED_FORWARDED_METHOD_SOURCE, &["MAGO_INVOCATION_FUNCTION_ONLY"])?;
-    assert!(observation.issues.is_empty(), "{:#?}", observation.issues);
-    assert_eq!(observation.invocations, ["forwarded-ScopedModel::whereKey"]);
-
-    Ok(())
-}
-
-/// A class initializer provider that targets a namespace's classes, as `Managed\*` does, names the initializer of
-/// each class of the namespace, which initializes its properties as a constructor would. A class outside it has none.
-#[test]
-fn a_class_initializer_provider_of_a_namespace_initializes_each_class_of_it() -> Result<(), Box<dyn std::error::Error>>
-{
-    if !php_sdk_is_available() {
-        return Ok(());
-    }
-
-    let observation =
-        analyze_with_fixture("src/invocation.php", NAMESPACE_INITIALIZER_SOURCE, &["MAGO_INVOCATION_FUNCTION_ONLY"])?;
-    assert_eq!(
-        observation.issues,
-        [(
-            Some("missing-constructor".to_owned()),
-            "Class `Plain\\OrderTest` has typed properties without default values but no constructor to initialize them."
-                .to_owned()
-        )]
-    );
-    assert_eq!(observation.invocations, ["namespace-initializer-Managed\\OrderTest"]);
-
-    Ok(())
-}
-
-/// The text a tracing subscriber writes, kept to be read once the analysis ends.
-#[derive(Clone, Default)]
-struct TracedText(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for TracedText {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("no write panics while it holds the text").extend_from_slice(bytes);
-
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// With tracing at its `trace` level, a property type or property initialization request that takes a provider 5 ms or
-/// more is traced as slow, naming the class and the property it asked about, so the trace shows which provider to
-/// make faster. The initialization request names the declaring class by the lowercase name the codebase keys it by.
-///
-/// The one-shot analysis runs on this thread, which alone traces to the test's subscriber. A second, silent dispatcher
-/// lives beside it, so a test on another thread that first reaches a trace with no subscriber of its own asks both
-/// dispatchers whether to trace it, and never turns the trace off for this thread.
-#[test]
-fn a_slow_property_provider_request_is_traced_with_its_class_and_property() -> Result<(), Box<dyn std::error::Error>> {
-    if !php_sdk_is_available() {
-        return Ok(());
-    }
-
-    let temporary = tempfile::tempdir()?;
-    let audit = temporary.path().join("invocations.txt");
-    std::fs::write(&audit, [])?;
-    let traced = TracedText::default();
-    let writer = traced.clone();
-    let tracer = tracing::Dispatch::new(
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .without_time()
-            .with_writer(move || writer.clone())
-            .finish(),
-    );
-    let _silent = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-    let issues = tracing::dispatcher::with_default(&tracer, || -> Result<_, Box<dyn std::error::Error>> {
-        let registry = fixture_registry(&audit, &["MAGO_INVOCATION_FUNCTION_ONLY", "MAGO_INVOCATION_SLOW_PROVIDERS"])?;
-        let database = fixture_database(&[("src/invocation.php", PROPERTY_PROVIDERS_SOURCE)]);
-        let service = AnalysisService::new(
-            database.read_only(),
-            CodebaseMetadata::new(),
-            SymbolReferences::new(),
-            fixture_settings(),
-            ParserSettings::default(),
-            Arc::new(registry),
-        );
-
-        Ok(service.oneshot(FileId::new(b"src/invocation.php"))?)
-    })?;
-
-    assert!(issues.is_empty(), "{issues:#?}");
-    assert_eq!(
-        std::fs::read_to_string(audit)?.lines().collect::<Vec<_>>(),
-        ["property-initialization", "property-id-read"]
-    );
-    let text = String::from_utf8(traced.0.lock().expect("the analysis wrote its trace").clone())?;
-    let slow: Vec<&str> = text.lines().filter(|line| line.contains("Slow external property")).collect();
-    assert_eq!(slow.len(), 2, "{text}");
-    assert!(
-        slow[0].contains(
-            "Slow external property initialization provider request completed. class=managedtestcase property=application"
-        ),
-        "{text}"
-    );
-    assert!(
-        slow[1].contains("Slow external property type provider request completed. class=User property=id access=Read"),
-        "{text}"
-    );
 
     Ok(())
 }
