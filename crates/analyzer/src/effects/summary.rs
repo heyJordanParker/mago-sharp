@@ -1076,26 +1076,23 @@ where
     /// every effect. Gives whether it recorded the call.
     fn runs_defaults(&mut self, class: Word, method: Word, span: Span) -> bool {
         let codebase = self.codebase();
-        let Some(marked) = codebase.get_method(class.as_bytes(), method.as_bytes()) else {
-            return false;
+        let marked = |mark: &str| {
+            codebase
+                .get_method(class.as_bytes(), method.as_bytes())
+                .is_some_and(|marked| marked.has_attribute(codebase, mark.as_bytes()))
         };
         let mut callees = Vec::new();
-        if marked.has_attribute(codebase, RUNS_DEFAULTS.as_bytes()) {
-            for class_like in codebase.class_likes.values() {
-                for method in &class_like.methods {
-                    let Some(metadata) = codebase.get_method(class_like.name.as_bytes(), method.as_bytes()) else {
-                        continue;
-                    };
-                    for parameter in metadata.parameters.iter().filter(|parameter| parameter.flags.default_runs_code())
-                    {
-                        if !class_like.flags.is_sharp() {
-                            return false;
-                        }
-                        callees.push(Body::Default(class_like.name, *method, parameter.get_name().0));
+        if marked(RUNS_DEFAULTS) {
+            let methods = codebase.function_likes.iter().filter(|(_, metadata)| metadata.kind.is_method());
+            for (&(class, method), metadata) in methods {
+                for parameter in metadata.parameters.iter().filter(|parameter| parameter.flags.default_runs_code()) {
+                    if !metadata.flags.is_sharp() {
+                        return false;
                     }
+                    callees.push(Body::Default(class, method, parameter.get_name().0));
                 }
             }
-        } else if marked.has_attribute(codebase, RUNS_INITIAL_VALUES.as_bytes()) {
+        } else if marked(RUNS_INITIAL_VALUES) {
             for class_like in codebase.class_likes.values().filter(|class_like| class_like.flags.is_sharp()) {
                 for (property, metadata) in &class_like.properties {
                     if metadata.flags.has_default() {

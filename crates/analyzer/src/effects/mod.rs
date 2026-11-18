@@ -360,19 +360,14 @@ impl Effects {
             let (Body::Method(class, method) | Body::Default(class, method, _)) = summary.body else {
                 continue;
             };
-            let Some(metadata) = codebase.get_class_like(class.as_bytes()) else {
-                continue;
-            };
-            if index.get(&summary.body) != Some(&position) {
-                continue;
-            }
-
             let place = |parameter: Word| {
                 codebase
                     .get_method(class.as_bytes(), method.as_bytes())
                     .and_then(|own| own.parameters.iter().position(|own| own.name.0 == parameter))
             };
-            for parent in &metadata.all_parent_classes {
+            for parent in
+                codebase.get_class_like(class.as_bytes()).into_iter().flat_map(|class| &class.all_parent_classes)
+            {
                 let parent = codebase.class_key(parent.as_bytes());
                 let overridden = match summary.body {
                     Body::Default(_, _, parameter) => place(parameter)

@@ -30986,7 +30986,9 @@ fn a_field_read_or_write_runs_no_project_code() {
 /// Spec sections 25 and 29: `defaultValue()` runs the default it reads, so it has the effects of every default the
 /// program declares that is not constant, and no other. A constant default runs no code, so with only constant ones a
 /// method held to `uses Database, Environment` reads a parameter's, a property's and a field's default. A default that
-/// creates a `Stamp`, whose constructor has the effect `Clock`, gives each read of its kind `Clock`.
+/// creates a `Stamp`, whose constructor has the effect `Clock`, gives each read of its kind `Clock`. A plain PHP
+/// parameter's default that creates an object runs code no `uses` names, so while the program declares one a parameter's
+/// read may have every effect, and a property's and a field's reads keep none.
 #[test]
 fn a_default_value_read_has_the_effects_of_the_defaults_it_can_run() {
     let ledger = (
@@ -31021,6 +31023,10 @@ fn a_default_value_read_has_the_effects_of_the_defaults_it_can_run() {
         "app/Shop/Kept.sharp",
         "namespace App.Shop;\n\npublic class Kept\n{\n    public Stamp stamp { get; set; } = new Stamp();\n}\n",
     );
+    let plain_default = (
+        "src/Lib/Calendar.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Calendar\n{\n    public function on(\\DateTimeImmutable $day = new \\DateTimeImmutable()): void\n    {\n    }\n}\n",
+    );
     let readers = [parameter, property, field, ledger, status];
     let [a, b, c, d, e, f, g] = REFLECTION;
     let reflection = [a, b, c, d, e, f, g];
@@ -31043,6 +31049,12 @@ fn a_default_value_read_has_the_effects_of_the_defaults_it_can_run() {
         [
             "app/Shop/PropertyRead.sharp:7:28 incompatible-effects: `PropertyRead.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database, Environment` on `Ledger.check` cannot accept it.",
             "app/Shop/FieldRead.sharp:7:47 incompatible-effects: `FieldRead.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database, Environment` on `Ledger.check` cannot accept it.",
+        ]
+    );
+    assert_eq!(
+        effect_issues(&with(&[plain_default])),
+        [
+            "app/Shop/ParameterRead.sharp:5:28 incompatible-effects: `ParameterRead.check` reaches `Parameter.defaultValue`, which may have every effect, so `uses Database, Environment` on `Ledger.check` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects."
         ]
     );
 }
