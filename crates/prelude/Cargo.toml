@@ -23,6 +23,7 @@ rust-embed = { workspace = true, optional = true }
 mago-syntax = { workspace = true, optional = true }
 mago-names = { workspace = true, optional = true }
 mago-php-version = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -31,7 +32,7 @@ serde = [
     "dep:bincode",
     "mago-codex/serde",
 ]
-build = ["serde", "mago-allocator", "rust-embed", "mago-syntax", "mago-names", "mago-php-version"]
+build = ["serde", "mago-allocator", "rust-embed", "mago-syntax", "mago-names", "mago-php-version", "rayon"]
 
 [dev-dependencies]
 criterion = { workspace = true }
