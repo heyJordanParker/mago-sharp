@@ -4085,7 +4085,7 @@ fn a_list_test_of_a_value_declared_a_map_is_an_error() {
         errors,
         [
             "This pattern never matches the value it tests, a `Map<int|string, Any?>?`: a `Map` is never a `List`.",
-            "This pattern never matches the value it tests, a `Map<int|string, Any?>?`: a `Map` is never a `List`.",
+            "`box.records` is a `Map<int|string, Any?>?` that is never a `List<Map<string, string?>>` here, so `box.records as List<Map<string, string?>>` always gives `null`.",
             "This pattern never matches the value it tests, a `Map<int, int>`: a `Map` is never a `List`.",
         ]
     );
@@ -8917,9 +8917,9 @@ fn a_type_with_properties_tests_both_and_binds() {
     );
 }
 
-/// A type pattern that can never match is an error at the pattern. A value pattern's `==` is the code's own, spec
-/// section 19, so a value of another type is the error `is == "none"` gives: at the tested value for `is`, and at the
-/// value in a `match` arm, whose read of the subject has no text.
+/// A type pattern that can never match is an error at the pattern, and an `as` that always gives null is one at the
+/// cast. A value pattern's `==` is the code's own, spec section 19, so a value of another type is the error `is ==
+/// "none"` gives: at the tested value for `is`, and at the value in a `match` arm, whose read of the subject has no text.
 #[test]
 fn a_pattern_that_can_never_match_is_an_error_at_the_pattern() {
     let sharp = "namespace Demo;\n\nimport Lib.Circle;\nimport Lib.Square;\n\nclass Report\n{\n    public static bool square(Circle circle) => circle is Square;\n\n    public static bool text(int count) => count is string;\n\n    public static bool named(int count) => count is \"none\";\n\n    public static Square? converted(Circle circle) => circle as Square;\n\n    public static int arm(Circle circle) => match (circle) {\n        Square => 1,\n        default => 0,\n    };\n\n    public static int value(int count) => match (count) {\n        1 => 1,\n        \"none\" => 0,\n        default => 2,\n    };\n\n    public static bool possible(int? count) => count is int and > 0;\n}\n";
@@ -8946,7 +8946,7 @@ fn a_pattern_that_can_never_match_is_an_error_at_the_pattern() {
             "Square impossible-type-comparison This pattern never matches the value it tests.",
             "string impossible-type-comparison Impossible type assertion: `count` of type `int` can never be `string`.",
             "count invalid-operand `==` cannot compare `int` with `string`.",
-            "Square impossible-type-comparison This pattern never matches the value it tests.",
+            "circle as Square impossible-type-comparison `circle` is a `Circle` that is never a `Square` here, so `circle as Square` always gives `null`.",
             "Square impossible-type-comparison This pattern never matches the value it tests.",
             "\"none\" invalid-operand `==` cannot compare `int` with `string`.",
         ]
@@ -21537,6 +21537,38 @@ fn as_gives_its_target_type_or_null_for_every_target() {
     );
 }
 
+/// Spec section 21: an `as` whose value can never be of its target type always gives null, so it is refused at the
+/// cast, which names both types, and a member read on its result reports nothing more, for an open interface as for a
+/// sealed one. An `as` that can succeed, as `maybe`'s, reports nothing.
+#[test]
+fn an_as_that_always_gives_null_is_refused_at_the_cast() {
+    let open = [
+        ("src/Demo/Payment.sharp", "namespace Demo;\n\npublic interface Payment\n{\n}\n"),
+        (
+            "src/Demo/Paid.sharp",
+            "namespace Demo;\n\npublic class Paid : Payment\n{\n    public int amount { get; init; }\n}\n",
+        ),
+    ];
+    let sealed = [
+        ("src/Demo/Payment.sharp", "namespace Demo;\n\npublic sealed interface Payment\n{\n}\n"),
+        (
+            "src/Demo/Paid.sharp",
+            "namespace Demo;\n\npublic class Paid : Payment\n{\n    public int amount { get; init; }\n}\n",
+        ),
+        ("src/Demo/Refund.sharp", "namespace Demo;\n\npublic class Refund : Payment\n{\n}\n"),
+    ];
+    let sweep = "namespace Demo;\n\npublic class Sweep\n{\n    public static int? total(Payment x)\n    {\n        if (x is not Paid) {\n            return (x as Paid).amount;\n        }\n        return null;\n    }\n\n    public static int? maybe(Payment x) => (x as Paid)?.amount;\n}\n";
+
+    let refused = |value_type: &str| {
+        vec![format!(
+            "8:21 impossible-type-comparison `x` is a `{value_type}` that is never a `Paid` here, so `x as Paid` always gives `null`. Remove the `as`, or convert a value that can be a `Paid`."
+        )]
+    };
+
+    assert_eq!(explained(("src/Demo/Sweep.sharp", sweep), &open), refused("Payment"));
+    assert_eq!(explained(("src/Demo/Sweep.sharp", sweep), &sealed), refused("Refund"));
+}
+
 /// Spec section 21: `as` converts a value, and only `is` narrows one, so the local an `as` converts keeps its own type
 /// after it. `n as TAny` of an `Event` is a `TAny` narrowed to `Event` where it holds and null where it doesn't, and `n`
 /// is still an `Event` below it, as it is after `m as Paid`, for an unbounded type parameter and a bounded one alike.
@@ -26824,7 +26856,7 @@ fn a_message_names_a_tested_value_as_sharp_writes_it() {
         [
             "7:49 impossible-type-comparison Impossible type assertion: `this.total()` of type `int` can never be `string`. | Argument `this.total()` has type `int` | The assertion expects `this.total()` to be `string`, but no value of type `int` can satisfy this. | Check that the correct variable is being passed, or update the assertion type.",
             "9:47 redundant-type-comparison Redundant type assertion: `this.total()` is already `int`. | Argument `this.total()` already has type `int` | The assertion against `int` always holds because `this.total()` is `int`. | Consider removing this assertion or replacing it with `default` if used in a `match` arm.",
-            "11:46 impossible-type-comparison Impossible type assertion: `this.total()` of type `int` can never be `string`. | Argument `this.total()` has type `int` | The assertion expects `this.total()` to be `string`, but no value of type `int` can satisfy this. | Check that the correct variable is being passed, or update the assertion type.",
+            "11:30 impossible-type-comparison `this.total()` is an `int` that is never a `string` here, so `this.total() as string` always gives `null`. | Always `null`. | Remove the `as`, or convert a value that can be a `string`.",
         ]
     );
 }

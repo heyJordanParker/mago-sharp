@@ -594,6 +594,8 @@ where
             .and_then(|id| block_context.locals.get(&id).cloned().map(|local| (id, local))),
         _ => None,
     };
+    // The clauses that hold where an `as` runs, which may say its value is never of its type, as `x is not Paid` does.
+    let known_clauses = matches!(node, Node::Expression(Expression::As(_))).then(|| block_context.clauses.clone());
     let (result, issues) = context.record(|context| match php {
         Node::Expression(expression) => expression.analyze(context, block_context, artifacts),
         Node::Statement(statement) => statement.analyze(context, block_context, artifacts),
@@ -700,10 +702,26 @@ where
     // A tested value whose expression is refused reported itself, so no test of it reports that it always or never
     // holds.
     let tested_refused = artifacts.get_expression_type(tested_value(node)).is_some_and(is_refused_type);
+    // Spec section 21: an `as` whose value is never of its type here always gives null, whether the value's type or a
+    // test before it says so, and that is the error, at the cast. Its PHP's test and branches say nothing more.
+    let always_null = match (node, &known_clauses) {
+        (Node::Expression(Expression::As(r#as)), Some(known_clauses)) if !tested_refused => tests
+            .iter()
+            .any(|(_, test)| {
+                artifacts.get_rc_expression_type(*test).is_some_and(|test| test.is_false())
+                    || is_contradicted(test, known_clauses, context, block_context, artifacts)
+            })
+            .then_some(r#as),
+        _ => None,
+    };
     let issues: Vec<Issue> = issues
         .into_iter()
         .filter(|issue| {
             let span = issue.primary_span();
+            if let Some(r#as) = always_null {
+                let value = r#as.value.span();
+                return span.is_some_and(|span| value.contains(&span.start) && value.contains(&span.end));
+            }
             let called = span.and_then(pattern_call);
             let reads_tested_value = is_code(issue, IssueCode::NonDocumentedProperty)
                 && span.is_some_and(|span| span.end == tested_read.end && span.start > tested_read.start);
@@ -828,7 +846,11 @@ where
     // does. That arm's own reports from its PHP, that it is unreachable and compares a value it never equals, say the
     // same again, so they are left out.
     let mut handled_arms: Vec<Span> = Vec::new();
-    for (pattern, test) in tests {
+    if let Some(r#as) = always_null {
+        let value_type = artifacts.get_expression_type(r#as.value).cloned().unwrap_or_else(get_mixed);
+        context.collector.report(gives_null_always(r#as, &value_type, context));
+    }
+    for (pattern, test) in tests.into_iter().filter(|_| always_null.is_none()) {
         let reported = issues.iter().any(|issue| {
             issue.level == Level::Error
                 && is_code(issue, IssueCode::ImpossibleTypeComparison)
@@ -860,9 +882,9 @@ where
     result?;
 
     // A refused type, as `value as Box` writes, gives the expression no type, so where its value goes reports nothing
-    // again.
+    // again, and so does an `as` that always gives null.
     if let Node::Expression(expression) = node
-        && is_refused
+        && (is_refused || always_null.is_some())
     {
         artifacts.set_expression_type(expression, wrap_atomic(TAtomic::Error));
     } else if let (Node::Expression(expression), Node::Expression(php)) = (node, php)
@@ -1898,6 +1920,66 @@ fn never_matches(pattern: Span, map: Option<String>) -> Issue {
         .with_annotation(Annotation::primary(pattern).with_message("Never matches."))
         .with_note("PHP# makes a pattern that can never match an error, as C# does (CS8121).")
         .with_help("Remove the pattern, or test a value that can match it.")
+}
+
+/// The error at `r#as`, an `as` that always gives null: its value, of type `value_type`, is never of the type it
+/// converts to where it runs.
+fn gives_null_always<A>(r#as: &As<'_>, value_type: &TUnion, context: &Context<'_, '_, A>) -> Issue
+where
+    A: Arena,
+{
+    let value = quoted_source(context, r#as.value.span());
+    let value_type = display_sharp_type(context, value_type);
+    let target = quoted_source(context, r#as.hint.span());
+
+    Issue::error(format!(
+        "`{value}` is {} `{value_type}` that is never {} `{target}` here, so `{}` always gives `null`.",
+        article(&value_type),
+        article(&target),
+        quoted_source(context, r#as.span())
+    ))
+    .with_code(IssueCode::ImpossibleTypeComparison.as_str())
+    .with_annotation(Annotation::primary(r#as.span()).with_message("Always `null`."))
+    .with_help(format!("Remove the `as`, or convert a value that can be {} `{target}`.", article(&target)))
+}
+
+/// Whether `known_clauses`, the clauses that hold where `test` runs, make it always false, as `x is not Paid` makes the
+/// test of `x as Paid`: one of them is a clause of its negation.
+fn is_contradicted<'ctx, 'arena, A>(
+    test: &Expression<'arena>,
+    known_clauses: &[Rc<Clause>],
+    context: &Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
+) -> bool
+where
+    A: Arena,
+{
+    let thresholds = context.settings.algebra_thresholds();
+    let size = context.settings.formula_size_threshold;
+    let Some(formula) = get_formula(
+        test.span(),
+        test.span(),
+        test,
+        context.get_assertion_context_from_block(block_context),
+        artifacts,
+        &thresholds,
+        size,
+    ) else {
+        return false;
+    };
+
+    negate_or_synthesize(
+        formula,
+        test,
+        context.get_assertion_context_from_block(block_context),
+        artifacts,
+        &thresholds,
+        size,
+    )
+    .iter()
+    .filter(|negated| negated.reconcilable && !negated.wedge)
+    .any(|negated| known_clauses.iter().any(|known| known.hash == negated.hash))
 }
 
 /// The type of `tested`, the value a pattern at `pattern` tests, when it holds only `Map`s, maybe null, and the pattern
