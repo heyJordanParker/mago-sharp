@@ -87,10 +87,17 @@ pub enum Compilation {
     Accepted(Vec<u8>),
     /// Its error-level issues, which stop it from running.
     Refused(IssueCollection),
+    /// Its `.sharpc` file holds the bytes this compile would write: the caller vouched it is the one the last compile
+    /// wrote, its key held, and its inputs kept the stamps it holds, so the compile neither read it nor gives its bytes.
+    Kept,
 }
 
 /// A `.sharp` file lowered and its Lean translation, or the errors that refused it.
 type Lowered = Result<(LoweredUnit, Translation), IssueCollection>;
+
+/// A file that keeps its compiled file: the compiled file's bytes, none when the compile keeps it unread, and what the
+/// last compile kept of it.
+type KeptFile<'last> = (Option<Vec<u8>>, &'last CompiledFile);
 
 /// A lowered `.sharp` file, with what its inputs depend on.
 #[derive(Debug)]
@@ -114,8 +121,9 @@ pub struct CompiledFiles {
     files: BTreeMap<Vec<u8>, CompiledFile>,
 }
 
-/// What [`CompiledFiles`] keeps of one file: its compiled file's key and the reads it hashes, its inline forms, and
-/// what its inputs depend on, as [`LoweredUnit`] holds them.
+/// What [`CompiledFiles`] keeps of one file: its compiled file's key and the reads it hashes, its inline forms, what its
+/// inputs depend on, as [`LoweredUnit`] holds them, and what its compiled file holds beside its code, as
+/// [`stamps_hash`] hashes it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CompiledFile {
     key: [u8; 16],
@@ -123,6 +131,7 @@ struct CompiledFile {
     forms: Vec<(Vec<u8>, InlineForm)>,
     namespace_classes: Vec<Word>,
     reaches_extension: bool,
+    stamps: [u8; 16],
 }
 
 impl CompiledFiles {
@@ -159,6 +168,24 @@ fn compiled_with(configuration: [u8; 16]) -> Vec<u8> {
     bytes.extend(configuration);
 
     bytes
+}
+
+/// The hash of what a compiled file holds beside its code: the stamp of each of its `inputs`, in their order, and the
+/// standard `library` it names. A compile keeps a compiled file unread while this hash holds.
+#[allow(clippy::little_endian_bytes)]
+fn stamps_hash(inputs: &[Input], library: &Library) -> [u8; 16] {
+    let mut bytes = Vec::new();
+    for Input { path, size, mtime_ns, hash } in inputs {
+        bytes.extend((path.len() as u64).to_le_bytes());
+        bytes.extend(path);
+        bytes.extend(size.to_le_bytes());
+        bytes.extend(mtime_ns.to_le_bytes());
+        bytes.extend(hash);
+    }
+    bytes.extend(library.native_fingerprint);
+    bytes.extend(&library.version);
+
+    source_hash(&bytes)
 }
 
 /// A PHP# listener, spec section 15: a method with an `on` clause, which the engine runs when an event it lists is
@@ -407,6 +434,10 @@ impl IncrementalAnalysisService {
     /// effects of its function types have the fingerprints the key hashes, as [`unit::is_stale`] checks it. Every other
     /// file is analyzed, lowered and translated again.
     ///
+    /// `intact` vouches that a file's compiled file is the one the last compile wrote, as its caller knows from the
+    /// file's status. Such a file whose key holds is read only when a stamp its compiled file holds changed, so a compile
+    /// that changes neither leaves it [`Compilation::Kept`], unread.
+    ///
     /// An accepted file's inputs are its own source, `composer.lock`, and each file outside `vendor/` whose edit makes
     /// the warm path re-analyze it and can change its code: each file whose signature edit reaches it through the
     /// cascade or reaches a symbol a plugin that registers a provider read, each file that declares a class alias its
@@ -443,10 +474,12 @@ impl IncrementalAnalysisService {
     ///
     /// Returns [`OrchestratorError`] when no analysis ran yet, when re-analyzing a file fails, or when `compiled`,
     /// `stamp` or `check` fails.
+    #[allow(clippy::too_many_arguments)]
     pub fn compile(
         &mut self,
         last: &CompiledFiles,
         mut compiled: impl FnMut(&File) -> Result<Option<Vec<u8>>, DatabaseError>,
+        mut intact: impl FnMut(&File) -> bool,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         check: impl FnOnce(Vec<Translation>, &Reach) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
@@ -466,9 +499,11 @@ impl IncrementalAnalysisService {
 
         // A library file inlines no form, so whether it keeps its compiled file needs none, and the files that keep
         // theirs give the forms the others' lowering and keys read.
-        let mut kept: HashMap<FileId, (Vec<u8>, &CompiledFile)> = HashMap::default();
+        let mut kept: HashMap<FileId, KeptFile> = HashMap::default();
         for file in &library {
-            if let Some(found) = self.kept(file, last, &mut compiled, &reads, &HashMap::default(), &effects, &errors)? {
+            if let Some(found) =
+                self.kept(file, last, &mut compiled, &mut intact, &reads, &HashMap::default(), &effects, &errors)?
+            {
                 kept.insert(file.id, found);
             }
         }
@@ -487,7 +522,9 @@ impl IncrementalAnalysisService {
             library_forms.iter().map(|(name, form)| (name.clone(), form.fingerprint())).collect();
         let forms: InlineForms = library_forms.into_iter().collect();
         for file in &rest {
-            if let Some(found) = self.kept(file, last, &mut compiled, &reads, &fingerprints, &effects, &errors)? {
+            if let Some(found) =
+                self.kept(file, last, &mut compiled, &mut intact, &reads, &fingerprints, &effects, &errors)?
+            {
                 kept.insert(file.id, found);
             }
         }
@@ -676,12 +713,29 @@ impl IncrementalAnalysisService {
                     Some(issues) => Compilation::Refused(issues),
                     None => {
                         let inputs = stamped(input_paths.remove(&file.id).unwrap_or_default());
-                        let Some(bytes) = unit::restamp(&bytes, &inputs, standard_library) else {
-                            unreachable!("a compiled file the compile keeps is one `unit::is_stale` read");
-                        };
-                        next.files.insert(file.name.to_vec(), record.clone());
+                        let stamps = stamps_hash(&inputs, standard_library);
+                        next.files.insert(file.name.to_vec(), CompiledFile { stamps, ..record.clone() });
+                        match bytes {
+                            None if stamps == record.stamps => Compilation::Kept,
+                            bytes => {
+                                let bytes = match bytes {
+                                    Some(bytes) => bytes,
+                                    None => compiled(file)?
+                                        .filter(|bytes| !unit::is_stale(bytes, record.key))
+                                        .ok_or_else(|| {
+                                            OrchestratorError::General(format!(
+                                                "The compiled file of {} changed while the compile ran. Compile again.",
+                                                String::from_utf8_lossy(&file.name)
+                                            ))
+                                        })?,
+                                };
+                                let Some(bytes) = unit::restamp(&bytes, &inputs, standard_library) else {
+                                    unreachable!("a compiled file the compile keeps is one `unit::is_stale` read");
+                                };
 
-                        Compilation::Accepted(bytes)
+                                Compilation::Accepted(bytes)
+                            }
+                        }
                     }
                 }
             } else {
@@ -696,9 +750,10 @@ impl IncrementalAnalysisService {
                         reads.function_types = unit.function_types().to_vec();
                         let key = key(source_hash(&file.contents), &reads);
                         let inputs = stamped(input_paths.remove(&file.id).unwrap_or_default());
+                        let stamps = stamps_hash(&inputs, standard_library);
                         next.files.insert(
                             file.name.to_vec(),
-                            CompiledFile { key, reads, forms, namespace_classes, reaches_extension },
+                            CompiledFile { key, reads, forms, namespace_classes, reaches_extension, stamps },
                         );
 
                         Compilation::Accepted(encode(&unit, &file.contents, key, &inputs, standard_library))
@@ -717,18 +772,19 @@ impl IncrementalAnalysisService {
     /// refused nothing in it, and the key of its source and the current fingerprints of the reads `last` kept, as
     /// `reads` holds the declarations, inferred returns and sets of names it reads, `forms` the fingerprint of each
     /// library form by its name and `effects` its function types' effects, is the one `last` kept and its compiled
-    /// file, as `compiled` gives it, names.
+    /// file, as `compiled` gives it, names. The compiled file is none, unread, when `intact` vouches for it.
     #[allow(clippy::too_many_arguments)]
     fn kept<'last>(
         &self,
         file: &File,
         last: &'last CompiledFiles,
         compiled: &mut impl FnMut(&File) -> Result<Option<Vec<u8>>, DatabaseError>,
+        intact: &mut impl FnMut(&File) -> bool,
         reads: &HashMap<FileId, (Reads, HashSet<FileId>)>,
         forms: &HashMap<Vec<u8>, u64>,
         effects: &Effects,
         errors: &HashMap<FileId, IssueCollection>,
-    ) -> Result<Option<(Vec<u8>, &'last CompiledFile)>, OrchestratorError> {
+    ) -> Result<Option<KeptFile<'last>>, OrchestratorError> {
         let Some(record) = last.files.get(file.name.as_ref()).filter(|_| !errors.contains_key(&file.id)) else {
             return Ok(None);
         };
@@ -757,8 +813,11 @@ impl IncrementalAnalysisService {
         if key != record.key {
             return Ok(None);
         }
+        if intact(file) {
+            return Ok(Some((None, record)));
+        }
 
-        Ok(compiled(file)?.filter(|bytes| !unit::is_stale(bytes, key)).map(|bytes| (bytes, record)))
+        Ok(compiled(file)?.filter(|bytes| !unit::is_stale(bytes, key)).map(|bytes| (Some(bytes), record)))
     }
 
     /// Refuses each plain PHP file that declares a class extending or implementing a PHP# type that it doesn't satisfy,
@@ -1610,7 +1669,7 @@ mod tests {
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<Vec<(FileId, Compilation)>, OrchestratorError> {
         service
-            .compile(&CompiledFiles::default(), uncompiled, stamp, check, standard_library, refusing)
+            .compile(&CompiledFiles::default(), uncompiled, |_| false, stamp, check, standard_library, refusing)
             .map(|(compiled, _)| compiled)
     }
 
@@ -2580,13 +2639,14 @@ mod tests {
     }
 
     /// The compiled files and the [`CompiledFiles`] of a compile of `service` that keeps each file `last` and
-    /// `previous`, the compiled files of the last compile by name, hold whose key holds, and the name of each file it
-    /// kept.
+    /// `previous`, the compiled files of the last compile by name, hold whose key holds, and the name of each file whose
+    /// compiled file it read. `intact` tells it which compiled files are the ones `previous` holds.
     fn compile_keeping(
         service: &mut IncrementalAnalysisService,
         last: &CompiledFiles,
         previous: &BTreeMap<String, Compilation>,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
+        intact: impl FnMut(&File) -> bool,
     ) -> (BTreeMap<String, Compilation>, CompiledFiles, BTreeSet<String>) {
         let mut asked = BTreeSet::new();
         let (compiled, kept) = service
@@ -2601,6 +2661,7 @@ mod tests {
                     asked.insert(name);
                     Ok(bytes)
                 },
+                intact,
                 stamp,
                 proved,
                 &Library::default(),
@@ -2629,6 +2690,7 @@ mod tests {
                 let outcome = match compilation {
                     Compilation::Accepted(bytes) => Ok(bytes.as_slice()),
                     Compilation::Refused(issues) => Err(messages(issues)),
+                    Compilation::Kept => panic!("{name} was kept unread"),
                 };
                 (name.as_str(), outcome)
             })
@@ -2646,12 +2708,12 @@ mod tests {
             let edited = shop_project(&shop(&edit.money, &edit.rate));
             let mut warm = analyzed(&base);
             let (before, last, _) =
-                compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), empty_stamp);
+                compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), empty_stamp, |_| false);
             let last = CompiledFiles::decode(&last.encode([0; 16]).expect("the record encodes"), [0; 16]);
             warm.update_database(edited.read_only());
             warm.analyze_incremental(None).expect("the warm path runs");
 
-            let (kept_compiled, _, kept) = compile_keeping(&mut warm, &last, &before, empty_stamp);
+            let (kept_compiled, _, kept) = compile_keeping(&mut warm, &last, &before, empty_stamp, |_| false);
             let clean = compile(&mut analyzed(&edited), empty_stamp);
 
             assert_eq!(whole(&kept_compiled), whole(&clean), "{}", edit.name);
@@ -2680,6 +2742,7 @@ mod tests {
             &CompiledFiles::default(),
             &BTreeMap::new(),
             empty_stamp,
+            |_| false,
         );
         let bytes = last.encode([0; 16]).expect("the record encodes");
 
@@ -2699,11 +2762,12 @@ mod tests {
         *tax = TAX.replace("rate(): int", "rate(): float").replace("return 2;", "return 2.5;");
         let edited = shop_project(&files);
         let mut warm = analyzed(&base);
-        let (before, last, _) = compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), empty_stamp);
+        let (before, last, _) =
+            compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), empty_stamp, |_| false);
         warm.update_database(edited.read_only());
         warm.analyze_incremental(None).expect("the warm path runs");
 
-        let (after, _, kept) = compile_keeping(&mut warm, &last, &before, empty_stamp);
+        let (after, _, kept) = compile_keeping(&mut warm, &last, &before, empty_stamp, |_| false);
 
         assert!(!kept.contains("app/Order.sharp"), "{kept:?}");
         assert!(kept.contains("app/Unrelated.sharp"), "{kept:?}");
@@ -2721,7 +2785,7 @@ mod tests {
         let base = files(&test("    public function test(): bool\n    {\n        return true;\n    }\n"));
         let mut warm = analyzed(&base);
         let (before, last, _) =
-            compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), database_stamp(&base));
+            compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), database_stamp(&base), |_| false);
         let inputs = input_paths(accepted(&before, "app/Order.sharp"));
         assert!(!inputs.iter().any(|input| input.starts_with("tests/")), "{inputs:?}");
 
@@ -2730,10 +2794,42 @@ mod tests {
         ));
         warm.update_database(edited.read_only());
         warm.analyze_incremental(None).expect("the warm path runs");
-        let (after, _, kept) = compile_keeping(&mut warm, &last, &before, database_stamp(&edited));
+        let (after, _, kept) = compile_keeping(&mut warm, &last, &before, database_stamp(&edited), |_| false);
 
         assert_eq!(kept, BTreeSet::from(["app/Order.sharp".to_owned()]));
         assert_eq!(accepted(&after, "app/Order.sharp"), accepted(&before, "app/Order.sharp"));
+    }
+
+    /// A compile whose caller vouches that each compiled file is the one the last compile wrote keeps a file whose key
+    /// holds and whose inputs kept their stamps without reading it, and reads only a kept file an input of which changed,
+    /// to restamp it. Each file then holds the bytes a clean compile of the edited project writes.
+    #[test]
+    fn a_compile_keeps_unread_each_intact_file_whose_inputs_kept_their_stamps() {
+        let base = shop_project(&shop(MONEY, RATE));
+        let edited = shop_project(&shop(&MONEY.replace("return 1;", "return 2;"), RATE));
+        let mut warm = analyzed(&base);
+        let (before, last, _) =
+            compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), database_stamp(&base), |_| false);
+        warm.update_database(edited.read_only());
+        warm.analyze_incremental(None).expect("the warm path runs");
+
+        let (after, _, read) = compile_keeping(&mut warm, &last, &before, database_stamp(&edited), |_| true);
+
+        assert!(matches!(after.get("app/Unrelated.sharp"), Some(Compilation::Kept)), "{after:?}");
+        assert!(!read.contains("app/Unrelated.sharp"), "{read:?}");
+        assert!(read.contains("app/Order.sharp"), "Order lists the edited Money as an input: {read:?}");
+        let clean = compile(&mut analyzed(&edited), database_stamp(&edited));
+        let resolved: BTreeMap<String, Compilation> = after
+            .into_iter()
+            .map(|(name, compilation)| match compilation {
+                Compilation::Kept => {
+                    let bytes = accepted(&before, &name).to_vec();
+                    (name, Compilation::Accepted(bytes))
+                }
+                compilation => (name, compilation),
+            })
+            .collect();
+        assert_eq!(whole(&resolved), whole(&clean));
     }
 
     fn declarations(codebase: &CodebaseMetadata, signature: &FileSignature) -> Vec<SymbolIdentifier> {
@@ -3311,6 +3407,7 @@ mod tests {
                 let outcome = match compilation {
                     Compilation::Accepted(bytes) => Ok(compiled_key(bytes)),
                     Compilation::Refused(issues) => Err(messages(issues)),
+                    Compilation::Kept => panic!("{name} was kept unread"),
                 };
                 (name.as_str(), outcome)
             })
@@ -3626,7 +3723,7 @@ mod tests {
                 let row = format!("diff {diff}: {} to {} files", before.len(), after.len());
                 let shop_refusal = match &clean["app/Shop.sharp"] {
                     Compilation::Refused(issues) => messages(issues),
-                    Compilation::Accepted(_) => Vec::new(),
+                    Compilation::Accepted(_) | Compilation::Kept => Vec::new(),
                 };
                 let expected: Vec<String> =
                     if refused { vec!["This `match` misses `ScrollInteraction`.".to_string()] } else { Vec::new() };
@@ -3774,6 +3871,7 @@ mod tests {
                 let outcome = match compilation {
                     Compilation::Accepted(bytes) => Ok(&bytes[104..]),
                     Compilation::Refused(issues) => Err(messages(issues)),
+                    Compilation::Kept => panic!("{name} was kept unread"),
                 };
                 (name.as_str(), outcome)
             })

@@ -181,27 +181,32 @@ impl Server {
 
     /// Compile each `.sharp` file of the last analysis into the bytes of its `.sharpc` file, or the errors that
     /// refuse it, and give the [`CompiledFiles`] the next compile keeps files by. A file whose key `last` holds keeps
-    /// its compiled file, which `compiled` gives, and is not lowered again. `stamp` gives the size, modification time
-    /// and hash of the file at a workspace-relative path, or none when no file is there, once for each path, called
-    /// from several threads at once. `check` gets the Lean translation of each file whose laws are checked again and
-    /// of each file they reach, with the reach, and returns the issues of each file whose law is not proved. Each
-    /// compiled file's header names `standard_library`, the standard library the workspace compiles against.
-    /// `refusing` keeps the analysis's errors that refuse their file.
+    /// its compiled file, which `compiled` gives, and is not lowered again. One `intact` vouches for, as the compiled
+    /// file the last compile wrote, is read only when a stamp it holds changed, and is [`Compilation::Kept`] otherwise.
+    /// `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or none when no
+    /// file is there, once for each path, called from several threads at once. `check` gets the Lean translation of
+    /// each file whose laws are checked again and of each file they reach, with the reach, and returns the issues of
+    /// each file whose law is not proved. Each compiled file's header names `standard_library`, the standard library
+    /// the workspace compiles against. `refusing` keeps the analysis's errors that refuse their file.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a file, `compiled`, `stamp` or `check`
     /// fails.
+    #[allow(clippy::too_many_arguments)]
     pub fn compile(
         &mut self,
         last: &CompiledFiles,
         compiled: impl FnMut(&File) -> Result<Option<Vec<u8>>, DatabaseError>,
+        intact: impl FnMut(&File) -> bool,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         check: impl FnOnce(Vec<Translation>, &Reach) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<(Vec<(FileId, Compilation)>, CompiledFiles), ServerError> {
-        self.service.compile(last, compiled, stamp, check, standard_library, refusing).map_err(ServerError::from)
+        self.service
+            .compile(last, compiled, intact, stamp, check, standard_library, refusing)
+            .map_err(ServerError::from)
     }
 
     /// The standard library's inline forms, which `mago convert` reads to find the library member that runs a PHP

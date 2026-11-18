@@ -633,6 +633,7 @@ fn compiled_consumer(
         .compile(
             &CompiledFiles::default(),
             |_| Ok(None),
+            |_| false,
             |path| {
                 inputs.lock().unwrap().push(String::from_utf8_lossy(path).into_owned());
                 Ok(None)

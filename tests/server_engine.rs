@@ -605,6 +605,7 @@ fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
         .compile(
             &CompiledFiles::default(),
             |_| Ok(None),
+            |_| false,
             |path| {
                 let input = database.get(&FileId::new(path)).ok().map(|file| Input {
                     path: path.to_vec(),

@@ -20,6 +20,7 @@
 //! else. A compile whose law checker refused a file keeps none, since what the checker does depends on no input. A
 //! project with an extension host enabled compiles every time, since a host names none of what it reads.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -63,6 +64,7 @@ use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
 use mago_database::loader::ExcludedFolders;
 use mago_database::loader::read_listed;
+use mago_database::membership::WorkspaceMatcher;
 use mago_orchestrator::Autoloader;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::OrchestratorError;
@@ -211,32 +213,16 @@ const HOST_REPORT: &str = "report.json";
 pub(crate) fn compile_for_hosts(
     configuration: &Configuration,
 ) -> Result<(BTreeMap<String, ExtensionHostConfiguration>, HostsChange), Error> {
-    let mut hosts = configuration.extension_hosts.clone();
-    if !hosts.values().any(|host| host.enabled) {
-        return Ok((hosts, HostsChange::Unchanged));
-    }
+    let mut hosts = HostsCompile::new(configuration)?;
+    let compiled = if hosts.enabled { silenced(|| hosts.compile_whole(false))? } else { HostsChange::Unchanged };
 
-    let workspace = configuration.source.workspace.clone();
-    let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.clone(), error))?;
-    let project: String =
-        unit::source_hash(root.as_os_str().as_encoded_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
-    let folder = mago_sharp_lean::cache_root()
-        .map_err(|error| OrchestratorError::General(error.to_string()))?
-        .join("hosts")
-        .join(project);
-    let mut without_hosts = configuration.clone();
-    without_hosts.extension_hosts.clear();
+    Ok((hosts.extension_hosts, compiled))
+}
 
-    let compiled = tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
-        compile_in_turn(&without_hosts, &root, &folder)
-    })?;
-
-    for host in hosts.values_mut().filter(|host| host.enabled) {
-        host.environment.insert(HOST_ROOT.to_owned(), root.to_string_lossy().into_owned());
-        host.environment.insert(HOST_COMPILED.to_owned(), folder.to_string_lossy().into_owned());
-    }
-
-    Ok((hosts, compiled))
+/// Runs `compile` with its own thread's log silenced, as the hosts' compile runs: the run with the hosts that follows
+/// reports the project's errors.
+fn silenced<T>(compile: impl FnOnce() -> T) -> T {
+    tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), compile)
 }
 
 /// Lets go of the lock of each hosts' folder this process holds, so other runs compile into it while its hosts read
@@ -265,69 +251,284 @@ pub(crate) enum HostsChange {
     Unknown,
 }
 
-/// Runs [`compile_into`] under the lock of `folder`'s [`COMPILE_LOCK`], as [`compile_for_hosts`] says, and keeps the
-/// shared lock in [`HOSTS_FOLDERS`]. A project with no PHP# file gives its hosts nothing to read, so it takes no lock.
-/// Returns what changed in the folder's tree since this process last held it: the files this compile changed, or any,
-/// when its record differs from the one the process last held, as after another run's compile between a watch's
-/// analyses. A folder that keeps no record can't tell, so any file may have changed.
-fn compile_in_turn(configuration: &Configuration, root: &Path, folder: &Path) -> Result<HostsChange, Error> {
-    let mut filesystems = Filesystems::new();
-    let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
-    let excluded = excluded_folders(&orchestrator, configuration)?;
-    let mut sources =
-        source_files(configuration, root, &mut filesystems, orchestrator.autoloader().as_deref(), &excluded);
-    if !sources.keys().any(|name| name.ends_with(".sharp")) {
-        return Ok(HostsChange::Unchanged);
+/// The compile of a project for its extension hosts, as [`compile_for_hosts`] runs it, which a watch keeps between its
+/// analyses. After its first compile it keeps that compile's analysis and record, so each [`Self::recompile`] analyzes
+/// and lowers again only what the files that changed reach, stamps only their inputs, and writes only the compiled files
+/// whose bytes changed.
+pub(crate) struct HostsCompile {
+    /// The project's configuration with no extension host, which the compile runs under.
+    configuration: Configuration,
+    /// The project's hosts, each enabled one given the folder through [`HOST_ROOT`] and [`HOST_COMPILED`].
+    extension_hosts: BTreeMap<String, ExtensionHostConfiguration>,
+    /// Whether a host is enabled, without which there is nothing to compile.
+    enabled: bool,
+    /// The project's canonical root.
+    root: PathBuf,
+    /// The hosts' folder in mago's cache.
+    folder: PathBuf,
+    /// What the last compile this process ran into the folder left, or none before the first.
+    last: Option<LastCompile>,
+}
+
+/// What a compile for the hosts left in the process that ran it, which the next one starts from while no other run
+/// compiled into the folder since.
+struct LastCompile {
+    /// The analysis it lowered from, without the hosts.
+    server: Server,
+    /// The autoloader of Composer's maps, which serves files the record stamps apart from the sources.
+    autoloader: Option<std::sync::Arc<Autoloader>>,
+    /// Which paths the project's database holds a file at.
+    workspace: WorkspaceMatcher,
+    /// The source files the record keeps, as [`source_files`] finds them.
+    sources: BTreeMap<String, Found>,
+    /// Whether each filesystem records every write.
+    filesystems: Filesystems,
+    /// The standard library the compiled files name.
+    library: unit::Library,
+    /// What it kept of each PHP# file it accepted.
+    compiled_files: CompiledFiles,
+    /// The status and hash of each file it wrote or kept, by name, as the record keeps them.
+    outputs: BTreeMap<String, (Status, [u8; 16])>,
+    /// The stamp of each source file and source listing it stamped, which holds until the file or a file of the folder
+    /// changes.
+    stamps: HashMap<Vec<u8>, unit::Input>,
+}
+
+impl HostsCompile {
+    /// The compile for the hosts of `configuration`'s project, which has compiled nothing yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of finding the project's root or mago's cache.
+    pub(crate) fn new(configuration: &Configuration) -> Result<Self, Error> {
+        let mut extension_hosts = configuration.extension_hosts.clone();
+        let workspace = configuration.source.workspace.clone();
+        if !extension_hosts.values().any(|host| host.enabled) {
+            return Ok(Self {
+                configuration: configuration.clone(),
+                extension_hosts,
+                enabled: false,
+                root: workspace,
+                folder: PathBuf::new(),
+                last: None,
+            });
+        }
+
+        let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.clone(), error))?;
+        let project: String =
+            unit::source_hash(root.as_os_str().as_encoded_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
+        let folder = mago_sharp_lean::cache_root()
+            .map_err(|error| OrchestratorError::General(error.to_string()))?
+            .join("hosts")
+            .join(project);
+        for host in extension_hosts.values_mut().filter(|host| host.enabled) {
+            host.environment.insert(HOST_ROOT.to_owned(), root.to_string_lossy().into_owned());
+            host.environment.insert(HOST_COMPILED.to_owned(), folder.to_string_lossy().into_owned());
+        }
+        let mut without_hosts = configuration.clone();
+        without_hosts.extension_hosts.clear();
+
+        Ok(Self { extension_hosts, ..Self::at(&without_hosts, &root, &folder) })
     }
 
-    let path = folder.join(COMPILE_LOCK);
-    let record_path = folder.join(INPUTS);
-    let locking = |error| DatabaseError::io(IOAction::WriteFile, &path, error);
-    let mut held = HOSTS_FOLDERS.lock().unwrap_or_else(PoisonError::into_inner).remove(folder);
-    let lock = match held.as_mut().and_then(|held| held.lock.take()) {
-        Some(lock) => lock,
-        None => mago_database::lock::shared(&path)?,
-    };
-    let compiled = if every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems) {
-        None
-    } else {
-        let stale = std::fs::read(&record_path).ok();
-        lock.unlock().and_then(|()| lock.lock()).map_err(locking)?;
-        // Only a compile writes the record, under the exclusive lock, so a record that changed while this run waited
-        // for the lock is another run's compile, whose tree this run checks again and reuses when it is current.
-        let reused = std::fs::read(&record_path).ok() != stale && {
-            filesystems = Filesystems::new();
-            sources =
-                source_files(configuration, root, &mut filesystems, orchestrator.autoloader().as_deref(), &excluded);
-            every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems)
+    /// The compile of the project at `root` with `configuration`, which enables no host, into `folder`.
+    fn at(configuration: &Configuration, root: &Path, folder: &Path) -> Self {
+        Self {
+            configuration: configuration.clone(),
+            extension_hosts: BTreeMap::new(),
+            enabled: true,
+            root: root.to_path_buf(),
+            folder: folder.to_path_buf(),
+            last: None,
+        }
+    }
+
+    /// The project's hosts, each enabled one given the folder through [`HOST_ROOT`] and [`HOST_COMPILED`].
+    pub(crate) fn extension_hosts(&self) -> &BTreeMap<String, ExtensionHostConfiguration> {
+        &self.extension_hosts
+    }
+
+    /// Compiles the project for its hosts again after the files `changed` names changed, as `database` now holds them:
+    /// from the last compile's analysis and record, when this process compiled last and no other run compiled into the
+    /// folder since, or else as [`compile_for_hosts`] does. Returns what changed in the folder's tree since this process
+    /// last held it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error that stops the compile.
+    pub(crate) fn recompile(&mut self, database: &Database<'_>, changed: &[FileId]) -> Result<HostsChange, Error> {
+        if !self.enabled {
+            return Ok(HostsChange::Unchanged);
+        }
+
+        silenced(|| match self.last.take() {
+            Some(last) => self.compile_changes(last, database, changed),
+            None => self.compile_whole(true),
+        })
+    }
+
+    /// Compiles the whole project under the lock of the folder's [`COMPILE_LOCK`], as [`compile_for_hosts`] says, and
+    /// keeps the shared lock in [`HOSTS_FOLDERS`]. A project with no PHP# file gives its hosts nothing to read, so it
+    /// takes no lock. When `keeping`, as a watch's compile is, it keeps what the next compile starts from, its analysis
+    /// included, which a folder that was current needs the analysis of the project for. Returns what changed in the
+    /// folder's tree since this process last held it: the files this compile changed, or any, when its record differs
+    /// from the one the process last held, as after another run's compile between a watch's analyses. A folder that
+    /// keeps no record can't tell, so any file may have changed.
+    fn compile_whole(&mut self, keeping: bool) -> Result<HostsChange, Error> {
+        let Self { configuration, root, folder, last: left, .. } = self;
+        let (configuration, root, folder) = (&*configuration, &*root, &*folder);
+        *left = None;
+        let mut filesystems = Filesystems::new();
+        let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
+        let excluded = excluded_folders(&orchestrator, configuration)?;
+        let mut sources =
+            source_files(configuration, root, &mut filesystems, orchestrator.autoloader().as_deref(), &excluded);
+        if !sources.keys().any(|name| name.ends_with(".sharp")) {
+            return Ok(HostsChange::Unchanged);
+        }
+
+        let path = folder.join(COMPILE_LOCK);
+        let record_path = folder.join(INPUTS);
+        let locking = |error| DatabaseError::io(IOAction::WriteFile, &path, error);
+        let mut held = HOSTS_FOLDERS.lock().unwrap_or_else(PoisonError::into_inner).remove(folder);
+        let lock = match held.as_mut().and_then(|held| held.lock.take()) {
+            Some(lock) => lock,
+            None => mago_database::lock::shared(&path)?,
         };
-        let compiled = if reused {
+        let compiled = if every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems) {
             None
         } else {
-            compile_into(configuration, root, folder, &orchestrator, &sources, filesystems)?
+            let stale = std::fs::read(&record_path).ok();
+            lock.unlock().and_then(|()| lock.lock()).map_err(locking)?;
+            // Only a compile writes the record, under the exclusive lock, so a record that changed while this run waited
+            // for the lock is another run's compile, whose tree this run checks again and reuses when it is current.
+            let reused = std::fs::read(&record_path).ok() != stale && {
+                filesystems = Filesystems::new();
+                sources = source_files(
+                    configuration,
+                    root,
+                    &mut filesystems,
+                    orchestrator.autoloader().as_deref(),
+                    &excluded,
+                );
+                every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems)
+            };
+            let compiled = if reused {
+                None
+            } else {
+                Some(compile_into(configuration, root, folder, &orchestrator, &sources, filesystems.clone())?)
+            };
+            lock.unlock().and_then(|()| lock.lock_shared()).map_err(locking)?;
+            compiled
         };
-        lock.unlock().and_then(|()| lock.lock_shared()).map_err(locking)?;
-        compiled
-    };
-    let record = std::fs::read(&record_path).ok().map(|bytes| unit::source_hash(&bytes));
-    let last = held.map(|held| held.record);
-    HOSTS_FOLDERS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(folder.to_path_buf(), HeldFolder { lock: Some(lock), record });
+        let compiled = match compiled {
+            Some((compiled, last)) => {
+                *left = keeping.then_some(last);
+                compiled
+            }
+            None => {
+                if keeping {
+                    let outputs = Record::read(&record_path).map(|mut record| std::mem::take(&mut record.outputs));
+                    *left = Some(LastCompile::analyzed(
+                        configuration,
+                        root,
+                        folder,
+                        &orchestrator,
+                        &sources,
+                        filesystems,
+                        outputs.unwrap_or_default(),
+                    )?);
+                }
+                None
+            }
+        };
+        let record = std::fs::read(&record_path).ok().map(|bytes| unit::source_hash(&bytes));
+        let last = held.map(|held| held.record);
+        HOSTS_FOLDERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(folder.to_path_buf(), HeldFolder { lock: Some(lock), record });
 
-    Ok(match (compiled, last) {
-        (Some(recompiled), _) => HostsChange::Recompiled(recompiled),
-        (None, Some(last)) if record.is_none() || last != record => HostsChange::Unknown,
-        (None, _) => HostsChange::Unchanged,
-    })
+        Ok(match (compiled, last) {
+            (Some(recompiled), _) => HostsChange::Recompiled(recompiled),
+            (None, Some(last)) if record.is_none() || last != record => HostsChange::Unknown,
+            (None, _) => HostsChange::Unchanged,
+        })
+    }
+
+    /// Compiles the project again from `last`, what the last compile of this process left, after the files `changed`
+    /// names changed, as `database` holds them now, under the lock of the folder's [`COMPILE_LOCK`] as
+    /// [`Self::compile_whole`] takes it. A run that compiled into the folder since this process held it last leaves
+    /// `last` out of date, so the whole compile runs instead. Returns what changed in the folder's tree.
+    fn compile_changes(
+        &mut self,
+        mut last: LastCompile,
+        database: &Database<'_>,
+        changed: &[FileId],
+    ) -> Result<HostsChange, Error> {
+        let path = self.folder.join(COMPILE_LOCK);
+        let record_path = self.folder.join(INPUTS);
+        let locking = |error| DatabaseError::io(IOAction::WriteFile, &path, error);
+        let recorded = || std::fs::read(&record_path).ok().map(|bytes| unit::source_hash(&bytes));
+        let hold = |lock: std::fs::File, record: Option<[u8; 16]>| {
+            HOSTS_FOLDERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(self.folder.clone(), HeldFolder { lock: Some(lock), record });
+        };
+        let Some(held) = HOSTS_FOLDERS.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.folder) else {
+            return self.compile_whole(true);
+        };
+        let lock = match held.lock {
+            Some(lock) => lock,
+            None => mago_database::lock::shared(&path)?,
+        };
+        // Only a compile writes the record, under the exclusive lock, so a record other than the one this process held
+        // last is another run's compile, which leaves `last` out of date. The whole compile then tells what changed.
+        if recorded() != held.record {
+            hold(lock, held.record);
+
+            return self.compile_whole(true);
+        }
+
+        let touched = last.take_in(database, changed, &self.root);
+        if touched.is_empty() {
+            hold(lock, held.record);
+            self.last = Some(last);
+
+            return Ok(HostsChange::Unchanged);
+        }
+        lock.unlock().and_then(|()| lock.lock()).map_err(locking)?;
+        if recorded() != held.record {
+            lock.unlock().and_then(|()| lock.lock_shared()).map_err(locking)?;
+            hold(lock, held.record);
+
+            return self.compile_whole(true);
+        }
+        last.server.analyze_incremental(&touched)?;
+        // A record the compile can't delete is in a folder it then fails to write its compiled files to.
+        let _ = std::fs::remove_file(&record_path);
+        let record = Record::start(
+            &self.configuration,
+            &self.root,
+            &last.sources,
+            &self.folder,
+            last.filesystems.clone(),
+            last.autoloader.as_deref(),
+        );
+        let compiled = write_hosts_folder(&self.configuration, &self.root, &self.folder, &mut last, record)?;
+        lock.unlock().and_then(|()| lock.lock_shared()).map_err(locking)?;
+        hold(lock, recorded());
+        self.last = Some(last);
+
+        Ok(compiled.map_or(HostsChange::Unchanged, HostsChange::Recompiled))
+    }
 }
 
 /// Compiles the project at `root`, whose source files are `sources`, as [`source_files`] found them with `orchestrator`
-/// and `filesystems`, into `folder` for its extension hosts, as [`compile_for_hosts`] says, and keeps the record of what
-/// it read and wrote in `folder`'s [`INPUTS`]. Its log never decides the record: the loader and the analysis log from
-/// their worker threads too, which the main thread's subscriber doesn't silence, and the run with the hosts that follows
-/// reports what they log. Returns, when a file in `folder` changed, the files whose compiled file changed.
+/// and `filesystems`, into `folder` for its extension hosts, as [`compile_for_hosts`] says, from an analysis of its own,
+/// as [`write_hosts_folder`] writes it. Returns, when a file in `folder` changed, the files whose compiled file changed,
+/// and what the compile leaves for the next one to start from.
 fn compile_into(
     configuration: &Configuration,
     root: &Path,
@@ -335,35 +536,169 @@ fn compile_into(
     orchestrator: &Orchestrator<'_>,
     sources: &BTreeMap<String, Found>,
     filesystems: Filesystems,
-) -> Result<Option<Recompiled>, Error> {
+) -> Result<(Option<Recompiled>, LastCompile), Error> {
     let record_path = folder.join(INPUTS);
-    let autoloader = orchestrator.autoloader();
+    // The last compile's outputs, which it keeps unread while their status holds.
+    let outputs = Record::read(&record_path).map(|mut record| std::mem::take(&mut record.outputs)).unwrap_or_default();
     // A record the compile can't delete is in a folder it then fails to write its compiled files to.
     let _ = std::fs::remove_file(&record_path);
-    let mut record = Record::start(configuration, root, sources, folder, filesystems, autoloader.as_deref());
-    let (database, _) = project_database(orchestrator, &configuration.source.workspace)?;
+    let record =
+        Record::start(configuration, root, sources, folder, filesystems.clone(), orchestrator.autoloader().as_deref());
+    let mut last = LastCompile::analyzed(configuration, root, folder, orchestrator, sources, filesystems, outputs)?;
+    let compiled = write_hosts_folder(configuration, root, folder, &mut last, record)?;
 
-    let library = standard_library(root, &database).map_err(OrchestratorError::General)?;
-    let mut server =
-        Server::new(database.into_static(), decode_prelude, server_settings(orchestrator)).keeping_lowering_inputs();
-    server.analyze()?;
+    Ok((compiled, last))
+}
+
+impl LastCompile {
+    /// Takes in that the files `changed` names changed, as `database` names them now: each the analysis's database
+    /// holds, or the project's would hold at its path, goes in or out of the analysis's database and of the sources the
+    /// record keeps, and its stamp and those of the listings of its folder and each folder above it are forgotten. Each
+    /// file's bytes are read after its status, as [`source_files`] and the loader take them, so a write between the two
+    /// leaves a status the record never matches. Returns the files the analysis holds that changed.
+    fn take_in(&mut self, database: &Database<'_>, changed: &[FileId], root: &Path) -> Vec<FileId> {
+        let mut touched = Vec::new();
+        for id in changed {
+            let held = self.server.database().get(id).ok();
+            let Some(file) = database
+                .get(id)
+                .ok()
+                .filter(|file| held.is_some() || file.path.as_deref().is_some_and(|path| self.workspace.contains(path)))
+                .or(held)
+            else {
+                continue;
+            };
+            let name = String::from_utf8_lossy(&file.name).into_owned();
+            let path = root.join(&name);
+            let status = std::fs::metadata(&path)
+                .ok()
+                .filter(std::fs::Metadata::is_file)
+                .map(|metadata| Status::of(&path, &metadata, &mut self.filesystems));
+            match (status, read_listed(&path)) {
+                (Some(status), Ok(Some(contents))) => {
+                    let file_type = match file.file_type {
+                        FileType::Vendored if Dialect::of(&file).is_sharp() => FileType::Host,
+                        file_type => file_type,
+                    };
+                    self.server.database_mut().add(copy_of(&file, file_type, Cow::Owned(contents)));
+                    if !self.autoloader.as_ref().is_some_and(|autoloader| autoloader.serves(&path)) {
+                        let real =
+                            path.canonicalize().ok().map(|real| source_name(root, &real)).filter(|real| *real != name);
+                        self.sources.insert(name.clone(), Found(status, real));
+                    }
+                }
+                _ => {
+                    self.server.database_mut().delete(*id);
+                    self.sources.remove(&name);
+                }
+            }
+            touched.push(*id);
+            let name = name.into_bytes();
+            self.stamps.remove(&name);
+            for (end, _) in name.iter().enumerate().filter(|(_, byte)| **byte == b'/') {
+                self.stamps.remove(&[&name[..=end], unit::SOURCE_LISTING.as_bytes()].concat());
+            }
+            self.stamps.remove(unit::SOURCE_LISTING.as_bytes());
+        }
+
+        touched
+    }
+
+    /// What a compile into `folder` for the hosts of the project at `root` starts from: the analysis of the project
+    /// without the hosts, whose source files are `sources`, as [`source_files`] found them with `orchestrator` and
+    /// `filesystems`, the record of the compiled files the folder holds, and `outputs`, the status and hash of each file
+    /// the folder's record names as written.
+    fn analyzed(
+        configuration: &Configuration,
+        root: &Path,
+        folder: &Path,
+        orchestrator: &Orchestrator<'_>,
+        sources: &BTreeMap<String, Found>,
+        filesystems: Filesystems,
+        outputs: BTreeMap<String, (Status, [u8; 16])>,
+    ) -> Result<Self, Error> {
+        let (database, _) = project_database(orchestrator, &configuration.source.workspace)?;
+        let library = standard_library(root, &database).map_err(OrchestratorError::General)?;
+        let mut server = Server::new(database.into_static(), decode_prelude, server_settings(orchestrator))
+            .keeping_lowering_inputs();
+        server.analyze()?;
+
+        Ok(Self {
+            server,
+            autoloader: orchestrator.autoloader(),
+            workspace: WorkspaceMatcher::from_configuration(
+                &orchestrator.database_configuration(&configuration.source.workspace, true),
+            )?,
+            sources: sources.clone(),
+            filesystems,
+            library,
+            compiled_files: CompiledFiles::decode(
+                &std::fs::read(folder.join(COMPILED_FILES)).unwrap_or_default(),
+                configuration_hash(configuration),
+            ),
+            outputs,
+            stamps: HashMap::new(),
+        })
+    }
+}
+
+/// Compiles the project at `root` from `last`'s analysis into `folder` for its extension hosts, as
+/// [`compile_for_hosts`] says, and keeps the record of what it read and wrote in `folder`'s [`INPUTS`], which `record`
+/// starts. Each compiled file whose status the last compile recorded holds is kept unread while its key and its inputs'
+/// stamps hold, and each other one is written only when its bytes changed. Its log never decides the record: the
+/// loader and the analysis log from their worker threads too, which the main thread's subscriber doesn't silence, and
+/// the run with the hosts that follows reports what they log. Returns, when a file in `folder` changed, the files
+/// whose compiled file changed, and leaves in `last` what the next compile starts from.
+fn write_hosts_folder(
+    configuration: &Configuration,
+    root: &Path,
+    folder: &Path,
+    last: &mut LastCompile,
+    mut record: Option<Record>,
+) -> Result<Option<Recompiled>, Error> {
+    let record_path = folder.join(INPUTS);
+    let LastCompile {
+        server, autoloader, filesystems, library, compiled_files: last_compiled, outputs, stamps, ..
+    } = last;
     // A file whose errors the lowering does not survive is refused, whatever panic message its lowering printed.
     let printing = std::panic::take_hook();
     std::panic::set_hook(Box::new(|panic| tracing::debug!("{panic}")));
     let stamped = Mutex::new(Vec::new());
+    let fresh = Mutex::new(Vec::new());
+    let held = server.database().read_only();
+    // A source file's stamp holds until the file changes, and a listing's until a file of its folder does.
+    let remembered = |path: &[u8]| -> Result<Option<unit::Input>, DatabaseError> {
+        if let Some(input) = stamps.get(path) {
+            return Ok(Some(input.clone()));
+        }
+        let input = unit::stamp(root, path)?;
+        if let Some(input) = &input
+            && (held.get_id(path).is_some() || path.ends_with(unit::SOURCE_LISTING.as_bytes()))
+        {
+            fresh.lock().unwrap_or_else(PoisonError::into_inner).push(input.clone());
+        }
+
+        Ok(input)
+    };
     let compiled_files_path = folder.join(COMPILED_FILES);
     let compilations = server.compile(
-        &CompiledFiles::decode(
-            &std::fs::read(&compiled_files_path).unwrap_or_default(),
-            configuration_hash(configuration),
-        ),
+        last_compiled,
         |file| match host_compiled_path(root, folder, &source_path(root, file))? {
             Some(compiled) => read_listed(&compiled),
             None => Ok(None),
         },
-        recording_stamp(root, &stamped),
+        |file| match host_compiled_path(root, folder, &source_path(root, file)) {
+            Ok(Some(compiled)) => is_unchanged(&compiled, outputs.get(&source_name(root, &compiled)), filesystems),
+            _ => false,
+        },
+        |path| {
+            let input = remembered(path)?;
+            stamped.lock().unwrap_or_else(PoisonError::into_inner).push(recorded(path, input.as_ref()));
+
+            Ok(input)
+        },
         |_, _| Ok(Default::default()),
-        &library,
+        library,
         |_| IssueCollection::default(),
     );
     std::panic::set_hook(printing);
@@ -388,6 +723,7 @@ fn compile_into(
     keep(&compiled_files_path, &bytes, write_if_changed(&compiled_files_path, &bytes)?);
     written.insert(compiled_files_path);
     let mut writes = Vec::new();
+    let mut kept = Vec::new();
     for (file_id, compilation) in compilations {
         let file = database.get_ref(&file_id)?;
         let Some(compiled) = host_compiled_path(root, folder, &source_path(root, file))? else {
@@ -396,6 +732,11 @@ fn compile_into(
         match compilation {
             Compilation::Accepted(bytes) => {
                 writes.push((file_id, compiled, bytes));
+                accepted.insert(file_id);
+            }
+            Compilation::Kept => {
+                kept.push(compiled.clone());
+                written.insert(compiled);
                 accepted.insert(file_id);
             }
             Compilation::Refused(errors) => {
@@ -425,7 +766,7 @@ fn compile_into(
         .map(|class| ascii_lowercase_word(class.original_name.as_bytes()))
         .collect();
 
-    let inputs = listener_inputs(root, database)?;
+    let inputs = listener_inputs(database, remembered)?;
     if !inputs.is_empty() {
         let listeners = server.listeners();
         let externs = server.extern_attributes();
@@ -461,6 +802,15 @@ fn compile_into(
     let path = folder.join(HOST_REPORT);
     keep(&path, &report, write_if_changed(&path, &report)?);
     written.insert(path);
+    if let Some(record) = record.as_mut() {
+        for compiled in kept {
+            if let Some(output) = outputs.get(&source_name(root, &compiled)) {
+                record.unchanged_output(&compiled, *output);
+            }
+        }
+    }
+    // The statuses of the files this compile wrote or kept, which the next one keeps unread while they hold.
+    let next_outputs = record.as_ref().map(|record| record.outputs.clone()).unwrap_or_default();
     // A compile with a file that doesn't lower keeps no record, so the next one tries that file again.
     let record = record.filter(|_| lowered);
     written.extend(record.as_ref().and_then(Record::marker_path));
@@ -470,6 +820,12 @@ fn compile_into(
         let listed = inputs.iter().map(|input| recorded(&input.path, Some(input)));
         record.write(&record_path, Outcome::default(), database, stamped.into_iter().chain(listed))?;
     }
+    *outputs = next_outputs;
+    *last_compiled = compiled_files;
+    stamps.extend(fresh.into_inner().unwrap_or_else(PoisonError::into_inner).into_iter().map(|input| {
+        let path = input.path.clone();
+        (path, input)
+    }));
 
     Ok((changed || deleted > 0).then_some(Recompiled { files: recompiled, classes }))
 }
@@ -495,13 +851,7 @@ pub(crate) fn project_database(
     let packaged: Vec<File> = database
         .files()
         .filter(|file| file.file_type == FileType::Vendored && Dialect::of(file).is_sharp())
-        .map(|file| {
-            let mut host = File::new(file.name.clone(), FileType::Host, file.path.clone(), file.contents.clone());
-            host.is_standard_library = file.is_standard_library;
-            host.folder_namespace = file.folder_namespace.clone();
-            host.is_project = file.is_project;
-            host
-        })
+        .map(|file| copy_of(&file, FileType::Host, file.contents.clone()))
         .collect();
     let included: HashSet<Vec<u8>> = packaged.iter().map(|file| file.name.to_vec()).collect();
     for file in packaged {
@@ -509,6 +859,16 @@ pub(crate) fn project_database(
     }
 
     Ok((database.into_static(), included))
+}
+
+/// A copy of `file` as a file of `file_type` that holds `contents`, as a package's `.sharp` file is copied into a file
+/// of the project, which the compile checks too.
+fn copy_of(file: &File, file_type: FileType, contents: Cow<'static, [u8]>) -> File {
+    let mut copy = File::new(file.name.clone(), file_type, file.path.clone(), contents);
+    copy.is_standard_library = file.is_standard_library;
+    copy.folder_namespace = file.folder_namespace.clone();
+    copy.is_project = file.is_project;
+    copy
 }
 
 /// A fresh orchestrator of the whole workspace, as `mago analyze` makes one when no path is named, with Composer's
@@ -609,14 +969,17 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     let autoloader = orchestrator.autoloader();
     let excluded = excluded_folders(&orchestrator, configuration)?;
     let sources = source_files(configuration, &root, &mut filesystems, autoloader.as_deref(), &excluded);
+    let mut last = Record::read(&record_path);
     // A host names none of what it reads, so only a compile without hosts can know it has nothing to do.
     if !configuration.extension_hosts.values().any(|host| host.enabled)
-        && let Some(mut record) = Record::read(&record_path)
-        && every_input_is_current(&record, configuration, &root, &sources, &mut filesystems)
+        && let Some(record) = last.as_mut()
+        && every_input_is_current(record, configuration, &root, &sources, &mut filesystems)
         && let Some(database) = record.outcome.report_database(&root)?
     {
         return std::mem::take(&mut record.outcome).print(database, configuration, color_choice);
     }
+    // The last compile's outputs, which this one keeps unread while their status holds.
+    let outputs = last.map(|mut record| std::mem::take(&mut record.outputs)).unwrap_or_default();
     // A record the compile can't delete is in a folder it then fails to write its compiled files to.
     let _ = std::fs::remove_file(&record_path);
     // A warning or an error the compile doesn't print in its outcome is printed again by the next compile, which a
@@ -626,7 +989,9 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     let mut record = sources
         .keys()
         .any(|name| name.ends_with(".sharp"))
-        .then(|| Record::start(configuration, &root, &sources, &compiled_folder, filesystems, autoloader.as_deref()))
+        .then(|| {
+            Record::start(configuration, &root, &sources, &compiled_folder, filesystems.clone(), autoloader.as_deref())
+        })
         .flatten();
 
     if let Some(external_analyzer) = start_external_analyzer(
@@ -760,6 +1125,12 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
             Some(compiled) => read_listed(&compiled),
             None => Ok(None),
         },
+        |file| match unit::compiled_path(&root, &source_path(&root, file)) {
+            Ok(Some(compiled)) => {
+                is_unchanged(&compiled, outputs.get(&source_name(&root, &compiled)), &mut filesystems)
+            }
+            _ => false,
+        },
         recording_stamp(&root, &stamped),
         |translations, reach| lean.check(translations, reach),
         &library,
@@ -804,6 +1175,15 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
                 writes.push((compiled, bytes));
                 accepted.insert(file_id);
             }
+            Compilation::Kept => {
+                if let Some(record) = record.as_mut()
+                    && let Some(output) = outputs.get(&source_name(&root, &compiled))
+                {
+                    record.unchanged_output(&compiled, *output);
+                }
+                written.insert(compiled);
+                accepted.insert(file_id);
+            }
             Compilation::Refused(issues) => {
                 refused.extend(issues);
                 if Dialect::of(file).is_sharp() {
@@ -831,7 +1211,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     }
 
     let listeners = server.listeners();
-    let inputs = listener_inputs(&root, database)?;
+    let inputs = listener_inputs(database, |path| unit::stamp(&root, path))?;
     if !inputs.is_empty() {
         let externs = server.extern_attributes();
         let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| accepted.contains(&line.file_id)).collect();
@@ -1201,6 +1581,14 @@ impl Record {
         }
     }
 
+    /// Keeps the file at `path`, which the compile kept unread, as an output with `output`, the status and hash the last
+    /// compile recorded for it, which [`is_unchanged`] found it still has.
+    fn unchanged_output(&mut self, path: &Path, output: (Status, [u8; 16])) {
+        let name = source_name(&self.root, path);
+        self.files.remove(&name);
+        self.outputs.insert(name, output);
+    }
+
     /// Keeps the file at `path`, which the compile read, as an input with its stamp now.
     fn input(&mut self, path: &Path) {
         let name = source_name(&self.root, path);
@@ -1307,11 +1695,9 @@ fn every_input_is_current(
         && found.iter().zip(&record.files).all(|((name, Found(_, real)), (recorded, (Found(_, recorded_real), _)))| {
             *name == recorded && real == recorded_real
         })
-        && record.outputs.iter().all(|(name, (status, hash))| {
-            let output = root.join(name);
-            std::fs::metadata(&output)
-                .is_ok_and(|metadata| status.sees_writes() && Status::of(&output, &metadata, filesystems) == *status)
-                || hashes_as(&output, hash)
+        && record.outputs.iter().all(|(name, output)| {
+            let path = root.join(name);
+            is_unchanged(&path, Some(output), filesystems) || hashes_as(&path, &output.1)
         })
         && record.inputs.par_iter().all(|(path, size, hash)| match unit::stamp(root, path.as_bytes()) {
             Ok(Some(input)) => (input.size, input.hash) == (*size, *hash),
@@ -1322,6 +1708,15 @@ fn every_input_is_current(
         && found.iter().zip(record.files.values()).all(|((name, Found(status, _)), (Found(recorded, _), hash))| {
             (status == recorded && status.is_older_than(record.marker)) || hashes_as(&root.join(name), hash)
         })
+}
+
+/// Whether the file at `path`, an output a compile recorded as `output`, is the one it wrote: its status is the one
+/// recorded, on a filesystem whose status change time records every write. `filesystems` tells which do.
+fn is_unchanged(path: &Path, output: Option<&(Status, [u8; 16])>, filesystems: &mut Filesystems) -> bool {
+    output.is_some_and(|(status, _)| {
+        status.sees_writes()
+            && std::fs::metadata(path).is_ok_and(|metadata| Status::of(path, &metadata, filesystems) == *status)
+    })
 }
 
 /// An input as [`Record`] holds it: its path, size and hash, both zero when no file is there.
@@ -1668,9 +2063,12 @@ pub(crate) fn standard_library(root: &Path, database: &impl DatabaseReader) -> R
 
 /// The inputs of the listener table, stamped as the engine reads them, which it checks only while it compiles on
 /// demand: every PHP# file, which an `on` clause or a module binding the dispatcher may join, and the listing of the
-/// folder of each and of each folder above it, which a PHP# file or a namespace folder joining or leaving changes. A
-/// project with no PHP# file has none.
-fn listener_inputs(root: &Path, database: &impl DatabaseReader) -> Result<Vec<unit::Input>, Error> {
+/// folder of each and of each folder above it, which a PHP# file or a namespace folder joining or leaving changes, each
+/// as `stamp` gives it. A project with no PHP# file has none.
+fn listener_inputs(
+    database: &impl DatabaseReader,
+    stamp: impl Fn(&[u8]) -> Result<Option<unit::Input>, DatabaseError> + Sync,
+) -> Result<Vec<unit::Input>, Error> {
     let mut paths = BTreeSet::new();
     for file in database.files().filter(|file| file.file_type == FileType::Host && Dialect::of(file).is_sharp()) {
         paths.insert(file.name.to_vec());
@@ -1684,8 +2082,7 @@ fn listener_inputs(root: &Path, database: &impl DatabaseReader) -> Result<Vec<un
 
     let paths: Vec<Vec<u8>> = paths.into_iter().collect();
     // Stamped at once, and the first file in order that can't be read is the one named, as one after another.
-    let stamped: Vec<Result<Option<unit::Input>, DatabaseError>> =
-        paths.par_iter().map(|path| unit::stamp(root, path)).collect();
+    let stamped: Vec<Result<Option<unit::Input>, DatabaseError>> = paths.par_iter().map(|path| stamp(path)).collect();
     let stamped: Vec<Option<unit::Input>> = stamped.into_iter().collect::<Result<_, _>>()?;
 
     Ok(stamped.into_iter().flatten().collect())
@@ -2321,7 +2718,7 @@ mod tests {
     fn the_hosts_compile_runs_again_after_an_edit_of_a_vendor_file() {
         let (_directory, root, configuration) = project();
         let folder = tempfile::tempdir().unwrap();
-        let compile = || compile_in_turn(&configuration, &root, folder.path()).unwrap();
+        let compile = || HostsCompile::at(&configuration, &root, folder.path()).compile_whole(false).unwrap();
         assert!(matches!(compile(), HostsChange::Recompiled(_)), "a fresh folder is written");
         // A compile that runs writes its record anew, though every compiled file it writes is the same.
         let recorded = || std::fs::metadata(folder.path().join(INPUTS)).unwrap().modified().unwrap();
@@ -2355,7 +2752,7 @@ mod tests {
         );
         let folder = tempfile::tempdir().unwrap();
 
-        let Err(error) = compile_in_turn(&configuration, &root, folder.path()) else {
+        let Err(error) = HostsCompile::at(&configuration, &root, folder.path()).compile_whole(false) else {
             panic!("the hosts' compile accepted library 0.5.9");
         };
         assert_eq!(
@@ -2367,6 +2764,108 @@ mod tests {
             )
         );
         assert!(!folder.path().join("app/Order.sharpc").exists());
+    }
+
+    /// Each file of a hosts' folder but its record of inputs, by its path in the folder.
+    fn folder_files(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        let mut folders = vec![folder.to_path_buf()];
+        while let Some(below) = folders.pop() {
+            for entry in std::fs::read_dir(below).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    folders.push(path);
+                } else if path != folder.join(INPUTS) {
+                    files.insert(path.strip_prefix(folder).unwrap().to_path_buf(), std::fs::read(&path).unwrap());
+                }
+            }
+        }
+
+        files
+    }
+
+    /// A watch compiles each edit for its hosts from its last compile, and each round writes the folder a fresh compile
+    /// of the tree writes, its record of the compiled files byte for byte included, keeps a record that stands for the
+    /// tree, and writes no compiled file whose bytes the edit leaves.
+    #[test]
+    fn each_watch_round_of_the_hosts_compile_writes_what_a_fresh_compile_of_the_tree_writes() {
+        let (_directory, root, configuration) = project();
+        let folder = tempfile::tempdir().unwrap();
+        let mut hosts = HostsCompile::at(&configuration, &root, folder.path());
+        assert!(matches!(hosts.compile_whole(true).unwrap(), HostsChange::Recompiled(_)), "a fresh folder is written");
+        let written = |name: &str| std::fs::metadata(folder.path().join(name)).unwrap().modified().unwrap();
+        let round = |hosts: &mut HostsCompile, changed: &str| {
+            let orchestrator = whole_workspace(&configuration, ColorChoice::Never, false).unwrap();
+            let (database, _) = project_database(&orchestrator, &root).unwrap();
+            let change = hosts.recompile(&database, &[FileId::new(changed.as_bytes())]).unwrap();
+
+            let fresh = tempfile::tempdir().unwrap();
+            HostsCompile::at(&configuration, &root, fresh.path()).compile_whole(false).unwrap();
+            assert_eq!(folder_files(folder.path()), folder_files(fresh.path()), "after the change of {changed}");
+            let mut filesystems = Filesystems::new();
+            let sources = source_files(&configuration, &root, &mut filesystems, None, &no_excludes(&root));
+            assert!(
+                every_compiled_file_is_current(&configuration, &root, folder.path(), &sources, &mut filesystems),
+                "the record stands for the tree after the change of {changed}"
+            );
+
+            change
+        };
+
+        let paced = written("app/Paced.sharpc");
+        write(&root, "app/Order.sharp", "namespace App;\n\npublic class Order\n{\n    public int total() => 2;\n}\n");
+        let HostsChange::Recompiled(Recompiled { files, .. }) = round(&mut hosts, "app/Order.sharp") else {
+            panic!("the body edit compiles again");
+        };
+        assert_eq!(files, HashSet::from([FileId::new(b"app/Order.sharp")]));
+        assert_eq!(written("app/Paced.sharpc"), paced, "the compiled file of Paced is not written again");
+
+        write(&root, "vendor/acme/rate/src/Rate.php", &rate("string"));
+        let HostsChange::Recompiled(Recompiled { files, .. }) = round(&mut hosts, "vendor/acme/rate/src/Rate.php")
+        else {
+            panic!("the vendor edit compiles again");
+        };
+        assert!(files.contains(&FileId::new(b"app/Paced.sharp")), "Paced calls the edited Rate");
+
+        write(
+            &root,
+            "app/Invoice.sharp",
+            "namespace App;\n\npublic class Invoice\n{\n    public int total() => 3;\n}\n",
+        );
+        assert!(matches!(round(&mut hosts, "app/Invoice.sharp"), HostsChange::Recompiled(_)), "a new file compiles");
+        assert!(folder.path().join("app/Invoice.sharpc").exists());
+
+        std::fs::remove_file(root.join("app/Invoice.sharp")).unwrap();
+        assert!(matches!(round(&mut hosts, "app/Invoice.sharp"), HostsChange::Recompiled(_)), "a deleted file is gone");
+        assert!(!folder.path().join("app/Invoice.sharpc").exists());
+    }
+
+    /// A watch that starts on a folder another run compiled, as each watch after the first does, compiles each round
+    /// only what the files the watch names reach, and analyzes, lowers and writes nothing else, so an edit the watch
+    /// doesn't name keeps the compiled file the last compile wrote.
+    #[test]
+    fn a_watch_round_of_the_hosts_compile_compiles_only_what_the_files_it_names_reach() {
+        let (_directory, root, configuration) = project();
+        let folder = tempfile::tempdir().unwrap();
+        HostsCompile::at(&configuration, &root, folder.path()).compile_whole(false).unwrap();
+        let mut hosts = HostsCompile::at(&configuration, &root, folder.path());
+        let (database, _) =
+            project_database(&whole_workspace(&configuration, ColorChoice::Never, false).unwrap(), &root).unwrap();
+        assert!(matches!(hosts.recompile(&database, &[]).unwrap(), HostsChange::Unchanged), "the folder is current");
+        let paced = std::fs::read(folder.path().join("app/Paced.sharpc")).unwrap();
+
+        write(&root, "app/Order.sharp", "namespace App;\n\npublic class Order\n{\n    public int total() => 2;\n}\n");
+        write(&root, "vendor/acme/rate/src/Rate.php", &rate("string"));
+        let (database, _) =
+            project_database(&whole_workspace(&configuration, ColorChoice::Never, false).unwrap(), &root).unwrap();
+        let HostsChange::Recompiled(Recompiled { files, .. }) =
+            hosts.recompile(&database, &[FileId::new(b"app/Order.sharp")]).unwrap()
+        else {
+            panic!("the body edit compiles again");
+        };
+
+        assert_eq!(files, HashSet::from([FileId::new(b"app/Order.sharp")]));
+        assert_eq!(std::fs::read(folder.path().join("app/Paced.sharpc")).unwrap(), paced);
     }
 
     /// Writes `bytes` to the file at `path` and sets its modification time back to `modified`, as `touch -d` does.

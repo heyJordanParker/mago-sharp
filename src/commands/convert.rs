@@ -670,6 +670,7 @@ impl<'configuration> Session<'configuration> {
         let (compilations, _) = self.server.compile(
             &CompiledFiles::default(),
             |_| Ok(None),
+            |_| false,
             |path| unit::stamp(&prover.root, path),
             |_, _| Ok(Default::default()),
             &prover.standard_library,
@@ -679,7 +680,7 @@ impl<'configuration> Session<'configuration> {
             .into_iter()
             .filter_map(|(file_id, compilation)| match compilation {
                 Compilation::Refused(errors) => database.get(&file_id).ok().map(|file| (file.name.to_vec(), errors)),
-                Compilation::Accepted(_) => None,
+                Compilation::Accepted(_) | Compilation::Kept => None,
             })
             .collect();
         tracing::trace!("The project's proof ran in {:?}.", start.elapsed());

@@ -75,6 +75,7 @@ use crate::commands::args::substitution::Substitution;
 use crate::commands::args::substitution::SubstitutionArgs;
 use crate::commands::args::substitution::substitute;
 use crate::commands::compile::HostsChange;
+use crate::commands::compile::HostsCompile;
 use crate::commands::compile::Recompiled;
 use crate::commands::compile::compile_for_hosts;
 use crate::commands::compile::release_hosts_folders;
@@ -482,9 +483,10 @@ impl AnalyzeCommand {
             DatabaseWatcher::new(Database::new(orchestrator.database_configuration(workspace, true).into_static()));
         watcher.watch(WatchOptions { poll_interval: Some(Duration::from_millis(500)), ..Default::default() })?;
 
-        let (extension_hosts, _) = compile_for_hosts(configuration)?;
+        let mut hosts = HostsCompile::new(configuration)?;
+        hosts.recompile(watcher.database(), &[])?;
         if let Some(external_analyzer) = initialize_external_analyzer(
-            &extension_hosts,
+            hosts.extension_hosts(),
             configuration.php_version,
             configuration.threads,
             &configuration.analyzer.plugins,
@@ -497,15 +499,17 @@ impl AnalyzeCommand {
         let database = orchestrator.load_database(workspace, true, Some(self.prelude_database()), None)?.into_static();
         *watcher.database_mut() = database;
 
-        self.run_watch_mode(orchestrator, configuration, color_choice, scope, watcher, restart_reasons)
+        self.run_watch_mode(orchestrator, configuration, color_choice, scope, watcher, hosts, restart_reasons)
     }
 
     /// Runs in watch mode, continuously monitoring for file changes and re-analyzing.
     ///
-    /// `watcher` holds the files the watch watches and reports each change to them, and `restart_receiver` each change
-    /// to the configuration, baseline and Composer files, for which it returns `WatchOutcome::Restart` so the caller
-    /// can reload configuration and restart. Each report renders from the server's database, which also holds each
-    /// file the autoload maps served, as the one-shot command's does.
+    /// `watcher` holds the files the watch watches and reports each change to them, `hosts` compiles each change for
+    /// the extension hosts, and `restart_receiver` reports each change to the configuration, baseline and Composer
+    /// files, for which it returns `WatchOutcome::Restart` so the caller can reload configuration and restart. Each
+    /// report renders from the server's database, which also holds each file the autoload maps served, as the one-shot
+    /// command's does.
+    #[allow(clippy::too_many_arguments)]
     fn run_watch_mode(
         &self,
         orchestrator: Orchestrator<'_>,
@@ -513,6 +517,7 @@ impl AnalyzeCommand {
         color_choice: ColorChoice,
         scope: Option<WorkspaceMatcher>,
         mut watcher: DatabaseWatcher<'static>,
+        mut hosts: HostsCompile,
         restart_receiver: &mpsc::Receiver<String>,
     ) -> Result<WatchOutcome, Error> {
         let mut server = Server::new(watcher.database().clone(), self.prelude(), server_settings(&orchestrator));
@@ -566,7 +571,7 @@ impl AnalyzeCommand {
             // class whose compiled file changed start again, and the files whose hooks read one are checked again. The
             // classes a recompiled or deleted file declared in the last analysis count too: one it no longer declares
             // changed.
-            let changed: Vec<Word> = match compile_for_hosts(configuration)?.1 {
+            let changed: Vec<Word> = match hosts.recompile(watcher.database(), &changed_file_ids)? {
                 HostsChange::Unchanged => Vec::new(),
                 HostsChange::Recompiled(Recompiled { files, classes }) => {
                     let deleted =

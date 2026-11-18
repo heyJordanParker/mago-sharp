@@ -1140,6 +1140,7 @@ fn compile_with_fixture(
     let (compiled, _) = service.compile(
         &CompiledFiles::default(),
         |_| Ok(None),
+        |_| false,
         |_| Ok(None),
         |_, _| Ok(Default::default()),
         &Library::default(),
