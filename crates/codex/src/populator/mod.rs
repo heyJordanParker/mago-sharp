@@ -8,6 +8,8 @@ use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
 use mago_word::empty_word;
+use rayon::iter::ParallelIterator;
+use rayon::slice::ParallelSliceMut;
 
 use crate::metadata::CodebaseMetadata;
 use crate::metadata::class_like::ClassLikeMetadata;
@@ -153,43 +155,16 @@ fn populate_codebase_inner(
 
     let incremental = !safe_symbols.is_empty() || !safe_symbol_members.is_empty();
 
-    if let Some(dirty) = &dirty_symbols {
-        for dirty_key in dirty {
-            if let Some(function_like_metadata) = codebase.function_likes.get_mut(dirty_key) {
-                let force_repopulation = function_like_metadata.flags.is_user_defined();
-                if function_like_metadata.flags.is_populated() && !force_repopulation {
-                    continue;
-                }
-
-                let reference_source = if dirty_key.1.is_empty() || function_like_metadata.get_kind().is_closure() {
-                    ReferenceSource::Symbol(true, dirty_key.0)
-                } else {
-                    ReferenceSource::ClassLikeMember(true, dirty_key.0, dirty_key.1)
-                };
-
-                signatures::populate_function_like_metadata(
-                    function_like_metadata,
-                    &codebase.symbols,
-                    &reference_source,
-                    symbol_references,
-                    force_repopulation,
-                );
-            }
-        }
-
-        // Also repopulate non-dirty function_likes that are not safe but need repopulation.
-        // This handles e.g. a child method when the parent class was re-added:
-        // the child method isn't dirty (file didn't change) but it's not safe
-        // (parent class changed), so it needs type signature repopulation.
-        for (name, function_like_metadata) in &mut codebase.function_likes {
-            if dirty.contains(name) {
-                continue;
-            }
-
+    // Each function-like's signature reads only the symbols, so they are populated at once, each thread into references
+    // of its own, which join the codebase's after.
+    let references =
+        populate_in_chunks(codebase.function_likes.iter_mut(), |name, function_like_metadata, references| {
             let is_closure_or_arrow =
                 function_like_metadata.get_kind().is_closure() || function_like_metadata.get_kind().is_arrow_function();
-
-            let is_safe = if is_closure_or_arrow {
+            let is_dirty = dirty_symbols.as_ref().is_some_and(|dirty| dirty.contains(name));
+            let is_safe = if is_dirty {
+                false
+            } else if is_closure_or_arrow {
                 true
             } else if name.1.is_empty() {
                 safe_symbols.contains(&name.0)
@@ -198,8 +173,9 @@ fn populate_codebase_inner(
             };
 
             let force_repopulation = function_like_metadata.flags.is_user_defined() && !is_safe;
-            if function_like_metadata.flags.is_populated() && !force_repopulation {
-                continue;
+            let skips_populated = dirty_symbols.is_some() || incremental;
+            if skips_populated && function_like_metadata.flags.is_populated() && !force_repopulation {
+                return;
             }
 
             let reference_source = if name.1.is_empty() || function_like_metadata.get_kind().is_closure() {
@@ -212,74 +188,33 @@ fn populate_codebase_inner(
                 function_like_metadata,
                 &codebase.symbols,
                 &reference_source,
-                symbol_references,
+                references,
                 force_repopulation,
             );
-        }
-    } else {
-        for (name, function_like_metadata) in &mut codebase.function_likes {
-            let is_closure_or_arrow =
-                function_like_metadata.get_kind().is_closure() || function_like_metadata.get_kind().is_arrow_function();
+        });
+    symbol_references.extend(references);
 
-            let is_safe = if is_closure_or_arrow {
-                true
-            } else if name.1.is_empty() {
-                safe_symbols.contains(&name.0)
-            } else {
-                safe_symbol_members.contains(name) || safe_symbols.contains(&name.0)
-            };
-
-            let force_repopulation = function_like_metadata.flags.is_user_defined() && !is_safe;
-            if incremental && function_like_metadata.flags.is_populated() && !force_repopulation {
-                continue;
+    // Each class-like's types read only the symbols too, so they are populated at once the same way.
+    let references = populate_in_chunks(codebase.class_likes.iter_mut(), |name, metadata, references| {
+        let force_repopulation = if dirty_symbols.is_some() {
+            if !class_likes_to_repopulate.contains(name) {
+                return;
             }
 
-            let reference_source = if name.1.is_empty() || function_like_metadata.get_kind().is_closure() {
-                ReferenceSource::Symbol(true, name.0)
-            } else {
-                ReferenceSource::ClassLikeMember(true, name.0, name.1)
-            };
+            true
+        } else if incremental {
+            !safe_symbols.contains(name)
+        } else {
+            metadata.flags.is_user_defined()
+        };
 
-            signatures::populate_function_like_metadata(
-                function_like_metadata,
-                &codebase.symbols,
-                &reference_source,
-                symbol_references,
-                force_repopulation,
-            );
+        if dirty_symbols.is_none() && incremental && metadata.flags.is_populated() && !force_repopulation {
+            return;
         }
-    }
 
-    if let Some(_dirty) = &dirty_symbols {
-        for class_name in &class_likes_to_repopulate {
-            if let Some(metadata) = codebase.class_likes.get_mut(class_name) {
-                hierarchy::populate_class_like_types(
-                    *class_name,
-                    metadata,
-                    &codebase.symbols,
-                    symbol_references,
-                    true, // force: these are in the repopulate set
-                );
-            }
-        }
-    } else {
-        for (name, metadata) in &mut codebase.class_likes {
-            let force_repopulation =
-                if incremental { !safe_symbols.contains(name) } else { metadata.flags.is_user_defined() };
-
-            if incremental && metadata.flags.is_populated() && !force_repopulation {
-                continue;
-            }
-
-            hierarchy::populate_class_like_types(
-                *name,
-                metadata,
-                &codebase.symbols,
-                symbol_references,
-                force_repopulation,
-            );
-        }
-    }
+        hierarchy::populate_class_like_types(*name, metadata, &codebase.symbols, references, force_repopulation);
+    });
+    symbol_references.extend(references);
 
     if let Some(dirty) = &dirty_symbols {
         let mut dirty_const_names: WordSet = WordSet::default();
@@ -411,6 +346,40 @@ fn populate_extern_signatures(codebase: &mut CodebaseMetadata, symbol_references
     }
 
     codebase.extern_signatures = signatures;
+}
+
+/// The number of entries one thread populates in a loop before it hands the rest to the others. A pool thread that
+/// waits on its share runs another population's share on its own stack, so each level a population splits into costs
+/// every such thread stack: splitting down to one entry overflowed rayon's default 2 MiB threads when twelve
+/// populations ran at once.
+const POPULATED_TOGETHER: usize = 256;
+
+/// The references of populating each of `entries` with `populate` on rayon's threads, each thread a chunk of them in a
+/// loop, into references of its own, which join after.
+fn populate_in_chunks<'map, K, V>(
+    entries: impl Iterator<Item = (&'map K, &'map mut V)>,
+    populate: impl Fn(&K, &mut V, &mut SymbolReferences) + Sync,
+) -> SymbolReferences
+where
+    K: Sync + 'map,
+    V: Send + 'map,
+{
+    let mut entries: Vec<(&K, &mut V)> = entries.collect();
+
+    entries
+        .par_chunks_mut(POPULATED_TOGETHER)
+        .map(|chunk| {
+            let mut references = SymbolReferences::new();
+            for (key, value) in chunk {
+                populate(key, value, &mut references);
+            }
+
+            references
+        })
+        .reduce(SymbolReferences::new, |mut references, other| {
+            references.extend(other);
+            references
+        })
 }
 
 /// Sets the permitted inheritors of each PHP# sealed interface, spec section 20.1: the classes and enums of its
