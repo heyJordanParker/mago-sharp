@@ -1477,15 +1477,20 @@ impl Walk<'_> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            // A link whose target is gone is no file, as the loader skips it.
-            let Ok(metadata) = std::fs::metadata(&path) else {
+            let Ok(kind) = entry.file_type() else {
                 continue;
             };
-            let real_path = match entry.file_type() {
-                Ok(kind) if kind.is_symlink() => path.canonicalize().unwrap_or_else(|_| path.clone()),
-                _ => real.last().map_or_else(|| path.clone(), |parent| parent.join(entry.file_name())),
+            // The listing gives each entry's kind, so only a link's target and a kept file are read from the disk.
+            let (is_folder, real_path) = if kind.is_symlink() {
+                // A link whose target is gone is no file, as the loader skips it.
+                let Ok(target) = std::fs::metadata(&path) else {
+                    continue;
+                };
+                (target.is_dir(), path.canonicalize().unwrap_or_else(|_| path.clone()))
+            } else {
+                (kind.is_dir(), real.last().map_or_else(|| path.clone(), |parent| parent.join(entry.file_name())))
             };
-            if metadata.is_dir() {
+            if is_folder {
                 if path != self.root.join(unit::COMPILED_FOLDER)
                     && !self.excluded.contains(&path)
                     && !real.contains(&real_path)
@@ -1498,6 +1503,7 @@ impl Walk<'_> {
                 .extension()
                 .is_some_and(|extension| self.extensions.iter().any(|known| extension == known.as_str()))
                 && !self.autoloader.is_some_and(|autoloader| autoloader.serves(&path))
+                && let Ok(metadata) = std::fs::metadata(&path)
             {
                 let named = if by_real_path { real_path.clone() } else { path };
                 self.found(&named, &real_path, &metadata);
