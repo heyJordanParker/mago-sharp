@@ -2632,6 +2632,51 @@ fn compiles_with_different_threads_share_one_compile() {
     assert_eq!(compiled_at(root, "app/Order.sharp"), written, "the compile on 2 threads wrote nothing");
 }
 
+/// Two compiles of one tree write the same record of the compiled files, byte for byte, on one thread and on several:
+/// each list the record keeps, such as what a file read of the classes of its namespace, keeps one order.
+#[test]
+fn compiles_of_one_tree_write_the_same_record_on_any_number_of_threads() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let items: Vec<String> = (0..12).map(|item| format!("Item{item}.value()")).collect();
+    for item in 0..12 {
+        write(
+            root,
+            &format!("app/Item{item}.sharp"),
+            &format!("namespace App;\n\npublic class Item{item}\n{{\n    public static int value() => {item};\n}}\n"),
+        );
+    }
+    write(
+        root,
+        "app/Catalog.sharp",
+        &format!(
+            "namespace App;\n\npublic class Catalog\n{{\n    public static int total() => {};\n}}\n",
+            items.join(" + ")
+        ),
+    );
+    let record_on = |threads: &str| {
+        let output = process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never", "--threads", threads, "compile"])
+                .env("MAGO_REPORTING_FORMAT", "medium")
+                .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+                .current_dir(root),
+        )
+        .unwrap();
+        assert!(output.status.success(), "{}", printed(&output));
+
+        let record = std::fs::read(root.join(".sharp/compiled.bin")).unwrap();
+        std::fs::remove_dir_all(root.join(".sharp")).unwrap();
+
+        record
+    };
+
+    let on_one = record_on("1");
+
+    assert_eq!(record_on("4"), on_one, "the compile on 4 threads wrote another record");
+    assert_eq!(record_on("4"), on_one, "the second compile on 4 threads wrote another record");
+}
+
 /// Each message `output` logged, without the time, level, thread and module a debug build's log puts before it.
 fn logged(output: &Output) -> Vec<String> {
     String::from_utf8_lossy(&output.stderr)

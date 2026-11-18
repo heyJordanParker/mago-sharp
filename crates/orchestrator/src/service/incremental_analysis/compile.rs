@@ -98,7 +98,7 @@ struct LoweredUnit {
     unit: Unit,
     /// The inline forms of a standard library file, or none of another file.
     forms: Vec<(Vec<u8>, InlineForm)>,
-    /// Each class-like of the file's namespace that would win over a default class-like it names.
+    /// Each class-like of the file's namespace that would win over a default class-like it names, in order.
     namespace_classes: Vec<Word>,
     /// Whether the file's code reaches a PHP# extension member, spec section 26.
     reaches_extension: bool,
@@ -106,6 +106,9 @@ struct LoweredUnit {
 
 /// What [`IncrementalAnalysisService::compile`] keeps of each `.sharp` file it accepted, by the file's name, so the
 /// next compile keeps the file's compiled file while its key holds.
+///
+/// Each list it keeps is in order, so two compiles of one tree by one checker build encode the same bytes on any
+/// number of threads.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CompiledFiles {
     files: BTreeMap<Vec<u8>, CompiledFile>,
@@ -811,10 +814,10 @@ impl IncrementalAnalysisService {
         refused.into_iter().map(|(file_id, issues)| (file_id, Compilation::Refused(issues))).collect()
     }
 
-    /// What each file's analysis read from other files: each declaration it read through its signature, each method
-    /// whose return is taken from its body, and each declaration and set of names its extensions read. With them, the
-    /// files whose bodies it read: those that declare those methods, and those whose bodies its calls reach, which
-    /// `effects` solved its functions' effects from.
+    /// What each file's analysis read from other files, each list in order: each declaration it read through its
+    /// signature, each method whose return is taken from its body, and each declaration and set of names its extensions
+    /// read. With them, the files whose bodies it read: those that declare those methods, and those whose bodies its
+    /// calls reach, which `effects` solved its functions' effects from.
     fn reads(&self, effects: &Effects) -> HashMap<FileId, (Reads, HashSet<FileId>)> {
         // A declaration several files hold, as two polyfill files each declare one function, is read as the one the
         // codebase keeps, else as the one in the first file by id, so every compile fingerprints the same one.
@@ -940,6 +943,11 @@ impl IncrementalAnalysisService {
         }
         for (file_id, callee_files) in effects.callee_files(&self.codebase) {
             reads.entry(file_id).or_default().1.extend(callee_files);
+        }
+        for (file_reads, _) in reads.values_mut() {
+            file_reads.signatures.sort();
+            file_reads.bodies.sort();
+            file_reads.listed.sort();
         }
 
         reads
@@ -1159,7 +1167,8 @@ impl IncrementalAnalysisService {
                     &self.changing_members,
                     &self.extern_namespaces,
                 );
-                let namespace_classes = names.namespace_classes().map(mago_word::word).collect();
+                let mut namespace_classes: Vec<Word> = names.namespace_classes().map(mago_word::word).collect();
+                namespace_classes.sort();
                 let kept = self
                     .file_states
                     .get(&file.id)
