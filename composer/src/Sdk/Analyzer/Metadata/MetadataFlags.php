@@ -45,6 +45,7 @@ final class MetadataFlags
     public const ASYMMETRIC_PROPERTY = 1 << 31;
     public const STATIC = 1 << 32;
     public const WRITEONLY = 1 << 33;
+    public const DEFAULT_RUNS_CODE = 1 << 34;
     public const MAGIC_METHOD = 1 << 35;
     public const API = 1 << 36;
     public const MUTATION_FREE = 1 << 37;
