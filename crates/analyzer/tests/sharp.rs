@@ -31226,6 +31226,44 @@ fn a_field_read_or_write_runs_no_project_code() {
     );
 }
 
+/// Spec sections 25 and 29: `Field.set` writes a lazy object that has not loaded without loading it, and runs no
+/// accessor, so a method held to `uses Database, Events` creates a ghost with `createLazy` and gives it its identity
+/// before it loads, as a model's reference does. `Property.set` runs a `set` body, so it still may have every effect,
+/// and `Property` has no `setBeforeLoad`.
+#[test]
+fn a_write_before_a_lazy_object_loads_goes_through_its_field() {
+    let saves = (
+        "app/Shop/Saves.sharp",
+        "namespace App.Shop;\n\npublic interface Saves\n{\n    Row reference(int id) uses Database, Events;\n}\n",
+    );
+    let row = (
+        "app/Shop/Row.sharp",
+        "namespace App.Shop;\n\npublic class Row\n{\n    public int id { get; set; } = 0;\n\n    public string name { get; set; } = \"\";\n}\n",
+    );
+    let ghosts = (
+        "app/Shop/Ghosts.sharp",
+        "namespace App.Shop;\n\npublic class Ghosts : Saves\n{\n    public Row reference(int id)\n    {\n        const ghost = typeof(Row).createLazy(loaded => { loaded.name = \"ada\"; });\n        typeof(Row).fields()[0].set(ghost, id);\n\n        return ghost;\n    }\n}\n",
+    );
+    let written = (
+        "app/Shop/Written.sharp",
+        "namespace App.Shop;\n\npublic class Written : Saves\n{\n    public Row reference(int id)\n    {\n        const ghost = typeof(Row).createLazy(loaded => { loaded.name = \"ada\"; });\n        typeof(Row).properties()[0].set(ghost, id);\n\n        return ghost;\n    }\n}\n",
+    );
+    let preset = (
+        "app/Shop/Preset.sharp",
+        "namespace App.Shop;\n\npublic class Preset\n{\n    public Row reference(int id)\n    {\n        const ghost = typeof(Row).createLazy(loaded => { loaded.name = \"ada\"; });\n        typeof(Row).properties()[0].setBeforeLoad(ghost, id);\n\n        return ghost;\n    }\n}\n",
+    );
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(issues(ghosts, &[saves, row, a, b, c, d, e, f, g]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[ghosts, written, saves, row, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/Written.sharp:8:9 incompatible-effects: `Written.reference` reaches `Property.set`, which may have every effect, so `uses Database, Events` on `Saves.reference` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+    assert_eq!(messages(preset, &[row, a, b, c, d, e, f, g]), ["Method `Property.setBeforeLoad` does not exist."]);
+}
+
 /// Spec sections 25 and 29: `defaultValue()` runs the default it reads, so it has the effects of every default the
 /// program declares that is not constant, and no other. A constant default runs no code, so with only constant ones a
 /// method held to `uses Database, Environment` reads a parameter's, a property's and a field's default. A default that

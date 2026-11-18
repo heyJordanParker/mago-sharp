@@ -812,12 +812,11 @@ function read(?object $receiver, string $class, string $property): mixed {}
 
 /**
  * Writes `$value` into the property `$property` that `$class` declares on `$receiver`, or into the static `$property`,
- * as a direct write from the caller's code would. The standard library's `Property.set` runs it, and with `$beforeLoad`
- * `Property.setBeforeLoad`, which writes a lazy object that has not loaded without loading it.
+ * as a direct write from the caller's code would. The standard library's `Property.set` runs it.
  *
  * @throws \InvalidArgumentException
  */
-function write(?object $receiver, string $class, string $property, mixed $value, bool $beforeLoad = false): void {}
+function write(?object $receiver, string $class, string $property, mixed $value): void {}
 
 /**
  * The value the storage of the field or auto-property `$field` that `$class` declares holds on `$receiver`, or the
@@ -831,7 +830,8 @@ function readField(?object $receiver, string $class, string $field): mixed {}
 /**
  * Writes `$value` into the storage of the field or auto-property `$field` that `$class` declares on `$receiver`, or
  * into the static `$field`, as a direct write from the caller's code would reach it, with no accessor, no initializer of
- * a lazy object and no initial value of statics run. The standard library's `Field.set` runs it.
+ * a lazy object and no initial value of statics run, so a lazy object that has not loaded takes it without loading. The
+ * standard library's `Field.set` runs it.
  *
  * @throws \InvalidArgumentException
  */
