@@ -435,6 +435,29 @@ where
                 return Some(first_type);
             }
         }
+        // A class value narrows as an object of its type does, spec section 21, so a `Class<Entity>` that passes `is
+        // Class<Linkable>` is a `Class<Entity&Linkable>`. A literal class value, as `typeof(Entity)`, holds its class
+        // alone and has no kind, so it narrows to no other class.
+        (
+            TAtomic::Scalar(TScalar::ClassLikeString(first_class)),
+            TAtomic::Scalar(TScalar::ClassLikeString(second_class)),
+        ) if !second_class.is_literal() => {
+            let kind = first_class.kind()?;
+            let object = intersect_atomic_with_atomic(
+                context,
+                &first_class.get_object_type(context.codebase),
+                &second_class.get_object_type(context.codebase),
+            )?;
+
+            return Some(TAtomic::Scalar(TScalar::ClassLikeString(match object {
+                TAtomic::GenericParameter(TGenericParameter {
+                    parameter_name, defining_entity, constraint, ..
+                }) if constraint.is_single() => {
+                    TClassLikeString::generic(kind, parameter_name, defining_entity, constraint.get_single().clone())
+                }
+                object => TClassLikeString::of_type(kind, object),
+            })));
+        }
         (TAtomic::Array(TArray::Keyed(first_array)), TAtomic::Array(TArray::Keyed(second_array))) => {
             return intersect_keyed_arrays(context, first_array, second_array);
         }

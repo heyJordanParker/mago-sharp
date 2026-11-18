@@ -21422,6 +21422,22 @@ fn a_class_value_test_of_an_interface_a_subclass_may_implement_can_match() {
     assert_eq!(issues(("src/Demo/Regions.sharp", sharp), &declared), ["9:62 impossible-type-comparison"]);
 }
 
+/// Spec section 21: a class value that passes `is Class<Linkable>` is a class value of both its own type and
+/// `Linkable`, as an `Entity` that passes `is Linkable` is an `Entity&Linkable`, so code after the test calls its
+/// members and passes it as either. A class value of a type parameter narrows the same way.
+#[test]
+fn a_class_value_that_passes_a_test_of_an_interface_is_a_class_value_of_both() {
+    let mut files = REFLECTION.to_vec();
+    files.extend([
+        ("src/Demo/Entity.sharp", "namespace Demo;\n\npublic abstract class Entity\n{\n}\n"),
+        ("src/Demo/Linkable.sharp", "namespace Demo;\n\npublic interface Linkable\n{\n}\n"),
+        ("src/Demo/Page.sharp", "namespace Demo;\n\npublic class Page : Entity, Linkable\n{\n}\n"),
+    ]);
+    let sharp = "namespace Demo;\n\npublic class Links\n{\n    public static string named(Class<Entity> type)\n    {\n        if (type is Class<Linkable>) {\n            return type.name();\n        }\n        return \"\";\n    }\n\n    public static Class<Linkable>? linkable(Class<Entity> type) => type is Class<Linkable> ? type : null;\n\n    public static Class<Entity>? entity(Class<Entity> type) => type is Class<Linkable> ? type : null;\n\n    public static string published<T : Object>(List<Class<T>> classes)\n    {\n        for (const type of classes) {\n            if (type is Class<Linkable>) {\n                return type.name();\n            }\n        }\n        return \"\";\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Links.sharp", sharp), &files), Vec::<String>::new());
+}
+
 /// A list pattern of types alone, as `[int, string]`, matches the values of that tuple, so the value it narrows is the
 /// tuple, which unpacks and returns as one. A list pattern with a name or a rest narrows to a `List`, and a parameter's
 /// type may start with a tuple.
