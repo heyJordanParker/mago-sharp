@@ -190,6 +190,9 @@ pub struct AnalysisArtifacts {
     variable_definedness_targets: Option<Arc<[bool; NodeKind::COUNT]>>,
     pub(crate) pending_readonly_property_writes: Vec<PendingReadonlyPropertyWrite>,
     pub(crate) static_local_types: Option<WordMap<TUnion>>,
+    /// The value of each static local that `static_local_types` last took in, so a value it already holds is not
+    /// compared and combined again after every expression.
+    static_local_values: WordMap<Rc<TUnion>>,
     /// The number each PHP# `is`, `as` and `match` of the body numbers its hidden variables after, keyed by its span.
     /// Read through [`Self::numbered_php_shape`].
     hidden_variable_starts: RefCell<HashMap<(u32, u32), u32>>,
@@ -251,6 +254,7 @@ impl AnalysisArtifacts {
             variable_definedness_targets: None,
             pending_readonly_property_writes: Vec::new(),
             static_local_types: None,
+            static_local_values: WordMap::default(),
             hidden_variable_starts: RefCell::default(),
             last_hidden_variable: Cell::default(),
         }
@@ -301,6 +305,10 @@ impl AnalysisArtifacts {
             let Some(variable_type) = block_context.locals.get(variable) else {
                 continue;
             };
+            if self.static_local_values.get(variable).is_some_and(|taken| Rc::ptr_eq(taken, variable_type)) {
+                continue;
+            }
+            self.static_local_values.insert(*variable, Rc::clone(variable_type));
 
             if let Some(previous_type) = static_local_types.get_mut(variable) {
                 if previous_type != variable_type.as_ref() {
