@@ -8212,6 +8212,20 @@ const SCROLL_INTERACTION: (&str, &str) = (
     "namespace App;\n\npublic class ScrollInteraction : Interaction\n{\n    public string name() => \"scroll\";\n}\n",
 );
 
+/// A branch that always leaves, by `return`, `throw` or a call that never returns, leaves the rest of the block the
+/// value's type without what its test matched, whether the test names the value or not. With an enum and a sealed
+/// interface in a union written in either order, or an `int` and an interface, a value that leaves when it `is Level
+/// level` is an `Interaction` after, so `name()` is the interface's method; one that leaves when it `is Interaction` is a
+/// `Level` after, whose `name` is the case's name. Where the test holds, the value is of the type it names too, and
+/// after a branch that leaves when it `is not Level level`, both the value and `level` are a `Level`.
+#[test]
+fn a_branch_that_leaves_on_a_type_test_narrows_the_rest_of_the_block_to_the_other_types() {
+    let level = ("src/App/Level.sharp", "namespace App;\n\npublic enum Level\n{\n    case Low;\n    case High;\n}\n");
+    let sharp = "namespace App;\n\npublic class Shop\n{\n    public static string returned(Level|Interaction audience)\n    {\n        if (audience is Level level) {\n            return level.name;\n        }\n        return audience.name();\n    }\n\n    public static string thrown(Interaction|Level audience)\n    {\n        if (audience is Level level) {\n            throw new Exception(level.name);\n        }\n        return audience.name();\n    }\n\n    public static string ended(Level|Interaction audience)\n    {\n        if (audience is Level level) {\n            Shop.fail(level);\n        }\n        return audience.name();\n    }\n\n    public static string level(Interaction|Level audience)\n    {\n        if (audience is Interaction interaction) {\n            return interaction.name();\n        }\n        return audience.name;\n    }\n\n    public static string plain(Level|Interaction audience)\n    {\n        if (audience is Level) {\n            return \"level\";\n        }\n        return audience.name();\n    }\n\n    public static string scalar(int|Interaction audience)\n    {\n        if (audience is int count) {\n            return \"count\";\n        }\n        return audience.name();\n    }\n\n    public static string inside(Level|Interaction audience)\n    {\n        if (audience is Interaction interaction) {\n            return audience.name() + interaction.name();\n        }\n        return \"level\";\n    }\n\n    public static string kept(Level|Interaction audience)\n    {\n        if (audience is not Level level) {\n            return \"interaction\";\n        }\n        return level.name + audience.name;\n    }\n\n    public static never fail(Level level) => throw new Exception(level.name);\n}\n";
+
+    assert_eq!(issues(("src/App/Shop.sharp", sharp), &[INTERACTION, POPUP_INTERACTION, level]), Vec::<String>::new());
+}
+
 /// Spec section 20.1: a sealed interface's implementers sit in its namespace. A class of another namespace that
 /// implements it is an error that names the namespace, and an implementer in it is not.
 #[test]

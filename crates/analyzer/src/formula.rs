@@ -148,8 +148,107 @@ where
         artifacts,
         formula_size_threshold,
     );
+    let formula = with_named_locals(formula, &named_locals(conditional, assertion_context, artifacts));
 
     if formula.len() > usize::from(formula_size_threshold) { None } else { Some(formula) }
+}
+
+/// Each local a PHP# `is` in `conditional` tests with a pattern that names its value, with the name: the pattern's PHP
+/// assigns the local to the name, as `($level = $audience) instanceof Level`, so once the test runs both hold one
+/// value. Only the `is` tests the condition joins with `&&`, `||` and `!` run as it does.
+fn named_locals<A>(
+    conditional: &Expression,
+    assertion_context: AssertionContext<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+) -> Vec<(Word, Word)>
+where
+    A: Arena,
+{
+    match unwrap_expression(conditional) {
+        Expression::Binary(binary)
+            if matches!(
+                binary.operator,
+                BinaryOperator::And(_) | BinaryOperator::LowAnd(_) | BinaryOperator::Or(_) | BinaryOperator::LowOr(_)
+            ) =>
+        {
+            let mut named = named_locals(binary.lhs, assertion_context, artifacts);
+            named.extend(named_locals(binary.rhs, assertion_context, artifacts));
+            named
+        }
+        Expression::UnaryPrefix(unary) if unary.operator.is_not() => {
+            named_locals(unary.operand, assertion_context, artifacts)
+        }
+        is @ Expression::Is(_) => {
+            let Some(PhpShape { php: Node::Expression(php), .. }) =
+                assertion_context.php_shape(Node::Expression(is), artifacts)
+            else {
+                return Vec::new();
+            };
+
+            // The PHP reads a local as its PHP# name, which the binder resolves to the local.
+            let is_local = |value: &Expression| {
+                matches!(unwrap_expression(value), Expression::ConstantAccess(access) if matches!(
+                    assertion_context.resolved_names.binding(&access.name.span()),
+                    Some(mago_names::binding::Binding::Local(_))
+                ))
+            };
+
+            Node::Expression(php).filter_map(|node| match node {
+                Node::Expression(Expression::Assignment(Assignment {
+                    lhs,
+                    operator: AssignmentOperator::Assign(_),
+                    rhs,
+                })) if is_local(rhs) => {
+                    Some((assertion_context.get_expression_id(lhs)?, assertion_context.get_expression_id(rhs)?))
+                }
+                _ => None,
+            })
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `clauses` with each clause on a name or the local it holds, of `named`, on both: the name and the local hold one
+/// value, so a clause on either holds of each. The negation of a test that names its value then narrows the local as
+/// the negation of the plain test does, where `p is not C or s is not C` would narrow neither.
+fn with_named_locals(mut clauses: Vec<Clause>, named: &[(Word, Word)]) -> Vec<Clause> {
+    for &(name, local) in named {
+        clauses = clauses
+            .into_iter()
+            .flat_map(|clause| {
+                if !clause.possibilities.contains_key(&name) && !clause.possibilities.contains_key(&local) {
+                    return vec![clause];
+                }
+
+                let held: IndexMap<u64, Assertion> = [name, local]
+                    .iter()
+                    .filter_map(|key| clause.possibilities.get(key))
+                    .flatten()
+                    .map(|(hash, assertion)| (*hash, assertion.clone()))
+                    .collect();
+                [name, local]
+                    .into_iter()
+                    .map(|key| {
+                        let mut possibilities = clause.possibilities.clone();
+                        possibilities.shift_remove(&name);
+                        possibilities.shift_remove(&local);
+                        possibilities.insert(key, held.clone());
+
+                        Clause::new(
+                            possibilities,
+                            clause.condition_span,
+                            clause.span,
+                            Some(clause.wedge),
+                            Some(clause.reconcilable),
+                            Some(clause.generated),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+    }
+
+    clauses
 }
 
 fn get_base_formula<A>(
@@ -951,7 +1050,7 @@ where
                 formula_size_threshold,
             );
 
-            negated_clauses
+            with_named_locals(negated_clauses, &named_locals(conditional, assertion_context, artifacts))
         }
         None => match get_formula(
             conditional.span(),

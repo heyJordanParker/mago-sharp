@@ -28781,7 +28781,7 @@ fn is_without_a_name_is_instanceof_or_a_type_check() {
 fn is_with_a_name_assigns_the_name_before_the_test() {
     assert_eq!(
         body_in(
-            "int run(Calc|int extra)",
+            "int run(Calc|int|string extra)",
             "        if (extra is Calc calc) {\n            return 1;\n        }\n        if (extra is not int count) {\n            return 0;\n        }\n        return count;\n",
             &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")]
         ),
