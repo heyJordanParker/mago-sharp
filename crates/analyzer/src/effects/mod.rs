@@ -352,19 +352,42 @@ impl Effects {
             index.entry(summary.body).or_insert(position);
         }
 
-        // A call to a method that can be overridden runs any override, so it reaches every override's body.
-        let mut overrides: HashMap<(Word, Word), Vec<usize>> = HashMap::default();
+        // A call to a method that can be overridden runs any override, so it reaches every override's body. A call
+        // that leaves out an argument runs the default of the override it reaches at that place, and a parameter an
+        // override adds after the method's own is one every call through the method leaves out.
+        let mut overrides: HashMap<Body, Vec<usize>> = HashMap::default();
         for (position, summary) in summaries.iter().enumerate() {
-            if let Body::Method(class, method) = summary.body
-                && index.get(&summary.body) == Some(&position)
-                && let Some(metadata) = codebase.get_class_like(class.as_bytes())
-            {
-                for parent in &metadata.all_parent_classes {
-                    overrides.entry((codebase.class_key(parent.as_bytes()), method)).or_default().push(position);
-                }
+            let (Body::Method(class, method) | Body::Default(class, method, _)) = summary.body else {
+                continue;
+            };
+            let Some(metadata) = codebase.get_class_like(class.as_bytes()) else {
+                continue;
+            };
+            if index.get(&summary.body) != Some(&position) {
+                continue;
+            }
+
+            let place = |parameter: Word| {
+                codebase
+                    .get_method(class.as_bytes(), method.as_bytes())
+                    .and_then(|own| own.parameters.iter().position(|own| own.name.0 == parameter))
+            };
+            for parent in &metadata.all_parent_classes {
+                let parent = codebase.class_key(parent.as_bytes());
+                let overridden = match summary.body {
+                    Body::Default(_, _, parameter) => place(parameter)
+                        .and_then(|place| {
+                            codebase.get_method(parent.as_bytes(), method.as_bytes())?.parameters.get(place)
+                        })
+                        .map_or(Body::Method(parent, method), |at| Body::Default(parent, method, at.name.0)),
+                    _ => Body::Method(parent, method),
+                };
+                overrides.entry(overridden).or_default().push(position);
             }
         }
 
+        // A callee with no summary contributes nothing but its overrides. A call of a method without a body has the
+        // effects its `uses` lists instead of a callee.
         let targets: Vec<Vec<Vec<usize>>> = summaries
             .iter()
             .map(|summary| {
@@ -372,17 +395,12 @@ impl Effects {
                     .calls
                     .iter()
                     .map(|call| {
-                        // A callee with no summary contributes nothing. A call of a method without a body has the
-                        // effects its `uses` lists instead of a callee.
-                        let Some(&callee) = index.get(&call.callee) else {
-                            return Vec::new();
-                        };
-                        let mut targets = vec![callee];
-                        if let Body::Method(class, method) = call.callee {
-                            targets.extend(overrides.get(&(class, method)).into_iter().flatten());
-                        }
-
-                        targets
+                        index
+                            .get(&call.callee)
+                            .into_iter()
+                            .chain(overrides.get(&call.callee).into_iter().flatten())
+                            .copied()
+                            .collect()
                     })
                     .collect()
             })
@@ -726,8 +744,9 @@ impl Effects {
         })
     }
 
-    /// Each PHP# method with the first method without a body it implements whose `uses` does not list one of its
-    /// effects: its class and member as messages name them, the declaration's class and metadata, the imports and the
+    /// Each PHP# method, or default of one, with the first method without a body it implements whose `uses` does not
+    /// list one of its effects, since a call of the declaration runs the defaults of the implementation it reaches:
+    /// its class and member as messages name them, the declaration's class and metadata, the imports and the
     /// scope of its file, and the call that has the effect. An implementation of `Sharp\Dispatcher::dispatch` is held
     /// to nothing, spec section 15: it runs the listeners of every event, which may reach any effect.
     fn unfit_implementations<'effects>(
@@ -745,7 +764,7 @@ impl Effects {
     > + 'effects {
         self.bodies.iter().enumerate().filter(|(position, body)| self.index.get(body) == Some(position)).filter_map(
             move |(position, body)| {
-                let Body::Method(class, method) = *body else {
+                let (Body::Method(class, method) | Body::Default(class, method, _)) = *body else {
                     return None;
                 };
                 let metadata = codebase.get_class_like(class.as_bytes())?;

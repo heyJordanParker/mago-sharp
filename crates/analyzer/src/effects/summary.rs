@@ -1192,19 +1192,16 @@ where
         let receiver_roots = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
         // An extension's member takes its receiver as its first parameter, as its method value does, and the call's
         // arguments fill the parameters after it.
-        let (receiver_roots, roots) = match metadata.parameters.split_first() {
-            Some((_, parameters)) if metadata.flags.is_extension_method() => {
-                let roots = self.argument_roots(arguments, parameters);
-                self.passed_functions(arguments, parameters, &receiver_roots, &roots);
-
-                (Roots::new(), std::iter::once(receiver_roots).chain(roots).collect())
-            }
-            _ => {
-                let roots = self.argument_roots(arguments, &metadata.parameters);
-                self.passed_functions(arguments, &metadata.parameters, &receiver_roots, &roots);
-
-                (receiver_roots, roots)
-            }
+        let (parameters, extension) = match metadata.parameters.split_first() {
+            Some((_, parameters)) if metadata.flags.is_extension_method() => (parameters, true),
+            _ => (metadata.parameters.as_slice(), false),
+        };
+        let roots = self.argument_roots(arguments, parameters);
+        self.passed_functions(arguments, parameters, &receiver_roots, &roots);
+        let (receiver_roots, roots) = if extension {
+            (Roots::new(), std::iter::once(receiver_roots).chain(roots).collect())
+        } else {
+            (receiver_roots, roots)
         };
         if let Some(effect) = foreign_class(codebase, class) {
             self.summary.effects.push((Effect::Foreign(effect), span, cause));
@@ -1223,8 +1220,14 @@ where
             }
 
             let declaring_class = codebase.class_key(declaring_class.as_bytes());
-            let callee = Body::Method(declaring_class, codebase.method_key(declaring_class, method_name.as_bytes()));
-            self.summary.calls.push(Call { callee, span, receiver: receiver_roots, arguments: roots });
+            let method = codebase.method_key(declaring_class, method_name.as_bytes());
+            self.left_out_defaults(declaring_class, method, parameters, Some(arguments), span);
+            self.summary.calls.push(Call {
+                callee: Body::Method(declaring_class, method),
+                span,
+                receiver: receiver_roots,
+                arguments: roots,
+            });
 
             return;
         }
@@ -1237,6 +1240,60 @@ where
             let declaration = codebase.extern_of(class, ascii_lowercase_word(method_name.as_bytes()));
             self.plain_php(declaration, span, cause);
             self.callbacks(arguments);
+        }
+    }
+
+    /// Records the call at `span` of each default of `parameters`, of the PHP# method `method` of `class`, that
+    /// `arguments` leave out: it runs at the call, spec section 7, so the call has its effects. A spread fills as many
+    /// parameters as its list surely holds. A constant default has no body of its own, so its call reaches only the
+    /// default an override declares at its place.
+    fn left_out_defaults(
+        &mut self,
+        class: Word,
+        method: Word,
+        parameters: &[FunctionLikeParameterMetadata],
+        arguments: Option<&ArgumentList<'arena>>,
+        span: Span,
+    ) {
+        let mut given = vec![false; parameters.len()];
+        let mut position = 0;
+        for argument in arguments.into_iter().flat_map(|arguments| arguments.arguments.iter()) {
+            let filled = match argument {
+                Argument::Named(named) => {
+                    let name = php_variable_name(named.name.value);
+                    if let Some(index) = parameters.iter().position(|parameter| parameter.name.0 == name) {
+                        given[index] = true;
+                    }
+
+                    continue;
+                }
+                Argument::Positional(positional) if positional.ellipsis.is_some() => self
+                    .artifacts
+                    .get_expression_type(positional.value)
+                    .and_then(|spread| {
+                        spread
+                            .types
+                            .iter()
+                            .map(|atomic| match atomic {
+                                TAtomic::Array(array) => array.get_minimum_size(),
+                                _ => 0,
+                            })
+                            .min()
+                    })
+                    .unwrap_or(0),
+                Argument::Positional(_) => 1,
+            };
+            for parameter in given.iter_mut().skip(position).take(filled) {
+                *parameter = true;
+            }
+            position += filled;
+        }
+
+        for (parameter, given) in parameters.iter().zip(given) {
+            if !given && parameter.flags.has_default() {
+                let callee = Body::Default(class, method, parameter.get_name().0);
+                self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
+            }
         }
     }
 
@@ -1339,6 +1396,8 @@ where
                 roots = self.argument_roots(arguments, &metadata.parameters);
                 self.passed_functions(arguments, &metadata.parameters, &Roots::new(), &roots);
             }
+            let arguments = instantiation.argument_list.as_ref();
+            self.left_out_defaults(declaring.name, constructor, &metadata.parameters, arguments, span);
             let callee = Body::Method(declaring.name, constructor);
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: roots });
         } else if !is_prelude_stub(class.name) {

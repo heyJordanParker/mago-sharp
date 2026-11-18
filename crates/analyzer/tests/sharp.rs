@@ -31047,6 +31047,134 @@ fn a_default_value_read_has_the_effects_of_the_defaults_it_can_run() {
     );
 }
 
+/// Spec sections 7 and 29: a default runs each time a call leaves its argument out, so the call has the default's
+/// effects, as if it wrote the default itself, and a call that passes the argument has only the argument's. A method's
+/// call, a constructor's and a `: super()` leave out a `Stamp` default, whose constructor has the effect `Clock`, and
+/// each is refused at the call that reaches it. A call through a class runs the default of the override it reaches, of a parameter the override adds
+/// too, and an implementation's default is held to the `uses` of the declaration it implements. A constant default adds
+/// nothing.
+#[test]
+fn a_call_that_leaves_an_argument_out_has_the_effects_of_its_default() {
+    let ledger = (
+        "app/Shop/Ledger.sharp",
+        "namespace App.Shop;\n\npublic interface Ledger\n{\n    bool check(Stamp given) uses Database;\n}\n",
+    );
+    let stamp = (
+        "app/Shop/Stamp.sharp",
+        "namespace App.Shop;\n\nimport Acme.Chrono;\n\npublic class Stamp\n{\n    public Stamp()\n    {\n        Chrono.now();\n    }\n}\n",
+    );
+    let stamped = (
+        "app/Shop/Stamped.sharp",
+        "namespace App.Shop;\n\npublic class Stamped\n{\n    public void touch(Stamp stamp = new Stamp(), int times = 1) { }\n}\n",
+    );
+    let shelf = (
+        "app/Shop/Shelf.sharp",
+        "namespace App.Shop;\n\npublic class Shelf\n{\n    public Shelf(Stamp stamp = new Stamp()) { }\n}\n",
+    );
+    let plain = (
+        "app/Shop/Plain.sharp",
+        "namespace App.Shop;\n\npublic class Plain\n{\n    public virtual void touch(Stamp? stamp = null) { }\n}\n",
+    );
+    let timed = (
+        "app/Shop/Timed.sharp",
+        "namespace App.Shop;\n\npublic class Timed : Plain\n{\n    public override void touch(Stamp? stamp = new Stamp()) { }\n}\n",
+    );
+    let toucher = (
+        "app/Shop/Toucher.sharp",
+        "namespace App.Shop;\n\npublic interface Toucher\n{\n    void touch(Stamp? stamp = null);\n}\n",
+    );
+    let stamping = (
+        "app/Shop/Stamping.sharp",
+        "namespace App.Shop;\n\npublic class Stamping : Toucher\n{\n    public void touch(Stamp? stamp = new Stamp()) { }\n}\n",
+    );
+    let leaving = (
+        "app/Shop/Leaving.sharp",
+        "namespace App.Shop;\n\npublic class Leaving : Ledger\n{\n    public bool check(Stamp given)\n    {\n        new Stamped().touch();\n\n        return true;\n    }\n}\n",
+    );
+    let building = (
+        "app/Shop/Building.sharp",
+        "namespace App.Shop;\n\npublic class Building : Ledger\n{\n    public bool check(Stamp given)\n    {\n        new Shelf();\n\n        return true;\n    }\n}\n",
+    );
+    let through = (
+        "app/Shop/Through.sharp",
+        "namespace App.Shop;\n\npublic class Through : Ledger\n{\n    public bool check(Stamp given)\n    {\n        new Plain().touch();\n\n        return true;\n    }\n}\n",
+    );
+    let kiosk = (
+        "app/Shop/Kiosk.sharp",
+        "namespace App.Shop;\n\npublic class Kiosk : Shelf\n{\n    public Kiosk() : super() { }\n}\n",
+    );
+    let opening = (
+        "app/Shop/Opening.sharp",
+        "namespace App.Shop;\n\npublic class Opening : Ledger\n{\n    public bool check(Stamp given)\n    {\n        new Kiosk();\n\n        return true;\n    }\n}\n",
+    );
+    let wide = (
+        "app/Shop/Wide.sharp",
+        "namespace App.Shop;\n\npublic class Wide\n{\n    public virtual void touch(Stamp stamp) { }\n}\n",
+    );
+    let wider = (
+        "app/Shop/Wider.sharp",
+        "namespace App.Shop;\n\npublic class Wider : Wide\n{\n    public override void touch(Stamp stamp, Stamp? extra = new Stamp()) { }\n}\n",
+    );
+    let across = (
+        "app/Shop/Across.sharp",
+        "namespace App.Shop;\n\npublic class Across : Ledger\n{\n    public bool check(Stamp given)\n    {\n        new Wide().touch(given);\n\n        return true;\n    }\n}\n",
+    );
+    let passing = (
+        "app/Shop/Passing.sharp",
+        "namespace App.Shop;\n\npublic class Passing : Ledger\n{\n    public bool check(Stamp given)\n    {\n        new Stamped().touch(given);\n        new Stamped().touch(stamp: given);\n        new Stamped().touch(...[given, 2]);\n        new Shelf(given);\n        new Plain().touch(given);\n\n        return true;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[passing, ledger, stamp, stamped, shelf, plain, wide, NOW, CLOCK_STUB]),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        effect_issues(&[across, opening, ledger, stamp, wide, wider, shelf, kiosk, NOW, CLOCK_STUB]),
+        [
+            "app/Shop/Across.sharp:7:9 incompatible-effects: `Across.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database` on `Ledger.check` cannot accept it.",
+            "app/Shop/Opening.sharp:7:9 incompatible-effects: `Opening.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database` on `Ledger.check` cannot accept it.",
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[
+            leaving, building, through, stamping, ledger, stamp, stamped, shelf, plain, timed, toucher, NOW, CLOCK_STUB
+        ]),
+        [
+            "app/Shop/Leaving.sharp:7:9 incompatible-effects: `Leaving.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database` on `Ledger.check` cannot accept it.",
+            "app/Shop/Building.sharp:7:9 incompatible-effects: `Building.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database` on `Ledger.check` cannot accept it.",
+            "app/Shop/Through.sharp:7:9 incompatible-effects: `Through.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database` on `Ledger.check` cannot accept it.",
+            "app/Shop/Stamping.sharp:5:38 incompatible-effects: `Stamping.touch(stamp)` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so the pure `Toucher.touch` cannot accept it.",
+        ]
+    );
+}
+
+/// Spec sections 1 and 29: creating an attribute runs its constructor's defaults for the arguments it leaves out, so a
+/// default of an attribute's constructor has no effects, as its body and its initial values have none, and one that
+/// has one is refused at the default. A constant default runs no code.
+#[test]
+fn an_attribute_constructor_s_default_has_no_effects() {
+    let stamp = (
+        "app/Shop/Stamp.sharp",
+        "namespace App.Shop;\n\nimport Acme.Chrono;\n\npublic class Stamp\n{\n    public Stamp()\n    {\n        Chrono.now();\n    }\n}\n",
+    );
+    let column = (
+        "app/Shop/Column.sharp",
+        "namespace App.Shop;\n\n[Attribute]\npublic class Column\n{\n    public Column(string name = \"\", Stamp? stamp = new Stamp()) { }\n}\n",
+    );
+    let label = (
+        "app/Shop/Label.sharp",
+        "namespace App.Shop;\n\n[Attribute]\npublic class Label\n{\n    public Label(string name = \"\", int width = 0) { }\n}\n",
+    );
+
+    assert_eq!(effect_issues(&[label, stamp, NOW, CLOCK_STUB]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[column, stamp, NOW, CLOCK_STUB]),
+        [
+            "app/Shop/Column.sharp:6:52 incompatible-effects: The default of `stamp` in the constructor of `Column` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, and an attribute has no effects. Help: Give the attribute constants, and do the work in the code that reads it.",
+        ]
+    );
+}
+
 /// Spec sections 23 and 29: PHP# calls a class's static method as `Rows.find(1)`, a method call, so the effect summary
 /// records it with its effect as it records an instance call, with the type arguments a method call writes. PHP's
 /// `Rows::find(1)` is a parse error in a `.sharp` file, so no body the summary records holds one.

@@ -157,29 +157,37 @@ pub(crate) fn values_have_no_effects(effects: &Effects, codebase: &CodebaseMetad
         .collect()
 }
 
-/// Spec section 1: an attribute is data, so creating one has no effect: the constructor a PHP# attribute class runs and
-/// the initial values of the class and of each class it extends have no effect, a plain PHP call no `extern` declares
-/// included, so reading a PHP# class's attributes with `attributes<T>()` is pure. A change of state is no effect. The
-/// refusal names the code and the effect: "The constructor of `Column` calls `Store.load`, which has the effect
-/// `Database`, and an attribute has no effects".
+/// Spec section 1: an attribute is data, so creating one has no effect: the constructor a PHP# attribute class runs, the
+/// defaults of its parameters, which run for each argument the attribute leaves out, and the initial values of the
+/// class and of each class it extends have no effect, a plain PHP call no `extern` declares included, so reading a PHP#
+/// class's attributes with `attributes<T>()` is pure. A change of state is no effect. The refusal names the code and the
+/// effect: "The constructor of `Column` calls `Store.load`, which has the effect `Database`, and an attribute has no
+/// effects".
 pub(crate) fn attributes_have_no_effects(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
     effects
         .bodies_with_effects()
         .filter_map(|(body, member, imports, _, impurity)| {
-            let (class, code) = match body {
-                Body::Method(class, method) if method.as_bytes() == b"__construct" => (class, "constructor"),
-                Body::InitialValue(class, _) => (class, "initial value"),
+            let constructor = |method: Word| method.as_bytes() == b"__construct";
+            let (class, runs_constructor) = match body {
+                Body::Method(class, method) | Body::Default(class, method, _) if constructor(method) => (class, true),
+                Body::InitialValue(class, _) => (class, false),
                 _ => return None,
             };
             let declaring = codebase.get_class_like(class.as_bytes())?;
-            let attribute = created_attribute(codebase, declaring, code == "constructor")?;
+            let attribute = created_attribute(codebase, declaring, runs_constructor)?;
 
             let class_name = |class| sharp_class_like_name(codebase, imports, class);
             let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
-            let written = if code == "constructor" {
-                format!("`{}`", class_name(declaring.original_name))
-            } else {
-                format!("`{}`", display_sharp_member(class_name(declaring.original_name), member))
+            let code = match body {
+                Body::Method(..) => format!("constructor of `{}`", class_name(declaring.original_name)),
+                Body::Default(_, _, parameter) => format!(
+                    "default of `{}` in the constructor of `{}`",
+                    parameter.as_bytes().strip_prefix(b"$").map(String::from_utf8_lossy).unwrap_or_default(),
+                    class_name(declaring.original_name)
+                ),
+                _ => {
+                    format!("initial value of `{}`", display_sharp_member(class_name(declaring.original_name), member))
+                }
             };
             let runs = if attribute == declaring.original_name {
                 String::new()
@@ -189,7 +197,7 @@ pub(crate) fn attributes_have_no_effects(effects: &Effects, codebase: &CodebaseM
 
             Some(
                 Issue::error(format!(
-                    "The {code} of {written}{runs} {}, and an attribute has no effects.",
+                    "The {code}{runs} {}, and an attribute has no effects.",
                     impurity.describe(&class_name, &effect_name)
                 ))
                 .with_code(IssueCode::IncompatibleEffects.as_str())

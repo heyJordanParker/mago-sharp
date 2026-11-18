@@ -60,6 +60,7 @@ use mago_codex::ttype::wrap_atomic;
 use mago_names::TypeParametersNamed;
 use mago_names::binding::php_variable_name;
 use mago_names::display_sharp_member;
+use mago_names::short_name;
 use mago_php_version::feature::Feature;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -1142,7 +1143,7 @@ where
 /// Analyzes `default`, the default value of `parameter_metadata`, and checks it against the parameter's type. A method
 /// without a body has its defaults analyzed too, since PHP# lowers each one into the PHP it compiles to, with the type
 /// the analysis gives it. A PHP# method's default that is not constant is recorded as a body of its own for the effect
-/// rules, which `Parameter.defaultValue()` runs.
+/// rules, which each call that leaves the argument out runs, and so does `Parameter.defaultValue()`.
 pub(crate) fn analyze_parameter_default<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -1178,13 +1179,18 @@ where
         && let Some(class) = block_context.scope.get_class_like()
     {
         let parameter = parameter_metadata.get_name().0;
+        // A constructor carries its class's name, as its body's member does.
+        let method = if function_like_metadata.method_metadata.as_ref().is_some_and(|method| method.is_constructor) {
+            short_name(class.original_name)
+        } else {
+            function_like_metadata.original_name.to_string()
+        };
         effects::summary::record(
             context,
             artifacts,
             Body::Default(class.name, class.method_key(function_like_metadata.original_name.as_bytes()), parameter),
             word(format!(
-                "{}({})",
-                function_like_metadata.original_name,
+                "{method}({})",
                 parameter.as_bytes().strip_prefix(b"$").map(String::from_utf8_lossy).unwrap_or_default()
             )),
             Vec::new(),
