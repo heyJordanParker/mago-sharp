@@ -35,6 +35,7 @@ use std::sync::PoisonError;
 use clap::ColorChoice;
 use clap::Parser;
 use rayon::iter::IntoParallelIterator;
+use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use serde::Deserialize;
 use serde::Serialize;
@@ -1297,7 +1298,7 @@ fn every_input_is_current(
                 .is_ok_and(|metadata| status.sees_writes() && Status::of(&output, &metadata, filesystems) == *status)
                 || hashes_as(&output, hash)
         })
-        && record.inputs.iter().all(|(path, size, hash)| match unit::stamp(root, path.as_bytes()) {
+        && record.inputs.par_iter().all(|(path, size, hash)| match unit::stamp(root, path.as_bytes()) {
             Ok(Some(input)) => (input.size, input.hash) == (*size, *hash),
             // On a disk that ignores case, the loader reads a file whose name differs only in case.
             Ok(None) => (*size, *hash) == (0, [0; 16]) && !root.join(path).exists(),
