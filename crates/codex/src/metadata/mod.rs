@@ -2075,15 +2075,11 @@ impl CodebaseMetadata {
 
     /// Adds another codebase's `extern namespace` declarations, keeping them sorted, whatever order the files merge in.
     fn merge_namespace_imports(&mut self, incoming: impl IntoIterator<Item = NamespaceImportMetadata>) {
-        self.namespace_imports.extend(incoming);
-        self.namespace_imports.sort_unstable();
-        self.namespace_imports.dedup();
+        merge_sorted(&mut self.namespace_imports, incoming);
     }
 
     fn merge_extern_namespaces(&mut self, incoming: impl IntoIterator<Item = ExternNamespaceMetadata>) {
-        self.extern_namespaces.extend(incoming);
-        self.extern_namespaces.sort_unstable();
-        self.extern_namespaces.dedup();
+        merge_sorted(&mut self.extern_namespaces, incoming);
     }
 
     /// Adds another codebase's extension members, keeping each name's members in span order, whatever order the files
@@ -2611,6 +2607,29 @@ fn template_types<'metadata>(template: &'metadata GenericTemplate, unions: &mut 
     unions.push(&template.constraint);
     unions.extend(&template.default);
     unions.extend(template.written_bound.iter().map(|bound| &bound.type_union));
+}
+
+/// Adds `incoming` to `sorted`, which stays sorted with no duplicate. One file's entries sort together, so a file's
+/// entries land in one gap of the others and move only the entries after them, where sorting the whole on each of the
+/// project's files made merging them quadratic.
+fn merge_sorted<T>(sorted: &mut Vec<T>, incoming: impl IntoIterator<Item = T>)
+where
+    T: Ord + Copy,
+{
+    let mut incoming: Vec<T> = incoming.into_iter().collect();
+    let (Some(&first), Some(&last)) = (incoming.iter().min(), incoming.iter().max()) else {
+        return;
+    };
+    let start = sorted.partition_point(|entry| *entry < first);
+    if sorted.partition_point(|entry| *entry <= last) == start {
+        incoming.sort_unstable();
+        incoming.dedup();
+        sorted.splice(start..start, incoming);
+    } else {
+        sorted.extend(incoming);
+        sorted.sort_unstable();
+        sorted.dedup();
+    }
 }
 
 /// Determines which metadata value to keep when merging duplicates.
