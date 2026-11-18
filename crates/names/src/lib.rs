@@ -80,6 +80,16 @@ pub const STARTS_LISTENER: &str = "Sharp\\Internal\\StartsListener";
 /// values have no effects.
 pub const CREATES_ATTRIBUTES: &str = "Sharp\\Internal\\CreatesAttributes";
 
+/// The mark of a method that runs the default of a parameter, as `Parameter.defaultValue()`.
+///
+/// A call has the effects of every parameter default the program declares that is not constant, spec section 29.
+pub const RUNS_DEFAULTS: &str = "Sharp\\Internal\\RunsDefaults";
+
+/// The mark of a method that runs the initial value of a property, as `Property.defaultValue()`.
+///
+/// A call has the effects of every initial value the program declares that is not constant, spec section 29.
+pub const RUNS_INITIAL_VALUES: &str = "Sharp\\Internal\\RunsInitialValues";
+
 /// The mark of the interface every `emit` hands its event to, as `Dispatcher`.
 ///
 /// The app's binding of the interface is its dispatcher, spec section 15. The checker, the compile command and the

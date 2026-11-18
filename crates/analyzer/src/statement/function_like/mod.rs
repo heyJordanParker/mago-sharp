@@ -85,6 +85,8 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::block::ReferenceConstraint;
 use crate::context::block::ReferenceConstraintSource;
+use crate::effects;
+use crate::effects::Body;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
@@ -759,6 +761,7 @@ where
     parent_artifacts.resolved_return_types.extend(std::mem::take(&mut artifacts.resolved_return_types));
     parent_artifacts.function_values.append(&mut artifacts.function_values);
     parent_artifacts.readonly_calls.append(&mut artifacts.readonly_calls);
+    parent_artifacts.effect_summaries.append(&mut artifacts.effect_summaries);
     parent_artifacts.symbol_references.extend(std::mem::take(&mut artifacts.symbol_references));
     parent_artifacts.listings.extend(std::mem::take(&mut artifacts.listings));
     parent_artifacts.pending_readonly_property_writes.append(&mut artifacts.pending_readonly_property_writes);
@@ -1138,7 +1141,8 @@ where
 
 /// Analyzes `default`, the default value of `parameter_metadata`, and checks it against the parameter's type. A method
 /// without a body has its defaults analyzed too, since PHP# lowers each one into the PHP it compiles to, with the type
-/// the analysis gives it.
+/// the analysis gives it. A PHP# method's default that is not constant is recorded as a body of its own for the effect
+/// rules, which `Parameter.defaultValue()` runs.
 pub(crate) fn analyze_parameter_default<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -1166,6 +1170,27 @@ where
             expand_type_metadata(context, block_context, artifacts, function_like_metadata, parameter_type_metadata);
 
         check_parameter_default_value(context, parameter_metadata, &expected_type, default, artifacts);
+    }
+
+    if context.dialect.is_sharp()
+        && parameter_metadata.flags.default_runs_code()
+        && function_like_metadata.kind.is_method()
+        && let Some(class) = block_context.scope.get_class_like()
+    {
+        let parameter = parameter_metadata.get_name().0;
+        effects::summary::record(
+            context,
+            artifacts,
+            Body::Default(class.name, class.method_key(function_like_metadata.original_name.as_bytes()), parameter),
+            word(format!(
+                "{}({})",
+                function_like_metadata.original_name,
+                parameter.as_bytes().strip_prefix(b"$").map(String::from_utf8_lossy).unwrap_or_default()
+            )),
+            Vec::new(),
+            None,
+            FunctionLikeBody::Expression(default),
+        );
     }
 
     Ok(())

@@ -17,6 +17,8 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_names::CREATES_ATTRIBUTES;
+use mago_names::RUNS_DEFAULTS;
+use mago_names::RUNS_INITIAL_VALUES;
 use mago_names::binding::Binding;
 use mago_names::binding::Local;
 use mago_names::binding::php_variable_name;
@@ -77,9 +79,9 @@ use crate::utils::names::display_function_holder;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_prelude_stub;
 
-/// Records the summary of the method, accessor or initial value `body`, which messages name by `member`, and whose
-/// parameters are declared at `parameters`, into `artifacts`, with the summary of each lambda written in it, and with
-/// the function values the analysis gave places since the last body. A constructor's `initializer` runs before `code`.
+/// Records the summary of the method, accessor, initial value or default `body`, which messages name by `member`, and
+/// whose parameters are declared at `parameters`, into `artifacts`, with the summary of each lambda written in it, and
+/// with the function values the analysis gave places since the last body. A constructor's `initializer` runs before `code`.
 pub(crate) fn record<'ast, 'arena, A>(
     context: &Context<'_, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -92,7 +94,10 @@ pub(crate) fn record<'ast, 'arena, A>(
     A: Arena,
 {
     let class = match body {
-        Body::Method(class, _) | Body::Accessor(class, _, _) | Body::InitialValue(class, _) => class,
+        Body::Method(class, _)
+        | Body::Accessor(class, _, _)
+        | Body::InitialValue(class, _)
+        | Body::Default(class, _, _) => class,
         Body::Lambda(_) => empty_word(),
     };
 
@@ -1013,6 +1018,7 @@ where
                 } => {
                     if type_arguments
                         .is_some_and(|written| self.creates_attributes(declaring_class, method_name, written))
+                        || self.runs_defaults(declaring_class, method_name, span)
                     {
                         continue;
                     }
@@ -1060,6 +1066,53 @@ where
 
         written_in_sharp(attribute)
             && codebase.get_all_descendants(attribute).iter().all(|descendant| written_in_sharp(descendant.as_bytes()))
+    }
+
+    /// Records the call at `span` of `method` of `class` as calls of the code it runs, when the standard library marks
+    /// it as running a parameter's default, `RunsDefaults`, as `Parameter.defaultValue()`, or a property's initial
+    /// value, `RunsInitialValues`, as `Property.defaultValue()` and `Field.defaultValue()`: it reaches every one the
+    /// program declares that is not constant, spec section 29, and a constant one runs no code. A plain PHP default
+    /// that is not constant runs code no summary records, so then the call stays the method's own, which may have
+    /// every effect. Gives whether it recorded the call.
+    fn runs_defaults(&mut self, class: Word, method: Word, span: Span) -> bool {
+        let codebase = self.codebase();
+        let Some(marked) = codebase.get_method(class.as_bytes(), method.as_bytes()) else {
+            return false;
+        };
+        let mut callees = Vec::new();
+        if marked.has_attribute(codebase, RUNS_DEFAULTS.as_bytes()) {
+            for class_like in codebase.class_likes.values() {
+                for method in &class_like.methods {
+                    let Some(metadata) = codebase.get_method(class_like.name.as_bytes(), method.as_bytes()) else {
+                        continue;
+                    };
+                    for parameter in metadata.parameters.iter().filter(|parameter| parameter.flags.default_runs_code())
+                    {
+                        if !class_like.flags.is_sharp() {
+                            return false;
+                        }
+                        callees.push(Body::Default(class_like.name, *method, parameter.get_name().0));
+                    }
+                }
+            }
+        } else if marked.has_attribute(codebase, RUNS_INITIAL_VALUES.as_bytes()) {
+            for class_like in codebase.class_likes.values().filter(|class_like| class_like.flags.is_sharp()) {
+                for (property, metadata) in &class_like.properties {
+                    if metadata.flags.has_default() {
+                        callees.push(Body::InitialValue(class_like.name, *property));
+                    }
+                }
+            }
+        } else {
+            return false;
+        }
+
+        callees.sort_unstable();
+        for callee in callees {
+            self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
+        }
+
+        true
     }
 
     /// Records a call of the property `property` of `class` that holds a function. A PHP# class declares it with a

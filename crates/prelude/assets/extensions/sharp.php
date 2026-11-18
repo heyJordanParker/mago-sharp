@@ -460,6 +460,21 @@ final class StartsListener {}
 final class CreatesAttributes {}
 
 /**
+ * Marks a standard library method that runs the default of a parameter, as `Parameter.defaultValue()` does, so a call
+ * has the effects of every parameter default the program declares that is not constant, and none for a constant one.
+ */
+#[\Attribute(\Attribute::TARGET_METHOD)]
+final class RunsDefaults {}
+
+/**
+ * Marks a standard library method that runs the initial value of a property, as `Property.defaultValue()` and
+ * `Field.defaultValue()` do, so a call has the effects of every initial value the program declares that is not
+ * constant, and none for a constant one.
+ */
+#[\Attribute(\Attribute::TARGET_METHOD)]
+final class RunsInitialValues {}
+
+/**
  * Marks the standard library interface every `emit` hands its event to, as `Dispatcher` is, so the app's binding of it
  * is its dispatcher. The checker, the compile command and the lowering of `emit` read the mark, so none copies the
  * library's name.

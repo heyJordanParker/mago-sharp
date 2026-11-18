@@ -30905,8 +30905,8 @@ fn a_delegate_has_the_effects_its_function_type_lists() {
 
 /// Spec sections 25 and 29: `Property.isInitialized` and `Property.hasDefaultValue` read PHP's reflection only through
 /// members that run no code a project wrote, which `Builtins.sharp` declares pure, so a method held to `uses Database`
-/// calls them. `Property.get` runs a computed property's `get`, and `Property.defaultValue` runs an initial value that
-/// is not constant, so each may still have every effect.
+/// calls them, and `Property.defaultValue` of a program whose initial values are all constant. `Property.get` runs a
+/// computed property's `get`, so it may still have every effect.
 #[test]
 fn a_reflection_read_that_runs_no_project_code_is_pure() {
     let ledger = (
@@ -30932,7 +30932,6 @@ fn a_reflection_read_that_runs_no_project_code_is_pure() {
         effect_issues(&[loaded, computed, defaulted, ledger, a, b, c, d, e, f, g]),
         [
             "app/Shop/Computed.sharp:7:28 incompatible-effects: `Computed.check` reaches `Property.get`, which may have every effect, so `uses Database` on `Ledger.check` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
-            "app/Shop/Defaulted.sharp:7:28 incompatible-effects: `Defaulted.check` reaches `Property.defaultValue`, which may have every effect, so `uses Database` on `Ledger.check` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
         ]
     );
 }
@@ -30940,8 +30939,8 @@ fn a_reflection_read_that_runs_no_project_code_is_pure() {
 /// Spec sections 6, 25 and 29: a field is storage, and so is an auto-property's that is neither `virtual` nor
 /// `abstract`, so `Field.get`, `Field.set` and `Field.isInitialized` run no code a project wrote, and a method held to
 /// `uses Database` reads and writes a declared field and an auto-property's storage through `fields()`. `Field` reads
-/// through members `Property` never calls, so `Property.get`, `Property.set` and `Property.defaultValue()` still may
-/// have every effect, and so does `Field.defaultValue()`, which runs an initial value that is not constant.
+/// through members `Property` never calls, so `Property.get` and `Property.set` still may have every effect. The
+/// program's initial values are all constant, so `Property.defaultValue()` and `Field.defaultValue()` are pure.
 #[test]
 fn a_field_read_or_write_runs_no_project_code() {
     let store = (
@@ -30980,8 +30979,70 @@ fn a_field_read_or_write_runs_no_project_code() {
         [
             "app/Shop/PropertyRead.sharp:5:34 incompatible-effects: `PropertyRead.sync` reaches `Property.get`, which may have every effect, so `uses Database` on `Store.sync` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
             "app/Shop/PropertyWrite.sharp:7:9 incompatible-effects: `PropertyWrite.sync` reaches `Property.set`, which may have every effect, so `uses Database` on `Store.sync` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
-            "app/Shop/PropertyDefault.sharp:5:34 incompatible-effects: `PropertyDefault.sync` reaches `Property.defaultValue`, which may have every effect, so `uses Database` on `Store.sync` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
-            "app/Shop/FieldDefault.sharp:5:34 incompatible-effects: `FieldDefault.sync` reaches `Field.defaultValue`, which may have every effect, so `uses Database` on `Store.sync` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+}
+
+/// Spec sections 25 and 29: `defaultValue()` runs the default it reads, so it has the effects of every default the
+/// program declares that is not constant, and no other. A constant default runs no code, so with only constant ones a
+/// method held to `uses Database, Environment` reads a parameter's, a property's and a field's default. A default that
+/// creates a `Stamp`, whose constructor has the effect `Clock`, gives each read of its kind `Clock`.
+#[test]
+fn a_default_value_read_has_the_effects_of_the_defaults_it_can_run() {
+    let ledger = (
+        "app/Shop/Ledger.sharp",
+        "namespace App.Shop;\n\npublic interface Ledger\n{\n    bool check() uses Database, Environment;\n}\n",
+    );
+    let parameter = (
+        "app/Shop/ParameterRead.sharp",
+        "namespace App.Shop;\n\npublic class ParameterRead : Ledger\n{\n    public bool check() => typeof(ParameterRead).methods()[1].parameters()[0].defaultValue() is int;\n\n    public int scaled(int by = 2, Status? reason = null, List<int> steps = [], Status status = Status.Open) => by;\n}\n",
+    );
+    let property = (
+        "app/Shop/PropertyRead.sharp",
+        "namespace App.Shop;\n\npublic class PropertyRead : Ledger\n{\n    public int count { get; set; } = 0;\n\n    public bool check() => typeof(PropertyRead).properties()[0].defaultValue() is int;\n}\n",
+    );
+    let field = (
+        "app/Shop/FieldRead.sharp",
+        "namespace App.Shop;\n\npublic class FieldRead : Ledger\n{\n    private int total = 0;\n\n    public bool check() => this.total == 0 && typeof(FieldRead).fields()[0].defaultValue() is int;\n}\n",
+    );
+    let status = (
+        "app/Shop/Status.sharp",
+        "namespace App.Shop;\n\npublic enum Status\n{\n    case Open;\n    case Closed;\n}\n",
+    );
+    let stamp = (
+        "app/Shop/Stamp.sharp",
+        "namespace App.Shop;\n\nimport Acme.Chrono;\n\npublic class Stamp\n{\n    public Stamp()\n    {\n        Chrono.now();\n    }\n}\n",
+    );
+    let stamped_call = (
+        "app/Shop/Stamped.sharp",
+        "namespace App.Shop;\n\npublic class Stamped\n{\n    public void touch(Stamp stamp = new Stamp()) { }\n}\n",
+    );
+    let stamped_value = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept\n{\n    public Stamp stamp { get; set; } = new Stamp();\n}\n",
+    );
+    let readers = [parameter, property, field, ledger, status];
+    let [a, b, c, d, e, f, g] = REFLECTION;
+    let reflection = [a, b, c, d, e, f, g];
+    let with = |extra: &[(&'static str, &'static str)]| -> Vec<(&'static str, &'static str)> {
+        readers.iter().chain(extra).chain(&reflection).copied().collect()
+    };
+
+    for reader in [parameter, property, field] {
+        assert_eq!(issues(reader, &[ledger, status, a, b, c, d, e, f, g]), Vec::<String>::new());
+    }
+    assert_eq!(effect_issues(&with(&[])), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&with(&[stamp, stamped_call, NOW, CLOCK_STUB])),
+        [
+            "app/Shop/ParameterRead.sharp:5:28 incompatible-effects: `ParameterRead.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database, Environment` on `Ledger.check` cannot accept it."
+        ]
+    );
+    assert_eq!(
+        effect_issues(&with(&[stamp, stamped_value, NOW, CLOCK_STUB])),
+        [
+            "app/Shop/PropertyRead.sharp:7:28 incompatible-effects: `PropertyRead.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database, Environment` on `Ledger.check` cannot accept it.",
+            "app/Shop/FieldRead.sharp:7:47 incompatible-effects: `FieldRead.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database, Environment` on `Ledger.check` cannot accept it.",
         ]
     );
 }

@@ -95,6 +95,9 @@ where
 
     if let Some(default_value) = &parameter.default_value {
         metadata.flags |= MetadataFlags::HAS_DEFAULT;
+        metadata
+            .flags
+            .set(MetadataFlags::DEFAULT_RUNS_CODE, !default_value.value.is_constant(&context.php_version, false));
         // Spec section 27: as a default, the standard library's `Position.current()` is the caller's position, or
         // one field of it, as `Position.current().line`.
         if let Some(field) = context.resolved_names.caller_position_field(default_value.value) {
