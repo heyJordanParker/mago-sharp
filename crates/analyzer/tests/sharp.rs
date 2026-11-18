@@ -655,6 +655,36 @@ fn a_plain_php_use_outside_the_namespace_keeps_a_public_member() {
     );
 }
 
+/// Spec sections 5 and 15: an event's parameters are its payload, public get-only properties that take no modifier,
+/// so no use makes them too wide: `Changed`, created in another namespace that reads neither `id` nor `name`, and
+/// `Quiet`, which only its namespace uses, report nothing. An event nothing uses, as `Lost`, is still refused, since
+/// it never runs.
+#[test]
+fn an_event_s_parameters_are_never_too_wide() {
+    let changed = "namespace App.Shop;\n\npublic event Changed(int id, string name);\n";
+    let quiet = "namespace App.Shop;\n\npublic event Quiet(int id);\n";
+    let lost = "namespace App.Shop;\n\npublic event Lost(int id);\n";
+    let cart = "namespace App.Shop;\n\npublic class Cart\n{\n    internal Quiet quiet() => new Quiet(1);\n}\n";
+    let page = "namespace App.Web;\n\nimport App.Shop.Changed;\n\npublic class Page\n{\n    internal Changed changed() => new Changed(1, \"a\");\n}\n";
+    let files = [
+        ("src/App/Shop/Changed.sharp", changed),
+        ("src/App/Shop/Quiet.sharp", quiet),
+        ("src/App/Shop/Lost.sharp", lost),
+        ("src/App/Shop/Cart.sharp", cart),
+        ("src/App/Web/Page.sharp", page),
+    ];
+
+    assert_eq!(too_wide(&files), Vec::<String>::new());
+    assert_eq!(
+        unused_classes(&files),
+        [
+            "src/App/Shop/Lost.sharp 3:14 Nothing uses `Lost`, so it never runs.",
+            "src/App/Shop/Cart.sharp 3:14 Nothing uses `Cart`, so it never runs.",
+            "src/App/Web/Page.sharp 5:14 Nothing uses `Page`, so it never runs.",
+        ]
+    );
+}
+
 /// Spec section 5: a member is too wide only on the class that declares it. A PHP# class that inherits a constant from
 /// a plain PHP parent declares no such member, whatever file the constant is in, and a plain PHP class's member is no
 /// PHP# report at all. The PHP# class's own constant still warns.

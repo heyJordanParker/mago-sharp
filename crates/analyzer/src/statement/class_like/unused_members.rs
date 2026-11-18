@@ -590,7 +590,8 @@ where
 /// Only a public PHP# class of a project has such members, a file whose nearest `composer.json` says `"type":
 /// "project"`, of the files analyzed: a library's uses are in the projects that install it, which the analysis never
 /// sees. An `internal` class's members reach no further than it does (a member is never more visible than its class),
-/// interface members are exempt because they have no narrower form, and plain PHP has no `internal`. A member that
+/// interface members are exempt because they have no narrower form, as an event's parameters are, its payload, which take
+/// no modifier, spec section 15, and plain PHP has no `internal`. A member that
 /// overrides or implements another keeps that one's access, PHP calls a magic method itself, `new` calls the
 /// constructor, which takes its class's reach, and the code that reads a member's or its class's marked attribute
 /// reaches the member through reflection, which no use records, so none of them is refused.
@@ -749,7 +750,8 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
     let mut members = Vec::new();
 
     for (name, property) in &class.properties {
-        if class.declaring_property_ids.get(name) == Some(&class_name)
+        if !class.flags.is_event()
+            && class.declaring_property_ids.get(name) == Some(&class_name)
             && property.read_visibility.is_public()
             && !is_dynamically_accessed(codebase, &property.attributes)
             && !property.flags.is_internal_reach()
