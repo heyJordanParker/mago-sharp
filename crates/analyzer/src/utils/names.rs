@@ -777,6 +777,11 @@ where
             display_sharp_type(context, iterable.get_value_type())
         ),
         TAtomic::Object(TObject::Any) => "Object".to_owned(),
+        // Spec section 25: the class a method was called on, PHP's `static` and the type of `$this`, is written `Self`,
+        // which a subclass's call makes the subclass, so it never reads as the class it was inferred in.
+        TAtomic::Object(TObject::Named(named)) if named.is_static || named.is_this => {
+            if named.is_readonly { "readonly Self" } else { "Self" }.to_owned()
+        }
         TAtomic::Object(object) => {
             let Some(name) = object.get_name() else {
                 return atomic.get_id().to_string();
