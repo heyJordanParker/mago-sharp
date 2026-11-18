@@ -21,6 +21,7 @@ use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_sharp_bridge::InlineForms;
 use mago_sharp_bridge::Unit;
+use mago_sharp_bridge::function_type_fingerprint;
 use mago_sharp_bridge::inline_forms;
 use mago_sharp_bridge::lower;
 use mago_sharp_bridge::sharp_kind;
@@ -31623,6 +31624,39 @@ fn each_accessor_and_each_method_without_a_body_names_its_function_type() {
             ("App\\Tenant\\Report::read".to_owned(), effects_fingerprint(&["App.Tenant.Meter"])),
         ]
     );
+}
+
+/// A compile keeps a file whose function types still list the effects its unit names them with: the fingerprint
+/// `function_type_fingerprint` gives each name, from the effects of a method, an accessor or a lambda the compile
+/// solves, is the one the lowering gave it.
+#[test]
+fn the_fingerprint_of_each_function_type_s_name_is_the_one_its_lowering_gave() {
+    let meter = (
+        "src/App/Tenant/Meter.sharp",
+        "namespace App.Tenant;\n\npublic foreign class Meter\n{\n    public int now() => 7;\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public Report(private Meter meter) { }\n\n    public int doubled => this.meter.now() * 2;\n\n    public int twice(int x) => x * 2;\n\n    public Function<int(int) uses Meter> scaled() => (int x) => x * this.meter.now();\n}\n";
+
+    let named =
+        common::checked_with_effects("src/App/Tenant/Report.sharp", code, &[meter], |checked, codebase, effects| {
+            lower(checked)
+                .function_types()
+                .iter()
+                .map(|read| {
+                    let name = String::from_utf8_lossy(&read.name).into_owned();
+                    (name, read.fingerprint, function_type_fingerprint(codebase, effects, &read.name))
+                })
+                .collect::<Vec<_>>()
+        })
+        .expect("the source lowers");
+
+    for kind in ["{closure:", "::$doubled::get", "::twice"] {
+        assert!(named.iter().any(|(name, _, _)| name.contains(kind)), "{kind} in {named:?}");
+    }
+    for (name, lowered, fingerprint) in &named {
+        assert_eq!(fingerprint, lowered, "{name}");
+    }
+    assert!(named.iter().any(|(_, lowered, _)| *lowered == effects_fingerprint(&["App.Tenant.Meter"])), "{named:?}");
 }
 
 /// Each node an inlined form copies takes the line of its call, as the call's own nodes would, and each value keeps

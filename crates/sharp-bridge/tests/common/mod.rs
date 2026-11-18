@@ -20,6 +20,7 @@ use mago_analyzer::analysis_result::AnalysisResult;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::r#extern::extern_namespace_classes;
 use mago_codex::scanner::scan_program;
 use mago_database::file::File;
@@ -179,6 +180,28 @@ pub fn checked_file<R>(
     forms: &InlineForms,
     then: impl FnOnce(&CheckedProgram<'_>) -> R,
 ) -> Result<R, Vec<String>> {
+    checked_file_with_effects(file, library, forms, |checked, _, _| then(checked))
+}
+
+/// [`checked`], which also passes `then` the codebase and the effects the check solved, as a compile holds them.
+pub fn checked_with_effects<R>(
+    path: &str,
+    code: &str,
+    library: &[(&str, &str)],
+    then: impl FnOnce(&CheckedProgram<'_>, &CodebaseMetadata, &Effects) -> R,
+) -> Result<R, Vec<String>> {
+    let file = File::ephemeral(Cow::Owned(path.as_bytes().to_vec()), Cow::Owned(code.as_bytes().to_vec()));
+
+    checked_file_with_effects(&file, library, &COLLECTION_MEMBER_FORMS, then)
+}
+
+/// [`checked_file`], which also passes `then` the codebase and the effects the check solved.
+fn checked_file_with_effects<R>(
+    file: &File,
+    library: &[(&str, &str)],
+    forms: &InlineForms,
+    then: impl FnOnce(&CheckedProgram<'_>, &CodebaseMetadata, &Effects) -> R,
+) -> Result<R, Vec<String>> {
     let Prelude { mut metadata, mut symbol_references, .. } = PRELUDE.clone();
     let settings = Settings::default();
     let arena = LocalArena::new();
@@ -271,7 +294,7 @@ pub fn checked_file<R>(
     // The library is scanned, not analyzed, so only the file's own bodies have effects.
     let effects = Effects::solve(&metadata, &artifacts.effect_summaries);
     match check(file, program, names, &artifacts, &metadata, &effects, forms, &issues) {
-        Ok(checked) => Ok(then(&checked)),
+        Ok(checked) => Ok(then(&checked, &metadata, &effects)),
         Err(Refusal::Parse(errors)) => {
             Err(errors.iter().map(|error| diagnostic(&code, Some(error.span()), "parse", &error.to_string())).collect())
         }

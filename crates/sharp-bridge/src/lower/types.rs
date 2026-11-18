@@ -2817,17 +2817,14 @@ pub(crate) struct FunctionType {
 /// declarations its check read, so this is what a compile checks a file's function types by without lowering it.
 #[must_use]
 pub fn function_type_fingerprint(codebase: &CodebaseMetadata, effects: &Effects, name: &[u8]) -> u64 {
-    let parts: Vec<&[u8]> = name.split(|byte| *byte == b':').filter(|part| !part.is_empty()).collect();
+    let mut parts = name.split(|byte| *byte == b':').filter(|part| !part.is_empty());
+    let (class, member) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
     let solved = if name.starts_with(b"{closure:") {
         effects.function_effects(codebase, &FunctionLikeIdentifier::Closure(word(name)))
-    } else if let [class, property, accessor] = parts[..]
-        && let Some(property) = property.strip_prefix(b"$")
-    {
-        effects.accessor_effects(codebase, class, property, accessor)
-    } else if let [class, method] = parts[..] {
-        effects.function_effects(codebase, &FunctionLikeIdentifier::Method(word(class), word(method)))
+    } else if let Some(accessor) = parts.next() {
+        effects.accessor_effects(codebase, class, member.strip_prefix(b"$").unwrap_or(member), accessor)
     } else {
-        None
+        effects.function_effects(codebase, &FunctionLikeIdentifier::Method(word(class), word(member)))
     };
 
     effects_fingerprint(solved, codebase)
