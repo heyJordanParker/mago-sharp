@@ -4,11 +4,11 @@ use std::fmt;
 use std::hash::Hash;
 use std::hash::Hasher;
 
-#[cfg(not(feature = "sso"))]
 use std::ptr::NonNull;
 
 use crate::interner::Entry;
 use crate::interner::intern;
+use crate::interner::lowercase;
 
 /// Maximum byte length stored inline in a [`Word`] when the `sso` feature is enabled.
 ///
@@ -132,6 +132,34 @@ impl Word {
         // lives for the lifetime of the process.
         unsafe {
             Entry::bytes(self.repr.ptr.as_ptr())
+        }
+    }
+
+    /// Returns the `Word` of this one's ASCII lowercase form. The interner links each word it holds to that form the
+    /// first time it is asked, so later calls neither lowercase nor intern.
+    #[inline]
+    #[must_use]
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
+    pub fn to_ascii_lowercase(self) -> Word {
+        #[cfg(feature = "sso")]
+        // SAFETY: the union discipline of `as_bytes` applies. When `tag == TAG_HEAP`, `heap.ptr` is the address of an
+        // `Entry` the interner wrote, live for the process.
+        unsafe {
+            if self.repr.inline.tag == TAG_HEAP {
+                let entry = NonNull::new_unchecked(self.repr.heap.ptr as *mut Entry);
+                let ptr = lowercase(entry).as_ptr() as usize;
+
+                return Word { repr: Repr { heap: Heap { tag: TAG_HEAP, _pad: [0u8; 7], ptr } } };
+            }
+
+            let mut inline = self.repr.inline;
+            inline.bytes.make_ascii_lowercase();
+            Word { repr: Repr { inline } }
+        }
+
+        #[cfg(not(feature = "sso"))]
+        {
+            Word { repr: Repr { ptr: lowercase(self.repr.ptr) } }
         }
     }
 

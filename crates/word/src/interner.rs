@@ -1,9 +1,10 @@
-use std::cell::Cell;
 use std::hash::BuildHasher;
 use std::hash::Hasher;
 use std::ptr::NonNull;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicPtr;
+use std::sync::atomic::Ordering;
 
 use foldhash::fast::FixedState;
 
@@ -16,14 +17,18 @@ use crate::bumpalloc::LeakyBumpAlloc;
 /// bytes follow immediately):
 ///
 /// ```text
-/// | hash: u64 | len: u32 | _pad: u32 | bytes: [u8; len] |
-///   ^ Entry                            ^ Entry::bytes()
+/// | hash: u64 | len: u32 | _pad: u32 | lowercase: AtomicPtr<Entry> | bytes: [u8; len] |
+///   ^ Entry                                                           ^ Entry::bytes()
 /// ```
+///
+/// `lowercase` is the entry of the bytes' ASCII lowercase form, the entry itself when the bytes hold no ASCII uppercase
+/// letter, or null until [`lowercase`] is first asked for it.
 #[repr(C)]
 pub(crate) struct Entry {
     pub(crate) hash: u64,
     pub(crate) len: u32,
     _pad: u32,
+    lowercase: AtomicPtr<Entry>,
 }
 
 impl Entry {
@@ -49,8 +54,7 @@ impl Entry {
     }
 }
 
-/// Number of shards. Each shard owns its own mutex, table, and arena, so concurrent
-/// interning rarely contends.
+/// Number of shards. Each shard owns its own table, arena and writer lock, so concurrent insertions rarely contend.
 const NUM_SHARDS: usize = 64;
 
 /// Initial table capacity (slots) per shard. Sized so the prelude warm-up doesn't
@@ -60,64 +64,152 @@ const INITIAL_TABLE_CAPACITY: usize = 1 << 14; // 16K slots/shard, 1M total
 /// Initial bytes per shard arena. Grows by doubling on overflow.
 const INITIAL_ARENA_BYTES: usize = 64 * 1024;
 
-struct Shard {
-    /// Open-addressed table of pointers to entries in the arena. `null` is the
-    /// sentinel for an empty slot. Load factor is kept under 0.5 by [`grow`].
-    entries: Vec<*mut Entry>,
+/// An open-addressed table of pointers to entries in the arena. Null is the sentinel for an empty slot, and a slot
+/// once filled never changes, so a reader probes it without a lock.
+struct Table {
+    slots: Box<[AtomicPtr<Entry>]>,
     mask: usize,
-    num_entries: usize,
-    /// Current arena. Old arenas are kept alive in [`old_allocs`] so previously-
-    /// handed-out pointers remain valid for the lifetime of the process.
-    alloc: LeakyBumpAlloc,
-    old_allocs: Vec<LeakyBumpAlloc>,
 }
 
-impl Shard {
-    fn new() -> Shard {
-        let capacity = INITIAL_TABLE_CAPACITY;
-        Shard {
-            entries: vec![std::ptr::null_mut(); capacity],
+impl Table {
+    fn new(capacity: usize) -> Table {
+        Table {
+            slots: std::iter::repeat_with(|| AtomicPtr::new(std::ptr::null_mut())).take(capacity).collect(),
             mask: capacity - 1,
-            num_entries: 0,
-            alloc: LeakyBumpAlloc::new(INITIAL_ARENA_BYTES, std::mem::align_of::<Entry>()),
-            old_allocs: Vec::new(),
         }
     }
 
-    /// Looks up `bytes` in this shard, or inserts a new entry and returns its pointer.
-    /// The returned pointer is stable for the lifetime of the process.
+    /// Finds the entry of `bytes` in this table, or the empty slot a new entry of them goes in.
     #[allow(clippy::multiple_unsafe_ops_per_block)]
-    #[allow(clippy::cast_ptr_alignment)]
-    #[allow(clippy::expect_used)]
-    #[allow(clippy::similar_names)]
-    fn intern(&mut self, bytes: &[u8], hash: u64) -> NonNull<Entry> {
+    fn find(&self, bytes: &[u8], hash: u64) -> Result<NonNull<Entry>, usize> {
         let mut pos = (hash as usize) & self.mask;
         let mut probe: usize = 0;
 
         loop {
-            // SAFETY: `pos` is masked with `self.mask = entries.len() - 1`, so it is always
-            // within bounds of `entries`.
-            let slot = unsafe { *self.entries.get_unchecked(pos) };
+            // SAFETY: `pos` is masked with `self.mask = slots.len() - 1`, so it is always within bounds of `slots`.
+            let slot = unsafe { self.slots.get_unchecked(pos) }.load(Ordering::Acquire);
             if slot.is_null() {
-                break;
+                return Err(pos);
             }
 
-            // SAFETY: every non-null slot points at an `Entry` written by a previous `intern`
-            // call; the arena outlives the program. Reading the header fields and trailing
-            // bytes through the raw `slot` keeps its whole-block provenance (see `Entry::bytes`).
+            // SAFETY: every non-null slot points at an `Entry` written in full before the release store that published
+            // it, which the acquire load above synchronizes with; the arena outlives the program. Reading the header
+            // fields and trailing bytes through the raw `slot` keeps its whole-block provenance (see `Entry::bytes`).
             let matched =
                 unsafe { (*slot).hash == hash && (*slot).len as usize == bytes.len() && Entry::bytes(slot) == bytes };
 
             if matched {
                 // SAFETY: `slot` was checked non-null above.
-                return unsafe { NonNull::new_unchecked(slot) };
+                return Ok(unsafe { NonNull::new_unchecked(slot) });
             }
 
             probe += 1;
-            debug_assert!(probe <= self.mask, "interner probe walked the entire shard");
+            debug_assert!(probe <= self.mask, "interner probe walked the entire table");
             pos = (pos + probe) & self.mask;
         }
+    }
+}
 
+/// What only the shard's writer, under its lock, changes: the count of entries and the arenas.
+struct Writer {
+    num_entries: usize,
+    /// Current arena. Old arenas are kept alive in [`Writer::old_allocs`] so previously-handed-out pointers remain valid
+    /// for the lifetime of the process.
+    alloc: LeakyBumpAlloc,
+    old_allocs: Vec<LeakyBumpAlloc>,
+}
+
+// SAFETY: A `Writer` owns its arenas exclusively, and the surrounding `Mutex` ensures only one thread mutates them at a
+// time. The arenas are leaked, so the pointers into them outlive every thread.
+unsafe impl Send for Writer {}
+
+struct Shard {
+    /// The current table. Only the writer, under its lock, replaces it, and a table it replaces is leaked, as the arena
+    /// is, since a reader may still be probing it.
+    table: AtomicPtr<Table>,
+    writer: Mutex<Writer>,
+}
+
+impl Shard {
+    fn new() -> Shard {
+        Shard {
+            table: AtomicPtr::new(Box::into_raw(Box::new(Table::new(INITIAL_TABLE_CAPACITY)))),
+            writer: Mutex::new(Writer {
+                num_entries: 0,
+                alloc: LeakyBumpAlloc::new(INITIAL_ARENA_BYTES, std::mem::align_of::<Entry>()),
+                old_allocs: Vec::new(),
+            }),
+        }
+    }
+
+    fn table(&self) -> &Table {
+        // SAFETY: the table pointer always holds a table this shard allocated and never frees.
+        unsafe { &*self.table.load(Ordering::Acquire) }
+    }
+
+    /// Finds the entry of `bytes`, or inserts one and returns its pointer. The returned pointer is stable for the
+    /// lifetime of the process.
+    #[allow(clippy::expect_used)]
+    fn intern(&self, bytes: &[u8], hash: u64) -> NonNull<Entry> {
+        if let Ok(entry) = self.table().find(bytes, hash) {
+            return entry;
+        }
+
+        // `expect` is acceptable here: a poisoned mutex means another thread panicked while holding the writer lock,
+        // which is an unrecoverable invariant violation.
+        let mut writer = self.writer.lock().expect("interner shard mutex poisoned");
+        // Under the lock the table is the writer's own, so a second find sees every entry and gives the slot to fill.
+        let table = self.table();
+        let pos = match table.find(bytes, hash) {
+            Ok(entry) => return entry,
+            Err(pos) => pos,
+        };
+
+        let entry = writer.allocate(bytes, hash);
+        // SAFETY: `pos` is within `slots` bounds, as `find` gave it.
+        unsafe { table.slots.get_unchecked(pos) }.store(entry.as_ptr(), Ordering::Release);
+        writer.num_entries += 1;
+        if writer.num_entries * 2 > table.mask {
+            self.grow(table);
+        }
+
+        entry
+    }
+
+    /// Doubles the table and re-inserts every existing pointer into the new one, which it then publishes. Existing
+    /// arena pointers are unchanged: only the index table grows. Called with the writer lock held.
+    fn grow(&self, table: &Table) {
+        let grown = Table::new((table.mask + 1) * 2);
+        for slot in &table.slots {
+            let ptr = slot.load(Ordering::Relaxed);
+            if ptr.is_null() {
+                continue;
+            }
+
+            // SAFETY: every non-null slot is a pointer to an `Entry` previously written by `allocate`; the arena is
+            // leaky so the pointer is still valid.
+            let hash = unsafe { (*ptr).hash };
+            let mut pos = (hash as usize) & grown.mask;
+            let mut probe: usize = 0;
+            while !grown.slots[pos].load(Ordering::Relaxed).is_null() {
+                probe += 1;
+                debug_assert!(probe <= grown.mask, "grow probe walked the entire table");
+                pos = (pos + probe) & grown.mask;
+            }
+
+            grown.slots[pos].store(ptr, Ordering::Relaxed);
+        }
+
+        self.table.store(Box::into_raw(Box::new(grown)), Ordering::Release);
+    }
+}
+
+impl Writer {
+    /// Writes a new entry of `bytes` into the arena and returns its pointer.
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
+    #[allow(clippy::cast_ptr_alignment)]
+    #[allow(clippy::expect_used)]
+    fn allocate(&mut self, bytes: &[u8], hash: u64) -> NonNull<Entry> {
         let entry_size = std::mem::size_of::<Entry>() + bytes.len();
         let aligned_size = round_up(entry_size, std::mem::align_of::<Entry>());
         if self.alloc.allocated() + aligned_size > self.alloc.capacity() {
@@ -140,86 +232,38 @@ impl Shard {
         unsafe {
             std::ptr::write(
                 ptr,
-                Entry { hash, len: u32::try_from(bytes.len()).expect("word length exceeds u32::MAX"), _pad: 0 },
+                Entry {
+                    hash,
+                    len: u32::try_from(bytes.len()).expect("word length exceeds u32::MAX"),
+                    _pad: 0,
+                    lowercase: AtomicPtr::new(std::ptr::null_mut()),
+                },
             );
 
             let dest_ptr = ptr.cast::<u8>().add(std::mem::size_of::<Entry>());
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), dest_ptr, bytes.len());
         }
 
-        // SAFETY: `pos` is within `entries` bounds (see top of function).
-        unsafe { *self.entries.get_unchecked_mut(pos) = ptr };
-        self.num_entries += 1;
-        if self.num_entries * 2 > self.mask {
-            // SAFETY: `grow` rehashes existing entries into a fresh table; no aliasing.
-            unsafe { self.grow() };
-        }
-
         // SAFETY: `ptr` was just written-to and is non-null (allocation didn't return null —
         // OOM aborts inside `LeakyBumpAlloc::allocate`).
         unsafe { NonNull::new_unchecked(ptr) }
     }
-
-    /// Doubles the table size and re-inserts every existing pointer. Existing arena
-    /// pointers are unchanged — only the index table grows.
-    unsafe fn grow(&mut self) {
-        let new_mask = self.mask * 2 + 1;
-        let mut new_entries: Vec<*mut Entry> = vec![std::ptr::null_mut(); new_mask + 1];
-
-        for slot in &self.entries {
-            let ptr = *slot;
-            if ptr.is_null() {
-                continue;
-            }
-
-            // SAFETY: every non-null slot is a pointer to an `Entry` previously written by
-            // `intern`; the arena is leaky so the pointer is still valid.
-            let hash = unsafe { (*ptr).hash };
-            let mut pos = (hash as usize) & new_mask;
-            let mut probe: usize = 0;
-            while !new_entries[pos].is_null() {
-                probe += 1;
-                debug_assert!(probe <= new_mask, "grow probe walked the entire shard");
-                pos = (pos + probe) & new_mask;
-            }
-
-            new_entries[pos] = ptr;
-        }
-
-        self.entries = new_entries;
-        self.mask = new_mask;
-    }
 }
-
-// SAFETY: A `Shard` owns its arena and table exclusively; the surrounding `Mutex` ensures
-// only one thread mutates at a time. Pointers in the table outlive every thread because the
-// arena is leaked, so transferring ownership across threads is sound.
-unsafe impl Send for Shard {}
 
 /// Global interner. Shards are lazily initialized on first use through the
 /// surrounding [`OnceLock`].
 struct Interner {
-    shards: [Mutex<Shard>; NUM_SHARDS],
+    shards: [Shard; NUM_SHARDS],
     hasher: FixedState,
 }
 
 impl Interner {
     fn new() -> Interner {
-        Interner { shards: std::array::from_fn(|_| Mutex::new(Shard::new())), hasher: FixedState::default() }
+        Interner { shards: std::array::from_fn(|_| Shard::new()), hasher: FixedState::default() }
     }
 }
 
 static INTERNER: OnceLock<Interner> = OnceLock::new();
-
-/// Per-thread, two-way set-associative cache for recently interned words.
-const CACHE_SETS: usize = 512;
-const CACHE_WAYS: usize = 2;
-const _: () = assert!(CACHE_SETS.is_power_of_two(), "interner cache set count must be a power of two");
-
-thread_local! {
-    static INTERN_CACHE: [[Cell<Option<NonNull<Entry>>>; CACHE_WAYS]; CACHE_SETS] =
-        const { [const { [const { Cell::new(None) }; CACHE_WAYS] }; CACHE_SETS] };
-}
 
 fn interner() -> &'static Interner {
     INTERNER.get_or_init(Interner::new)
@@ -227,7 +271,6 @@ fn interner() -> &'static Interner {
 
 /// Hashes `bytes` and returns the canonical entry pointer for them. Subsequent calls
 /// with the same bytes return the same pointer.
-#[allow(clippy::expect_used)]
 pub(crate) fn intern(bytes: &[u8]) -> NonNull<Entry> {
     let interner = interner();
 
@@ -235,60 +278,42 @@ pub(crate) fn intern(bytes: &[u8]) -> NonNull<Entry> {
     hasher.write(bytes);
     let hash = hasher.finish();
 
-    let cache_index = (hash as usize) & (CACHE_SETS - 1);
-    if let Some(entry) = INTERN_CACHE.with(|cache| {
-        let set = &cache[cache_index];
+    let shard_idx = (hash >> (u64::BITS as usize - SHARD_BITS)) as usize;
+    interner.shards[shard_idx].intern(bytes, hash)
+}
 
-        for way in 0..CACHE_WAYS {
-            let Some(entry) = set[way].get() else {
-                continue;
-            };
-
-            let ptr = entry.as_ptr();
-            // SAFETY: cache entries come only from the leaky global interner and
-            // therefore remain valid for the process lifetime.
-            let cached_hash = unsafe { (*ptr).hash };
-            if cached_hash != hash {
-                continue;
-            }
-
-            // SAFETY: same as above.
-            let cached_len = unsafe { (*ptr).len as usize };
-            if cached_len != bytes.len() {
-                continue;
-            }
-
-            // SAFETY: same as above; interner entries include their trailing bytes.
-            let cached_bytes = unsafe { Entry::bytes(ptr) };
-            if cached_bytes != bytes {
-                continue;
-            }
-
-            if way != 0 {
-                let previous = set[0].replace(Some(entry));
-                set[way].set(previous);
-            }
-
-            return Some(entry);
-        }
-
-        None
-    }) {
-        return entry;
+/// Returns the entry of the ASCII lowercase form of the entry `entry`'s bytes. The first call for an entry finds or
+/// interns that form and links the entry to it, and every later call reads the link. Two threads that race on the first
+/// call link the same pointer, as interning is canonical.
+pub(crate) fn lowercase(entry: NonNull<Entry>) -> NonNull<Entry> {
+    // SAFETY: `entry` points at an `Entry` the interner wrote, which lives for the process.
+    let link = unsafe { &entry.as_ref().lowercase };
+    if let Some(lowercase) = NonNull::new(link.load(Ordering::Acquire)) {
+        return lowercase;
     }
 
-    let shard_idx = (hash >> (u64::BITS as usize - SHARD_BITS)) as usize;
-    // `expect` is acceptable here: a poisoned mutex means another thread panicked while
-    // holding the interner lock, which is an unrecoverable invariant violation.
-    let mut shard = interner.shards[shard_idx].lock().expect("interner shard mutex poisoned");
-    let entry = shard.intern(bytes, hash);
-    INTERN_CACHE.with(|cache| {
-        let set = &cache[cache_index];
-        let previous = set[0].replace(Some(entry));
-        set[1].set(previous);
-    });
+    // SAFETY: as above, the entry's trailing bytes are initialized and live for the process.
+    let bytes = unsafe { Entry::bytes(entry.as_ptr()) };
+    let lowercase = if bytes.iter().any(u8::is_ascii_uppercase) { intern_lowercase(bytes) } else { entry };
+    link.store(lowercase.as_ptr(), Ordering::Release);
 
-    entry
+    lowercase
+}
+
+/// Interns the ASCII lowercase form of `bytes`.
+fn intern_lowercase(bytes: &[u8]) -> NonNull<Entry> {
+    const STACK_BUFFER: usize = 256;
+
+    if bytes.len() <= STACK_BUFFER {
+        let mut buffer = [0u8; STACK_BUFFER];
+        for (lowercase, byte) in buffer.iter_mut().zip(bytes) {
+            *lowercase = byte.to_ascii_lowercase();
+        }
+
+        return intern(&buffer[..bytes.len()]);
+    }
+
+    intern(&bytes.to_ascii_lowercase())
 }
 
 /// Top-bits shift count for shard selection. Top bits of the hash, not the low bits,

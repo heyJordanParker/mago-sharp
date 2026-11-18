@@ -202,3 +202,50 @@ fn debug_renders_quoted_string_for_valid_utf8() {
     let formatted = format!("{w:?}");
     assert_eq!(formatted, "\"hello\"");
 }
+
+#[test]
+fn lowercase_form_is_the_word_of_the_lowercase_bytes() {
+    let mixed = Word::new(b"App\\Models\\OrderLineItemRepository");
+    assert_eq!(mixed.to_ascii_lowercase(), Word::new(b"app\\models\\orderlineitemrepository"));
+    assert_eq!(Word::new(b"FOO").to_ascii_lowercase(), Word::new(b"foo"));
+    assert_eq!(Word::new(b"Caf\xC9").to_ascii_lowercase(), Word::new(b"caf\xC9"));
+}
+
+#[test]
+fn lowercase_word_is_its_own_lowercase_form() {
+    let lowercase = Word::new(b"already\\lowercase\\name");
+    assert_eq!(lowercase.to_ascii_lowercase(), lowercase);
+    assert_eq!(Word::new(b"").to_ascii_lowercase(), Word::new(b""));
+}
+
+#[test]
+fn threads_that_lowercase_one_word_at_once_get_the_same_word() {
+    const THREADS: usize = 8;
+    const WORDS: usize = 2_000;
+    let barrier = Arc::new(Barrier::new(THREADS));
+    let mut handles = Vec::with_capacity(THREADS);
+    for _ in 0..THREADS {
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            let mut lowercase = Vec::with_capacity(WORDS);
+            for i in 0..WORDS {
+                lowercase.push(Word::new(format!("Racing\\Lowercase\\Name{i}").as_bytes()).to_ascii_lowercase());
+            }
+            lowercase
+        }));
+    }
+
+    let mut results = Vec::with_capacity(THREADS);
+    for handle in handles {
+        match handle.join() {
+            Ok(lowercase) => results.push(lowercase),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    for (i, word) in results[0].iter().enumerate() {
+        assert_eq!(word.as_bytes(), format!("racing\\lowercase\\name{i}").as_bytes());
+        assert!(results.iter().all(|result| result[i] == *word));
+    }
+}
