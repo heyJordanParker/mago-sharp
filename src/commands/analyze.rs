@@ -63,6 +63,7 @@ use mago_database::watcher::start_watcher;
 use mago_orchestrator::Orchestrator;
 use mago_prelude::Prelude;
 use mago_reporting::CompiledIgnoreSet;
+use mago_reporting::IssueCollection;
 use mago_server::Server;
 use mago_server::Settings as ServerSettings;
 
@@ -79,6 +80,7 @@ use crate::consts::PRELUDE_BYTES;
 use crate::error::Error;
 use crate::extensions::initialize_external_analyzer;
 use crate::extensions::start_external_analyzer;
+use crate::service::BaselineIssueProcessor;
 use crate::utils::create_orchestrator;
 use crate::utils::git;
 
@@ -536,7 +538,7 @@ impl AnalyzeCommand {
             self.staged || !self.path.is_empty() || self.stdin_input,
         );
 
-        processor.process_issues(&orchestrator, server.database_mut(), issues)?;
+        report(&processor, &orchestrator, &mut server, issues);
 
         tracing::info!("Initial analysis complete. Watching for changes...");
 
@@ -567,10 +569,33 @@ impl AnalyzeCommand {
                 server.database().get_ref(&file_id).ok().map(|f| String::from_utf8_lossy(&f.name).into_owned())
             });
 
-            processor.process_issues(&orchestrator, server.database_mut(), issues)?;
+            report(&processor, &orchestrator, &mut server, issues);
 
             tracing::info!("Analysis complete. Watching for changes...");
         }
+    }
+}
+
+/// Reports one watch round's `issues` from `server`'s database. An issue that names a file the database lacks, as one
+/// deleted after the analysis read it, is left out, and the round that analyzes the file again reports it. A report that
+/// fails is logged, and the watch goes on to the next change.
+fn report(
+    processor: &BaselineIssueProcessor,
+    orchestrator: &Orchestrator<'_>,
+    server: &mut Server,
+    issues: IssueCollection,
+) {
+    let database = server.database();
+    let issues: IssueCollection = issues
+        .into_iter()
+        .filter(|issue| {
+            issue.annotations.iter().all(|annotation| {
+                annotation.span.file_id.is_zero() || database.get_ref(&annotation.span.file_id).is_ok()
+            })
+        })
+        .collect();
+    if let Err(error) = processor.process_issues(orchestrator, server.database_mut(), issues) {
+        tracing::error!("Failed to report results: {error}");
     }
 }
 

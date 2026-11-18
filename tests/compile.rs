@@ -1066,6 +1066,98 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     assert_ne!(runs[0].0, runs[1].0, "{failure}");
 }
 
+/// `mago analyze --watch` keeps reporting the issues that point into a vendor file Composer's autoload maps served, round
+/// after round, while files are deleted, created, renamed and edited, as agents change a tree. Deleting a class's file
+/// analyzes the project from scratch inside the round, and 0.6.27's watch then lost the served files and stopped with
+/// "Files error: file missing". Each round's report is the one-shot command's on the same tree.
+#[test]
+fn a_watch_reports_the_vendor_files_the_autoload_maps_served_through_deletes_creates_renames_and_edits() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
+    write(
+        root,
+        "vendor/composer/autoload_psr4.php",
+        "<?php\n\n$vendorDir = dirname(__DIR__);\n\nreturn array(\n    'Acme\\\\Rate\\\\' => array($vendorDir . '/acme/rate/src'),\n);\n",
+    );
+    write(
+        root,
+        "vendor/acme/rate/src/Rate.php",
+        "<?php\n\nnamespace Acme\\Rate;\n\nfinal class Rate\n{\n    private static function of(int $percent): int\n    {\n        return $percent;\n    }\n}\n",
+    );
+    let calling = |function: &str, percent: u8| {
+        format!(
+            "<?php\n\nnamespace App;\n\nuse Acme\\Rate\\Rate;\n\nfunction {function}(): int\n{{\n    return Rate::of({percent});\n}}\n"
+        )
+    };
+    write(root, "app/Order.php", &calling("total", 5));
+    write(root, "app/Extra.php", "<?php\n\nnamespace App;\n\nfinal class Extra\n{\n}\n");
+    let analyze = |watch: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mago"));
+        command
+            .args(["--no-version-check", "--colors", "never", "analyze", "--reporting-format", "rich"])
+            .args(watch.then_some("--watch"))
+            .env("MAGO_LOG", "info")
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root);
+        command
+    };
+    let once = || String::from_utf8_lossy(&process::output(&mut analyze(false)).unwrap().stdout).into_owned();
+
+    let reports = tempfile::NamedTempFile::new().unwrap();
+    let watch_log = tempfile::NamedTempFile::new().unwrap();
+    let mut watch =
+        process::spawn(analyze(true).stdout(reports.reopen().unwrap()).stderr(watch_log.reopen().unwrap())).unwrap();
+    let seen = || std::fs::read_to_string(watch_log.path()).unwrap();
+    let reported = || std::fs::read_to_string(reports.path()).unwrap();
+    let within = |done: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !done() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        done()
+    };
+    let started = within(&|| seen().contains("Initial analysis complete") || seen().contains("ERROR"));
+    let mut rounds: Vec<(&str, bool, String, String)> = Vec::new();
+    let changes: [(&str, &dyn Fn()); 4] = [
+        ("delete app/Extra.php", &|| std::fs::remove_file(root.join("app/Extra.php")).unwrap()),
+        ("create app/Added.php", &|| write(root, "app/Added.php", &calling("added", 7))),
+        ("rename app/Added.php", &|| std::fs::rename(root.join("app/Added.php"), root.join("app/Moved.php")).unwrap()),
+        ("edit app/Order.php", &|| write(root, "app/Order.php", &calling("total", 6))),
+    ];
+    let completed = || seen().matches("Analysis complete.").count();
+    for (change, apply) in changes {
+        let (before, rounds_before) = (reported().len(), completed());
+        apply();
+        let done = within(&|| completed() > rounds_before || seen().contains("ERROR"));
+        // A change can reach the watch in two batches, as a rename's delete and create, each a round of its own.
+        let mut settled = completed();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let now = completed();
+            if now == settled {
+                break;
+            }
+            settled = now;
+        }
+        let running = watch.try_wait().unwrap().is_none();
+        rounds.push((change, done && running && !seen().contains("ERROR"), reported().split_off(before), once()));
+    }
+    watch.kill().unwrap();
+    watch.wait().unwrap();
+
+    let failure = format!("{}{}", reported(), seen());
+    assert!(started, "{failure}");
+    for (change, kept_watching, report, cold) in rounds {
+        assert!(kept_watching, "the watch kept watching after `{change}`: {failure}");
+        assert!(report.contains("vendor/acme/rate/src/Rate.php"), "after `{change}`: {failure}");
+        assert!(
+            report.ends_with(&cold),
+            "after `{change}` the watch reports what the one-shot command reports: {failure}"
+        );
+    }
+}
+
 /// A batch of changes that holds a deleted file removes it from the watch's tree: `mago analyze --watch`, with a host
 /// whose compile reads the tree, reports the error of the file that used the deleted one and keeps watching, so it
 /// analyzes the next change too.

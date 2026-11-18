@@ -801,6 +801,20 @@ mod tests {
     }
 
     #[test]
+    fn a_run_from_scratch_after_an_update_reads_the_vendor_files_a_cold_run_reads() {
+        let root = project();
+        let (database, mut warm) = service(root.path());
+        warm.analyze().unwrap();
+
+        warm.update_database(database);
+        let again = issues(&warm.analyze().unwrap().issues);
+
+        let (_, read, cold) = analyzed(root.path());
+        assert_eq!(vendor_names(warm.autoloaded().to_vec()), read);
+        assert_eq!(again, cold);
+    }
+
+    #[test]
     fn an_edit_that_reaches_a_vendor_class_the_last_run_did_not_read_reads_it() {
         let root = project();
         let (_, mut warm) = service(root.path());

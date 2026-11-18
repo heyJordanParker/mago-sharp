@@ -571,6 +571,15 @@ impl IncrementalAnalysisService {
             .external_codebase_scan_plan()
             .map_err(mago_analyzer::error::AnalysisError::from)?
             .map(Arc::new);
+        // The database holds the files the last analysis from scratch served. This one serves its own, as a cold run
+        // does, so they leave it first: else the autoloader finds each one held, serves none, and the service forgets
+        // them, and the server's next database lacks the files its issues point into.
+        if !self.autoloaded.is_empty() {
+            let served: HashSet<FileId> = std::mem::take(&mut self.autoloaded).iter().map(|file| file.id).collect();
+            let mut database = ReadDatabase::empty();
+            database.extend(self.database.files().filter(|file| !served.contains(&file.id)));
+            self.database = database;
+        }
         let source_files: Vec<_> = self.database.files().filter(|f| f.file_type != FileType::Builtin).collect();
 
         if source_files.is_empty() {
