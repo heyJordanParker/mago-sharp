@@ -385,7 +385,7 @@ impl AnalyzeCommand {
         }
 
         let drop_server_start = trace_enabled.then(Instant::now);
-        drop(server);
+        server.leak();
         let drop_server_duration = drop_server_start.map(|s| s.elapsed());
 
         let drop_orchestrator_start = trace_enabled.then(Instant::now);

@@ -238,6 +238,14 @@ impl std::fmt::Debug for IncrementalAnalysisService {
 }
 
 impl IncrementalAnalysisService {
+    /// Ends a run that exits next: drops the plugin registry, which holds the extension hosts' processes, and the
+    /// autoloader, and leaks the rest, which the process's exit frees at once.
+    pub fn leak(mut self) {
+        drop(self.autoloader.take());
+        drop(std::mem::take(&mut self.plugin_registry));
+        std::mem::forget(self);
+    }
+
     /// Creates a new incremental analysis service with the given database, prelude, and settings.
     ///
     /// `prelude` returns the codebase and symbol references of the builtins only (no user

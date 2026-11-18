@@ -122,6 +122,14 @@ impl Server {
         &mut self.database
     }
 
+    /// Ends a run that exits next: drops what holds processes and files open, and leaks the files and the analysis,
+    /// which the process's exit frees at once, where dropping them would walk every file, symbol and type on one
+    /// thread.
+    pub fn leak(self) {
+        std::mem::forget(self.database);
+        self.service.leak();
+    }
+
     /// Run a full analysis pass over the workspace.
     ///
     /// # Errors
