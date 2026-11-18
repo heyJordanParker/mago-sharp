@@ -271,12 +271,14 @@ fn compile_in_turn(configuration: &Configuration, root: &Path, folder: &Path) ->
     let mut filesystems = Filesystems::new();
     let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
     let excluded = excluded_folders(&orchestrator, configuration)?;
-    let sources = source_files(configuration, root, &mut filesystems, orchestrator.autoloader().as_deref(), &excluded);
+    let mut sources =
+        source_files(configuration, root, &mut filesystems, orchestrator.autoloader().as_deref(), &excluded);
     if !sources.keys().any(|name| name.ends_with(".sharp")) {
         return Ok(HostsChange::Unchanged);
     }
 
     let path = folder.join(COMPILE_LOCK);
+    let record_path = folder.join(INPUTS);
     let locking = |error| DatabaseError::io(IOAction::WriteFile, &path, error);
     let mut held = HOSTS_FOLDERS.lock().unwrap_or_else(PoisonError::into_inner).remove(folder);
     let lock = match held.as_mut().and_then(|held| held.lock.take()) {
@@ -286,12 +288,25 @@ fn compile_in_turn(configuration: &Configuration, root: &Path, folder: &Path) ->
     let compiled = if every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems) {
         None
     } else {
+        let stale = std::fs::read(&record_path).ok();
         lock.unlock().and_then(|()| lock.lock()).map_err(locking)?;
-        let compiled = compile_into(configuration, root, folder)?;
+        // Only a compile writes the record, under the exclusive lock, so a record that changed while this run waited
+        // for the lock is another run's compile, whose tree this run checks again and reuses when it is current.
+        let reused = std::fs::read(&record_path).ok() != stale && {
+            filesystems = Filesystems::new();
+            sources =
+                source_files(configuration, root, &mut filesystems, orchestrator.autoloader().as_deref(), &excluded);
+            every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems)
+        };
+        let compiled = if reused {
+            None
+        } else {
+            compile_into(configuration, root, folder, &orchestrator, &sources, filesystems)?
+        };
         lock.unlock().and_then(|()| lock.lock_shared()).map_err(locking)?;
         compiled
     };
-    let record = std::fs::read(folder.join(INPUTS)).ok().map(|bytes| unit::source_hash(&bytes));
+    let record = std::fs::read(&record_path).ok().map(|bytes| unit::source_hash(&bytes));
     let last = held.map(|held| held.record);
     HOSTS_FOLDERS
         .lock()
@@ -305,28 +320,28 @@ fn compile_in_turn(configuration: &Configuration, root: &Path, folder: &Path) ->
     })
 }
 
-/// Compiles the project at `root` into `folder` for its extension hosts, as [`compile_for_hosts`] says, unless every
-/// file there is current, and keeps the record of what it read and wrote in `folder`'s [`INPUTS`]. Its log never
-/// decides the record: the loader and the analysis log from their worker threads too, which the main thread's
-/// subscriber doesn't silence, and the run with the hosts that follows reports what they log. Returns, when a file in
-/// `folder` changed, the files whose compiled file changed.
-fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Result<Option<Recompiled>, Error> {
+/// Compiles the project at `root`, whose source files are `sources`, as [`source_files`] found them with `orchestrator`
+/// and `filesystems`, into `folder` for its extension hosts, as [`compile_for_hosts`] says, and keeps the record of what
+/// it read and wrote in `folder`'s [`INPUTS`]. Its log never decides the record: the loader and the analysis log from
+/// their worker threads too, which the main thread's subscriber doesn't silence, and the run with the hosts that follows
+/// reports what they log. Returns, when a file in `folder` changed, the files whose compiled file changed.
+fn compile_into(
+    configuration: &Configuration,
+    root: &Path,
+    folder: &Path,
+    orchestrator: &Orchestrator<'_>,
+    sources: &BTreeMap<String, Found>,
+    filesystems: Filesystems,
+) -> Result<Option<Recompiled>, Error> {
     let record_path = folder.join(INPUTS);
-    let mut filesystems = Filesystems::new();
-    let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
     let autoloader = orchestrator.autoloader();
-    let excluded = excluded_folders(&orchestrator, configuration)?;
-    let sources = source_files(configuration, root, &mut filesystems, autoloader.as_deref(), &excluded);
-    if every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems) {
-        return Ok(None);
-    }
     // A record the compile can't delete is in a folder it then fails to write its compiled files to.
     let _ = std::fs::remove_file(&record_path);
-    let mut record = Record::start(configuration, root, &sources, folder, filesystems, autoloader.as_deref());
-    let (database, _) = project_database(&orchestrator, &configuration.source.workspace)?;
+    let mut record = Record::start(configuration, root, sources, folder, filesystems, autoloader.as_deref());
+    let (database, _) = project_database(orchestrator, &configuration.source.workspace)?;
 
     let library = standard_library(root, &database).map_err(OrchestratorError::General)?;
-    let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
+    let mut server = Server::new(database.into_static(), decode_prelude, server_settings(orchestrator));
     server.analyze()?;
     // A file whose errors the lowering does not survive is refused, whatever panic message its lowering printed.
     let printing = std::panic::take_hook();
@@ -2244,20 +2259,18 @@ mod tests {
     fn the_hosts_compile_runs_again_after_an_edit_of_a_vendor_file() {
         let (_directory, root, configuration) = project();
         let folder = tempfile::tempdir().unwrap();
-        assert!(compile_into(&configuration, &root, folder.path()).unwrap().is_some(), "a fresh folder is written");
+        let compile = || compile_in_turn(&configuration, &root, folder.path()).unwrap();
+        assert!(matches!(compile(), HostsChange::Recompiled(_)), "a fresh folder is written");
         // A compile that runs writes its record anew, though every compiled file it writes is the same.
         let recorded = || std::fs::metadata(folder.path().join(INPUTS)).unwrap().modified().unwrap();
         let written = recorded();
-        assert!(compile_into(&configuration, &root, folder.path()).unwrap().is_none(), "nothing changed");
+        assert!(matches!(compile(), HostsChange::Unchanged), "nothing changed");
         assert_eq!(recorded(), written, "the compile had nothing to do");
 
         write(&root, "vendor/acme/rate/src/Rate.php", &rate("string"));
         let paced = std::fs::read(folder.path().join("app/Paced.sharpc")).unwrap();
 
-        assert!(
-            compile_into(&configuration, &root, folder.path()).unwrap().is_some(),
-            "the vendor edit compiles again"
-        );
+        assert!(matches!(compile(), HostsChange::Recompiled(_)), "the vendor edit compiles again");
         assert_ne!(std::fs::read(folder.path().join("app/Paced.sharpc")).unwrap(), paced);
     }
 
@@ -2280,7 +2293,7 @@ mod tests {
         );
         let folder = tempfile::tempdir().unwrap();
 
-        let Err(error) = compile_into(&configuration, &root, folder.path()) else {
+        let Err(error) = compile_in_turn(&configuration, &root, folder.path()) else {
             panic!("the hosts' compile accepted library 0.5.9");
         };
         assert_eq!(
