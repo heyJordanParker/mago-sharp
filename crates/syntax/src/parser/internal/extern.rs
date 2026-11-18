@@ -83,6 +83,44 @@ where
         })
     }
 
+    /// Whether a PHP# `extern` line starts here: `extern`, then a name or a type, as its return type or its target. A
+    /// return type in brackets, as `[int, int]` or `(int|string)?`, starts one only outside code, where the target's
+    /// name follows it, so `extern(text)` and `extern[0]` stay a call and an index of a value named `extern`.
+    pub(crate) fn is_at_extern(&self) -> Result<bool, ParseError<'arena>> {
+        let mut tokens = self.stream.peek_tokens();
+        if !self.dialect.is_sharp()
+            || !tokens.next().transpose()?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"extern")
+        {
+            return Ok(false);
+        }
+
+        let Some(first) = tokens.next().transpose()? else {
+            return Ok(false);
+        };
+        if first.kind.is_identifier_maybe_reserved() {
+            return Ok(true);
+        }
+        if self.state.within_block || !matches!(first.kind, T!["(" | "["]) {
+            return Ok(false);
+        }
+
+        let mut depth = 1usize;
+        while depth > 0 {
+            match tokens.next().transpose()?.map(|token| token.kind) {
+                Some(T!["(" | "["]) => depth += 1,
+                Some(T![")" | "]"]) => depth -= 1,
+                Some(T![";" | "{" | "}"]) | None => return Ok(false),
+                Some(_) => {}
+            }
+        }
+        let mut after = tokens.next().transpose()?;
+        if after.is_some_and(|token| token.kind == T!["?"]) {
+            after = tokens.next().transpose()?;
+        }
+
+        Ok(after.is_some_and(|token| token.kind.is_identifier_maybe_reserved()))
+    }
+
     /// Whether the `extern` line ahead states a signature: a `(` comes before the line ends.
     fn is_at_extern_signature(&self) -> Result<bool, ParseError<'arena>> {
         for token in self.stream.peek_tokens() {

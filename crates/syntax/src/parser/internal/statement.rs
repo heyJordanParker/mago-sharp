@@ -65,13 +65,7 @@ where
             T![Identifier] if self.dialect.is_sharp() && token.value == b"import" => {
                 self.parse_import().map(Statement::Use)
             }
-            T![Identifier]
-                if self.dialect.is_sharp()
-                    && token.value == b"extern"
-                    && self.stream.peek_kind(1)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) =>
-            {
-                self.parse_extern(Sequence::empty()).map(Statement::Extern)
-            }
+            T![Identifier] if self.is_at_extern()? => self.parse_extern(Sequence::empty()).map(Statement::Extern),
             T![Identifier]
                 if self.dialect.is_sharp()
                     && token.value == b"module"
@@ -100,13 +94,7 @@ where
                 let maybe_after = self.stream.peek_kind(1)?;
 
                 match next.kind {
-                    T![Identifier]
-                        if self.dialect.is_sharp()
-                            && next.value == b"extern"
-                            && self.stream.peek_kind(1)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) =>
-                    {
-                        self.parse_extern(attributes).map(Statement::Extern)
-                    }
+                    T![Identifier] if self.is_at_extern()? => self.parse_extern(attributes).map(Statement::Extern),
                     T!["interface" | Identifier] if self.is_at_interface()? => {
                         self.parse_interface_with_attributes(attributes).map(Statement::Interface)
                     }

@@ -136,6 +136,21 @@ fn an_extern_signature_names_a_member_and_states_its_types_alone() {
     );
 }
 
+/// Spec section 23: an `extern` line's types are checked as a method's are, so it states a function type, a tuple and
+/// a nullable union, and `void` is still no parameter of a function type, and a union in parentheses still takes `?`.
+#[test]
+fn an_extern_signature_takes_any_type_a_method_declares() {
+    let code = "namespace App.Stubs;\n\nimport Lib.Factory;\n\nextern Function<void()> Factory.make();\nextern [int, int] Factory.pair();\nextern (int|string)? Factory.either();\nextern Function<int(void)> Factory.broken();\nextern (int|string) Factory.bare();\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "8:21 A function type takes no `void` parameter: `void` is only a return type, and `Function<int()>` takes nothing.",
+            "9:8 Write `int|string` without parentheses: they go only around a union or an intersection before `?`, as in `(int|string)?`.",
+        ]
+    );
+}
+
 /// Spec section 15: an event runs as a final class whose parameters are its public get-only properties. It takes only
 /// `public` or `internal`, spec section 5, and each parameter is a type, a `Set` among them, a name and an optional
 /// default. An event is a class, so any capitalized word but a reserved type name names one, as `Print` and `Exit` do,

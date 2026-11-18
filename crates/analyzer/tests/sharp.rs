@@ -10953,6 +10953,26 @@ fn a_typed_extern_that_misfits_the_native_types_is_refused_at_its_line() {
     );
 }
 
+/// Spec section 23: an `extern` line states any return type a PHP# method declares: a function type over a native
+/// `\Closure`, a tuple over a native `array` and a nullable union over a native one, as a nullable type over a nullable
+/// one. A call reads each as the line states it, so the function `Factory.make()` returns is called in turn, with no
+/// argument, as `Function<void()>` takes none.
+#[test]
+fn an_extern_line_states_any_return_type_a_method_declares() {
+    let factory = "<?php\n\nnamespace Lib;\n\nfinal class Factory\n{\n    public static function make(): \\Closure\n    {\n        return static function (): void {};\n    }\n\n    public static function pair(): array\n    {\n        return [1, 2];\n    }\n\n    public static function either(): int|string|null\n    {\n        return 1;\n    }\n\n    public static function name(): ?string\n    {\n        return null;\n    }\n}\n";
+    let stubs = "namespace Stubs;\n\nimport Lib.Factory;\n\nextern Function<void()> Factory.make();\nextern [int, int] Factory.pair();\nextern (int|string)? Factory.either();\nextern string? Factory.name();\n";
+    let shop = "namespace Shop;\n\nimport Lib.Factory;\n\npublic class Shop\n{\n    public int run()\n    {\n        Factory.make()();\n        Factory.make()(1);\n        [int, int] pair = Factory.pair();\n        (int|string)? either = Factory.either();\n        string? name = Factory.name();\n        return pair[0] + pair[1];\n    }\n}\n";
+
+    assert_eq!(
+        package_errors(&[
+            ("src/Lib/Factory.php", factory),
+            ("src/Stubs/Library.sharp", stubs),
+            ("src/Shop/Shop.sharp", shop),
+        ]),
+        ["Too many arguments provided for function value `Factory.make()`."]
+    );
+}
+
 /// Spec section 24: the help of each refusal names what to write instead: a backed enum for a selection, the empty
 /// tests for `""`, and a struct for a `Map` key.
 #[test]

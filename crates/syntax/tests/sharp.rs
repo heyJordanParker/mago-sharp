@@ -5049,6 +5049,46 @@ fn an_extern_line_states_a_signature_in_method_order() {
     );
 }
 
+/// An `extern` line's return type is any type a PHP# method returns, spec section 23: a function type, a tuple and a
+/// parenthesized union start a line as a name does, with attributes before it or none.
+#[test]
+fn an_extern_line_returns_any_type_a_method_returns() {
+    const CODE: &str = "namespace App.Stubs;\n\nextern Function<void()> Factory.make();\nextern [int, int] Factory.pair();\nextern (int|string) Factory.either();\nextern string? Factory.name();\n[Group(\"pairs\")]\nextern [int, int] Factory.again();\n[Group(\"unions\")]\nextern (int|string) Factory.other();\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Stubs/Factory.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+        panic!("expected a namespace, got {:#?}", program.statements);
+    };
+    let externs: Vec<(usize, Option<&str>, &str)> = namespace
+        .statements()
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Extern(declaration) => Some(declaration),
+            _ => None,
+        })
+        .map(|declaration| {
+            (
+                declaration.attribute_lists.len(),
+                declaration.return_type_hint.as_ref().map(|hint| source(CODE, hint)),
+                source(CODE, &declaration.target),
+            )
+        })
+        .collect();
+    assert_eq!(
+        externs,
+        [
+            (0, Some("Function<void()>"), "Factory.make"),
+            (0, Some("[int, int]"), "Factory.pair"),
+            (0, Some("(int|string)"), "Factory.either"),
+            (0, Some("string?"), "Factory.name"),
+            (1, Some("[int, int]"), "Factory.again"),
+            (1, Some("(int|string)"), "Factory.other"),
+        ]
+    );
+}
+
 /// `extern` declares only when a name follows it, so `extern(text)` at the start of a PHP# statement stays a call.
 #[test]
 fn extern_before_a_parenthesis_stays_a_call_in_php_sharp() {

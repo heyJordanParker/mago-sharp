@@ -1468,7 +1468,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // A function type's parts are checked as a parameter's type is, so its return type may be `void`, which
         // `is_slice_type` refuses for its parameters, and `Self` in it is an error, because `Self` is a method's return
         // type only.
-        (Node::FunctionHint(function), FieldOrProperty | ClassConstant | Method | Parameter | Body) => {
+        (Node::FunctionHint(function), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body) => {
             for void in function.parameters.iter().filter(|parameter| matches!(parameter, Hint::Void(_))) {
                 context.report(
                     Issue::error(
