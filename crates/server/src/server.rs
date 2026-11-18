@@ -88,6 +88,15 @@ impl Server {
         self
     }
 
+    /// Leave the extension host issues of `package_files` out of each analysis: the packages' `.sharp` files a compile
+    /// checks as files of the workspace, which a host reports on no more than on any other file outside the
+    /// configuration's `paths`.
+    #[must_use]
+    pub fn with_package_files(mut self, package_files: impl IntoIterator<Item = FileId>) -> Self {
+        self.service = self.service.with_package_files(package_files);
+        self
+    }
+
     /// Analyze the whole workspace, but report only the issues in the files `scope` holds, plus the
     /// issues that name no file. An issue is reported in its primary annotation's file, else in its
     /// first annotation's. The node-analysis hooks report only in the file they inspect, so they run

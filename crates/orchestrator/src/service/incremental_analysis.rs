@@ -201,6 +201,9 @@ pub struct IncrementalAnalysisService {
     /// the file from without analyzing it again.
     keeps_lowering_inputs: bool,
     node_analysis_files: Option<HashSet<FileId>>,
+    /// The packages' `.sharp` files a compile checks as files of the project, whose extension host issues each analysis
+    /// leaves out, as it leaves out those of every other file outside the configuration's `paths`.
+    package_files: HashSet<FileId>,
     /// Composer's autoload maps, which serve each analysis from scratch the plain PHP vendor files its files reach.
     autoloader: Option<Arc<Autoloader>>,
     /// The files the autoloader served the last analysis from scratch, which every later database of the service holds.
@@ -247,6 +250,7 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("scan_only", &self.scan_only)
             .field("keeps_lowering_inputs", &self.keeps_lowering_inputs)
             .field("node_analysis_files", &self.node_analysis_files.as_ref().map(HashSet::len))
+            .field("package_files", &self.package_files.len())
             .field("autoloader", &self.autoloader.is_some())
             .field("autoloaded", &self.autoloaded.len())
             .field("declared_returns", &self.declared_returns.len())
@@ -311,6 +315,7 @@ impl IncrementalAnalysisService {
             scan_only: false,
             keeps_lowering_inputs: false,
             node_analysis_files: None,
+            package_files: HashSet::default(),
             autoloader: None,
             autoloaded: Vec::new(),
             declared_returns: HashMap::default(),
@@ -343,6 +348,15 @@ impl IncrementalAnalysisService {
     #[must_use]
     pub fn keeping_lowering_inputs(mut self) -> Self {
         self.keeps_lowering_inputs = true;
+        self
+    }
+
+    /// Leaves the extension host issues of `package_files` out of each analysis: the packages' `.sharp` files a compile
+    /// checks as files of the project, which a host reports on no more than on any other file outside the
+    /// configuration's `paths`.
+    #[must_use]
+    pub fn with_package_files(mut self, package_files: impl IntoIterator<Item = FileId>) -> Self {
+        self.package_files = package_files.into_iter().collect();
         self
     }
 
@@ -2010,6 +2024,15 @@ impl IncrementalAnalysisService {
         let before = plugin_registry
             .run_external_before_analysis_hooks(codebase, external_session.as_deref())
             .map_err(mago_analyzer::error::AnalysisError::from)?;
+        // A host reports only on the project's own files, those under the configuration's `paths`: never on a file of
+        // `includes`, nor on a package's `.sharp` file a compile checks as a file of the project, which only the
+        // checker's own errors refuse.
+        let in_project = |issue: &Issue| {
+            issue.primary_span().is_none_or(|span| {
+                !self.package_files.contains(&span.file_id)
+                    && self.database.get_ref(&span.file_id).is_ok_and(|file| file.file_type == FileType::Host)
+            })
+        };
         let references_changed = before.references != self.external_symbol_references;
         let external_symbol_references = before.references;
         let effective_skip_files = if references_changed { HashSet::default() } else { skip_files.clone() };
@@ -2210,7 +2233,7 @@ impl IncrementalAnalysisService {
         }
 
         let mut aggregated_result = AnalysisResult::new(current_symbol_references);
-        aggregated_result.issues = before.issues;
+        aggregated_result.issues = before.issues.into_iter().filter(in_project).collect();
         let mut per_file_issues: HashMap<FileId, IssueCollection> = HashMap::default();
         let mut snapshots = Vec::new();
         let mut per_file_effect_summaries: HashMap<FileId, Vec<EffectSummary>> = HashMap::default();
@@ -2253,7 +2276,7 @@ impl IncrementalAnalysisService {
             #[cfg(not(target_arch = "wasm32"))]
             let issue_count = batches.iter().map(|batch| batch.issues.len()).sum::<usize>();
             for batch in batches {
-                for issue in batch.issues {
+                for issue in batch.issues.into_iter().filter(in_project) {
                     let file_id = issue.annotations.first().map(|annotation| annotation.span.file_id);
                     if let Some(issues) = file_id.and_then(|file_id| per_file_issues.get_mut(&file_id)) {
                         issues.push(issue);
@@ -2386,7 +2409,7 @@ impl IncrementalAnalysisService {
                     "Incremental external after-analysis hooks completed."
                 );
             }
-            aggregated_result.issues.extend(after_issues);
+            aggregated_result.issues.extend(after_issues.into_iter().filter(in_project));
         }
 
         if !after_analysis {

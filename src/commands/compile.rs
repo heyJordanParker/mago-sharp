@@ -841,11 +841,11 @@ fn host_compiled_path(root: &Path, folder: &Path, source: &Path) -> Result<Optio
 }
 
 /// The project's database: every file the analyzer loads with the prelude, and each `.sharp` file of a package as a
-/// file of the project, which the compile checks too. Also gives the names of those packaged files.
+/// file of the project, which the compile checks too. Also gives the IDs of those packaged files.
 pub(crate) fn project_database(
     orchestrator: &Orchestrator<'_>,
     workspace: &Path,
-) -> Result<(Database<'static>, HashSet<Vec<u8>>), Error> {
+) -> Result<(Database<'static>, HashSet<FileId>), Error> {
     let mut database = orchestrator.load_database(workspace, true, None, None)?;
     database.merge_base(Prelude::decode_database(PRELUDE_BYTES).expect("Failed to decode embedded prelude"));
     let packaged: Vec<File> = database
@@ -853,7 +853,7 @@ pub(crate) fn project_database(
         .filter(|file| file.file_type == FileType::Vendored && Dialect::of(file).is_sharp())
         .map(|file| copy_of(&file, FileType::Host, file.contents.clone()))
         .collect();
-    let included: HashSet<Vec<u8>> = packaged.iter().map(|file| file.name.to_vec()).collect();
+    let included: HashSet<FileId> = packaged.iter().map(|file| file.id).collect();
     for file in packaged {
         database.add(file);
     }
@@ -1017,7 +1017,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
             && Dialect::of(file).is_sharp()
             && !file.is_standard_library
             && !file.name.starts_with(VENDOR)
-            && !included.contains(file.name.as_ref())
+            && !included.contains(&file.id)
     }) {
         let source = root.join(String::from_utf8_lossy(&file.name).as_ref());
         let folder = source.parent().unwrap_or(&root).to_path_buf();
@@ -1103,6 +1103,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     };
     let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator))
         .keeping_lowering_inputs()
+        .with_package_files(included)
         .scoped_to(is_lowered);
     server.analyze()?;
     // The compile hides what `mago analyze` hides: a host rule's error an `ignore` entry or the baseline targets.

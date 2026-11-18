@@ -1792,6 +1792,42 @@ fn compile_runs_the_node_hooks_only_in_the_php_sharp_files_it_lowers() {
     assert!(compiled(root, MONEY_PATH).exists());
 }
 
+/// A host's rule reports only on the project's own files, those under `paths`, never on a package's `.sharp` file the
+/// compile checks beside them: its error there is left out, so the package file compiles, while its error on a project
+/// file refuses that file.
+#[test]
+fn compile_reports_a_hosts_issue_only_on_the_projects_own_files() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the host issue scope compile test") {
+        return;
+    }
+    let directory = project(ORDER, &MONEY.replace("return 100;", "return 100; // host-error-here"));
+    let root = directory.path();
+    write(
+        root,
+        "app/Marked.sharp",
+        "namespace App;\n\npublic class Marked\n{\n    public static string text() => \"host-error-here\";\n}\n",
+    );
+    write(root, "tools/host.php", MARKER_HOST);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.acme]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert_eq!(printed(&output).matches("acme/no-marker").count(), 1, "{}", printed(&output));
+    assert!(printed(&output).contains("app/Marked.sharp"), "{}", printed(&output));
+    assert!(!printed(&output).contains("Money.sharp"), "{}", printed(&output));
+    assert!(compiled(root, MONEY_PATH).exists(), "{}", printed(&output));
+    assert!(!compiled(root, "app/Marked.sharp").exists(), "{}", printed(&output));
+}
+
 /// The typing host of [`a_typing_host_loads_a_class_only_its_typing_makes_correct_on_a_fresh_tree`]: it gives
 /// `App\Helpers\untyped()` the return type `string`, and its hook throws unless the hosts' compile holds
 /// `app/Greeting.sharp`, as a host whose loading of a project class fails rethrows.
