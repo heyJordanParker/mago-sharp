@@ -375,24 +375,21 @@ fn compile_into(
 
     // Whether a file a host's worker loads changed, so a watch knows to start the workers again.
     let mut changed = false;
-    let mut write = |path: &Path, bytes: &[u8]| -> Result<bool, Error> {
-        let rewritten = std::fs::read(path).ok().as_deref() != Some(bytes);
-        if rewritten {
-            write_by_rename(path, bytes)?;
-            changed = true;
-        }
+    let mut keep = |path: &Path, bytes: &[u8], wrote: bool| {
+        changed |= wrote;
         if let Some(record) = record.as_mut() {
             record.output(path, bytes);
         }
-        Ok(rewritten)
     };
     let mut written = BTreeSet::new();
     let mut refused = IssueCollection::default();
     let mut accepted = HashSet::new();
     let mut recompiled = HashSet::new();
     let (compilations, compiled_files) = compilations?;
-    write(&compiled_files_path, &compiled_files.encode(configuration_hash(configuration))?)?;
+    let bytes = compiled_files.encode(configuration_hash(configuration))?;
+    keep(&compiled_files_path, &bytes, write_if_changed(&compiled_files_path, &bytes)?);
     written.insert(compiled_files_path);
+    let mut writes = Vec::new();
     for (file_id, compilation) in compilations {
         let file = database.get_ref(&file_id)?;
         let Some(compiled) = host_compiled_path(root, folder, &source_path(root, file))? else {
@@ -400,10 +397,7 @@ fn compile_into(
         };
         match compilation {
             Compilation::Accepted(bytes) => {
-                if write(&compiled, &bytes)? {
-                    recompiled.insert(file_id);
-                }
-                written.insert(compiled);
+                writes.push((file_id, compiled, bytes));
                 accepted.insert(file_id);
             }
             Compilation::Refused(errors) => {
@@ -413,6 +407,17 @@ fn compile_into(
                 refused.extend(errors);
             }
         }
+    }
+    // Each file is read and written on its own, so they are written at once and kept in the record in compile order.
+    let wrote: Vec<Result<bool, DatabaseError>> =
+        writes.par_iter().map(|(_, compiled, bytes)| write_if_changed(compiled, bytes)).collect();
+    for ((file_id, compiled, bytes), wrote) in writes.into_iter().zip(wrote) {
+        let wrote = wrote?;
+        if wrote {
+            recompiled.insert(file_id);
+        }
+        keep(&compiled, &bytes, wrote);
+        written.insert(compiled);
     }
     let classes = server
         .codebase()
@@ -434,7 +439,8 @@ fn compile_into(
         let effects = server.extern_effects();
         let table = folder.join(LISTENERS);
         let dispatcher = server.dispatcher_module();
-        write(&table, &listener_table(&inputs, &accepted, dispatcher.as_ref(), &externs, &effects, &families))?;
+        let bytes = listener_table(&inputs, &accepted, dispatcher.as_ref(), &externs, &effects, &families);
+        keep(&table, &bytes, write_if_changed(&table, &bytes)?);
         written.insert(table);
     }
 
@@ -455,7 +461,7 @@ fn compile_into(
     .report(refused, None)?;
     let report = report.lock().unwrap_or_else(PoisonError::into_inner).clone();
     let path = folder.join(HOST_REPORT);
-    write(&path, &report)?;
+    keep(&path, &report, write_if_changed(&path, &report)?);
     written.insert(path);
     // A compile with a file that doesn't lower keeps no record, so the next one tries that file again.
     let record = record.filter(|_| lowered);
@@ -541,12 +547,17 @@ fn served_stamps(
         return Ok(Vec::new());
     };
 
-    database
+    let served: Vec<_> = database
         .files()
         .filter(|file| !file.name.starts_with(VENDOR))
         .filter(|file| file.path.as_deref().is_some_and(|path| autoloader.serves(path)))
-        .map(|file| Ok(recorded(&file.name, unit::stamp(root, &file.name)?.as_ref())))
-        .collect()
+        .collect();
+
+    // Stamped at once, and the first file in order that can't be read is the one named, as one after another.
+    let stamped: Vec<Result<Stamp, Error>> =
+        served.par_iter().map(|file| Ok(recorded(&file.name, unit::stamp(root, &file.name)?.as_ref()))).collect();
+
+    stamped.into_iter().collect()
 }
 
 /// The path of `file`, a file of the project at `root`: its own, or its name under `root`.
@@ -555,17 +566,18 @@ fn source_path(root: &Path, file: &File) -> PathBuf {
 }
 
 /// Writes `bytes` to the file at `path`, unless it holds them already, so a compile that changes nothing in it leaves
-/// it as it was.
+/// it as it was. Returns whether it wrote.
 ///
 /// # Errors
 ///
 /// Returns the error of writing the file.
-fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), DatabaseError> {
-    if std::fs::read(path).ok().as_deref() != Some(bytes) {
-        write_by_rename(path, bytes)?;
+fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
+    if std::fs::read(path).ok().as_deref() == Some(bytes) {
+        return Ok(false);
     }
+    write_by_rename(path, bytes)?;
 
-    Ok(())
+    Ok(true)
 }
 
 /// The folders the loader skips in `orchestrator`'s workspace, which `configuration` names, as it loads the project's
@@ -775,6 +787,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     let mut refused_files = 0;
     let mut refused_php_files = 0;
     let mut packaged_refusals = Vec::new();
+    let mut writes = Vec::new();
     for (file_id, compilation) in compilations {
         let file = database.get_ref(&file_id)?;
         let name = String::from_utf8_lossy(&file.name);
@@ -792,11 +805,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
 
         match compilation {
             Compilation::Accepted(bytes) => {
-                write_if_changed(&compiled, &bytes)?;
-                if let Some(record) = record.as_mut() {
-                    record.output(&compiled, &bytes);
-                }
-                written.insert(compiled);
+                writes.push((compiled, bytes));
                 accepted.insert(file_id);
             }
             Compilation::Refused(issues) => {
@@ -813,6 +822,16 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
                 }
             }
         }
+    }
+    // Each file is read and written on its own, so they are written at once and kept in the record in compile order.
+    let wrote: Vec<Result<bool, DatabaseError>> =
+        writes.par_iter().map(|(compiled, bytes)| write_if_changed(compiled, bytes)).collect();
+    wrote.into_iter().collect::<Result<Vec<bool>, _>>()?;
+    for (compiled, bytes) in writes {
+        if let Some(record) = record.as_mut() {
+            record.output(&compiled, &bytes);
+        }
+        written.insert(compiled);
     }
 
     let listeners = server.listeners();
@@ -1645,12 +1664,13 @@ fn listener_inputs(root: &Path, database: &impl DatabaseReader) -> Result<Vec<un
         paths.insert(unit::SOURCE_LISTING.as_bytes().to_vec());
     }
 
-    let mut inputs = Vec::with_capacity(paths.len());
-    for path in paths {
-        inputs.extend(unit::stamp(root, &path)?);
-    }
+    let paths: Vec<Vec<u8>> = paths.into_iter().collect();
+    // Stamped at once, and the first file in order that can't be read is the one named, as one after another.
+    let stamped: Vec<Result<Option<unit::Input>, DatabaseError>> =
+        paths.par_iter().map(|path| unit::stamp(root, path)).collect();
+    let stamped: Vec<Option<unit::Input>> = stamped.into_iter().collect::<Result<_, _>>()?;
 
-    Ok(inputs)
+    Ok(stamped.into_iter().flatten().collect())
 }
 
 /// The PHP source of the listener table. Its `inputs` are the files whose change makes the table out of date, each as
