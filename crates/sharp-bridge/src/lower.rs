@@ -6854,10 +6854,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// through a hidden copy, which its `set` then stores once the write changed it: `this.sizes[key] = value` is
     /// `[$receiver#1 = $this->sizes, $kept#2 = $receiver#1, $receiver#1[$key] = $value, $receiver#1 === $kept#2 ||
     /// ($this->sizes = $receiver#1)][2]`. The key and the value run before the copy is read, as [`Self::with_place`]
-    /// holds them, so a change they make to the property stays. A `??=` runs its value only where the property holds no
-    /// value for the key, so the copy is read behind that test, after the value runs: `this.sizes[key] ??= value` is
-    /// `$this->sizes[$key] ?? …`, the `=` write, with an object or a key that runs code held once before the test. The
-    /// checker refuses every other operator, since it reads the value of the `Map` bare.
+    /// holds them, so a change they make to the property stays. A `??=` is [`Self::coalesced_write`] of the `=` write,
+    /// behind `$this->sizes[$key] ?? …`. The checker refuses every other operator, since it reads the value of the `Map`
+    /// bare.
     fn plain_map_write(&mut self, line: u32, assignment: &Assignment, access: &ArrayAccess) -> u32 {
         let write = |this: &mut Self| {
             let held = [(access.index, "index"), (assignment.rhs, "value")];
@@ -6870,34 +6869,101 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 this.node(SHARP_AST_ASSIGN, 0, line, &[element, value])
             })
         };
+        let found = |this: &mut Self| {
+            let property = this.target(access.array, PlaceUse::Read);
+            let key = this.expression(access.index);
+
+            this.node(SHARP_AST_DIM, 0, line, &[property, key])
+        };
+
         match assignment.operator {
-            AssignmentOperator::Assign(_) => return write(self),
-            AssignmentOperator::Coalesce(_) => {}
+            AssignmentOperator::Assign(_) => write(self),
+            AssignmentOperator::Coalesce(_) => self.coalesced_write(line, access, found, write),
             _ => unreachable!("the checker refuses `{}` on a `Map` value, which reads it bare", assignment.operator),
         }
+    }
 
+    /// A write to the value of a `Map` at a key, spec section 12, which runs the standard library's `set` member of a
+    /// `Map` on the map's place, as [`Self::with_place`] passes it, as a `List`'s index write runs a `List`'s. Its inline
+    /// form calls the engine's `put`: `map[key] = value` is `\Sharp\Internal\put($map, $key, $value)`. The key and the
+    /// value run before the place is taken, as PHP's own write runs them, as [`Self::with_place`] holds them. A `??=` is
+    /// [`Self::coalesced_write`] of the `=` write, behind `\Sharp\Internal\get($map, $key) ?? …`. The checker refuses
+    /// every other operator, since it reads the value of the `Map` bare.
+    fn map_write(&mut self, line: u32, assignment: &Assignment, access: &ArrayAccess) -> u32 {
+        let write = |this: &mut Self| {
+            let gives_stored = this.discarded != Some(assignment.span());
+            let held = [(access.index, "index"), (assignment.rhs, "value")];
+
+            this.with_place(access.array, false, &held, |this, place| {
+                let key = this.expression(access.index);
+                let declared = this.types.plain_place_type(assignment.lhs);
+                let value = this
+                    .stored_in_plain_place(line, assignment.rhs, declared)
+                    .unwrap_or_else(|| this.expression(assignment.rhs));
+                let set = this.types.collection_operation(b"set", CollectionKind::Map);
+
+                this.written(line, access.span(), &set, [place, key, value], false, gives_stored)
+            })
+        };
+        let found = |this: &mut Self| {
+            let map = this.expression(access.array);
+            let key = this.expression(access.index);
+            let get = this.types.collection_operation(b"get", CollectionKind::Map);
+
+            this.member_operation(line, &get, &[map, key])
+        };
+
+        match assignment.operator {
+            AssignmentOperator::Assign(_) => write(self),
+            AssignmentOperator::Coalesce(_) => self.coalesced_write(line, access, found, write),
+            _ => unreachable!("the checker refuses `{}` on a `Map` value, which reads it bare", assignment.operator),
+        }
+    }
+
+    /// `map[key] ??= value` as `found ?? write`: `found` reads the value the map holds at the key, and `write`, the `=`
+    /// write, runs only where that is null, so the value runs only for a missing key. The object of the property that
+    /// holds the map, each index on the way to the map and the key run once, before the test, in hidden variables where
+    /// they run code, and the test reads the map only where each `List` element on the way exists, as the write checks
+    /// again after its value ran. The `=` write takes the place after its value ran, so a change the value makes to the
+    /// map stays, whatever accessors the property has: `this.counts["a"] ??= this.bump()`, where `bump` writes
+    /// `this.counts["z"]`, keeps both keys.
+    fn coalesced_write(
+        &mut self,
+        line: u32,
+        access: &ArrayAccess,
+        found: impl FnOnce(&mut Self) -> u32,
+        write: impl FnOnce(&mut Self) -> u32,
+    ) -> u32 {
         let taken = self.temporaries;
         let receivers_before = self.held_receivers.len();
-        let Expression::Access(
-            Access::Property(PropertyAccess { object, .. })
-            | Access::NullSafeProperty(NullSafePropertyAccess { object, .. }),
-        ) = access.array.unparenthesized()
-        else {
-            unreachable!("a hooked property's `Map` is written through the property");
-        };
+        let mut parts = vec![(access.index, "index")];
+        let mut indexes = Vec::new();
+        let mut root = access.array.unparenthesized();
+        while let Expression::ArrayAccess(inner) = root {
+            parts.push((inner.index, "index"));
+            indexes.push(inner);
+            root = inner.array.unparenthesized();
+        }
+        match root {
+            Expression::Access(Access::Property(property)) if self.static_classes(property).is_none() => {
+                parts.push((property.object, "receiver"));
+            }
+            Expression::Access(Access::NullSafeProperty(property)) => parts.push((property.object, "receiver")),
+            _ => {}
+        }
         let mut steps = Vec::new();
-        for (value, base) in [(*object, "receiver"), (access.index, "index")] {
+        for (value, base) in parts.into_iter().rev() {
             if !self.is_pure(value) {
                 let (step, name) = self.hold_step(line, value, base);
                 steps.push(step);
                 self.held_receivers.push((value.span(), name));
             }
         }
-        let property = self.target(access.array, PlaceUse::Read);
-        let key = self.expression(access.index);
-        let found = self.node(SHARP_AST_DIM, 0, line, &[property, key]);
+
+        let found = found(self);
         let written = write(self);
-        let mut lowered = self.node(SHARP_AST_COALESCE, 0, line, &[found, written]);
+        let coalesced = self.node(SHARP_AST_COALESCE, 0, line, &[found, written]);
+        let mut lowered = self.where_elements_exist(line, &indexes, coalesced);
         if !steps.is_empty() {
             let position = steps.len();
             steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[lowered, NULL]));
@@ -6909,49 +6975,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         lowered
     }
 
-    /// A write to the value of a `Map` at a key, spec section 12, which runs the standard library's `set` member of a
-    /// `Map` on the map's place, as [`Self::with_place`] passes it, as a `List`'s index write runs a `List`'s. Its inline
-    /// form calls the engine's `put`: `map[key] = value` is `\Sharp\Internal\put($map, $key, $value)`, and
-    /// `map[key] ??= value` writes only where the map holds no value for the key, `\Sharp\Internal\get($map, $key) ??
-    /// \Sharp\Internal\put($map, $key, $value)`. The key and the value run before the place is taken, as PHP's own write
-    /// runs them, as [`Self::with_place`] and [`Self::written`] hold them. The checker refuses every other operator,
-    /// since it reads the value of the `Map` bare.
-    fn map_write(&mut self, line: u32, assignment: &Assignment, access: &ArrayAccess) -> u32 {
-        let coalesces = match assignment.operator {
-            AssignmentOperator::Assign(_) => false,
-            AssignmentOperator::Coalesce(_) => true,
-            _ => unreachable!("the checker refuses `{}` on a `Map` value, which reads it bare", assignment.operator),
-        };
-        let gives_stored = self.discarded != Some(assignment.span());
-
-        // `??=` runs its value only where the map holds none for the key, which `written` holds after the `get`.
-        let held: &[(&Expression, &str)] =
-            if coalesces { &[(access.index, "index")] } else { &[(access.index, "index"), (assignment.rhs, "value")] };
-
-        self.with_place(access.array, false, held, |this, place| {
-            let found = coalesces.then(|| {
-                let map = this.expression(access.array);
-                let key = this.expression(access.index);
-                let get = this.types.collection_operation(b"get", CollectionKind::Map);
-
-                this.member_operation(line, &get, &[map, key])
-            });
-            let key = this.expression(access.index);
-            let declared = this.types.plain_place_type(assignment.lhs);
-            let value = this
-                .stored_in_plain_place(line, assignment.rhs, declared)
-                .unwrap_or_else(|| this.expression(assignment.rhs));
-            let set = this.types.collection_operation(b"set", CollectionKind::Map);
-            let runs_code = !this.is_pure(assignment.rhs);
-            let write = this.written(line, access.span(), &set, [place, key, value], runs_code, gives_stored);
-
-            match found {
-                Some(found) => this.node(SHARP_AST_COALESCE, 0, line, &[found, write]),
-                None => write,
-            }
-        })
-    }
-
     /// The member `operation` run on the lowered `values`, the first of them its place: its inline form, or the call of
     /// its static method where it has none.
     fn member_operation(&mut self, line: u32, operation: &Declaration, values: &[u32]) -> u32 {
@@ -6960,12 +6983,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The write a collection's `set` member makes of `[place, key, value]`, as [`Self::member_operation`] runs it. A
-    /// value that `runs_code` here, as `??=`'s does, which runs only where the key holds nothing, is held in a hidden
+    /// value that `runs_code` here, as the operator a class declares does in `totals[i] += amount`, is held in a hidden
     /// variable before the place is taken, so code that changes the place runs first: `[$stored#N =
-    /// $this->next(), \Sharp\Internal\put($this->counts, $key, $stored#N)][1]`. Where code reads the write, the write
-    /// `gives_stored`, the value it stores: the first step, `[$stored#N = $this->next(), …][0]`, or, for a value that
-    /// runs nothing, `\Sharp\Internal\put($map, $key, $stored#N = $value) ? $stored#N : $stored#N`, as PHP has no
-    /// expression that runs one and gives another.
+    /// Money::op_Addition($this->totals[$i], $amount), \Sharp\Internal\set($this->totals, $i, $stored#N)][1]`. Where code
+    /// reads the write, the write `gives_stored`, the value it stores: the first step, `[$stored#N = …, …][0]`, or, for a
+    /// value that runs nothing, `\Sharp\Internal\put($map, $key, $stored#N = $value) ? $stored#N : $stored#N`, as PHP
+    /// has no expression that runs one and gives another.
     fn written(
         &mut self,
         line: u32,
@@ -8909,19 +8932,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
             lowered = self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_null, null, lowered]);
         }
-        for access in indexes {
-            let index = self.expression(access.index);
-            let list = self.expression(access.array);
-            let exists = self.global_call(line, b"array_key_exists", &[index, list]);
-            let class = self.string(ZEND_NAME_FQ, line, b"OutOfRangeException");
-            let undefined = self.string(0, line, b"Undefined array key ");
-            let index = self.expression(access.index);
-            let message = self.node(SHARP_AST_BINARY_OP, ZEND_CONCAT, line, &[undefined, index]);
-            let message = self.node(SHARP_AST_ARG_LIST, 0, line, &[message]);
-            let exception = self.node(SHARP_AST_NEW, 0, line, &[class, message]);
-            let throw = self.node(SHARP_AST_THROW, 0, line, &[exception]);
-            lowered = self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[exists, lowered, throw]);
-        }
+        lowered = self.where_elements_exist(line, &indexes, lowered);
         if !steps.is_empty() {
             let position = steps.len();
             steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[lowered, NULL]));
@@ -8948,6 +8959,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         self.held_receivers.truncate(receivers_before);
         self.temporaries = taken;
+
+        lowered
+    }
+
+    /// `lowered` where each `List` element `indexes` reach exists, and otherwise `OutOfRangeException`, since PHP's write
+    /// would add the element: `(\array_key_exists(1, $l) ? lowered : throw new \OutOfRangeException('Undefined array key '
+    /// . 1))`.
+    fn where_elements_exist(&mut self, line: u32, indexes: &[&ArrayAccess], mut lowered: u32) -> u32 {
+        for access in indexes {
+            let index = self.expression(access.index);
+            let list = self.expression(access.array);
+            let exists = self.global_call(line, b"array_key_exists", &[index, list]);
+            let class = self.string(ZEND_NAME_FQ, line, b"OutOfRangeException");
+            let undefined = self.string(0, line, b"Undefined array key ");
+            let index = self.expression(access.index);
+            let message = self.node(SHARP_AST_BINARY_OP, ZEND_CONCAT, line, &[undefined, index]);
+            let message = self.node(SHARP_AST_ARG_LIST, 0, line, &[message]);
+            let exception = self.node(SHARP_AST_NEW, 0, line, &[class, message]);
+            let throw = self.node(SHARP_AST_THROW, 0, line, &[exception]);
+            lowered = self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[exists, lowered, throw]);
+        }
 
         lowered
     }

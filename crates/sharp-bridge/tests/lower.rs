@@ -8890,7 +8890,8 @@ fn list_insert_remove_and_clear_change_the_list_where_it_lives() {
 /// (\array_key_exists(0, $grid) ? \Sharp\Internal\clear($grid[0]) : throw new \OutOfRangeException('Undefined array key ' . 0));
 /// (\array_key_exists(0, $sets) ? \Sharp\Internal\addKey($sets[0], 4) : throw …);
 /// (\array_key_exists(0, $maps) ? \Sharp\Internal\put($maps[0], 'c', 3) : throw …);
-/// (\array_key_exists(0, $maps) ? \Sharp\Internal\get($maps[0], 'd') ?? \Sharp\Internal\put($maps[0], 'd', 4) : throw …);
+/// (\array_key_exists(0, $maps) ? \Sharp\Internal\get($maps[0], 'd')
+///     ?? (\array_key_exists(0, $maps) ? \Sharp\Internal\put($maps[0], 'd', 4) : throw …) : throw …);
 /// ${'index#1'} = $this->next();
 /// (\array_key_exists(${'index#1'}, $grid) ? \Sharp\Internal\remove($grid[${'index#1'}], 2)
 ///     : throw new \OutOfRangeException('Undefined array key ' . ${'index#1'}));
@@ -9210,15 +9211,29 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
                           ZVAL "maps"
                         ZVAL 0
                       ZVAL "d"
-                  CALL
-                    ZVAL "Sharp\\Internal\\put"
-                    ARG_LIST
-                      DIM
+                  CONDITIONAL [1]
+                    CALL
+                      ZVAL "array_key_exists"
+                      ARG_LIST
+                        ZVAL 0
                         VAR
                           ZVAL "maps"
-                        ZVAL 0
-                      ZVAL "d"
-                      ZVAL 4
+                    CALL
+                      ZVAL "Sharp\\Internal\\put"
+                      ARG_LIST
+                        DIM
+                          VAR
+                            ZVAL "maps"
+                          ZVAL 0
+                        ZVAL "d"
+                        ZVAL 4
+                    THROW
+                      NEW
+                        ZVAL "OutOfRangeException"
+                        ARG_LIST
+                          BINARY_OP [8]
+                            ZVAL "Undefined array key "
+                            ZVAL 0
                 THROW
                   NEW
                     ZVAL "OutOfRangeException"
@@ -10720,7 +10735,7 @@ fn a_set_method_changes_a_property_through_the_property() {
 /// … \Sharp\Internal\addKey($receiver#2, $argument#1); …
 /// (($nullsafe#1 = $other) === null ? null
 ///     : [$argument#2 = $this->at(2), \Sharp\Internal\removeKey($nullsafe#1->memo, $argument#2)][1]);
-/// \Sharp\Internal\get($this->memo, 3) ?? [$stored#1 = $this->at(3), \Sharp\Internal\put($this->memo, 3, $stored#1)][1];
+/// \Sharp\Internal\get($this->memo, 3) ?? [$value#1 = $this->at(3), \Sharp\Internal\put($this->memo, 3, $value#1)][1];
 /// $index#1 = $this->at(0);
 /// $stored#2 = \App\Money::op_Addition($prices[$index#1], $extra);
 /// \Sharp\Internal\set($prices, $index#1, $stored#2);
@@ -10891,7 +10906,7 @@ fn a_change_runs_its_values_before_it_takes_its_place() {
                     ARRAY_ELEM
                       ASSIGN
                         VAR
-                          ZVAL "stored#1"
+                          ZVAL "value#1"
                         METHOD_CALL
                           VAR
                             ZVAL "this"
@@ -10909,7 +10924,7 @@ fn a_change_runs_its_values_before_it_takes_its_place() {
                             ZVAL "memo"
                           ZVAL 3
                           VAR
-                            ZVAL "stored#1"
+                            ZVAL "value#1"
                       null
                   ZVAL 1
               STMT_LIST
@@ -10947,6 +10962,124 @@ fn a_change_runs_its_values_before_it_takes_its_place() {
                       VAR
                         ZVAL "stored#2"
     "#}
+    );
+}
+
+/// ```php
+/// \Sharp\Internal\get($this->counts, 'a') ?? [$value#1 = $this->bump(), $receiver#2 = $this->counts, $kept#3 = $receiver#2,
+///     \Sharp\Internal\put($receiver#2, 'a', $value#1), $receiver#2 === $kept#3 || ($this->counts = $receiver#2)][3];
+/// \Sharp\Internal\get($this->totals, 'a') ?? [$value#1 = $this->bump(), \Sharp\Internal\put($this->totals, 'a', $value#1)][1];
+/// ```
+///
+/// A `??=` into a `Map` a property holds runs its value only for a missing key, and before it takes the place, whether
+/// the property has a `set` body or not, so what the value writes to the same property stays. PHP gives no reference
+/// to a property with a `set` body, so its write goes through a copy, which is read after the value ran.
+#[test]
+fn a_coalescing_write_runs_its_value_before_it_takes_the_place_with_or_without_a_set_body() {
+    let code = "namespace App;\n\nclass Report\n{\n    public Map<string, int> counts { get; set => field = value; } = [:];\n\n    public Map<string, int> totals { get; set; } = [:];\n\n    public void run()\n    {\n        this.counts[\"a\"] ??= this.bump();\n        this.totals[\"a\"] ??= this.bump();\n    }\n\n    private int bump()\n    {\n        this.counts[\"z\"] = 1;\n        this.totals[\"z\"] = 1;\n        return 1;\n    }\n}\n";
+
+    assert_eq!(
+        Lowered::new(code).body(),
+        indoc! {r#"
+            STMT_LIST
+              COALESCE
+                CALL
+                  ZVAL "Sharp\\Internal\\get"
+                  ARG_LIST
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "counts"
+                    ZVAL "a"
+                DIM
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "value#1"
+                        METHOD_CALL
+                          VAR
+                            ZVAL "this"
+                          ZVAL "bump"
+                          ARG_LIST
+                      null
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "receiver#2"
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "counts"
+                      null
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "kept#3"
+                        VAR
+                          ZVAL "receiver#2"
+                      null
+                    ARRAY_ELEM
+                      CALL
+                        ZVAL "Sharp\\Internal\\put"
+                        ARG_LIST
+                          VAR
+                            ZVAL "receiver#2"
+                          ZVAL "a"
+                          VAR
+                            ZVAL "value#1"
+                      null
+                    ARRAY_ELEM
+                      OR
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "receiver#2"
+                          VAR
+                            ZVAL "kept#3"
+                        ASSIGN
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "counts"
+                          VAR
+                            ZVAL "receiver#2"
+                      null
+                  ZVAL 3
+              COALESCE
+                CALL
+                  ZVAL "Sharp\\Internal\\get"
+                  ARG_LIST
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "totals"
+                    ZVAL "a"
+                DIM
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "value#1"
+                        METHOD_CALL
+                          VAR
+                            ZVAL "this"
+                          ZVAL "bump"
+                          ARG_LIST
+                      null
+                    ARRAY_ELEM
+                      CALL
+                        ZVAL "Sharp\\Internal\\put"
+                        ARG_LIST
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "totals"
+                          ZVAL "a"
+                          VAR
+                            ZVAL "value#1"
+                      null
+                  ZVAL 1
+        "#}
     );
 }
 
@@ -22108,7 +22241,7 @@ fn a_file_lowers_to_the_same_bytes_from_any_workspace_root_and_names_no_path() {
             "no text names the file"
         );
 
-        encode(&unit, &file.contents, [0; 16], &[], &Library::default())
+        encode(&unit, &file.contents, 0, [0; 16], &[], &Library::default())
     });
 
     assert_eq!(encoded[0], encoded[1]);
