@@ -152,7 +152,6 @@ use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_syntax_core::utils::parse_literal_integer_as_float;
 use mago_word::Word;
 use mago_word::word;
-use xxhash_rust::xxh3::xxh3_64;
 
 use crate::Unit;
 use crate::kind::SHARP_T_FILE;
@@ -7603,14 +7602,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The result type of a PHP# method or lambda declaration: a `SHARP_TYPE_ARGS` of `php_type` and `function_type`'s
     /// text, which `is` tests a closure of it by, or of its result alone, as [`result_alone`] writes it, when no
     /// function type takes a closure of it, or `php_type` alone when PHP# can't write either, as
-    /// [`Self::carried_type`] gives it with `attr`. The unit lists the function type's fingerprint, or zero without
-    /// one, since its effects come from other files' bodies.
+    /// [`Self::carried_type`] gives it with `attr`. The unit lists the fingerprint of the function type's effects,
+    /// since they come from other files' bodies.
     fn function_type(&mut self, php_type: u32, function_type: FunctionType, attr: u32, line: u32) -> u32 {
-        let FunctionType { name, text, result } = function_type;
-        self.function_types.push(Read {
-            name: name.into_bytes(),
-            fingerprint: text.as_ref().map_or(0, |text| xxh3_64(text.as_bytes())),
-        });
+        let FunctionType { name, text, result, effects } = function_type;
+        self.function_types.push(Read { name: name.into_bytes(), fingerprint: effects });
 
         self.carried_type(php_type, text.or_else(|| result.as_deref().map(result_alone)), attr, line)
     }

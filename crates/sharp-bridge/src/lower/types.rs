@@ -79,6 +79,7 @@ use mago_syntax::cst::NullSafePropertyAccess;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
 use mago_word::word;
+use xxhash_rust::xxh3::Xxh3;
 
 use super::inline::InlineForm;
 use super::inline::InlineForms;
@@ -906,10 +907,13 @@ impl<'analysis> Types<'analysis> {
         parameters: &[Option<&TUnion>],
         result: Option<&TUnion>,
     ) -> FunctionType {
+        let effects = self.effects.function_effects(self.codebase, function);
+
         FunctionType {
             name: function.as_string(),
-            text: self.function_type_text(self.effects.function_effects(self.codebase, function), parameters, result),
+            text: self.function_type_text(effects.clone(), parameters, result),
             result: self.result_text(result),
+            effects: effects_fingerprint(effects, self.codebase),
         }
     }
 
@@ -927,8 +931,9 @@ impl<'analysis> Types<'analysis> {
 
         FunctionType {
             name: String::from_utf8_lossy(&[class, b"::", &variable, b"::", accessor].concat()).into_owned(),
-            text: self.function_type_text(effects, &parameters, result),
+            text: self.function_type_text(effects.clone(), &parameters, result),
             result: self.result_text(result),
+            effects: effects_fingerprint(effects, self.codebase),
         }
     }
 
@@ -2798,6 +2803,51 @@ pub(crate) struct FunctionType {
     /// The type text of its result, which a generator's elements and a map stage's are read from whatever it calls,
     /// spec section 12, or `None` when PHP# can't write it.
     pub(crate) result: Option<String>,
+    /// The fingerprint of the effects its type lists, as [`function_type_fingerprint`] gives it.
+    pub(crate) effects: u64,
+}
+
+/// The fingerprint of the effects the type of the PHP# function `name` lists, as `effects` solves them over `codebase`.
+///
+/// It is the xxh3-64 of each effect's name, sorted, or of nothing more when no function type can say its effects.
+/// `name` names a method `Class::method`, an accessor `Class::$property::get` or `Class::$property::set`, and a lambda
+/// by its `{closure:…}` name, as `Unit::function_types` names them.
+///
+/// Every other part of a function type follows from the source of the file that declares the function and from the
+/// declarations its check read, so this is what a compile checks a file's function types by without lowering it.
+#[must_use]
+pub fn function_type_fingerprint(codebase: &CodebaseMetadata, effects: &Effects, name: &[u8]) -> u64 {
+    let parts: Vec<&[u8]> = name.split(|byte| *byte == b':').filter(|part| !part.is_empty()).collect();
+    let solved = if name.starts_with(b"{closure:") {
+        effects.function_effects(codebase, &FunctionLikeIdentifier::Closure(word(name)))
+    } else if let [class, property, accessor] = parts[..]
+        && let Some(property) = property.strip_prefix(b"$")
+    {
+        effects.accessor_effects(codebase, class, property, accessor)
+    } else if let [class, method] = parts[..] {
+        effects.function_effects(codebase, &FunctionLikeIdentifier::Method(word(class), word(method)))
+    } else {
+        None
+    };
+
+    effects_fingerprint(solved, codebase)
+}
+
+/// The fingerprint [`function_type_fingerprint`] gives `effects`.
+fn effects_fingerprint(effects: Option<Vec<Word>>, codebase: &CodebaseMetadata) -> u64 {
+    let mut hasher = Xxh3::new();
+    if let Some(effects) = effects {
+        let mut names: Vec<String> = effects.into_iter().map(|effect| class_text(effect, codebase)).collect();
+        names.sort_unstable();
+        names.dedup();
+        hasher.update(&[1]);
+        for name in names {
+            hasher.update(name.as_bytes());
+            hasher.update(&[0]);
+        }
+    }
+
+    hasher.digest()
 }
 
 /// A parameter of plain PHP code a call runs, which a `Map` or a `Set` crosses into: a declared function's, method's or

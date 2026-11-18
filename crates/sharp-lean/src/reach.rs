@@ -127,6 +127,11 @@ impl Reach {
         self.files.get(&file_id).map_or(&[], Vec::as_slice)
     }
 
+    /// Each file that states a law.
+    pub fn law_files(&self) -> impl Iterator<Item = FileId> + '_ {
+        self.files.keys().copied()
+    }
+
     /// Records what the analysis knows about `class`'s reached member `member`: a method's name, arity and return, or a
     /// property's storage and type.
     fn record_member(&mut self, codebase: &CodebaseMetadata, class: Word, member: Word) {

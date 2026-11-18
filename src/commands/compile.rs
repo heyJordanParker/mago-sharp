@@ -54,6 +54,7 @@ use mago_orchestrator::Autoloader;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
+use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::ExternAttributes;
 use mago_orchestrator::service::incremental_analysis::compile::ExternEffects;
@@ -72,6 +73,7 @@ use mago_server::Server;
 use mago_sharp_bridge::unit;
 use mago_sharp_lean::Lean;
 use mago_sharp_lean::PACKAGE_FOLDER;
+use mago_sharp_lean::PROOFS;
 use mago_syntax::cst::Statement;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file;
@@ -109,6 +111,11 @@ const LISTENERS: &str = "listeners.php";
 /// compile that warned, was interrupted or had a file refused by the law checker leaves none, and so does one whose
 /// output changed while it ran.
 const INPUTS: &str = "inputs.json";
+
+/// The record of what the last compile kept of each PHP# file it accepted, in the `.sharp` folder and in the hosts'
+/// folder, as `CompiledFiles::encode` writes it, so the next compile keeps the compiled file of each file whose key
+/// holds instead of lowering it again.
+const COMPILED_FILES: &str = "compiled.bin";
 
 /// The file in the `.sharp` folder whose lock the engine holds while it runs `sharp.compile_command`, so a project
 /// compiles once at a time on demand, and in the hosts' folder whose lock [`compile_for_hosts`] takes the same way. The
@@ -230,7 +237,8 @@ pub(crate) fn release_hosts_folders() {
 fn compile_in_turn(configuration: &Configuration, root: &Path, folder: &Path) -> Result<bool, Error> {
     let mut filesystems = Filesystems::new();
     let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
-    let sources = source_files(configuration, root, &mut filesystems, orchestrator.autoloader().as_deref());
+    let excluded = excluded_folders(&orchestrator, configuration)?;
+    let sources = source_files(configuration, root, &mut filesystems, orchestrator.autoloader().as_deref(), &excluded);
     if !sources.keys().any(|name| name.ends_with(".sharp")) {
         return Ok(false);
     }
@@ -270,7 +278,8 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     let mut filesystems = Filesystems::new();
     let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
     let autoloader = orchestrator.autoloader();
-    let sources = source_files(configuration, root, &mut filesystems, autoloader.as_deref());
+    let excluded = excluded_folders(&orchestrator, configuration)?;
+    let sources = source_files(configuration, root, &mut filesystems, autoloader.as_deref(), &excluded);
     if every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems) {
         return Ok(false);
     }
@@ -286,13 +295,22 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     let printing = std::panic::take_hook();
     std::panic::set_hook(Box::new(|panic| tracing::debug!("{panic}")));
     let mut stamped = Vec::new();
+    let compiled_files_path = folder.join(COMPILED_FILES);
     let compilations = server.compile(
+        &CompiledFiles::decode(
+            &std::fs::read(&compiled_files_path).unwrap_or_default(),
+            configuration_hash(configuration),
+        ),
+        |file| match host_compiled_path(root, folder, &source_path(root, file))? {
+            Some(compiled) => read_listed(&compiled),
+            None => Ok(None),
+        },
         |path| {
             let input = unit::stamp(root, path)?;
             stamped.push(recorded(path, input.as_ref()));
             Ok(input)
         },
-        |_| Ok(Default::default()),
+        |_, _| Ok(Default::default()),
         &library,
         |_| IssueCollection::default(),
     );
@@ -315,10 +333,12 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     let mut written = BTreeSet::new();
     let mut refused = IssueCollection::default();
     let mut accepted = HashSet::new();
-    for (file_id, compilation) in compilations? {
+    let (compilations, compiled_files) = compilations?;
+    write(&compiled_files_path, &compiled_files.encode(configuration_hash(configuration))?)?;
+    written.insert(compiled_files_path);
+    for (file_id, compilation) in compilations {
         let file = database.get_ref(&file_id)?;
-        let source = file.path.clone().unwrap_or_else(|| root.join(String::from_utf8_lossy(&file.name).as_ref()));
-        let Some(compiled) = host_compiled_path(root, folder, &source)? else {
+        let Some(compiled) = host_compiled_path(root, folder, &source_path(root, file))? else {
             continue;
         };
         match compilation {
@@ -452,9 +472,41 @@ fn served_stamps(
 
     database
         .files()
+        .filter(|file| !file.name.starts_with(VENDOR))
         .filter(|file| file.path.as_deref().is_some_and(|path| autoloader.serves(path)))
         .map(|file| Ok(recorded(&file.name, unit::stamp(root, &file.name)?.as_ref())))
         .collect()
+}
+
+/// The path of `file`, a file of the project at `root`: its own, or its name under `root`.
+fn source_path(root: &Path, file: &File) -> PathBuf {
+    file.path.clone().unwrap_or_else(|| root.join(String::from_utf8_lossy(&file.name).as_ref()))
+}
+
+/// Writes `bytes` to the file at `path`, unless it holds them already, so a compile that changes nothing in it leaves
+/// it as it was.
+///
+/// # Errors
+///
+/// Returns the error of writing the file.
+fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), DatabaseError> {
+    if std::fs::read(path).ok().as_deref() != Some(bytes) {
+        write_by_rename(path, bytes)?;
+    }
+
+    Ok(())
+}
+
+/// The folders the loader skips in `orchestrator`'s workspace, which `configuration` names, as it loads the project's
+/// files with its includes and patches.
+///
+/// # Errors
+///
+/// Returns the error of compiling an exclude pattern.
+fn excluded_folders(orchestrator: &Orchestrator<'_>, configuration: &Configuration) -> Result<ExcludedFolders, Error> {
+    Ok(ExcludedFolders::from_configuration(
+        &orchestrator.database_configuration(&configuration.source.workspace, true),
+    )?)
 }
 
 /// Whether the compile lowers `file`, a PHP# file of the project, which is the scope of its analysis. The compile
@@ -474,7 +526,8 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     let mut filesystems = Filesystems::new();
     let orchestrator = whole_workspace(configuration, color_choice, true)?;
     let autoloader = orchestrator.autoloader();
-    let sources = source_files(configuration, &root, &mut filesystems, autoloader.as_deref());
+    let excluded = excluded_folders(&orchestrator, configuration)?;
+    let sources = source_files(configuration, &root, &mut filesystems, autoloader.as_deref(), &excluded);
     // A host names none of what it reads, so only a compile without hosts can know it has nothing to do.
     if !configuration.extension_hosts.values().any(|host| host.enabled)
         && let Some(mut record) = Record::read(&record_path)
@@ -615,13 +668,22 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     let read_database = server.database().read_only();
     let lean = Lean::new(&root);
     let mut stamped = Vec::new();
-    let compilations = server.compile(
+    let compiled_files_path = compiled_folder.join(COMPILED_FILES);
+    let (compilations, compiled_files) = server.compile(
+        &CompiledFiles::decode(
+            &std::fs::read(&compiled_files_path).unwrap_or_default(),
+            configuration_hash(configuration),
+        ),
+        |file| match unit::compiled_path(&root, &source_path(&root, file))? {
+            Some(compiled) => read_listed(&compiled),
+            None => Ok(None),
+        },
         |path| {
             let input = unit::stamp(&root, path)?;
             stamped.push(recorded(path, input.as_ref()));
             Ok(input)
         },
-        |translations| lean.check(translations),
+        |translations, reach| lean.check(translations, reach),
         &library,
         |mut issues| {
             issues.filter_out_ignored(&ignored, |file_id| {
@@ -645,7 +707,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     for (file_id, compilation) in compilations {
         let file = database.get_ref(&file_id)?;
         let name = String::from_utf8_lossy(&file.name);
-        let source = file.path.clone().unwrap_or_else(|| root.join(name.as_ref()));
+        let source = source_path(&root, file);
         let Some(compiled) = unit::compiled_path(&root, &source)? else {
             errors.push(format!(
                 "{name} is a link to {}, outside the project, so it was not compiled. Install the package as a copy instead of a link.",
@@ -659,7 +721,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
 
         match compilation {
             Compilation::Accepted(bytes) => {
-                write_by_rename(&compiled, &bytes)?;
+                write_if_changed(&compiled, &bytes)?;
                 if let Some(record) = record.as_mut() {
                     record.output(&compiled, &bytes);
                 }
@@ -695,13 +757,20 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         let table = compiled_folder.join(LISTENERS);
         let dispatcher = server.dispatcher_module();
         let bytes = listener_table(&inputs, &accepted, dispatcher.as_ref(), &externs, &effects, &families);
-        write_by_rename(&table, &bytes)?;
+        write_if_changed(&table, &bytes)?;
         if let Some(record) = record.as_mut() {
             record.output(&table, &bytes);
         }
         written.insert(table);
     }
     if compiled_folder.is_dir() {
+        let bytes = compiled_files.encode(configuration_hash(configuration))?;
+        write_if_changed(&compiled_files_path, &bytes)?;
+        if let Some(record) = record.as_mut() {
+            record.output(&compiled_files_path, &bytes);
+        }
+        written.insert(compiled_files_path);
+        written.insert(compiled_folder.join(PROOFS));
         let kept: BTreeSet<PathBuf> = written
             .iter()
             .cloned()
@@ -1286,12 +1355,14 @@ fn source_files(
     root: &Path,
     filesystems: &mut Filesystems,
     autoloader: Option<&Autoloader>,
+    excluded: &ExcludedFolders,
 ) -> BTreeMap<String, Found> {
     let source = &configuration.source;
     let whole_workspace = [".".to_owned()];
     let paths = if source.paths.is_empty() { &whole_workspace[..] } else { &source.paths[..] };
     let is_glob = |text: &str| text.contains(['*', '?', '[', '{']);
-    let mut walk = Walk { root, extensions: &source.extensions, autoloader, filesystems, files: BTreeMap::new() };
+    let mut walk =
+        Walk { root, extensions: &source.extensions, autoloader, excluded, filesystems, files: BTreeMap::new() };
     for configured in paths.iter().chain(&source.includes).chain(&source.patches) {
         let path = root.join(configured);
         if path.exists() {
@@ -1317,6 +1388,7 @@ struct Walk<'walk> {
     root: &'walk Path,
     extensions: &'walk [String],
     autoloader: Option<&'walk Autoloader>,
+    excluded: &'walk ExcludedFolders,
     filesystems: &'walk mut Filesystems,
     files: BTreeMap<String, Found>,
 }
@@ -1341,7 +1413,10 @@ impl Walk<'_> {
                 _ => real.last().map_or_else(|| path.clone(), |parent| parent.join(entry.file_name())),
             };
             if metadata.is_dir() {
-                if path != self.root.join(unit::COMPILED_FOLDER) && !real.contains(&real_path) {
+                if path != self.root.join(unit::COMPILED_FOLDER)
+                    && !self.excluded.contains(&path)
+                    && !real.contains(&real_path)
+                {
                     real.push(real_path);
                     self.folder(&path, real, by_real_path);
                     real.pop();
@@ -1386,7 +1461,7 @@ pub(crate) fn standard_library(root: &Path, database: &impl DatabaseReader) -> R
     let Some(file) = database.files().find(|file| file.is_standard_library) else {
         return Ok(unit::Library::default());
     };
-    let source = file.path.clone().unwrap_or_else(|| root.join(String::from_utf8_lossy(&file.name).as_ref()));
+    let source = source_path(root, &file);
     let Some(package) = source.ancestors().skip(1).find(|folder| folder.join("composer.json").is_file()) else {
         return Err(format!(
             "{} belongs to no Composer package. Reinstall {STANDARD_LIBRARY_PACKAGE}.",
@@ -2067,6 +2142,11 @@ mod tests {
     }
 
     /// Writes `bytes` to the file at `path` and sets its modification time back to `modified`, as `touch -d` does.
+    /// The folders a project at `root` with no excludes skips: none.
+    fn no_excludes(root: &Path) -> ExcludedFolders {
+        ExcludedFolders::from_configuration(&DatabaseConfiguration::new(root, vec![], vec![], vec![], vec![])).unwrap()
+    }
+
     fn rewrite(path: &Path, bytes: &[u8], modified: std::time::SystemTime) {
         std::fs::write(path, bytes).unwrap();
         std::fs::File::options().write(true).open(path).unwrap().set_modified(modified).unwrap();
@@ -2093,12 +2173,12 @@ mod tests {
         for path in [&root, folder] {
             forced.insert(std::fs::metadata(path).unwrap().dev(), false);
         }
-        let sources = source_files(&configuration, &root, &mut forced, None);
+        let sources = source_files(&configuration, &root, &mut forced, None, &no_excludes(&root));
         let mut record = Record::start(&configuration, &root, &sources, folder, forced.clone(), None).unwrap();
         record.output(&output, b"compiled");
         record.write(&folder.join(INPUTS), Outcome::default(), &ReadDatabase::empty(), []).unwrap();
         let mut current = || {
-            let sources = source_files(&configuration, &root, &mut forced, None);
+            let sources = source_files(&configuration, &root, &mut forced, None, &no_excludes(&root));
             every_compiled_file_is_current(&configuration, &root, folder, &sources, &mut forced)
         };
         assert!(current(), "each file hashes as it did");

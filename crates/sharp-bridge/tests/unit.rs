@@ -43,6 +43,7 @@ use mago_sharp_bridge::unit::header;
 use mago_sharp_bridge::unit::inputs_changed;
 use mago_sharp_bridge::unit::is_stale;
 use mago_sharp_bridge::unit::key;
+use mago_sharp_bridge::unit::restamp;
 use mago_sharp_bridge::unit::sharp_input;
 use mago_sharp_bridge::unit::sharp_unit_header;
 use mago_sharp_bridge::unit::source_hash;
@@ -510,6 +511,7 @@ fn compiled_with_inputs(root: &Path, names: &[&str]) -> Vec<u8> {
     encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, &inputs, &library())
 }
 
+/// The engine checks a compiled file's inputs before it runs it: the file is out of date once one changed.
 #[test]
 fn a_compiled_file_is_current_until_one_of_its_inputs_changes() {
     let directory = tempfile::tempdir().unwrap();
@@ -519,24 +521,26 @@ fn a_compiled_file_is_current_until_one_of_its_inputs_changes() {
     write(root, "app/Money.sharp", money);
     let bytes = compiled_with_inputs(root, &["app/Report.sharp", "app/Money.sharp", "app/Absent.sharp"]);
 
-    assert!(!is_stale(root, &bytes).unwrap(), "every input is as it was stamped");
+    assert!(!inputs_changed(root, &bytes).unwrap(), "every input is as it was stamped");
 
     write(root, "app/Money.sharp", "namespace App;\n\npublic class Money\n{\n    public int amount = 0;\n}\n");
-    assert!(is_stale(root, &bytes).unwrap(), "an input's bytes changed");
+    assert!(inputs_changed(root, &bytes).unwrap(), "an input's bytes changed");
 
     write(root, "app/Money.sharp", money);
-    assert!(!is_stale(root, &bytes).unwrap(), "rewriting the same bytes keeps it current");
+    assert!(!inputs_changed(root, &bytes).unwrap(), "rewriting the same bytes keeps it current");
 
     write(root, "app/Absent.sharp", "namespace App;\n\npublic class Absent\n{\n}\n");
-    assert!(is_stale(root, &bytes).unwrap(), "a file appeared where an input was absent");
+    assert!(inputs_changed(root, &bytes).unwrap(), "a file appeared where an input was absent");
 
     fs::remove_file(root.join("app/Absent.sharp")).unwrap();
     fs::remove_file(root.join("app/Money.sharp")).unwrap();
-    assert!(is_stale(root, &bytes).unwrap(), "an input that was there is gone");
+    assert!(inputs_changed(root, &bytes).unwrap(), "an input that was there is gone");
 }
 
+/// A compile keeps a compiled file while it names the key the compile computes for its source, whatever its inputs'
+/// bytes, and not once another checker build wrote it, its sections changed, or it is no compiled file.
 #[test]
-fn a_compiled_file_another_checker_build_wrote_whose_sections_changed_or_that_is_no_compiled_file_is_stale() {
+fn a_compiled_file_is_stale_once_its_key_changes_or_another_checker_build_wrote_it() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "app/Report.sharp", SOURCE);
@@ -546,10 +550,33 @@ fn a_compiled_file_another_checker_build_wrote_whose_sections_changed_or_that_is
     let mut damaged = bytes.clone();
     *damaged.last_mut().unwrap() ^= 1;
 
-    assert!(!is_stale(root, &bytes).unwrap());
-    assert!(is_stale(root, &other_build).unwrap());
-    assert!(is_stale(root, &damaged).unwrap());
-    assert!(is_stale(root, b"not a compiled file").unwrap());
+    assert!(!is_stale(&bytes, KEY));
+    write(root, "app/Report.sharp", &format!("{SOURCE}\n"));
+    assert!(!is_stale(&bytes, KEY), "an input's bytes are no part of the key");
+    assert!(is_stale(&bytes, *b"fedcba9876543210"));
+    assert!(is_stale(&other_build, KEY));
+    assert!(is_stale(&damaged, KEY));
+    assert!(is_stale(b"not a compiled file", KEY));
+}
+
+/// A compiled file restamped with new inputs and a new standard library is the file the encoder writes for the same
+/// unit with them, and a restamp of no compiled file is none.
+#[test]
+fn a_restamped_compiled_file_is_the_one_the_encoder_writes_with_its_new_inputs() {
+    let unit = lowered(SOURCE);
+    let other_inputs = vec![
+        Input { path: b"src/Report.sharp".to_vec(), size: 99, mtime_ns: 1_700_000_000_999_999_999, hash: [8; 16] },
+        Input { path: b"app/Money.sharp".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] },
+        Input { path: b"composer.lock".to_vec(), size: 4096, mtime_ns: -5, hash: [9; 16] },
+    ];
+    let other_library =
+        Library { native_fingerprint: *b"0000000000000001", version: b"v0.4.0-with-a-longer-name".to_vec() };
+
+    let restamped = restamp(&encoded(SOURCE), &other_inputs, &other_library).expect("a compiled file restamps");
+
+    assert_eq!(restamped, encode(&unit, SOURCE.as_bytes(), KEY, &other_inputs, &other_library));
+    assert_eq!(restamp(&restamped, &inputs(), &library()), Some(encoded(SOURCE)));
+    assert_eq!(restamp(b"not a compiled file", &inputs(), &library()), None);
 }
 
 /// The engine checks a compiled file's inputs whichever checker build wrote it, so a file another build wrote keeps its

@@ -8,6 +8,8 @@ use std::process::Output;
 
 use mago_extension::PayloadReader;
 use mago_extension::PayloadWriter;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::library;
 use crate::library::Stop;
@@ -32,7 +34,7 @@ pub(crate) struct Theorem<'theorem> {
 }
 
 /// How the runner judged one law's theorem.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Judgment {
     Proved,
     /// Each case and condition of the proof whose goal stayed open.
@@ -45,7 +47,7 @@ pub(crate) enum Judgment {
 
 /// A step of a proof whose goal stayed open: the case or the call of its index, whether its steps ran out of their
 /// time budget, and the goal as the tree `Sharp/Lean/Proof.lean` writes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Open {
     pub(crate) condition: bool,
     pub(crate) out_of_time: bool,
@@ -82,7 +84,7 @@ pub(crate) enum Answer {
 pub(crate) fn check(
     library: &Path,
     package: &Package,
-    modules: &[Module],
+    modules: &[&Module],
     checks: &[Check<'_>],
     stopped: &mut Vec<(String, Stop)>,
 ) -> io::Result<Vec<Answer>> {
@@ -164,7 +166,7 @@ fn run(library: &Path, package: &Package, request: &[u8]) -> io::Result<(Output,
 /// A `Check` request: each module an earlier runner of the compile stopped in, each generated module's name and
 /// source, then for each check, each module to import, then each theorem's statement, text, and whether the answer
 /// judges it.
-fn encode(stopped: &[(String, Stop)], modules: &[Module], checks: &[Check<'_>]) -> io::Result<Vec<u8>> {
+fn encode(stopped: &[(String, Stop)], modules: &[&Module], checks: &[Check<'_>]) -> io::Result<Vec<u8>> {
     let mut writer = PayloadWriter::new();
     writer.write_raw(&LAW_PROTOCOL_MAGIC);
     writer.write_u16(LAW_PROTOCOL_MAJOR);
@@ -353,10 +355,17 @@ mod tests {
         ];
         let rejected = || Answer::Refused("Code.App.Uses".to_owned(), Refusal::Rejected(3));
 
-        let beside =
-            check(&library, &package, &modules, &[elaborating(&["Code.App.Base", "Code.App.Uses"])], &mut Vec::new())?;
-        let alone = check(&library, &package, &modules, &[elaborating(&["Code.App.Uses"])], &mut Vec::new())?;
-        let imported = check(&library, &package, &modules, &[elaborating(&["Code.App.Imports"])], &mut Vec::new())?;
+        let beside = check(
+            &library,
+            &package,
+            &modules.each_ref(),
+            &[elaborating(&["Code.App.Base", "Code.App.Uses"])],
+            &mut Vec::new(),
+        )?;
+        let alone =
+            check(&library, &package, &modules.each_ref(), &[elaborating(&["Code.App.Uses"])], &mut Vec::new())?;
+        let imported =
+            check(&library, &package, &modules.each_ref(), &[elaborating(&["Code.App.Imports"])], &mut Vec::new())?;
 
         assert_eq!(beside, [rejected()]);
         assert_eq!(alone, [rejected()]);
@@ -380,7 +389,7 @@ mod tests {
         let checks =
             [elaborating(&["Code.App.Lost"]), elaborating(&["Code.App.Missing"]), elaborating(&["Code.App.Base"])];
 
-        let answers = check(&library, &package, &modules, &checks, &mut Vec::new())?;
+        let answers = check(&library, &package, &modules.each_ref(), &checks, &mut Vec::new())?;
 
         assert_eq!(
             answers,
@@ -448,7 +457,8 @@ mod tests {
         };
         let mut stopped = Vec::new();
 
-        let answers = check(&library, &package, &modules, &[fine, elaborating(&["Code.App.Spin"])], &mut stopped)?;
+        let answers =
+            check(&library, &package, &modules.each_ref(), &[fine, elaborating(&["Code.App.Spin"])], &mut stopped)?;
 
         assert_eq!(answers.first(), Some(&Answer::Judged(vec![Judgment::Proved])));
         let Some(Answer::Refused(module, Refusal::Stopped(stop))) = answers.get(1) else {

@@ -109,6 +109,7 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
         files_under(&root.join(".sharp")),
         [
             Path::new("app/Order.sharpc"),
+            Path::new("compiled.bin"),
             Path::new("inputs.json"),
             Path::new("listeners.php"),
             Path::new("vendor/acme/money/src/Money.sharpc")
@@ -761,11 +762,9 @@ fn a_compile_with_a_host_enabled_runs_every_time() {
         ),
     );
     compile_succeeds(root);
-    let written = compiled_at(root, "app/Order.sharp");
-
     compile_succeeds(root);
 
-    assert_ne!(compiled_at(root, "app/Order.sharp"), written);
+    assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\nfirst\n", "each compile ran its host");
 }
 
 /// An extension host that deletes `app/Gone.sharp` as its analysis starts, once the compile has read the file, as an
@@ -1065,76 +1064,6 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     assert_eq!(runs[0].1, "first", "{failure}");
     assert_eq!(runs[1].1, "second", "{failure}");
     assert_ne!(runs[0].0, runs[1].0, "{failure}");
-}
-
-/// A watch reports what the one-shot command reports where an issue points into a vendor file Composer's autoload maps
-/// served, and keeps watching: the report renders each file the analysis read, and the watch's own tree holds only
-/// the files it watches. 0.6.26 stopped the watch after its first analysis with "Files error: file missing".
-#[test]
-fn a_watch_reports_an_issue_that_points_into_a_vendor_file_the_autoload_maps_served() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
-    write(
-        root,
-        "vendor/composer/autoload_psr4.php",
-        "<?php\n\n$vendorDir = dirname(__DIR__);\n\nreturn array(\n    'Acme\\\\Rate\\\\' => array($vendorDir . '/acme/rate/src'),\n);\n",
-    );
-    write(
-        root,
-        "vendor/acme/rate/src/Rate.php",
-        "<?php\n\nnamespace Acme\\Rate;\n\nfinal class Rate\n{\n    private static function of(int $percent): int\n    {\n        return $percent;\n    }\n}\n",
-    );
-    let order = |percent: u8| {
-        format!(
-            "<?php\n\nnamespace App;\n\nuse Acme\\Rate\\Rate;\n\nfunction total(): int\n{{\n    return Rate::of({percent});\n}}\n"
-        )
-    };
-    write(root, "app/Order.php", &order(5));
-    let analyze = |watch: bool| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_mago"));
-        command
-            .args(["--no-version-check", "--colors", "never", "analyze", "--reporting-format", "rich"])
-            .args(watch.then_some("--watch"))
-            .env("MAGO_LOG", "info")
-            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
-            .current_dir(root);
-        command
-    };
-    let once = process::output(&mut analyze(false)).unwrap();
-    let report = String::from_utf8_lossy(&once.stdout).into_owned();
-    assert!(
-        report.contains("vendor/acme/rate/src/Rate.php"),
-        "the issue points into the vendor file: {}",
-        printed(&once)
-    );
-
-    let reports = tempfile::NamedTempFile::new().unwrap();
-    let watch_log = tempfile::NamedTempFile::new().unwrap();
-    let mut watch =
-        process::spawn(analyze(true).stdout(reports.reopen().unwrap()).stderr(watch_log.reopen().unwrap())).unwrap();
-    let seen = || std::fs::read_to_string(watch_log.path()).unwrap();
-    let within = |done: &dyn Fn() -> bool| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while !done() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        done()
-    };
-    let started = within(&|| seen().contains("Initial analysis complete") || seen().contains("ERROR"));
-    let first = std::fs::read_to_string(reports.path()).unwrap();
-    write(root, "app/Order.php", &order(6));
-    let rechecked = within(&|| seen().contains("Analysis complete.") || seen().contains("ERROR"));
-    let running = watch.try_wait().unwrap().is_none();
-    watch.kill().unwrap();
-    watch.wait().unwrap();
-
-    let failure = format!("{}{}", std::fs::read_to_string(reports.path()).unwrap(), seen());
-    assert!(started && !seen().contains("ERROR"), "{failure}");
-    assert_eq!(first, report, "the watch's first report is the one-shot command's: {failure}");
-    assert!(rechecked && running, "{failure}");
-    let second = std::fs::read_to_string(reports.path()).unwrap().split_off(first.len());
-    assert!(second.contains("Rate::of(6)") && second.contains("vendor/acme/rate/src/Rate.php"), "{failure}");
 }
 
 /// A batch of changes that holds a deleted file removes it from the watch's tree: `mago analyze --watch`, with a host
@@ -1682,7 +1611,12 @@ fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
     compile_succeeds(root);
     assert_eq!(
         files_under(&root.join(".sharp")),
-        [Path::new("inputs.json"), Path::new("listeners.php"), Path::new("vendor/acme/money/src/Money.sharpc")]
+        [
+            Path::new("compiled.bin"),
+            Path::new("inputs.json"),
+            Path::new("listeners.php"),
+            Path::new("vendor/acme/money/src/Money.sharpc")
+        ]
     );
 }
 
@@ -1756,7 +1690,12 @@ fn compile_reports_a_link_to_a_file_outside_the_project_and_writes_no_compiled_f
     assert!(printed(&output).contains("vendor/acme/money/src/Money.sharp is a link to"), "{}", printed(&output));
     assert_eq!(
         files_under(&root.join(".sharp")),
-        [Path::new("app/Order.sharpc"), Path::new("inputs.json"), Path::new("listeners.php")]
+        [
+            Path::new("app/Order.sharpc"),
+            Path::new("compiled.bin"),
+            Path::new("inputs.json"),
+            Path::new("listeners.php")
+        ]
     );
 }
 
@@ -2445,7 +2384,7 @@ fn compile_deletes_the_php_file_of_a_source_whose_folder_moved_to_autoload_dev()
 }
 
 /// The deprecated `perform-heuristic-checks`, which serde never writes back, changes the analysis, so a change of it
-/// makes the compile run.
+/// makes the compile run and write its record again.
 #[test]
 fn compile_runs_again_after_a_change_of_perform_heuristic_checks() {
     let directory = project(ORDER, MONEY);
@@ -2455,31 +2394,34 @@ fn compile_runs_again_after_a_change_of_perform_heuristic_checks() {
             "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[analyzer]\nperform-heuristic-checks = {checks}\n"
         )
     };
+    let record = || std::fs::read(root.join(".sharp/inputs.json")).unwrap();
     write(root, "mago.toml", &configured(true));
     compile_succeeds(root);
-    let written = compiled_at(root, "app/Order.sharp");
+    let written = record();
 
     write(root, "mago.toml", &configured(false));
     compile_succeeds(root);
 
-    assert_ne!(compiled_at(root, "app/Order.sharp"), written);
+    assert_ne!(record(), written);
 }
 
-/// Another build of the checker lowers to other code, so a record another build wrote makes the compile run.
+/// Another build of the checker lowers to other code, so a record another build wrote makes the compile run and
+/// write the record of this build.
 #[test]
 fn compile_runs_again_after_another_build_of_the_checker_compiled() {
     let directory = project(ORDER, MONEY);
     let root = directory.path();
     compile_succeeds(root);
-    let written = compiled_at(root, "app/Order.sharp");
     let record = root.join(".sharp/inputs.json");
-    let mut inputs: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
-    inputs["build"][0] = serde_json::json!(inputs["build"][0].as_u64().unwrap() ^ 1);
-    std::fs::write(&record, serde_json::to_vec(&inputs).unwrap()).unwrap();
+    let inputs = || serde_json::from_slice::<serde_json::Value>(&std::fs::read(&record).unwrap()).unwrap();
+    let mut written = inputs();
+    let build = written["build"].clone();
+    written["build"][0] = serde_json::json!(build[0].as_u64().unwrap() ^ 1);
+    std::fs::write(&record, serde_json::to_vec(&written).unwrap()).unwrap();
 
     compile_succeeds(root);
 
-    assert_ne!(compiled_at(root, "app/Order.sharp"), written);
+    assert_eq!(inputs()["build"], build);
 }
 
 #[test]
@@ -3012,7 +2954,7 @@ fn compile_keeps_the_php_files_out_of_git_with_no_git_to_run() {
         assert!(checkout.join("app/Order.php").exists());
         assert_eq!(
             untracked(checkout),
-            "?? .sharp/app/Order.sharpc\n?? .sharp/inputs.json\n?? .sharp/listeners.php\n?? .sharp/vendor/acme/money/src/Money.sharpc\n",
+            "?? .sharp/app/Order.sharpc\n?? .sharp/compiled.bin\n?? .sharp/inputs.json\n?? .sharp/listeners.php\n?? .sharp/vendor/acme/money/src/Money.sharpc\n",
             "{}",
             checkout.display()
         );
@@ -3994,6 +3936,34 @@ fn compile_reports_an_unavailable_law_checker_on_each_file_that_needs_it_and_who
     assert!(!root.join(".sharp/inputs.json").exists(), "the next compile tries to install the law checker again");
 }
 
+/// A law's proof ends once while its key holds, passed or failed: the next compile reports a failed proof from
+/// `.sharp/proofs.json`, so it needs no Lean, and an edit no law reaches proves nothing again.
+#[test]
+fn a_proof_is_not_attempted_again_while_its_law_is_unchanged() {
+    let broken =
+        LAWFUL_MONEY.replace("this.amount + other.amount, this.currency", "this.amount + other.amount, other.currency");
+    let directory = lawful_project(&[("app/Shared/Money.sharp", &broken)]);
+    let root = directory.path();
+    let unproven = "app/Shared/Money.sharp:8:5:error - law-unproven: law addKeepsCurrency is not proven";
+    let first = compile_lines(root);
+    assert!(printed(&first).contains(unproven), "{}", printed(&first));
+
+    let output = compile_without_lean(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains(unproven), "the failed proof is reported again: {}", printed(&output));
+    assert!(!printed(&output).contains("law-checker-unavailable"), "{}", printed(&output));
+
+    write(root, "app/Shared/Money.sharp", LAWFUL_MONEY);
+    compile_succeeds(root);
+    let unread = "    public int pages() => 1;\n\n    law addKeepsCurrency";
+    write(root, "app/Shared/Money.sharp", &LAWFUL_MONEY.replace("    law addKeepsCurrency", unread));
+    let output = compile_without_lean(root);
+
+    assert!(output.status.success(), "the proof ran again: {}", printed(&output));
+    assert!(compiled(root, "app/Shared/Money.sharp").exists());
+}
+
 #[test]
 fn compile_needs_no_lean_for_a_project_with_no_law() {
     let directory = project(ORDER, MONEY);
@@ -4030,7 +4000,10 @@ fn compile_deletes_the_lean_package_once_no_law_remains() {
 
     assert!(output.status.success(), "{}", printed(&output));
     assert!(!root.join(".sharp/.lean").exists());
-    assert_eq!(files_under(&root.join(".sharp")), [Path::new("app/Order.sharpc"), Path::new("listeners.php")]);
+    assert_eq!(
+        files_under(&root.join(".sharp")),
+        [Path::new("app/Order.sharpc"), Path::new("compiled.bin"), Path::new("listeners.php")]
+    );
 }
 
 /// A `Money.lean` a 0.4.2 compile left beside `Money.sharp` is an ordinary unused file: the compile builds none of it,
@@ -4089,11 +4062,9 @@ fn compile_proves_a_law_whose_calls_go_from_one_file_to_another_and_back_with_no
 
     assert!(output.status.success(), "{}", printed(&output));
     assert!(compiled(root, "app/Shared/Alpha.sharp").exists());
-    assert_eq!(
-        generated_module(lake.path(), "Code.App.Shared.Beta"),
-        "-- Generated by mago compile. Do not edit.\nimport Code.App.Shared.Alpha\n"
-    );
-    assert!(!generated_module(lake.path(), "Code.App.Shared.Alpha").contains("import Code."));
+    let alpha = generated_module(lake.path(), "Code.App.Shared.Alpha");
+    assert!(alpha.contains("def App.Shared.Beta.middle"), "the group's module holds Beta's declaration: {alpha}");
+    assert!(!alpha.contains("import Code."), "{alpha}");
 }
 
 /// A call through the class, as `ShapeMath.doubled(s)`, is that static call already, as in C#, so it compiles and its

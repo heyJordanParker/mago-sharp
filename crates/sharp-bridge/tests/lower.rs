@@ -32,7 +32,6 @@ use mago_sharp_bridge::unit::encode;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Node;
-use xxhash_rust::xxh3::xxh3_64;
 
 /// A file the checker accepted and its lowered unit, or the checker's refusal.
 struct Lowered(Result<Unit, Vec<String>>);
@@ -31555,11 +31554,24 @@ fn the_unit_names_each_form_it_inlines_with_its_fingerprint() {
     assert_eq!(inlined, [("Sharp\\Text::capitalized".to_owned(), capitalized.fingerprint())]);
 }
 
-/// The unit names the function type of each method its file declares with the xxh3-64 of the type text `is` tests a
-/// closure of it by, which `Reads::function_types` takes, since the effects the text lists come from other files. The
-/// `parse` and `tryParse` spec section 10 gives the class carry theirs too.
+/// The fingerprint `function_type_fingerprint` gives a function type whose effects are `effects`, sorted: the xxh3-64
+/// of a mark, then each effect's name and a zero byte.
+fn effects_fingerprint(effects: &[&str]) -> u64 {
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    hasher.update(&[1]);
+    for effect in effects {
+        hasher.update(effect.as_bytes());
+        hasher.update(&[0]);
+    }
+
+    hasher.digest()
+}
+
+/// The unit names the function type of each method its file declares with the fingerprint of the effects it lists,
+/// which `Reads::function_types` takes, since those effects come from other files. The `parse` and `tryParse` spec
+/// section 10 gives the class carry theirs too, which list no effect.
 #[test]
-fn the_unit_names_each_function_type_with_the_hash_of_its_text() {
+fn the_unit_names_each_function_type_with_the_fingerprint_of_its_effects() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int twice(int x) => x * 2;\n}\n";
     let lowered = Lowered::new(code);
     let function_types: Vec<(String, u64)> = lowered
@@ -31573,15 +31585,9 @@ fn the_unit_names_each_function_type_with_the_hash_of_its_text() {
     assert_eq!(
         function_types,
         [
-            (
-                "App\\Tenant\\Report::parse".to_owned(),
-                xxh3_64(b"Function<App.Tenant.Report(Map<string, Any?>|Object)>")
-            ),
-            (
-                "App\\Tenant\\Report::tryParse".to_owned(),
-                xxh3_64(b"Function<App.Tenant.Report?(Map<string, Any?>|Object)>")
-            ),
-            ("App\\Tenant\\Report::twice".to_owned(), xxh3_64(b"Function<int(int)>")),
+            ("App\\Tenant\\Report::parse".to_owned(), effects_fingerprint(&[])),
+            ("App\\Tenant\\Report::tryParse".to_owned(), effects_fingerprint(&[])),
+            ("App\\Tenant\\Report::twice".to_owned(), effects_fingerprint(&[])),
         ]
     );
 }
@@ -31610,11 +31616,11 @@ fn each_accessor_and_each_method_without_a_body_names_its_function_type() {
     assert_eq!(
         function_types,
         [
-            ("App\\Tenant\\Report::$doubled::get".to_owned(), xxh3_64(b"Function<int() uses App.Tenant.Meter>")),
-            ("App\\Tenant\\Report::$stock::get".to_owned(), xxh3_64(b"Function<int()>")),
-            ("App\\Tenant\\Report::$stock::set".to_owned(), xxh3_64(b"Function<void(int)>")),
-            ("App\\Tenant\\Report::$total::set".to_owned(), xxh3_64(b"Function<void(int) uses App.Tenant.Meter>")),
-            ("App\\Tenant\\Report::read".to_owned(), xxh3_64(b"Function<int() uses App.Tenant.Meter>")),
+            ("App\\Tenant\\Report::$doubled::get".to_owned(), effects_fingerprint(&["App.Tenant.Meter"])),
+            ("App\\Tenant\\Report::$stock::get".to_owned(), effects_fingerprint(&[])),
+            ("App\\Tenant\\Report::$stock::set".to_owned(), effects_fingerprint(&[])),
+            ("App\\Tenant\\Report::$total::set".to_owned(), effects_fingerprint(&["App.Tenant.Meter"])),
+            ("App\\Tenant\\Report::read".to_owned(), effects_fingerprint(&["App.Tenant.Meter"])),
         ]
     );
 }

@@ -76,7 +76,7 @@ pub(crate) const RESULT_TYPE_SLOT: &[u8] = b"result#type";
 pub(crate) const KEY_ORDER_SLOT: &[u8] = b"key#order";
 
 /// A standard library method's body, lowered, with a slot where it reads its receiver or a parameter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InlineForm {
     nodes: Vec<sharp_node>,
     children: Vec<u32>,
@@ -103,7 +103,7 @@ pub struct InlineForm {
 
 /// The plain PHP function a form's body is one call of, as `count` is for a `List`'s `count()`, whose body is
 /// `global.count(items)`, and what the body passes it, in the function's order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PhpCall {
     /// The function's name as its declaration writes it.
     pub function: Word,
@@ -111,7 +111,7 @@ pub struct PhpCall {
 }
 
 /// What a form's body passes the PHP function it calls, in one of the function's parameters.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PhpCallArgument {
     /// The value of the form's slot at this index: the receiver first for an instance or extension member, then each
     /// parameter in declaration order.
@@ -145,7 +145,7 @@ impl PhpCallArgument {
 /// The form runs only for a call that passes a literal in the slot `slot` that equals `literal`, when `equal`, or one
 /// that doesn't, otherwise, as a text to replace other than `""` decides `replace`'s `old != ""`, so the form holds the
 /// branch it takes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FixedArgument {
     /// The receiver first for an instance or extension member, then each parameter in declaration order.
     pub slot: usize,

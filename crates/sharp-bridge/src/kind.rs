@@ -4,7 +4,7 @@
 
 /// One value per `zend_ast_kind`, named as that kind without `ZEND_` and equal to it, so `ext/sharp` casts it.
 #[repr(u16)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum sharp_kind {
     SHARP_AST_ZVAL = 64,
     SHARP_AST_CONSTANT = 65,

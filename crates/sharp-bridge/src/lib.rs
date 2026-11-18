@@ -31,18 +31,19 @@ pub use lower::types::Declaration;
 pub use lower::types::DeclarationKind;
 pub use lower::types::Equality;
 pub use lower::types::Types;
+pub use lower::types::function_type_fingerprint;
 pub use lower::types::type_text;
 
 /// `len` bytes of UTF-8 at `offset` in the unit's texts, not NUL-terminated.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct sharp_str {
     pub offset: u32,
     pub len: u32,
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum sharp_value {
     SHARP_NULL,
     SHARP_FALSE,
@@ -53,7 +54,7 @@ pub enum sharp_value {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct sharp_node {
     pub kind: sharp_kind,
     /// `zend_ast` attr: flags, modifiers, operator, `ZEND_NAME_FQ`.
@@ -85,7 +86,7 @@ pub struct Unit {
     texts: Vec<u8>,
     /// Each standard library method the file inlines, once, with its form's fingerprint.
     inlined: Vec<Read>,
-    /// Each function type the file spells for its own methods and lambdas, with its text's fingerprint.
+    /// Each function type the file spells for its own methods and lambdas, with the fingerprint of its effects.
     function_types: Vec<Read>,
 }
 
@@ -124,8 +125,10 @@ impl Unit {
     }
 
     /// The function type of each method and lambda the file declares, which `is` tests a closure of it by, named
-    /// `Class::method` or by the lambda's `{closure:…}` name, with the xxh3-64 of its type text. Its effects come from
-    /// the bodies of every function it calls, in any file, so the orchestrator stores them as `Reads::function_types`.
+    /// `Class::method` or by the lambda's `{closure:…}` name, with the fingerprint [`function_type_fingerprint`] gives
+    /// its effects. Its effects come from the bodies of every function it calls, in any file, so the orchestrator
+    /// stores them as `Reads::function_types`. The rest of its type follows from the file's own source and the
+    /// declarations the file's other reads name.
     #[must_use]
     pub fn function_types(&self) -> &[Read] {
         &self.function_types

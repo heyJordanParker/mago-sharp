@@ -20,6 +20,7 @@ use mago_extension::WorkerPool;
 use mago_extension::WorkerPoolOptions;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
+use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
 use mago_php_version::PHPVersion;
 use mago_reporting::IssueCollection;
 use mago_sharp_bridge::unit::Library;
@@ -628,13 +629,15 @@ fn compiled_consumer(
     incremental.analyze().expect("body return analysis should succeed");
 
     let mut inputs = Vec::new();
-    let compiled = incremental
+    let (compiled, _) = incremental
         .compile(
+            &CompiledFiles::default(),
+            |_| Ok(None),
             |path| {
                 inputs.push(String::from_utf8_lossy(path).into_owned());
                 Ok(None)
             },
-            |_| Ok(Default::default()),
+            |_, _| Ok(Default::default()),
             &Library::default(),
             |issues| issues,
         )

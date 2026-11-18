@@ -2,7 +2,7 @@
 `sharp-lean`: the program Mago runs to prove PHP# laws.
 
 Mago writes one `Check` request to standard input and reads the answer from standard output. The request holds the
-source of every generated module of the project's code, and checks, each the generated modules some laws of one `.sharp`
+source of each generated module its checks reach, and checks, each the generated modules some laws of one `.sharp`
 file reach and the theorems of those laws, after the theorems of each law they call. The runner reads no file of the
 project. It imports the runtime library once, then for each check elaborates the generated modules it reaches,
 elaborates each theorem with the steps of `Sharp.Lean.Proof`, and answers for each law: proven, each case and condition
@@ -11,8 +11,9 @@ refuses its check, with the line of its first error. This elaboration is the onl
 builds the package.
 
 One runner answers the checks of a compile because Lean cannot free an imported environment while the tasks that
-elaborated a theorem may still hold parts of it, so a runner imports once. Generated modules are elaborated rather than
-imported. Each is elaborated on the runtime library with exactly the generated modules it imports, transitively, as Lean
+elaborated a theorem may still hold parts of it, so a runner imports once. A theorem is elaborated once per runner: a
+later check that calls it gets the declaration Lean added for it, when the check's environment holds every constant that
+declaration uses. Generated modules are elaborated rather than imported. Each is elaborated on the runtime library with exactly the generated modules it imports, transitively, as Lean
 compiles a module from its imports alone, so whether Lean accepts it does not depend on the other modules of its check or
 of the request. A check's theorems are elaborated with exactly the modules the check names, and what they import.
 
@@ -175,49 +176,94 @@ def reachedOf (env : Environment) (name : Name) (targets : Array Name) : Option 
       pending := pending.push used
   return none
 
-/-- Elaborates each theorem in order, each with the theorems before it in scope, and appends to `b` the count of judged
-ones and the answer for each: `0` when it is proven; `1` and each step whose goal stays open, as its kind, its index and
-its goal; `2` and the statement of the law not proven that it holds through; or `3` and Lean's first error, when Lean
-rejected the theorem, or the axioms it rests on, when it has a gap no law it holds through explains. A theorem has no
-time budget of its own: each step `Sharp/Lean/Proof.lean` runs has its own, and Mago's limits on the runner bound the
-rest. -/
-def answer (env : Environment) (request : Check) (b : ByteArray) : IO ByteArray := do
+/-- What elaborating one theorem gave: each step whose goal stayed open, as its kind, its index and its goal, the first
+other error, whether Lean declared the theorem, and the axioms it rests on. With them, the declaration Lean added for it
+and each constant that declaration uses, when they were all there before it, so no other declaration its elaboration
+added is part of it. -/
+structure Elaborated where
+  steps : Array (UInt8 × Nat × String)
+  rejected : Option String
+  declared : Bool
+  axioms : Array Name
+  declaration : Option (Declaration × NameSet)
+
+/-- Whether `env` holds each constant of `names`. -/
+def holdsAll (env : Environment) (names : NameSet) : Bool := Id.run do
+  for name in names do
+    unless env.contains name do return false
+  return true
+
+/-- Elaborates `item` in `env` with the steps of `Sharp.Lean.Proof`, and gives the environment with its theorem and what
+elaborating it gave. A theorem has no time budget of its own: each step `Sharp/Lean/Proof.lean` runs has its own, and
+Mago's limits on the runner bound the rest. -/
+def elaborate (env : Environment) (item : Theorem) : IO (Environment × Elaborated) := do
+  let input := Parser.mkInputContext s!"open Sharp\n{item.text}" "<law>"
+  let state ← IO.processCommands input {} (Command.mkState env {} (maxHeartbeats.set {} 0))
+  let elaborated := state.commandState.env
+  let name := item.statement ++ `proof
+  let mut steps := #[]
+  let mut rejected := none
+  for message in state.commandState.messages.toList do
+    if message.severity != .error then continue
+    let text ← message.data.toString
+    match openStep text with
+    | some step => steps := steps.push step
+    | none => if rejected.isNone then rejected := some text
+  let declared := elaborated.contains name
+  let axioms ← if declared then runCore elaborated (collectAxioms name) else pure #[]
+  let declaration := match elaborated.find? name with
+    | some (.thmInfo val) =>
+      let uses := (ConstantInfo.thmInfo val).getUsedConstantsAsSet
+      if holdsAll env uses then some (.thmDecl val, uses) else none
+    | _ => none
+  return (elaborated, { steps, rejected, declared, axioms, declaration })
+
+/-- `env` with `item`'s theorem, and what elaborating it gave: from `known`, what an earlier check of the runner gave,
+when `env` holds each constant its declaration uses, so the runner adds the declaration Lean already checked and
+elaborates each theorem once, and else elaborated in `env`. -/
+def withTheorem (env : Environment) (item : Theorem) (known : NameMap Elaborated) :
+    IO (Environment × Elaborated) := do
+  if let some elaborated := known.find? item.statement then
+    if let some (declaration, uses) := elaborated.declaration then
+      if holdsAll env uses then
+        if let .ok added := env.addDeclCore 0 0 declaration none (doCheck := false) then
+          return (added, elaborated)
+  elaborate env item
+
+/-- Takes each theorem in order, each with the theorems before it in scope, as [`withTheorem`] gives it from `known`,
+and appends to `b` the count of judged ones and the answer for each: `0` when it is proven; `1` and each step whose goal
+stays open, as its kind, its index and its goal; `2` and the statement of the law not proven that it holds through; or
+`3` and Lean's first error, when Lean rejected the theorem, or the axioms it rests on, when it has a gap no law it holds
+through explains. Gives `known` with what elaborating each theorem gave. -/
+def answer (env : Environment) (request : Check) (b : ByteArray) (known : NameMap Elaborated) :
+    IO (ByteArray × NameMap Elaborated) := do
   let mut env := env
+  let mut known := known
   let mut gaps : Array Name := #[]
   let mut b := putU32 b (request.theorems.filter (·.judged)).size.toUInt32
   for item in request.theorems do
-    let input := Parser.mkInputContext s!"open Sharp\n{item.text}" "<law>"
-    let state ← IO.processCommands input {} (Command.mkState env {} (maxHeartbeats.set {} 0))
-    env := state.commandState.env
+    let (next, elaborated) ← withTheorem env item known
+    env := next
+    known := known.insert item.statement elaborated
     let name := item.statement ++ `proof
-    let mut steps := #[]
-    let mut rejected := none
-    for message in state.commandState.messages.toList do
-      if message.severity != .error then continue
-      let text ← message.data.toString
-      match openStep text with
-      | some step => steps := steps.push step
-      | none => if rejected.isNone then rejected := some text
-    let declared := env.contains name
-    let axioms ← if declared then runCore env (collectAxioms name) else pure #[]
-    let gap := hasGap axioms
+    let gap := hasGap elaborated.axioms
     if gap then gaps := gaps.push name
     unless item.judged do continue
-    if let some message := rejected then
+    if let some message := elaborated.rejected then
       b := putString (putU8 b 3) message
-    else if !declared then
+    else if !elaborated.declared then
       b := putString (putU8 b 3) s!"Lean declared no {name}"
-    else if !steps.isEmpty then
-      b := putU32 (putU8 b 1) steps.size.toUInt32
-      for (kind, index, goal) in steps do
+    else if !elaborated.steps.isEmpty then
+      b := putU32 (putU8 b 1) elaborated.steps.size.toUInt32
+      for (kind, index, goal) in elaborated.steps do
         b := putString (putU32 (putU8 b kind) index.toUInt32) goal
     else if gap then
       b := match reachedOf env name gaps with
         | some law => putString (putU8 b 2) law.getPrefix.toString
-        | none => putString (putU8 b 3) s!"{name} rests on the axioms {axioms}"
+        | none => putString (putU8 b 3) s!"{name} rests on the axioms {elaborated.axioms}"
     else
       b := putU8 b 0
-  return b
+  return (b, known)
 
 partial def readAll (stream : IO.FS.Stream) (bytes : ByteArray := .empty) : IO ByteArray := do
   let chunk ← stream.read 65536
@@ -375,6 +421,7 @@ def respond : IO Unit := do
   let stdout ← IO.getStdout
   stdout.write (putU32 (header checkedResponse) checks.size.toUInt32)
   stdout.flush
+  let mut theorems : NameMap Elaborated := {}
   for request in checks, index in [0:checks.size] do
     let (elaborated, known) ← (withImports index {} (request.modules.filter isGenerated)).run.run modules
     modules := known
@@ -382,7 +429,9 @@ def respond : IO Unit := do
       | .ok (checked, _) => do
         progress s!"theorems {index}"
         let code := checked.constants.foldStage2 (fun code name _ => code.insert name) ({} : NameSet)
-        answer (Proof.generated.setState checked code) request (putU8 .empty 0)
+        let (b, known) ← answer (Proof.generated.setState checked code) request (putU8 .empty 0) theorems
+        theorems := known
+        pure b
       | .error (.rejected module line) =>
         pure <| putU32 (putString (putU8 .empty 1) (written sources module)) line.toUInt32
       | .error (.stopped module) => pure <| putString (putU8 .empty 2) (written sources module)

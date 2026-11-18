@@ -148,6 +148,25 @@ impl<'program> Program<'program> {
         (reached, missing)
     }
 
+    /// Every declaration the Lean text of `key` needs, `key`'s own included: each it uses, transitively, as
+    /// [`Self::closure`] gives them, and the type that declares each member, which a method's `this` and a constructor's
+    /// result name without using it.
+    pub(crate) fn reached(&self, key: &str) -> Vec<&'program str> {
+        let mut reached = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::default();
+        let mut pending = vec![key];
+        while let Some(next) = pending.pop() {
+            for found in self.closure(next).0 {
+                if seen.insert(found) {
+                    reached.push(found);
+                    pending.extend(found.rsplit_once('.').map(|(owner, _)| owner));
+                }
+            }
+        }
+
+        reached
+    }
+
     /// Why the declaration `key`, or one it uses, cannot be written to Lean.
     pub(crate) fn problems(&self, key: &str) -> Problems {
         let (reached, missing) = self.closure(key);
@@ -166,18 +185,23 @@ impl<'program> Program<'program> {
     }
 
     /// The generated module of each translation that names one and declares something or is in `proved`, whose laws'
-    /// theorems import it. A declaration that cannot be written to Lean is left out. Files whose declarations use each
-    /// other form one group, whose declarations all live in the module that sorts first; each other module of the group
-    /// imports it, so no two modules import each other, as Lean requires.
-    pub(crate) fn modules(&self, proved: &[FileId]) -> Vec<Module> {
-        let sound: HashSet<&str> =
-            self.declarations.keys().copied().filter(|key| self.problems(key).is_empty()).collect();
+    /// theorems import it. Of the declarations, each of `reached` that can be written to Lean is in it, so a module
+    /// holds what the laws being proved reach. Files whose declarations use each other form one group, whose
+    /// declarations all live in the module that sorts first; each other module of the group imports it, so no two
+    /// modules import each other, as Lean requires.
+    pub(crate) fn modules(&self, proved: &HashSet<FileId>, reached: &HashSet<&str>) -> Vec<Module> {
+        let sound: HashSet<&str> = reached
+            .iter()
+            .copied()
+            .filter(|key| self.declarations.contains_key(key) && self.problems(key).is_empty())
+            .collect();
 
         let named: Vec<usize> = (0..self.translations.len())
             .filter(|index| {
                 let translation = &self.translations[*index];
                 translation.class.is_some()
-                    && (!translation.declarations.is_empty() || proved.contains(&translation.file))
+                    && (translation.declarations.iter().any(|declaration| sound.contains(declaration.key.as_str()))
+                        || proved.contains(&translation.file))
             })
             .collect();
         let position: HashMap<usize, usize> =
@@ -248,23 +272,22 @@ impl<'program> Program<'program> {
     /// The text of `group`, declarations that use each other or one alone, each method that recurses with the measure
     /// Lean sees it end by: methods that call each other are one Lean `mutual` block.
     fn group_text(&self, group: &[&str]) -> String {
-        let texts: Vec<String> = group
-            .iter()
-            .map(|key| {
-                let declaration = self.declarations[key].1;
-                match &declaration.measure {
-                    Some(measure) if self.terminating.contains(key) => {
-                        format!("{}\n{}", declaration.text, measure.termination)
-                    }
-                    _ => declaration.text.clone(),
-                }
-            })
-            .collect();
+        let texts: Vec<String> = group.iter().filter_map(|key| self.text(key)).collect();
 
         match texts.as_slice() {
             [text] => text.clone(),
             _ => format!("mutual\n\n{}\n\nend", texts.join("\n\n")),
         }
+    }
+
+    /// The Lean text of the declaration `key`: a method that recurses ends in the measure Lean sees it end by.
+    pub(crate) fn text(&self, key: &str) -> Option<String> {
+        let declaration = self.declarations.get(key)?.1;
+
+        Some(match &declaration.measure {
+            Some(measure) if self.terminating.contains(key) => format!("{}\n{}", declaration.text, measure.termination),
+            _ => declaration.text.clone(),
+        })
     }
 
     /// The sound declarations of the translations at `indexes`, in groups that use each other, each group after every
@@ -441,7 +464,7 @@ impl Package {
 
 /// Writes `bytes` to `path` by rename unless the file already holds them, so a reader never sees a file half written,
 /// and an unchanged file keeps its modification time. Returns whether it wrote.
-fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
+pub(crate) fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
     if fs::read(path).is_ok_and(|current| current == bytes) {
         return Ok(false);
     }

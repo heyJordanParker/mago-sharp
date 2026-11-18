@@ -19,6 +19,7 @@ use mago_extension::WorkerCommand;
 use mago_extension::WorkerPool;
 use mago_extension::WorkerPoolOptions;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
+use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
 use mago_php_version::PHPVersion;
 use mago_reporting::IssueCollection;
 use mago_server::Server;
@@ -600,8 +601,10 @@ fn a_file_whose_type_a_provider_read_from_a_class_is_analyzed_again_when_the_cla
 fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
     let database = server.database().read_only();
     let mut inputs = BTreeMap::new();
-    let compiled = server
+    let (compiled, _) = server
         .compile(
+            &CompiledFiles::default(),
+            |_| Ok(None),
             |path| {
                 let input = database.get(&FileId::new(path)).ok().map(|file| Input {
                     path: path.to_vec(),
@@ -612,7 +615,7 @@ fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
                 inputs.insert(String::from_utf8_lossy(path).into_owned(), input.clone());
                 Ok(input)
             },
-            |_| Ok(Default::default()),
+            |_, _| Ok(Default::default()),
             &Library::default(),
             |issues| issues,
         )

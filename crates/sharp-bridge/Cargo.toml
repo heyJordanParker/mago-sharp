@@ -32,7 +32,8 @@ mago-reporting = { workspace = true }
 mago-span = { workspace = true }
 mago-syntax = { workspace = true }
 mago-syntax-core = { workspace = true }
-mago-word = { workspace = true }
+mago-word = { workspace = true, features = ["serde"] }
+serde = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]

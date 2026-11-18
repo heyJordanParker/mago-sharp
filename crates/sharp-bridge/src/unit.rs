@@ -120,7 +120,7 @@ pub struct Input {
 }
 
 /// One declaration a check read, and the fingerprint of what it read.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Read {
     pub name: Vec<u8>,
     pub fingerprint: u64,
@@ -128,7 +128,7 @@ pub struct Read {
 
 /// What a file's check, and the extensions that analyzed it, read from other declarations. Only these enter the key,
 /// so an edit that changes none of them leaves the compiled code's name unchanged.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Reads {
     /// Each declaration the check read through its signature, and each declaration an extension read in the analysis,
     /// for any file, with its ancestors, fingerprinted by codex's `DefSignatureNode::signature_hash`.
@@ -144,7 +144,7 @@ pub struct Reads {
     /// the key. A method search is fingerprinted by the methods it finds with the fields it projects of them.
     pub listed: Vec<Read>,
     /// The function type of each method and lambda the file declares, as `Unit::function_types` gives them, since its
-    /// effects come from the bodies it calls, in any file.
+    /// effects come from the bodies it calls, in any file, fingerprinted by `function_type_fingerprint`.
     pub function_types: Vec<Read>,
 }
 
@@ -226,51 +226,127 @@ fn key_of(compiler: &[&[u8]], source_hash: [u8; 16], reads: &Reads) -> [u8; 16] 
 /// Panics when a section holds more than a 32-bit size can say.
 #[must_use]
 pub fn encode(unit: &Unit, source: &[u8], key: [u8; 16], inputs: &[Input], library: &Library) -> Vec<u8> {
-    let mut texts = unit.texts.clone();
-    let library_version = store_text(&mut texts, &library.version);
-    let inputs: Vec<sharp_input> = inputs
-        .iter()
-        .map(|input| sharp_input {
-            path: store_text(&mut texts, &input.path),
-            size: input.size,
-            mtime_ns: input.mtime_ns,
-            hash: input.hash,
-        })
-        .collect();
-
-    let header = sharp_unit_header {
-        magic: SHARP_UNIT_MAGIC,
-        abi: SHARP_UNIT_ABI,
-        checker: BUILD_ID.to_be_bytes(),
+    let mut nodes =
+        Vec::with_capacity(size_of::<sharp_node>() * unit.nodes.len() + size_of::<u32>() * unit.children.len());
+    for node in &unit.nodes {
+        nodes.extend_from_slice(&node_bytes(node));
+    }
+    for child in &unit.children {
+        nodes.extend_from_slice(&child.to_le_bytes());
+    }
+    let code = Code {
         key,
         source_hash: source_hash(source),
         source_size: source.len() as u64,
-        input_count: size("inputs", inputs.len()),
         node_count: size("nodes", unit.nodes.len()),
         children_count: size("children", unit.children.len()),
         root: unit.root,
-        texts_size: size("texts", texts.len()),
-        native_fingerprint: library.native_fingerprint,
-        library_version,
-        sections_hash: [0; 16],
+        tree: &nodes,
+        texts: &unit.texts,
     };
 
-    let mut bytes = Vec::with_capacity(length(&header) as usize);
-    bytes.extend_from_slice(&header_bytes(&header));
-    for input in &inputs {
-        bytes.extend_from_slice(&input_bytes(input));
-    }
-    for node in &unit.nodes {
-        bytes.extend_from_slice(&node_bytes(node));
-    }
-    for child in &unit.children {
-        bytes.extend_from_slice(&child.to_le_bytes());
-    }
-    bytes.extend_from_slice(&texts);
-    let sections_hash = sections_hash(&bytes);
-    put(&mut bytes, offset_of!(sharp_unit_header, sections_hash), &sections_hash);
+    code.encode(inputs, library)
+}
 
-    bytes
+/// The bytes of the compiled file `bytes` with `inputs` as its inputs and `library` as its standard library.
+///
+/// They are the bytes [`encode`] gives the unit `bytes` holds, with its key and its source. None when `bytes` is no
+/// compiled file this bridge reads.
+///
+/// A compile keeps the code of each file whose key holds, and only an input's stamp or the standard library can differ
+/// from the compile that wrote it.
+///
+/// # Panics
+///
+/// Panics when a section holds more than a 32-bit size can say.
+#[must_use]
+pub fn restamp(bytes: &[u8], inputs: &[Input], library: &Library) -> Option<Vec<u8>> {
+    let header = header(bytes).ok()?;
+    let word = |offset: usize| -> u32 {
+        let mut word = [0; 4];
+        word.copy_from_slice(&bytes[offset..offset + 4]);
+        u32::from_le_bytes(word)
+    };
+    let (input_count, node_count, children_count) = (
+        word(offset_of!(sharp_unit_header, input_count)) as usize,
+        word(offset_of!(sharp_unit_header, node_count)),
+        word(offset_of!(sharp_unit_header, children_count)),
+    );
+    let tree = size_of::<sharp_unit_header>() + size_of::<sharp_input>() * input_count;
+    let texts = tree + size_of::<sharp_node>() * node_count as usize + size_of::<u32>() * children_count as usize;
+    // `Code::encode` stores the library's version right after the unit's own texts, then each input's path.
+    let own_texts = word(offset_of!(sharp_unit_header, library_version) + offset_of!(sharp_str, offset)) as usize;
+    let code = Code {
+        key: header.key,
+        source_hash: header.source_hash,
+        source_size: header.source_size,
+        node_count,
+        children_count,
+        root: word(offset_of!(sharp_unit_header, root)),
+        tree: &bytes[tree..texts],
+        texts: &bytes[texts..texts + own_texts],
+    };
+
+    Some(code.encode(inputs, library))
+}
+
+/// The code a compiled file holds apart from its inputs and its standard library: its key, its source's hash and size,
+/// and its tree, the nodes then the children as the file lays them out, with the texts they point into.
+struct Code<'code> {
+    key: [u8; 16],
+    source_hash: [u8; 16],
+    source_size: u64,
+    node_count: u32,
+    children_count: u32,
+    root: u32,
+    tree: &'code [u8],
+    texts: &'code [u8],
+}
+
+impl Code<'_> {
+    /// The compiled file of this code, written by this checker build, with `inputs` and `library`.
+    fn encode(&self, inputs: &[Input], library: &Library) -> Vec<u8> {
+        let mut texts = self.texts.to_vec();
+        let library_version = store_text(&mut texts, &library.version);
+        let inputs: Vec<sharp_input> = inputs
+            .iter()
+            .map(|input| sharp_input {
+                path: store_text(&mut texts, &input.path),
+                size: input.size,
+                mtime_ns: input.mtime_ns,
+                hash: input.hash,
+            })
+            .collect();
+
+        let header = sharp_unit_header {
+            magic: SHARP_UNIT_MAGIC,
+            abi: SHARP_UNIT_ABI,
+            checker: BUILD_ID.to_be_bytes(),
+            key: self.key,
+            source_hash: self.source_hash,
+            source_size: self.source_size,
+            input_count: size("inputs", inputs.len()),
+            node_count: self.node_count,
+            children_count: self.children_count,
+            root: self.root,
+            texts_size: size("texts", texts.len()),
+            native_fingerprint: library.native_fingerprint,
+            library_version,
+            sections_hash: [0; 16],
+        };
+
+        let mut bytes = Vec::with_capacity(length(&header) as usize);
+        bytes.extend_from_slice(&header_bytes(&header));
+        for input in &inputs {
+            bytes.extend_from_slice(&input_bytes(input));
+        }
+        bytes.extend_from_slice(self.tree);
+        bytes.extend_from_slice(&texts);
+        let sections_hash = sections_hash(&bytes);
+        put(&mut bytes, offset_of!(sharp_unit_header, sections_hash), &sections_hash);
+
+        bytes
+    }
 }
 
 /// The xxh3-128 of every byte of the compiled file `bytes` after its header, as the header's `sections_hash` stores it.
@@ -472,19 +548,15 @@ pub fn compiled_path(root: &Path, source: &Path) -> Result<Option<PathBuf>, Data
     Ok(real.strip_prefix(root).ok().map(|relative| root.join(COMPILED_FOLDER).join(relative).with_extension("sharpc")))
 }
 
-/// Returns `true` when the compiled file `bytes` cannot stand for its source any more.
+/// Returns `true` when the compiled file `bytes` cannot stand for the code whose key is `key` any more: it is no compiled
+/// file this bridge reads, another checker build wrote it, or it names another key.
 ///
-/// That is when another checker build wrote it, or its [inputs changed](inputs_changed).
-///
-/// # Errors
-///
-/// Returns the error of reading an input.
-pub fn is_stale(root: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
-    if header(bytes).is_ok_and(|header| header.checker != BUILD_ID.to_be_bytes()) {
-        return Ok(true);
-    }
-
-    inputs_changed(root, bytes)
+/// The key hashes the source and the fingerprint of each declaration its check read, as [`key`] gives it, so a compile
+/// that computes `key` from the fingerprints of the reads the file's last check named keeps the file while none of
+/// them changed, whatever else an edit changed.
+#[must_use]
+pub fn is_stale(bytes: &[u8], key: [u8; 16]) -> bool {
+    header(bytes).ok().is_none_or(|header| header.checker != BUILD_ID.to_be_bytes() || header.key != key)
 }
 
 /// Returns `true` when the compiled file `bytes` is no compiled file this bridge reads, or one of its inputs changed.

@@ -16,6 +16,7 @@ workspace = true
 flate2 = { workspace = true }
 foldhash = { workspace = true }
 mago-analyzer = { workspace = true }
+mago-build-id = { workspace = true }
 mago-codex = { workspace = true }
 mago-database = { workspace = true }
 mago-extension = { workspace = true }

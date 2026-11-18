@@ -10,8 +10,6 @@ pub(crate) mod names;
 mod pattern;
 pub(crate) mod proof;
 
-use std::path::PathBuf;
-
 use mago_analyzer::smaller::Bound;
 use mago_analyzer::smaller::Smaller;
 use mago_analyzer::smaller::Step;
@@ -57,7 +55,6 @@ pub struct Translation {
     pub(crate) file: FileId,
     /// Workspace-relative, with `/` separators.
     pub(crate) name: Vec<u8>,
-    pub(crate) path: Option<PathBuf>,
     /// The Lean name of the file's first class-like, which names its generated module, and that name's span.
     pub(crate) class: Option<(String, Span)>,
     pub(crate) laws: Vec<Law>,
@@ -173,7 +170,6 @@ pub fn translate(checked: &CheckedProgram<'_>, reach: &Reach) -> Translation {
         translation: Translation {
             file: file.id,
             name: file.name.to_vec(),
-            path: file.path.clone(),
             class: None,
             laws: Vec::new(),
             declarations: Vec::new(),

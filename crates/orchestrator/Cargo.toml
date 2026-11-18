@@ -14,10 +14,11 @@ workspace = true
 
 [dependencies]
 mago-allocator = { workspace = true }
+mago-build-id = { workspace = true }
 mago-syntax = { workspace = true }
 mago-reporting = { workspace = true }
 mago-bytes = { workspace = true }
-mago-word = { workspace = true }
+mago-word = { workspace = true, features = ["serde"] }
 mago-database = { workspace = true, features = ["loader"] }
 mago-linter = { workspace = true }
 mago-names = { workspace = true }
@@ -29,7 +30,9 @@ mago-analyzer = { workspace = true }
 mago-guard = { workspace = true }
 mago-sharp-bridge = { workspace = true }
 mago-composer = { workspace = true }
+bincode = { workspace = true }
 foldhash = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 indicatif = { workspace = true }
 rayon = { workspace = true }

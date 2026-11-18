@@ -57,6 +57,7 @@ use mago_database::matcher::contains_glob_metacharacters;
 use mago_names::resolver::NameResolver;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
+use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
 use mago_orchestrator::service::incremental_analysis::compile::LOWERING_PANIC;
 use mago_reporting::CompiledIgnoreSet;
 use mago_reporting::IssueCollection;
@@ -665,9 +666,11 @@ impl<'configuration> Session<'configuration> {
         let analysis = self.server.analyze()?;
         let database = self.server.database().read_only();
         let issues = keys(&self.server, prover.hidden.shown(analysis.issues, &database));
-        let compilations = self.server.compile(
+        let (compilations, _) = self.server.compile(
+            &CompiledFiles::default(),
+            |_| Ok(None),
             |path| unit::stamp(&prover.root, path),
-            |_| Ok(Default::default()),
+            |_, _| Ok(Default::default()),
             &prover.standard_library,
             |issues| prover.hidden.shown(issues, &database),
         )?;
