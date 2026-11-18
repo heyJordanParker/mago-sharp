@@ -269,7 +269,7 @@ fn analyze_string_concat_operand<'arena, A>(
                     continue;
                 };
 
-                if context.codebase.method_exists(class_like_name.as_bytes(), b"__toString") {
+                if context.codebase.method_exists(class_like_name, word("__toString")) {
                     current_atomic_is_valid = true;
 
                     context.collector.report_with_code(

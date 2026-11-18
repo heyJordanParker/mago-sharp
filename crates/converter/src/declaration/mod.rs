@@ -132,22 +132,22 @@ fn member_uses(
     codebase: &CodebaseMetadata,
     references: &SymbolReferences,
 ) -> HashMap<Word, Uses> {
-    let key = codebase.class_key(class.name.as_bytes());
+    let key = codebase.class_key(class.name);
     let full_name = class.original_name.as_str_lossy();
     let own = namespace_of(&full_name);
     // Whether `symbol`, a class's or a function's name, is a subclass of `class`, and whether it is outside `own`.
     let place = |symbol: Word| {
-        let name = codebase.get_class_like(symbol.as_bytes()).map_or_else(
+        let name = codebase.get_class_like(symbol).map_or_else(
             || symbol.as_str_lossy().into_owned(),
             |other| other.original_name.as_str_lossy().into_owned(),
         );
-        let is_subclass = codebase.is_instance_of(symbol.as_bytes(), class.name.as_bytes());
+        let is_subclass = codebase.is_instance_of(symbol, class.name);
         (is_subclass, !is_within(namespace_of(&name), own))
     };
 
     let mut uses: HashMap<Word, Uses> = HashMap::new();
     references.for_each_reference(|origin, (on, member), _| {
-        if member.as_bytes().is_empty() || on != key && !codebase.is_instance_of(on.as_bytes(), class.name.as_bytes()) {
+        if member.as_bytes().is_empty() || on != key && !codebase.is_instance_of(on, class.name) {
             return;
         }
         let found = uses.entry(member).or_default();
@@ -169,7 +169,7 @@ fn member_uses(
     });
 
     for (child, metadata) in &codebase.class_likes {
-        if *child == key || !codebase.is_instance_of(metadata.name.as_bytes(), class.name.as_bytes()) {
+        if *child == key || !codebase.is_instance_of(metadata.name, class.name) {
             continue;
         }
         let (_, outside) = place(*child);
@@ -202,12 +202,12 @@ fn member_uses(
 /// reaches the member it marks, or each public member of the class it marks, by reflection, which no use records
 /// (spec section 5).
 fn dynamically_accessed(codebase: &CodebaseMetadata, attributes: &[AttributeMetadata]) -> bool {
-    let mark = codebase.class_key(DYNAMICALLY_ACCESSED.as_bytes());
+    let mark = codebase.class_key(word(DYNAMICALLY_ACCESSED));
 
     attributes.iter().any(|attribute| {
-        codebase.get_class_like(attribute.name.as_bytes()).is_some_and(|class| {
-            class.attributes.iter().any(|marked| codebase.class_key(marked.name.as_bytes()) == mark)
-        })
+        codebase
+            .get_class_like(attribute.name)
+            .is_some_and(|class| class.attributes.iter().any(|marked| codebase.class_key(marked.name) == mark))
     })
 }
 
@@ -233,7 +233,7 @@ fn writers(
     codebase: &CodebaseMetadata,
     references: &SymbolReferences,
 ) -> HashMap<Word, BTreeSet<String>> {
-    let key = codebase.class_key(class.name.as_bytes());
+    let key = codebase.class_key(class.name);
     let mut writers: HashMap<Word, BTreeSet<String>> = HashMap::new();
     references.for_each_reference(|origin, (target, property), kind| {
         if kind != SymbolReferenceKind::PropertyWrite || target != key {
@@ -241,7 +241,7 @@ fn writers(
         }
         let writer = match origin {
             ReferenceOrigin::Symbol((writer, _)) if writer == key => return,
-            ReferenceOrigin::Symbol((writer, _)) => codebase.get_class_like(writer.as_bytes()).map_or_else(
+            ReferenceOrigin::Symbol((writer, _)) => codebase.get_class_like(writer).map_or_else(
                 || writer.as_str_lossy().into_owned(),
                 |writer| writer.original_name.as_str_lossy().into_owned(),
             ),
@@ -266,17 +266,17 @@ fn cycles(
     if own.is_empty() {
         return BTreeMap::new();
     }
-    let key = codebase.class_key(class.name.as_bytes());
+    let key = codebase.class_key(class.name);
     let name_of = |symbol: Word| {
         codebase
-            .get_class_like(symbol.as_bytes())
+            .get_class_like(symbol)
             .map_or_else(|| symbol.as_str_lossy().into_owned(), |class| class.original_name.as_str_lossy().into_owned())
     };
     let neighbours: HashSet<Word> = codebase
         .class_likes
         .values()
         .filter(|other| namespace_of(&other.original_name.as_str_lossy()).eq_ignore_ascii_case(own))
-        .map(|other| codebase.class_key(other.name.as_bytes()))
+        .map(|other| codebase.class_key(other.name))
         .collect();
     // Each namespace this class imports, and each other namespace that imports one of its neighbours, by lowercase
     // name, as PHP matches one.
@@ -299,7 +299,7 @@ fn cycles(
                 return;
             }
             let file = codebase
-                .get_class_like(source.as_bytes())
+                .get_class_like(source)
                 .and_then(|importer| codebase.file_name(importer.span.file_id))
                 .map_or_else(
                     || name.clone(),

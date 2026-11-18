@@ -103,7 +103,7 @@ where
             // A PHP# call through a class of a static property holding a function runs it.
             if let Some(classname) = resolved_classname.fqcn
                 && let ClassLikeMemberSelector::Identifier(name) = method_selector
-                && !context.codebase.method_exists(classname.as_bytes(), method_name.as_bytes())
+                && !context.codebase.method_exists(classname, *method_name)
                 && let Some(property) = resolve_called_static_property(
                     context,
                     block_context,
@@ -162,7 +162,7 @@ where
          method_name: Word,
          has_magic_static_call: bool,
          result: Option<&mut MethodResolutionResult>| {
-            let Some(defining_class_metadata) = context.codebase.get_class_like(fq_class_id.as_bytes()) else {
+            let Some(defining_class_metadata) = context.codebase.get_class_like(fq_class_id) else {
                 return (false, None);
             };
 
@@ -170,7 +170,7 @@ where
             // either runs in the engine.
             let family_parse = context.dialect.is_sharp()
                 && matches!(method_name.as_bytes(), b"parse" | b"tryParse")
-                && context.codebase.parses(fq_class_id.as_bytes());
+                && context.codebase.parses(fq_class_id);
             // A PHP# call through a type parameter bound by an interface that lacks the method is refused as a missing
             // method alone, as `TItem.make()` on a `TItem : Labeled` whose `Labeled` declares no `make`.
             if !from_instance
@@ -180,7 +180,7 @@ where
                 && !has_magic_static_call
                 && (!from_class_string
                     || !context.dialect.is_sharp()
-                    || context.codebase.get_declaring_method(fq_class_id.as_bytes(), method_name.as_bytes()).is_some())
+                    || context.codebase.get_declaring_method(fq_class_id, method_name).is_some())
             {
                 report_static_call_on_interface(
                     context,
@@ -326,7 +326,7 @@ where
     // If method not found, try to find in mixins
     if resolved_methods.is_empty()
         && let Some(fq_class_id) = first_class_id
-        && let Some(class_metadata) = context.codebase.get_class_like(fq_class_id.as_bytes())
+        && let Some(class_metadata) = context.codebase.get_class_like(fq_class_id)
         && !class_metadata.mixins.is_empty()
         // Try to find method in mixin types
         && let Some(resolved_method) = find_static_method_in_mixins(
@@ -374,13 +374,13 @@ where
                     let identifier = FunctionLikeIdentifier::Method(fq_class_id, method_name);
                     let has_incomplete_hierarchy = context
                         .codebase
-                        .get_class_like(fq_class_id.as_bytes())
+                        .get_class_like(fq_class_id)
                         .or(current_class_metadata)
                         .is_some_and(ClassLikeMetadata::has_incomplete_hierarchy);
 
                     if context.external_analysis_session.is_some()
                         && context.plugin_registry.may_have_callable_signature_provider(&identifier)
-                        && let Some(class_metadata) = context.codebase.get_class_like(fq_class_id.as_bytes())
+                        && let Some(class_metadata) = context.codebase.get_class_like(fq_class_id)
                     {
                         result.unresolved_methods.push(UnresolvedMethod {
                             classname: class_metadata.original_name,
@@ -403,10 +403,8 @@ where
                         report_non_existent_method(context, class_span, method_span, fq_class_id, method_name);
                     }
                 } else {
-                    let receiver_name = context
-                        .codebase
-                        .get_class_like(fq_class_id.as_bytes())
-                        .map_or(fq_class_id, |m| m.original_name);
+                    let receiver_name =
+                        context.codebase.get_class_like(fq_class_id).map_or(fq_class_id, |m| m.original_name);
 
                     if !resolve_forwarded_call(
                         context,
@@ -463,15 +461,15 @@ where
     let defining_class_metadata = if classname.is_parent()
         && defining_class_metadata.kind.is_interface()
         && let Some(defaults) =
-            context.codebase.get_trait(defaults_trait_name(defining_class_metadata.original_name.as_bytes()).as_bytes())
-        && defaults.declaring_method_ids.contains_key(&defaults.method_key(method_name.as_bytes()))
+            context.codebase.get_trait(defaults_trait_name(defining_class_metadata.original_name.as_bytes()))
+        && defaults.declaring_method_ids.contains_key(&defaults.method_key(method_name))
     {
         defaults
     } else {
         defining_class_metadata
     };
     // As the class keys it, see `get_method_candidates_from_object`.
-    let method_name = defining_class_metadata.method_key(method_name.as_bytes());
+    let method_name = defining_class_metadata.method_key(method_name);
     let method_id = MethodIdentifier::new(defining_class_metadata.original_name, method_name);
     let declaring_method_id = context.codebase.get_declaring_method_identifier(&method_id);
     let (declaring_method_id, function_like) = match context.codebase.get_method_by_id(&declaring_method_id) {
@@ -481,7 +479,7 @@ where
             for required_class in
                 defining_class_metadata.require_extends.iter().chain(defining_class_metadata.require_implements.iter())
             {
-                let Some(required_metadata) = context.codebase.get_class_like(required_class.as_bytes()) else {
+                let Some(required_metadata) = context.codebase.get_class_like(*required_class) else {
                     continue;
                 };
                 let req_method_id = MethodIdentifier::new(required_metadata.original_name, method_name);
@@ -500,8 +498,8 @@ where
         && !check_method_visibility(
             context,
             block_context.scope.get_class_like_name(),
-            method_id.get_class_name().as_bytes(),
-            method_id.get_method_name().as_bytes(),
+            method_id.get_class_name(),
+            method_id.get_method_name(),
             access_span,
             Some(selector.span()),
         )
@@ -543,7 +541,7 @@ where
         && classname.is_parent()
         && function_like.method_metadata.as_ref().is_some_and(|method| method.is_abstract)
     {
-        let declaring_class = context.codebase.get_class_like(declaring_method_id.get_class_name().as_bytes());
+        let declaring_class = context.codebase.get_class_like(declaring_method_id.get_class_name());
         let declaring_name = declaring_class.map_or(declaring_method_id.get_class_name(), |class| class.original_name);
         let method = display_member(context, declaring_name, function_like.original_name);
         let name = function_like.original_name;
@@ -563,7 +561,7 @@ where
         get_static_class_type(context, current_class_metadata, classname, fq_class_id, defining_class_metadata);
 
     // Get the class it was called on - need original name for callable creation
-    let called_on_class_metadata = context.codebase.get_class_like(fq_class_id.as_bytes())?;
+    let called_on_class_metadata = context.codebase.get_class_like(fq_class_id)?;
 
     Some(ResolvedMethod {
         // Use the original name of the class it was called on
@@ -628,7 +626,7 @@ where
 
     let mut intersections = vec![];
     for required_interface in &class_like_metadata.require_implements {
-        let Some(interface_metadata) = context.codebase.get_interface(required_interface.as_bytes()) else {
+        let Some(interface_metadata) = context.codebase.get_interface(*required_interface) else {
             continue;
         };
 
@@ -649,7 +647,7 @@ where
     }
 
     for required_class in &class_like_metadata.require_extends {
-        let Some(parent_class_metadata) = context.codebase.get_class_like(required_class.as_bytes()) else {
+        let Some(parent_class_metadata) = context.codebase.get_class_like(*required_class) else {
             continue;
         };
 
@@ -731,13 +729,11 @@ where
     A: Arena,
 {
     class_metadata.all_parent_classes.iter().chain(class_metadata.used_traits.iter()).any(|ancestor_name| {
-        context.codebase.get_class_like(ancestor_name.as_bytes()).is_some_and(|ancestor| {
-            ancestor.declaring_method_ids.get(&ancestor.method_key(method_name.as_bytes())).is_some_and(
-                |declaring_id| {
-                    context.codebase.get_method_by_id(declaring_id).is_some_and(|m| !m.flags.is_magic_method())
-                        && is_method_visible(context, block_context, ancestor_name.as_bytes(), method_name.as_bytes())
-                },
-            )
+        context.codebase.get_class_like(*ancestor_name).is_some_and(|ancestor| {
+            ancestor.declaring_method_ids.get(&ancestor.method_key(method_name)).is_some_and(|declaring_id| {
+                context.codebase.get_method_by_id(declaring_id).is_some_and(|m| !m.flags.is_magic_method())
+                    && is_method_visible(context, block_context, *ancestor_name, method_name)
+            })
         })
     })
 }
@@ -998,7 +994,7 @@ fn find_static_method_in_single_mixin<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    let mixin_metadata = context.codebase.get_class_like(mixin_class_name.as_bytes())?;
+    let mixin_metadata = context.codebase.get_class_like(mixin_class_name)?;
 
     let method_id = MethodIdentifier::new(mixin_metadata.original_name, method_name);
     let declaring_method_id = context.codebase.get_declaring_method_identifier(&method_id);
@@ -1015,8 +1011,8 @@ where
     if !check_method_visibility(
         context,
         block_context.scope.get_class_like_name(),
-        method_id.get_class_name().as_bytes(),
-        method_id.get_method_name().as_bytes(),
+        method_id.get_class_name(),
+        method_id.get_method_name(),
         access_span,
         Some(selector.span()),
     ) {

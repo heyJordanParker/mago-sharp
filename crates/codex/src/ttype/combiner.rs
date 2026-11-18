@@ -1126,31 +1126,29 @@ fn scrape_type_properties(
 
                 if matches!(existing_symbol_kind, SymbolKind::Class) {
                     // remove subclasses
-                    if codebase.is_instance_of(existing_name.as_bytes(), fq_class_name.as_bytes()) {
+                    if codebase.is_instance_of(existing_name, fq_class_name) {
                         types_to_remove.push(*key);
                         continue;
                     }
 
                     if is_class {
                         // if covered by a parent class
-                        if codebase.class_extends(fq_class_name.as_bytes(), existing_name.as_bytes()) {
+                        if codebase.class_extends(fq_class_name, existing_name) {
                             return;
                         }
                     } else if is_interface {
                         // if covered by a parent class
-                        if codebase.class_implements(fq_class_name.as_bytes(), existing_name.as_bytes()) {
+                        if codebase.class_implements(fq_class_name, existing_name) {
                             return;
                         }
                     }
                 } else if matches!(existing_symbol_kind, SymbolKind::Interface) {
-                    if codebase.class_implements(existing_name.as_bytes(), fq_class_name.as_bytes()) {
+                    if codebase.class_implements(existing_name, fq_class_name) {
                         types_to_remove.push(existing_name);
                         continue;
                     }
 
-                    if (is_class || is_interface)
-                        && codebase.class_implements(fq_class_name.as_bytes(), existing_name.as_bytes())
-                    {
+                    if (is_class || is_interface) && codebase.class_implements(fq_class_name, existing_name) {
                         return;
                     }
                 }
@@ -1359,8 +1357,8 @@ fn scrape_type_properties(
     {
         let mut effects = existing_effects.clone();
         for effect in signature.effects.take().unwrap_or_default() {
-            let key = codebase.class_key(effect.as_bytes());
-            if !effects.iter().any(|known| codebase.class_key(known.as_bytes()) == key) {
+            let key = codebase.class_key(effect);
+            if !effects.iter().any(|known| codebase.class_key(*known) == key) {
                 effects.push(effect);
             }
         }
@@ -1586,7 +1584,7 @@ fn flush_sealed_keyed_arrays_into_combination(
 const COMBINER_KEY_STACK_BUF: usize = 256;
 
 fn get_combiner_key(name: Word, type_params: &[TUnion], codebase: &CodebaseMetadata) -> Word {
-    let covariants = if let Some(class_like_metadata) = codebase.get_class_like(name.as_bytes()) {
+    let covariants = if let Some(class_like_metadata) = codebase.get_class_like(name) {
         &class_like_metadata.template_variance
     } else {
         return name;

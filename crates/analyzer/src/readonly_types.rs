@@ -7,6 +7,7 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::ReadonlyHint;
 use mago_syntax::walker::Walker;
+use mago_word::word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
@@ -75,7 +76,7 @@ where
 {
     let class = |name: Span, plain: &mut Vec<Span>| {
         let class =
-            context.resolved_names.resolve(&name).and_then(|resolved| context.codebase.get_class_like(resolved));
+            context.resolved_names.resolve(&name).and_then(|resolved| context.codebase.get_class_like(word(resolved)));
         if class.is_some_and(|class| !class.flags.is_sharp()) {
             plain.push(name);
         }

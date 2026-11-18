@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use mago_word::word;
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -614,8 +615,7 @@ where
             &mut template_result,
         );
     }
-    let class_like_metadata =
-        context.codebase.get_class_like(class.as_bytes()).expect("an extension's class is a class-like");
+    let class_like_metadata = context.codebase.get_class_like(class).expect("an extension's class is a class-like");
     // A collection's member is the collection's own, spec section 12, so its class carries the receiver's element
     // types, which an issue names it with, as `List<int>.getOrNull`.
     let class_type = match artifacts.get_expression_type(receiver).filter(|_| is_collection_member(class, metadata)) {
@@ -686,21 +686,21 @@ where
             report_fixed_map_key(context, value);
         }
         let method = metadata.original_name.as_str_lossy();
-        if metadata.has_attribute(context.codebase, SEARCHES_ELEMENTS)
-            && parameter.has_attribute(context.codebase, COMPARED_BY_EQUALITY)
+        if metadata.has_attribute(context.codebase, word(SEARCHES_ELEMENTS))
+            && parameter.has_attribute(context.codebase, word(COMPARED_BY_EQUALITY))
             && !argument.is_unpacked()
         {
             report_collection_selection(context, artifacts, &method, receiver, value, span);
         }
         // A member that tests equality compares its receiver with its first parameter, the one after the receiver.
-        if metadata.has_attribute(context.codebase, TESTS_EQUALITY)
+        if metadata.has_attribute(context.codebase, word(TESTS_EQUALITY))
             && metadata.parameters.get(1).is_some_and(|compared| compared.get_name() == parameter.get_name())
         {
             report_text_selection(context, artifacts, &method, receiver, value, span);
         }
         // A collection member orders by the keys the function in a parameter marked `ComparedByOrder` returns, as
         // `sortedBy` does, so a key type `<` cannot order is refused, and the bridge passes the engine how to order it.
-        if parameter.has_attribute(context.codebase, COMPARED_BY_ORDER)
+        if parameter.has_attribute(context.codebase, word(COMPARED_BY_ORDER))
             && !argument.is_unpacked()
             && let Some(TAtomic::Callable(TCallable::Signature(function))) =
                 artifacts.get_expression_type(value).filter(|function| function.is_single()).map(TUnion::get_single)
@@ -710,7 +710,7 @@ where
             comparisons.push(Comparison::Order { method: metadata.original_name, selector: value, key_type });
         }
         // A spread, as `contains(...[cart])`, passes the elements of the list it spreads, so the search compares those.
-        if parameter.has_attribute(context.codebase, COMPARED_BY_EQUALITY)
+        if parameter.has_attribute(context.codebase, word(COMPARED_BY_EQUALITY))
             && let Some(value_type) = artifacts.get_expression_type(value).cloned().and_then(|value_type| {
                 if argument.is_unpacked() {
                     get_unpacked_argument_type(context, &value_type, value.span())
@@ -941,7 +941,7 @@ pub(crate) fn can_compare_elements(
     receiver_type: &TUnion,
     codebase: &CodebaseMetadata,
 ) -> bool {
-    !metadata.parameters.iter().skip(1).any(|parameter| parameter.has_attribute(codebase, COMPARED_BY_EQUALITY))
+    !metadata.parameters.iter().skip(1).any(|parameter| parameter.has_attribute(codebase, word(COMPARED_BY_EQUALITY)))
         || searched_element_type(&read_receiver(metadata, receiver_type, codebase), codebase)
             .is_none_or(|element_type| search_refusal(&element_type, &element_type, codebase).is_none())
 }
@@ -1132,7 +1132,7 @@ where
         .or_else(|| {
             // If this is a method and we can't find it, try looking up the inheritance chain
             if let FunctionLikeIdentifier::Method(class_name, method_name) = identifier {
-                if let Some(class_metadata) = context.codebase.get_class_like(class_name.as_bytes()) {
+                if let Some(class_metadata) = context.codebase.get_class_like(class_name) {
                     // Try to find the method in parent classes
                     if let Some(declaring_method_id) = class_metadata.declaring_method_ids.get(&method_name) {
                         let declaring_class_id = declaring_method_id.get_class_name();
@@ -1216,7 +1216,7 @@ where
     // If this is a method, we need to create a method context so that static types can be resolved properly
     let method_context = if let Some(original_class_name) = original_class_for_method_context {
         // Look up the class metadata for the class this method is being called on (not where it's declared)
-        if let Some(class_like_metadata) = context.codebase.get_class_like(original_class_name.as_bytes()) {
+        if let Some(class_like_metadata) = context.codebase.get_class_like(original_class_name) {
             // Create the method identifier using the looked up identifier (which points to where the method is declared)
             let declaring_method_id = if let FunctionLikeIdentifier::Method(class_name, method_name) = identifier {
                 Some(MethodIdentifier::new(class_name, method_name))

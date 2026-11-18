@@ -325,16 +325,14 @@ where
 
     if is_this(object, context.resolved_names) {
         if let Some(class_name) = block_context.scope.get_class_like_name()
-            && let Some(declaring_class) =
-                context.codebase.get_declaring_property_class(class_name.as_bytes(), property_name.as_bytes())
+            && let Some(declaring_class) = context.codebase.get_declaring_property_class(class_name, property_name)
         {
             declaring_classes.push(declaring_class);
         }
     } else if let Some(object_type) = artifacts.get_rc_expression_type(object) {
         for atomic in object_type.types.iter() {
             for class_name in atomic.get_all_object_names() {
-                if let Some(declaring_class) =
-                    context.codebase.get_declaring_property_class(class_name.as_bytes(), property_name.as_bytes())
+                if let Some(declaring_class) = context.codebase.get_declaring_property_class(class_name, property_name)
                 {
                     declaring_classes.push(declaring_class);
                 }

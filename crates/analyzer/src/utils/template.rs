@@ -288,7 +288,7 @@ where
     let mut template_uses = Vec::new();
 
     for (parent_name, arguments) in &class.template_extended_offsets {
-        let Some(parent) = codebase.get_class_like(parent_name.as_bytes()) else {
+        let Some(parent) = codebase.get_class_like(*parent_name) else {
             continue;
         };
 
@@ -311,7 +311,7 @@ where
     }
 
     for method_name in &class.methods {
-        let Some(method) = codebase.get_method(class.name.as_bytes(), method_name.as_bytes()) else {
+        let Some(method) = codebase.get_method(class.name, *method_name) else {
             unreachable!("a class lists only the methods it declares");
         };
         // The `parse` and `tryParse` the codex writes span the whole type and create it, as a constructor does.
@@ -380,7 +380,7 @@ pub(crate) fn check_private_method_reach<A>(
     let codebase = context.codebase;
     let method = codebase.get_declaring_method_identifier(method);
     let (Some(class), Some(metadata)) =
-        (codebase.get_class_like(method.get_class_name().as_bytes()), codebase.get_method_by_id(&method))
+        (codebase.get_class_like(method.get_class_name()), codebase.get_method_by_id(&method))
     else {
         return;
     };
@@ -545,7 +545,7 @@ fn find_atomic_template_positions(
             positions.push((*parameter_name, position));
         }
         TAtomic::Object(TObject::Named(named)) => {
-            let variances = codebase.get_class_like(named.name.as_bytes()).map(|class| &class.template_variance);
+            let variances = codebase.get_class_like(named.name).map(|class| &class.template_variance);
             for (index, argument) in named.get_type_parameters().unwrap_or_default().iter().enumerate() {
                 let argument_position = match variances.and_then(|variances| variances.get(index)) {
                     Some(Variance::Covariant) => position,
@@ -610,16 +610,14 @@ where
         return unchanged(issue);
     };
     // A class-like is named by its key, spec section 24, so the PHP# `Box` is not `BOX`.
-    let given = codebase.class_key(given_object.name.as_bytes());
+    let given = codebase.class_key(given_object.name);
     let Some((wanted, wanted_object)) = expected.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Object(TObject::Named(object)) if codebase.class_key(object.name.as_bytes()) == given => {
-            Some((atomic, object))
-        }
+        TAtomic::Object(TObject::Named(object)) if codebase.class_key(object.name) == given => Some((atomic, object)),
         _ => None,
     }) else {
         return unchanged(issue);
     };
-    let Some(class) = codebase.get_class_like(given_object.name.as_bytes()) else {
+    let Some(class) = codebase.get_class_like(given_object.name) else {
         return unchanged(issue);
     };
     let given_arguments = given_object.get_type_parameters().unwrap_or_default();

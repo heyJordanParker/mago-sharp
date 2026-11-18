@@ -101,9 +101,9 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
         // Spec section 23: a bare name in a `.sharp` file reads the code's own constant, of its namespace, and a plain
         // PHP library's constants are read through their namespace, as `Pdf.DEFAULT_DPI`.
         let constant_metadata = if context.dialect.is_sharp() {
-            context.codebase.get_constant(name_bytes)
+            context.codebase.get_constant(word(name_bytes))
         } else {
-            context.codebase.get_constant_or_global(name_bytes, unqualified_name)
+            context.codebase.get_constant_or_global(word(name_bytes), word(unqualified_name))
         };
 
         let Some(constant_metadata) = constant_metadata else {
@@ -214,8 +214,8 @@ pub(crate) fn analyze_namespace_constant<A>(
     // A refused read is refused once, so nothing that uses it reports again.
     let refused = || TUnion::from_atomic(TAtomic::Error);
     // The name as the import and the read write it, which PHP finds as the codebase did: its namespace in any case.
-    let full_name = namespace_member(context.codebase, namespace, member.value);
-    if let Some(constant) = context.codebase.get_constant(full_name.as_bytes()) {
+    let full_name = namespace_member(context.codebase, namespace, word(member.value));
+    if let Some(constant) = context.codebase.get_constant(full_name) {
         let constant_type =
             read_constant(context, block_context, artifacts, constant, full_name.as_bytes(), read.span());
         artifacts.record_namespace_constant(read.span(), full_name);
@@ -225,7 +225,7 @@ pub(crate) fn analyze_namespace_constant<A>(
     }
 
     let written = format!("{}.{}", BytesDisplay(namespace_name.value()), BytesDisplay(member.value));
-    if let Some(function) = context.codebase.get_function(full_name.as_bytes()) {
+    if let Some(function) = context.codebase.get_function(full_name) {
         let value =
             resolve_function_value(context, block_context, artifacts, full_name, function, &written, read.span());
         artifacts.record_call_target(

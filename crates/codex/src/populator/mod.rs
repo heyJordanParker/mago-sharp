@@ -476,7 +476,7 @@ fn populate_sealed_interfaces(codebase: &mut CodebaseMetadata) {
 /// runs a full analysis, which scans every bound again.
 fn refuse_missing_bounds(codebase: &mut CodebaseMetadata) {
     let CodebaseMetadata { symbols, class_likes, function_likes, .. } = codebase;
-    let declares = |name: Word| symbols.get_kind(symbols.class_key(name.as_bytes())).is_some();
+    let declares = |name: Word| symbols.get_kind(symbols.class_key(name)).is_some();
 
     let sharp_classes = class_likes.values_mut().filter(|class| class.flags.is_sharp());
     let sharp_functions = function_likes.values_mut().filter(|function| function.flags.is_sharp());
@@ -666,7 +666,7 @@ fn populate_constant(
     for attribute_metadata in &constant.attributes {
         symbol_references.add_attribute_reference(
             ReferenceOrigin::Symbol((name, empty_word())),
-            (symbols.class_key(attribute_metadata.name.as_bytes()), empty_word()),
+            (symbols.class_key(attribute_metadata.name), empty_word()),
             true,
         );
     }

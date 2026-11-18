@@ -290,11 +290,11 @@ impl Impurity {
 /// namespace as spec section 23 calls it, as `Foundation.now` for Laravel's `now()`, and `Clock` with no member.
 fn written((class, member): (Word, Word), class_name: &dyn Fn(Word) -> String) -> String {
     if class.is_empty() {
-        let name = member.as_bytes();
-        match name.iter().rposition(|byte| *byte == b'\\') {
+        let name = member;
+        match name.as_bytes().iter().rposition(|byte| *byte == b'\\') {
             Some(separator) => display_sharp_member(
-                class_name(word(&name[..separator])),
-                String::from_utf8_lossy(&name[separator + 1..]),
+                class_name(word(&name.as_bytes()[..separator])),
+                String::from_utf8_lossy(&name.as_bytes()[separator + 1..]),
             ),
             None => member.to_string(),
         }
@@ -362,18 +362,14 @@ impl Effects {
             };
             let place = |parameter: Word| {
                 codebase
-                    .get_method(class.as_bytes(), method.as_bytes())
+                    .get_method(class, method)
                     .and_then(|own| own.parameters.iter().position(|own| own.name.0 == parameter))
             };
-            for parent in
-                codebase.get_class_like(class.as_bytes()).into_iter().flat_map(|class| &class.all_parent_classes)
-            {
-                let parent = codebase.class_key(parent.as_bytes());
+            for parent in codebase.get_class_like(class).into_iter().flat_map(|class| &class.all_parent_classes) {
+                let parent = codebase.class_key(*parent);
                 let overridden = match summary.body {
                     Body::Default(_, _, parameter) => place(parameter)
-                        .and_then(|place| {
-                            codebase.get_method(parent.as_bytes(), method.as_bytes())?.parameters.get(place)
-                        })
+                        .and_then(|place| codebase.get_method(parent, method)?.parameters.get(place))
                         .map_or(Body::Method(parent, method), |at| Body::Default(parent, method, at.name.0)),
                     _ => Body::Method(parent, method),
                 };
@@ -458,7 +454,7 @@ impl Effects {
                     | Body::Accessor(class, _, _)
                     | Body::InitialValue(class, _)
                     | Body::Default(class, _, _) => codebase
-                        .get_class_like(class.as_bytes())
+                        .get_class_like(class)
                         .is_some_and(|metadata| codebase.is_standard_library_file(metadata.span.file_id)),
                     Body::Lambda(_) => false,
                 })
@@ -505,10 +501,10 @@ impl Effects {
     pub fn callee_files(&self, codebase: &CodebaseMetadata) -> HashMap<FileId, HashSet<FileId>> {
         let file_of = |body: Body| match body {
             Body::Method(class, method) | Body::Default(class, method, _) => {
-                codebase.get_method(class.as_bytes(), method.as_bytes()).map(|method| method.span.file_id)
+                codebase.get_method(class, method).map(|method| method.span.file_id)
             }
             Body::Accessor(class, _, _) | Body::InitialValue(class, _) => {
-                codebase.get_class_like(class.as_bytes()).map(|class| class.span.file_id)
+                codebase.get_class_like(class).map(|class| class.span.file_id)
             }
             Body::Lambda(_) => unreachable!("a call reaches a method, an accessor, an initial value or a default"),
         };
@@ -539,8 +535,8 @@ impl Effects {
             return None;
         };
 
-        let class = codebase.class_key(class.as_bytes());
-        let body = Body::Method(class, codebase.method_key(class, method.as_bytes()));
+        let class = codebase.class_key(*class);
+        let body = Body::Method(class, codebase.method_key(class, *method));
         let imports = &self.imports[*self.index.get(&body)?];
 
         self.body_impurity(body).map(|impurity| {
@@ -567,8 +563,8 @@ impl Effects {
                 if let Some(declaration) = holding_declaration(codebase, *class, *method) {
                     return Some(declaration.uses.clone());
                 }
-                let class = codebase.class_key(class.as_bytes());
-                Body::Method(class, codebase.method_key(class, method.as_bytes()))
+                let class = codebase.class_key(*class);
+                Body::Method(class, codebase.method_key(class, *method))
             }
             FunctionLikeIdentifier::Closure(name) => Body::Lambda(*name),
             FunctionLikeIdentifier::Function(_) => unreachable!("PHP# declares no function outside a class"),
@@ -586,13 +582,13 @@ impl Effects {
     pub fn accessor_effects(
         &self,
         codebase: &CodebaseMetadata,
-        class: &[u8],
+        class: Word,
         property: &[u8],
         accessor: &[u8],
     ) -> Option<Vec<Word>> {
         let property = php_variable_name(property);
         let declaring = *codebase.get_class_like(class)?.declaring_property_ids.get(&property)?;
-        let declaring = codebase.class_key(declaring.as_bytes());
+        let declaring = codebase.class_key(declaring);
         let observers: &[&[u8]] = if accessor == b"set" { &[b"willSet", b"didSet"] } else { &[] };
         let positions: Vec<usize> = std::iter::once(accessor)
             .chain(observers.iter().copied())
@@ -762,7 +758,7 @@ impl Effects {
                 let (Body::Method(class, method) | Body::Default(class, method, _)) = *body else {
                     return None;
                 };
-                let metadata = codebase.get_class_like(class.as_bytes())?;
+                let metadata = codebase.get_class_like(class)?;
 
                 metadata.all_parent_classes.iter().chain(&metadata.all_parent_interfaces).find_map(|ancestor| {
                     let declaration = holding_declaration(codebase, *ancestor, method)?;
@@ -838,9 +834,9 @@ fn is_outside(codebase: &CodebaseMetadata, effect: Effect, allowed: &[Word]) -> 
         Effect::Emit => events(),
         Effect::Unknown(_) => return true,
     };
-    let named = codebase.class_key(named.as_bytes());
+    let named = codebase.class_key(named);
 
-    !allowed.iter().any(|known| codebase.class_key(known.as_bytes()) == named)
+    !allowed.iter().any(|known| codebase.class_key(*known) == named)
 }
 
 /// The effect an `emit` has, the class the standard library marks `EffectOfEmit`.
@@ -858,17 +854,17 @@ pub(crate) fn holding_declaration(
     ancestor: Word,
     method: Word,
 ) -> Option<&FunctionLikeMetadata> {
-    codebase.get_method(ancestor.as_bytes(), method.as_bytes()).filter(|declaration| {
+    codebase.get_method(ancestor, method).filter(|declaration| {
         declaration.flags.is_sharp()
             && declaration.method_metadata.as_ref().is_some_and(|method| method.is_abstract)
-            && !declaration.has_attribute(codebase, ACCEPTS_ANY_EFFECT.as_bytes())
+            && !declaration.has_attribute(codebase, word(ACCEPTS_ANY_EFFECT))
     })
 }
 
 /// Whether `name`, a class name as the binder resolves it, is an effect, spec section 29: a `foreign` class, the
 /// standard library's among them, or `Events`.
-fn is_effect(codebase: &CodebaseMetadata, name: &[u8]) -> bool {
-    codebase.class_key(name) == codebase.class_key(events().as_bytes())
+fn is_effect(codebase: &CodebaseMetadata, name: Word) -> bool {
+    codebase.class_key(name) == codebase.class_key(events())
         || codebase.get_class_like(name).is_some_and(|class| class.flags.is_foreign())
 }
 
@@ -887,7 +883,7 @@ fn carried_effects(codebase: &CodebaseMetadata) -> HashMap<Word, Vec<CarriedEffe
     for declaration in codebase.externs.values().filter_map(|declarations| declarations.first()) {
         let (class, member) = declaration.target;
         let returning: Vec<(Word, &FunctionLikeMetadata)> = if class.is_empty() {
-            codebase.get_function(member.as_bytes()).map(|function| (empty_word(), function)).into_iter().collect()
+            codebase.get_function(member).map(|function| (empty_word(), function)).into_iter().collect()
         } else if member.is_empty() {
             methods_of(codebase, class)
         } else {
@@ -927,7 +923,7 @@ fn carried_effects(codebase: &CodebaseMetadata) -> HashMap<Word, Vec<CarriedEffe
 /// and the ones its docblock gives it.
 fn methods_of(codebase: &CodebaseMetadata, class: Word) -> Vec<(Word, &FunctionLikeMetadata)> {
     codebase
-        .get_class_like(class.as_bytes())
+        .get_class_like(class)
         .into_iter()
         .flat_map(|metadata| {
             metadata
@@ -938,7 +934,7 @@ fn methods_of(codebase: &CodebaseMetadata, class: Word) -> Vec<(Word, &FunctionL
                     metadata
                         .pseudo_methods
                         .iter()
-                        .filter_map(|method| codebase.get_method(class.as_bytes(), method.as_bytes()))
+                        .filter_map(|method| codebase.get_method(class, *method))
                         .map(|found| (metadata.original_name, found)),
                 )
         })

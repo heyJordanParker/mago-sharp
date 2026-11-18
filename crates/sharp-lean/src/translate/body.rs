@@ -54,6 +54,8 @@ use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_word::Word;
+use mago_word::word;
 
 use crate::issues;
 use crate::reach::Reach;
@@ -561,7 +563,9 @@ impl<'body, 'program> Body<'body, 'program> {
                 }
             }
             Some(Binding::This) => "this".to_owned(),
-            Some(Binding::Member) => self.field("this".to_owned(), self.class, name.name.value(), expression),
+            Some(Binding::Member) => {
+                self.field("this".to_owned(), word(self.class), word(name.name.value()), expression)
+            }
             _ => {
                 let what = format!("the constant `{}`", self.source(name.name.span()));
                 self.unmodeled(expression.span(), what, issues::CONSTANT)
@@ -867,7 +871,9 @@ impl<'body, 'program> Body<'body, 'program> {
             TAtomic::Object(TObject::Enum(r#enum)) => r#enum.name.as_bytes(),
             _ => return None,
         };
-        if !self.reach.same_class(named, r#enum) || self.checked.types().enum_case_class(r#enum, case).is_none() {
+        if !self.reach.same_class(named, r#enum)
+            || self.checked.types().enum_case_class(word(r#enum), word(case)).is_none()
+        {
             return None;
         }
 
@@ -989,7 +995,7 @@ impl<'body, 'program> Body<'body, 'program> {
             // Spec section 20: `PaymentResult.Paid(…)` creates the case, which is its constructor applied to the
             // fields in order, a value and no call.
             if let Some(case) = self.method_name(&call.method)
-                && self.checked.types().enum_case_class(class, case).is_some()
+                && self.checked.types().enum_case_class(word(class), word(case)).is_some()
             {
                 let class_name = self.reached_name(class);
                 let lean = names::full_name(&class_name);
@@ -1020,7 +1026,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 let Some(method) = self.method_name(&call.method) else {
                     return "default".to_owned();
                 };
-                let target = self.checked.types().member_declaration(self.class, method);
+                let target = self.checked.types().member_declaration(word(self.class), word(method));
                 if target.kind != DeclarationKind::StaticMethod {
                     return self.unmodeled(expression.span(), "a call through `Self`".to_owned(), issues::OVERRIDABLE);
                 }
@@ -1052,12 +1058,12 @@ impl<'body, 'program> Body<'body, 'program> {
                 return "default".to_owned();
             }
 
-            let class = extension.class.as_bytes();
+            let class = extension.class;
             let receiver = self.value(call.object);
             return self.call(
                 expression,
-                class,
-                class,
+                class.as_bytes(),
+                class.as_bytes(),
                 extension.name.as_bytes(),
                 Some(receiver),
                 Some(&call.argument_list),
@@ -1070,7 +1076,7 @@ impl<'body, 'program> Body<'body, 'program> {
         match target.kind {
             DeclarationKind::Method { overridable: false } => {}
             DeclarationKind::Method { overridable: true } => {
-                return self.overridable(expression, class, target.name.as_bytes());
+                return self.overridable(expression, word(class), target.name.as_bytes());
             }
             _ => return self.unmodeled(expression.span(), "a call of a function value".to_owned(), issues::LAMBDA),
         }
@@ -1180,9 +1186,16 @@ impl<'body, 'program> Body<'body, 'program> {
                 return "default".to_owned();
             }
 
-            let class = extension.class.as_bytes();
+            let class = extension.class;
             let method = extension.name.as_bytes();
-            return self.null_safe(expression, class, class, method, call.object, Some(&call.argument_list));
+            return self.null_safe(
+                expression,
+                class.as_bytes(),
+                class.as_bytes(),
+                method,
+                call.object,
+                Some(&call.argument_list),
+            );
         }
         let Some(class) = self.receiver_class(call.object) else {
             return "default".to_owned();
@@ -1192,7 +1205,7 @@ impl<'body, 'program> Body<'body, 'program> {
         };
         let target = self.checked.types().call_target(expression);
         if target.kind != (DeclarationKind::Method { overridable: false }) {
-            return self.overridable(expression, class, target.name.as_bytes());
+            return self.overridable(expression, word(class), target.name.as_bytes());
         }
 
         self.null_safe(expression, target.class.as_bytes(), class, method, call.object, Some(&call.argument_list))
@@ -1381,7 +1394,7 @@ impl<'body, 'program> Body<'body, 'program> {
             let lean = names::full_name(&class_name);
             let short = names::short_name(&class_name);
 
-            return match self.checked.types().member_declaration(class, member.value).kind {
+            return match self.checked.types().member_declaration(word(class), word(member.value)).kind {
                 // Spec section 20: a plain case of an enum whose cases carry data is the constructor without fields.
                 DeclarationKind::EnumCase | DeclarationKind::CaseObject => {
                     self.uses(class, &lean, short);
@@ -1406,59 +1419,66 @@ impl<'body, 'program> Body<'body, 'program> {
                 return "default".to_owned();
             }
 
-            let class = extension.class.as_bytes();
+            let class = extension.class;
             let receiver = self.value(access.object);
-            return self.call(expression, class, class, extension.name.as_bytes(), Some(receiver), None);
+            return self.call(
+                expression,
+                class.as_bytes(),
+                class.as_bytes(),
+                extension.name.as_bytes(),
+                Some(receiver),
+                None,
+            );
         }
         let Some(class) = self.receiver_class(access.object) else {
             return "default".to_owned();
         };
         let object = self.value(access.object);
 
-        self.field(object, class, member.value, expression)
+        self.field(object, word(class), word(member.value), expression)
     }
 
     /// The read of `class`'s property `property` from `object`: a field of the object's structure, or a backed enum's
     /// `value`.
-    fn field(&mut self, object: String, class: &[u8], property: &[u8], expression: &Expression) -> String {
+    fn field(&mut self, object: String, class: Word, property: Word, expression: &Expression) -> String {
         // Spec section 20: a case that carries data is a constructor, whose fields Lean reads only by matching on it.
-        if let Some(separator) = class.iter().rposition(|&byte| byte == b'\\')
-            && let (r#enum, case) = (&class[..separator], &class[separator + 1..])
-            && self.checked.types().enum_case_class(r#enum, case).is_some()
+        if let Some(separator) = class.as_bytes().iter().rposition(|&byte| byte == b'\\')
+            && let (r#enum, case) = (&class.as_bytes()[..separator], &class.as_bytes()[separator + 1..])
+            && self.checked.types().enum_case_class(word(r#enum), word(case)).is_some()
         {
             let place = format!(
                 "{}.{}.{}",
                 names::short_name(r#enum),
                 String::from_utf8_lossy(case),
-                String::from_utf8_lossy(property)
+                String::from_utf8_lossy(property.as_bytes())
             );
 
             return self.unmodeled(expression.span(), format!("the field {place} of a case"), issues::CASE_FIELD);
         }
-        let class_name = self.reached_name(class);
+        let class_name = self.reached_name(class.as_bytes());
         let short = names::short_name(&class_name);
-        let place = format!("{short}.{}", String::from_utf8_lossy(property));
+        let place = format!("{short}.{}", String::from_utf8_lossy(property.as_bytes()));
         let declaration = self.checked.types().member_declaration(class, property);
         if matches!(self.checked.types().class_declaration(class).kind, DeclarationKind::Enum { backed: true })
-            && property == b"value"
+            && property == word("value")
         {
             let key = names::member(&names::full_name(&class_name), b"value");
-            self.uses(class, &key, place);
+            self.uses(class.as_bytes(), &key, place);
             return format!("({key} {object})");
         }
         if !matches!(declaration.kind, DeclarationKind::Property { .. }) {
             return self.unmodeled(expression.span(), format!("the member {place}"), issues::MEMBER);
         }
-        if !self.reach.same_class(declaration.class.as_bytes(), class) {
+        if !self.reach.same_class(declaration.class.as_bytes(), class.as_bytes()) {
             return self.unmodeled(expression.span(), format!("the inherited property {place}"), issues::INHERITANCE);
         }
-        if !self.reach.is_stored_field(class, property) {
+        if !self.reach.is_stored_field(class.as_bytes(), property.as_bytes()) {
             return self.unmodeled(expression.span(), format!("the accessor of {place}"), issues::ACCESSOR);
         }
 
-        self.uses(class, &names::full_name(&class_name), short);
-        let read = format!("{object}.{}", names::identifier(property));
-        if self.reach.is_nullable_field(class, property)
+        self.uses(class.as_bytes(), &names::full_name(&class_name), short);
+        let read = format!("{object}.{}", names::identifier(property.as_bytes()));
+        if self.reach.is_nullable_field(class.as_bytes(), property.as_bytes())
             && !self.checked.types().expression_type(expression).is_nullable()
         {
             format!("({read}.getD default)")
@@ -1477,14 +1497,21 @@ impl<'body, 'program> Body<'body, 'program> {
                 return "default".to_owned();
             }
 
-            let class = extension.class.as_bytes();
-            return self.null_safe(expression, class, class, extension.name.as_bytes(), access.object, None);
+            let class = extension.class;
+            return self.null_safe(
+                expression,
+                class.as_bytes(),
+                class.as_bytes(),
+                extension.name.as_bytes(),
+                access.object,
+                None,
+            );
         }
         let Some(class) = self.receiver_class(access.object) else {
             return "default".to_owned();
         };
         let object = self.value(access.object);
-        let read = self.field("present".to_owned(), class, member.value, expression);
+        let read = self.field("present".to_owned(), word(class), word(member.value), expression);
         let combine = if self.reach.is_nullable_field(class, member.value) { "bind" } else { "map" };
 
         format!("({object}.{combine} (fun present => {read}))")
@@ -1553,8 +1580,8 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// A call of `class`'s method `method`, which a subclass or, on an interface, each implementation gives its own body,
     /// so Lean cannot see which body runs, nor whether it has effects.
-    fn overridable(&mut self, expression: &Expression, class: &[u8], method: &[u8]) -> String {
-        let place = format!("{}.{}", names::short_name(class), String::from_utf8_lossy(method));
+    fn overridable(&mut self, expression: &Expression, class: Word, method: &[u8]) -> String {
+        let place = format!("{}.{}", names::short_name(class.as_bytes()), String::from_utf8_lossy(method));
         if self.checked.types().class_declaration(class).kind == DeclarationKind::Interface {
             return self.unmodeled(
                 expression.span(),
@@ -1619,10 +1646,7 @@ impl<'body, 'program> Body<'body, 'program> {
             TAtomic::Scalar(TScalar::Float(_)) => Kind::Float,
             TAtomic::Object(TObject::Enum(_)) => Kind::Enum,
             TAtomic::Object(TObject::Named(named)) => {
-                if matches!(
-                    self.checked.types().class_declaration(named.name.as_bytes()).kind,
-                    DeclarationKind::Enum { .. }
-                ) {
+                if matches!(self.checked.types().class_declaration(named.name).kind, DeclarationKind::Enum { .. }) {
                     Kind::Enum
                 } else {
                     Kind::Object

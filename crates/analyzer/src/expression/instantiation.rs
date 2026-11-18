@@ -290,9 +290,7 @@ fn check_foreign_outside_module<A>(
         return;
     }
     let Some(foreign) = std::iter::once(metadata)
-        .chain(
-            metadata.all_parent_classes.iter().filter_map(|parent| context.codebase.get_class_like(parent.as_bytes())),
-        )
+        .chain(metadata.all_parent_classes.iter().filter_map(|parent| context.codebase.get_class_like(*parent)))
         .find(|class| class.flags.is_foreign())
     else {
         return;
@@ -327,13 +325,13 @@ fn check_required_properties<A>(
 ) where
     A: Arena,
 {
-    let Some(metadata) = context.codebase.get_class_like(class.as_bytes()) else {
+    let Some(metadata) = context.codebase.get_class_like(class) else {
         return;
     };
     let assigned_by = |method: &[u8]| {
         context
             .codebase
-            .get_declaring_method(metadata.name.as_bytes(), method)
+            .get_declaring_method(metadata.name, word(method))
             .and_then(|method| method.method_metadata.as_ref())
             .map(|method| method.assigned_properties.clone())
             .unwrap_or_default()
@@ -351,7 +349,7 @@ fn check_required_properties<A>(
         .iter()
         .filter(|(name, _)| !assigned.contains(*name))
         .filter_map(|(name, declaring)| {
-            let property = context.codebase.get_class_like(declaring.as_bytes())?.properties.get(name)?;
+            let property = context.codebase.get_class_like(*declaring)?.properties.get(name)?;
             (property.flags.is_required() && !property.flags.is_static()).then(|| {
                 (
                     property.name_span.map(|span| span.start.offset),
@@ -402,7 +400,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for GenericClass<'arena> {
         let classnames = resolve_classnames_from_expression(context, block_context, artifacts, self.class, false)?;
         let class_type = match classnames.as_slice() {
             [ResolvedClassname { fqcn: Some(fqcn), .. }]
-                if let Some(metadata) = context.codebase.get_class_like(fqcn.as_bytes()) =>
+                if let Some(metadata) = context.codebase.get_class_like(*fqcn) =>
             {
                 let class_name = display_class_like_name(context, metadata.original_name);
                 let type_arguments = seed_type_arguments(
@@ -472,7 +470,7 @@ where
         return Ok(wrap_atomic(classname.get_object_type(context.codebase)));
     };
 
-    let Some(metadata) = context.codebase.get_class_like(fq_classname.as_bytes()) else {
+    let Some(metadata) = context.codebase.get_class_like(fq_classname) else {
         // The error names the class, so the object gets the refused type, and no read or assignment of it adds a second.
         if report_missing_class(context, fq_classname.as_bytes(), class_expression_span) {
             argument_list.analyze(context, block_context, artifacts)?;
@@ -679,13 +677,13 @@ where
         // A `required` one passes down, spec section 11, so a class below the one that requires it has its own, which
         // `new TItem.fromJson(…)` and `new Self.fromJson(…)` call, whether or not the class they name declares one.
         Some(constructor) => {
-            let constructor_name = metadata.method_key(constructor.name.value);
+            let constructor_name = metadata.method_key(word(constructor.name.value));
             let declared = context
                 .codebase
                 .get_method_by_id(&MethodIdentifier::new(metadata.name, constructor_name))
                 .is_some_and(|method| method.flags.is_named_constructor());
             let requiring = below_named_class
-                .then(|| requiring_class(context.codebase, Some(metadata.name), constructor.name.value))
+                .then(|| requiring_class(context.codebase, Some(metadata.name), word(constructor.name.value)))
                 .flatten();
             let constructor_id = match requiring {
                 Some(requiring) if !declared => MethodIdentifier::new(requiring.name, constructor_name),
@@ -695,7 +693,7 @@ where
                 let name = BytesDisplay(constructor.name.value);
                 let inherited = context
                     .codebase
-                    .get_declaring_method(metadata.name.as_bytes(), constructor.name.value)
+                    .get_declaring_method(metadata.name, word(constructor.name.value))
                     .is_some_and(|method| method.flags.is_named_constructor());
                 let issue = if inherited {
                     Issue::error(format!(
@@ -833,8 +831,8 @@ where
         if !check_method_visibility(
             context,
             block_context.scope.get_class_like_name(),
-            constructor_declraing_id.get_class_name().as_bytes(),
-            constructor_declraing_id.get_method_name().as_bytes(),
+            constructor_declraing_id.get_class_name(),
+            constructor_declraing_id.get_method_name(),
             instantiation_span,
             None,
         ) {
@@ -873,7 +871,7 @@ where
                 return None;
             };
             let (name, type_arguments) = (object.name, object.type_parameters.as_ref());
-            (context.codebase.class_key(name.as_bytes()) == metadata.name).then(|| type_arguments.cloned()).flatten()
+            (context.codebase.class_key(name) == metadata.name).then(|| type_arguments.cloned()).flatten()
         });
         let mut unfixed = vec![];
         let mut unwritable = vec![];
@@ -971,7 +969,7 @@ where
         && metadata.flags.is_sharp()
         && let Some(constructor) = constructor
     {
-        if requiring_class(context.codebase, Some(metadata.name), constructor.name.value).is_none() {
+        if requiring_class(context.codebase, Some(metadata.name), word(constructor.name.value)).is_none() {
             let (written, holder, name) = (written(), holder(), BytesDisplay(constructor.name.value));
             context.collector.report_with_code(
                 IssueCode::UnsafeInstantiation,
@@ -1033,7 +1031,7 @@ where
     }
 
     if classname.is_from_class_string() || classname.is_from_any_object() {
-        let descendants = context.codebase.get_all_descendants(metadata.name.as_bytes());
+        let descendants = context.codebase.get_all_descendants(metadata.name);
 
         for descendant_class in descendants {
             artifacts.symbol_references.add_reference_to_overridden_class_member(
@@ -1179,7 +1177,7 @@ where
         }
         _ => return None,
     };
-    let class = context.codebase.get_class_like(context.resolved_names.get(name))?;
+    let class = context.codebase.get_class_like(word(context.resolved_names.get(name)))?;
     if !context.dialect.is_sharp() || !class.flags.is_sharp() || class.template_types.is_empty() {
         return None;
     }

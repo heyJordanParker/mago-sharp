@@ -280,7 +280,7 @@ mod tests {
         let resolved_names = NameResolver::new(&arena).resolve(program);
         let codebase = scan_program(&arena, &file, program, &resolved_names, mago_php_version::PHPVersion::LATEST);
 
-        codebase.get_class_like(b"App\\Holder").expect("Holder is scanned").attributes.clone()
+        codebase.get_class_like(word(b"App\\Holder")).expect("Holder is scanned").attributes.clone()
     }
 
     #[test]

@@ -149,7 +149,7 @@ fn collect_checkable_members(
         if class_like_metadata
             .used_traits
             .iter()
-            .any(|trait_name| codebase.property_exists(trait_name.as_bytes(), property_name.as_bytes()))
+            .any(|trait_name| codebase.property_exists(*trait_name, *property_name))
         {
             // trait property override, could be used in the trait itself.
             continue;
@@ -206,11 +206,7 @@ fn collect_checkable_members(
             continue;
         }
 
-        if class_like_metadata
-            .used_traits
-            .iter()
-            .any(|trait_name| codebase.method_exists(trait_name.as_bytes(), method_name.as_bytes()))
-        {
+        if class_like_metadata.used_traits.iter().any(|trait_name| codebase.method_exists(*trait_name, *method_name)) {
             // non-abstract trait method override, could be used in the trait itself.
             continue;
         }
@@ -614,8 +610,8 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
     // `CodebaseMetadata::is_instance_of` decides.
     let mut member_uses = HashMap::<(Word, Word), Vec<&[Option<Word>]>>::default();
     for ((member, on), code_in) in &uses_on {
-        let on = codebase.class_key(on.as_bytes());
-        let metadata = codebase.get_class_like(on.as_bytes());
+        let on = codebase.class_key(*on);
+        let metadata = codebase.get_class_like(on);
         let instance_of = metadata.into_iter().flat_map(|metadata| {
             std::iter::once(metadata.name).chain(metadata.instance_of().into_iter().flatten().copied())
         });
@@ -640,7 +636,7 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
         }
 
         let namespace = namespace_of(class.original_name.as_bytes());
-        let class_key = codebase.class_key(class_name.as_bytes());
+        let class_key = codebase.class_key(*class_name);
         let is_used_outside = |member: Word| {
             member_uses.get(&(member, class_key)).is_some_and(|uses| {
                 uses.iter().copied().flatten().any(|code_in| {
@@ -698,7 +694,7 @@ pub fn unused_classes(
             ReferenceOrigin::Symbol((symbol, _)) => {
                 symbol == class
                     || codebase
-                        .get_class_like(symbol.as_bytes())
+                        .get_class_like(symbol)
                         .is_some_and(|case| case.flags.is_enum_case_class() && case.direct_parent_class == Some(class))
             }
             ReferenceOrigin::File(_) => false,
@@ -742,7 +738,7 @@ fn is_reached_by_its_members(codebase: &CodebaseMetadata, class_name: Word, clas
         || class.constants.values().any(|constant| is_dynamically_accessed(codebase, &constant.attributes))
         || class.methods.iter().filter_map(|name| codebase.function_likes.get(&(class_name, *name))).any(|method| {
             !method.listens.is_empty()
-                || method.has_attribute(codebase, EXPORT.as_bytes())
+                || method.has_attribute(codebase, word(EXPORT))
                 || is_dynamically_accessed(codebase, &method.attributes)
         })
 }
@@ -775,7 +771,7 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
             && class.declaring_method_ids.get(name).is_none_or(|declaring| declaring.get_class_name() == class_name)
             && method.method_metadata.as_ref().is_some_and(|metadata| metadata.visibility.is_public())
             && !is_dynamically_accessed(codebase, &method.attributes)
-            && !method.has_attribute(codebase, EXPORT.as_bytes())
+            && !method.has_attribute(codebase, word(EXPORT))
             && !method.flags.is_internal_reach()
             && !name.as_bytes().starts_with(b"__")
             && !class.overridden_method_ids.contains_key(name)
@@ -804,11 +800,11 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
 /// reaches the member it marks, or each public member of the class it marks, by reflection, which the checker never
 /// sees. Any other attribute, as `[Deprecated]`, says nothing about who uses the member.
 fn is_dynamically_accessed(codebase: &CodebaseMetadata, attributes: &[AttributeMetadata]) -> bool {
-    let mark = codebase.class_key(DYNAMICALLY_ACCESSED.as_bytes());
+    let mark = codebase.class_key(word(DYNAMICALLY_ACCESSED));
 
     attributes.iter().any(|attribute| {
-        codebase.get_class_like(attribute.name.as_bytes()).is_some_and(|class| {
-            class.attributes.iter().any(|marked| codebase.class_key(marked.name.as_bytes()) == mark)
-        })
+        codebase
+            .get_class_like(attribute.name)
+            .is_some_and(|class| class.attributes.iter().any(|marked| codebase.class_key(marked.name) == mark))
     })
 }

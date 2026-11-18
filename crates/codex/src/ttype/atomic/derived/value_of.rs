@@ -54,7 +54,7 @@ impl TValueOf {
                     value_types.extend(iterable.get_value_type().types.iter().cloned());
                 }
                 TAtomic::Object(TObject::Enum(TEnum { name: enum_name, case: Some(case_name) })) => {
-                    let Some(metadata) = codebase.get_enum(enum_name.as_bytes()) else {
+                    let Some(metadata) = codebase.get_enum(*enum_name) else {
                         continue;
                     };
 
@@ -71,7 +71,7 @@ impl TValueOf {
                         continue;
                     };
 
-                    let Some(class_like_metadata) = codebase.get_class_like(name.as_bytes()) else {
+                    let Some(class_like_metadata) = codebase.get_class_like(name) else {
                         continue;
                     };
 
@@ -90,22 +90,24 @@ impl TValueOf {
                     }
 
                     let is_enum_interface = class_like_metadata.flags.is_enum_interface()
-                        || codebase.is_instance_of(class_like_metadata.name.as_bytes(), b"unitenum");
+                        || codebase.is_instance_of(class_like_metadata.name, mago_word::word("unitenum"));
 
                     if !is_enum_interface {
                         continue;
                     }
 
-                    if codebase
-                        .is_instance_of(class_like_metadata.name.as_bytes(), b"__internal_do_not_use__stringbackedenum")
-                    {
+                    if codebase.is_instance_of(
+                        class_like_metadata.name,
+                        mago_word::word("__internal_do_not_use__stringbackedenum"),
+                    ) {
                         value_types.push(TAtomic::Scalar(TScalar::string()));
                         continue;
                     }
 
-                    if codebase
-                        .is_instance_of(class_like_metadata.name.as_bytes(), b"__internal_do_not_use__intbackedenum")
-                    {
+                    if codebase.is_instance_of(
+                        class_like_metadata.name,
+                        mago_word::word("__internal_do_not_use__intbackedenum"),
+                    ) {
                         value_types.push(TAtomic::Scalar(TScalar::int()));
                         continue;
                     }

@@ -19,6 +19,7 @@ use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Property;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
+use mago_word::word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
@@ -100,7 +101,7 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             continue;
         }
 
-        let method_key = metadata.method_key(php_method_name(method));
+        let method_key = metadata.method_key(word(php_method_name(method)));
         let Some(parent_class_names) = metadata.overridden_method_ids.get(&method_key) else {
             if metadata.has_incomplete_hierarchy() {
                 continue;
@@ -145,10 +146,8 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
                 && !matches!(method.body, MethodBody::Abstract(_))
                 && context
                     .codebase
-                    .get_interface(parent_method_id.get_class_name().as_bytes())
-                    .and_then(|parent| {
-                        context.codebase.get_trait(defaults_trait_name(parent.original_name.as_bytes()).as_bytes())
-                    })
+                    .get_interface(parent_method_id.get_class_name())
+                    .and_then(|parent| context.codebase.get_trait(defaults_trait_name(parent.original_name.as_bytes())))
                     .is_some_and(|defaults| {
                         defaults.declaring_method_ids.contains_key(&parent_method_id.get_method_name())
                     })
@@ -161,20 +160,20 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             && let Some(interface_method) = parent_class_names.values().find(|parent_method_id| {
                 context
                     .codebase
-                    .get_class_like(parent_method_id.get_class_name().as_bytes())
+                    .get_class_like(parent_method_id.get_class_name())
                     .is_some_and(|parent| parent.kind.is_interface())
             })
             && parent_class_names.values().all(|parent_method_id| {
                 context
                     .codebase
-                    .get_class_like(parent_method_id.get_class_name().as_bytes())
+                    .get_class_like(parent_method_id.get_class_name())
                     .is_some_and(|parent| parent.kind.is_interface())
             })
         {
             let method_display = display_member(context, class_name, mago_bytes::BytesDisplay(method.name.value));
             let interface = context
                 .codebase
-                .get_class_like(interface_method.get_class_name().as_bytes())
+                .get_class_like(interface_method.get_class_name())
                 .map_or(interface_method.get_class_name(), |interface| interface.original_name);
             let interface_display = display_member(context, interface, mago_bytes::BytesDisplay(method.name.value));
             context.collector.report(
@@ -200,7 +199,7 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
         let overridden_class = |parent_method_id: &MethodIdentifier| {
             context
                 .codebase
-                .get_class_like(parent_method_id.get_class_name().as_bytes())
+                .get_class_like(parent_method_id.get_class_name())
                 .filter(|parent_metadata| {
                     !is_sharp || !parent_metadata.kind.is_interface() || replaces_default_body(parent_method_id)
                 })
@@ -351,9 +350,8 @@ pub(super) fn overridden_properties<'ctx>(
     name: Word,
     codebase: &'ctx CodebaseMetadata,
 ) -> impl Iterator<Item = (&'ctx ClassLikeMetadata, &'ctx PropertyMetadata)> {
-    let parent_of = move |class: &ClassLikeMetadata| {
-        class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
-    };
+    let parent_of =
+        move |class: &ClassLikeMetadata| class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent));
 
     std::iter::successors(parent_of(metadata), move |parent| parent_of(parent))
         .filter_map(move |parent| Some((parent, parent.properties.get(&name)?)))
@@ -370,7 +368,7 @@ fn defaulted_properties<'ctx>(
     metadata
         .all_parent_interfaces
         .iter()
-        .filter_map(move |interface| codebase.get_interface(interface.as_bytes()))
+        .filter_map(move |interface| codebase.get_interface(*interface))
         .filter_map(move |interface| Some((interface, interface.properties.get(&name)?)))
         .filter(|(_, property)| property.hooks.values().any(|accessor| !accessor.is_abstract))
 }

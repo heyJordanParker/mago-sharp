@@ -69,7 +69,7 @@ impl<'ctx> DeclaredOperator<'ctx> {
 /// Operands with no class-like type declare none.
 pub(crate) fn get_operator_method<'ctx>(
     codebase: &'ctx CodebaseMetadata,
-    name: &[u8],
+    name: Word,
     operand_types: &[&TUnion],
 ) -> Option<DeclaredOperator<'ctx>> {
     let candidates = declared_operators(codebase, name, operand_types);
@@ -99,7 +99,7 @@ pub(crate) fn get_operator_method<'ctx>(
 /// [`get_operator_method`] chooses it, as `App\Priced` for `a < b` on a `Rare` and a `Book`. None when no operator
 /// takes the operands, or two tie.
 #[must_use]
-pub fn chosen_operator(codebase: &CodebaseMetadata, name: &[u8], operand_types: &[&TUnion]) -> Option<Word> {
+pub fn chosen_operator(codebase: &CodebaseMetadata, name: Word, operand_types: &[&TUnion]) -> Option<Word> {
     let method = get_operator_method(codebase, name, operand_types)?.chosen()?;
 
     can_take_operands(codebase, method, operand_types).then(|| method.0.get_class_name())
@@ -109,7 +109,7 @@ pub fn chosen_operator(codebase: &CodebaseMetadata, name: &[u8], operand_types: 
 /// their interfaces, each once, in the order of the operands, a type's own before its parents' and its interfaces'.
 fn declared_operators<'ctx>(
     codebase: &'ctx CodebaseMetadata,
-    name: &[u8],
+    name: Word,
     operand_types: &[&TUnion],
 ) -> Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)> {
     let mut operators: Vec<(MethodIdentifier, &FunctionLikeMetadata)> = Vec::new();
@@ -126,20 +126,20 @@ fn declared_operators<'ctx>(
 
 /// The operators named `name` that the class-like `class`, its parent classes and its interfaces declare, the class's
 /// own first. A class the codebase does not hold declares none.
-fn class_operators<'ctx>(
-    codebase: &'ctx CodebaseMetadata,
+fn class_operators(
+    codebase: &CodebaseMetadata,
     class: Word,
-    name: &[u8],
-) -> Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)> {
+    name: Word,
+) -> Vec<(MethodIdentifier, &FunctionLikeMetadata)> {
     codebase
-        .get_class_like(class.as_bytes())
+        .get_class_like(class)
         .into_iter()
         .flat_map(|metadata| {
             std::iter::once(&metadata.name).chain(&metadata.all_parent_classes).chain(&metadata.all_parent_interfaces)
         })
         .filter_map(|owner| {
-            let owner = codebase.get_class_like(owner.as_bytes())?;
-            let method = codebase.get_method(owner.name.as_bytes(), name)?;
+            let owner = codebase.get_class_like(*owner)?;
+            let method = codebase.get_method(owner.name, name)?;
             let is_static = method.method_metadata.as_ref().is_some_and(|method| method.is_static);
 
             (is_static && method.flags.is_operator())
@@ -166,11 +166,11 @@ fn operand_classes(operand_type: &TUnion) -> Option<Vec<Word>> {
 /// Whether a PHP# operator named `name` runs on a value of `operand_type`, spec section 19: each of its types is a
 /// class, a case or a type parameter bounded by one, or an enum that declares the operator, or gets it from an
 /// interface, as no other operator takes an enum's cases.
-fn is_instance(codebase: &CodebaseMetadata, operand_type: &TUnion, name: &[u8]) -> bool {
+fn is_instance(codebase: &CodebaseMetadata, operand_type: &TUnion, name: Word) -> bool {
     operand_classes(operand_type).is_some_and(|classes| {
-        classes.into_iter().all(|class| {
-            codebase.get_enum(class.as_bytes()).is_none() || !class_operators(codebase, class, name).is_empty()
-        })
+        classes
+            .into_iter()
+            .all(|class| codebase.get_enum(class).is_none() || !class_operators(codebase, class, name).is_empty())
     })
 }
 
@@ -247,10 +247,10 @@ where
 {
     let codebase = context.codebase;
     let name = php_operator_name(symbol, operands.len())?;
-    let instance = operands.iter().position(|(_, operand_type)| is_instance(codebase, operand_type, name))?;
+    let instance = operands.iter().position(|(_, operand_type)| is_instance(codebase, operand_type, word(name)))?;
     let operand_types: Vec<&TUnion> = operands.iter().map(|(_, operand_type)| *operand_type).collect();
 
-    Some(match get_operator_method(codebase, name, &operand_types) {
+    Some(match get_operator_method(codebase, word(name), &operand_types) {
         Some(DeclaredOperator::Chosen(method)) if can_take_operands(codebase, method, &operand_types) => {
             analyze_operator_call(context, artifacts, method, operands, span)
         }
@@ -327,7 +327,7 @@ pub(crate) fn report_tied_operator<A>(
 
 /// `union` as the class declaring `method` reads it, so its `self` is that class.
 fn expand_in_class(codebase: &CodebaseMetadata, method: &MethodIdentifier, union: &TUnion) -> TUnion {
-    let class = codebase.get_class_like(method.get_class_name().as_bytes()).map(|class| class.name);
+    let class = codebase.get_class_like(method.get_class_name()).map(|class| class.name);
     let options = TypeExpansionOptions {
         self_class: class,
         static_class_type: class.map_or(StaticClassType::None, StaticClassType::Name),
@@ -807,8 +807,7 @@ pub fn are_definitely_not_identical(
             && let (right_enum, Some(right_case)) = right_cases[0]
         {
             // An enum is named by its key, spec section 24, so the PHP# `Status` and `STATUS` are two enums.
-            return codebase.class_key(left_enum.as_bytes()) != codebase.class_key(right_enum.as_bytes())
-                || left_case != right_case;
+            return codebase.class_key(left_enum) != codebase.class_key(right_enum) || left_case != right_case;
         }
     }
 

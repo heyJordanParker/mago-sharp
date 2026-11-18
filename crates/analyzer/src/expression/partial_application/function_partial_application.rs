@@ -173,11 +173,11 @@ where
         let name = word(context.resolved_names.get(function_name));
         let unqualified_name = word(function_name.value());
 
-        let identifier = if context.codebase.function_exists(name.as_bytes()) {
+        let identifier = if context.codebase.function_exists(name) {
             FunctionLikeIdentifier::Function(name)
         } else if !function_name.is_fully_qualified()
             && unqualified_name != name
-            && context.codebase.function_exists(unqualified_name.as_bytes())
+            && context.codebase.function_exists(unqualified_name)
         {
             FunctionLikeIdentifier::Function(unqualified_name)
         } else {

@@ -106,7 +106,7 @@ impl<'codebase, 'artifacts, 'block> ProviderContext<'codebase, 'artifacts, 'bloc
     }
 
     #[inline]
-    pub fn is_instance_of(&self, class: &[u8], parent: &[u8]) -> bool {
+    pub fn is_instance_of(&self, class: Word, parent: Word) -> bool {
         self.codebase.is_instance_of(class, parent)
     }
 
@@ -135,7 +135,7 @@ impl<'codebase, 'artifacts, 'block> ProviderContext<'codebase, 'artifacts, 'bloc
                     }
 
                     if let Expression::Identifier(identifier) = func_partial.function {
-                        self.codebase.get_function(identifier.value())
+                        self.codebase.get_function(word(identifier.value()))
                     } else {
                         None
                     }
@@ -147,7 +147,7 @@ impl<'codebase, 'artifacts, 'block> ProviderContext<'codebase, 'artifacts, 'bloc
 
                     if let Expression::Identifier(class_id) = static_partial.class {
                         if let ClassLikeMemberSelector::Identifier(method_id) = &static_partial.method {
-                            self.codebase.get_method(class_id.value(), method_id.value)
+                            self.codebase.get_method(word(class_id.value()), word(method_id.value))
                         } else {
                             None
                         }
@@ -168,7 +168,7 @@ impl<'codebase, 'artifacts, 'block> ProviderContext<'codebase, 'artifacts, 'bloc
                     let single_object = object_type.get_single_named_object()?;
                     let class_name = single_object.get_name();
 
-                    self.codebase.get_method(class_name.as_bytes(), method_id.value)
+                    self.codebase.get_method(class_name, word(method_id.value))
                 }
             },
             _ => {
@@ -189,11 +189,11 @@ impl<'codebase, 'artifacts, 'block> ProviderContext<'codebase, 'artifacts, 'bloc
                         literal: Some(TStringLiteral::Value(literal_string)),
                         ..
                     })) => {
-                        let bytes = literal_string.as_bytes();
-                        if let Some(pos) = memchr::memmem::find(bytes, b"::") {
-                            self.codebase.get_method(&bytes[..pos], &bytes[pos + 2..])
+                        let bytes = literal_string;
+                        if let Some(pos) = memchr::memmem::find(bytes.as_bytes(), b"::") {
+                            self.codebase.get_method(word(&bytes.as_bytes()[..pos]), word(&bytes.as_bytes()[pos + 2..]))
                         } else {
-                            self.codebase.get_function(bytes)
+                            self.codebase.get_function(*bytes)
                         }
                     }
                     _ => None,
@@ -204,7 +204,7 @@ impl<'codebase, 'artifacts, 'block> ProviderContext<'codebase, 'artifacts, 'bloc
 
     #[inline]
     pub fn get_class_like(&self, name: Word) -> Option<&ClassLikeMetadata> {
-        self.codebase.get_class_like(name.as_bytes())
+        self.codebase.get_class_like(name)
     }
 
     #[inline]
@@ -322,7 +322,7 @@ impl<'ctx, 'block> HookContext<'ctx, 'block> {
 
     /// Check if a class is an instance of another class.
     #[inline]
-    pub fn is_instance_of(&self, class: &[u8], parent: &[u8]) -> bool {
+    pub fn is_instance_of(&self, class: Word, parent: Word) -> bool {
         self.codebase.is_instance_of(class, parent)
     }
 
@@ -339,7 +339,7 @@ impl<'ctx, 'block> HookContext<'ctx, 'block> {
     /// Get metadata for a class-like by name.
     #[inline]
     pub fn get_class_like(&self, name: Word) -> Option<&ClassLikeMetadata> {
-        self.codebase.get_class_like(name.as_bytes())
+        self.codebase.get_class_like(name)
     }
 
     /// Get the current class name if inside a class.

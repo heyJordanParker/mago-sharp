@@ -88,8 +88,7 @@ pub fn populate_template_result_from_invocation<'ctx, 'arena, A>(
             return;
         };
 
-        let Some(declaring_class_metadata) = context.codebase.get_class_like(identifier.get_class_name().as_bytes())
-        else {
+        let Some(declaring_class_metadata) = context.codebase.get_class_like(identifier.get_class_name()) else {
             return;
         };
 
@@ -111,8 +110,8 @@ pub fn populate_template_result_from_invocation<'ctx, 'arena, A>(
         // the declaring class's own. A class-like is named by its key, spec section 24.
         if let Some(instance_type) = get_named_static_class_type(&method_context.class_type)
             && (instance_type.type_parameters.is_some()
-                || context.codebase.class_key(instance_type.name.as_bytes()) != declaring_class_metadata.name)
-            && let Some(calling_class_metadata) = context.codebase.get_class_like(instance_type.name.as_bytes())
+                || context.codebase.class_key(instance_type.name) != declaring_class_metadata.name)
+            && let Some(calling_class_metadata) = context.codebase.get_class_like(instance_type.name)
         {
             for (template_name, _) in &declaring_class_metadata.template_types {
                 if template_result.lower_bounds.get(template_name).is_some_and(|m| !m.is_empty()) {
@@ -155,8 +154,7 @@ pub fn populate_template_result_from_invocation<'ctx, 'arena, A>(
     } else {
         // A receiver with no type of its own, as the object `new` makes, takes the type arguments `new` bound.
         if let Some(identifier) = method_context.declaring_method_id
-            && let Some(declaring_class_metadata) =
-                context.codebase.get_class_like(identifier.get_class_name().as_bytes())
+            && let Some(declaring_class_metadata) = context.codebase.get_class_like(identifier.get_class_name())
             && let Some(type_arguments) =
                 get_bound_type_arguments(context, template_result, method_context.class_like_metadata)
         {
@@ -173,7 +171,7 @@ pub fn populate_template_result_from_invocation<'ctx, 'arena, A>(
     };
 
     let is_declaring_instance =
-        context.codebase.class_key(instance_type.name.as_bytes()) == method_context.class_like_metadata.name;
+        context.codebase.class_key(instance_type.name) == method_context.class_like_metadata.name;
 
     if is_declaring_instance && let Some(type_parameters) = &instance_type.type_parameters {
         for (template_index, template_type) in type_parameters.iter().enumerate() {
@@ -201,8 +199,7 @@ pub fn populate_template_result_from_invocation<'ctx, 'arena, A>(
         }
     }
 
-    if !is_declaring_instance
-        && let Some(calling_class_metadata) = context.codebase.get_class_like(instance_type.name.as_bytes())
+    if !is_declaring_instance && let Some(calling_class_metadata) = context.codebase.get_class_like(instance_type.name)
     {
         for (template_name, _) in &method_context.class_like_metadata.template_types {
             if template_result.lower_bounds.get(template_name).is_some_and(|m| !m.is_empty()) {
@@ -231,7 +228,7 @@ pub fn populate_template_result_from_invocation<'ctx, 'arena, A>(
         return;
     };
 
-    let Some(metadata) = context.codebase.get_class_like(identifier.get_class_name().as_bytes()) else {
+    let Some(metadata) = context.codebase.get_class_like(identifier.get_class_name()) else {
         return;
     };
 

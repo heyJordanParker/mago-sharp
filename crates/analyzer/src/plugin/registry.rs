@@ -1250,11 +1250,11 @@ impl PluginRegistry {
     fn get_method_provider_indices(
         &self,
         codebase: &CodebaseMetadata,
-        class_name: &[u8],
+        class_name: Word,
         method_name: &[u8],
     ) -> Vec<usize> {
         use mago_word::concat_word;
-        let key = concat_word!(ascii_lowercase_word(class_name), b"::", ascii_lowercase_word(method_name));
+        let key = concat_word!(ascii_lowercase_word(class_name.as_bytes()), b"::", ascii_lowercase_word(method_name));
         let mut indices = Vec::new();
 
         if let Some(idxs) = self.method_exact.get(&key) {
@@ -1375,7 +1375,7 @@ impl PluginRegistry {
                 source_file,
                 block_context,
                 artifacts,
-                class_name.as_bytes(),
+                *class_name,
                 method_name.as_bytes(),
                 invocation,
                 external_session,
@@ -1446,7 +1446,7 @@ impl PluginRegistry {
         source_file: &'ctx File,
         block_context: &BlockContext<'ctx>,
         artifacts: &AnalysisArtifacts,
-        class_name: &[u8],
+        class_name: Word,
         method_name: &[u8],
         invocation: &Invocation<'ctx, '_, '_>,
         external_session: Option<&ExternalAnalysisSession>,
@@ -1459,9 +1459,12 @@ impl PluginRegistry {
                 ProviderContext::new(codebase, source_file, block_context, artifacts, Some(invocation.span));
             let invocation_info = InvocationInfo::new(invocation);
 
-            if let Some(ty) =
-                self.method_providers[idx].get_return_type(&provider_context, class_name, method_name, &invocation_info)
-            {
+            if let Some(ty) = self.method_providers[idx].get_return_type(
+                &provider_context,
+                class_name.as_bytes(),
+                method_name,
+                &invocation_info,
+            ) {
                 all_issues.extend(provider_context.take_issues());
                 return ProviderResult { return_type: Some(ty), issues: all_issues };
             }
@@ -1475,7 +1478,7 @@ impl PluginRegistry {
                     "method return-type provider",
                     analyzer.with(|analyzer| {
                         analyzer.get_method_return_type(
-                            class_name,
+                            class_name.as_bytes(),
                             method_name,
                             invocation,
                             artifacts,
@@ -1512,7 +1515,7 @@ impl PluginRegistry {
     pub(crate) fn get_property_type(
         &self,
         codebase: &CodebaseMetadata,
-        class: &[u8],
+        class: Word,
         property: &[u8],
         access: PropertyAccessKind,
         receiver_type: &TUnion,
@@ -1541,7 +1544,7 @@ impl PluginRegistry {
         &self,
         codebase: &CodebaseMetadata,
         source_file: &File,
-        class: &[u8],
+        class: Word,
         member: &[u8],
         property: bool,
         receiver_type: &TUnion,
@@ -1602,7 +1605,7 @@ impl PluginRegistry {
                     "property initialization provider",
                     analyzer.with(|analyzer| {
                         analyzer.is_property_initialized(
-                            class_metadata.name.as_bytes(),
+                            class_metadata.name,
                             property_metadata,
                             source_file,
                             codebase,
@@ -1675,7 +1678,7 @@ impl PluginRegistry {
     fn get_method_assertion_provider_indices(
         &self,
         codebase: &CodebaseMetadata,
-        class_name: &[u8],
+        class_name: Word,
         method_name: &[u8],
     ) -> Vec<usize> {
         if self.method_assertion_exact.is_empty() && self.method_assertion_wildcard.is_empty() {
@@ -1683,7 +1686,7 @@ impl PluginRegistry {
         }
 
         use mago_word::concat_word;
-        let key = concat_word!(ascii_lowercase_word(class_name), b"::", ascii_lowercase_word(method_name));
+        let key = concat_word!(ascii_lowercase_word(class_name.as_bytes()), b"::", ascii_lowercase_word(method_name));
         let mut indices = Vec::new();
 
         if let Some(idxs) = self.method_assertion_exact.get(&key) {
@@ -1732,7 +1735,7 @@ impl PluginRegistry {
                 source_file,
                 block_context,
                 artifacts,
-                class_name.as_bytes(),
+                *class_name,
                 method_name.as_bytes(),
                 invocation,
                 external_session,
@@ -1805,7 +1808,7 @@ impl PluginRegistry {
         source_file: &'ctx File,
         block_context: &BlockContext<'ctx>,
         artifacts: &AnalysisArtifacts,
-        class_name: &[u8],
+        class_name: Word,
         method_name: &[u8],
         invocation: &Invocation<'ctx, '_, '_>,
         external_session: Option<&ExternalAnalysisSession>,
@@ -1824,7 +1827,7 @@ impl PluginRegistry {
 
             if let Some(assertions) = self.method_assertion_providers[idx].get_assertions(
                 &provider_context,
-                class_name,
+                class_name.as_bytes(),
                 method_name,
                 &invocation_info,
             ) && !assertions.is_empty()
@@ -1842,7 +1845,7 @@ impl PluginRegistry {
                 "method assertion provider",
                 analyzer.with(|analyzer| {
                     analyzer.get_method_assertions(
-                        class_name,
+                        class_name.as_bytes(),
                         method_name,
                         invocation,
                         artifacts,
@@ -1889,7 +1892,7 @@ impl PluginRegistry {
     fn get_method_throw_provider_indices(
         &self,
         codebase: &CodebaseMetadata,
-        class_name: &[u8],
+        class_name: Word,
         method_name: &[u8],
     ) -> Vec<usize> {
         if self.method_throw_providers.is_empty()
@@ -1900,7 +1903,7 @@ impl PluginRegistry {
         }
 
         use mago_word::concat_word;
-        let key = concat_word!(ascii_lowercase_word(class_name), b"::", ascii_lowercase_word(method_name));
+        let key = concat_word!(ascii_lowercase_word(class_name.as_bytes()), b"::", ascii_lowercase_word(method_name));
         let mut indices = Vec::new();
 
         if let Some(idxs) = self.method_throw_exact.get(&key) {
@@ -1974,7 +1977,7 @@ impl PluginRegistry {
         source_file: &'ctx File,
         block_context: &BlockContext<'ctx>,
         artifacts: &AnalysisArtifacts,
-        class_name: &[u8],
+        class_name: Word,
         method_name: &[u8],
         invocation: &Invocation<'ctx, '_, '_>,
     ) -> WordSet {
@@ -1987,7 +1990,7 @@ impl PluginRegistry {
             let invocation_info = InvocationInfo::new(invocation);
             exceptions.extend(self.method_throw_providers[idx].get_thrown_exceptions(
                 &provider_context,
-                class_name,
+                class_name.as_bytes(),
                 method_name,
                 &invocation_info,
             ));

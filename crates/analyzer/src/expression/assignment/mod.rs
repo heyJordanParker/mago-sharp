@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use mago_word::word;
 use std::rc::Rc;
 
 use indexmap::IndexMap;
@@ -1118,7 +1119,7 @@ where
     let can_be_destructured = destructure_type
         .types
         .iter()
-        .all(|atomic| atomic.is_array() || atomic.extends_or_implements(context.codebase, b"ArrayAccess"));
+        .all(|atomic| atomic.is_array() || atomic.extends_or_implements(context.codebase, word("ArrayAccess")));
 
     if array_type.is_null() {
         let mut issue = Issue::error("Destructuring a `null` value.".to_string());

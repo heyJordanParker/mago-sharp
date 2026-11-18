@@ -675,7 +675,7 @@ impl Converter<'_, '_> {
         if !enums.all(|other| other == Some(name)) {
             return None;
         }
-        let r#enum = self.input.codebase.get_enum(name.as_bytes()).filter(|r#enum| r#enum.flags.is_user_defined())?;
+        let r#enum = self.input.codebase.get_enum(name).filter(|r#enum| r#enum.flags.is_user_defined())?;
 
         let named: Vec<Word> = handled
             .iter()

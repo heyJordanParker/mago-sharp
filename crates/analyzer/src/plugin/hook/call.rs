@@ -71,7 +71,7 @@ fn function_name(resolved_names: &ResolvedNames<'_>, codebase: &CodebaseMetadata
     }
 
     let name = identifier.value();
-    if !codebase.function_exists(full_name) && !name.contains(&b'\\') && codebase.function_exists(name) {
+    if !codebase.function_exists(word(full_name)) && !name.contains(&b'\\') && codebase.function_exists(word(name)) {
         return word(name);
     }
 

@@ -88,7 +88,7 @@ pub(crate) fn check_extern_property<A>(
 ) where
     A: Arena,
 {
-    if context.codebase.method_exists(class.name.as_bytes(), b"__get") {
+    if context.codebase.method_exists(class.name, word("__get")) {
         return;
     }
 
@@ -357,7 +357,7 @@ where
         // Semantics refuses a behavior that names no class.
         _ => return None,
     };
-    let Some(class) = context.codebase.get_class_like(name.as_bytes()) else {
+    let Some(class) = context.codebase.get_class_like(name) else {
         // Only a `.sharp` file has behaviors, so the missing class is reported by its PHP# name.
         report_missing_class(context, name.as_bytes(), behavior.span());
         return None;
@@ -392,7 +392,7 @@ where
     };
     let required = context
         .codebase
-        .get_method(class.name.as_bytes(), b"__construct")
+        .get_method(class.name, word("__construct"))
         .and_then(|constructor| {
             constructor
                 .parameters
@@ -450,9 +450,9 @@ where
         };
         let implemented = context
             .codebase
-            .get_class_like(PROPERTY_BEHAVIOR.as_bytes())
+            .get_class_like(word(PROPERTY_BEHAVIOR))
             .and_then(|behavior| behavior.template_types.keys().next().copied())
-            .filter(|_| context.codebase.class_implements(class.name.as_bytes(), PROPERTY_BEHAVIOR.as_bytes()))
+            .filter(|_| context.codebase.class_implements(class.name, word(PROPERTY_BEHAVIOR)))
             .and_then(|template| {
                 get_specialized_template_type(
                     context.codebase,
@@ -507,15 +507,12 @@ where
     A: Arena,
 {
     let declaring = class.declaring_method_ids.get(&word(b"__construct"))?.get_class_name();
-    let constructor = context.codebase.get_method(declaring.as_bytes(), b"__construct")?;
+    let constructor = context.codebase.get_method(declaring, word("__construct"))?;
     let visibility = constructor.method_metadata.as_ref()?.visibility;
     let is_internal = constructor.flags.is_internal_reach();
-    let reached = is_visible_from_scope(
-        context.codebase,
-        visibility,
-        declaring.as_bytes(),
-        block_context.scope.get_class_like_name(),
-    ) && reaches_internal(context, class, is_internal);
+    let reached =
+        is_visible_from_scope(context.codebase, visibility, declaring, block_context.scope.get_class_like_name())
+            && reaches_internal(context, class, is_internal);
 
     (!reached).then(|| if is_internal { "internal".to_owned() } else { visibility.to_string() })
 }

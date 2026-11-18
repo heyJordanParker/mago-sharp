@@ -465,9 +465,7 @@ impl Settings {
     /// `method_name` is the key `meta` holds the method under, spec section 24.
     #[must_use]
     pub fn is_class_initializer_for(&self, meta: &ClassLikeMetadata, method_name: Word) -> bool {
-        self.class_initializers
-            .iter()
-            .any(|init| meta.method_key(init.method.as_bytes()) == method_name && init.applies_to(meta))
+        self.class_initializers.iter().any(|init| meta.method_key(init.method) == method_name && init.applies_to(meta))
     }
 
     /// Iterator over the initializer methods applicable to `meta`, each by the key `meta` holds it under, spec section 24.
@@ -478,7 +476,7 @@ impl Settings {
         self.class_initializers
             .iter()
             .filter(move |init| init.applies_to(meta))
-            .map(|init| meta.method_key(init.method.as_bytes()))
+            .map(|init| meta.method_key(init.method))
     }
 }
 

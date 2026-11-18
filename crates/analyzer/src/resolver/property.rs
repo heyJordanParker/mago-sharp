@@ -207,7 +207,7 @@ where
     let mut rest_resolved = false;
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(name) = property_selector
-        && let Some((rest, whole)) = parts_without_member(context.codebase, &receiver, name.value)
+        && let Some((rest, whole)) = parts_without_member(context.codebase, &receiver, word(name.value))
         && let Some(extension) = resolve_extension(context, &rest, name, MetadataFlags::EXTENSION_PROPERTY)
         && !matches!(extension, Extension::Value(method) if holds_tuple
         && context.codebase.get_method_by_id(&method).is_some_and(|metadata| {
@@ -274,7 +274,7 @@ where
             Extension::Refused => result.has_error_path = true,
         }
         if partial && !for_assignment && !matches!(extension, Extension::Refused) {
-            let classes = own_member_classes(context.codebase, &receiver, name.value);
+            let classes = own_member_classes(context.codebase, &receiver, word(name.value));
             artifacts.record_own_member_classes(object_expression.span().join(name.span()), classes);
             rest_resolved = true;
         } else {
@@ -313,7 +313,7 @@ where
         // This part was resolved above, with the other parts that declare no member of the name.
         if rest_resolved
             && let ClassLikeMemberSelector::Identifier(name) = property_selector
-            && lacks_member(context.codebase, written_atomic, name.value)
+            && lacks_member(context.codebase, written_atomic, word(name.value))
         {
             continue;
         }
@@ -682,7 +682,7 @@ where
     let receiver_type = TUnion::from_atomic(TAtomic::Object(object.clone()));
     let Some(effective) = context.plugin_registry.get_property_type(
         context.codebase,
-        class.as_bytes(),
+        class,
         property_without_dollar,
         if for_assignment { PropertyAccessKind::Write } else { PropertyAccessKind::Read },
         &receiver_type,
@@ -735,7 +735,7 @@ fn report_external_invalid_property_access<A>(
 ) where
     A: Arena,
 {
-    let class = context.codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+    let class = context.codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
     let property = display_member(context, class, property);
     let (code, action, direction) = if for_assignment {
         (IssueCode::InvalidPropertyWrite, "write to", "read-only")
@@ -771,7 +771,7 @@ where
         return None;
     }
 
-    let class_metadata = context.codebase.get_class_like(enum_type.name.as_bytes())?;
+    let class_metadata = context.codebase.get_class_like(enum_type.name)?;
 
     // Determine which cases to process: Either it's a specific case, or all cases
     let cases: Vec<_> = if let Some(case_name) = enum_type.case {
@@ -960,11 +960,8 @@ pub(crate) fn resolve_declared_property<'ctx>(
 ) -> Option<DeclaredProperty<'ctx>> {
     let annotation = if instance_access {
         class_metadata.magic_property_ids.get(&prop_name).copied().and_then(|tag_class| {
-            let tag_metadata = if tag_class == class_metadata.name {
-                class_metadata
-            } else {
-                codebase.get_class_like(tag_class.as_bytes())?
-            };
+            let tag_metadata =
+                if tag_class == class_metadata.name { class_metadata } else { codebase.get_class_like(tag_class)? };
 
             Some((tag_metadata, tag_metadata.magic_properties.get(&prop_name)?))
         })
@@ -974,7 +971,7 @@ pub(crate) fn resolve_declared_property<'ctx>(
 
     let Some((declaring_metadata, real_property)) =
         class_metadata.declaring_property_ids.get(&prop_name).copied().and_then(|declaring_class| {
-            let declaring_metadata = codebase.get_class_like(declaring_class.as_bytes())?;
+            let declaring_metadata = codebase.get_class_like(declaring_class)?;
             let real_property = declaring_metadata.properties.get(&prop_name)?;
 
             Some((declaring_metadata, real_property))
@@ -994,7 +991,7 @@ pub(crate) fn resolve_declared_property<'ctx>(
     // (asymmetric visibility, e.g. `public private(set)`) throws instead of falling through.
     let real_property_reachable = || {
         !real_property.flags.is_static()
-            && is_visible_from_scope(codebase, real_property.read_visibility, declaring_metadata.name.as_bytes(), scope)
+            && is_visible_from_scope(codebase, real_property.read_visibility, declaring_metadata.name, scope)
     };
 
     if let Some((tag_metadata, annotation)) = annotation
@@ -1070,13 +1067,13 @@ where
     r#struct
         .methods
         .iter()
-        .filter_map(|method| context.codebase.get_method(r#struct.name.as_bytes(), method.as_bytes()))
+        .filter_map(|method| context.codebase.get_method(r#struct.name, *method))
         .filter(|method| {
             method.method_metadata.as_ref().is_some_and(|metadata| !metadata.is_static && !metadata.is_constructor)
                 && method.return_type_metadata.as_ref().is_some_and(|return_type| {
                     return_type.type_union.types.iter().any(|atomic| {
                         matches!(atomic, TAtomic::Object(TObject::Named(object))
-                            if context.codebase.class_key(object.name.as_bytes()) == r#struct.name)
+                            if context.codebase.class_key(object.name) == r#struct.name)
                     })
                 })
         })
@@ -1104,7 +1101,7 @@ fn find_property_in_class<'ctx, 'ast, 'arena, A>(
 where
     A: Arena,
 {
-    let Some(class_metadata) = context.codebase.get_class_like(class_id.as_bytes()) else {
+    let Some(class_metadata) = context.codebase.get_class_like(class_id) else {
         report_non_existent_class_like(context, object_expr.span(), class_id);
 
         return None;
@@ -1130,7 +1127,7 @@ where
             || !is_visible_from_scope(
                 context.codebase,
                 property.read_visibility,
-                declaring_class.name.as_bytes(),
+                declaring_class.name,
                 block_context.scope.get_class_like_name(),
             ))
     {
@@ -1202,7 +1199,7 @@ where
         }
 
         for required_class in class_metadata.require_extends.iter().chain(class_metadata.require_implements.iter()) {
-            let Some(required_metadata) = context.codebase.get_class_like(required_class.as_bytes()) else {
+            let Some(required_metadata) = context.codebase.get_class_like(*required_class) else {
                 continue;
             };
 
@@ -1291,7 +1288,7 @@ where
             && let Some(forwarded) = context.plugin_registry.get_forwarded_call(
                 context.codebase,
                 context.source_file,
-                class_metadata.original_name.as_bytes(),
+                class_metadata.original_name,
                 trim_start_byte(prop_name.as_bytes(), b'$'),
                 true,
                 &TUnion::from_atomic(TAtomic::Object(object.clone())),
@@ -1575,10 +1572,8 @@ fn record_asserted_descendant_property_references<'ctx, A>(
     }
 
     let mut declaring_classes = Vec::new();
-    for descendant in context.codebase.get_all_descendants(object.name.as_bytes()) {
-        let Some(declaring_class) =
-            context.codebase.get_declaring_property_class(descendant.as_bytes(), property_name.as_bytes())
-        else {
+    for descendant in context.codebase.get_all_descendants(object.name) {
+        let Some(declaring_class) = context.codebase.get_declaring_property_class(descendant, property_name) else {
             continue;
         };
 
@@ -1586,7 +1581,7 @@ fn record_asserted_descendant_property_references<'ctx, A>(
             continue;
         }
 
-        let Some(declaring_metadata) = context.codebase.get_class_like(declaring_class.as_bytes()) else {
+        let Some(declaring_metadata) = context.codebase.get_class_like(declaring_class) else {
             continue;
         };
         let Some(property_metadata) = declaring_metadata.properties.get(&property_name) else {
@@ -1653,7 +1648,7 @@ where
         return is_visible_from_scope(
             context.codebase,
             visibility,
-            declaring_class.name.as_bytes(),
+            declaring_class.name,
             block_context.scope.get_class_like_name(),
         );
     }
@@ -1668,7 +1663,7 @@ where
     is_visible_from_scope(
         context.codebase,
         property.read_visibility,
-        declaring_class.name.as_bytes(),
+        declaring_class.name,
         block_context.scope.get_class_like_name(),
     )
 }
@@ -1690,7 +1685,7 @@ pub(crate) fn localize_member_type<A>(
             context,
             member_type,
             receiver.get_type_parameters().unwrap_or_default(),
-            context.codebase.get_class_like(receiver.name.as_bytes()).unwrap_or(declaring_class),
+            context.codebase.get_class_like(receiver.name).unwrap_or(declaring_class),
             declaring_class,
         );
     }
@@ -1733,8 +1728,8 @@ pub(crate) fn static_member_type_arguments<A>(
 where
     A: Arena,
 {
-    let class = context.codebase.get_class_like(class.as_bytes())?;
-    let declaring_class = context.codebase.get_class_like(declaring_class.as_bytes())?;
+    let class = context.codebase.get_class_like(class)?;
+    let declaring_class = context.codebase.get_class_like(declaring_class)?;
     if !declaring_class.flags.is_sharp() || declaring_class.template_types.is_empty() {
         return None;
     }
@@ -1820,10 +1815,8 @@ where
     A: Arena,
 {
     let intersection_parts = receiver.get_intersection_types().unwrap_or_default();
-    let receiver_class = receiver
-        .get_name()
-        .and_then(|name| context.codebase.get_class_like(name.as_bytes()))
-        .unwrap_or(declaring_class);
+    let receiver_class =
+        receiver.get_name().and_then(|name| context.codebase.get_class_like(name)).unwrap_or(declaring_class);
     let static_class_type = match self_parameter {
         Some(parameter) => StaticClassType::Generic(parameter.clone()),
         None => {
@@ -1852,10 +1845,10 @@ where
     let (inheriting_class, inheriting_type_arguments) = std::iter::once(receiver)
         .chain(objects)
         .find_map(|object| {
-            let class = context.codebase.get_class_like(object.get_name()?.as_bytes())?;
+            let class = context.codebase.get_class_like(object.get_name()?)?;
             context
                 .codebase
-                .is_instance_of(class.name.as_bytes(), declaring_class.name.as_bytes())
+                .is_instance_of(class.name, declaring_class.name)
                 .then(|| (class, object.get_type_parameters().unwrap_or_default()))
         })
         .unwrap_or((receiver_class, receiver_type_arguments));
@@ -1906,11 +1899,9 @@ where
             return None;
         };
         let class_name = object.get_name()?;
-        let mut property_type =
-            context.codebase.get_property_type(class_name.as_bytes(), property_name.as_bytes())?.clone();
-        let declaring_class_name =
-            context.codebase.get_declaring_property_class(class_name.as_bytes(), property_name.as_bytes())?;
-        let declaring_class = context.codebase.get_class_like(declaring_class_name.as_bytes())?;
+        let mut property_type = context.codebase.get_property_type(class_name, property_name)?.clone();
+        let declaring_class_name = context.codebase.get_declaring_property_class(class_name, property_name)?;
+        let declaring_class = context.codebase.get_class_like(declaring_class_name)?;
         localize_member_type(context, &mut property_type, object, declaring_class);
 
         Some(property_type)
@@ -2260,7 +2251,7 @@ where
     A: Arena,
 {
     context.dialect.is_sharp()
-        && context.codebase.method_exists(class_id.as_bytes(), method_name.as_bytes())
+        && context.codebase.method_exists(class_id, method_name)
         && artifacts.get_expected_type(&read_span).is_some_and(|expected| {
             expected.to_non_nullable().is_callable()
                 && !union_comparator::is_contained_by(
@@ -2305,15 +2296,15 @@ where
     let class_id = std::iter::once(receiver)
         .chain(parts)
         .filter_map(TObject::get_name)
-        .find(|class_id| context.codebase.method_exists(class_id.as_bytes(), method_name.as_bytes()))?;
+        .find(|class_id| context.codebase.method_exists(*class_id, method_name))?;
 
     let method = context.codebase.get_declaring_method_identifier(&MethodIdentifier::new(class_id, method_name));
     let class_name = method.get_class_name();
     if !check_method_visibility(
         context,
         block_context.scope.get_class_like_name(),
-        class_name.as_bytes(),
-        method.get_method_name().as_bytes(),
+        class_name,
+        method.get_method_name(),
         access_span,
         None,
     ) {
@@ -2335,12 +2326,12 @@ where
 
     artifacts.symbol_references.add_reference_to_class_member(
         &block_context.scope,
-        (context.codebase.class_key(class_name.as_bytes()), method.get_method_name()),
+        (context.codebase.class_key(class_name), method.get_method_name()),
         false,
     );
 
     let codebase = context.codebase;
-    let declaring_class = codebase.get_class_like(class_name.as_bytes())?;
+    let declaring_class = codebase.get_class_like(class_name)?;
     let method_metadata = codebase.get_method_by_id(&method)?;
 
     let value = specialize_member_type(
@@ -2606,13 +2597,13 @@ where
 
 /// The public method of `class` that gives its property `property`'s value, a `getMessage()` for `message`, as
 /// Kotlin reads Java's getters, written as the code calls it, as in `getMessage()`.
-pub(crate) fn public_getter(codebase: &CodebaseMetadata, class: &[u8], property: &[u8]) -> Option<String> {
+pub(crate) fn public_getter(codebase: &CodebaseMetadata, class: Word, property: &[u8]) -> Option<String> {
     let property = property.strip_prefix(b"$").unwrap_or(property);
     let (first, rest) = property.split_first()?;
     let getter = [b"get".as_slice(), &[first.to_ascii_uppercase()], rest].concat();
-    let method = codebase.get_declaring_method(class, &getter)?;
+    let method = codebase.get_declaring_method(class, word(&getter))?;
 
-    (method.parameters.is_empty() && codebase.get_method_visibility(class, &getter) == Some(Visibility::Public))
+    (method.parameters.is_empty() && codebase.get_method_visibility(class, word(&getter)) == Some(Visibility::Public))
         .then(|| format!("{}()", method.original_name))
 }
 
@@ -2626,8 +2617,8 @@ fn report_non_existent_property<A>(
 ) where
     A: Arena,
 {
-    let class_kind_str = context.codebase.get_class_like(classname.as_bytes()).map_or("class", |m| m.kind.as_str());
-    let getter = public_getter(context.codebase, classname.as_bytes(), prop_name.as_bytes());
+    let class_kind_str = context.codebase.get_class_like(classname).map_or("class", |m| m.kind.as_str());
+    let getter = public_getter(context.codebase, classname, prop_name.as_bytes());
     let classname = display_class_like_name(context, classname);
 
     // PHP# writes no sealed object type, so its message names the property of a class, and its help the public method
@@ -2876,8 +2867,7 @@ where
                     if let TObject::Named(named_object) = outer_object
                         && let Some(type_params) = named_object.get_type_parameters()
                         && let GenericParent::ClassLike(defining_class) = defining_entity
-                        && context.codebase.class_key(named_object.name.as_bytes())
-                            == context.codebase.class_key(defining_class.as_bytes())
+                        && context.codebase.class_key(named_object.name) == context.codebase.class_key(*defining_class)
                         && let Some(index) = class_metadata.get_template_index_for_name(*parameter_name)
                         && let Some(concrete_type) = type_params.get(index)
                     {
@@ -2932,7 +2922,7 @@ fn find_property_in_single_mixin<A>(
 where
     A: Arena,
 {
-    let mixin_metadata = context.codebase.get_class_like(mixin_class_name.as_bytes())?;
+    let mixin_metadata = context.codebase.get_class_like(mixin_class_name)?;
     // Mixin access is always external, so a non-public real property defers to a magic
     // `@property*` annotation when the mixin class documents one.
     let resolution = resolve_property_for_external_access(context.codebase, mixin_metadata, prop_name)?;
@@ -2956,7 +2946,7 @@ where
     for atomic in intersection_types {
         match atomic {
             TAtomic::Object(TObject::Named(TNamedObject { name, .. }) | TObject::Enum(TEnum { name, .. })) => {
-                let Some(class_metadata) = context.codebase.get_class_like(name.as_bytes()) else {
+                let Some(class_metadata) = context.codebase.get_class_like(*name) else {
                     continue;
                 };
 

@@ -1,6 +1,7 @@
 //! `ReflectionMethod<T>::getName()` return type provider.
 
 use mago_codex::ttype::union::TUnion;
+use mago_word::word;
 
 use crate::plugin::context::InvocationInfo;
 use crate::plugin::context::ProviderContext;
@@ -44,7 +45,7 @@ impl MethodReturnTypeProvider for ReflectionMethodGetNameProvider {
         _method_name: &[u8],
         invocation: &InvocationInfo<'_, '_, '_>,
     ) -> Option<TUnion> {
-        let reflected_class = super::reflected_class_name(context, invocation, b"ReflectionMethod")?;
+        let reflected_class = super::reflected_class_name(context, invocation, word("ReflectionMethod"))?;
 
         super::method_name_union(context.codebase(), reflected_class)
     }

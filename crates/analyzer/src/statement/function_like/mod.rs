@@ -674,7 +674,7 @@ where
     }
 
     if let Some(calling_class) = block_context.scope.get_class_like_name()
-        && let Some(class_like_metadata) = context.codebase.get_class_like(calling_class.as_bytes())
+        && let Some(class_like_metadata) = context.codebase.get_class_like(calling_class)
     {
         add_properties_to_context(context, block_context, class_like_metadata, Some(function_like_metadata))?;
     }
@@ -895,9 +895,10 @@ where
     A: Arena,
 {
     let is_overriding_method = function_like_metadata.kind.is_method()
-        && block_context.scope.get_class_like_name().is_some_and(|class_name| {
-            context.codebase.method_is_overriding(class_name.as_bytes(), function_like_metadata.name.as_bytes())
-        });
+        && block_context
+            .scope
+            .get_class_like_name()
+            .is_some_and(|class_name| context.codebase.method_is_overriding(class_name, function_like_metadata.name));
 
     let is_operator = function_like_metadata.flags.is_operator();
     for (i, parameter_metadata) in function_like_metadata.parameters.iter().enumerate() {
@@ -1188,7 +1189,7 @@ where
         effects::summary::record(
             context,
             artifacts,
-            Body::Default(class.name, class.method_key(function_like_metadata.original_name.as_bytes()), parameter),
+            Body::Default(class.name, class.method_key(function_like_metadata.original_name), parameter),
             word(format!(
                 "{method}({})",
                 parameter.as_bytes().strip_prefix(b"$").map(String::from_utf8_lossy).unwrap_or_default()
@@ -1444,7 +1445,7 @@ where
     A: Arena,
 {
     expand_receiver(context, receiver).types.iter().find_map(|atomic| match atomic {
-        TAtomic::Object(TObject::Named(named)) => context.codebase.get_class_like(named.name.as_bytes()),
+        TAtomic::Object(TObject::Named(named)) => context.codebase.get_class_like(named.name),
         TAtomic::GenericParameter(TGenericParameter { constraint, .. }) => receiver_class(context, constraint),
         _ => None,
     })
@@ -1471,7 +1472,7 @@ where
 
     let mut intersections = vec![];
     for required_interface in &class_like_metadata.require_implements {
-        let Some(interface_metadata) = context.codebase.get_interface(required_interface.as_bytes()) else {
+        let Some(interface_metadata) = context.codebase.get_interface(*required_interface) else {
             continue;
         };
 
@@ -1491,7 +1492,7 @@ where
     }
 
     for required_class in &class_like_metadata.require_extends {
-        let Some(parent_class_metadata) = context.codebase.get_class_like(required_class.as_bytes()) else {
+        let Some(parent_class_metadata) = context.codebase.get_class_like(*required_class) else {
             continue;
         };
 
@@ -1570,7 +1571,7 @@ fn add_symbol_references(
     for type_node in parameter_type.get_all_child_nodes() {
         if let TypeRef::Atomic(atomic) = type_node {
             let symbol = match atomic {
-                TAtomic::Reference(TReference::Symbol { name, .. }) => Some(codebase.class_key(name.as_bytes())),
+                TAtomic::Reference(TReference::Symbol { name, .. }) => Some(codebase.class_key(*name)),
                 TAtomic::Callable(TCallable::Alias(FunctionLikeIdentifier::Function(name))) => {
                     Some(ascii_lowercase_word(name.as_bytes()))
                 }
@@ -1591,8 +1592,8 @@ fn add_symbol_references(
                     _ => {}
                 },
                 TAtomic::Callable(TCallable::Alias(FunctionLikeIdentifier::Method(name, member_name))) => {
-                    let class = codebase.class_key(name.as_bytes());
-                    let method = (class, codebase.method_key(class, member_name.as_bytes()));
+                    let class = codebase.class_key(*name);
+                    let method = (class, codebase.method_key(class, *member_name));
                     match calling_function_like_id {
                         Some(FunctionLikeIdentifier::Function(calling_function)) => {
                             artifacts.symbol_references.add_symbol_reference_to_class_member(
@@ -1646,9 +1647,10 @@ fn check_return_type_width<'ctx, A>(
 
     // A method keeps the type of the method it overrides.
     if function_like_metadata.kind.is_method()
-        && block_context.scope.get_class_like_name().is_some_and(|class_name| {
-            context.codebase.method_is_overriding(class_name.as_bytes(), function_like_metadata.name.as_bytes())
-        })
+        && block_context
+            .scope
+            .get_class_like_name()
+            .is_some_and(|class_name| context.codebase.method_is_overriding(class_name, function_like_metadata.name))
     {
         return;
     }
@@ -2005,12 +2007,12 @@ where
 {
     // A setting names a class-like as written, which the codebase keys, spec section 24, so the PHP# `NotFound` names
     // no `NOTFOUND`.
-    let exception = context.codebase.class_key(exception_name.as_bytes());
+    let exception = context.codebase.class_key(exception_name);
     if context
         .settings
         .unchecked_exception_classes
         .iter()
-        .any(|unchecked| context.codebase.class_key(unchecked.as_bytes()) == exception)
+        .any(|unchecked| context.codebase.class_key(*unchecked) == exception)
     {
         return true;
     }
@@ -2019,7 +2021,7 @@ where
         .settings
         .unchecked_exceptions
         .iter()
-        .any(|unchecked| context.codebase.is_instance_of(exception_name.as_bytes(), unchecked.as_bytes()))
+        .any(|unchecked| context.codebase.is_instance_of(exception_name, *unchecked))
     {
         return true;
     }
@@ -2368,7 +2370,7 @@ where
         {
             is_refused |= report_classes_joined(context, named, joined, type_metadata.span);
         }
-        let Some(class) = codebase.get_class_like(named.name.as_bytes()) else {
+        let Some(class) = codebase.get_class_like(named.name) else {
             continue;
         };
 
@@ -2408,7 +2410,7 @@ where
             TAtomic::Object(TObject::Named(named)) => Some(named),
             _ => None,
         }))
-        .filter_map(|named| codebase.get_class_like(named.name.as_bytes()))
+        .filter_map(|named| codebase.get_class_like(named.name))
         .filter(|class| !class.kind.is_interface())
         .map(|class| class.original_name)
         .collect();
@@ -2606,7 +2608,7 @@ pub(crate) fn is_union_for_a_class_bound(codebase: &CodebaseMetadata, bound: &TU
     argument.types.len() > 1
         && bound
             .get_single_named_object()
-            .and_then(|class| codebase.get_class_like(class.name.as_bytes()))
+            .and_then(|class| codebase.get_class_like(class.name))
             .is_some_and(|class| class.kind.is_class())
 }
 
@@ -2658,7 +2660,7 @@ fn report_plain_named_constructor_argument<A>(
 {
     let codebase = context.codebase;
     let (GenericParent::ClassLike(class) | GenericParent::FunctionLike((class, _))) = template.defining_entity;
-    let Some((_, _, constructor)) = codebase.get_class_like(class.as_bytes()).and_then(|class| {
+    let Some((_, _, constructor)) = codebase.get_class_like(class).and_then(|class| {
         class
             .type_parameter_named_constructors
             .iter()
@@ -2668,7 +2670,7 @@ fn report_plain_named_constructor_argument<A>(
     };
     let Some(argument_class) = argument
         .get_single_named_object()
-        .and_then(|named| codebase.get_class_like(named.name.as_bytes()))
+        .and_then(|named| codebase.get_class_like(named.name))
         .filter(|class| !class.flags.is_sharp())
     else {
         return;

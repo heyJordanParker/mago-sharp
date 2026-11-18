@@ -1951,7 +1951,7 @@ where
                     }
                 };
 
-                let Some(class_metadata) = context.codebase.get_class_like(class_like_name.as_bytes()) else {
+                let Some(class_metadata) = context.codebase.get_class_like(class_like_name) else {
                     let missing_class = display_class_like_name(context, class_like_name);
 
                     context.collector.report_with_code(
@@ -2002,10 +2002,10 @@ where
                     to_string_method_id,
                 ));
 
-                if let Some(to_string_metadata) = context.codebase.get_method(
-                    declaring_method_id.get_class_name().as_bytes(),
-                    declaring_method_id.get_method_name().as_bytes(),
-                ) {
+                if let Some(to_string_metadata) = context
+                    .codebase
+                    .get_method(declaring_method_id.get_class_name(), declaring_method_id.get_method_name())
+                {
                     let result = analyze_implicit_method_call(
                         context,
                         block_context,
@@ -2150,7 +2150,7 @@ where
 
             TAtomic::Object(TObject::Named(named)) => {
                 let intersection_name = named.get_name();
-                let Some(intersection_class) = context.codebase.get_class_like(intersection_name.as_bytes()) else {
+                let Some(intersection_class) = context.codebase.get_class_like(intersection_name) else {
                     continue;
                 };
 
@@ -2159,10 +2159,10 @@ where
                     to_string_id,
                 ));
 
-                let Some(method) = context.codebase.get_method(
-                    intersection_method_id.get_class_name().as_bytes(),
-                    intersection_method_id.get_method_name().as_bytes(),
-                ) else {
+                let Some(method) = context
+                    .codebase
+                    .get_method(intersection_method_id.get_class_name(), intersection_method_id.get_method_name())
+                else {
                     continue;
                 };
 

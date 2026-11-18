@@ -1021,7 +1021,7 @@ fn members_of(codebase: &CodebaseMetadata, file: FileId) -> Vec<(u32, u32, Strin
         let name = class.original_name.as_str_lossy();
         let class_name = name.rsplit('\\').next().unwrap_or(&name).to_owned();
         for method in &class.methods {
-            if let Some(method) = codebase.get_method(class.name.as_bytes(), method.as_bytes())
+            if let Some(method) = codebase.get_method(class.name, *method)
                 && method.span.file_id == file
             {
                 let named = format!("{class_name}::{}()", method.original_name.as_str_lossy());

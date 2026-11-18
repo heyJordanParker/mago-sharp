@@ -46,11 +46,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NameOf<'arena> {
         let name = word(context.resolved_names.get(&self.class));
         artifacts.symbol_references.add_reference_to_symbol(
             &block_context.scope,
-            context.codebase.class_key(name.as_bytes()),
+            context.codebase.class_key(name),
             false,
         );
 
-        let Some(class) = context.codebase.get_class_like(name.as_bytes()) else {
+        let Some(class) = context.codebase.get_class_like(name) else {
             report_non_existent_class_like(context, self.class.span(), name);
 
             return Ok(());
@@ -72,14 +72,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NameOf<'arena> {
         let property = display_sharp_member(class_name, property_name);
 
         let Some(resolution) = resolve_declared_property(context.codebase, class, property_name, true, scope) else {
-            if let Some(method) = context.codebase.get_declaring_method(class.name.as_bytes(), member.name.value)
+            if let Some(method) = context.codebase.get_declaring_method(class.name, word(member.name.value))
                 && let Some(metadata) = method.method_metadata.as_ref()
             {
                 let declaring = context
                     .codebase
                     .get_declaring_method_identifier(&MethodIdentifier::new(class.name, word(member.name.value)));
                 let declaring_class = declaring.get_class_name();
-                if !is_visible_from_scope(context.codebase, metadata.visibility, declaring_class.as_bytes(), scope) {
+                if !is_visible_from_scope(context.codebase, metadata.visibility, declaring_class, scope) {
                     let method_name = display_sharp_member(class_name, word(member.name.value));
                     context.collector.report_with_code(
                         IssueCode::InvalidMethodAccess,
@@ -93,7 +93,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NameOf<'arena> {
                 }
                 artifacts.symbol_references.add_reference_to_class_member(
                     &block_context.scope,
-                    (context.codebase.class_key(declaring_class.as_bytes()), declaring.get_method_name()),
+                    (context.codebase.class_key(declaring_class), declaring.get_method_name()),
                     false,
                 );
 
@@ -117,7 +117,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NameOf<'arena> {
 
         let visibility = resolution.property.read_visibility;
         if !resolution.is_magic()
-            && !is_visible_from_scope(context.codebase, visibility, resolution.declaring_class.name.as_bytes(), scope)
+            && !is_visible_from_scope(context.codebase, visibility, resolution.declaring_class.name, scope)
         {
             context.collector.report_with_code(
                 IssueCode::InvalidPropertyRead,

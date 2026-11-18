@@ -6,6 +6,7 @@
 //! adds when the project has none. A type PHP# can't write, as `get_sharp_type` reads it, is the reason the file is
 //! refused.
 
+use mago_word::word;
 use std::collections::BTreeMap;
 
 use foldhash::HashMap;
@@ -70,7 +71,7 @@ impl<'input> Imports<'input> {
     /// declared at `declared`: the one the project's `extern namespace` line gives its folder, or else the one the line
     /// the conversion adds gives it (spec section 23). The reason it has none, otherwise.
     pub fn root_namespace(&mut self, name: &str, declared: Span) -> Result<String, String> {
-        if let Some(namespace) = self.codebase.extern_namespace_of(name.as_bytes()) {
+        if let Some(namespace) = self.codebase.extern_namespace_of(word(name)) {
             return Ok(namespace.as_str_lossy().into_owned());
         }
         let Some(folder) = self.codebase.folder(declared.file_id) else {
@@ -99,7 +100,7 @@ impl<'input> Imports<'input> {
     /// The plain PHP library's class of PHP's root namespace that `class` names, which an `extern namespace` line
     /// reaches, as decision 91 reaches `WP_Post`. None for a PHP# class and one of PHP's built-ins, which has no folder.
     pub fn library_root_class(&self, class: &str) -> Option<Span> {
-        let declared = self.codebase.get_class_like(class.as_bytes())?;
+        let declared = self.codebase.get_class_like(word(class))?;
         let reached = !declared.flags.is_sharp()
             && !declared.original_name.as_bytes().contains(&b'\\')
             && self.codebase.folder(declared.span.file_id).is_some();
@@ -202,7 +203,7 @@ pub fn raw_generic(union: &TUnion, codebase: &CodebaseMetadata) -> Option<(Strin
             return None;
         };
         let arguments = object.get_type_parameters()?;
-        let class = codebase.get_class_like(object.name.as_bytes()).filter(|class| class.flags.is_sharp())?;
+        let class = codebase.get_class_like(object.name).filter(|class| class.flags.is_sharp())?;
         let bounds: Vec<&TUnion> = class.template_types.iter().map(|(_, template)| &template.constraint).collect();
         if bounds.iter().zip(arguments).all(|(bound, argument)| bound.get_id() == argument.get_id()) {
             return None;
@@ -308,7 +309,7 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, imports: &mut Impo
             // PHP takes a generic class written alone as any object of the class, and a PHP# type names its type
             // arguments (spec section 11). Its bounds hold every such object where each type parameter is covariant,
             // as `out T` holds a `Box<Order>` in a `Box<Object>`, and no type arguments do otherwise.
-            let bounds: Vec<TUnion> = match codebase.get_class_like(name.as_bytes()) {
+            let bounds: Vec<TUnion> = match codebase.get_class_like(name) {
                 Some(declared) if arguments.is_empty() && !declared.template_types.is_empty() => {
                     let covariant = (0..declared.template_types.len())
                         .all(|index| matches!(declared.template_variance.get(index), Some(Variance::Covariant)));
@@ -488,7 +489,7 @@ fn held(
 }
 
 fn class_name(name: Word, codebase: &CodebaseMetadata, imports: &mut Imports) -> Result<String, String> {
-    let declared = codebase.get_class_like(name.as_bytes()).map_or(name, |class| class.original_name);
+    let declared = codebase.get_class_like(name).map_or(name, |class| class.original_name);
 
     imports.name_of(&declared.as_str_lossy())
 }

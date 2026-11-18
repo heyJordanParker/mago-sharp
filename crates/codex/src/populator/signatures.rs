@@ -203,7 +203,7 @@ fn add_class_reference(
     record(
         symbol_references,
         origin,
-        (symbols.class_key(name.as_bytes()), empty_word()),
+        (symbols.class_key(name), empty_word()),
         in_signature_override.unwrap_or(in_signature),
     );
 }

@@ -173,8 +173,8 @@ fn subtract_complex_type<A>(
                 let existing_classlike_name = existing_named_object.get_name();
                 let assertion_classlike_name = assertion_named_object.get_name();
 
-                if (context.codebase.interface_exists(assertion_classlike_name.as_bytes())
-                    || context.codebase.interface_exists(existing_classlike_name.as_bytes()))
+                if (context.codebase.interface_exists(assertion_classlike_name)
+                    || context.codebase.interface_exists(existing_classlike_name))
                     && assertion_classlike_name != existing_classlike_name
                 {
                     *can_be_disjunct = true;
@@ -190,10 +190,10 @@ fn subtract_complex_type<A>(
             (
                 TAtomic::Object(TObject::Enum(TEnum { name: existing_enum_name, case: None })),
                 TAtomic::Object(TObject::Enum(TEnum { name: assertion_enum_name, case: Some(assertion_case) })),
-            ) if context.codebase.is_instance_of(assertion_enum_name.as_bytes(), existing_enum_name.as_bytes()) => {
+            ) if context.codebase.is_instance_of(*assertion_enum_name, *existing_enum_name) => {
                 *can_be_disjunct = true;
 
-                let Some(enum_metadata) = context.codebase.get_enum(existing_enum_name.as_bytes()) else {
+                let Some(enum_metadata) = context.codebase.get_enum(*existing_enum_name) else {
                     acceptable_types.push(existing_atomic);
                     continue;
                 };

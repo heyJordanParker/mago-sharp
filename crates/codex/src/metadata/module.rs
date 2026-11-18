@@ -122,7 +122,7 @@ pub fn service_id(r#type: &TUnion, codebase: &CodebaseMetadata) -> Word {
     let mut keyed = Vec::with_capacity(id.len());
     for part in id.as_bytes().chunk_by(|left, right| is_name(left) == is_name(right)) {
         if part.iter().all(is_name) {
-            keyed.extend_from_slice(codebase.class_key(part).as_bytes());
+            keyed.extend_from_slice(codebase.class_key(mago_word::word(part)).as_bytes());
         } else {
             keyed.extend_from_slice(part);
         }
@@ -176,7 +176,7 @@ pub fn dispatcher(codebase: &CodebaseMetadata) -> Option<Word> {
     codebase
         .class_likes
         .values()
-        .filter(|class_like| class_like.has_attribute(codebase, mago_names::DISPATCHES_EMITS.as_bytes()))
+        .filter(|class_like| class_like.has_attribute(codebase, mago_word::word(mago_names::DISPATCHES_EMITS)))
         .map(|class_like| class_like.original_name)
         .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()))
 }
@@ -187,8 +187,8 @@ impl BindingMetadata {
     #[must_use]
     pub fn binds_dispatcher(&self, codebase: &CodebaseMetadata) -> bool {
         codebase
-            .get_class_like(self.service.type_union.clone().without_readonly().get_id().as_bytes())
-            .is_some_and(|service| service.has_attribute(codebase, mago_names::DISPATCHES_EMITS.as_bytes()))
+            .get_class_like(self.service.type_union.clone().without_readonly().get_id())
+            .is_some_and(|service| service.has_attribute(codebase, mago_word::word(mago_names::DISPATCHES_EMITS)))
     }
 }
 

@@ -89,10 +89,8 @@ where
             continue;
         };
 
-        let key = (
-            binding_metadata.service_id,
-            binding_metadata.target.map(|target| context.codebase.class_key(target.as_bytes())),
-        );
+        let key =
+            (binding_metadata.service_id, binding_metadata.target.map(|target| context.codebase.class_key(target)));
         if let Some((_, first)) = bound.iter().find(|(earlier, _)| *earlier == key) {
             report_duplicate_binding(context, service, binding_metadata, *first);
         } else {
@@ -103,7 +101,7 @@ where
         }
 
         if let (Some(target), Some(written_target)) = (binding_metadata.target, &binding.target)
-            && !context.codebase.get_class_like(target.as_bytes()).is_some_and(|class| class.kind.is_class())
+            && !context.codebase.get_class_like(target).is_some_and(|class| class.kind.is_class())
         {
             report_undefined_type(context, target, written_target.class.span());
         }
@@ -253,7 +251,7 @@ fn check_class_services<A>(
 ) where
     A: Arena,
 {
-    let Some(constructor) = context.codebase.get_declaring_method(class.name.as_bytes(), b"__construct") else {
+    let Some(constructor) = context.codebase.get_declaring_method(class.name, word("__construct")) else {
         return;
     };
 
@@ -370,9 +368,9 @@ where
     A: Arena,
 {
     let creates = |class: Word| {
-        let metadata = context.codebase.get_class_like(class.as_bytes());
-        let takes = metadata
-            .and_then(|metadata| context.codebase.get_declaring_method(metadata.name.as_bytes(), b"__construct"));
+        let metadata = context.codebase.get_class_like(class);
+        let takes =
+            metadata.and_then(|metadata| context.codebase.get_declaring_method(metadata.name, word("__construct")));
         let arguments = if takes.is_some_and(|constructor| !constructor.parameters.is_empty()) { "…" } else { "" };
         let name = metadata.map_or(class, |metadata| metadata.original_name);
         format!("new {}({arguments})", display_class_like_name(context, name))
@@ -450,7 +448,7 @@ impl<'ctx> Services<'ctx> {
                 let serves = |binding: &&BindingMetadata| binding.service_id == service;
                 let targeted = module.bindings.iter().filter(serves).find(|binding| {
                     binding.target.zip(requester).is_some_and(|(target, requester)| {
-                        self.codebase.class_key(target.as_bytes()) == self.codebase.class_key(requester.as_bytes())
+                        self.codebase.class_key(target) == self.codebase.class_key(requester)
                     })
                 });
                 if let Some(binding) =
@@ -597,9 +595,9 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
         classes
             .into_iter()
             .filter_map(|class| {
-                let metadata = codebase.get_class_like(class.as_bytes())?;
+                let metadata = codebase.get_class_like(class)?;
                 self.classes.push(metadata.name);
-                let constructor = codebase.get_declaring_method(metadata.name.as_bytes(), b"__construct")?;
+                let constructor = codebase.get_declaring_method(metadata.name, word("__construct"))?;
                 let namespace = namespace_of(metadata.name);
                 Some((namespace, Some(metadata.original_name), constructor.parameters.as_slice()))
             })
@@ -619,7 +617,7 @@ where
     A: Arena,
 {
     let codebase = context.codebase;
-    let Some(metadata) = codebase.get_class_like(class.as_bytes()) else {
+    let Some(metadata) = codebase.get_class_like(class) else {
         report_undefined_type(context, class, span);
         return None;
     };
@@ -747,11 +745,9 @@ where
                 && codebase.extern_namespace_folder(declaration).is_some()
         })
     };
-    for (namespace, span) in &metadata.imports {
-        let namespace = namespace.as_bytes();
-        if !codebase.namespace_exists(namespace)
-            && !holds_function_or_constant(codebase, namespace)
-            && !given(namespace)
+    for (import, span) in &metadata.imports {
+        let namespace = import.as_bytes();
+        if !codebase.namespace_exists(*import) && !holds_function_or_constant(codebase, namespace) && !given(namespace)
         {
             report_non_existent_import(context, *span, namespace, "namespace");
         } else if let Some(parent) = list_refusing(context.codebase, metadata.namespace.as_bytes(), namespace) {
@@ -836,7 +832,7 @@ pub(crate) fn report_bound_from_plain_php<A>(
     let binding = enclosing_binding(codebase, span);
     let adapted = |class: &Word| {
         binding.is_some_and(|binding| binds(binding, class.as_bytes()))
-            && codebase.get_class_like(class.as_bytes()).is_some_and(|class| !class.flags.is_sharp())
+            && codebase.get_class_like(*class).is_some_and(|class| !class.flags.is_sharp())
     };
     let Some((class, module)) = returned
         .chain(narrowed.iter().copied())
@@ -846,10 +842,8 @@ pub(crate) fn report_bound_from_plain_php<A>(
         return;
     };
 
-    let class = display_class_like_name(
-        context,
-        codebase.get_class_like(class.as_bytes()).map_or(class, |class| class.original_name),
-    );
+    let class =
+        display_class_like_name(context, codebase.get_class_like(class).map_or(class, |class| class.original_name));
     let namespace = display_namespace(codebase, module);
     context.collector.report_with_code(
         IssueCode::InvalidBinding,
@@ -996,7 +990,7 @@ fn is_service(service: &TUnion) -> bool {
 
 fn single_class<'ctx>(codebase: &'ctx CodebaseMetadata, service: &TUnion) -> Option<&'ctx ClassLikeMetadata> {
     match service.types.as_ref() {
-        [TAtomic::Object(TObject::Named(object))] => codebase.get_class_like(object.name.as_bytes()),
+        [TAtomic::Object(TObject::Named(object))] => codebase.get_class_like(object.name),
         _ => None,
     }
 }

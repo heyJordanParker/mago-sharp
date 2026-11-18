@@ -183,7 +183,7 @@ fn expand_finite_match_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> Opt
                 alternatives.push(TAtomic::Scalar(TScalar::r#false()));
             }
             TAtomic::Object(TObject::Enum(r#enum)) if r#enum.case.is_none() => {
-                let metadata = codebase.get_enum(r#enum.name.as_bytes())?;
+                let metadata = codebase.get_enum(r#enum.name)?;
                 if metadata.enum_cases.is_empty() || metadata.enum_cases.len() > MAX_ENUM_CASES_FOR_ANALYSIS {
                     return None;
                 }

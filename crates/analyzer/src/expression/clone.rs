@@ -50,8 +50,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Clone<'arena> {
                         invalid_clone_atomics.push(atomic_type);
                     }
                     TObject::Named(named_object) => {
-                        if !context.codebase.trait_exists(named_object.name.as_bytes())
-                            && !context.codebase.class_or_interface_exists(named_object.name.as_bytes())
+                        if !context.codebase.trait_exists(named_object.name)
+                            && !context.codebase.class_or_interface_exists(named_object.name)
                         {
                             invalid_clone_atomics.push(atomic_type);
                         } else {

@@ -137,7 +137,7 @@ pub(super) fn handle_query(
     match operation {
         GET_CLASS_LIKES => query_class_likes(reader, writer, codebase, session),
         GET_FUNCTIONS => query_names(reader, writer, |name, writer| {
-            write_optional(writer, codebase.get_function(name), |writer, metadata| {
+            write_optional(writer, codebase.get_function(word(name)), |writer, metadata| {
                 write_function_like(
                     writer,
                     FunctionLikeIdentifier::Function(metadata.original_name),
@@ -148,7 +148,7 @@ pub(super) fn handle_query(
             })
         }),
         GET_METHODS => query_members(reader, writer, |class, member, writer| {
-            write_optional(writer, codebase.get_method(class, member), |writer, metadata| {
+            write_optional(writer, codebase.get_method(word(class), word(member)), |writer, metadata| {
                 write_function_like(
                     writer,
                     method_identifier(codebase, class, member, metadata),
@@ -159,22 +159,22 @@ pub(super) fn handle_query(
             })
         }),
         GET_CONSTANTS => query_names(reader, writer, |name, writer| {
-            write_optional(writer, codebase.get_constant(name), |writer, metadata| {
+            write_optional(writer, codebase.get_constant(word(name)), |writer, metadata| {
                 write_constant(writer, metadata, codebase, session)
             })
         }),
         GET_PROPERTIES => query_members(reader, writer, |class, member, writer| {
-            write_optional(writer, codebase.get_property(class, member), |writer, metadata| {
+            write_optional(writer, codebase.get_property(word(class), word(member)), |writer, metadata| {
                 write_property(writer, metadata, codebase, session)
             })
         }),
         GET_CLASS_CONSTANTS => query_members(reader, writer, |class, member, writer| {
-            write_optional(writer, codebase.get_class_constant(class, member), |writer, metadata| {
+            write_optional(writer, codebase.get_class_constant(word(class), word(member)), |writer, metadata| {
                 write_class_constant(writer, metadata, codebase, session)
             })
         }),
         GET_ENUM_CASES => query_members(reader, writer, |class, member, writer| {
-            write_optional(writer, codebase.get_enum_case(class, member), |writer, metadata| {
+            write_optional(writer, codebase.get_enum_case(word(class), word(member)), |writer, metadata| {
                 write_enum_case(writer, metadata, codebase, session)
             })
         }),
@@ -182,7 +182,7 @@ pub(super) fn handle_query(
         LIST_FUNCTIONS => list_functions(reader, writer, codebase),
         LIST_CONSTANTS => list_constants(reader, writer, codebase),
         GET_DECLARING_METHODS => query_members(reader, writer, |class, member, writer| {
-            write_optional(writer, codebase.get_declaring_method(class, member), |writer, metadata| {
+            write_optional(writer, codebase.get_declaring_method(word(class), word(member)), |writer, metadata| {
                 write_function_like(
                     writer,
                     method_identifier(codebase, class, member, metadata),
@@ -193,7 +193,7 @@ pub(super) fn handle_query(
             })
         }),
         GET_DECLARING_PROPERTIES => query_members(reader, writer, |class, member, writer| {
-            write_optional(writer, codebase.get_declaring_property(class, member), |writer, metadata| {
+            write_optional(writer, codebase.get_declaring_property(word(class), word(member)), |writer, metadata| {
                 write_property(writer, metadata, codebase, session)
             })
         }),
@@ -201,14 +201,16 @@ pub(super) fn handle_query(
         CHECK_MEMBER_EXISTENCE => check_member_existence(reader, writer, codebase),
         GET_CLASS_LIKE_RELATIONS => get_class_like_relations(reader, writer, codebase),
         GET_MAGIC_PROPERTIES => query_members(reader, writer, |class, member, writer| {
-            write_optional(writer, codebase.get_magic_property(class, member), |writer, metadata| {
+            write_optional(writer, codebase.get_magic_property(word(class), word(member)), |writer, metadata| {
                 write_property(writer, metadata, codebase, session)
             })
         }),
         GET_DECLARING_MAGIC_PROPERTIES => query_members(reader, writer, |class, member, writer| {
-            write_optional(writer, codebase.get_declaring_magic_property(class, member), |writer, metadata| {
-                write_property(writer, metadata, codebase, session)
-            })
+            write_optional(
+                writer,
+                codebase.get_declaring_magic_property(word(class), word(member)),
+                |writer, metadata| write_property(writer, metadata, codebase, session),
+            )
         }),
         GET_FUNCTION_LIKES => query_function_likes(reader, writer, codebase, session),
         FIND_METHODS => find_methods(reader, writer, codebase, session),
@@ -343,8 +345,7 @@ fn write_methods<'codebase>(
 ) -> Result<(), ExternalAnalyzerError> {
     let started = tracing::enabled!(tracing::Level::TRACE).then(std::time::Instant::now);
     let MethodSearch { class_filter, pattern, prefix, declared_only, fields, .. } = *search;
-    let attributes: Vec<Word> =
-        search.attributes.iter().map(|attribute| codebase.class_key(attribute.as_bytes())).collect();
+    let attributes: Vec<Word> = search.attributes.iter().map(|attribute| codebase.class_key(*attribute)).collect();
     writer.write_u32(fields);
 
     let mut scanned_classes = 0usize;
@@ -352,7 +353,7 @@ fn write_methods<'codebase>(
     let mut matches = Vec::new();
     let mut collect = |class_like: &'codebase ClassLikeMetadata| {
         scanned_classes += 1;
-        let pattern = class_like.method_key(pattern.as_bytes());
+        let pattern = class_like.method_key(pattern);
         for (method_name, declaring) in &class_like.declaring_method_ids {
             scanned_methods += 1;
             let matches_name =
@@ -366,7 +367,7 @@ fn write_methods<'codebase>(
             };
             if !attributes.is_empty()
                 && !metadata.attributes.iter().any(|attribute| {
-                    attributes.iter().any(|requested| codebase.class_key(attribute.name.as_bytes()) == *requested)
+                    attributes.iter().any(|requested| codebase.class_key(attribute.name) == *requested)
                 })
             {
                 continue;
@@ -378,14 +379,14 @@ fn write_methods<'codebase>(
 
     match class_filter {
         ClassFilter::Exact(class) => {
-            if let Some(class_like) = codebase.get_class_like(class.as_bytes()) {
+            if let Some(class_like) = codebase.get_class_like(class) {
                 collect(class_like);
             }
         }
         ClassFilter::Descendants(class) => {
-            let class = codebase.class_key(class.as_bytes());
+            let class = codebase.class_key(class);
             for class_like in codebase.class_likes.values() {
-                if class_like.name != class && codebase.is_instance_of(class_like.name.as_bytes(), class.as_bytes()) {
+                if class_like.name != class && codebase.is_instance_of(class_like.name, class) {
                     collect(class_like);
                 }
             }
@@ -558,9 +559,9 @@ fn get_class_like_relations(
     writer.write_u8(relation);
     query_names(reader, writer, |name, writer| {
         match relation {
-            DIRECT_DESCENDANTS => write_words(writer, direct_descendants(codebase, name))?,
-            ALL_DESCENDANTS => write_words(writer, codebase.get_class_descendants(name))?,
-            ALL_ANCESTORS => write_words(writer, codebase.get_class_ancestors(name))?,
+            DIRECT_DESCENDANTS => write_words(writer, direct_descendants(codebase, word(name)))?,
+            ALL_DESCENDANTS => write_words(writer, codebase.get_class_descendants(word(name)))?,
+            ALL_ANCESTORS => write_words(writer, codebase.get_class_ancestors(word(name)))?,
             _ => unreachable!(),
         }
 
@@ -581,11 +582,11 @@ fn check_member_existence(
     writer.write_u8(predicate);
     query_members(reader, writer, |class, member, writer| {
         writer.write_bool(match predicate {
-            EXISTS_METHOD => codebase.method_exists(class, member),
-            EXISTS_PROPERTY => codebase.property_exists(class, member),
-            EXISTS_CLASS_CONSTANT => codebase.class_constant_exists(class, member),
-            EXISTS_ENUM_CASE => codebase.get_enum_case(class, member).is_some(),
-            EXISTS_MAGIC_PROPERTY => codebase.magic_property_exists(class, member),
+            EXISTS_METHOD => codebase.method_exists(word(class), word(member)),
+            EXISTS_PROPERTY => codebase.property_exists(word(class), word(member)),
+            EXISTS_CLASS_CONSTANT => codebase.class_constant_exists(word(class), word(member)),
+            EXISTS_ENUM_CASE => codebase.get_enum_case(word(class), word(member)).is_some(),
+            EXISTS_MAGIC_PROPERTY => codebase.magic_property_exists(word(class), word(member)),
             _ => unreachable!(),
         });
 
@@ -606,16 +607,16 @@ fn check_existence(
     writer.write_u8(predicate);
     query_names(reader, writer, |name, writer| {
         writer.write_bool(match predicate {
-            EXISTS_CLASS => codebase.class_exists(name),
-            EXISTS_INTERFACE => codebase.interface_exists(name),
-            EXISTS_TRAIT => codebase.trait_exists(name),
-            EXISTS_ENUM => codebase.enum_exists(name),
-            EXISTS_CLASS_LIKE => codebase.class_like_exists(name),
-            EXISTS_NAMESPACE => codebase.namespace_exists(name),
-            EXISTS_FUNCTION => codebase.function_exists(name),
-            EXISTS_CONSTANT => codebase.constant_exists(name),
-            EXISTS_CLASS_OR_TRAIT => codebase.class_or_trait_exists(name),
-            EXISTS_CLASS_OR_INTERFACE => codebase.class_or_interface_exists(name),
+            EXISTS_CLASS => codebase.class_exists(word(name)),
+            EXISTS_INTERFACE => codebase.interface_exists(word(name)),
+            EXISTS_TRAIT => codebase.trait_exists(word(name)),
+            EXISTS_ENUM => codebase.enum_exists(word(name)),
+            EXISTS_CLASS_LIKE => codebase.class_like_exists(word(name)),
+            EXISTS_NAMESPACE => codebase.namespace_exists(word(name)),
+            EXISTS_FUNCTION => codebase.function_exists(word(name)),
+            EXISTS_CONSTANT => codebase.constant_exists(word(name)),
+            EXISTS_CLASS_OR_TRAIT => codebase.class_or_trait_exists(word(name)),
+            EXISTS_CLASS_OR_INTERFACE => codebase.class_or_interface_exists(word(name)),
             _ => unreachable!(),
         });
 
@@ -677,10 +678,7 @@ pub(super) fn constant_names(codebase: &CodebaseMetadata) -> impl Iterator<Item 
 }
 
 /// The class-likes that extend, implement, or use `name` directly.
-pub(super) fn direct_descendants<'codebase>(
-    codebase: &'codebase CodebaseMetadata,
-    name: &[u8],
-) -> impl Iterator<Item = Word> + 'codebase {
+pub(super) fn direct_descendants(codebase: &CodebaseMetadata, name: Word) -> impl Iterator<Item = Word> + '_ {
     codebase
         .get_class_like(name)
         .and_then(|metadata| codebase.direct_classlike_descendants.get(&metadata.name))
@@ -703,11 +701,11 @@ fn query_class_likes(
     writer.write_u8(filter);
     query_names(reader, writer, |name, writer| {
         let metadata = match filter {
-            ANY_CLASS_LIKE => codebase.get_class_like(name),
-            CLASS => codebase.get_class(name),
-            INTERFACE => codebase.get_interface(name),
-            TRAIT => codebase.get_trait(name),
-            ENUM => codebase.get_enum(name),
+            ANY_CLASS_LIKE => codebase.get_class_like(word(name)),
+            CLASS => codebase.get_class(word(name)),
+            INTERFACE => codebase.get_interface(word(name)),
+            TRAIT => codebase.get_trait(word(name)),
+            ENUM => codebase.get_enum(word(name)),
             _ => unreachable!(),
         };
 
@@ -937,7 +935,7 @@ fn method_identifier(
 ) -> FunctionLikeIdentifier {
     let declaring = codebase.get_declaring_method_identifier(&MethodIdentifier::new(word(class), word(method)));
     let class = codebase
-        .get_class_like(declaring.get_class_name().as_bytes())
+        .get_class_like(declaring.get_class_name())
         .map_or(declaring.get_class_name(), |metadata| metadata.original_name);
 
     FunctionLikeIdentifier::Method(class, metadata.original_name)
@@ -1360,13 +1358,11 @@ fn write_attributes(
 /// constant, as `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;`, is that constant, and its function no constant
 /// expression. A name that is neither is `class::member`, as its PHP twin is, whose missing class the analyzer reports.
 fn member_read(codebase: &CodebaseMetadata, class: Word, member: Word, span: Span, as_key: bool) -> ConstantExpression {
-    if let Some(class_like) = codebase.get_class_like(class.as_bytes()) {
+    if let Some(class_like) = codebase.get_class_like(class) {
         let case_object = codebase
-            .get_class_like(&[class.as_bytes(), b"\\", member.as_bytes()].concat())
+            .get_class_like(word([class.as_bytes(), b"\\", member.as_bytes()].concat()))
             .is_some_and(|case| case.flags.is_enum_case_class() && case.direct_parent_class == Some(class_like.name));
-        let backing_value = as_key
-            && class_like.enum_type.is_some()
-            && codebase.get_enum_case(class.as_bytes(), member.as_bytes()).is_some();
+        let backing_value = as_key && class_like.enum_type.is_some() && codebase.get_enum_case(class, member).is_some();
 
         return if case_object || backing_value {
             ConstantExpression::Unsupported(span)
@@ -1375,10 +1371,10 @@ fn member_read(codebase: &CodebaseMetadata, class: Word, member: Word, span: Spa
         };
     }
 
-    if is_member_namespace(codebase, class, member.as_bytes(), false) {
-        let full_name = namespace_member(codebase, class, member.as_bytes());
+    if is_member_namespace(codebase, class, member, false) {
+        let full_name = namespace_member(codebase, class, member);
 
-        return if codebase.constant_exists(full_name.as_bytes()) {
+        return if codebase.constant_exists(full_name) {
             ConstantExpression::Constant(full_name)
         } else {
             ConstantExpression::Unsupported(span)

@@ -537,14 +537,14 @@ fn unions_could_share_object_runtime_instance(
         let TAtomic::Object(TObject::Named(inferred_named)) = inferred_atomic else {
             continue;
         };
-        let inferred = codebase.class_key(inferred_named.name.as_bytes());
+        let inferred = codebase.class_key(inferred_named.name);
 
         for docblock_atomic in docblock_type.types.iter() {
             let TAtomic::Object(TObject::Named(docblock_named)) = docblock_atomic else {
                 continue;
             };
 
-            if codebase.class_key(docblock_named.name.as_bytes()) == inferred {
+            if codebase.class_key(docblock_named.name) == inferred {
                 return true;
             }
         }

@@ -77,17 +77,15 @@ where
                         _ => None,
                     })
                     .filter_map(|existing_class| {
-                        if context.codebase.is_instance_of(subtracting_named.name.as_bytes(), existing_class.as_bytes())
-                        {
-                            context.codebase.get_class_like(existing_class.as_bytes())
+                        if context.codebase.is_instance_of(subtracting_named.name, *existing_class) {
+                            context.codebase.get_class_like(*existing_class)
                         } else {
                             None
                         }
                     })
                     .any(|parent_class| {
                         parent_class.permitted_inheritors.as_ref().is_some_and(|permitted_inheritors| {
-                            permitted_inheritors
-                                .contains(&context.codebase.class_key(subtracting_named.name.as_bytes()))
+                            permitted_inheritors.contains(&context.codebase.class_key(subtracting_named.name))
                         })
                     }) =>
             {
@@ -332,13 +330,12 @@ where
                 && let Some(TAtomic::Object(TObject::Named(subtracting_named))) = type_to_subtract
             {
                 // Each class by its key, spec section 24.
-                let subtracting_key = context.codebase.class_key(subtracting_named.get_name().as_bytes());
+                let subtracting_key = context.codebase.class_key(subtracting_named.get_name());
 
-                if context.codebase.class_key(existing_named.get_name().as_bytes()) == subtracting_key {
-                } else if let Some(existing_metadata) =
-                    context.codebase.get_class_like(existing_named.get_name().as_bytes())
+                if context.codebase.class_key(existing_named.get_name()) == subtracting_key {
+                } else if let Some(existing_metadata) = context.codebase.get_class_like(existing_named.get_name())
                     && let Some(permitted_inheritors) = &existing_metadata.permitted_inheritors
-                    && context.codebase.is_instance_of(subtracting_key.as_bytes(), existing_named.get_name().as_bytes())
+                    && context.codebase.is_instance_of(subtracting_key, existing_named.get_name())
                     && permitted_inheritors.contains(&subtracting_key)
                 {
                     let parent_type_params = existing_named.get_type_parameters();
@@ -348,10 +345,7 @@ where
                             .filter(|inheritor| **inheritor != subtracting_key)
                             .map(|inheritor| {
                                 let child = TNamedObject::new(
-                                    context
-                                        .codebase
-                                        .get_class_like(inheritor.as_bytes())
-                                        .map_or(*inheritor, |m| m.original_name),
+                                    context.codebase.get_class_like(*inheritor).map_or(*inheritor, |m| m.original_name),
                                 );
 
                                 if let Some(type_params) = parent_type_params {

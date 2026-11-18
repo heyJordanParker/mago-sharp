@@ -792,7 +792,7 @@ fn adjust_object_property_type<A>(
             TAtomic::Object(TObject::Named(named)) => {
                 let fq_class_name = named.get_name();
                 if fq_class_name.as_bytes().eq_ignore_ascii_case(b"stdClass")
-                    || !context.codebase.class_or_interface_exists(fq_class_name.as_bytes())
+                    || !context.codebase.class_or_interface_exists(fq_class_name)
                 {
                     None
                 } else {
@@ -1170,11 +1170,11 @@ where
         let fq_class_name = &base_key[..sep];
         let const_name = &base_key[sep + 2..];
 
-        if !context.codebase.class_like_exists(fq_class_name) {
+        if !context.codebase.class_like_exists(word(fq_class_name)) {
             return None;
         }
 
-        let class_constant = context.codebase.get_class_constant_type(fq_class_name, const_name);
+        let class_constant = context.codebase.get_class_constant_type(word(fq_class_name), word(const_name));
 
         let class_constant = class_constant?;
         let class_constant = Rc::new(match class_constant {
@@ -1380,7 +1380,7 @@ where
                         let fq_class_name = named_object.get_name();
 
                         if fq_class_name.as_bytes().eq_ignore_ascii_case(b"stdClass")
-                            || !context.codebase.class_or_interface_exists(fq_class_name.as_bytes())
+                            || !context.codebase.class_or_interface_exists(fq_class_name)
                         {
                             class_property_type = get_mixed();
                         } else {
@@ -1430,7 +1430,7 @@ where
     // Add `$` prefix
     let property_name = concat_word!(b"$", property_name_str);
 
-    let class_metadata = context.codebase.get_class_like(classlike_name.as_bytes())?;
+    let class_metadata = context.codebase.get_class_like(classlike_name)?;
     let resolution =
         resolve_declared_property(context.codebase, class_metadata, property_name, instance_access, scope)?;
     let declaring_property_class = resolution.declaring_class.name;

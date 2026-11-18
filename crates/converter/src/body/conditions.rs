@@ -39,6 +39,7 @@ use mago_syntax::cst::While;
 use mago_syntax::cst::Yield;
 use mago_syntax::token::is_sharp_keyword;
 use mago_syntax::walker::MutWalker;
+use mago_word::word;
 
 use super::Kind;
 use super::atomic_kinds;
@@ -825,13 +826,13 @@ impl Converter<'_, '_> {
                 let codebase = self.input.codebase;
                 let plain = |class: &[u8]| {
                     let declared = codebase
-                        .get_declaring_property(class, &property)
+                        .get_declaring_property(word(class), word(&property))
                         .is_some_and(|metadata| metadata.hooks.is_empty() && !metadata.flags.is_virtual_property());
-                    let descendants = codebase.get_all_descendants(class);
+                    let descendants = codebase.get_all_descendants(word(class));
                     declared
                         && std::iter::once(class)
                             .chain(descendants.iter().map(|descendant| descendant.as_bytes()))
-                            .all(|class| codebase.get_declaring_method(class, b"__get").is_none())
+                            .all(|class| codebase.get_declaring_method(word(class), word("__get")).is_none())
                 };
                 self.gives_again(access.object)
                     && self.narrowed_read(expression).is_none()
@@ -1076,8 +1077,7 @@ impl Converter<'_, '_> {
         }
         let property = [b"$".as_slice(), name.value].concat();
         for class in classes {
-            let class = class.as_bytes();
-            let valued = codebase.get_declaring_property(class, &property).is_some_and(|metadata| {
+            let valued = codebase.get_declaring_property(class, word(&property)).is_some_and(|metadata| {
                 metadata.flags.has_default()
                     || metadata.flags.is_promoted_property()
                     || metadata.type_declaration_metadata.is_none()
@@ -1086,15 +1086,13 @@ impl Converter<'_, '_> {
                 return Some("reads a property that may hold no value, which PHP gives as unset without an error, and PHP# reads the property itself, which has no default and is not promoted".to_owned());
             }
             let descendants = codebase.get_all_descendants(class);
-            let magic = std::iter::once(class).chain(descendants.iter().map(|descendant| descendant.as_bytes())).find(
-                |class| {
-                    [b"__isset".as_slice(), b"__get"]
-                        .iter()
-                        .any(|method| codebase.get_declaring_method(class, method).is_some())
-                },
-            );
+            let magic = std::iter::once(class).chain(descendants.iter().copied()).find(|class| {
+                [b"__isset".as_slice(), b"__get"]
+                    .iter()
+                    .any(|method| codebase.get_declaring_method(word(class), word(method)).is_some())
+            });
             if let Some(magic) = magic {
-                let magic = String::from_utf8_lossy(magic);
+                let magic = String::from_utf8_lossy(magic.as_bytes());
                 return Some(format!(
                     "reads a property `{magic}`'s `__isset` or `__get` may answer for, which PHP asks and PHP# never does"
                 ));

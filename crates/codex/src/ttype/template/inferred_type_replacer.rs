@@ -242,7 +242,7 @@ fn replace_template_parameter(
         for lower_bounds_by_source in inferred_lower_bounds.values() {
             for defining_entity in lower_bounds_by_source.keys() {
                 if let GenericParent::ClassLike(classlike_name) = defining_entity
-                    && let Some(metadata) = codebase.get_class_like(classlike_name.as_bytes())
+                    && let Some(metadata) = codebase.get_class_like(*classlike_name)
                     && let Some(extended_parameter_map) = metadata.template_extended_parameters.get(&metadata.name)
                     && let Some(param) = extended_parameter_map.get(&parameter_name)
                     && let TAtomic::GenericParameter(TGenericParameter { parameter_name, .. }) = param.get_single()

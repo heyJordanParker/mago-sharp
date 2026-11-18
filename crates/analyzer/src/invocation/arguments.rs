@@ -938,9 +938,8 @@ fn effects_outside(codebase: &CodebaseMetadata, input_type: &TUnion, parameter_t
     let mut outside: Vec<Word> = Vec::new();
     for effect in input_type.types.iter().filter_map(lists).flatten() {
         // An effect is a class-like, named by its key, spec section 24.
-        let key = codebase.class_key(effect.as_bytes());
-        let listed =
-            allowed.iter().all(|effects| effects.iter().any(|known| codebase.class_key(known.as_bytes()) == key));
+        let key = codebase.class_key(effect);
+        let listed = allowed.iter().all(|effects| effects.iter().any(|known| codebase.class_key(*known) == key));
         if !listed && !outside.contains(&effect) {
             outside.push(effect);
         }

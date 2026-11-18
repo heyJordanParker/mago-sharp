@@ -41,6 +41,7 @@ use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
+use mago_word::word;
 
 use crate::issues;
 use crate::reach::Reach;
@@ -257,7 +258,7 @@ impl Translator<'_, '_> {
         let mut body = Body::new(self.checked, self.reach, full, short.clone());
         for parent in inheritance.iter().flat_map(|inheritance| inheritance.names()) {
             let parent = self.checked.names().get(&parent);
-            if self.checked.types().class_declaration(parent).kind == DeclarationKind::Class {
+            if self.checked.types().class_declaration(word(parent)).kind == DeclarationKind::Class {
                 body.unmodeled(
                     name.span,
                     format!("the class {short}, which extends {}", names::short_name(parent)),
@@ -515,7 +516,7 @@ impl Translator<'_, '_> {
         for (index, name) in inheritance.iter().flat_map(|inheritance| inheritance.names()).enumerate() {
             let parent = self.checked.names().get(&name);
             let translated = self.reach.class(parent).is_some_and(|reached| reached.sharp);
-            if self.checked.types().class_declaration(parent).kind != DeclarationKind::Interface
+            if self.checked.types().class_declaration(word(parent)).kind != DeclarationKind::Interface
                 || !translated
                 || !self.reach.reaches(parent, b"")
             {

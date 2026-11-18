@@ -210,7 +210,7 @@ impl TClassLikeString {
                 ))
             }
             TClassLikeString::Literal { value } => {
-                if codebase.symbols.contains_enum(codebase.class_key(value.as_bytes())) {
+                if codebase.symbols.contains_enum(codebase.class_key(*value)) {
                     TAtomic::Object(TObject::Enum(TEnum::new(*value)))
                 } else {
                     TAtomic::Object(TObject::Named(TNamedObject::new(*value)))

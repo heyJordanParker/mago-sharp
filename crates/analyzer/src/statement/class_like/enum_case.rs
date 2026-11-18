@@ -77,7 +77,7 @@ where
         let Some(interface) = context
             .resolved_names
             .resolve(&identifier)
-            .and_then(|name| context.codebase.get_class_like(name))
+            .and_then(|name| context.codebase.get_class_like(word(name)))
             .and_then(|defaults| context.codebase.get_defaults_interface(defaults))
         else {
             continue;
@@ -105,7 +105,7 @@ where
         Node::Hint(Hint::Identifier(identifier @ Identifier::Dotted(_))) => Some(*identifier),
         _ => None,
     }) {
-        let Some(class) = context.codebase.get_class_like(context.resolved_names.get(&node)) else {
+        let Some(class) = context.codebase.get_class_like(word(context.resolved_names.get(&node))) else {
             continue;
         };
         if class.flags.is_enum_case_class() {
@@ -130,7 +130,7 @@ where
 {
     let name = case.item.name();
     let class_name = [enum_metadata.original_name.as_bytes(), b"\\", name.value].concat();
-    let Some(case_metadata) = context.codebase.get_class_like(&class_name) else {
+    let Some(case_metadata) = context.codebase.get_class_like(word(&class_name)) else {
         return Ok(());
     };
     if case_metadata.span != case.span() {
@@ -151,7 +151,7 @@ where
     let EnumCaseItem::Data(item) = &case.item else {
         return Ok(());
     };
-    let Some(constructor) = context.codebase.get_method(&class_name, b"__construct") else {
+    let Some(constructor) = context.codebase.get_method(word(&class_name), word("__construct")) else {
         unreachable!("a case's class has a constructor")
     };
 

@@ -15,6 +15,7 @@ use mago_syntax::cst::Property;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::TraitUseSpecification;
 use mago_word::ascii_lowercase_word;
+use mago_word::word;
 
 use crate::Class;
 use crate::Converter;
@@ -41,8 +42,7 @@ impl<'input> Converter<'input, '_> {
         self.header(header_start, metadata, &class.name);
         if let Some(extends) = &class.extends {
             // The checker warns on a deprecated parent, and a `.sharp` file holds no warning (spec section 27).
-            let deprecated =
-                metadata.direct_parent_class.and_then(|parent| self.input.codebase.get_class_like(parent.as_bytes()));
+            let deprecated = metadata.direct_parent_class.and_then(|parent| self.input.codebase.get_class_like(parent));
             if let Some(parent) = deprecated.filter(|parent| parent.flags.is_deprecated()) {
                 let shown = parent.original_name.as_str_lossy().into_owned();
                 self.refuse(extends.extends.span, format!("`{shown}` is deprecated, and the PHP# checker warns on a class that extends it (spec section 27)"));
@@ -97,7 +97,7 @@ impl<'input> Converter<'input, '_> {
 
     /// The analysis's class-like `name` declares, or a refusal.
     fn declared(&mut self, name: &LocalIdentifier<'_>) -> Option<&'input ClassLikeMetadata> {
-        let metadata = self.input.codebase.get_class_like(self.input.names.get(name));
+        let metadata = self.input.codebase.get_class_like(word(self.input.names.get(name)));
         match metadata {
             Some(metadata) => self.import_cycles(metadata, name.span),
             None => self.refuse(name.span, "the analysis holds no class of this name"),
@@ -221,7 +221,7 @@ impl<'input> Converter<'input, '_> {
     /// it is written (spec section 1).
     fn case_attributes(&mut self, lists: &Sequence<'_, AttributeList<'_>>) {
         for attribute in lists.iter().flat_map(|list| list.attributes.iter()) {
-            let class = self.input.codebase.get_class_like(self.input.names.get(&attribute.name));
+            let class = self.input.codebase.get_class_like(word(self.input.names.get(&attribute.name)));
             let Some(flags) =
                 class.and_then(|class| class.attribute_flags).filter(|flags| !flags.targets_class_constant())
             else {

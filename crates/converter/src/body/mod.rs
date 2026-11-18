@@ -51,6 +51,7 @@ use mago_syntax::cst::Try;
 use mago_syntax::cst::Variable;
 use mago_syntax::cst::Yield;
 use mago_syntax::cst::YieldValue;
+use mago_word::word;
 
 use crate::Converter;
 use crate::types::narrowing;
@@ -447,7 +448,7 @@ impl<'input> Converter<'input, '_> {
         self.type_of(expression).is_some_and(|union| {
             union.types.iter().all(|atomic| {
                 matches!(atomic, TAtomic::Object(TObject::Named(_)))
-                    && atomic.extends_or_implements(codebase, b"ArrayAccess")
+                    && atomic.extends_or_implements(codebase, word("ArrayAccess"))
             })
         })
     }
@@ -739,7 +740,7 @@ impl<'input> Converter<'input, '_> {
         let property = [b"$".as_slice(), name.value].concat();
         let codebase = self.input.codebase;
         let declared = codebase
-            .get_declaring_property(class.name.as_bytes(), &property)
+            .get_declaring_property(class.name, word(&property))
             .and_then(|metadata| metadata.type_metadata.as_ref())
             .map(|metadata| &metadata.type_union)
             .filter(|declared| !declared.has_template_types() && !declared.types.iter().any(TAtomic::is_mixed))?;
@@ -910,11 +911,7 @@ impl<'input> Converter<'input, '_> {
             Some(SharpType::Class(name, arguments)) => {
                 arguments.is_empty()
                     && !matches!(atomic, TAtomic::Object(TObject::Named(object)) if object.is_static)
-                    && self
-                        .input
-                        .codebase
-                        .get_class_like(name.as_bytes())
-                        .is_some_and(|class| class.template_types.is_empty())
+                    && self.input.codebase.get_class_like(name).is_some_and(|class| class.template_types.is_empty())
             }
             _ => false,
         }

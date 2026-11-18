@@ -23,6 +23,7 @@ use mago_syntax::cst::Use;
 use mago_syntax::cst::UseItems;
 use mago_syntax::cst::UseType;
 use mago_syntax::walker::MutWalker;
+use mago_word::word;
 
 use crate::context::GuardContext;
 use crate::perimeter::checker::check_usage;
@@ -41,7 +42,7 @@ impl DependenciesGuardWalker {
         match hint {
             Hint::Identifier(identifier) => {
                 let fqn = context.lookup_name(identifier);
-                check_usage(context, fqn, PermittedDependencyKind::ClassLike, usage_kind, identifier.span());
+                check_usage(context, word(fqn), PermittedDependencyKind::ClassLike, usage_kind, identifier.span());
             }
             Hint::Parenthesized(parenthesized) => {
                 Self::check_hint_recursive(parenthesized.hint, usage_kind, context);
@@ -78,7 +79,7 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
                 use_item_sequence.items.iter().for_each(|use_item| {
                     check_usage(
                         context,
-                        use_item.name.value(),
+                        word(use_item.name.value()),
                         PermittedDependencyKind::ClassLike,
                         BreachVector::Use,
                         use_item.name.span(),
@@ -94,7 +95,7 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
                 typed_use_item_sequence.items.iter().for_each(|typed_use_item| {
                     check_usage(
                         context,
-                        typed_use_item.name.value(),
+                        word(typed_use_item.name.value()),
                         symbol_kind,
                         BreachVector::Use,
                         typed_use_item.name.span(),
@@ -115,7 +116,7 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
                     fqn.push(b'\\');
                     fqn.extend_from_slice(typed_use_item.name.value());
 
-                    check_usage(context, &fqn, symbol_kind, BreachVector::Use, typed_use_item.name.span());
+                    check_usage(context, word(fqn), symbol_kind, BreachVector::Use, typed_use_item.name.span());
                 });
             }
             UseItems::MixedList(mixed_use_item_list) => {
@@ -133,7 +134,7 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
                     fqn.push(b'\\');
                     fqn.extend_from_slice(mixed_use_item.item.name.value());
 
-                    check_usage(context, &fqn, symbol_kind, BreachVector::Use, mixed_use_item.item.name.span());
+                    check_usage(context, word(fqn), symbol_kind, BreachVector::Use, mixed_use_item.item.name.span());
                 });
             }
         }
@@ -142,7 +143,13 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
     fn walk_in_attribute(&mut self, attribute: &'ast Attribute<'arena>, context: &mut GuardContext<'ctx, 'arena>) {
         let fqn = context.lookup_name(&attribute.name);
 
-        check_usage(context, fqn, PermittedDependencyKind::ClassLike, BreachVector::Attribute, attribute.name.span());
+        check_usage(
+            context,
+            word(fqn),
+            PermittedDependencyKind::ClassLike,
+            BreachVector::Attribute,
+            attribute.name.span(),
+        );
     }
 
     // Check class-like extends
@@ -150,7 +157,13 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
         for extended_type in &extends.types {
             let fqn = context.lookup_name(extended_type);
 
-            check_usage(context, fqn, PermittedDependencyKind::ClassLike, BreachVector::Extends, extended_type.span());
+            check_usage(
+                context,
+                word(fqn),
+                PermittedDependencyKind::ClassLike,
+                BreachVector::Extends,
+                extended_type.span(),
+            );
         }
     }
 
@@ -159,7 +172,13 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
         for interface in &implements.types {
             let fqn = context.lookup_name(interface);
 
-            check_usage(context, fqn, PermittedDependencyKind::ClassLike, BreachVector::Implements, interface.span());
+            check_usage(
+                context,
+                word(fqn),
+                PermittedDependencyKind::ClassLike,
+                BreachVector::Implements,
+                interface.span(),
+            );
         }
     }
 
@@ -168,7 +187,13 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
         for trait_name in &trait_use.trait_names {
             let fqn = context.lookup_name(trait_name);
 
-            check_usage(context, fqn, PermittedDependencyKind::ClassLike, BreachVector::TraitUse, trait_name.span());
+            check_usage(
+                context,
+                word(fqn),
+                PermittedDependencyKind::ClassLike,
+                BreachVector::TraitUse,
+                trait_name.span(),
+            );
         }
     }
 
@@ -210,7 +235,7 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
 
             check_usage(
                 context,
-                fqn,
+                word(fqn),
                 PermittedDependencyKind::ClassLike,
                 BreachVector::Instantiation,
                 class_name.span(),
@@ -229,7 +254,7 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
 
             check_usage(
                 context,
-                fqn,
+                word(fqn),
                 PermittedDependencyKind::ClassLike,
                 BreachVector::StaticMethodCall,
                 class_name.span(),
@@ -248,7 +273,7 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
 
             check_usage(
                 context,
-                fqn,
+                word(fqn),
                 PermittedDependencyKind::ClassLike,
                 BreachVector::StaticMethodCall,
                 class_name.span(),
@@ -267,7 +292,7 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
 
             check_usage(
                 context,
-                fqn,
+                word(fqn),
                 PermittedDependencyKind::ClassLike,
                 BreachVector::StaticPropertyAccess,
                 class_name.span(),
@@ -286,7 +311,7 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
         {
             check_usage(
                 context,
-                fqn,
+                word(fqn),
                 PermittedDependencyKind::Function,
                 BreachVector::FunctionCall,
                 function_name.span(),
@@ -305,7 +330,7 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
         {
             check_usage(
                 context,
-                fqn,
+                word(fqn),
                 PermittedDependencyKind::Function,
                 BreachVector::FunctionCall,
                 function_name.span(),
@@ -324,7 +349,7 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
 
             check_usage(
                 context,
-                fqn,
+                word(fqn),
                 PermittedDependencyKind::ClassLike,
                 BreachVector::ClassConstantAccess,
                 class_name.span(),
@@ -341,7 +366,7 @@ impl<'ast, 'ctx, 'arena> MutWalker<'ast, 'arena, GuardContext<'ctx, 'arena>> for
         if let Some(fqn) = context.try_lookup_name(&constant_access.name) {
             check_usage(
                 context,
-                fqn,
+                word(fqn),
                 PermittedDependencyKind::Constant,
                 BreachVector::ConstantAccess,
                 constant_access.name.span(),

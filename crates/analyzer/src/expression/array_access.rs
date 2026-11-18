@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use mago_word::word;
 use std::rc::Rc;
 
 use mago_codex::ttype::atomic::TAtomic;
@@ -216,7 +217,7 @@ fn check_constant_list_index<A>(
         }) = StaticProperty::from_property_access(read, context.resolved_names)
         && let Some(TAtomic::Array(TArray::List(list))) = context
             .codebase
-            .get_class_constant(context.resolved_names.get(&class.name), name.value)
+            .get_class_constant(word(context.resolved_names.get(&class.name)), word(name.value))
             .and_then(|constant| constant.inferred_type.as_ref())
         && let Some(known) = list.known_elements.as_ref().filter(|_| list.element_type.is_never())
         && !usize::try_from(index).is_ok_and(|index| known.contains_key(&index))

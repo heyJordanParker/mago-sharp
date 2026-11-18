@@ -98,8 +98,8 @@ pub(crate) fn list_refusing<'codebase>(
 pub(crate) fn display_namespace(codebase: &CodebaseMetadata, module: &ModuleMetadata) -> String {
     // A module keeps its namespace lowercase, as PHP finds a namespace, and its class is PHP#'s, keyed by its exact name.
     let name = [module.namespace.as_bytes(), b"\\module"].concat();
-    let class = codebase.get_class_like(&name).or_else(|| {
-        codebase.symbols.sharp_class_like_in_another_case(&name).and_then(|key| codebase.get_class_like(key.as_bytes()))
+    let class = codebase.get_class_like(word(&name)).or_else(|| {
+        codebase.symbols.sharp_class_like_in_another_case(word(name)).and_then(|key| codebase.get_class_like(key))
     });
 
     dotted(class.map_or(module.namespace.as_bytes(), |class| namespace_of(class.original_name.as_bytes())))
@@ -213,8 +213,8 @@ where
 pub fn check_method_visibility<A>(
     context: &mut Context<'_, '_, A>,
     calling_class: Option<Word>,
-    fqcn: &[u8],
-    method_name: &[u8],
+    fqcn: Word,
+    method_name: Word,
     access_span: Span,
     member_span: Option<Span>,
 ) -> bool
@@ -227,16 +227,16 @@ where
         return true;
     };
 
-    if let Some(class) = context.codebase.get_class_like(declaring_class.as_bytes())
+    if let Some(class) = context.codebase.get_class_like(declaring_class)
         && !check_internal_reach(
             context,
             class,
             Some(method_metadata.flags.is_internal_reach()),
             |context| {
-                if method_name.eq_ignore_ascii_case(b"__construct") {
+                if method_name.as_bytes().eq_ignore_ascii_case(b"__construct") {
                     format!("new {}", display_class_like_name(context, class.original_name))
                 } else {
-                    display_member(context, class.original_name, BytesDisplay(method_name))
+                    display_member(context, class.original_name, BytesDisplay(method_name.as_bytes()))
                 }
             },
             member_span.unwrap_or(access_span),
@@ -254,18 +254,16 @@ where
         return true;
     }
 
-    let is_visible = is_visible_from_scope(context.codebase, visibility, declaring_class.as_bytes(), calling_class);
+    let is_visible = is_visible_from_scope(context.codebase, visibility, declaring_class, calling_class);
     if !is_visible {
-        let declaring_class_name = context
-            .codebase
-            .get_class_like(declaring_class.as_bytes())
-            .map_or(declaring_class, |metadata| metadata.original_name);
+        let declaring_class_name =
+            context.codebase.get_class_like(declaring_class).map_or(declaring_class, |metadata| metadata.original_name);
 
-        let method = display_member(context, declaring_class_name, BytesDisplay(method_name));
+        let method = display_member(context, declaring_class_name, BytesDisplay(method_name.as_bytes()));
         let issue_title = format!("Cannot access {visibility} method `{method}`.");
         let help_text = format!(
             "Change the visibility of method `{}` to `public`, or call it from an allowed scope.",
-            BytesDisplay(method_name)
+            BytesDisplay(method_name.as_bytes())
         );
 
         report_visibility_issue(
@@ -291,8 +289,8 @@ where
 pub fn is_method_visible<'ctx, A>(
     context: &Context<'ctx, '_, A>,
     block_context: &BlockContext<'ctx>,
-    fqcn: &[u8],
-    method_name: &[u8],
+    fqcn: Word,
+    method_name: Word,
 ) -> bool
 where
     A: Arena,
@@ -311,12 +309,7 @@ where
         return true;
     }
 
-    is_visible_from_scope(
-        context.codebase,
-        visibility,
-        declaring_class.as_bytes(),
-        block_context.scope.get_class_like_name(),
-    )
+    is_visible_from_scope(context.codebase, visibility, declaring_class, block_context.scope.get_class_like_name())
 }
 
 /// Checks if a static property (`Class::$prop`) is readable from the current scope and
@@ -327,7 +320,7 @@ where
 pub fn check_static_property_read_visibility<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     block_context: &BlockContext<'ctx>,
-    fqcn: &[u8],
+    fqcn: Word,
     property_name: &[u8],
     access_span: Span,
     member_span: Option<Span>,
@@ -434,7 +427,7 @@ where
     let is_visible = is_visible_from_scope(
         context.codebase,
         visibility,
-        declaring_class_metadata.name.as_bytes(),
+        declaring_class_metadata.name,
         block_context.scope.get_class_like_name(),
     );
 
@@ -444,11 +437,7 @@ where
         // code cannot be made `public`.
         let (issue_title, help_text) = if context.dialect.is_sharp() {
             let property = display_member(context, declaring_class_metadata.original_name, property_name);
-            let help = match public_getter(
-                context.codebase,
-                declaring_class_metadata.name.as_bytes(),
-                property_name.as_bytes(),
-            ) {
+            let help = match public_getter(context.codebase, declaring_class_metadata.name, property_name.as_bytes()) {
                 Some(getter) => format!("Call `{getter}`, the public method that gives the value."),
                 None => {
                     format!("Make the property `{property}` readable (e.g., `public`), or add a public getter method.")
@@ -609,7 +598,7 @@ where
     let is_visible = is_visible_from_scope(
         context.codebase,
         visibility,
-        declaring_class_metadata.name.as_bytes(),
+        declaring_class_metadata.name,
         block_context.scope.get_class_like_name(),
     );
     if !is_visible {
@@ -834,26 +823,26 @@ pub(crate) fn effective_write_visibility(property: &PropertyMetadata, version: P
 pub(crate) fn is_visible_from_scope(
     codebase: &CodebaseMetadata,
     visibility: Visibility,
-    declaring_class_id: &[u8],
+    declaring_class_id: Word,
     current_class_opt: Option<Word>,
 ) -> bool {
     match visibility {
         Visibility::Public => true,
         Visibility::Protected => {
             if let Some(current_class_id) = current_class_opt {
-                codebase.class_key(current_class_id.as_bytes()) == codebase.class_key(declaring_class_id)
-                    || codebase.is_instance_of(current_class_id.as_bytes(), declaring_class_id)
-                    || codebase.is_instance_of(declaring_class_id, current_class_id.as_bytes())
-                    || is_visible_via_required_extends(codebase, current_class_id.as_bytes(), declaring_class_id)
+                codebase.class_key(current_class_id) == codebase.class_key(declaring_class_id)
+                    || codebase.is_instance_of(current_class_id, declaring_class_id)
+                    || codebase.is_instance_of(declaring_class_id, current_class_id)
+                    || is_visible_via_required_extends(codebase, current_class_id, declaring_class_id)
             } else {
                 false
             }
         }
         Visibility::Private => {
             if let Some(current_class_id) = current_class_opt {
-                codebase.class_key(current_class_id.as_bytes()) == codebase.class_key(declaring_class_id)
-                    || codebase.class_uses_trait(current_class_id.as_bytes(), declaring_class_id)
-                    || codebase.class_uses_trait(declaring_class_id, current_class_id.as_bytes())
+                codebase.class_key(current_class_id) == codebase.class_key(declaring_class_id)
+                    || codebase.class_uses_trait(current_class_id, declaring_class_id)
+                    || codebase.class_uses_trait(declaring_class_id, current_class_id)
             } else {
                 false
             }
@@ -866,8 +855,8 @@ pub(crate) fn is_visible_from_scope(
 /// `@require-extends BaseClass` and `BaseClass` uses another trait that declares the method.
 fn is_visible_via_required_extends(
     codebase: &CodebaseMetadata,
-    current_class_id: &[u8],
-    declaring_class_id: &[u8],
+    current_class_id: Word,
+    declaring_class_id: Word,
 ) -> bool {
     let Some(current_metadata) = codebase.get_class_like(current_class_id) else {
         return false;
@@ -878,8 +867,8 @@ fn is_visible_via_required_extends(
     }
 
     for required_class in current_metadata.require_extends.iter() {
-        if codebase.is_instance_of(required_class.as_bytes(), declaring_class_id)
-            || codebase.class_uses_trait(required_class.as_bytes(), declaring_class_id)
+        if codebase.is_instance_of(*required_class, declaring_class_id)
+            || codebase.class_uses_trait(*required_class, declaring_class_id)
         {
             return true;
         }

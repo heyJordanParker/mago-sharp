@@ -1,5 +1,4 @@
 use mago_word::WordSet;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use mago_word::Word;
@@ -93,7 +92,7 @@ impl Symbols {
     /// is found in any case, whatever case the key of a class-like in it keeps.
     #[inline]
     pub fn add_symbol_name(&mut self, name: Word, kind: SymbolKind) {
-        self.namespaces.extend(get_symbol_namespaces(ascii_lowercase_word(name.as_bytes())));
+        self.namespaces.extend(get_symbol_namespaces(name.to_ascii_lowercase()));
         self.all.insert(name, kind);
     }
 
@@ -111,29 +110,28 @@ impl Symbols {
     /// case names no PHP# class-like, and a plain PHP one's lowercase name, so it is found in any case, as PHP finds
     /// it. A name of no known symbol keys as a plain PHP one would, and a key is its own key.
     #[must_use]
-    pub fn class_key(&self, name: &[u8]) -> Word {
-        let exact = word(name);
-        if self.all.contains_key(&exact) {
-            return exact;
+    pub fn class_key(&self, name: Word) -> Word {
+        if self.all.contains_key(&name) {
+            return name;
         }
 
-        let lowercase = ascii_lowercase_word(name);
+        let lowercase = name.to_ascii_lowercase();
         // A PHP# class-like whose whole name is lowercase, as `order`, is no plain one that `ORDER` finds.
-        if self.sharp.contains(&lowercase) { exact } else { lowercase }
+        if lowercase == name || self.sharp.contains(&lowercase) { name } else { lowercase }
     }
 
     /// The key of the PHP# class-like `name` names in another case, as `Demo\ORDER` names `Demo\Order`, when `name`
     /// names no class-like itself, spec section 24: the first by its bytes when several PHP# class-likes differ from
     /// `name` only in case. It is for the error that names the class-like the code meant.
     #[must_use]
-    pub fn sharp_class_like_in_another_case(&self, name: &[u8]) -> Option<Word> {
+    pub fn sharp_class_like_in_another_case(&self, name: Word) -> Option<Word> {
         if self.contains(self.class_key(name)) {
             return None;
         }
 
         self.sharp
             .iter()
-            .filter(|key| key.as_bytes().eq_ignore_ascii_case(name))
+            .filter(|key| key.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
             .min_by_key(|key| key.as_bytes())
             .copied()
     }

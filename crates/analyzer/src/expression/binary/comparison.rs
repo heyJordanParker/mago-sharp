@@ -824,7 +824,7 @@ fn comparands(union: &TUnion, codebase: &CodebaseMetadata) -> Vec<Comparand> {
             }
             TAtomic::Mixed(_) => found.push(Comparand::Any),
             TAtomic::Object(object) => {
-                let class = object.get_name().and_then(|name| codebase.get_class_like(name.as_bytes()));
+                let class = object.get_name().and_then(|name| codebase.get_class_like(name));
                 found.push(match class {
                     Some(class) if class.kind.is_enum() => Comparand::Enum(class.name),
                     Some(class) if class.flags.is_struct() => Comparand::Struct(class.name),
@@ -1314,7 +1314,7 @@ pub(crate) fn get_comparison_method<'ctx>(
         _ => return None,
     };
 
-    get_operator_method(codebase, php_operator_name(&declared, 2)?, &[lhs_type, rhs_type])
+    get_operator_method(codebase, word(php_operator_name(&declared, 2)?), &[lhs_type, rhs_type])
 }
 
 /// Runs the operator a PHP# comparison of instances runs, checked as the static call it runs as, and returns what it
@@ -1955,13 +1955,13 @@ pub(crate) fn struct_property_refusal<'codebase>(
     codebase: &'codebase CodebaseMetadata,
     visiting: &mut Vec<Word>,
 ) -> Option<(&'codebase PropertyMetadata, TUnion, Option<Refusal>)> {
-    let class = codebase.get_class_like(name.as_bytes())?;
+    let class = codebase.get_class_like(name)?;
     if visiting.contains(&class.name) {
         return None;
     }
     let properties = value_properties(codebase, class)?;
     let type_arguments = type_of.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Object(TObject::Named(named)) if codebase.class_key(named.name.as_bytes()) == class.name => {
+        TAtomic::Object(TObject::Named(named)) if codebase.class_key(named.name) == class.name => {
             named.type_parameters.as_deref()
         }
         _ => None,
@@ -2046,7 +2046,7 @@ fn enum_type_arguments<'union>(
     unions: impl IntoIterator<Item = &'union TUnion>,
     codebase: &CodebaseMetadata,
 ) -> Option<Vec<TUnion>> {
-    let r#enum = codebase.get_class_like(name.as_bytes())?;
+    let r#enum = codebase.get_class_like(name)?;
 
     unions
         .into_iter()
@@ -2078,7 +2078,7 @@ where
         unreachable!("`==` is refused for a struct's property only when one of its properties cannot compare");
     };
     let r#struct = display_operand(context, &get_named_object(name, None));
-    let (value, note) = if codebase.get_class_like(name.as_bytes()).is_some_and(|class| class.flags.is_struct()) {
+    let (value, note) = if codebase.get_class_like(name).is_some_and(|class| class.flags.is_struct()) {
         ("struct", "A struct compares by value, property by property, with each property's own `==`.")
     } else {
         ("case", "An enum case compares by value, field by field, with each field's own `==`.")

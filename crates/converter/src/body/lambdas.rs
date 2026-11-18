@@ -24,6 +24,7 @@ use mago_syntax::cst::PartialApplication;
 use mago_syntax::cst::Sequence;
 use mago_syntax::token::is_sharp_keyword;
 use mago_syntax::walker::MutWalker;
+use mago_word::word;
 
 use super::Kind;
 use super::Locals;
@@ -385,7 +386,7 @@ impl Converter<'_, '_> {
         let codebase = self.input.codebase;
         let Some((held_class, method)) = self
             .held_class(class)
-            .and_then(|held| codebase.get_declaring_method(held.as_bytes(), name.value).map(|method| (held, method)))
+            .and_then(|held| codebase.get_declaring_method(held, word(name.value)).map(|method| (held, method)))
         else {
             let held = self.shown(class);
             return self.refuse(
@@ -517,7 +518,9 @@ impl Converter<'_, '_> {
                 _ => (None, Some(*object)),
             },
         };
-        let method = class.as_ref().and_then(|class| self.input.codebase.get_declaring_method(class, &name));
+        let method = class
+            .as_ref()
+            .and_then(|class| self.input.codebase.get_declaring_method(mago_word::word(class), mago_word::word(&name)));
         let (Some(class), Some(method)) = (class, method) else {
             self.refuse(
                 expression.span(),
@@ -532,7 +535,7 @@ impl Converter<'_, '_> {
                 if super::is_primary(object) { rendered } else { format!("({rendered})") }
             }
             None => {
-                let declared = self.input.codebase.get_class_like(&class).map(|class| class.original_name);
+                let declared = self.input.codebase.get_class_like(word(&class)).map(|class| class.original_name);
                 let Some(declared) = declared else {
                     return false;
                 };

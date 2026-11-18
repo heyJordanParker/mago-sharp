@@ -55,8 +55,7 @@ impl FunctionReturnTypeProvider for GetObjectVarsProvider {
 
         let mut known_items: BTreeMap<ArrayKey, (bool, TUnion)> = BTreeMap::new();
         for (property_name, declaring_class) in class_metadata.appearing_property_ids.iter() {
-            let Some(property) = context.codebase().get_property(declaring_class.as_bytes(), property_name.as_bytes())
-            else {
+            let Some(property) = context.codebase().get_property(*declaring_class, *property_name) else {
                 continue;
             };
 
@@ -64,12 +63,7 @@ impl FunctionReturnTypeProvider for GetObjectVarsProvider {
                 continue;
             }
 
-            if !is_visible_from_scope(
-                context.codebase(),
-                property.read_visibility,
-                declaring_class.as_bytes(),
-                current_class,
-            ) {
+            if !is_visible_from_scope(context.codebase(), property.read_visibility, *declaring_class, current_class) {
                 continue;
             }
 

@@ -18,6 +18,7 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::Modifier;
 use mago_word::Word;
+use mago_word::word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
@@ -53,7 +54,7 @@ pub fn check_listener<'ctx, 'arena, A>(
 
     let class_name = display_class_like_name(context, metadata.original_name);
     let first_name = BytesDisplay(first.name.value);
-    let constructor = context.codebase.get_declaring_method(metadata.name.as_bytes(), b"__construct");
+    let constructor = context.codebase.get_declaring_method(metadata.name, word("__construct"));
     if let Some(visibility) = constructor
         .and_then(|constructor| constructor.method_metadata.as_ref())
         .map(|constructor| constructor.visibility)
@@ -69,7 +70,7 @@ pub fn check_listener<'ctx, 'arena, A>(
     }
     if let Some(event) = context
         .codebase
-        .get_method(metadata.name.as_bytes(), first.name.value)
+        .get_method(metadata.name, word(first.name.value))
         .and_then(|method| method.listens.first())
         .and_then(TUnion::get_single_named_object)
     {
@@ -80,7 +81,7 @@ pub fn check_listener<'ctx, 'arena, A>(
         // A second method of the same name has no metadata of its own: semantics reports it.
         let Some(method_metadata) = context
             .codebase
-            .get_method(metadata.name.as_bytes(), method.name.value)
+            .get_method(metadata.name, word(method.name.value))
             .filter(|method_metadata| method_metadata.span == method.span())
         else {
             continue;
@@ -176,7 +177,7 @@ where
     A: Arena,
 {
     let listened_class =
-        listened.get_single_named_object().and_then(|named| context.codebase.get_class_like(named.name.as_bytes()));
+        listened.get_single_named_object().and_then(|named| context.codebase.get_class_like(named.name));
     let message = match listened_class {
         Some(class_like) => unheard_class(context, class_like, "the listener"),
         None if listened.has_template_types() || is_refused_type(listened) => None,
@@ -337,7 +338,7 @@ fn shared_interface(codebase: &CodebaseMetadata, listed: &[TUnion]) -> Option<Wo
             .chain(class_like.all_parent_interfaces.iter().copied())
             .collect();
         shared = Some(match shared {
-            None => interfaces.iter().filter_map(|name| codebase.get_class_like(name.as_bytes())).collect(),
+            None => interfaces.iter().filter_map(|name| codebase.get_class_like(*name)).collect(),
             Some(shared) => shared.into_iter().filter(|interface| interfaces.contains(&interface.name)).collect(),
         });
     }
@@ -378,7 +379,7 @@ fn listed_class<'codebase>(
     codebase: &'codebase CodebaseMetadata,
     listed: &TUnion,
 ) -> Option<&'codebase ClassLikeMetadata> {
-    codebase.get_class_like(listed.get_single_named_object()?.name.as_bytes())
+    codebase.get_class_like(listed.get_single_named_object()?.name)
 }
 
 /// Whether the listed type names the type arguments of its event, a type parameter being none, so a bare `on Saved`
@@ -387,7 +388,7 @@ fn names_its_type_arguments(codebase: &CodebaseMetadata, listed: &TUnion) -> boo
     !listed.has_template_types()
         && listed.get_single_named_object().is_some_and(|named| {
             named.type_parameters.is_some()
-                || codebase.get_class_like(named.name.as_bytes()).is_none_or(|class| class.template_types.is_empty())
+                || codebase.get_class_like(named.name).is_none_or(|class| class.template_types.is_empty())
         })
 }
 

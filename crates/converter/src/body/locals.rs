@@ -42,6 +42,7 @@ use mago_syntax::cst::TokenSeparatedSequence;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::Variable;
 use mago_syntax::walker::MutWalker;
+use mago_word::word;
 
 use super::Kind;
 use super::conditions::unproven_scalar;
@@ -619,7 +620,7 @@ impl Converter<'_, '_> {
             Expression::Instantiation(Instantiation { class: Expression::Identifier(identifier), .. }) => declared(
                 self.input
                     .codebase
-                    .get_class_like(self.input.names.get(identifier))
+                    .get_class_like(word(self.input.names.get(identifier)))
                     .is_some_and(|class| class.template_types.is_empty()),
             ),
             _ => Source::Inferred,
@@ -643,7 +644,7 @@ impl Converter<'_, '_> {
 
         self.input
             .codebase
-            .get_declaring_property(class.name.as_bytes(), &property)
+            .get_declaring_property(class.name, word(&property))
             .is_some_and(|metadata| metadata.type_metadata.is_some())
     }
 

@@ -25,12 +25,10 @@ pub fn inherit_methods_from_parent(
     {
         let mut map: HashMap<Word, Vec<Word>> = HashMap::default();
         for (alias, (trait_name, original)) in metadata.get_trait_alias_map() {
-            if trait_name.is_some_and(|trait_name| codebase.class_key(trait_name.as_bytes()) != parent_metadata.name) {
+            if trait_name.is_some_and(|trait_name| codebase.class_key(trait_name) != parent_metadata.name) {
                 continue;
             }
-            map.entry(parent_metadata.method_key(original.as_bytes()))
-                .or_default()
-                .push(metadata.method_key(alias.as_bytes()));
+            map.entry(parent_metadata.method_key(*original)).or_default().push(metadata.method_key(*alias));
         }
         Some(map)
     } else {
@@ -41,8 +39,8 @@ pub fn inherit_methods_from_parent(
         metadata
             .trait_exclusions
             .iter()
-            .filter(|(trait_name, _)| codebase.class_key(trait_name.as_bytes()) == parent_metadata.name)
-            .map(|(_, method)| parent_metadata.method_key(method.as_bytes()))
+            .filter(|(trait_name, _)| codebase.class_key(*trait_name) == parent_metadata.name)
+            .map(|(_, method)| parent_metadata.method_key(*method))
             .collect()
     } else {
         Vec::new()
@@ -124,8 +122,7 @@ pub fn inherit_methods_from_parent(
                         .is_some_and(|m| m.flags.is_magic_method());
 
                 if !is_existing_pseudo_from_trait
-                    && (!codebase
-                        .method_is_abstract(implementing_class.as_bytes(), implementing_method_name.as_bytes())
+                    && (!codebase.method_is_abstract(implementing_class, implementing_method_name)
                         || implementing_class == class_like_name)
                 {
                     return;
@@ -139,10 +136,8 @@ pub fn inherit_methods_from_parent(
                 || metadata.kind.is_trait()
                 || is_ctor_or_clone
                 || metadata
-                    .trait_visibility(codebase, aliased_method_name.as_bytes(), parent_metadata.name)
-                    .or_else(|| {
-                        codebase.get_method_visibility(parent_metadata.name.as_bytes(), aliased_method_name.as_bytes())
-                    })
+                    .trait_visibility(codebase, aliased_method_name, parent_metadata.name)
+                    .or_else(|| codebase.get_method_visibility(parent_metadata.name, aliased_method_name))
                     .is_none_or(|visibility| !visibility.is_private());
 
             if is_inheritable {

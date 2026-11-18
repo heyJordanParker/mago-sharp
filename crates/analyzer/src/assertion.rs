@@ -1817,7 +1817,7 @@ where
             }
             Expression::Parent(_) => {
                 if let Some(self_class) = context.this_class_name
-                    && let Some(self_meta) = context.codebase.get_class_like(self_class.as_bytes())
+                    && let Some(self_meta) = context.codebase.get_class_like(self_class)
                     && let Some(parent_id_ref) = self_meta.direct_parent_class.as_ref()
                 {
                     if_types.insert(

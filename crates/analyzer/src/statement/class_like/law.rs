@@ -74,7 +74,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
             unreachable!("a class-like or a module analyzes its laws in its own scope");
         };
 
-        let law_key = class_like_metadata.method_key(self.name.value);
+        let law_key = class_like_metadata.method_key(word(self.name.value));
         let Some(law_metadata) = class_like_metadata.laws.get(&law_key) else {
             unreachable!("the codex scans each law the analyzer analyzes");
         };
@@ -164,9 +164,9 @@ where
         return None;
     };
     let class = context.resolved_names.static_call_class(call)?;
-    let class = context.codebase.get_class_like(context.resolved_names.get(&class.name))?;
+    let class = context.codebase.get_class_like(word(context.resolved_names.get(&class.name)))?;
 
-    Some((class, class.laws.get(&class.method_key(name.value))?))
+    Some((class, class.laws.get(&class.method_key(word(name.value)))?))
 }
 
 /// Whether `call` is a bare call of a law of `class`, which a law's body writes through the class name, as it writes a
@@ -180,7 +180,7 @@ where
     };
 
     !matches!(context.resolved_names.binding(name), Some(Binding::Local(_) | Binding::This))
-        && class.laws.contains_key(&class.method_key(name.value()))
+        && class.laws.contains_key(&class.method_key(word(name.value())))
 }
 
 /// The call a statement of a law's body is, when it calls a law.

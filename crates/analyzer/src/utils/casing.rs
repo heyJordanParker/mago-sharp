@@ -49,8 +49,8 @@ where
     let Some(metadata) = context
         .codebase
         .symbols
-        .sharp_class_like_in_another_case(used_name)
-        .and_then(|key| context.codebase.get_class_like(key.as_bytes()))
+        .sharp_class_like_in_another_case(word(used_name))
+        .and_then(|key| context.codebase.get_class_like(key))
     else {
         return false;
     };
@@ -83,7 +83,7 @@ where
         return;
     }
 
-    let Some(metadata) = context.codebase.get_class_like(used_name.as_bytes()) else {
+    let Some(metadata) = context.codebase.get_class_like(used_name) else {
         return;
     };
 
@@ -158,7 +158,7 @@ where
         return;
     }
 
-    let Some(metadata) = context.codebase.get_function(used_name.as_bytes()) else {
+    let Some(metadata) = context.codebase.get_function(used_name) else {
         return;
     };
 

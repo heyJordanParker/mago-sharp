@@ -1,3 +1,4 @@
+use mago_word::Word;
 use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::Arc;
@@ -262,7 +263,7 @@ fn build_node_analysis_plan<'ast, 'arena>(
             && let Some(class_like) = class_like_name(node, resolved_names)
         {
             for hook in requirements.class_like_hooks.iter() {
-                if class_like_matches_hook(class_like, hook, codebase) {
+                if class_like_matches_hook(word(class_like), hook, codebase) {
                     requested |= hook.requirements;
                     targeted_hook_routes.push(hook.route);
                 }
@@ -313,8 +314,8 @@ fn analyzed_names(
     while let Some(node) = stack.pop() {
         if let Node::TypePattern(pattern) = node
             && let Hint::Identifier(hint) = &pattern.hint
-            && let Some(case) = data_case(codebase, resolved_names.get(hint))
-            && let Some(r#enum) = case.direct_parent_class.and_then(|name| codebase.get_class_like(name.as_bytes()))
+            && let Some(case) = data_case(codebase, word(resolved_names.get(hint)))
+            && let Some(r#enum) = case.direct_parent_class.and_then(|name| codebase.get_class_like(name))
             && let Some(dot) = hint.value().iter().rposition(|byte| *byte == b'.')
         {
             let start = hint.span().start.offset;
@@ -339,12 +340,12 @@ fn analyzed_names(
                     case.original_name.as_bytes().to_vec(),
                     SNAPSHOT_CLASS_BINDING,
                 ));
-            } else if let Some(namespace) = member_namespace(resolved_names, codebase, &class.name, member.value)
+            } else if let Some(namespace) = member_namespace(resolved_names, codebase, &class.name, word(member.value))
                 && !namespace.is_empty()
             {
                 let span = class.name.span();
                 names.push((span.start.offset, span.end.offset, namespace.as_bytes().to_vec(), 0));
-                let full_name = namespace_member(codebase, namespace, member.value);
+                let full_name = namespace_member(codebase, namespace, word(member.value));
                 names.push((member_span.0, member_span.1, full_name.as_bytes().to_vec(), 0));
             }
         }
@@ -359,7 +360,7 @@ fn analyzed_names(
 const SNAPSHOT_CLASS_BINDING: u8 = 1;
 
 /// The class a case of an enum with data runs as, spec section 20, when `name` names one.
-fn data_case<'codebase>(codebase: &'codebase CodebaseMetadata, name: &[u8]) -> Option<&'codebase ClassLikeMetadata> {
+fn data_case(codebase: &CodebaseMetadata, name: Word) -> Option<&ClassLikeMetadata> {
     codebase.get_class_like(name).filter(|case| case.flags.is_enum_case_class())
 }
 
@@ -373,7 +374,7 @@ fn built_data_case<'codebase>(
 ) -> Option<&'codebase ClassLikeMetadata> {
     let enum_name = resolved_names.get(&class.name);
 
-    data_case(codebase, &[enum_name, b"\\", member].concat())
+    data_case(codebase, word([enum_name, b"\\", member].concat()))
 }
 
 fn is_method_call_kind(kind: mago_syntax::cst::NodeKind) -> bool {
@@ -391,9 +392,7 @@ fn method_call_matches_hook(
     codebase: &CodebaseMetadata,
 ) -> bool {
     calls.iter().any(|call_target| {
-        hook.targets
-            .iter()
-            .any(|target| target.matches(codebase, call_target.class.as_bytes(), call_target.method.as_bytes()))
+        hook.targets.iter().any(|target| target.matches(codebase, call_target.class, call_target.method.as_bytes()))
     })
 }
 
@@ -408,7 +407,7 @@ fn class_like_name<'arena>(node: Node<'_, 'arena>, resolved_names: &ResolvedName
 }
 
 fn class_like_matches_hook(
-    class_like: &[u8],
+    class_like: Word,
     hook: &super::ClassLikeAnalysisHookRegistration,
     codebase: &CodebaseMetadata,
 ) -> bool {
@@ -418,7 +417,7 @@ fn class_like_matches_hook(
 
     // A hook names its ancestor as written, which the codebase keys, spec section 24.
     hook.targets.iter().any(|ancestor| {
-        let ancestor = &codebase.class_key(ancestor.as_bytes());
+        let ancestor = &codebase.class_key(*ancestor);
         if metadata.name != *ancestor
             && (metadata.all_parent_classes.contains(ancestor) || metadata.all_parent_interfaces.contains(ancestor))
         {
@@ -1704,7 +1703,7 @@ fn read_symbol_identifier_with_kind(
     if symbol.is_empty() {
         return Err(protocol("symbol reference name cannot be empty"));
     }
-    let symbol = normalize_symbol(codebase, symbol, target);
+    let symbol = normalize_symbol(codebase, word(symbol), target);
 
     match kind {
         1 => Ok((symbol, empty_word())),
@@ -1714,8 +1713,8 @@ fn read_symbol_identifier_with_kind(
                 return Err(protocol("symbol reference member cannot be empty"));
             }
             // A method as its class keys it, and any other member, a property or a constant, as written.
-            let member = if codebase.get_method(symbol.as_bytes(), member).is_some() {
-                codebase.method_key(symbol, member)
+            let member = if codebase.get_method(symbol, word(member)).is_some() {
+                codebase.method_key(symbol, word(member))
             } else {
                 word(member)
             };
@@ -1728,18 +1727,18 @@ fn read_symbol_identifier_with_kind(
 /// The key the codebase holds the symbol a worker names as `bytes` under, spec section 24: a class-like's by
 /// [`CodebaseMetadata::class_key`], exact for a PHP# one, a function's in lowercase, and a constant's with its namespace
 /// in lowercase. A symbol the codebase holds none of is a target as written, and a source in lowercase.
-fn normalize_symbol(codebase: &CodebaseMetadata, bytes: &[u8], target: bool) -> mago_word::Word {
+fn normalize_symbol(codebase: &CodebaseMetadata, bytes: Word, target: bool) -> mago_word::Word {
     let class = codebase.class_key(bytes);
     if codebase.symbols.contains(class) {
         return class;
     }
 
-    let lowercase = ascii_lowercase_word(bytes);
+    let lowercase = ascii_lowercase_word(bytes.as_bytes());
     if codebase.function_likes.contains_key(&(empty_word(), lowercase)) {
         return lowercase;
     }
 
-    let constant = ascii_lowercase_constant_name_word(bytes);
+    let constant = ascii_lowercase_constant_name_word(bytes.as_bytes());
     if codebase.constants.contains_key(&constant) {
         return constant;
     }
@@ -1785,23 +1784,21 @@ fn validate_reference_target(
         let exists = if kind == SymbolReferenceKind::FunctionLikeReturn {
             codebase.function_likes.contains_key(&(empty_word(), target.0))
         } else {
-            codebase.class_like_exists(target.0.as_bytes())
+            codebase.class_like_exists(target.0)
                 || codebase.function_likes.contains_key(&(empty_word(), target.0))
                 || codebase.constants.contains_key(&target.0)
         };
         return exists.then_some(()).ok_or_else(|| format!("target `{}` does not exist", target.0));
     }
 
-    let Some(class_like) = codebase.get_class_like(target.0.as_bytes()) else {
+    let Some(class_like) = codebase.get_class_like(target.0) else {
         return Err(format!("target class-like `{}` does not exist", target.0));
     };
     let exists = match kind {
         SymbolReferenceKind::PropertyRead | SymbolReferenceKind::PropertyWrite => {
             class_like.properties.contains_key(&target.1)
         }
-        SymbolReferenceKind::FunctionLikeReturn => {
-            codebase.get_method(target.0.as_bytes(), target.1.as_bytes()).is_some()
-        }
+        SymbolReferenceKind::FunctionLikeReturn => codebase.get_method(target.0, target.1).is_some(),
         SymbolReferenceKind::OverriddenMember => class_like.methods.contains(&target.1),
         SymbolReferenceKind::Body | SymbolReferenceKind::Signature => {
             class_like.methods.contains(&target.1)
@@ -2145,8 +2142,8 @@ mod tests {
             route: 0,
         };
 
-        assert!(!class_like_matches_hook(b"FrameworkTestCase", &hook, &codebase));
-        assert!(class_like_matches_hook(b"ApplicationTest", &hook, &codebase));
+        assert!(!class_like_matches_hook(word("FrameworkTestCase"), &hook, &codebase));
+        assert!(class_like_matches_hook(word("ApplicationTest"), &hook, &codebase));
     }
 
     /// A PHP# class whose methods name each other and a plain PHP class.
@@ -2170,8 +2167,8 @@ mod tests {
             for endpoint in endpoints {
                 write_symbol_identifier(&mut writer, *endpoint).expect("the endpoint should fit in a frame");
             }
-            let class = analysis.codebase.class_key(b"Probe\\Box");
-            let tagged = analysis.codebase.class_key(b"Probe\\Tagged");
+            let class = analysis.codebase.class_key(word(b"Probe\\Box"));
+            let tagged = analysis.codebase.class_key(word(b"Probe\\Tagged"));
             let mut references = SymbolReferences::new();
             references.add_symbol_reference((class, word(b"openLid")), (class, word(b"tag")), false);
             references.add_symbol_reference((class, word(b"tag")), (tagged, empty_word()), true);

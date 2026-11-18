@@ -2189,7 +2189,7 @@ pub(super) fn encode_function_like_identifier(
             writer.write_u8(2);
             writer.write_bytes(class.as_bytes())?;
             writer.write_bytes(method.as_bytes())?;
-            let class = codebase.get_class_like(class.as_bytes());
+            let class = codebase.get_class_like(class);
             writer.write_u8(
                 if class.is_some_and(|class| class.flags.is_sharp()) { METHOD_OF_SHARP_CLASS } else { 0 }
                     | if class.is_some_and(|class| class.exact_names) { METHOD_OF_EXACT_NAMES } else { 0 },
@@ -3834,8 +3834,8 @@ pub(super) mod testing {
                     Node::ArgumentList(list) => Some(*list),
                     _ => None,
                 });
-                let sink = analysis.codebase.get_class_like(b"Lib\\Sink").unwrap();
-                let take = analysis.codebase.get_method(b"Lib\\Sink", b"take").unwrap();
+                let sink = analysis.codebase.get_class_like(word(b"Lib\\Sink")).unwrap();
+                let take = analysis.codebase.get_method(word(b"Lib\\Sink"), word("take")).unwrap();
                 let target = InvocationTarget::FunctionLike {
                     identifier: FunctionLikeIdentifier::Method(sink.name, take.name),
                     metadata: take,

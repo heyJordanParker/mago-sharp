@@ -199,29 +199,28 @@ pub(crate) fn record_parse<A>(
     // `callee`, a member of an object of `object` that messages name `member`, runs as a written call of it does.
     let reach = |summary: &mut EffectSummary, object: Word, callee: Body, member: &[u8]| {
         if let Some(effect) = foreign_class(codebase, object) {
-            let class_name =
-                codebase.get_class_like(object.as_bytes()).map_or(object, |metadata| metadata.original_name);
+            let class_name = codebase.get_class_like(object).map_or(object, |metadata| metadata.original_name);
             summary.effects.push((Effect::Foreign(effect), span, (class_name, word(member))));
         } else {
             summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
         }
     };
-    let parse = Body::Method(class.name, class.method_key(b"parse"));
+    let parse = Body::Method(class.name, class.method_key(word("parse")));
 
     let mut parsing = summary(parse, b"parse");
-    let mut trying = summary(Body::Method(class.name, class.method_key(b"tryParse")), b"tryParse");
+    let mut trying = summary(Body::Method(class.name, class.method_key(word("tryParse"))), b"tryParse");
     reach(&mut trying, class.name, parse, b"parse");
     if class.tag_key().is_some() {
         for (_, variant) in codebase.variants(class) {
             // A case that carries no data is one object, which the family's `parse` gives as it is. A case is no
             // class the analysis visits, so the enum records the `parse` of each.
-            if !codebase.parses(variant.name.as_bytes()) {
+            if !codebase.parses(variant.name) {
                 continue;
             }
             if variant.flags.is_enum_case_class() {
                 record_parse(context, artifacts, variant);
             }
-            reach(&mut parsing, variant.name, Body::Method(variant.name, variant.method_key(b"parse")), b"parse");
+            reach(&mut parsing, variant.name, Body::Method(variant.name, variant.method_key(word("parse"))), b"parse");
         }
         artifacts.effect_summaries.push(parsing);
         artifacts.effect_summaries.push(trying);
@@ -229,8 +228,8 @@ pub(crate) fn record_parse<A>(
         return;
     }
     let constructor = codebase
-        .get_declaring_method_class(class.name.as_bytes(), b"__construct")
-        .and_then(|declaring| codebase.get_class_like(declaring.as_bytes()));
+        .get_declaring_method_class(class.name, word("__construct"))
+        .and_then(|declaring| codebase.get_class_like(declaring));
     if let Some(constructor) = constructor {
         if constructor.flags.is_sharp() {
             reach(&mut parsing, class.name, Body::Method(constructor.name, word(b"__construct")), b"__construct");
@@ -243,19 +242,19 @@ pub(crate) fn record_parse<A>(
         }
     }
     let mut nested = Vec::new();
-    for field in codebase.struct_parse_fields(class.name.as_bytes()) {
+    for field in codebase.struct_parse_fields(class.name) {
         if !field.is_parameter {
             let property = word([b"$".as_slice(), field.name].concat());
             let Some(declaring) = class.declaring_property_ids.get(&property) else {
                 unreachable!("a property field is one of its class's properties, each of which has a declaring class");
             };
-            let set = Body::Accessor(codebase.class_key(declaring.as_bytes()), property, word(b"set"));
+            let set = Body::Accessor(codebase.class_key(*declaring), property, word(b"set"));
             reach(&mut parsing, class.name, set, field.name);
         }
         parsed_classes(codebase, field.r#type, &mut nested);
     }
     for nested in nested {
-        reach(&mut parsing, nested.name, Body::Method(nested.name, nested.method_key(b"parse")), b"parse");
+        reach(&mut parsing, nested.name, Body::Method(nested.name, nested.method_key(word("parse"))), b"parse");
     }
 
     artifacts.effect_summaries.push(parsing);
@@ -273,11 +272,11 @@ fn parsed_classes<'codebase>(
     for atomic in r#type.types.iter() {
         match atomic {
             TAtomic::Object(TObject::Named(object))
-                if codebase.parses(object.name.as_bytes())
-                    || codebase.is_text_value(object.name.as_bytes())
-                    || codebase.parses_any_value(object.name.as_bytes()) =>
+                if codebase.parses(object.name)
+                    || codebase.is_text_value(object.name)
+                    || codebase.parses_any_value(object.name) =>
             {
-                let Some(class) = codebase.get_class_like(object.name.as_bytes()) else {
+                let Some(class) = codebase.get_class_like(object.name) else {
                     unreachable!("a class that parses is in the codebase");
                 };
                 if !parsed.iter().any(|seen| seen.name == class.name) {
@@ -352,9 +351,7 @@ pub(crate) fn record_function_values<A>(
         };
         let runs = match source {
             Some(FunctionLikeIdentifier::Closure(name)) => Some(Runs::Body(Body::Lambda(name))),
-            Some(FunctionLikeIdentifier::Method(class, method)) => {
-                method_value_runs(codebase, class, method.as_bytes())
-            }
+            Some(FunctionLikeIdentifier::Method(class, method)) => method_value_runs(codebase, class, method),
             Some(FunctionLikeIdentifier::Function(function)) => Some(function_value_runs(codebase, function)),
             None => None,
         };
@@ -374,15 +371,15 @@ pub(crate) fn record_function_values<A>(
 
 /// What a method value of `method`, read through `class`, runs wherever it is called: the PHP# method's body, or the
 /// effects a call of the method has without one, `None` when `class` has no such method.
-fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: &[u8]) -> Option<Runs> {
-    let declaring_class = codebase.get_declaring_method_class(class.as_bytes(), method)?;
-    let declaring = codebase.get_class_like(declaring_class.as_bytes())?;
-    let metadata = codebase.get_method(declaring_class.as_bytes(), method)?;
+fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: Word) -> Option<Runs> {
+    let declaring_class = codebase.get_declaring_method_class(class, method)?;
+    let declaring = codebase.get_class_like(declaring_class)?;
+    let metadata = codebase.get_method(declaring_class, method)?;
 
     // `class` is the class the value is read through, where a call's `extern` lookup starts too.
-    let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+    let class_name = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
     let callee = (class_name, metadata.original_name);
-    let lowercase_method = ascii_lowercase_word(method);
+    let lowercase_method = ascii_lowercase_word(method.as_bytes());
 
     Some(if let Some(effect) = foreign_class(codebase, class) {
         Runs::Foreign { callee, effects: vec![Effect::Foreign(effect)] }
@@ -439,7 +436,7 @@ where
     let effect_taking_parameters = match body {
         Body::Method(class, method) => context
             .codebase
-            .get_method(class.as_bytes(), method.as_bytes())
+            .get_method(class, method)
             .map(|metadata| {
                 metadata
                     .parameters
@@ -468,7 +465,7 @@ where
                 method.as_bytes().eq_ignore_ascii_case(b"__construct")
                     || context
                         .codebase
-                        .get_method(class.as_bytes(), method.as_bytes())
+                        .get_method(class, method)
                         .is_some_and(|method| method.flags.is_named_constructor())
             }
             _ => false,
@@ -780,9 +777,9 @@ where
     /// `via` names, which a property's PHP metadata lists no hook for. A call of a body without one adds nothing.
     fn accessor(&self, class: Word, property: &[u8], accessor: &[u8]) -> Option<Body> {
         let property = php_variable_name(property);
-        let declaring = *self.codebase().get_class_like(class.as_bytes())?.declaring_property_ids.get(&property)?;
+        let declaring = *self.codebase().get_class_like(class)?.declaring_property_ids.get(&property)?;
 
-        Some(Body::Accessor(self.codebase().class_key(declaring.as_bytes()), property, word(accessor)))
+        Some(Body::Accessor(self.codebase().class_key(declaring), property, word(accessor)))
     }
 
     fn read_property(&mut self, object: &Expression<'arena>, property: &ClassLikeMemberSelector<'arena>, span: Span) {
@@ -795,7 +792,7 @@ where
         let codebase = self.codebase();
         for class in self.object_classes(object) {
             if let Some(effect) = foreign_class(codebase, class) {
-                let class = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+                let class = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
                 self.summary.effects.push((Effect::Foreign(effect), span, (class, member)));
             }
         }
@@ -818,9 +815,9 @@ where
         let codebase = self.codebase();
         let property = php_variable_name(property);
         let Some(declaring) = codebase
-            .get_class_like(class.as_bytes())
+            .get_class_like(class)
             .and_then(|class| class.declaring_property_ids.get(&property))
-            .and_then(|declaring| codebase.get_class_like(declaring.as_bytes()))
+            .and_then(|declaring| codebase.get_class_like(*declaring))
             .filter(|declaring| declaring.properties.get(&property).is_some_and(|used| used.flags.is_static()))
         else {
             return;
@@ -1047,8 +1044,8 @@ where
     fn creates_attributes(&self, class: Word, method: Word, written: &TypeArgumentList<'arena>) -> bool {
         let codebase = self.codebase();
         let marked = codebase
-            .get_method(class.as_bytes(), method.as_bytes())
-            .is_some_and(|method| method.has_attribute(codebase, CREATES_ATTRIBUTES.as_bytes()));
+            .get_method(class, method)
+            .is_some_and(|method| method.has_attribute(codebase, word(CREATES_ATTRIBUTES)));
         let [Hint::Identifier(attribute)] = written.arguments.as_slice() else {
             return false;
         };
@@ -1056,16 +1053,19 @@ where
             return false;
         }
         let attribute = self.context.resolved_names.get(attribute);
-        let is_sharp = |class: &[u8]| codebase.get_class_like(class).is_some_and(|class| class.flags.is_sharp());
+        let is_sharp = |class: &[u8]| codebase.get_class_like(word(class)).is_some_and(|class| class.flags.is_sharp());
         let written_in_sharp = |class: &[u8]| {
             is_sharp(class)
                 && codebase
-                    .get_declaring_method_class(class, b"__construct")
+                    .get_declaring_method_class(word(class), word("__construct"))
                     .is_none_or(|constructor| is_sharp(constructor.as_bytes()))
         };
 
         written_in_sharp(attribute)
-            && codebase.get_all_descendants(attribute).iter().all(|descendant| written_in_sharp(descendant.as_bytes()))
+            && codebase
+                .get_all_descendants(word(attribute))
+                .iter()
+                .all(|descendant| written_in_sharp(descendant.as_bytes()))
     }
 
     /// Records the call at `span` of `method` of `class` as calls of the code it runs, when the standard library marks
@@ -1077,9 +1077,7 @@ where
     fn runs_defaults(&mut self, class: Word, method: Word, span: Span) -> bool {
         let codebase = self.codebase();
         let marked = |mark: &str| {
-            codebase
-                .get_method(class.as_bytes(), method.as_bytes())
-                .is_some_and(|marked| marked.has_attribute(codebase, mark.as_bytes()))
+            codebase.get_method(class, method).is_some_and(|marked| marked.has_attribute(codebase, word(mark)))
         };
         let mut callees = Vec::new();
         if marked(RUNS_DEFAULTS) {
@@ -1118,11 +1116,11 @@ where
     /// method it is.
     fn property_call(&mut self, class: Word, property: Word, span: Span) {
         let codebase = self.codebase();
-        let Some(class_like) = codebase.get_class_like(class.as_bytes()) else {
+        let Some(class_like) = codebase.get_class_like(class) else {
             return;
         };
         let property_type = codebase
-            .get_property(class.as_bytes(), property.as_bytes())
+            .get_property(class, property)
             .and_then(|metadata| metadata.type_metadata.as_ref())
             .map(|metadata| &metadata.type_union);
         let cause =
@@ -1163,8 +1161,8 @@ where
                 continue;
             };
 
-            let class = self.codebase().class_key(class.as_bytes());
-            let callee = Body::Method(class, self.codebase().method_key(class, method.as_bytes()));
+            let class = self.codebase().class_key(*class);
+            let callee = Body::Method(class, self.codebase().method_key(class, *method));
             let arguments = operands.iter().map(|operand| self.roots(operand)).collect();
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
         }
@@ -1180,11 +1178,11 @@ where
         arguments: &'ast ArgumentList<'arena>,
     ) {
         let codebase = self.codebase();
-        let Some(metadata) = codebase.get_method(declaring_class.as_bytes(), method_name.as_bytes()) else {
+        let Some(metadata) = codebase.get_method(declaring_class, method_name) else {
             return;
         };
 
-        let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+        let class_name = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
         let cause = (class_name, metadata.original_name);
         let receiver_roots = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
         // An extension's member takes its receiver as its first parameter, as its method value does, and the call's
@@ -1206,7 +1204,7 @@ where
             return;
         }
 
-        if codebase.get_class_like(declaring_class.as_bytes()).is_some_and(|declaring| declaring.flags.is_sharp()) {
+        if codebase.get_class_like(declaring_class).is_some_and(|declaring| declaring.flags.is_sharp()) {
             // A method without a body has the effects its `uses` lists, which each implementation is held to.
             if metadata.method_metadata.as_ref().is_some_and(|method| method.is_abstract) {
                 for effect in &metadata.uses {
@@ -1216,8 +1214,8 @@ where
                 return;
             }
 
-            let declaring_class = codebase.class_key(declaring_class.as_bytes());
-            let method = codebase.method_key(declaring_class, method_name.as_bytes());
+            let declaring_class = codebase.class_key(declaring_class);
+            let method = codebase.method_key(declaring_class, method_name);
             self.left_out_defaults(declaring_class, method, parameters, Some(arguments), span);
             self.summary.calls.push(Call {
                 callee: Body::Method(declaring_class, method),
@@ -1366,25 +1364,25 @@ where
             _ => None,
         };
         let codebase = self.codebase();
-        let Some(class) = class_name.and_then(|class_name| codebase.get_class_like(class_name)) else {
+        let Some(class) = class_name.and_then(|class_name| codebase.get_class_like(word(class_name))) else {
             return;
         };
 
         let span = instantiation.span();
         let (declaring, constructor) = match &instantiation.constructor {
-            Some(constructor) => (class, class.method_key(constructor.name.value)),
+            Some(constructor) => (class, class.method_key(word(constructor.name.value))),
             None => {
                 let constructor = word(b"__construct");
                 let declaring = codebase
-                    .get_declaring_method_class(class.name.as_bytes(), constructor.as_bytes())
-                    .and_then(|declaring_class| codebase.get_class_like(declaring_class.as_bytes()))
+                    .get_declaring_method_class(class.name, constructor)
+                    .and_then(|declaring_class| codebase.get_class_like(declaring_class))
                     .unwrap_or(class);
 
                 (declaring, constructor)
             }
         };
         if declaring.flags.is_sharp() {
-            let Some(metadata) = codebase.get_method(declaring.name.as_bytes(), constructor.as_bytes()) else {
+            let Some(metadata) = codebase.get_method(declaring.name, constructor) else {
                 return;
             };
 
@@ -1401,7 +1399,7 @@ where
             let declaration = codebase.extern_of(class.name, constructor);
             // Only plain PHP takes an `extern`, so a PHP# class's error names its nearest plain PHP parent.
             let named = std::iter::successors(Some(class), |class| {
-                class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
+                class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent))
             })
             .find(|class| !class.flags.is_sharp())
             .unwrap_or(declaring);
@@ -1413,8 +1411,7 @@ where
     fn emit(&mut self, emit: &'ast Emit<'arena>) {
         let span = emit.span();
         for class in self.object_classes(emit.value) {
-            let class =
-                self.codebase().get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+            let class = self.codebase().get_class_like(class).map_or(class, |metadata| metadata.original_name);
             self.summary.effects.push((Effect::Emit, span, (class, empty_word())));
         }
     }
@@ -1462,13 +1459,13 @@ where
                     source: Some(FunctionLikeIdentifier::Method(class, method)),
                     ..
                 })) => Some((
-                    method_value_runs(codebase, *class, method.as_bytes())?,
-                    codebase.get_declaring_method(class.as_bytes(), method.as_bytes())?,
+                    method_value_runs(codebase, *class, *method)?,
+                    codebase.get_declaring_method(*class, *method)?,
                 )),
                 TAtomic::Callable(TCallable::Signature(TCallableSignature {
                     source: Some(FunctionLikeIdentifier::Function(function)),
                     ..
-                })) => Some((function_value_runs(codebase, *function), codebase.get_function(function.as_bytes())?)),
+                })) => Some((function_value_runs(codebase, *function), codebase.get_function(*function)?)),
                 _ => None,
             })
             .collect();
@@ -1680,8 +1677,8 @@ where
 /// root namespace through the namespace an `extern namespace` line gives it, as `Illuminate\Foundation\now` for
 /// Laravel's `now()` after `extern namespace Foundation for now;`, which `extern Foundation.now` declares.
 fn function_extern(codebase: &CodebaseMetadata, function: Word) -> ((Word, Word), Option<&ExternMetadata>) {
-    let name = codebase.get_function(function.as_bytes()).map_or(function, |metadata| metadata.original_name);
-    let cause = match codebase.extern_namespace_of(name.as_bytes()) {
+    let name = codebase.get_function(function).map_or(function, |metadata| metadata.original_name);
+    let cause = match codebase.extern_namespace_of(name) {
         Some(namespace) if !name.as_bytes().contains(&b'\\') => {
             word([namespace.as_bytes(), b"\\", name.as_bytes()].concat())
         }
@@ -1703,10 +1700,10 @@ fn plain_php_effects(declaration: Option<&ExternMetadata>, cause: (Word, Word)) 
 /// The `foreign` class an object of `class` is, spec section 29: `class` itself or a parent marked `foreign`, by its
 /// original name. Code that reaches such an object has that class's effect, whatever its members do.
 fn foreign_class(codebase: &CodebaseMetadata, class: Word) -> Option<Word> {
-    let metadata = codebase.get_class_like(class.as_bytes())?;
+    let metadata = codebase.get_class_like(class)?;
 
     std::iter::once(metadata)
-        .chain(metadata.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(parent.as_bytes())))
+        .chain(metadata.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(*parent)))
         .find(|metadata| metadata.flags.is_foreign())
         .map(|metadata| metadata.original_name)
 }
@@ -1753,8 +1750,8 @@ fn declared_effects(codebase: &CodebaseMetadata, value_type: &TUnion) -> Vec<Wor
         }
 
         for effect in signature.effects.iter().flatten() {
-            let key = codebase.class_key(effect.as_bytes());
-            if !effects.iter().any(|known| codebase.class_key(known.as_bytes()) == key) {
+            let key = codebase.class_key(*effect);
+            if !effects.iter().any(|known| codebase.class_key(*known) == key) {
                 effects.push(*effect);
             }
         }

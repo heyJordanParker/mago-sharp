@@ -18,6 +18,7 @@ use mago_span::Span;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Struct;
+use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -57,7 +58,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Struct<'arena> {
 
         context
             .codebase
-            .get_class_like(name)
+            .get_class_like(word(name))
             .map_or(Ok(()), |class_like_metadata| analyze_struct(self, class_like_metadata, context, artifacts))
     }
 }
@@ -76,7 +77,7 @@ where
     // A class-like declared first in the file under the struct's name keeps it.
     if class_like_metadata.span != r#struct.span() {
         let name = context.resolved_names.get(&r#struct.name);
-        report_duplicate_definition(context, "Struct", "struct", name, r#struct.span(), class_like_metadata.span);
+        report_duplicate_definition(context, "Struct", "struct", word(name), r#struct.span(), class_like_metadata.span);
         return Ok(());
     }
 
@@ -115,7 +116,7 @@ where
     let mut inherits = false;
     // `Iterable<T>` names no class, spec section 12, so a struct's header may hold it.
     for type_name in r#struct.inheritance.iter().flat_map(Inheritance::names) {
-        let Some(named) = context.codebase.get_class_like(context.resolved_names.get(&type_name)) else {
+        let Some(named) = context.codebase.get_class_like(word(context.resolved_names.get(&type_name))) else {
             continue;
         };
 
@@ -140,7 +141,7 @@ where
         );
     }
 
-    if context.codebase.parses(class_like_metadata.name.as_bytes()) {
+    if context.codebase.parses(class_like_metadata.name) {
         report_keys_read_twice(context, class_like_metadata, r#struct.name.span);
     }
 
@@ -157,7 +158,7 @@ pub(crate) fn report_keys_read_twice<A>(
 ) where
     A: Arena,
 {
-    let fields = context.codebase.struct_parse_fields(class_like_metadata.name.as_bytes());
+    let fields = context.codebase.struct_parse_fields(class_like_metadata.name);
     let reader = |field: &ParsedField<'_>| {
         let kind = if field.is_parameter { "the main constructor parameter" } else { "the property" };
 
@@ -269,7 +270,7 @@ fn check_variant<A>(
     let Some(key) = family.tag_key() else {
         unreachable!("a family is the class-like its `[Tag]` gives a key");
     };
-    if let Some(field) = codebase.struct_parse_fields(variant.name.as_bytes()).iter().find(|field| field.key == key) {
+    if let Some(field) = codebase.struct_parse_fields(variant.name).iter().find(|field| field.key == key) {
         let kind = if field.is_parameter { "the main constructor parameter" } else { "the property" };
         context.collector.report_with_code(
             IssueCode::InvalidStruct,
@@ -324,7 +325,7 @@ pub(crate) fn check_struct_parse<A>(
     let method = if throws { "parse" } else { "tryParse" };
     let class = display_class_like_name(context, r#struct.original_name);
     for (parsed, type_arguments) in parsed_classes(context.codebase, r#struct, type_arguments) {
-        for field in context.codebase.struct_parse_fields(parsed.name.as_bytes()) {
+        for field in context.codebase.struct_parse_fields(parsed.name) {
             let Some((unreadable, why)) = unreadable_field(
                 context.codebase,
                 parsed,
@@ -383,8 +384,8 @@ where
     }
     let parsing = parsed
         .get_single_named_object()
-        .and_then(|named| Some((named, codebase.get_class_like(named.name.as_bytes())?)))
-        .filter(|(_, class)| codebase.parses(class.name.as_bytes()));
+        .and_then(|named| Some((named, codebase.get_class_like(named.name)?)))
+        .filter(|(_, class)| codebase.parses(class.name));
     if let Some((named, class)) = parsing {
         check_struct_parse(context, class, named.type_parameters.as_deref().unwrap_or_default(), true, span);
 
@@ -412,11 +413,11 @@ where
 /// property and, with the `hash()` it then declares, keys a `Map` and joins a `Set`.
 pub(crate) fn declares_equality(codebase: &CodebaseMetadata, name: Word) -> bool {
     // The `op_Equality` the codex writes for a struct that declares none spans the whole struct.
-    let Some(r#struct) = codebase.get_class_like(name.as_bytes()) else {
+    let Some(r#struct) = codebase.get_class_like(name) else {
         unreachable!("each caller names a struct or a class the codebase declares, as `is_key_type` requires");
     };
 
-    codebase.get_method(name.as_bytes(), b"op_Equality").is_some_and(|equality| equality.span != r#struct.span)
+    codebase.get_method(name, word("op_Equality")).is_some_and(|equality| equality.span != r#struct.span)
 }
 
 /// The properties a value of `class` compares by with `==`, and is hashed by as a `Map` key or a `Set` element, when
@@ -453,7 +454,7 @@ pub(crate) fn data_cases<'codebase>(
         .permitted_inheritors
         .iter()
         .flatten()
-        .filter_map(|case| codebase.get_class_like(case.as_bytes()))
+        .filter_map(|case| codebase.get_class_like(*case))
         .filter(|case| case.flags.is_enum_case_class() && case.direct_parent_class == Some(class.name))
         .collect();
     cases.sort_by_key(|case| case.span.start.offset);
@@ -481,14 +482,16 @@ where
     let mut reported = false;
     for atomic in key_type.types.iter().filter(|atomic| matches!(atomic, TAtomic::Object(TObject::Named(_)))) {
         let value = TUnion::from_atomic(atomic.clone());
-        if let Some(DeclaredOperator::Tied(tied)) = get_operator_method(codebase, b"op_Equality", &[&value, &value]) {
+        if let Some(DeclaredOperator::Tied(tied)) =
+            get_operator_method(codebase, word("op_Equality"), &[&value, &value])
+        {
             report_tied_operator(context, &BinaryOperator::Equal(span), &[&value, &value], &tied, span);
             reported = true;
         }
     }
     let structs = key_type.types.iter().filter_map(|atomic| match atomic {
         TAtomic::Object(TObject::Named(object)) if !declares_equality(codebase, object.name) => codebase
-            .get_class_like(object.name.as_bytes())
+            .get_class_like(object.name)
             .filter(|class_like| value_properties(codebase, class_like).is_some())
             .map(|class_like| (class_like, TUnion::from_atomic(atomic.clone()))),
         _ => None,
@@ -539,20 +542,20 @@ fn unreadable_part(
 ) -> Option<(TAtomic, &'static str)> {
     r#type.types.iter().find_map(|atomic| match atomic {
         TAtomic::Object(TObject::Enum(r#enum)) => codebase
-            .get_class_like(r#enum.name.as_bytes())
+            .get_class_like(r#enum.name)
             .filter(|r#enum| r#enum.enum_type.is_none())
             .map(|_| (atomic.clone(), "has no backing value")),
         TAtomic::Callable(_) => Some((atomic.clone(), "is a function")),
         TAtomic::Object(TObject::Named(object))
             if visiting.contains(&object.name)
-                || codebase.is_text_value(object.name.as_bytes())
-                || codebase.parses_any_value(object.name.as_bytes()) =>
+                || codebase.is_text_value(object.name)
+                || codebase.parses_any_value(object.name) =>
         {
             None
         }
-        TAtomic::Object(TObject::Named(object)) if !codebase.parses(object.name.as_bytes()) => {
+        TAtomic::Object(TObject::Named(object)) if !codebase.parses(object.name) => {
             // A type that names no class is reported where it is written.
-            let class = codebase.get_class_like(object.name.as_bytes())?;
+            let class = codebase.get_class_like(object.name)?;
             let why = if class.kind.is_interface() {
                 "is an interface"
             } else if class.flags.is_abstract() {
@@ -566,13 +569,13 @@ fn unreadable_part(
             Some((atomic.clone(), why))
         }
         TAtomic::Object(TObject::Named(object)) => {
-            let class = codebase.get_class_like(object.name.as_bytes())?;
+            let class = codebase.get_class_like(object.name)?;
             let type_arguments = object.get_type_parameters().unwrap_or_default();
             visiting.push(object.name);
             let found = parsed_classes(codebase, class, type_arguments).into_iter().find_map(|(parsed, arguments)| {
                 visiting.push(parsed.name);
                 let found = codebase
-                    .struct_parse_fields(parsed.name.as_bytes())
+                    .struct_parse_fields(parsed.name)
                     .iter()
                     .find_map(|field| unreadable_field(codebase, parsed, arguments, field, visiting));
                 visiting.pop();

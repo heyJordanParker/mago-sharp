@@ -4,6 +4,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::union::TUnion;
+use mago_word::word;
 
 use crate::plugin::context::InvocationInfo;
 use crate::plugin::context::ProviderContext;
@@ -46,7 +47,7 @@ impl MethodReturnTypeProvider for ContainerGetProvider {
         _method_name: &[u8],
         invocation: &InvocationInfo<'_, '_, '_>,
     ) -> Option<TUnion> {
-        if !context.is_instance_of(class_name, b"Psr\\Container\\ContainerInterface") {
+        if !context.is_instance_of(word(class_name), word(b"Psr\\Container\\ContainerInterface")) {
             return None;
         }
 

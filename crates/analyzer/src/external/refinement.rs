@@ -307,14 +307,14 @@ fn apply_class_like(
 ) -> Result<(), ExternalAnalyzerError> {
     // A refinement runs on its file's codebase before population, so the file keys its own class-like, and the names
     // of the class-like's header stay as written until the populator keys them, as the ancestors here do.
-    let class_name = codebase.class_key(class_name.as_bytes());
+    let class_name = codebase.class_key(class_name);
     let Some(class) = codebase.class_likes.get_mut(&class_name) else {
         return Err(protocol(format!(
             "a declaration refinement names class `{class_name}`, which its file does not declare"
         )));
     };
     let methods: Vec<_> =
-        methods.into_iter().map(|(method, signature)| (class.method_key(method.as_bytes()), signature)).collect();
+        methods.into_iter().map(|(method, signature)| (class.method_key(method), signature)).collect();
 
     class.issues.extend(issues);
     let sharp = class.flags.is_sharp();

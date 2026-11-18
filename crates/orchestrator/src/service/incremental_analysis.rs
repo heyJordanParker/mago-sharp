@@ -1023,7 +1023,7 @@ impl IncrementalAnalysisService {
         // rounds of an analysis from scratch.
         if let Some(autoloader) = &self.autoloader {
             for name in reached.iter().flatten() {
-                if !self.codebase.class_like_exists(name.as_bytes())
+                if !self.codebase.class_like_exists(*name)
                     && autoloader.load(name.as_bytes())?.is_some_and(|file| self.database.get(&file.id).is_err())
                 {
                     return self.analyze();
@@ -1105,7 +1105,7 @@ impl IncrementalAnalysisService {
                     for member in &mut node.children {
                         if member.is_function
                             && declared
-                                .get_method(node.name.as_bytes(), member.name.as_bytes())
+                                .get_method(node.name, member.name)
                                 .is_some_and(|method| method.return_from_body.is_some())
                         {
                             member.signature_hash = member.hash;
@@ -2340,7 +2340,7 @@ fn names_a_refused_bound_type(codebase: &CodebaseMetadata, declared: &WordSet) -
                 matches!(
                     node,
                     TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. }))
-                        if declared.contains(&codebase.class_key(name.as_bytes()))
+                        if declared.contains(&codebase.class_key(*name))
                 )
             })
         })
@@ -2376,7 +2376,7 @@ fn autoload(
             .iter()
             .flatten()
             .filter(|name| {
-                !declared.contains(declared.class_key(name.as_bytes()))
+                !declared.contains(declared.class_key(**name))
                     && tried.insert(mago_word::ascii_lowercase_word(name.as_bytes()))
             })
             .copied()
@@ -2556,14 +2556,14 @@ fn code_reads(file_states: &HashMap<FileId, FileState>, before_analysis: &Extens
 /// only population knows, as a plain class with exact names keys `syncedId`, spec section 24, and any other member's by
 /// its name. A signature names a method as declared, so the key of each change and each reference meets.
 fn member_key(codebase: &CodebaseMetadata, class: Word, member: &DefSignatureNode) -> Word {
-    if member.is_function { codebase.method_key(class, member.name.as_bytes()) } else { member.name }
+    if member.is_function { codebase.method_key(class, member.name) } else { member.name }
 }
 
 /// Whether `codebase` keeps a built-in under the name of `node`, a top-level signature node, so the node is a library's
 /// polyfill of a name the engine builds in, as `if (!function_exists('str_starts_with'))` declares. The built-in keeps
 /// the name (`should_replace_metadata`), so the node declares nothing any code reads.
 fn is_kept_built_in(codebase: &CodebaseMetadata, node: &DefSignatureNode) -> bool {
-    let name = node.name.as_bytes();
+    let name = node.name;
     if node.is_function {
         codebase.get_function(name).is_some_and(|function| function.flags.is_built_in())
     } else {
@@ -4294,7 +4294,8 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let bounds = |service: &IncrementalAnalysisService| {
-            let held = service.codebase.get_method(b"App\\Bounded", b"held").expect("Bounded.held is declared");
+            let held =
+                service.codebase.get_method(word(b"App\\Bounded"), word("held")).expect("Bounded.held is declared");
             let template = |name: &str| &held.template_types[&mago_word::word(name)];
 
             (
@@ -4385,7 +4386,7 @@ mod tests {
 
         let defaults = service
             .codebase
-            .get_class_like(mago_codex::defaults_trait_name(b"App\\Shelved").as_bytes())
+            .get_class_like(mago_codex::defaults_trait_name(b"App\\Shelved"))
             .expect("Shelved's default bodies are a trait");
         let bound = &defaults.template_types[&mago_word::word("T")];
         assert!(

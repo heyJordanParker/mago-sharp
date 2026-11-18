@@ -157,7 +157,7 @@ pub fn populate_class_like_metadata_iterative(
     for attribute_metadata in &metadata.attributes {
         symbol_references.add_attribute_reference(
             ReferenceOrigin::Symbol((metadata.name, empty_word())),
-            (codebase.class_key(attribute_metadata.name.as_bytes()), empty_word()),
+            (codebase.class_key(attribute_metadata.name), empty_word()),
             true,
         );
     }
@@ -312,7 +312,7 @@ pub fn populate_class_like_metadata_iterative(
     }
 
     if (metadata.kind.is_class() || metadata.kind.is_enum())
-        && metadata.appearing_method_ids.contains_key(&metadata.method_key(b"__toString"))
+        && metadata.appearing_method_ids.contains_key(&metadata.method_key(word("__toString")))
         && !metadata.all_parent_interfaces.contains(&word(b"stringable"))
     {
         metadata.add_direct_parent_interface(word(b"stringable"));
@@ -369,7 +369,7 @@ fn inherit_exact_names(metadata: &mut ClassLikeMetadata, codebase: &mut Codebase
 /// inherits the parent's pair, as it inherits any static method, and has no `tryParse` where the parent has none. The
 /// scanner's pair stays in the class's methods, so each population decides again.
 fn inherit_declared_parse(metadata: &mut ClassLikeMetadata, codebase: &CodebaseMetadata, parent_classname: Word) {
-    let names: [&[u8]; 2] = [b"parse", b"tryParse"];
+    let names = [word("parse"), word("tryParse")];
     let generated = |id: &MethodIdentifier| {
         codebase
             .function_likes
@@ -382,7 +382,7 @@ fn inherit_declared_parse(metadata: &mut ClassLikeMetadata, codebase: &CodebaseM
     };
     let parent_declares = names
         .iter()
-        .any(|name| parent.declaring_method_ids.get(&parent.method_key(name)).is_some_and(|id| !generated(id)));
+        .any(|name| parent.declaring_method_ids.get(&parent.method_key(*name)).is_some_and(|id| !generated(id)));
     // The class being populated is out of the codebase until it is done.
     let own_generated = codebase
         .function_likes
@@ -627,7 +627,7 @@ pub fn populate_class_like_types(
         for attribute_metadata in &constant.attributes {
             symbol_references.add_attribute_reference(
                 ReferenceOrigin::Symbol((name, *constant_name)),
-                (codebase_symbols.class_key(attribute_metadata.name.as_bytes()), empty_word()),
+                (codebase_symbols.class_key(attribute_metadata.name), empty_word()),
                 true,
             );
         }
@@ -659,7 +659,7 @@ pub fn populate_class_like_types(
         for attribute_metadata in &enum_case.attributes {
             symbol_references.add_attribute_reference(
                 ReferenceOrigin::Symbol((name, *enum_case_name)),
-                (codebase_symbols.class_key(attribute_metadata.name.as_bytes()), empty_word()),
+                (codebase_symbols.class_key(attribute_metadata.name), empty_word()),
                 true,
             );
         }

@@ -80,7 +80,7 @@ where
         let TAtomic::Object(object) = atomic else {
             return None;
         };
-        let class = context.codebase.get_class_like(object.get_name()?.as_bytes())?;
+        let class = context.codebase.get_class_like(object.get_name()?)?;
         let kind = if class.kind.is_enum() {
             "an enum"
         } else if is_event_class(context.codebase, class) {
@@ -183,8 +183,8 @@ where
         let TAtomic::Object(TObject::Named(object)) = atomic else {
             return None;
         };
-        let class = context.codebase.get_class_like(object.name.as_bytes())?;
-        let property = context.codebase.get_declaring_property(class.name.as_bytes(), property_name.as_bytes())?;
+        let class = context.codebase.get_class_like(object.name)?;
+        let property = context.codebase.get_declaring_property(class.name, property_name)?;
 
         (!is_set_by_with(property)).then(|| class.flags.is_sharp())
     })

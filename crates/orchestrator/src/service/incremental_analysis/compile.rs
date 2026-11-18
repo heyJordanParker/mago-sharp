@@ -273,10 +273,7 @@ impl IncrementalAnalysisService {
                     .effects
                     .iter()
                     .map(|effect| {
-                        let name = self
-                            .codebase
-                            .get_class_like(effect.as_bytes())
-                            .map_or(*effect, |class| class.original_name);
+                        let name = self.codebase.get_class_like(*effect).map_or(*effect, |class| class.original_name);
 
                         name.as_str_lossy().trim_start_matches('\\').replace('\\', ".")
                     })
@@ -311,7 +308,7 @@ impl IncrementalAnalysisService {
                             Some(_) => type_text(listed, &self.codebase),
                             None => self
                                 .codebase
-                                .get_class_like(named.name.as_bytes())
+                                .get_class_like(named.name)
                                 .map_or(named.name, |event| event.original_name)
                                 .to_string(),
                         })
@@ -785,7 +782,7 @@ impl IncrementalAnalysisService {
             })
         };
         let names_sharp_type =
-            |name: &Word| self.codebase.get_class_like(name.as_bytes()).is_some_and(|class| class.flags.is_sharp());
+            |name: &Word| self.codebase.get_class_like(*name).is_some_and(|class| class.flags.is_sharp());
         let declarations: HashSet<_> = self
             .codebase
             .class_likes
@@ -822,7 +819,6 @@ impl IncrementalAnalysisService {
         // A declaration several files hold, as two polyfill files each declare one function, is read as the one the
         // codebase keeps, else as the one in the first file by id, so every compile fingerprints the same one.
         let kept = |name: Word, is_function: bool| {
-            let name = name.as_bytes();
             let span = if is_function {
                 self.codebase.get_function(name).map(|function| function.span)
             } else {
@@ -854,7 +850,7 @@ impl IncrementalAnalysisService {
 
         let declared = |target: SymbolIdentifier| -> Option<(SymbolIdentifier, FileId, u64)> {
             let find = |class: mago_word::Word| {
-                [(class, target.1), (self.codebase.class_key(class.as_bytes()), target.1)]
+                [(class, target.1), (self.codebase.class_key(class), target.1)]
                     .into_iter()
                     .find_map(|member| declarations.get(&member).map(|(file_id, hash)| (member, *file_id, *hash)))
             };
@@ -864,7 +860,7 @@ impl IncrementalAnalysisService {
 
             let mut class = Some(target.0);
             while let Some(name) = class {
-                let metadata = self.codebase.get_class_like(name.as_bytes())?;
+                let metadata = self.codebase.get_class_like(name)?;
                 if let Some(found) = find(name).or_else(|| metadata.used_traits.iter().find_map(|t| find(*t))) {
                     return Some(found);
                 }
@@ -965,7 +961,7 @@ impl IncrementalAnalysisService {
         }
 
         let read = dependencies.files.get(&mago_word::word(file.name.as_ref())).into_iter().flatten();
-        let read = read.filter_map(|(class, _)| self.codebase.get_class_like(class.as_bytes()));
+        let read = read.filter_map(|(class, _)| self.codebase.get_class_like(*class));
         let tested = modules.iter().filter(|module| module.kind == ModuleKind::Test).flat_map(|module| {
             self.codebase.class_likes.values().map(|class| &**class).filter(|class| {
                 let name = class.name.as_bytes();
@@ -998,14 +994,14 @@ impl IncrementalAnalysisService {
     /// `name` and, when it names a class-like, every class, interface and trait it inherits from, since an extension
     /// that read a class-like read its inherited members too.
     fn with_ancestors(&self, name: Word) -> Vec<Word> {
-        let Some(class_like) = self.codebase.get_class_like(name.as_bytes()) else {
+        let Some(class_like) = self.codebase.get_class_like(name) else {
             return vec![name];
         };
 
         let classes = std::iter::once(class_like.name).chain(class_like.all_parent_classes.iter().copied());
         let traits = classes
             .clone()
-            .filter_map(|class| self.codebase.get_class_like(class.as_bytes()))
+            .filter_map(|class| self.codebase.get_class_like(class))
             .flat_map(|class| class.used_traits.iter().copied());
 
         classes.chain(class_like.all_parent_interfaces.iter().copied()).chain(traits).collect()
@@ -1175,7 +1171,7 @@ impl IncrementalAnalysisService {
                 let mut reaches_extension = false;
                 result.symbol_references.for_each_reference(|_, (class, member), _| {
                     reaches_extension |= !member.is_empty()
-                        && self.codebase.get_method(class.as_bytes(), member.as_bytes()).is_some_and(|method| {
+                        && self.codebase.get_method(class, member).is_some_and(|method| {
                             (method.flags.is_extension_method() || method.flags.is_extension_property())
                                 && !is_collection_member(class, method)
                         });
@@ -1341,7 +1337,7 @@ impl<'service> Dependencies<'service> {
         // lists the file that declares it and, along the chain of aliases, each file that declares the next name.
         for (alias, target, span) in service.codebase.class_like_alias_declarations() {
             let alias = (alias, empty_word());
-            let target = service.codebase.class_key(target.as_bytes());
+            let target = service.codebase.class_key(target);
             dependencies.signature.entry(alias).or_default().push((target, empty_word()));
             if service.database.get(&span.file_id).is_ok_and(|file| is_source(&file)) {
                 dependencies.declared_in.entry(alias).or_default().push(span.file_id);
@@ -1381,11 +1377,7 @@ impl<'service> Dependencies<'service> {
         }
         // A read names a class-like as the extension wrote it, which the codebase keys, spec section 24.
         for &(class, member) in &self.code_reads.symbols {
-            self.signature_changes(
-                (self.service.codebase.class_key(class.as_bytes()), member),
-                &mut changes,
-                &mut visited,
-            );
+            self.signature_changes((self.service.codebase.class_key(class), member), &mut changes, &mut visited);
         }
 
         changes
@@ -2265,7 +2257,8 @@ mod tests {
                 polyfills.iter().map(|(name, code)| (name.as_str(), code.as_str())).collect();
             files.push((TEXT_PATH, text.as_str()));
             let mut service = analyzed(&project(&files));
-            let kept = service.codebase.get_function(b"shout").expect("the codebase keeps one `shout`").span.file_id;
+            let kept =
+                service.codebase.get_function(word("shout")).expect("the codebase keeps one `shout`").span.file_id;
 
             (kept, compiled_key(accepted(&compile(&mut service, empty_stamp), TEXT_PATH)))
         };

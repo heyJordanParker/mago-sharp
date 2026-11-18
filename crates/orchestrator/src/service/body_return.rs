@@ -154,6 +154,6 @@ fn is_applied_declaration(codebase: &CodebaseMetadata, key: (Word, Word), return
         return false;
     };
 
-    codebase.is_instance_of(applied.name.as_bytes(), native.name.as_bytes())
+    codebase.is_instance_of(applied.name, native.name)
         && arguments.iter().all(|argument| !argument.is_mixed() && !argument.has_template_types())
 }

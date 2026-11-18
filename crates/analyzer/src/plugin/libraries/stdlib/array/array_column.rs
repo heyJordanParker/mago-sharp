@@ -87,7 +87,7 @@ fn try_resolve_from_named_object(
     codebase: &CodebaseMetadata,
 ) -> Option<TUnion> {
     let obj = element_type.get_single_named_object()?;
-    let class_like = codebase.get_class_like(obj.name.as_bytes())?;
+    let class_like = codebase.get_class_like(obj.name)?;
 
     let column_type = if column_key_type.is_null() {
         TUnion::from_atomic(TAtomic::Object(TObject::Named(obj.clone())))

@@ -6,6 +6,7 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Function;
+use mago_word::Word;
 use mago_word::empty_word;
 use mago_word::word;
 
@@ -30,7 +31,7 @@ use crate::utils::missing_type_hints;
 /// which never runs beside it, as its existence check guards it.
 fn report_duplicate_function_definition<A>(
     context: &mut Context<'_, '_, A>,
-    name: &[u8],
+    name: Word,
     duplicate_span: Span,
     original_span: Span,
 ) where
@@ -40,7 +41,7 @@ fn report_duplicate_function_definition<A>(
         return;
     }
 
-    let name = mago_bytes::BytesDisplay(name);
+    let name = mago_bytes::BytesDisplay(name.as_bytes());
     context.collector.report_with_code(
         IssueCode::DuplicateDefinition,
         Issue::error(format!("Function `{name}` is already defined {}.", defined_in(context, original_span)))
@@ -78,7 +79,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Function<'arena> {
             return Ok(());
         }
 
-        let Some(function_metadata) = context.codebase.get_function(function_name.as_bytes()) else {
+        let Some(function_metadata) = context.codebase.get_function(function_name) else {
             return Err(AnalysisError::InternalError(
                 format!("Function metadata for `{function_name}` not found."),
                 self.span(),
@@ -86,7 +87,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Function<'arena> {
         };
 
         if function_metadata.span != self.span() {
-            report_duplicate_function_definition(context, function_name.as_ref(), self.span(), function_metadata.span);
+            report_duplicate_function_definition(
+                context,
+                word(function_name.as_ref()),
+                self.span(),
+                function_metadata.span,
+            );
 
             return Ok(());
         }

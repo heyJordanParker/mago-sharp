@@ -126,7 +126,7 @@ where
     }
 
     let root_is_array_access_object =
-        root_array_type.types.iter().all(|atomic| atomic.extends_or_implements(context.codebase, b"ArrayAccess"));
+        root_array_type.types.iter().all(|atomic| atomic.extends_or_implements(context.codebase, word("ArrayAccess")));
 
     let mut current_type = root_array_type.clone();
 

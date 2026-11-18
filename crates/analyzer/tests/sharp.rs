@@ -27570,9 +27570,8 @@ fn an_extern_namespace_line_gives_its_namespace_to_the_root_names_of_its_folder(
         ),
         ("app/Stubs/Blog.sharp", "namespace App.Stubs;\n\nextern namespace Blog for Blog_Post;\n"),
     ]);
-    let of = |name: &str| {
-        codebase.extern_namespace_of(name.as_bytes()).map(|namespace| namespace.as_str_lossy().into_owned())
-    };
+    let of =
+        |name: &str| codebase.extern_namespace_of(word(name)).map(|namespace| namespace.as_str_lossy().into_owned());
 
     assert_eq!(
         ["blog_title", "BLOG_VERSION", "Blog_Post", "Blog_Screen", "blog_admin", "strlen"].map(of),
@@ -31631,7 +31630,7 @@ fn the_files_a_call_reaches_are_its_methods_its_overrides_and_its_accessors() {
     );
     let (codebase, summaries) = summarized(&[base, sale, stock, opened, till, CLOCK_STUB, NOW]);
     let effects = Effects::solve(&codebase, &summaries);
-    let file = |class: &[u8]| codebase.get_class_like(class).expect("the class is declared").span.file_id;
+    let file = |class: &[u8]| codebase.get_class_like(word(class)).expect("the class is declared").span.file_id;
     let method = |name: &[u8]| FunctionLikeIdentifier::Method(word(b"App\\Shop\\Till"), word(name));
 
     let callee_files = effects.callee_files(&codebase);

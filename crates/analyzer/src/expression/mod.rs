@@ -488,7 +488,7 @@ where
         let reads_type_arguments = match hint {
             Hint::Identifier(name) => {
                 context.resolved_names.is_type_parameter(name)
-                    || context.codebase.get_trait(context.resolved_names.get(name)).is_some()
+                    || context.codebase.get_trait(word(context.resolved_names.get(name))).is_some()
             }
             Hint::Generic(_)
             | Hint::Mixed(_)
@@ -952,7 +952,7 @@ fn report_listed_default<'ctx, 'arena, A>(
         enum_value(atomic, codebase)
             .map(|(name, _)| name)
             .or_else(|| closed_class(atomic, codebase).map(|class| class.name))
-            .and_then(|name| codebase.get_class_like(name.as_bytes()))
+            .and_then(|name| codebase.get_class_like(name))
             .is_some_and(|class| class.flags.is_sharp() && class.flags.is_user_defined())
     };
     if cases.peek().is_none() || !cases.all(is_project_set) {
@@ -1100,7 +1100,7 @@ where
     }
     let mut named = Vec::new();
     for name in enums {
-        let Some(metadata) = context.codebase.get_enum(name.as_bytes()) else {
+        let Some(metadata) = context.codebase.get_enum(name) else {
             continue;
         };
         let mut declared: Vec<_> = metadata.enum_cases.values().collect();
@@ -1134,14 +1134,13 @@ where
         // A member of the set inherits the set's `permitted_inheritors` from its parent, so only a class outside its
         // own set, the enum or the sealed interface, stands for the whole set.
         let members: Vec<&ClassLikeMetadata> = match &class.permitted_inheritors {
-            Some(inheritors) if !inheritors.contains(&class.name) => inheritors
-                .iter()
-                .filter_map(|inheritor| context.codebase.get_class_like(inheritor.as_bytes()))
-                .collect(),
+            Some(inheritors) if !inheritors.contains(&class.name) => {
+                inheritors.iter().filter_map(|inheritor| context.codebase.get_class_like(*inheritor)).collect()
+            }
             _ => vec![class],
         };
         for member in members {
-            let is_tested = tested.iter().any(|tested| context.codebase.class_key(tested) == member.name);
+            let is_tested = tested.iter().any(|tested| context.codebase.class_key(word(tested)) == member.name);
             if !is_tested && !left_classes.iter().any(|known| known.name == member.name) {
                 left_classes.push(member);
             }
@@ -1237,7 +1236,7 @@ where
     let tested = artifacts.get_expression_type(pattern_match.expression).cloned().unwrap_or_else(get_mixed);
     let mut arms: Vec<(Word, Vec<TUnion>, Vec<Option<TUnion>>)> = Vec::new();
     for (hint, fields) in unpacking {
-        let case = context.resolved_names.resolve(hint).and_then(|name| context.codebase.get_class_like(name));
+        let case = context.resolved_names.resolve(hint).and_then(|name| context.codebase.get_class_like(word(name)));
         let (Some(case), Some(declared)) = (case, case_field_types(context, hint, &tested)) else {
             unreachable!("a case pattern with PHP names a case's class, which has a constructor")
         };
@@ -1319,17 +1318,17 @@ where
             // A plain case of an enum with data, `Option.None`, whose class the binder resolves at the case's name.
             if let Some(name) = context.resolved_names.resolve(&case.span)
                 && let Some(class) =
-                    context.codebase.get_class_like(name).filter(|class| class.flags.is_enum_case_class())
+                    context.codebase.get_class_like(word(name)).filter(|class| class.flags.is_enum_case_class())
             {
                 return Some(
-                    case_type(context, name, tested)
+                    case_type(context, word(name), tested)
                         .map_or_else(|| get_named_object(class.original_name, None), |(case_type, _)| case_type),
                 );
             }
 
             // A case of an enum without data, `Status.Open`.
             let class = context.resolved_names.static_property_class(access)?;
-            let r#enum = context.codebase.get_enum(context.resolved_names.get(&class.name))?;
+            let r#enum = context.codebase.get_enum(word(context.resolved_names.get(&class.name)))?;
             let case = r#enum.enum_cases.values().find(|declared| declared.name.as_bytes() == case.value)?;
 
             Some(TUnion::from_atomic(TAtomic::Object(TObject::Enum(TEnum::new_case(r#enum.name, case.name)))))
@@ -1358,7 +1357,7 @@ fn holds_every_value(codebase: &CodebaseMetadata, held: &TUnion, declared: &TUni
             let TAtomic::Object(TObject::Named(object)) = atomic else {
                 return vec![atomic.clone()];
             };
-            let cases = codebase.get_class_like(object.name.as_bytes()).map(|class| data_cases(codebase, class));
+            let cases = codebase.get_class_like(object.name).map(|class| data_cases(codebase, class));
             let parameters = object.get_type_parameters().map(<[_]>::to_vec);
             match cases {
                 Some(cases) if !cases.is_empty() => cases
@@ -1703,7 +1702,7 @@ fn enum_cases(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Option<Vec<TAtom
     let (name, None) = enum_value(atomic, codebase)? else {
         return None;
     };
-    let mut cases: Vec<_> = codebase.get_enum(name.as_bytes())?.enum_cases.values().collect();
+    let mut cases: Vec<_> = codebase.get_enum(name)?.enum_cases.values().collect();
     cases.sort_by_key(|case| case.span.start.offset);
 
     (!cases.is_empty()).then(|| {
@@ -1721,7 +1720,7 @@ fn closed_members(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Option<Vec<T
     };
     let parameters = object.get_type_parameters().map(<[_]>::to_vec);
     let mut members: Vec<&ClassLikeMetadata> =
-        inheritors.iter().filter_map(|inheritor| codebase.get_class_like(inheritor.as_bytes())).collect();
+        inheritors.iter().filter_map(|inheritor| codebase.get_class_like(*inheritor)).collect();
     members.sort_by_key(|member| (member.span.file_id, member.span.start.offset));
 
     Some(
@@ -1820,11 +1819,11 @@ where
     let class = match r#type.get_single() {
         TAtomic::Null => return "`null`".to_owned(),
         TAtomic::Object(TObject::Enum(TEnum { name, case: Some(case) })) => {
-            let r#enum = context.codebase.get_enum(name.as_bytes()).map_or(*name, |r#enum| r#enum.original_name);
+            let r#enum = context.codebase.get_enum(*name).map_or(*name, |r#enum| r#enum.original_name);
 
             return format!("`{}`", display_code_member(context, r#enum, case));
         }
-        TAtomic::Object(TObject::Named(object)) => context.codebase.get_class_like(object.name.as_bytes()),
+        TAtomic::Object(TObject::Named(object)) => context.codebase.get_class_like(object.name),
         _ => None,
     };
     if let Some(case) = class.and_then(|class| display_enum_case(context, class)) {
@@ -1871,7 +1870,7 @@ fn closed_class<'codebase>(
     let TAtomic::Object(TObject::Named(object)) = atomic else {
         return None;
     };
-    let class = codebase.get_class_like(object.name.as_bytes())?;
+    let class = codebase.get_class_like(object.name)?;
 
     (class.flags.is_enum_case_class() || class.permitted_inheritors.is_some()).then_some(class)
 }
@@ -1881,9 +1880,7 @@ fn closed_class<'codebase>(
 fn enum_value(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Option<(Word, Option<Word>)> {
     match atomic {
         TAtomic::Object(TObject::Enum(TEnum { name, case })) => Some((*name, *case)),
-        TAtomic::Object(TObject::Named(named)) if codebase.get_enum(named.name.as_bytes()).is_some() => {
-            Some((named.name, None))
-        }
+        TAtomic::Object(TObject::Named(named)) if codebase.get_enum(named.name).is_some() => Some((named.name, None)),
         _ => None,
     }
 }
@@ -2254,7 +2251,7 @@ where
             None if context
                 .resolved_names
                 .resolve(&hint)
-                .and_then(|class| context.codebase.get_class_like(class))
+                .and_then(|class| context.codebase.get_class_like(word(class)))
                 .is_some() =>
             {
                 reported = true;
@@ -2388,7 +2385,7 @@ where
     let names_generic_case = hints.iter().any(|hint| {
         matches!(hint, Hint::Identifier(name) if context
             .codebase
-            .get_class_like(context.resolved_names.get(name))
+            .get_class_like(word(context.resolved_names.get(name)))
             .is_some_and(|case| case.flags.is_enum_case_class() && !case.template_types.is_empty()))
     });
     if !names_generic_case {
@@ -2460,19 +2457,18 @@ fn case_hint_type<A>(context: &Context<'_, '_, A>, hint: &Hint<'_>, tested: &TUn
 where
     A: Arena,
 {
-    case_type(context, context.resolved_names.resolve(hint)?, tested)
+    case_type(context, word(context.resolved_names.resolve(hint)?), tested)
 }
 
 /// The type the case `name` of a generic enum is in a value of `tested`, with the type arguments `tested` gives the
 /// enum, and those type arguments. None for any other class, and when `tested` gives the enum no type arguments.
-fn case_type<A>(context: &Context<'_, '_, A>, name: &[u8], tested: &TUnion) -> Option<(TUnion, Vec<TUnion>)>
+fn case_type<A>(context: &Context<'_, '_, A>, name: Word, tested: &TUnion) -> Option<(TUnion, Vec<TUnion>)>
 where
     A: Arena,
 {
     let codebase = context.codebase;
     let case = codebase.get_class_like(name)?;
-    let r#enum =
-        codebase.get_class_like(case.direct_parent_class.filter(|_| case.flags.is_enum_case_class())?.as_bytes())?;
+    let r#enum = codebase.get_class_like(case.direct_parent_class.filter(|_| case.flags.is_enum_case_class())?)?;
     let arguments = tested.types.iter().find_map(|atomic| ancestor_type_arguments(codebase, atomic, r#enum))?;
     let case_type = TNamedObject::new_with_type_parameters(case.original_name, Some(arguments.clone()));
 
@@ -2486,8 +2482,8 @@ fn case_field_types<A>(context: &Context<'_, '_, A>, hint: &Hint<'_>, tested: &T
 where
     A: Arena,
 {
-    let case = context.codebase.get_class_like(context.resolved_names.resolve(hint)?)?;
-    let constructor = context.codebase.get_method(case.name.as_bytes(), b"__construct")?;
+    let case = context.codebase.get_class_like(word(context.resolved_names.resolve(hint)?))?;
+    let constructor = context.codebase.get_method(case.name, word("__construct"))?;
     let arguments = case_hint_type(context, hint, tested).map(|(_, arguments)| arguments);
 
     Some(
@@ -2639,7 +2635,7 @@ const RESULT_ERR: &str = "Sharp\\Result\\Err";
 /// The type arguments `union` gives `Result<T, TError>`, spec section 31, when each of its types is a `Result` or one
 /// of its cases, joined across them.
 pub(crate) fn result_type_arguments(codebase: &CodebaseMetadata, union: &TUnion) -> Option<[TUnion; 2]> {
-    let result = codebase.get_class_like(RESULT.as_bytes())?;
+    let result = codebase.get_class_like(word(RESULT))?;
     let mut joined: Option<[TUnion; 2]> = None;
     for atomic in union.types.iter() {
         let found: [TUnion; 2] = ancestor_type_arguments(codebase, atomic, result)?.try_into().ok()?;
@@ -2666,9 +2662,8 @@ pub(crate) fn ancestor_type_arguments(
     let TAtomic::Object(TObject::Named(object)) = atomic else {
         return None;
     };
-    let class = codebase.get_class_like(object.name.as_bytes())?;
-    let is_generic_object =
-        !ancestor.template_types.is_empty() && codebase.is_instance_of(class.name.as_bytes(), ancestor.name.as_bytes());
+    let class = codebase.get_class_like(object.name)?;
+    let is_generic_object = !ancestor.template_types.is_empty() && codebase.is_instance_of(class.name, ancestor.name);
 
     is_generic_object
         .then(|| {
@@ -2688,10 +2683,10 @@ pub(crate) fn with_type_arguments(
     type_arguments: Option<&[TUnion]>,
     codebase: &CodebaseMetadata,
 ) -> TUnion {
-    let Some((type_arguments, class)) = type_arguments.zip(codebase.get_class_like(name.as_bytes())) else {
+    let Some((type_arguments, class)) = type_arguments.zip(codebase.get_class_like(name)) else {
         return declared.clone();
     };
-    let r#enum = data_enum(codebase, class).and_then(|r#enum| codebase.get_class_like(r#enum.as_bytes()));
+    let r#enum = data_enum(codebase, class).and_then(|r#enum| codebase.get_class_like(r#enum));
     let entities = r#enum
         .into_iter()
         .flat_map(|r#enum| std::iter::once(r#enum.name).chain(r#enum.permitted_inheritors.iter().flatten().copied()));

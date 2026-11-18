@@ -175,16 +175,16 @@ fn leads_back(
     visited: &mut Vec<(Word, Word)>,
 ) -> bool {
     let (class, name) = (current.0.as_bytes(), current.1.as_bytes());
-    let reads = match codebase.get_class_constant(class, name) {
+    let reads = match codebase.get_class_constant(word(class), word(name)) {
         Some(constant) => &constant.read_constants,
-        None => match codebase.get_enum_case(class, name) {
+        None => match codebase.get_enum_case(word(class), word(name)) {
             Some(case) => &case.read_constants,
             None => return false,
         },
     };
 
     for &(class, name) in reads {
-        let read = (codebase.class_key(class.as_bytes()), name);
+        let read = (codebase.class_key(class), name);
         if read == start {
             return true;
         }
@@ -211,7 +211,7 @@ where
     let names: Vec<String> = path
         .iter()
         .map(|(class, name)| {
-            let class = context.codebase.get_class_like(class.as_bytes()).map_or(*class, |class| class.original_name);
+            let class = context.codebase.get_class_like(*class).map_or(*class, |class| class.original_name);
 
             format!("`{}`", display_member(context, class, name))
         })

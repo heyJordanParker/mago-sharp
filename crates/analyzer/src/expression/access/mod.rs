@@ -117,7 +117,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                 if is_self
                     && let Some(constant) = context
                         .codebase
-                        .get_class_like(classes[0].as_bytes())
+                        .get_class_like(classes[0])
                         .and_then(|class| class.constants.get(&word(name.value)))
                     && report_private_self_member(
                         context,
@@ -157,8 +157,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                     name: StaticPropertyName::Identifier(name),
                     ..
                 }) if context.dialect.is_sharp()
-                    && let Some(namespace) =
-                        member_namespace(context.resolved_names, context.codebase, &class_name.name, name.value) =>
+                    && let Some(namespace) = member_namespace(
+                        context.resolved_names,
+                        context.codebase,
+                        &class_name.name,
+                        word(name.value),
+                    ) =>
                 {
                     analyze_namespace_constant(
                         context,
@@ -176,7 +180,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                 // of that name, as `Nope` in `Nope.render`.
                 Some(StaticProperty { class: Expression::ConstantAccess(class_name), .. })
                     if context.dialect.is_sharp()
-                        && !context.codebase.class_like_exists(context.resolved_names.get(&class_name.name)) =>
+                        && !context.codebase.class_like_exists(word(context.resolved_names.get(&class_name.name))) =>
                 {
                     report_unknown_class_read(context, artifacts, access, &class_name.name);
 
@@ -186,9 +190,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                     if let Some(class_name) = context.resolved_names.static_property_class(access)
                         && (block_context.flags.inside_constant_expression()
                             || context.patterns.iter().any(|(_, pattern)| pattern.span().contains(&span.start))
-                            || context
-                                .codebase
-                                .class_constant_exists(context.resolved_names.get(&class_name.name), name.value)) =>
+                            || context.codebase.class_constant_exists(
+                                word(context.resolved_names.get(&class_name.name)),
+                                word(name.value),
+                            )) =>
                 {
                     class_constant_access::analyze_class_constant_access(
                         context,
@@ -204,8 +209,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                     if let Some(class_name) = context.resolved_names.static_property_class(access)
                         && is_static_method_value(
                             context,
-                            context.resolved_names.get(&class_name.name),
-                            name.value,
+                            word(context.resolved_names.get(&class_name.name)),
+                            word(name.value),
                         ) =>
                 {
                     // `Counter<int>.bump` names the type arguments the value runs `bump` with.
@@ -312,7 +317,8 @@ where
     };
 
     let resolved = context.resolved_names.get(root);
-    let reported = !context.codebase.class_like_exists(resolved) && report_full_name_in(context, root, &names, is_call);
+    let reported =
+        !context.codebase.class_like_exists(word(resolved)) && report_full_name_in(context, root, &names, is_call);
     // The semantic checks leave a `new` without arguments a chain reads through to this refusal, as
     // `new Order.of.total`, when it is no full name.
     if let Some(new) = new
@@ -378,21 +384,20 @@ where
     // `written_parts` counts the parts of `full_name` the code writes: one in `Pdf.render` after `import Vendor.Pdf;`.
     for (written_parts, (index, name)) in (1..).zip(names.iter().enumerate().rev()) {
         let member = [full_name.as_slice(), b"\\", name.value].concat();
-        let reached = namespace_member(context.codebase, word(&full_name), name.value);
-        let reaches_function = context.codebase.function_exists(reached.as_bytes());
+        let reached = namespace_member(context.codebase, word(&full_name), word(name.value));
+        let reaches_function = context.codebase.function_exists(reached);
         if written_parts == 1
             && index == 0
             && reaches_function
             && (is_call
                 || context
                     .codebase
-                    .get_class_like(&member)
+                    .get_class_like(word(&member))
                     .is_none_or(|class| short_name(class.original_name).as_bytes() != name.value))
         {
             return false;
         }
-        if written_parts > 1 && index == 0 && (reaches_function || context.codebase.constant_exists(reached.as_bytes()))
-        {
+        if written_parts > 1 && index == 0 && (reaches_function || context.codebase.constant_exists(reached)) {
             // A full name counts as an import, spec section 32.
             if !check_listed_import(context, &member, root.span().join(name.span)) {
                 return true;
@@ -413,7 +418,7 @@ where
         }
 
         full_name = member;
-        if context.codebase.class_like_exists(&full_name) {
+        if context.codebase.class_like_exists(word(&full_name)) {
             return report_full_class_name(context, &full_name, root.span().join(name.span));
         }
     }
@@ -494,17 +499,15 @@ pub(crate) fn report_member_of_mixed_kinds<A>(
         let Some(class) = atomic.get_object_or_enum_name() else {
             return;
         };
-        let declares_property = codebase.get_declaring_property(class.as_bytes(), property.as_bytes()).is_some();
+        let declares_property = codebase.get_declaring_property(class, property).is_some();
         // Spec section 18: a plain PHP class's `__toString()` is its `toString()`.
-        let declares_method = codebase.get_declaring_method(class.as_bytes(), name.value).is_some()
+        let declares_method = codebase.get_declaring_method(class, word(name.value)).is_some()
             || (name.value == b"toString"
-                && codebase
-                    .get_class_like(class.as_bytes())
-                    .is_some_and(|class| plain_text_method(codebase, class).is_some()));
+                && codebase.get_class_like(class).is_some_and(|class| plain_text_method(codebase, class).is_some()));
         let is_method = if is_call {
-            declares_method || (!declares_property && codebase.method_exists(class.as_bytes(), b"__call"))
+            declares_method || (!declares_property && codebase.method_exists(class, word("__call")))
         } else {
-            let has_property = declares_property || codebase.method_exists(class.as_bytes(), b"__get");
+            let has_property = declares_property || codebase.method_exists(class, word("__get"));
             let reads_method = artifacts.get_callees(&read).any(|target| {
                 matches!(target, CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(method_class, _), .. }
                     if *method_class == class)
@@ -645,9 +648,9 @@ where
     let kinds: Vec<(usize, Word)> = classes
         .iter()
         .map(|class| {
-            let kind = if context.codebase.class_constant_exists(class.as_bytes(), name.value) {
+            let kind = if context.codebase.class_constant_exists(*class, word(name.value)) {
                 CONSTANT
-            } else if is_static_method_value(context, class.as_bytes(), name.value) {
+            } else if is_static_method_value(context, *class, word(name.value)) {
                 STATIC_METHOD
             } else {
                 STATIC_PROPERTY
@@ -903,11 +906,11 @@ pub(super) fn explain_unnarrowed_property<A>(
 
 /// Whether PHP# `Class.name` reads the static method `name`: the class has no static property of that name, which the
 /// engine finds first, and its method of that name is static.
-fn is_static_method_value<A>(context: &Context<'_, '_, A>, class: &[u8], name: &[u8]) -> bool
+fn is_static_method_value<A>(context: &Context<'_, '_, A>, class: Word, name: Word) -> bool
 where
     A: Arena,
 {
-    context.codebase.get_declaring_property_class(class, concat_word!("$", name).as_bytes()).is_none()
+    context.codebase.get_declaring_property_class(class, concat_word!("$", name)).is_none()
         && context
             .codebase
             .get_declaring_method(class, name)

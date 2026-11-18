@@ -676,7 +676,7 @@ impl Converter<'_, '_> {
         let (class_name, metadata, class_is_final) = (class.name.clone(), class.metadata, class.is_final);
         let name = method.name.value;
         let shown = String::from_utf8_lossy(name).into_owned();
-        let Some(declared) = self.input.codebase.get_method(metadata.name.as_bytes(), name) else {
+        let Some(declared) = self.input.codebase.get_method(metadata.name, word(name)) else {
             self.refuse(method.name.span, "the analysis holds no method of this name");
             return;
         };
@@ -702,7 +702,7 @@ impl Converter<'_, '_> {
             return;
         }
         // A method that replaces another keeps the name of what it replaces.
-        if !is_constructor && !is_text && !self.input.codebase.method_is_overriding(metadata.name.as_bytes(), name) {
+        if !is_constructor && !is_text && !self.input.codebase.method_is_overriding(metadata.name, word(name)) {
             self.misnamed(name, method.name.span, "method", NameCase::Camel);
         }
         // PHP# reads a name as a property or a method by where it is written, so a class has one member of each name
@@ -785,17 +785,14 @@ impl Converter<'_, '_> {
             let is_final = has(&method.modifiers, |modifier| matches!(modifier, Modifier::Final(_)));
             let overrides = metadata.overridden_method_ids.get(&ascii_lowercase_word(name)).is_some_and(|parents| {
                 parents.keys().any(|parent| {
-                    self.input
-                        .codebase
-                        .get_class_like(parent.as_bytes())
-                        .is_some_and(|parent| !parent.kind.is_interface())
+                    self.input.codebase.get_class_like(*parent).is_some_and(|parent| !parent.kind.is_interface())
                 })
             });
             // An override takes at least what each method it replaces takes (spec section 22). PHP lets it take less,
             // as a typed parameter in place of an untyped one, and a parameter's type here is the one it declares.
             let replaced =
                 metadata.overridden_method_ids.get(&ascii_lowercase_word(name)).into_iter().flat_map(|parents| {
-                    parents.keys().filter_map(|parent| self.input.codebase.get_method(parent.as_bytes(), name))
+                    parents.keys().filter_map(|parent| self.input.codebase.get_method(*parent, word(name)))
                 });
             let type_id = |parameter: Option<&mago_codex::metadata::parameter::FunctionLikeParameterMetadata>| {
                 parameter.map(|parameter| {
@@ -894,7 +891,7 @@ impl Converter<'_, '_> {
         // A method PHP declares no return type for returns `null` where its body runs on past its last statement, as the
         // analysis finds it. A method the analysis didn't check keeps its body, and its proof decides.
         let reaches_end =
-            self.input.artifacts.method_reaches_end_of_body.get(&(metadata.name, metadata.method_key(name)));
+            self.input.artifacts.method_reaches_end_of_body.get(&(metadata.name, metadata.method_key(word(name))));
         let gives_null = method.return_type_hint.is_none()
             && !declared.flags.has_yield()
             && returning.as_ref().is_some_and(|returning| returning.is_mixed() || returning.has_null())
@@ -921,7 +918,7 @@ impl Converter<'_, '_> {
                     static_fields: Vec::new(),
                 });
                 if is_constructor && let Some(parent) = metadata.direct_parent_class {
-                    self.super_call(method, block, parent.as_bytes());
+                    self.super_call(method, block, parent);
                 }
                 self.block(block);
                 self.declare_locals();
@@ -1019,10 +1016,9 @@ impl Converter<'_, '_> {
         let name = ascii_lowercase_word(declared.name.as_bytes());
         let parents = metadata.overridden_method_ids.get(&name).into_iter().flat_map(|parents| parents.keys());
         for parent in parents {
-            let (Some(class), Some(replaced)) = (
-                codebase.get_class_like(parent.as_bytes()),
-                codebase.get_method(parent.as_bytes(), declared.name.as_bytes()),
-            ) else {
+            let (Some(class), Some(replaced)) =
+                (codebase.get_class_like(*parent), codebase.get_method(*parent, declared.name))
+            else {
                 continue;
             };
             for (index, (theirs, ours)) in replaced.parameters.iter().zip(&declared.parameters).enumerate() {

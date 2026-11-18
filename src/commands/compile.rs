@@ -1848,7 +1848,7 @@ fn anonymous_class_types(codebase: &CodebaseMetadata, mut loaded: HashSet<FileId
         for class in declared.get(&file).into_iter().flatten() {
             let names =
                 class.direct_parent_class.iter().chain(&class.direct_parent_interfaces).chain(&class.used_traits);
-            let used = names.filter_map(|name| codebase.get_class_like(name.as_bytes()));
+            let used = names.filter_map(|name| codebase.get_class_like(*name));
             for used in used.filter(|used| !used.flags.is_built_in()) {
                 if loaded.insert(used.span.file_id) {
                     unread.push(used.span.file_id);

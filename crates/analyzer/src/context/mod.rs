@@ -143,7 +143,7 @@ where
                 continue;
             }
 
-            let Some(metadata) = self.codebase.get_class_like(class.as_bytes()) else {
+            let Some(metadata) = self.codebase.get_class_like(class) else {
                 continue;
             };
             let initializers = self.plugin_registry.get_class_initializers(

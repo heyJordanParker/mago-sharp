@@ -59,7 +59,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Closure<'arena> {
             scope.set_static(false);
         } else if let Some(bind_scope) = &artifacts.closure_bind_scope {
             if let Some(class_name) = bind_scope.class_name {
-                scope.set_class_like(context.codebase.get_class_like(class_name.as_bytes()));
+                scope.set_class_like(context.codebase.get_class_like(class_name));
             } else {
                 scope.set_class_like(block_context.scope.get_class_like());
             }

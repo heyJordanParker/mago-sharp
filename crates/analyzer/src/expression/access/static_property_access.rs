@@ -172,9 +172,7 @@ where
         return Ok(());
     }
 
-    if let Some(declaring_class) =
-        context.codebase.get_declaring_property_class(class_name.as_bytes(), property_name.as_bytes())
-    {
+    if let Some(declaring_class) = context.codebase.get_declaring_property_class(class_name, property_name) {
         artifacts.symbol_references.add_reference_for_property_read(
             context.codebase,
             &block_context.scope,

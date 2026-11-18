@@ -23,7 +23,7 @@ pub fn check_experimental_class_like<A>(
         return;
     }
 
-    let Some(metadata) = context.codebase.get_class_like(class_name.as_bytes()) else {
+    let Some(metadata) = context.codebase.get_class_like(class_name) else {
         return;
     };
 

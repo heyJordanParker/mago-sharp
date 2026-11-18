@@ -1,5 +1,6 @@
 use mago_codex::metadata::CodebaseMetadata;
 use mago_span::Span;
+use mago_word::Word;
 
 use crate::context::GuardContext;
 use crate::matcher;
@@ -25,7 +26,7 @@ use crate::settings::Settings;
 /// * `span` - The span of the usage in the source code
 pub fn check_usage(
     ctx: &mut GuardContext<'_, '_>,
-    dependency_fqn: &[u8],
+    dependency_fqn: Word,
     dependency_kind: PermittedDependencyKind,
     vector: BreachVector,
     span: Span,
@@ -33,7 +34,7 @@ pub fn check_usage(
     if let Some(reason) = check_allowed(ctx, dependency_fqn, dependency_kind) {
         ctx.boundary_breaches.push(BoundaryBreach {
             source_namespace: ctx.get_current_namespace().to_vec(),
-            dependency_fqn: dependency_fqn.to_vec(),
+            dependency_fqn: dependency_fqn.as_bytes().to_vec(),
             dependency_kind,
             vector,
             span,
@@ -45,14 +46,12 @@ pub fn check_usage(
 /// Checks if a usage is allowed based on the configured rules.
 fn check_allowed(
     ctx: &GuardContext<'_, '_>,
-    target_fqn: &[u8],
+    target_fqn: Word,
     dependency_kind: PermittedDependencyKind,
 ) -> Option<BreachReason> {
-    if let Some(restriction) =
-        ctx.settings.perimeter.restrictions.iter().find(|restriction| {
-            violates_restriction(restriction, ctx.get_current_namespace(), target_fqn, dependency_kind)
-        })
-    {
+    if let Some(restriction) = ctx.settings.perimeter.restrictions.iter().find(|restriction| {
+        violates_restriction(restriction, ctx.get_current_namespace(), target_fqn.as_bytes(), dependency_kind)
+    }) {
         return Some(BreachReason::ForbiddenByRestriction { dependency: restriction.dependency.clone() });
     }
 
@@ -99,7 +98,7 @@ fn check_allowed(
     let rules: Vec<_> = rule.into_iter().collect();
     if !ctx.settings.perimeter.layering.is_empty() {
         let source_layer_index = get_layer_index(ctx.get_current_namespace(), ctx.settings);
-        let target_layer_index = get_layer_index(target_fqn, ctx.settings);
+        let target_layer_index = get_layer_index(target_fqn.as_bytes(), ctx.settings);
 
         if let (Some(src_idx), Some(tgt_idx)) = (source_layer_index, target_layer_index) {
             if src_idx >= tgt_idx {
@@ -161,7 +160,7 @@ fn matches_selector(target_fqn: &[u8], selector: &SymbolSelector) -> bool {
 }
 
 /// Checks if a fully qualified name is considered native/builtin.
-fn is_native(codebase: &CodebaseMetadata, fqn: &[u8]) -> bool {
+fn is_native(codebase: &CodebaseMetadata, fqn: Word) -> bool {
     codebase
         .get_class_like(fqn)
         .map(|c| &c.flags)
@@ -192,20 +191,22 @@ fn is_path_allowed(
     settings: &Settings,
     path: &Path,
     rule_namespace: &NamespacePath,
-    target_fqn: &[u8],
+    target_fqn: Word,
 ) -> bool {
     match path {
         Path::All => true,
         Path::Native => is_native(codebase, target_fqn),
         Path::Self_ => match rule_namespace {
-            NamespacePath::Global => !target_fqn.contains(&b'\\'),
-            NamespacePath::Specific(namespace) => matcher::matches(target_fqn, namespace.as_bytes(), false, true),
+            NamespacePath::Global => !target_fqn.as_bytes().contains(&b'\\'),
+            NamespacePath::Specific(namespace) => {
+                matcher::matches(target_fqn.as_bytes(), namespace.as_bytes(), false, true)
+            }
         },
         Path::Layer(layer_name) => settings.perimeter.layers.get(layer_name).is_some_and(|layer_patterns| {
             layer_patterns
                 .iter()
                 .any(|pattern| is_path_allowed(codebase, settings, pattern, rule_namespace, target_fqn))
         }),
-        Path::Selector(selector) => matches_selector(target_fqn, selector),
+        Path::Selector(selector) => matches_selector(target_fqn.as_bytes(), selector),
     }
 }

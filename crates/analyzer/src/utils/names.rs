@@ -70,7 +70,7 @@ where
     if context.dialect.is_sharp() {
         word(sharp_class_like_name(context.codebase, &context.imported_names, name))
     } else {
-        context.codebase.get_class_like(name.as_bytes()).map_or(name, |m| m.original_name)
+        context.codebase.get_class_like(name).map_or(name, |m| m.original_name)
     }
 }
 
@@ -83,13 +83,13 @@ pub(crate) fn sharp_class_like_name(codebase: &CodebaseMetadata, imported_names:
     // Spec section 22: the trait that holds an interface's default bodies is named by the interface, which PHP# code
     // writes, as in `HasLabel.label`.
     let name = codebase
-        .get_class_like(name.as_bytes())
+        .get_class_like(name)
         .map_or(name, |class_like| codebase.get_defaults_interface(class_like).unwrap_or(class_like).original_name);
     let full_name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
 
     if let Some(imported_name) = imported_names.get(&ascii_lowercase_word(full_name)) {
         imported_name.to_string()
-    } else if codebase.shares_short_name(name.as_bytes()) {
+    } else if codebase.shares_short_name(name) {
         String::from_utf8_lossy(full_name).replace('\\', ".")
     } else {
         short_name(name)
@@ -143,7 +143,7 @@ pub(crate) fn sharp_missing_imports(
     let mut imports: Vec<String> = Vec::new();
     let mut unlisted: Vec<(&ModuleMetadata, Vec<Word>)> = Vec::new();
     for class_name in class_names {
-        let name = codebase.get_class_like(class_name.as_bytes()).map_or(class_name, |m| m.original_name);
+        let name = codebase.get_class_like(class_name).map_or(class_name, |m| m.original_name);
         if binds_class_like(imported_names, scope, name) {
             continue;
         }
@@ -247,7 +247,7 @@ fn binds_short_name(
     let (bound, imported) = scope.resolve(NameKind::Default, name);
 
     [bound, format!("Sharp\\{name}").into_bytes(), name.as_bytes().to_vec()].into_iter().any(|class_like| {
-        (imported || codebase.class_like_exists(&class_like))
+        (imported || codebase.class_like_exists(word(&class_like)))
             && binds_class_like(imported_names, scope, word(&class_like))
     })
 }
@@ -298,7 +298,7 @@ where
 
     context.dialect.is_sharp()
         && !context.source_file.is_standard_library
-        && context.codebase.get_class_like(name).is_some_and(|class| class.flags.is_built_in())
+        && context.codebase.get_class_like(word(name)).is_some_and(|class| class.flags.is_built_in())
         && !name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| is_sharp_namespace(&name[..end]))
         && !STANDARD_ROOT_CLASSES.iter().any(|class| class.as_bytes().eq_ignore_ascii_case(name))
 }
@@ -462,7 +462,7 @@ pub(crate) fn display_method_name<A>(context: &Context<'_, '_, A>, class_name: W
 where
     A: Arena,
 {
-    context.codebase.get_method(class_name.as_bytes(), method_name.as_bytes()).map_or(method_name, |m| m.original_name)
+    context.codebase.get_method(class_name, method_name).map_or(method_name, |m| m.original_name)
 }
 
 /// The name `class` answers to for its method `key`, as written, whose metadata is `method`: the name `method`
@@ -474,15 +474,15 @@ pub(crate) fn declared_method_name(
     key: Word,
     method: &FunctionLikeMetadata,
 ) -> Word {
-    if class.method_key(method.original_name.as_bytes()) == key {
+    if class.method_key(method.original_name) == key {
         return method.original_name;
     }
 
     std::iter::once(class)
-        .chain(class.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(parent.as_bytes())))
+        .chain(class.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(*parent)))
         .flat_map(|class| class.get_trait_alias_map().keys())
         .copied()
-        .find(|alias| class.method_key(alias.as_bytes()) == key)
+        .find(|alias| class.method_key(*alias) == key)
         .unwrap_or(method.original_name)
 }
 
@@ -493,7 +493,7 @@ pub(crate) fn display_function_name<A>(context: &Context<'_, '_, A>, name: Word)
 where
     A: Arena,
 {
-    context.codebase.get_function(name.as_bytes()).map_or(name, |m| m.original_name)
+    context.codebase.get_function(name).map_or(name, |m| m.original_name)
 }
 
 /// The name an issue gives the PHP# extension member `metadata`, spec section 26: the member on the type it extends,
@@ -770,7 +770,7 @@ where
                     // `Result<Order, PaymentError>.Ok`.
                     let case_of = object
                         .get_name()
-                        .and_then(|name| context.codebase.get_class_like(name.as_bytes()))
+                        .and_then(|name| context.codebase.get_class_like(name))
                         .and_then(|class| class.direct_parent_class.filter(|_| class.flags.is_enum_case_class()));
                     match case_of {
                         Some(r#enum) => format!(
@@ -946,7 +946,7 @@ where
     A: Arena,
 {
     let enum_name = class.direct_parent_class.filter(|_| class.flags.is_enum_case_class())?;
-    let r#enum = context.codebase.get_class_like(enum_name.as_bytes())?;
+    let r#enum = context.codebase.get_class_like(enum_name)?;
     let case = class.original_name.as_bytes().rsplit(|&byte| byte == b'\\').next().unwrap_or_default();
 
     Some(display_code_member(context, r#enum.original_name, word(case)))
@@ -1002,7 +1002,7 @@ pub(crate) fn sharp_code_class_name(
     scope: &NamespaceScope,
     name: Word,
 ) -> String {
-    let name = codebase.get_class_like(name.as_bytes()).map_or(name, |m| m.original_name);
+    let name = codebase.get_class_like(name).map_or(name, |m| m.original_name);
     if let Some(imported_name) =
         imported_names.get(&ascii_lowercase_word(mago_bytes::trim_start_byte(name.as_bytes(), b'\\')))
     {
@@ -1092,7 +1092,7 @@ where
                     format!("global.{name}")
                 }
                 None if context.dialect.is_sharp()
-                    && let Some(namespace) = context.codebase.extern_namespace_of(name.as_bytes()) =>
+                    && let Some(namespace) = context.codebase.extern_namespace_of(name) =>
                 {
                     display_member(context, display_class_like_name(context, namespace), name)
                 }
@@ -1113,23 +1113,23 @@ where
 /// `import Illuminate.Foundation;` and `extern namespace Foundation for abort;`, as [`namespace_member`] finds it. The
 /// caller reads a name that is also a class's as the class.
 #[must_use]
-pub(crate) fn namespace_function<'codebase>(
-    codebase: &'codebase CodebaseMetadata,
+pub(crate) fn namespace_function(
+    codebase: &CodebaseMetadata,
     namespace: Word,
-    member: &[u8],
-) -> Option<&'codebase FunctionLikeMetadata> {
-    codebase.get_function(namespace_member(codebase, namespace, member).as_bytes())
+    member: Word,
+) -> Option<&FunctionLikeMetadata> {
+    codebase.get_function(namespace_member(codebase, namespace, member))
 }
 
 /// The plain PHP constant `member` of the namespace `namespace`, as PHP# reads one: `Pdf.DEFAULT_DPI` after
 /// `import Vendor.Pdf;`, spec section 23, as [`namespace_member`] finds it.
 #[must_use]
-pub(crate) fn namespace_constant<'codebase>(
-    codebase: &'codebase CodebaseMetadata,
+pub(crate) fn namespace_constant(
+    codebase: &CodebaseMetadata,
     namespace: Word,
-    member: &[u8],
-) -> Option<&'codebase ConstantMetadata> {
-    codebase.get_constant(namespace_member(codebase, namespace, member).as_bytes())
+    member: Word,
+) -> Option<&ConstantMetadata> {
+    codebase.get_constant(namespace_member(codebase, namespace, member))
 }
 
 /// Whether `name`, which resolves to `full_name`, names a namespace a file imports, as `Pdf` does after
@@ -1145,7 +1145,7 @@ pub(crate) fn is_imported_namespace<T>(
 where
     T: HasPosition,
 {
-    resolved_names.is_imported(name) && !codebase.class_like_exists(full_name.as_bytes())
+    resolved_names.is_imported(name) && !codebase.class_like_exists(full_name)
 }
 
 /// The namespace whose plain PHP function or constant the PHP# `name.member` names, spec section 23: the namespace
@@ -1158,7 +1158,7 @@ pub(crate) fn member_namespace(
     resolved_names: &ResolvedNames<'_>,
     codebase: &CodebaseMetadata,
     name: &Identifier<'_>,
-    member: &[u8],
+    member: Word,
 ) -> Option<Word> {
     if name.value() == b"global" && codebase.is_standard_library_file(name.span().file_id) {
         return Some(word(""));
@@ -1174,13 +1174,13 @@ pub(crate) fn member_namespace(
 /// `member`. [`member_namespace`] reads it with the file's names. A reader of scanned metadata, which keeps no names,
 /// passes `imported: false`, so a namespace counts only when it has the member.
 #[must_use]
-pub(crate) fn is_member_namespace(codebase: &CodebaseMetadata, namespace: Word, member: &[u8], imported: bool) -> bool {
-    if codebase.class_like_exists(namespace.as_bytes()) {
+pub(crate) fn is_member_namespace(codebase: &CodebaseMetadata, namespace: Word, member: Word, imported: bool) -> bool {
+    if codebase.class_like_exists(namespace) {
         return false;
     }
     let full_name = namespace_member(codebase, namespace, member);
 
-    imported || codebase.function_exists(full_name.as_bytes()) || codebase.constant_exists(full_name.as_bytes())
+    imported || codebase.function_exists(full_name) || codebase.constant_exists(full_name)
 }
 
 /// The plain PHP function a PHP# `Name.member(…)` calls, spec section 23: `Pdf.render(html)` after
@@ -1198,9 +1198,9 @@ pub(crate) fn namespace_function_name(
     let ClassLikeMemberSelector::Identifier(member) = &call.method else {
         return None;
     };
-    let namespace = member_namespace(resolved_names, codebase, &name.name, member.value)?;
+    let namespace = member_namespace(resolved_names, codebase, &name.name, word(member.value))?;
 
-    Some(namespace_member(codebase, namespace, member.value))
+    Some(namespace_member(codebase, namespace, word(member.value)))
 }
 
 /// The full name PHP gives the function or constant `member` of `namespace`, which [`member_namespace`] found, as the
@@ -1209,13 +1209,13 @@ pub(crate) fn namespace_function_name(
 /// after `import Illuminate.Foundation;` and `extern namespace Foundation for abort;`, else the name inside `namespace`,
 /// which names nothing. The empty namespace, the standard library's `global`, gives the bare name.
 #[must_use]
-pub(crate) fn namespace_member(codebase: &CodebaseMetadata, namespace: Word, member: &[u8]) -> Word {
+pub(crate) fn namespace_member(codebase: &CodebaseMetadata, namespace: Word, member: Word) -> Word {
     if namespace.is_empty() {
         return word(member);
     }
 
-    let full_name = word([namespace.as_bytes(), b"\\", member].concat());
-    if codebase.function_exists(full_name.as_bytes()) || codebase.constant_exists(full_name.as_bytes()) {
+    let full_name = word([namespace.as_bytes(), b"\\", member.as_bytes()].concat());
+    if codebase.function_exists(full_name) || codebase.constant_exists(full_name) {
         return full_name;
     }
     if codebase

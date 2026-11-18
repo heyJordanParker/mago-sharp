@@ -199,8 +199,8 @@ impl TCallableSignature {
 
         self.source.is_none()
             && !effects.iter().all(|effect| {
-                let effect = codebase.class_key(effect.as_bytes());
-                allowed.iter().any(|known| codebase.class_key(known.as_bytes()) == effect)
+                let effect = codebase.class_key(*effect);
+                allowed.iter().any(|known| codebase.class_key(*known) == effect)
             })
     }
 

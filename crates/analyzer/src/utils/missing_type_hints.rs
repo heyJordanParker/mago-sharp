@@ -415,7 +415,7 @@ where
 
     // Check all parent classes
     for parent_name in &class_like_metadata.all_parent_classes {
-        if let Some(parent_metadata) = context.codebase.get_class_like(parent_name.as_bytes()) {
+        if let Some(parent_metadata) = context.codebase.get_class_like(*parent_name) {
             // If parent has this property
             if parent_metadata.properties.contains_key(&property_word) {
                 return false;
@@ -425,7 +425,7 @@ where
 
     // Check all used traits
     for trait_name in &class_like_metadata.used_traits {
-        if let Some(trait_metadata) = context.codebase.get_class_like(trait_name.as_bytes())
+        if let Some(trait_metadata) = context.codebase.get_class_like(*trait_name)
             && trait_metadata.properties.contains_key(&property_word)
         {
             return false;
@@ -453,10 +453,7 @@ where
     }
 
     // Check if this method is overriding a parent method
-    if context
-        .codebase
-        .method_is_overriding(class_like_metadata.name.as_bytes(), function_like_metadata.name.as_bytes())
-    {
+    if context.codebase.method_is_overriding(class_like_metadata.name, function_like_metadata.name) {
         // If overriding, we need to be conservative and not report
         // because we'd need to check if all parameters in the parent have type hints
         return false;
@@ -483,10 +480,7 @@ where
     }
 
     // Check if this method is overriding a parent method
-    if context
-        .codebase
-        .method_is_overriding(class_like_metadata.name.as_bytes(), function_like_metadata.name.as_bytes())
-    {
+    if context.codebase.method_is_overriding(class_like_metadata.name, function_like_metadata.name) {
         // If overriding, we need to be conservative and not report
         return false;
     }

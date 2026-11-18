@@ -273,10 +273,10 @@ impl Listing {
             Self::Functions => hash_names(&mut hasher, metadata::function_names(codebase)),
             Self::Constants => hash_names(&mut hasher, metadata::constant_names(codebase)),
             Self::DirectDescendants(name) => {
-                hash_names(&mut hasher, metadata::direct_descendants(codebase, name.as_bytes()));
+                hash_names(&mut hasher, metadata::direct_descendants(codebase, *name));
             }
-            Self::Descendants(name) => hash_names(&mut hasher, codebase.get_class_descendants(name.as_bytes())),
-            Self::Namespace(name) => codebase.namespace_exists(name.as_bytes()).hash(&mut hasher),
+            Self::Descendants(name) => hash_names(&mut hasher, codebase.get_class_descendants(*name)),
+            Self::Namespace(name) => codebase.namespace_exists(*name).hash(&mut hasher),
             Self::Methods(search) => {
                 let mut found = PayloadWriter::new();
                 // A search that fails, as one that finds more methods than an answer holds, answers apart from each

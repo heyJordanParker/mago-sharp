@@ -46,7 +46,7 @@ impl MethodAssertionProvider for ReflectionClassHasMethodAssertionProvider {
         _method_name: &[u8],
         invocation: &InvocationInfo<'_, '_, '_>,
     ) -> Option<InvocationAssertions> {
-        let reflected_class = super::reflected_class_name(context, invocation, b"ReflectionClass")?;
+        let reflected_class = super::reflected_class_name(context, invocation, word("ReflectionClass"))?;
         let method_names = super::method_name_union(context.codebase(), reflected_class)?;
 
         let mut assertions = InvocationAssertions::new();

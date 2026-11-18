@@ -284,7 +284,7 @@ where
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(name) = selector
         && let Some(object_type) = artifacts.get_expression_type(object).cloned()
-        && let Some((rest, whole)) = parts_without_member(context.codebase, &object_type, name.value)
+        && let Some((rest, whole)) = parts_without_member(context.codebase, &object_type, word(name.value))
     {
         match resolve_extension(context, &rest, name, MetadataFlags::EXTENSION_METHOD) {
             Some(Extension::Member(method))
@@ -374,7 +374,7 @@ where
             // This part was resolved above, with the other parts that declare no member of the name.
             if rest_resolved
                 && let ClassLikeMemberSelector::Identifier(name) = selector
-                && lacks_member(context.codebase, written_atomic, name.value)
+                && lacks_member(context.codebase, written_atomic, word(name.value))
             {
                 continue;
             }
@@ -402,9 +402,9 @@ where
             // member wins, spec section 12, as C#'s LINQ reaches every `IEnumerable`.
             if context.dialect.is_sharp()
                 && let TAtomic::Object(TObject::Named(named)) = object_atomic
-                && context.codebase.class_implements(named.name.as_bytes(), b"Traversable")
+                && context.codebase.class_implements(named.name, word("Traversable"))
                 && let ClassLikeMemberSelector::Identifier(name) = selector
-                && lacks_member(context.codebase, object_atomic, name.value)
+                && lacks_member(context.codebase, object_atomic, word(name.value))
                 && let Some((_, element)) = get_iterable_parameters(object_atomic, context.codebase)
             {
                 collection_parts.push(TAtomic::Iterable(TIterable::sharp_of(Arc::new(element))));
@@ -488,7 +488,7 @@ where
             for &method_name in &method_names {
                 // A PHP# call of a declared property holding a function runs it, ahead of the class's `__call`.
                 if let Some(classname) = obj_type.get_name()
-                    && !context.codebase.method_exists(classname.as_bytes(), method_name.as_bytes())
+                    && !context.codebase.method_exists(classname, method_name)
                     && let Some(property) = resolve_called_property(context, block_context, classname, selector)
                 {
                     result.called_properties.push(property);
@@ -525,7 +525,7 @@ where
                         if !has_method_assertion {
                             let has_incomplete_hierarchy = context
                                 .codebase
-                                .get_class_like(classname.as_bytes())
+                                .get_class_like(classname)
                                 .is_some_and(ClassLikeMetadata::has_incomplete_hierarchy);
 
                             if resolved_magic_call_method.is_empty() {
@@ -556,10 +556,7 @@ where
                                         .find(|name| {
                                             context
                                                 .codebase
-                                                .get_method_name_in_another_case(
-                                                    name.as_bytes(),
-                                                    method_name.as_bytes(),
-                                                )
+                                                .get_method_name_in_another_case(*name, method_name)
                                                 .is_some()
                                         })
                                         .unwrap_or(classname);
@@ -730,7 +727,7 @@ pub(crate) fn check_call_through_readonly<A>(
     let identifier = context.codebase.get_declaring_method_identifier(method);
     let declaring_class = identifier.get_class_name();
     let (Some(method), Some(declaring)) =
-        (context.codebase.get_method_by_id(&identifier), context.codebase.get_class_like(declaring_class.as_bytes()))
+        (context.codebase.get_method_by_id(&identifier), context.codebase.get_class_like(declaring_class))
     else {
         unreachable!("a resolved method's declaring identifier names a method of a class the codebase holds");
     };
@@ -758,7 +755,7 @@ pub(crate) fn check_call_through_readonly<A>(
     }
 
     readonly_calls.push(ReadonlyCall {
-        callee: Body::Method(context.codebase.class_key(declaring_class.as_bytes()), identifier.get_method_name()),
+        callee: Body::Method(context.codebase.class_key(declaring_class), identifier.get_method_name()),
         span: selector.span(),
         caller,
         call,
@@ -790,17 +787,12 @@ where
 
     let property_name = php_variable_name(name.value);
     let scope = block_context.scope.get_class_like_name();
-    let class_metadata = context.codebase.get_class_like(classname.as_bytes())?;
+    let class_metadata = context.codebase.get_class_like(classname)?;
     let resolution = resolve_declared_property(context.codebase, class_metadata, property_name, true, scope)?;
     let declaring_class = resolution.declaring_class.name;
     if !matches!(resolution.kind, DeclaredPropertyKind::Real { .. })
         || resolution.property.flags.is_static()
-        || !is_visible_from_scope(
-            context.codebase,
-            resolution.property.read_visibility,
-            declaring_class.as_bytes(),
-            scope,
-        )
+        || !is_visible_from_scope(context.codebase, resolution.property.read_visibility, declaring_class, scope)
     {
         return None;
     }
@@ -893,7 +885,7 @@ where
     let forwarded = context.plugin_registry.get_forwarded_call(
         context.codebase,
         context.source_file,
-        classname.as_bytes(),
+        classname,
         method_name.as_bytes(),
         false,
         &TUnion::from_atomic(TAtomic::Object(receiver.clone())),
@@ -945,11 +937,11 @@ fn forwarded_return_type<A>(context: &Context<'_, '_, A>, object: &TObject, meth
 where
     A: Arena,
 {
-    let class_metadata = context.codebase.get_class_like(object.get_name()?.as_bytes())?;
+    let class_metadata = context.codebase.get_class_like(object.get_name()?)?;
     let method_id =
         context.codebase.get_declaring_method_identifier(&MethodIdentifier::new(class_metadata.original_name, method));
     let function_like = context.codebase.get_method_by_id(&method_id)?;
-    let declaring_metadata = context.codebase.get_class_like(method_id.get_class_name().as_bytes())?;
+    let declaring_metadata = context.codebase.get_class_like(method_id.get_class_name())?;
     let mut returned = function_like.return_type_metadata.as_ref()?.type_union.clone();
 
     expander::expand_union(
@@ -995,9 +987,9 @@ fn collect_asserted_descendant_method_references<'ctx, A>(
         return;
     };
 
-    for descendant in context.codebase.get_all_descendants(class_name.as_bytes()) {
-        if !context.codebase.method_exists(descendant.as_bytes(), method_name.as_bytes())
-            || !is_method_visible(context, block_context, descendant.as_bytes(), method_name.as_bytes())
+    for descendant in context.codebase.get_all_descendants(class_name) {
+        if !context.codebase.method_exists(descendant, method_name)
+            || !is_method_visible(context, block_context, descendant, method_name)
         {
             continue;
         }
@@ -1049,7 +1041,7 @@ where
             receiver_object,
         } = candidate;
         let declaring_class_metadata =
-            context.codebase.get_class_like(declaring_method_id.get_class_name().as_bytes()).unwrap_or(metadata);
+            context.codebase.get_class_like(declaring_method_id.get_class_name()).unwrap_or(metadata);
 
         // Collect class-template bounds from the object the method was found on:
         // for `@mixin`-resolved methods that is the mixin object, whose parameters
@@ -1108,7 +1100,7 @@ where
 /// The `__toString()` the plain PHP class `class` declares or inherits, when it declares and inherits no `toString()`:
 /// PHP# code calls it, and a template shows the class, as its `toString()`, spec section 18.
 pub(crate) fn plain_text_method(codebase: &CodebaseMetadata, class: &ClassLikeMetadata) -> Option<MethodIdentifier> {
-    if class.flags.is_sharp() || codebase.get_declaring_method(class.original_name.as_bytes(), b"toString").is_some() {
+    if class.flags.is_sharp() || codebase.get_declaring_method(class.original_name, word("toString")).is_some() {
         return None;
     }
     let text_method =
@@ -1125,7 +1117,7 @@ pub(crate) fn mixes_enum_and_plain_text(codebase: &CodebaseMetadata, value_type:
     parts.iter().any(|part| matches!(part, SharpType::Enum(_)))
         && parts.iter().any(|part| {
             matches!(part, SharpType::Class(name, _) if codebase
-                .get_class_like(name.as_bytes())
+                .get_class_like(*name)
                 .is_some_and(|class| plain_text_method(codebase, class).is_some()))
         })
 }
@@ -1155,10 +1147,7 @@ where
 /// or an interface it implements has them, so a value of `Ledger&Countable` is of a class with `Ledger`'s.
 fn has_exact_names(codebase: &CodebaseMetadata, object: &TObject) -> bool {
     let exact = |object: &TObject| {
-        object
-            .get_name()
-            .and_then(|name| codebase.get_class_like(name.as_bytes()))
-            .is_some_and(|class| class.exact_names)
+        object.get_name().and_then(|name| codebase.get_class_like(name)).is_some_and(|class| class.exact_names)
     };
 
     exact(object)
@@ -1208,7 +1197,7 @@ where
         return candidates;
     };
 
-    let Some(class_metadata) = context.codebase.get_class_like(name.as_bytes()) else {
+    let Some(class_metadata) = context.codebase.get_class_like(name) else {
         result.has_invalid_target = true;
         report_non_existent_class_like(context, object_span, name);
         return candidates;
@@ -1219,14 +1208,14 @@ where
     // required class or a mixin, keys the name as written by its own rule. A plain part of an intersection with a part
     // that has exact names, as `Countable` of `Ledger&Countable`, is a class the value's class extends or implements,
     // which then has exact names, so it has the method only by the name it declares.
-    let method_key = class_metadata.method_key(method_name.as_bytes());
+    let method_key = class_metadata.method_key(method_name);
     let exact_receiver = !class_metadata.exact_names && has_exact_names(context.codebase, outer_object);
     let mut method_id = MethodIdentifier::new(class_metadata.original_name, method_key);
     if !context.codebase.method_identifier_exists(&method_id) {
         method_id = context.codebase.get_declaring_method_identifier(&method_id);
     }
     if context.dialect.is_sharp()
-        && method_key == class_metadata.method_key(b"toString")
+        && method_key == class_metadata.method_key(word("toString"))
         && let Some(text_method) = plain_text_method(context.codebase, class_metadata)
     {
         method_id = text_method;
@@ -1240,8 +1229,8 @@ where
         if !check_method_visibility(
             context,
             block_context.scope.get_class_like_name(),
-            class_metadata.original_name.as_bytes(),
-            method_key.as_bytes(),
+            class_metadata.original_name,
+            method_key,
             access_span,
             Some(selector.span()),
         ) {
@@ -1263,17 +1252,18 @@ where
         if function_like_metadata.flags.is_magic_method() {
             let is_pseudo = class_metadata.pseudo_methods.contains(&method_key)
                 || class_metadata.all_parent_classes.iter().any(|parent_name| {
-                    context.codebase.get_class_like(parent_name.as_bytes()).is_some_and(|parent| {
-                        parent.pseudo_methods.contains(&parent.method_key(method_name.as_bytes()))
-                    })
+                    context
+                        .codebase
+                        .get_class_like(*parent_name)
+                        .is_some_and(|parent| parent.pseudo_methods.contains(&parent.method_key(method_name)))
                 });
 
             let mut is_inherited = false;
 
             if is_pseudo {
                 for parent_class_name in &class_metadata.all_parent_classes {
-                    if let Some(parent_metadata) = context.codebase.get_class_like(parent_class_name.as_bytes())
-                        && let parent_key = parent_metadata.method_key(method_name.as_bytes())
+                    if let Some(parent_metadata) = context.codebase.get_class_like(*parent_class_name)
+                        && let parent_key = parent_metadata.method_key(method_name)
                         && parent_metadata.methods.contains(&parent_key)
                         && !parent_metadata.pseudo_methods.contains(&parent_key)
                     {
@@ -1333,14 +1323,12 @@ where
         });
     } else if !class_metadata.require_extends.is_empty() || !class_metadata.require_implements.is_empty() {
         for required_class in class_metadata.require_extends.iter().chain(class_metadata.require_implements.iter()) {
-            let Some(required_metadata) = context.codebase.get_class_like(required_class.as_bytes()) else {
+            let Some(required_metadata) = context.codebase.get_class_like(*required_class) else {
                 continue;
             };
 
-            let mut required_method_id = MethodIdentifier::new(
-                required_metadata.original_name,
-                required_metadata.method_key(method_name.as_bytes()),
-            );
+            let mut required_method_id =
+                MethodIdentifier::new(required_metadata.original_name, required_metadata.method_key(method_name));
             if !context.codebase.method_identifier_exists(&required_method_id) {
                 required_method_id = context.codebase.get_declaring_method_identifier(&required_method_id);
             }
@@ -1371,11 +1359,11 @@ where
                 continue;
             }
 
-            let Some(mixin_metadata) = context.codebase.get_class_like(mixin_class_name.as_bytes()) else {
+            let Some(mixin_metadata) = context.codebase.get_class_like(mixin_class_name) else {
                 continue;
             };
 
-            let mixin_key = mixin_metadata.method_key(method_name.as_bytes());
+            let mixin_key = mixin_metadata.method_key(method_name);
             let mut mixin_method_id = MethodIdentifier::new(mixin_metadata.original_name, mixin_key);
             if !context.codebase.method_identifier_exists(&mixin_method_id) {
                 mixin_method_id = context.codebase.get_declaring_method_identifier(&mixin_method_id);
@@ -1387,8 +1375,8 @@ where
                 if !check_method_visibility(
                     context,
                     block_context.scope.get_class_like_name(),
-                    mixin_metadata.original_name.as_bytes(),
-                    mixin_key.as_bytes(),
+                    mixin_metadata.original_name,
+                    mixin_key,
                     access_span,
                     Some(selector.span()),
                 ) {
@@ -1491,11 +1479,11 @@ pub(crate) fn untyped_implementations(
         .all_parent_interfaces
         .iter()
         .filter_map(|interface| {
-            let interface = codebase.get_class_like(interface.as_bytes())?;
-            interface.declaring_method_ids.get(&interface.method_key(method.original_name.as_bytes())).copied()
+            let interface = codebase.get_class_like(*interface)?;
+            interface.declaring_method_ids.get(&interface.method_key(method.original_name)).copied()
         })
         .filter(|member| {
-            codebase.get_class_like(member.get_class_name().as_bytes()).is_some_and(|interface| {
+            codebase.get_class_like(member.get_class_name()).is_some_and(|interface| {
                 codebase.get_method_by_id(member).is_some_and(|member| interface.checks_results_at_call(member))
             })
         })
@@ -1696,8 +1684,8 @@ where
             let is_declared_in_sharp = |class: &[u8]| {
                 context
                     .codebase
-                    .get_declaring_property_class(class, property_name.as_bytes())
-                    .and_then(|declaring_class| context.codebase.get_class_like(declaring_class.as_bytes()))
+                    .get_declaring_property_class(word(class), property_name)
+                    .and_then(|declaring_class| context.codebase.get_class_like(declaring_class))
                     .is_some_and(|metadata| metadata.flags.is_sharp())
             };
 
@@ -1708,7 +1696,7 @@ where
             if let Some(class) = static_class {
                 let class = context.resolved_names.get(&class.name);
                 let declared = is_declared_in_sharp(class)
-                    .then(|| context.codebase.get_property_type(class, property_name.as_bytes()))??;
+                    .then(|| context.codebase.get_property_type(word(class), property_name))??;
                 // A bare `Counter.items`, refused where it is read, reads as its bounds.
                 let bounds = bare_generic_class(context, object_expression).map(|(_, bounds)| bounds);
                 let type_arguments = artifacts
@@ -1716,11 +1704,11 @@ where
                     .and_then(TUnion::get_single_named_object)
                     .and_then(|object| object.get_type_parameters())
                     .or(bounds.as_deref());
-                let class_metadata = context.codebase.get_class_like(class)?;
+                let class_metadata = context.codebase.get_class_like(word(class))?;
                 let declaring_class = context
                     .codebase
-                    .get_declaring_property_class(class, property_name.as_bytes())
-                    .and_then(|declaring_class| context.codebase.get_class_like(declaring_class.as_bytes()))?;
+                    .get_declaring_property_class(word(class), property_name)
+                    .and_then(|declaring_class| context.codebase.get_class_like(declaring_class))?;
 
                 Some(localize_property_type(
                     context,
@@ -2044,8 +2032,8 @@ pub(crate) fn report_non_existent_method<A>(
 {
     // Spec section 28: a law is checked and never runs, so the class keeps it apart from its methods, and only a law's
     // call statement in a law's body calls it.
-    if let Some(class) = context.codebase.get_class_like(classname.as_bytes())
-        && let Some(law) = class.laws.get(&class.method_key(method_name.as_bytes()))
+    if let Some(class) = context.codebase.get_class_like(classname)
+        && let Some(law) = class.laws.get(&class.method_key(method_name))
     {
         context
             .collector
@@ -2055,7 +2043,7 @@ pub(crate) fn report_non_existent_method<A>(
     }
 
     // A call on a name that names no class, as `SUPER.toString()` or `Math.floor(x)`, is the class's error.
-    if !context.codebase.class_like_exists(classname.as_bytes())
+    if !context.codebase.class_like_exists(classname)
         && report_unknown_sharp_class(context, classname.as_bytes(), obj_span)
     {
         return;
@@ -2063,9 +2051,7 @@ pub(crate) fn report_non_existent_method<A>(
 
     // Spec section 24: a class with exact names finds a method only as declared, so a call in another case names the
     // method it meant, as the engine's `Error` does.
-    if let Some(declared) =
-        context.codebase.get_method_name_in_another_case(classname.as_bytes(), method_name.as_bytes())
-    {
+    if let Some(declared) = context.codebase.get_method_name_in_another_case(classname, method_name) {
         let class = display_class_like_name(context, classname);
         context.collector.report_with_code(
             IssueCode::NonExistentMethod,
@@ -2389,10 +2375,10 @@ fn collect_mixin_types_into(
         for mixin_atomic in mixin_type.type_union.types.as_ref() {
             match mixin_atomic {
                 TAtomic::Object(obj @ TObject::Named(named)) => {
-                    direct.push((codebase.class_key(named.name.as_bytes()), obj));
+                    direct.push((codebase.class_key(named.name), obj));
                 }
                 TAtomic::Object(obj @ TObject::Enum(enum_type)) => {
-                    direct.push((codebase.class_key(enum_type.name.as_bytes()), obj));
+                    direct.push((codebase.class_key(enum_type.name), obj));
                 }
                 TAtomic::GenericParameter(TGenericParameter {
                     parameter_name, constraint, defining_entity, ..
@@ -2402,19 +2388,18 @@ fn collect_mixin_types_into(
                     if let TObject::Named(named_object) = outer_object
                         && let Some(type_params) = named_object.get_type_parameters()
                         && let GenericParent::ClassLike(defining_class) = defining_entity
-                        && codebase.class_key(named_object.name.as_bytes())
-                            == codebase.class_key(defining_class.as_bytes())
+                        && codebase.class_key(named_object.name) == codebase.class_key(*defining_class)
                         && let Some(index) = class_metadata.get_template_index_for_name(*parameter_name)
                         && let Some(concrete_type) = type_params.get(index)
                     {
                         for atomic in concrete_type.types.as_ref() {
                             match atomic {
                                 TAtomic::Object(obj @ TObject::Named(named)) => {
-                                    direct.push((codebase.class_key(named.name.as_bytes()), obj));
+                                    direct.push((codebase.class_key(named.name), obj));
                                     resolved = true;
                                 }
                                 TAtomic::Object(obj @ TObject::Enum(enum_type)) => {
-                                    direct.push((codebase.class_key(enum_type.name.as_bytes()), obj));
+                                    direct.push((codebase.class_key(enum_type.name), obj));
                                     resolved = true;
                                 }
                                 _ => {}
@@ -2426,10 +2411,10 @@ fn collect_mixin_types_into(
                         for constraint_atomic in constraint.types.as_ref() {
                             match constraint_atomic {
                                 TAtomic::Object(obj @ TObject::Named(named)) => {
-                                    direct.push((codebase.class_key(named.name.as_bytes()), obj));
+                                    direct.push((codebase.class_key(named.name), obj));
                                 }
                                 TAtomic::Object(obj @ TObject::Enum(enum_type)) => {
-                                    direct.push((codebase.class_key(enum_type.name.as_bytes()), obj));
+                                    direct.push((codebase.class_key(enum_type.name), obj));
                                 }
                                 _ => {}
                             }
@@ -2451,7 +2436,7 @@ fn collect_mixin_types_into(
 
         results.push((name, obj.clone(), carrier));
 
-        if let Some(mixin_metadata) = codebase.get_class_like(name.as_bytes())
+        if let Some(mixin_metadata) = codebase.get_class_like(name)
             && !mixin_metadata.mixins.is_empty()
         {
             collect_mixin_types_into(

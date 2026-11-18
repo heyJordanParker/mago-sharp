@@ -352,7 +352,7 @@ pub fn validate_method_signature_compatibility(
         );
 
         if !is_compatible && links_to_php_declaration {
-            let declared = codebase.get_method(parent_class_name.as_bytes(), parent_method.name.as_bytes());
+            let declared = codebase.get_method(parent_class_name, parent_method.name);
             let declared = declared.and_then(|declared| declared.parameters.get(index));
             issues.push(SignatureCompatibilityIssue::ErasedParameterNarrowed {
                 parameter_index: index,
@@ -400,7 +400,7 @@ pub fn validate_method_signature_compatibility(
         && let Some(parent_return) = &parent_method.return_type_declaration_metadata
         && child_method.return_type_declaration_metadata.is_none()
         && !codebase
-            .get_class_like(parent_class_name.as_bytes())
+            .get_class_like(parent_class_name)
             .is_some_and(|parent_class| parent_class.checks_results_at_call(parent_method))
     {
         // The error names the type as PHP declares it.
@@ -642,7 +642,7 @@ fn as_declared(method: &FunctionLikeMetadata) -> FunctionLikeMetadata {
 /// that declares a return type, which PHP requires it to keep. A result plain PHP gets the PHP array of, under such a
 /// method, is typed as that method declares it.
 fn as_lowered(codebase: &CodebaseMetadata, class: Word, method: &FunctionLikeMetadata) -> FunctionLikeMetadata {
-    let method = codebase.get_method(class.as_bytes(), method.name.as_bytes()).unwrap_or(method);
+    let method = codebase.get_method(class, method.name).unwrap_or(method);
     let with_array = |mut erased: TUnion, takes_array: bool| {
         if takes_array {
             erased = TUnion::from_vec(
@@ -661,9 +661,8 @@ fn as_lowered(codebase: &CodebaseMetadata, class: Word, method: &FunctionLikeMet
         });
         parameter.type_metadata = parameter.type_declaration_metadata.clone();
     }
-    let overridden = codebase
-        .get_class_like(class.as_bytes())
-        .and_then(|class| codebase.get_overridden_php_result(class, method.name.as_bytes()));
+    let overridden =
+        codebase.get_class_like(class).and_then(|class| codebase.get_overridden_php_result(class, method.name));
     lowered.return_type_declaration_metadata =
         lowered.return_type_declaration_metadata.take().and_then(|mut declared| {
             let erased = get_php_declared_type(&declared.type_union, codebase);
@@ -812,8 +811,8 @@ pub(super) fn bound_example(
         TAtomic::Object(TObject::Enum(object)) => object.name,
         _ => return None,
     };
-    let bound = short_name(codebase.get_class_like(bound.as_bytes()).map_or(bound, |class| class.original_name));
-    let class = codebase.get_class_like(class.as_bytes())?;
+    let bound = short_name(codebase.get_class_like(bound).map_or(bound, |class| class.original_name));
+    let class = codebase.get_class_like(*class)?;
     let name = parameter.parameter_name;
     let marker = match class.get_template_index_for_name(name).and_then(|index| class.template_variance.get(index)) {
         Some(Variance::Covariant) => "out ",

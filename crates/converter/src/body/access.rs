@@ -19,6 +19,7 @@ use mago_syntax::cst::MagicConstant;
 use mago_syntax::cst::StaticPropertyAccess;
 use mago_syntax::cst::Variable;
 use mago_word::Word;
+use mago_word::word;
 
 use super::Kind;
 use super::builtins::runs_nothing;
@@ -34,8 +35,8 @@ impl<'input> Converter<'input, '_> {
         let codebase = self.input.codebase;
         let written = constant.name.value();
         let Some(metadata) = codebase
-            .get_constant(self.input.names.get(&constant.name))
-            .or_else(|| (!written.contains(&b'\\')).then(|| codebase.get_constant(written)).flatten())
+            .get_constant(word(self.input.names.get(&constant.name)))
+            .or_else(|| (!written.contains(&b'\\')).then(|| codebase.get_constant(word(written))).flatten())
         else {
             return self.refuse(expression.span(), "the analysis holds no constant of this name");
         };
@@ -135,7 +136,7 @@ impl<'input> Converter<'input, '_> {
             },
         };
         // `Text.str` names the class `Text\Str` where one exists, since a class's name has no case (spec section 23).
-        if let Some(class) = self.input.codebase.get_class_like(format!("{namespace}\\{member}").as_bytes()) {
+        if let Some(class) = self.input.codebase.get_class_like(mago_word::word(format!("{namespace}\\{member}"))) {
             let class = class.original_name.as_str_lossy().into_owned();
             self.refuse(
                 span,
@@ -209,7 +210,7 @@ impl<'input> Converter<'input, '_> {
                     return self.edits.replace(expression.span(), format!("Class.of({object})"));
                 }
                 if !self.static_class(access.class) {
-                    return self.held_constant_read(expression, access.class, constant.value);
+                    return self.held_constant_read(expression, access.class, word(constant.value));
                 }
                 if constant.value.eq_ignore_ascii_case(b"class") {
                     // `X::class` is the class value `typeof(X)` (spec section 25).
@@ -287,7 +288,7 @@ impl<'input> Converter<'input, '_> {
         }
         let codebase = self.input.codebase;
         let Some((held, declared)) = self.held_class(access.class).and_then(|held| {
-            codebase.get_declaring_property(held.as_bytes(), variable.name).map(|declared| (held, declared))
+            codebase.get_declaring_property(held, word(variable.name)).map(|declared| (held, declared))
         }) else {
             self.unknown_member(span, access.class, "static property", variable.name);
             return None;
@@ -397,7 +398,7 @@ impl<'input> Converter<'input, '_> {
     /// with, `kind.constants().first(constant => constant.name == "MAX").value()`, which reads the constant of the
     /// class the value holds, as PHP's `$kind::MAX` does (spec section 25). The read takes the type the constant
     /// declares, which a subclass's constant keeps, and not the value the analysis finds in the class it names.
-    fn held_constant_read(&mut self, expression: &Expression<'_>, class: &Expression<'_>, constant: &[u8]) {
+    fn held_constant_read(&mut self, expression: &Expression<'_>, class: &Expression<'_>, constant: Word) {
         let span = expression.span();
         if !self.holds_class_value(span, class) {
             return;
@@ -405,17 +406,17 @@ impl<'input> Converter<'input, '_> {
         let codebase = self.input.codebase;
         let Some((held, declared)) = self
             .held_class(class)
-            .and_then(|held| codebase.get_class_constant(held.as_bytes(), constant).map(|declared| (held, declared)))
+            .and_then(|held| codebase.get_class_constant(held, constant).map(|declared| (held, declared)))
         else {
-            return self.unknown_member(span, class, "constant", constant);
+            return self.unknown_member(span, class, "constant", constant.as_bytes());
         };
         let read = match &declared.type_metadata {
             Some(metadata) => metadata.type_union.clone(),
             None if declared.flags.is_final()
-                || codebase.get_class_like(held.as_bytes()).is_some_and(|held| held.flags.is_final()) =>
+                || codebase.get_class_like(held).is_some_and(|held| held.flags.is_final()) =>
             {
                 let Some(mut read) = self.type_of(expression).cloned() else {
-                    return self.unknown_member(span, class, "constant", constant);
+                    return self.unknown_member(span, class, "constant", constant.as_bytes());
                 };
                 read.widen_literals();
                 read
@@ -424,13 +425,13 @@ impl<'input> Converter<'input, '_> {
                 let shown = String::from_utf8_lossy(self.text(span)).into_owned();
                 return self.refuse(
                     span,
-                    format!("`{shown}` reads a constant that declares no type, which a subclass of `{held}` may give a value of another type, and PHP# reads through reflection as `Any?`: declare its type, as `const int {}`, or the constant or the class `final` (spec section 25)", String::from_utf8_lossy(constant)),
+                    format!("`{shown}` reads a constant that declares no type, which a subclass of `{held}` may give a value of another type, and PHP# reads through reflection as `Any?`: declare its type, as `const int {}`, or the constant or the class `final` (spec section 25)", String::from_utf8_lossy(constant.as_bytes())),
                 );
             }
         };
         let class = self.held_class_text(class);
         let found = self.unused_name("constant", &[]);
-        let name = String::from_utf8_lossy(constant);
+        let name = String::from_utf8_lossy(constant.as_bytes());
         let reflected = format!("{class}.constants().first({found} => {found}.name == \"{name}\").value()");
         self.reflected_read(expression, reflected, Some(read), declared.type_declaration.as_ref());
     }

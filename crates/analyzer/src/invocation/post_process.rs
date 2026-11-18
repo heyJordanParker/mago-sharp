@@ -657,8 +657,7 @@ fn clear_object_property_narrowings<'ctx, 'arena, A>(
                 .get_class_like_name()
                 // A class-like is named by its key, spec section 24, so the PHP# `Order` is not `ORDER`.
                 .is_some_and(|current_class| {
-                    context.codebase.class_key(current_class.as_bytes())
-                        == context.codebase.class_key(class_name.as_bytes())
+                    context.codebase.class_key(current_class) == context.codebase.class_key(*class_name)
                 }),
             _ => false,
         };
@@ -907,7 +906,7 @@ where
         return false;
     };
 
-    let Some(class_metadata) = context.codebase.get_class_like(class_name.as_bytes()) else {
+    let Some(class_metadata) = context.codebase.get_class_like(class_name) else {
         return false;
     };
 
@@ -1588,7 +1587,7 @@ fn collect_plugin_throw_types<'ctx, 'arena, A>(
                 context.source_file,
                 block_context,
                 artifacts,
-                class_name.as_bytes(),
+                *class_name,
                 method_name.as_bytes(),
                 invocation,
             )

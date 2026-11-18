@@ -234,7 +234,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
             }
 
             for caught in &caught_classes {
-                if context.codebase.is_instance_of(caught.as_bytes(), b"Error") {
+                if context.codebase.is_instance_of(*caught, word("Error")) {
                     context.collector.report_with_code(
                         IssueCode::AvoidCatchingError,
                         Issue::warning("Avoid catching 'Error' class instances.")
@@ -256,11 +256,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
             let mut definitely_defined_locals: Option<WordSet> = None;
             for caught_class in &caught_classes {
                 for possibly_thrown_exception in possibly_thrown_exceptions.keys() {
-                    if context.codebase.class_key(possibly_thrown_exception.as_bytes())
-                        == context.codebase.class_key(caught_class.as_bytes())
-                        || context
-                            .codebase
-                            .is_instance_of(possibly_thrown_exception.as_bytes(), caught_class.as_bytes())
+                    if context.codebase.class_key(*possibly_thrown_exception)
+                        == context.codebase.class_key(*caught_class)
+                        || context.codebase.is_instance_of(*possibly_thrown_exception, *caught_class)
                     {
                         if caught_exception_types.insert(*possibly_thrown_exception)
                             && let Some(entry_locals) = exception_entry_locals.get(possibly_thrown_exception)
@@ -526,9 +524,8 @@ where
                     bound_classes = vec![throwable];
                 } else if bound_classes.is_empty()
                     || !bound_classes.iter().all(|class| {
-                        context.codebase.get_class_like(class.as_bytes()).is_some_and(|metadata| {
-                            metadata.kind.is_interface()
-                                || context.codebase.is_instance_of(class.as_bytes(), throwable.as_bytes())
+                        context.codebase.get_class_like(*class).is_some_and(|metadata| {
+                            metadata.kind.is_interface() || context.codebase.is_instance_of(*class, throwable)
                         })
                     })
                 {
@@ -646,7 +643,7 @@ where
             continue;
         }
 
-        let Some(class_like_metadata) = context.codebase.get_class_like(caught_type.as_bytes()) else {
+        let Some(class_like_metadata) = context.codebase.get_class_like(caught_type) else {
             // The error names the class the code meant, so the block catches what any class does, with no second error.
             if report_missing_class(context, caught_type.as_bytes(), caught_span) {
                 caught_classes.insert(throwable);
@@ -696,8 +693,7 @@ where
         }
 
         let is_interface = class_like_metadata.kind.is_interface();
-        let is_throwable =
-            is_interface || context.codebase.is_instance_of(caught_type.as_bytes(), throwable.as_bytes());
+        let is_throwable = is_interface || context.codebase.is_instance_of(caught_type, throwable);
         if !is_throwable {
             context.collector.report_with_code(
                 IssueCode::CatchTypeNotThrowable,

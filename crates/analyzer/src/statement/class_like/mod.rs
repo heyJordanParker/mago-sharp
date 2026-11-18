@@ -143,7 +143,7 @@ fn report_duplicate_definition<A>(
     context: &mut Context<'_, '_, A>,
     title: &str,
     kind: &str,
-    name: &[u8],
+    name: Word,
     duplicate_span: Span,
     original_span: Span,
 ) where
@@ -178,7 +178,7 @@ fn report_duplicate_definition<A>(
     let name = if context.dialect.is_sharp() {
         display_class_like_name(context, word(name)).to_string()
     } else {
-        BytesDisplay(name).to_string()
+        BytesDisplay(name.as_bytes()).to_string()
     };
     context.collector.report_with_code(
         IssueCode::DuplicateDefinition,
@@ -218,7 +218,7 @@ fn report_class_like_named_as_a_namespace<A>(
 ) where
     A: Arena,
 {
-    let name = class_like_metadata.name.as_bytes();
+    let name = class_like_metadata.name;
     // The codebase keeps a namespace after its last class-like leaves it, so the class-likes decide.
     if !context.codebase.namespace_exists(name) {
         return;
@@ -226,8 +226,7 @@ fn report_class_like_named_as_a_namespace<A>(
 
     let sharp = context.dialect.is_sharp();
     // Spec section 22: PHP# code never names an interface's trait of default bodies, so the rule leaves it out.
-    let defaults =
-        context.codebase.class_key(defaults_trait_name(class_like_metadata.original_name.as_bytes()).as_bytes());
+    let defaults = context.codebase.class_key(defaults_trait_name(class_like_metadata.original_name.as_bytes()));
     let Some(inside) = context
         .codebase
         .class_likes
@@ -242,7 +241,7 @@ fn report_class_like_named_as_a_namespace<A>(
                 && other.name != defaults
                 && !is_own_case
                 // A namespace is found in any case, as PHP finds it, whatever case each class-like's key keeps.
-                && other.name.as_bytes().get(..name.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+                && other.name.as_bytes().get(..name.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(name.as_bytes()))
                 && other.name.as_bytes().get(name.len()) == Some(&b'\\')
         })
         .min_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()))
@@ -288,12 +287,13 @@ fn report_namespace_named_as_a_plain_php_class_like<A>(
         return;
     }
 
-    let name = class_like_metadata.original_name.as_bytes();
+    let name = class_like_metadata.original_name;
     let Some(plain) = name
+        .as_bytes()
         .iter()
         .enumerate()
         .filter(|(_, byte)| **byte == b'\\')
-        .filter_map(|(end, _)| context.codebase.get_class_like(&name[..end]))
+        .filter_map(|(end, _)| context.codebase.get_class_like(word(&name.as_bytes()[..end])))
         .find(|namespace| !namespace.flags.is_sharp())
     else {
         return;
@@ -547,9 +547,8 @@ fn check_unused_template_parameters<'ctx, A>(
         }
 
         for method_id in class_like_metadata.declaring_method_ids.values() {
-            let Some(function_like) = context
-                .codebase
-                .get_method(method_id.get_class_name().as_bytes(), method_id.get_method_name().as_bytes())
+            let Some(function_like) =
+                context.codebase.get_method(method_id.get_class_name(), method_id.get_method_name())
             else {
                 continue;
             };
@@ -620,7 +619,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
     {
         let name = context.resolved_names.get(&self.name);
 
-        let Some(class_like_metadata) = context.codebase.get_class_like(name) else {
+        let Some(class_like_metadata) = context.codebase.get_class_like(word(name)) else {
             tracing::warn!("Class {} not found in codebase", BytesDisplay(name));
 
             return Ok(());
@@ -629,10 +628,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
         analyze_class_like_attributes(context, artifacts, self.attribute_lists.as_slice(), class_like_metadata)?;
 
         if class_like_metadata.span != self.span() {
-            report_duplicate_definition(context, "Class", "class", name, self.span(), class_like_metadata.span);
+            report_duplicate_definition(context, "Class", "class", word(name), self.span(), class_like_metadata.span);
             return Ok(());
         }
-        if context.codebase.parses(name) {
+        if context.codebase.parses(word(name)) {
             r#struct::report_keys_read_twice(context, class_like_metadata, self.name.span);
         }
 
@@ -769,7 +768,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Interface<'arena> {
         A: Arena,
     {
         let name = context.resolved_names.get(&self.name);
-        let Some(class_like_metadata) = context.codebase.get_class_like(name) else {
+        let Some(class_like_metadata) = context.codebase.get_class_like(word(name)) else {
             tracing::warn!("Interface {} not found in codebase", BytesDisplay(name));
 
             return Ok(());
@@ -778,7 +777,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Interface<'arena> {
         analyze_class_like_attributes(context, artifacts, self.attribute_lists.as_slice(), class_like_metadata)?;
 
         if class_like_metadata.span != self.span() {
-            report_duplicate_definition(context, "Interface", "interface", name, self.span(), class_like_metadata.span);
+            report_duplicate_definition(
+                context,
+                "Interface",
+                "interface",
+                word(name),
+                self.span(),
+                class_like_metadata.span,
+            );
             return Ok(());
         }
 
@@ -856,7 +862,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Event<'arena> {
 
         context
             .codebase
-            .get_class_like(name)
+            .get_class_like(word(name))
             .map_or(Ok(()), |class_like_metadata| analyze_event(self, class_like_metadata, context, artifacts))
     }
 }
@@ -872,7 +878,7 @@ where
 {
     // An interface or a class declared first in the file under the event's name keeps it, and has no constructor.
     if class_like_metadata.span != event.span() {
-        let name = class_like_metadata.original_name.as_bytes();
+        let name = class_like_metadata.original_name;
         report_duplicate_definition(context, "Event", "event", name, event.span(), class_like_metadata.span);
         return Ok(());
     }
@@ -882,7 +888,9 @@ where
         .inheritance
         .iter()
         .flat_map(|inheritance| inheritance.types.iter())
-        .filter_map(|type_name| Some((type_name, codebase.get_class_like(context.resolved_names.get(type_name))?)))
+        .filter_map(|type_name| {
+            Some((type_name, codebase.get_class_like(word(context.resolved_names.get(type_name)))?))
+        })
         // A plain PHP trait works everywhere an interface does, spec section 22.
         .filter(|(_, named)| !named.kind.is_interface() && !named.kind.is_trait())
         .collect();
@@ -917,7 +925,7 @@ where
     )?;
 
     // The constructor has no body: its parameters' types and defaults are checked as a method's.
-    let constructor = context.codebase.get_method(class_like_metadata.name.as_bytes(), b"__construct");
+    let constructor = context.codebase.get_method(class_like_metadata.name, word("__construct"));
     constructor.map_or(Ok(()), |constructor| {
         let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, constructor.name)));
         scope.set_class_like(Some(class_like_metadata));
@@ -949,7 +957,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {
         A: Arena,
     {
         let name = context.resolved_names.get(&self.name);
-        let Some(class_like_metadata) = context.codebase.get_class_like(name) else {
+        let Some(class_like_metadata) = context.codebase.get_class_like(word(name)) else {
             tracing::warn!("Trait {} not found in codebase", BytesDisplay(name));
 
             return Ok(());
@@ -958,7 +966,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {
         analyze_class_like_attributes(context, artifacts, self.attribute_lists.as_slice(), class_like_metadata)?;
 
         if class_like_metadata.span != self.span() {
-            report_duplicate_definition(context, "Trait", "trait", name, self.span(), class_like_metadata.span);
+            report_duplicate_definition(context, "Trait", "trait", word(name), self.span(), class_like_metadata.span);
             return Ok(());
         }
 
@@ -1044,16 +1052,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Module<'arena> {
 
         // The scanner registers the module of every `Module.sharp`, or the class-like declared first under its name.
         let name = context.resolved_names.get(&self.module);
-        context
-            .codebase
-            .get_class_like(name)
-            .map_or(Ok(()), |class_like_metadata| analyze_module(self, name, class_like_metadata, context, artifacts))
+        context.codebase.get_class_like(word(name)).map_or(Ok(()), |class_like_metadata| {
+            analyze_module(self, word(name), class_like_metadata, context, artifacts)
+        })
     }
 }
 
 fn analyze_module<'ctx, 'arena, A>(
     module: &Module<'arena>,
-    name: &[u8],
+    name: Word,
     class_like_metadata: &'ctx ClassLikeMetadata,
     context: &mut Context<'ctx, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -1092,7 +1099,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
     {
         let name = context.resolved_names.get(&self.name);
 
-        let Some(class_like_metadata) = context.codebase.get_class_like(name) else {
+        let Some(class_like_metadata) = context.codebase.get_class_like(word(name)) else {
             tracing::warn!("Enum {} not found in codebase", BytesDisplay(name));
 
             return Ok(());
@@ -1101,7 +1108,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
         analyze_class_like_attributes(context, artifacts, self.attribute_lists.as_slice(), class_like_metadata)?;
 
         if class_like_metadata.span != self.span() {
-            report_duplicate_definition(context, "Enum", "enum", name, self.span(), class_like_metadata.span);
+            report_duplicate_definition(context, "Enum", "enum", word(name), self.span(), class_like_metadata.span);
             return Ok(());
         }
 
@@ -1264,7 +1271,7 @@ where
     }
 
     context.prepare_class_initializers(class_like_metadata)?;
-    if context.codebase.parses(class_like_metadata.name.as_bytes()) {
+    if context.codebase.parses(class_like_metadata.name) {
         record_parse(context, artifacts, class_like_metadata);
     }
     if class_like_metadata.flags.is_sharp() {
@@ -1298,11 +1305,11 @@ where
         let is_parent = class_like_metadata.kind.is_interface()
             || class_like_metadata
                 .direct_parent_class
-                .is_some_and(|parent| parent == context.codebase.class_key(resolved));
+                .is_some_and(|parent| parent == context.codebase.class_key(word(resolved)));
 
         if is_parent {
             extended_types.push(type_name);
-        } else if context.codebase.get_trait(resolved).is_some() {
+        } else if context.codebase.get_trait(word(resolved)).is_some() {
             header_traits.push(type_name);
         } else {
             implemented_types.push(type_name);
@@ -1321,9 +1328,11 @@ where
         .collect();
 
     let links_to_sharp = !context.dialect.is_sharp()
-        && class_like_metadata.all_parent_classes.iter().chain(&class_like_metadata.all_parent_interfaces).any(
-            |parent| context.codebase.get_class_like(parent.as_bytes()).is_some_and(|parent| parent.flags.is_sharp()),
-        );
+        && class_like_metadata
+            .all_parent_classes
+            .iter()
+            .chain(&class_like_metadata.all_parent_interfaces)
+            .any(|parent| context.codebase.get_class_like(*parent).is_some_and(|parent| parent.flags.is_sharp()));
     let class_span = name_span.unwrap_or(declaration_span);
     if links_to_sharp {
         context.collector.start_recording();
@@ -1331,9 +1340,9 @@ where
 
     // The base that starts a chain back to the class is the cycle's error alone, so no other check reads it.
     if let Some(start) = report_inheritance_cycle(context, class_like_metadata, &extended_types, &implemented_types) {
-        let start = context.codebase.class_key(start.as_bytes());
+        let start = context.codebase.class_key(start);
         let starts_cycle =
-            |name: &Identifier<'arena>| context.codebase.class_key(context.resolved_names.get(name)) == start;
+            |name: &Identifier<'arena>| context.codebase.class_key(word(context.resolved_names.get(name))) == start;
         extended_types.retain(|name| !starts_cycle(name));
         implemented_types.retain(|name| !starts_cycle(name));
     }
@@ -1376,16 +1385,13 @@ where
         let without_defaults =
             report_missing_defaults(context, class_like_metadata, name_span.unwrap_or(declaration_span));
         for (method_name, method_id) in &class_like_metadata.declaring_method_ids {
-            if without_defaults
-                .iter()
-                .any(|defaults| context.codebase.get_method(defaults.as_bytes(), method_name.as_bytes()).is_some())
-            {
+            if without_defaults.iter().any(|defaults| context.codebase.get_method(*defaults, *method_name).is_some()) {
                 continue;
             }
             if class_like_metadata.kind.is_enum() {
                 // An enum keys its built-in methods by its own rule, spec section 24, so a PHP# enum's `Cases` is a
                 // method of its own.
-                let built_in = |name: &[u8]| *method_name == class_like_metadata.method_key(name);
+                let built_in = |name: &[u8]| *method_name == class_like_metadata.method_key(word(name));
                 if built_in(b"cases") {
                     continue;
                 }
@@ -1395,15 +1401,13 @@ where
                 }
             }
 
-            let Some(declaring_class_like_metadata) =
-                context.codebase.get_class_like(method_id.get_class_name().as_bytes())
+            let Some(declaring_class_like_metadata) = context.codebase.get_class_like(method_id.get_class_name())
             else {
                 continue;
             };
 
-            let Some(function_like) = context
-                .codebase
-                .get_method(method_id.get_class_name().as_bytes(), method_id.get_method_name().as_bytes())
+            let Some(function_like) =
+                context.codebase.get_method(method_id.get_class_name(), method_id.get_method_name())
             else {
                 continue;
             };
@@ -1457,7 +1461,7 @@ where
                 .chain(class_like_metadata.all_parent_interfaces.iter())
                 .chain(class_like_metadata.used_traits.iter())
             {
-                let Some(parent_metadata) = context.codebase.get_class_like(parent_fqcn.as_bytes()) else {
+                let Some(parent_metadata) = context.codebase.get_class_like(*parent_fqcn) else {
                     continue;
                 };
 
@@ -1492,7 +1496,7 @@ where
                             all_parent_class.any(|parent_class_fqcn| {
                                 context
                                     .codebase
-                                    .get_class_like(parent_class_fqcn.as_bytes())
+                                    .get_class_like(*parent_class_fqcn)
                                     .and_then(|parent| parent.properties.get(property_name))
                                     .is_some_and(|prop| {
                                         if prop.hooks.get(hook_name).is_some_and(|h| !h.is_abstract) {
@@ -1588,7 +1592,7 @@ where
     if !class_like_metadata.template_types.is_empty() {
         for (template_name, _) in &class_like_metadata.template_types {
             let (resolved_template_name, _) = context.scope.resolve(NameKind::Default, template_name);
-            if let Some(conflicting_class) = context.codebase.get_class_like(&resolved_template_name) {
+            if let Some(conflicting_class) = context.codebase.get_class_like(word(resolved_template_name)) {
                 let conflicting_name = &conflicting_class.name;
                 let conflicting_class_span = conflicting_class.name_span.unwrap_or(conflicting_class.span);
 
@@ -1815,7 +1819,7 @@ where
     A: Arena,
 {
     let iterated = word("iteratoraggregate");
-    if !context.codebase.is_sharp_iterable(class_like_metadata.name.as_bytes()) {
+    if !context.codebase.is_sharp_iterable(class_like_metadata.name) {
         return;
     }
     // The element type the header names, which the populator gives every class whose header or base names
@@ -1833,7 +1837,7 @@ where
     let class_name = display_class_like_name(context, class_like_metadata.original_name);
     let iterable = TUnion::from_atomic(TAtomic::Iterable(TIterable::sharp_of(Arc::new(element))));
     let iterable_name = display_type(context, &iterable);
-    let declared = context.codebase.get_declaring_method(class_like_metadata.name.as_bytes(), b"elements");
+    let declared = context.codebase.get_declaring_method(class_like_metadata.name, word("elements"));
     let Some(elements) =
         declared.filter(|method| method.method_metadata.as_ref().is_some_and(|method| !method.is_static))
     else {
@@ -2001,12 +2005,12 @@ fn report_members_named_like_inherited_members<A>(context: &mut Context<'_, '_, 
 where
     A: Arena,
 {
-    let is_own = |declaring: Word| context.codebase.class_key(declaring.as_bytes()) == class.name;
+    let is_own = |declaring: Word| context.codebase.class_key(declaring) == class.name;
 
     let mut clashes = vec![];
     for (property_name, &property_class) in &class.declaring_property_ids {
         let name = property_name.as_bytes().strip_prefix(b"$").unwrap_or(property_name.as_bytes());
-        let Some(method_id) = class.declaring_method_ids.get(&class.method_key(name)) else {
+        let Some(method_id) = class.declaring_method_ids.get(&class.method_key(word(name))) else {
             continue;
         };
         let method_class = method_id.get_class_name();
@@ -2014,11 +2018,10 @@ where
             continue;
         }
         let inherited_from = if is_own(method_class) { property_class } else { method_class };
-        if !context.codebase.get_class_like(inherited_from.as_bytes()).is_some_and(|ancestor| ancestor.flags.is_sharp())
-        {
+        if !context.codebase.get_class_like(inherited_from).is_some_and(|ancestor| ancestor.flags.is_sharp()) {
             continue;
         }
-        let Some(declaring) = context.codebase.get_class_like(property_class.as_bytes()) else {
+        let Some(declaring) = context.codebase.get_class_like(property_class) else {
             unreachable!("the class that declares a property the class inherits is in the codebase");
         };
         let (Some(method), Some(property)) =
@@ -2042,8 +2045,7 @@ where
     clashes.sort_by_key(|(span, ..)| span.start.offset);
     for (span, declared, inherited, ancestor, name) in clashes {
         let class_name = display_class_like_name(context, class.original_name);
-        let ancestor =
-            context.codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |metadata| metadata.original_name);
+        let ancestor = context.codebase.get_class_like(ancestor).map_or(ancestor, |metadata| metadata.original_name);
         let ancestor = display_class_like_name(context, ancestor);
         context.collector.report_with_code(
             IssueCode::NameAlreadyInUse,
@@ -2182,7 +2184,7 @@ fn report_cases_without_property<A>(
         let case_class = [enum_metadata.original_name.as_bytes(), b"\\", case_name.value].concat();
         if context
             .codebase
-            .get_class_like(&case_class)
+            .get_class_like(word(case_class))
             .is_some_and(|case_class| case_class.properties.contains_key(&property_name))
         {
             continue;
@@ -2219,7 +2221,7 @@ fn inheritance_cycle<'ctx>(
         let mut bases: Vec<Word> = current.direct_parent_interfaces.iter().copied().collect();
         bases.sort_unstable();
         for base in current.direct_parent_class.into_iter().chain(bases) {
-            let Some(base) = codebase.get_class_like(base.as_bytes()) else {
+            let Some(base) = codebase.get_class_like(base) else {
                 continue;
             };
             chain.push(base);
@@ -2254,7 +2256,7 @@ where
     let written = extended_types
         .iter()
         .chain(implemented_types)
-        .find(|name| context.codebase.class_key(context.resolved_names.get(*name)) == start)?;
+        .find(|name| context.codebase.class_key(word(context.resolved_names.get(*name))) == start)?;
     let names: Vec<Word> =
         chain.iter().map(|type_like| display_class_like_name(context, type_like.original_name)).collect();
     let (own, base) = (names[0], names[1]);
@@ -2295,7 +2297,7 @@ fn check_class_like_extends<'ctx, 'arena, A>(
 
     for &extended_type in extended_types {
         let extended_type_str = context.resolved_names.get(&extended_type);
-        let extended_class_metadata = context.codebase.get_class_like(extended_type_str);
+        let extended_class_metadata = context.codebase.get_class_like(word(extended_type_str));
 
         // Case: The extended type does not exist.
         let Some(extended_class_metadata) = extended_class_metadata else {
@@ -2564,7 +2566,7 @@ fn check_class_like_implements<'ctx, 'arena, A>(
 
     for &implemented_type in implemented_types {
         let implemented_type_str = context.resolved_names.get(&implemented_type);
-        let implemented_interface_metadata = context.codebase.get_class_like(implemented_type_str);
+        let implemented_interface_metadata = context.codebase.get_class_like(word(implemented_type_str));
         if let Some(implemented_metadata) = implemented_interface_metadata {
             let implemented_name = display_class_like_name(context, implemented_metadata.original_name);
             let implemented_kind_str = implemented_metadata.kind.as_str();
@@ -2575,9 +2577,8 @@ fn check_class_like_implements<'ctx, 'arena, A>(
             // A PHP# class header names one class, which the populator linked as the parent.
             if context.dialect.is_sharp()
                 && implemented_metadata.kind.is_class()
-                && let Some(parent) = class_like_metadata
-                    .direct_parent_class
-                    .and_then(|parent| context.codebase.get_class_like(parent.as_bytes()))
+                && let Some(parent) =
+                    class_like_metadata.direct_parent_class.and_then(|parent| context.codebase.get_class_like(parent))
             {
                 let parent_name = display_class_like_name(context, parent.original_name);
                 context.collector.report_with_code(
@@ -2641,7 +2642,7 @@ fn check_class_like_implements<'ctx, 'arena, A>(
                     implemented_metadata
                         .all_parent_interfaces
                         .iter()
-                        .filter_map(|interface| context.codebase.get_class_like(interface.as_bytes())),
+                        .filter_map(|interface| context.codebase.get_class_like(*interface)),
                 )
                 .find(|interface| {
                     interface.flags.is_sealed() && !class_like_metadata.is_permitted_to_inherit(interface)
@@ -2723,7 +2724,7 @@ fn check_class_like_use<'ctx, 'arena, A>(
 
     for &used_type in used_types {
         let used_type_str = context.resolved_names.get(used_type);
-        let used_trait_metadata = context.codebase.get_class_like(used_type_str);
+        let used_trait_metadata = context.codebase.get_class_like(word(used_type_str));
 
         let Some(used_trait_metadata) = used_trait_metadata else {
             if report_missing_class(context, used_type_str, used_type.span()) {
@@ -3192,7 +3193,7 @@ fn check_template_parameters<'ctx, A>(
 /// Checks if this is the same method that was inherited (not overridden), by the classes' keys, spec section 24.
 /// Example: `StringBox` extends Box and inherits `Box::setValue` without overriding it.
 #[inline]
-fn should_skip_same_method(codebase: &CodebaseMetadata, appearing_fqcn: &[u8], overridden_fqcn: &[u8]) -> bool {
+fn should_skip_same_method(codebase: &CodebaseMetadata, appearing_fqcn: Word, overridden_fqcn: Word) -> bool {
     codebase.class_key(appearing_fqcn) == codebase.class_key(overridden_fqcn)
 }
 
@@ -3267,8 +3268,7 @@ fn check_template_variance_positions<'ctx, A>(
     let own_entity = GenericParent::ClassLike(class_like_metadata.name);
 
     for method_name in &class_like_metadata.methods {
-        let Some(method) = context.codebase.get_method(class_like_metadata.name.as_bytes(), method_name.as_bytes())
-        else {
+        let Some(method) = context.codebase.get_method(class_like_metadata.name, *method_name) else {
             continue;
         };
 
@@ -3356,7 +3356,7 @@ fn check_sharp_template_variance<A>(
         .flat_map(|inheritance| inheritance.types.iter())
         .filter_map(|hint| match hint {
             Hint::Generic(generic) => {
-                Some((context.codebase.class_key(context.resolved_names.resolve(&generic.name)?), generic.span()))
+                Some((context.codebase.class_key(word(context.resolved_names.resolve(&generic.name)?)), generic.span()))
             }
             _ => None,
         })
@@ -3398,7 +3398,7 @@ fn check_sharp_reached_twice<A>(
     let header: Vec<&ClassLikeMetadata> = inheritance
         .iter()
         .flat_map(|inheritance| inheritance.names())
-        .filter_map(|name| context.codebase.get_class_like(context.resolved_names.resolve(&name)?))
+        .filter_map(|name| context.codebase.get_class_like(word(context.resolved_names.resolve(&name)?)))
         .collect();
     let class_name = display_class_like_name(context, class_like_metadata.original_name);
 
@@ -3406,16 +3406,14 @@ fn check_sharp_reached_twice<A>(
         .template_extended_parameter_paths
         .iter()
         .filter(|(_, paths)| paths.len() > 1)
-        .filter_map(|(ancestor_name, _)| context.codebase.get_class_like(ancestor_name.as_bytes()));
+        .filter_map(|(ancestor_name, _)| context.codebase.get_class_like(*ancestor_name));
     for ancestor in ancestors {
         let ancestor_display = display_class_like_name(context, ancestor.original_name);
         // Each type the header reaches the ancestor as, with the header entry it is reached through, or `None` when the
         // header names the ancestor itself.
         let mut reached: Vec<(String, Option<&ClassLikeMetadata>)> = Vec::new();
         for parent in &header {
-            if parent.name != ancestor.name
-                && !context.codebase.is_instance_of(parent.name.as_bytes(), ancestor.name.as_bytes())
-            {
+            if parent.name != ancestor.name && !context.codebase.is_instance_of(parent.name, ancestor.name) {
                 continue;
             }
 
@@ -3494,7 +3492,7 @@ fn check_uninhabitable_diamonds<'ctx, A>(
             continue;
         }
 
-        let Some(ancestor_metadata) = context.codebase.get_class_like(ancestor_name.as_bytes()) else {
+        let Some(ancestor_metadata) = context.codebase.get_class_like(*ancestor_name) else {
             continue;
         };
         let ancestor_display = display_class_like_name(context, ancestor_metadata.original_name);
@@ -3508,7 +3506,7 @@ fn check_uninhabitable_diamonds<'ctx, A>(
                 continue;
             }
 
-            let Some(method) = context.codebase.get_method(ancestor_name.as_bytes(), method_name.as_bytes()) else {
+            let Some(method) = context.codebase.get_method(*ancestor_name, method_name) else {
                 continue;
             };
 
@@ -3565,7 +3563,7 @@ fn check_inherited_operators<'ctx, 'arena, A>(
     A: Arena,
 {
     let Some(parent) =
-        class_like_metadata.direct_parent_class.and_then(|parent| context.codebase.get_class_like(parent.as_bytes()))
+        class_like_metadata.direct_parent_class.and_then(|parent| context.codebase.get_class_like(parent))
     else {
         return;
     };
@@ -3577,12 +3575,11 @@ fn check_inherited_operators<'ctx, 'arena, A>(
         let Some(method) = MethodParts::of_operator(operator) else {
             continue;
         };
-        let name = parent.method_key(method.name);
+        let name = parent.method_key(word(method.name));
         let Some(declaring_method_id) = parent.declaring_method_ids.get(&name) else {
             continue;
         };
-        let Some(declaring_class) = context.codebase.get_class_like(declaring_method_id.get_class_name().as_bytes())
-        else {
+        let Some(declaring_class) = context.codebase.get_class_like(declaring_method_id.get_class_name()) else {
             continue;
         };
         checked_signatures.insert((declaring_method_id.get_class_name(), name));
@@ -3617,13 +3614,13 @@ fn check_abstract_method_signatures<'ctx, A>(
         };
 
         let declaring_fqcn = declaring_method_id.get_class_name();
-        let declaring_method_opt = context.codebase.get_method(declaring_fqcn.as_bytes(), method_name_str);
+        let declaring_method_opt = context.codebase.get_method(declaring_fqcn, word(method_name_str));
 
         let (method_fqcn, appearing_method) = if let Some(method) = declaring_method_opt {
             (declaring_fqcn, method)
         } else if let Some(appearing_method_id) = class_like_metadata.appearing_method_ids.get(method_name_atom) {
             let appearing_fqcn = appearing_method_id.get_class_name();
-            let Some(method) = context.codebase.get_method(appearing_fqcn.as_bytes(), method_name_str) else {
+            let Some(method) = context.codebase.get_method(appearing_fqcn, word(method_name_str)) else {
                 continue;
             };
 
@@ -3641,26 +3638,26 @@ fn check_abstract_method_signatures<'ctx, A>(
             let declaring_class_name = parent_declaring_method_id.get_class_name();
             let declaring_class_name_str = declaring_class_name.as_ref();
 
-            if should_skip_same_method(context.codebase, method_fqcn.as_bytes(), parent_fqcn_str) {
+            if should_skip_same_method(context.codebase, method_fqcn, word(parent_fqcn_str)) {
                 continue;
             }
 
             if overridden_declaring_classes.iter().any(|other| {
                 *other != declaring_class_name
-                    && context.codebase.is_instance_of(other.as_bytes(), declaring_class_name_str)
+                    && context.codebase.is_instance_of(*other, word(declaring_class_name_str))
             }) {
                 continue;
             }
 
             let declaring_class_name = required_constructor_class(context, class_like_metadata, *method_name_atom)
                 .unwrap_or(declaring_class_name);
-            let declaring_class_name_str = declaring_class_name.as_bytes();
+            let declaring_class_name_str = declaring_class_name;
             if !checked_signatures.insert((declaring_class_name, *method_name_atom)) {
                 continue;
             }
 
             let Some(overridden_method) =
-                context.codebase.get_declaring_method(declaring_class_name_str, method_name_str)
+                context.codebase.get_declaring_method(declaring_class_name_str, word(method_name_str))
             else {
                 continue;
             };
@@ -3669,7 +3666,7 @@ fn check_abstract_method_signatures<'ctx, A>(
                 continue;
             };
 
-            let Some(appearing_class) = context.codebase.get_class_like(method_fqcn.as_bytes()) else {
+            let Some(appearing_class) = context.codebase.get_class_like(method_fqcn) else {
                 continue;
             };
 
@@ -3683,7 +3680,7 @@ fn check_abstract_method_signatures<'ctx, A>(
                 continue;
             }
 
-            if should_skip_enum_builtin_interface(class_like_metadata, declaring_class_name_str) {
+            if should_skip_enum_builtin_interface(class_like_metadata, declaring_class_name_str.as_bytes()) {
                 continue;
             }
 
@@ -3772,27 +3769,29 @@ fn check_trait_method_conflicts<'ctx, 'arena, A>(
                 let first_trait_fqcn = &first_traits[k];
                 let second_trait_fqcn = &first_traits[l];
 
-                let Some(first_trait_metadata) = context.codebase.get_class_like(first_trait_fqcn.as_ref()) else {
+                let Some(first_trait_metadata) = context.codebase.get_class_like(word(first_trait_fqcn.as_ref()))
+                else {
                     continue;
                 };
-                let Some(second_trait_metadata) = context.codebase.get_class_like(second_trait_fqcn.as_ref()) else {
+                let Some(second_trait_metadata) = context.codebase.get_class_like(word(second_trait_fqcn.as_ref()))
+                else {
                     continue;
                 };
 
                 for (method_name, first_method_id) in &first_trait_metadata.declaring_method_ids {
                     if let Some(second_method_id) = second_trait_metadata.declaring_method_ids.get(method_name) {
                         let first_method_str = method_name.as_ref();
-                        let Some(first_method) = context
-                            .codebase
-                            .get_declaring_method(first_method_id.get_class_name().as_ref(), first_method_str)
-                        else {
+                        let Some(first_method) = context.codebase.get_declaring_method(
+                            word(first_method_id.get_class_name().as_ref()),
+                            word(first_method_str),
+                        ) else {
                             continue;
                         };
 
-                        let Some(second_method) = context
-                            .codebase
-                            .get_declaring_method(second_method_id.get_class_name().as_ref(), first_method_str)
-                        else {
+                        let Some(second_method) = context.codebase.get_declaring_method(
+                            word(second_method_id.get_class_name().as_ref()),
+                            word(first_method_str),
+                        ) else {
                             continue;
                         };
 
@@ -3828,12 +3827,13 @@ fn check_trait_method_conflicts<'ctx, 'arena, A>(
 
         for (second_trait_use_span, second_traits) in trait_uses.iter().skip(i + 1) {
             for first_trait_fqcn in first_traits {
-                let Some(first_trait_metadata) = context.codebase.get_class_like(first_trait_fqcn.as_ref()) else {
+                let Some(first_trait_metadata) = context.codebase.get_class_like(word(first_trait_fqcn.as_ref()))
+                else {
                     continue;
                 };
 
                 for second_trait_fqcn in second_traits {
-                    let Some(second_trait_metadata) = context.codebase.get_class_like(second_trait_fqcn.as_ref())
+                    let Some(second_trait_metadata) = context.codebase.get_class_like(word(second_trait_fqcn.as_ref()))
                     else {
                         continue;
                     };
@@ -3841,16 +3841,16 @@ fn check_trait_method_conflicts<'ctx, 'arena, A>(
                     for (method_name, first_method_id) in &first_trait_metadata.declaring_method_ids {
                         if let Some(second_method_id) = second_trait_metadata.declaring_method_ids.get(method_name) {
                             let first_method_str = method_name.as_ref();
-                            let Some(first_method) = context
-                                .codebase
-                                .get_declaring_method(first_method_id.get_class_name().as_ref(), first_method_str)
-                            else {
+                            let Some(first_method) = context.codebase.get_declaring_method(
+                                word(first_method_id.get_class_name().as_ref()),
+                                word(first_method_str),
+                            ) else {
                                 continue;
                             };
-                            let Some(second_method) = context
-                                .codebase
-                                .get_declaring_method(second_method_id.get_class_name().as_ref(), first_method_str)
-                            else {
+                            let Some(second_method) = context.codebase.get_declaring_method(
+                                word(second_method_id.get_class_name().as_ref()),
+                                word(first_method_str),
+                            ) else {
                                 continue;
                             };
 
@@ -3916,10 +3916,12 @@ fn check_trait_property_conflicts<'ctx, 'arena, A>(
                 let first_trait_fqcn = &first_traits[k];
                 let second_trait_fqcn = &first_traits[l];
 
-                let Some(first_trait_metadata) = context.codebase.get_class_like(first_trait_fqcn.as_ref()) else {
+                let Some(first_trait_metadata) = context.codebase.get_class_like(word(first_trait_fqcn.as_ref()))
+                else {
                     continue;
                 };
-                let Some(second_trait_metadata) = context.codebase.get_class_like(second_trait_fqcn.as_ref()) else {
+                let Some(second_trait_metadata) = context.codebase.get_class_like(word(second_trait_fqcn.as_ref()))
+                else {
                     continue;
                 };
 
@@ -3948,12 +3950,13 @@ fn check_trait_property_conflicts<'ctx, 'arena, A>(
 
         for (second_trait_use_span, second_traits) in trait_uses.iter().skip(i + 1) {
             for first_trait_fqcn in first_traits {
-                let Some(first_trait_metadata) = context.codebase.get_class_like(first_trait_fqcn.as_ref()) else {
+                let Some(first_trait_metadata) = context.codebase.get_class_like(word(first_trait_fqcn.as_ref()))
+                else {
                     continue;
                 };
 
                 for second_trait_fqcn in second_traits {
-                    let Some(second_trait_metadata) = context.codebase.get_class_like(second_trait_fqcn.as_ref())
+                    let Some(second_trait_metadata) = context.codebase.get_class_like(word(second_trait_fqcn.as_ref()))
                     else {
                         continue;
                     };
@@ -3984,7 +3987,7 @@ fn check_trait_property_conflicts<'ctx, 'arena, A>(
         }
 
         for first_trait_fqcn in first_traits {
-            let Some(first_trait_metadata) = context.codebase.get_class_like(first_trait_fqcn.as_ref()) else {
+            let Some(first_trait_metadata) = context.codebase.get_class_like(word(first_trait_fqcn.as_ref())) else {
                 continue;
             };
 
@@ -4115,7 +4118,7 @@ fn report_trait_property_conflict<A>(
     // A PHP# class's header traits, spec section 22, are named as PHP# writes classes, and a member has no `$`.
     if context.dialect.is_sharp() {
         let display = |name: Word| {
-            let original = context.codebase.get_class_like(name.as_bytes()).map_or(name, |class| class.original_name);
+            let original = context.codebase.get_class_like(name).map_or(name, |class| class.original_name);
             display_class_like_name(context, original)
         };
         let (class, first, second) = (display(class_name), display(trait1_name), display(trait2_name));
@@ -4321,7 +4324,7 @@ where
         let members: Vec<(Word, Span, FunctionLikeMetadata)> = untyped_implementations(codebase, class, method)
             .into_iter()
             .filter_map(|member| {
-                let interface = codebase.get_class_like(member.get_class_name().as_bytes())?;
+                let interface = codebase.get_class_like(member.get_class_name())?;
                 let metadata = codebase.get_method_by_id(&member)?;
                 metadata.return_type_metadata.as_ref()?;
 
@@ -4387,14 +4390,15 @@ fn check_interface_method_signatures<'ctx, A>(
     for (method_name_atom, interface_method_id) in &interface_metadata.declaring_method_ids {
         let method_name_str = method_name_atom.as_ref();
         let interface_fqcn_word = interface_method_id.get_class_name();
-        let interface_fqcn_str = interface_fqcn_word.as_bytes();
+        let interface_fqcn_str = interface_fqcn_word;
         // `BackedEnum` and `UnitEnum` declare the enum's methods the engine writes, also through an interface that
         // extends them.
-        if should_skip_enum_builtin_interface(class_like_metadata, interface_fqcn_str) {
+        if should_skip_enum_builtin_interface(class_like_metadata, interface_fqcn_str.as_bytes()) {
             continue;
         }
 
-        let Some(interface_method) = context.codebase.get_declaring_method(interface_fqcn_str, method_name_str) else {
+        let Some(interface_method) = context.codebase.get_declaring_method(interface_fqcn_str, word(method_name_str))
+        else {
             continue;
         };
 
@@ -4403,8 +4407,8 @@ fn check_interface_method_signatures<'ctx, A>(
         };
 
         let class_fqcn_word = class_method_id.get_class_name();
-        let class_fqcn_str = class_fqcn_word.as_bytes();
-        let Some(class_method) = context.codebase.get_declaring_method(class_fqcn_str, method_name_str) else {
+        let class_fqcn_str = class_fqcn_word;
+        let Some(class_method) = context.codebase.get_declaring_method(class_fqcn_str, word(method_name_str)) else {
             continue;
         };
 
@@ -4529,20 +4533,18 @@ where
 
 /// The class at `class` or above it that marks its named constructor `name` `required`, spec section 11. `required`
 /// passes down, so every class below it with objects of its own declares one, as Swift's `required init` does.
-pub(crate) fn requiring_class<'codebase>(
-    codebase: &'codebase CodebaseMetadata,
+pub(crate) fn requiring_class(
+    codebase: &CodebaseMetadata,
     class: Option<Word>,
-    name: &[u8],
-) -> Option<&'codebase ClassLikeMetadata> {
-    std::iter::successors(class, |class| codebase.get_class_like(class.as_bytes())?.direct_parent_class).find_map(
-        |class| {
-            let method = codebase.get_method(class.as_bytes(), name)?;
+    name: Word,
+) -> Option<&ClassLikeMetadata> {
+    std::iter::successors(class, |class| codebase.get_class_like(*class)?.direct_parent_class).find_map(|class| {
+        let method = codebase.get_method(class, name)?;
 
-            (method.flags.is_named_constructor() && method.flags.is_required())
-                .then(|| codebase.get_class_like(class.as_bytes()))
-                .flatten()
-        },
-    )
+        (method.flags.is_named_constructor() && method.flags.is_required())
+            .then(|| codebase.get_class_like(class))
+            .flatten()
+    })
 }
 
 /// Reports a PHP# class with objects of its own that inherits a `required` named constructor instead of declaring its
@@ -4560,11 +4562,11 @@ fn check_required_named_constructors<A>(
     }
 
     for (method_name, declaring_method_id) in &class_like_metadata.declaring_method_ids {
-        if context.codebase.class_key(declaring_method_id.get_class_name().as_bytes()) == class_like_metadata.name {
+        if context.codebase.class_key(declaring_method_id.get_class_name()) == class_like_metadata.name {
             continue;
         }
         let Some(requiring_class) =
-            requiring_class(context.codebase, class_like_metadata.direct_parent_class, method_name.as_bytes())
+            requiring_class(context.codebase, class_like_metadata.direct_parent_class, *method_name)
         else {
             continue;
         };
@@ -4573,7 +4575,7 @@ fn check_required_named_constructors<A>(
         let requiring = display_class_like_name(context, requiring_class.original_name);
         let constructor = context
             .codebase
-            .get_method(requiring_class.name.as_bytes(), method_name.as_bytes())
+            .get_method(requiring_class.name, *method_name)
             .map_or_else(|| method_name.to_string(), |method| method.original_name.to_string());
         let required = display_sharp_member(requiring, &constructor);
         context.collector.report_with_code(
@@ -4603,12 +4605,12 @@ where
     }
 
     std::iter::successors(class_like_metadata.direct_parent_class, |class| {
-        context.codebase.get_class_like(class.as_bytes())?.direct_parent_class
+        context.codebase.get_class_like(*class)?.direct_parent_class
     })
     .find(|class| {
         context
             .codebase
-            .get_method(class.as_bytes(), b"__construct")
+            .get_method(*class, word("__construct"))
             .is_some_and(|constructor| constructor.flags.is_required())
     })
 }
@@ -4722,10 +4724,8 @@ fn report_signature_compatibility_issue<'ctx, A>(
         && parent_class.flags.is_sharp()
         && parent_class.flags.has_consistent_constructor()
         && method_name.as_bytes().eq_ignore_ascii_case(b"__construct")
-        && let Some(child_constructor) =
-            context.codebase.get_declaring_method(child_class.name.as_bytes(), b"__construct")
-        && let Some(parent_constructor) =
-            context.codebase.get_declaring_method(parent_class.name.as_bytes(), b"__construct")
+        && let Some(child_constructor) = context.codebase.get_declaring_method(child_class.name, word("__construct"))
+        && let Some(parent_constructor) = context.codebase.get_declaring_method(parent_class.name, word("__construct"))
     {
         report_required_constructor_mismatch(
             context,
@@ -4968,7 +4968,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
             // The overridden parameter as its own class declares it, before a type argument fills its type parameters.
             let Some(parent_parameter) = context
                 .codebase
-                .get_declaring_method(parent_class.name.as_bytes(), method_name.as_bytes())
+                .get_declaring_method(parent_class.name, method_name)
                 .and_then(|parent_method| parent_method.parameters.get(parameter_index))
             else {
                 unreachable!("the signature check found this parameter on the method its class declares");
@@ -5517,7 +5517,7 @@ fn check_class_like_properties<'ctx, A>(
         // Check each parent class for this property
         for parent_fqcn in &class_like_metadata.all_parent_classes {
             let parent_fqcn_str = parent_fqcn.as_ref();
-            let Some(parent_metadata) = context.codebase.get_class_like(parent_fqcn_str) else {
+            let Some(parent_metadata) = context.codebase.get_class_like(word(parent_fqcn_str)) else {
                 continue;
             };
 
@@ -6003,7 +6003,7 @@ fn check_class_like_properties<'ctx, A>(
 
         // Check interface hook by-ref signature compatibility
         for interface_fqcn in &class_like_metadata.all_parent_interfaces {
-            let Some(interface_metadata) = context.codebase.get_class_like(interface_fqcn.as_bytes()) else {
+            let Some(interface_metadata) = context.codebase.get_class_like(*interface_fqcn) else {
                 continue;
             };
 
@@ -6078,18 +6078,18 @@ where
     let names_itself = |interface_name: &Word| {
         class_like_metadata.direct_parent_interfaces.iter().any(|named| {
             named == interface_name
-                || codebase.get_class_like(named.as_bytes()).is_some_and(|named| named.has_parent(*interface_name))
+                || codebase.get_class_like(*named).is_some_and(|named| named.has_parent(*interface_name))
         })
     };
 
     for interface_name in &class_like_metadata.all_parent_interfaces {
-        let Some(interface) = codebase.get_class_like(interface_name.as_bytes()) else {
+        let Some(interface) = codebase.get_class_like(*interface_name) else {
             continue;
         };
 
         for (property_name, stated) in &interface.properties {
             let owner = std::iter::successors(Some(class_like_metadata), |metadata| {
-                metadata.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
+                metadata.direct_parent_class.and_then(|parent| codebase.get_class_like(parent))
             })
             .find_map(|metadata| metadata.properties.get(property_name).map(|property| (metadata, property)));
             let Some((owner, property)) = owner else {
@@ -6254,7 +6254,7 @@ fn check_class_like_constants<'ctx, 'arena, A>(
                 continue;
             };
 
-            let Some(trait_metadata) = context.codebase.get_class_like(trait_fqcn.as_bytes()) else {
+            let Some(trait_metadata) = context.codebase.get_class_like(*trait_fqcn) else {
                 continue;
             };
 
@@ -6334,7 +6334,7 @@ fn check_class_like_constants<'ctx, 'arena, A>(
 
             for parent_fqcn in &class_like_metadata.all_parent_classes {
                 let parent_fqcn_str = parent_fqcn.as_ref();
-                let Some(parent_metadata) = context.codebase.get_class_like(parent_fqcn_str) else {
+                let Some(parent_metadata) = context.codebase.get_class_like(word(parent_fqcn_str)) else {
                     continue;
                 };
 
@@ -6441,7 +6441,7 @@ fn check_class_like_constants<'ctx, 'arena, A>(
 
             for interface_fqcn in &class_like_metadata.all_parent_interfaces {
                 let interface_fqcn_str = interface_fqcn.as_ref();
-                let Some(interface_metadata) = context.codebase.get_class_like(interface_fqcn_str) else {
+                let Some(interface_metadata) = context.codebase.get_class_like(word(interface_fqcn_str)) else {
                     continue;
                 };
 
@@ -6542,7 +6542,7 @@ fn check_readonly_class_trait_properties<'ctx, 'arena, A>(
     for trait_name_id in trait_uses.iter().flat_map(|(_, trait_names)| trait_names) {
         let trait_fqcn = word(context.resolved_names.get(*trait_name_id));
         let properties =
-            context.codebase.get_class_like(trait_fqcn.as_ref()).map(|trait_metadata| &trait_metadata.properties);
+            context.codebase.get_class_like(word(trait_fqcn.as_ref())).map(|trait_metadata| &trait_metadata.properties);
 
         for (property_name, property) in properties.into_iter().flatten() {
             if !property.flags.is_readonly() {
@@ -6578,7 +6578,7 @@ fn check_members_given_twice<A>(
     A: Arena,
 {
     let mut traits: Vec<&ClassLikeMetadata> =
-        header_traits.iter().filter_map(|header_trait| context.codebase.get_trait(header_trait.as_bytes())).collect();
+        header_traits.iter().filter_map(|header_trait| context.codebase.get_trait(*header_trait)).collect();
     traits.extend(context.codebase.get_defaults_traits(class_like_metadata));
     traits.sort_unstable_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
 
@@ -6594,8 +6594,7 @@ fn check_members_given_twice<A>(
                     .is_some_and(|method| !method.is_abstract && !method.visibility.is_private())
             })
     };
-    let parent =
-        class_like_metadata.direct_parent_class.and_then(|parent| context.codebase.get_class_like(parent.as_bytes()));
+    let parent = class_like_metadata.direct_parent_class.and_then(|parent| context.codebase.get_class_like(parent));
 
     let mut methods: Vec<Word> =
         traits.iter().flat_map(|trait_metadata| trait_metadata.declaring_method_ids.keys().copied()).collect();

@@ -1343,8 +1343,7 @@ fn intersect_atomic_types(
 
     if type_1.can_be_intersected() && type_2.can_be_intersected() {
         if let (TAtomic::Object(TObject::Named(n1)), TAtomic::Object(TObject::Named(n2))) = (type_1, type_2)
-            && let (Some(c1), Some(c2)) =
-                (codebase.get_class_like(n1.name.as_bytes()), codebase.get_class_like(n2.name.as_bytes()))
+            && let (Some(c1), Some(c2)) = (codebase.get_class_like(n1.name), codebase.get_class_like(n2.name))
             && !c1.kind.is_interface()
             && !c1.kind.is_trait()
             && !c2.kind.is_interface()
@@ -1404,17 +1403,17 @@ pub fn get_iterable_parameters(atomic: &TAtomic, codebase: &CodebaseMetadata) ->
                 let iterator = word("iterator");
                 let iterator_aggregate = word("iteratoraggregate");
 
-                let class_metadata = codebase.get_class_like(name.as_bytes())?;
-                if !codebase.is_instance_of(class_metadata.name.as_bytes(), traversable.as_bytes()) {
+                let class_metadata = codebase.get_class_like(name)?;
+                if !codebase.is_instance_of(class_metadata.name, traversable) {
                     break 'parameters None;
                 }
 
                 let is_iterator_interface = name == iterator || name == traversable || name == iterator_aggregate;
                 if !is_iterator_interface
-                    && codebase.is_instance_of(class_metadata.name.as_bytes(), iterator.as_bytes())
+                    && codebase.is_instance_of(class_metadata.name, iterator)
                     && let (Some(key_type), Some(value_type)) = (
-                        get_iterator_method_return_type(codebase, name, b"key"),
-                        get_iterator_method_return_type(codebase, name, b"current"),
+                        get_iterator_method_return_type(codebase, name, word("key")),
+                        get_iterator_method_return_type(codebase, name, word("current")),
                     )
                 {
                     let contains_generic_param = |t: &TUnion| t.types.iter().any(atomic::TAtomic::is_generic_parameter);
@@ -1428,7 +1427,7 @@ pub fn get_iterable_parameters(atomic: &TAtomic, codebase: &CodebaseMetadata) ->
                     }
                 }
 
-                let traversable_metadata = codebase.get_class_like(traversable.as_bytes())?;
+                let traversable_metadata = codebase.get_class_like(traversable)?;
                 let key_template = traversable_metadata.template_types.get_index(0).map(|(name, _)| *name)?;
                 let value_template = traversable_metadata.template_types.get_index(1).map(|(name, _)| *name)?;
 
@@ -1491,10 +1490,10 @@ pub fn get_backing_key_type<'key>(
         let TAtomic::Object(TObject::Named(named_object)) = atomic else {
             return None;
         };
-        let name = named_object.name.as_bytes();
+        let name = named_object.name;
         let is_struct = codebase.get_class_like(name).is_some_and(|class_like| class_like.flags.is_struct());
 
-        (is_struct || codebase.get_declaring_method(name, b"op_Equality").is_some()).then(|| STRING_ATOMIC.clone())
+        (is_struct || codebase.get_declaring_method(name, word("op_Equality")).is_some()).then(|| STRING_ATOMIC.clone())
     };
 
     if !key_type.types.iter().any(|atomic| backing_type(atomic).is_some()) {
@@ -1520,12 +1519,12 @@ pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
     let is_key_object = |member: &TAtomic| match member {
         TAtomic::Object(TObject::Enum(_)) => true,
         TAtomic::Object(TObject::Named(named_object)) => {
-            let name = named_object.name.as_bytes();
+            let name = named_object.name;
 
             codebase
                 .get_class_like(name)
                 .is_some_and(|class_like| class_like.kind.is_enum() || class_like.flags.is_struct())
-                || codebase.get_declaring_method(name, b"op_Equality").is_some()
+                || codebase.get_declaring_method(name, word("op_Equality")).is_some()
         }
         _ => false,
     };
@@ -1610,7 +1609,7 @@ pub fn get_php_declared_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TU
             _ => return true,
         };
 
-        !codebase.get_class_like(name.as_bytes()).is_some_and(|class_like| class_like.kind.is_trait())
+        !codebase.get_class_like(name).is_some_and(|class_like| class_like.kind.is_trait())
     };
     // A class without its type arguments, and the classes it is intersected with apart.
     let bare = |atomic: &TAtomic| match atomic {
@@ -1837,7 +1836,7 @@ fn get_php_array_key(key_type: &TUnion, codebase: &CodebaseMetadata) -> Option<T
     for atomic in key_type.types.iter() {
         let backed_enum = match atomic {
             TAtomic::Reference(TReference::Symbol { name, .. }) => {
-                codebase.get_class_like(name.as_bytes()).filter(|class_like| class_like.enum_type.is_some())
+                codebase.get_class_like(*name).filter(|class_like| class_like.enum_type.is_some())
             }
             atomic => get_backed_enum(atomic, codebase, Dialect::Sharp),
         };
@@ -2114,9 +2113,7 @@ pub fn get_backed_enum<'codebase>(
     dialect: Dialect,
 ) -> Option<&'codebase ClassLikeMetadata> {
     let backed_enum = |name: Word| {
-        codebase
-            .get_class_like(name.as_bytes())
-            .filter(|class_like| class_like.kind.is_enum() && class_like.enum_type.is_some())
+        codebase.get_class_like(name).filter(|class_like| class_like.kind.is_enum() && class_like.enum_type.is_some())
     };
 
     if !dialect.is_sharp() {
@@ -2149,7 +2146,7 @@ pub fn get_backed_enum<'codebase>(
 pub fn get_php_array_key_type<'key>(key_type: &'key TUnion, codebase: &CodebaseMetadata) -> Option<Cow<'key, TUnion>> {
     let backing_type = |atomic: &TAtomic| match atomic {
         TAtomic::Reference(TReference::Symbol { name, .. }) => codebase
-            .get_class_like(name.as_bytes())
+            .get_class_like(*name)
             .filter(|class_like| class_like.kind.is_enum())
             .and_then(|class_like| class_like.enum_type.clone()),
         atomic => get_backed_enum(atomic, codebase, Dialect::Sharp)?.enum_type.clone(),
@@ -2380,12 +2377,12 @@ pub fn get_iterable_value_parameter(atomic: &TAtomic, codebase: &CodebaseMetadat
             let name = object.get_name()?;
             let traversable = word("traversable");
 
-            let class_metadata = codebase.get_class_like(name.as_bytes())?;
-            if !codebase.is_instance_of(class_metadata.name.as_bytes(), traversable.as_bytes()) {
+            let class_metadata = codebase.get_class_like(name)?;
+            if !codebase.is_instance_of(class_metadata.name, traversable) {
                 return None;
             }
 
-            let traversable_metadata = codebase.get_class_like(traversable.as_bytes())?;
+            let traversable_metadata = codebase.get_class_like(traversable)?;
             let value_template = traversable_metadata.template_types.get_index(1).map(|(name, _)| *name)?;
 
             get_specialized_template_type(
@@ -2463,7 +2460,7 @@ pub fn get_specialized_template_type(
     instantiated_class_metadata: &ClassLikeMetadata,
     instantiated_type_parameters: Option<&[TUnion]>,
 ) -> Option<TUnion> {
-    let defining_class_metadata = codebase.get_class_like(template_defining_class_id.as_bytes())?;
+    let defining_class_metadata = codebase.get_class_like(template_defining_class_id)?;
 
     if defining_class_metadata.name == instantiated_class_metadata.name {
         let index = instantiated_class_metadata.get_template_index_for_name(template_name)?;
@@ -2525,12 +2522,8 @@ pub fn get_specialized_template_type(
     Some(template_type)
 }
 
-fn get_iterator_method_return_type(
-    codebase: &CodebaseMetadata,
-    class_name: Word,
-    method_name: &[u8],
-) -> Option<TUnion> {
-    let method = codebase.get_declaring_method(class_name.as_bytes(), method_name)?;
+fn get_iterator_method_return_type(codebase: &CodebaseMetadata, class_name: Word, method_name: Word) -> Option<TUnion> {
+    let method = codebase.get_declaring_method(class_name, method_name)?;
     let return_type_meta = method.return_type_metadata.as_ref()?;
     let mut return_type = return_type_meta.type_union.clone();
     expander::expand_union(codebase, &mut return_type, &TypeExpansionOptions::default());

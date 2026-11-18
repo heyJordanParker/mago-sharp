@@ -92,8 +92,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodPartialApplication<'
                 let Some(metadata) = context.codebase.get_function_like(&identifier) else {
                     continue;
                 };
-                let Some(class_like_metadata) = context.codebase.get_class_like(resolved_method.classname.as_bytes())
-                else {
+                let Some(class_like_metadata) = context.codebase.get_class_like(resolved_method.classname) else {
                     continue;
                 };
 
@@ -168,5 +167,5 @@ fn called_method_key(codebase: &CodebaseMetadata, resolved: &ResolvedMethod) -> 
         .get_method_by_id(&resolved.method_identifier)
         .map_or(resolved.method_identifier.get_method_name(), |method| method.original_name);
 
-    codebase.method_key(resolved.classname, declared.as_bytes())
+    codebase.method_key(resolved.classname, declared)
 }

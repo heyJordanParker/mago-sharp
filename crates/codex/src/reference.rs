@@ -555,7 +555,7 @@ impl SymbolReferences {
     ) {
         self.add_reference_to_class_member(
             scope,
-            (codebase.class_key(method.get_class_name().as_bytes()), method.get_method_name()),
+            (codebase.class_key(method.get_class_name()), method.get_method_name()),
             false,
         );
     }
@@ -569,7 +569,7 @@ impl SymbolReferences {
         class_name: Word,
         property_name: Word,
     ) {
-        let class_member = (codebase.class_key(class_name.as_bytes()), property_name);
+        let class_member = (codebase.class_key(class_name), property_name);
 
         self.add_property_read_reference(scope.get_reference_origin(), class_member);
     }
@@ -584,7 +584,7 @@ impl SymbolReferences {
         class_name: Word,
         property_name: Word,
     ) {
-        let class_member = (codebase.class_key(class_name.as_bytes()), property_name);
+        let class_member = (codebase.class_key(class_name), property_name);
 
         self.add_property_write_reference(scope.get_reference_origin(), class_member);
     }
@@ -942,7 +942,7 @@ impl SymbolReferences {
         // section 24, which a deleted PHP# class-like no longer has.
         let read_invalid = read.iter().any(|&(class, member)| {
             invalid_signatures.contains(&(class, member))
-                || invalid_signatures.contains(&(codebase.class_key(class.as_bytes()), member))
+                || invalid_signatures.contains(&(codebase.class_key(class), member))
         });
 
         let mut all_invalid_symbols = invalid_signatures;

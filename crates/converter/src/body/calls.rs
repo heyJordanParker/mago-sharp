@@ -101,7 +101,7 @@ impl<'input> Converter<'input, '_> {
                     _ => None,
                 },
             ))
-            .find_map(|class| codebase.get_declaring_method(class.as_bytes(), name.value))
+            .find_map(|class| codebase.get_declaring_method(class, word(name.value)))
     }
 
     /// The method `selector` names, written as its class declares it: PHP finds a method in any case, and PHP# only in
@@ -132,8 +132,8 @@ impl<'input> Converter<'input, '_> {
                     return;
                 };
                 let codebase = self.input.codebase;
-                if codebase.get_class_like(class.name.as_bytes()).is_some()
-                    && codebase.get_declaring_method(class.name.as_bytes(), b"__call").is_none()
+                if codebase.get_class_like(class.name).is_some()
+                    && codebase.get_declaring_method(class.name, word("__call")).is_none()
                 {
                     let (method, class) = (String::from_utf8_lossy(name.value), class.name.as_str_lossy());
                     self.refuse(
@@ -318,10 +318,9 @@ impl<'input> Converter<'input, '_> {
     /// [`CodebaseMetadata::extern_of`]: mago_codex::metadata::CodebaseMetadata::extern_of
     fn declared_effect(&self, callee: &FunctionLikeMetadata, class: Option<Word>) -> Option<Word> {
         let codebase = self.input.codebase;
-        let class = class.and_then(|class| codebase.get_class_like(class.as_bytes()));
+        let class = class.and_then(|class| codebase.get_class_like(class));
         if let Some(class) = class {
-            let parents =
-                class.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(parent.as_bytes()));
+            let parents = class.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(*parent));
             if let Some(foreign) = std::iter::once(class).chain(parents).find(|class| class.flags.is_foreign()) {
                 return Some(foreign.original_name);
             }
@@ -345,13 +344,13 @@ impl<'input> Converter<'input, '_> {
             let TAtomic::Object(TObject::Named(object)) = atomic else {
                 return None;
             };
-            let class = codebase.get_class_like(object.name.as_bytes())?;
-            let key = codebase.class_key(class.name.as_bytes());
+            let class = codebase.get_class_like(object.name)?;
+            let key = codebase.class_key(class.name);
             let module = codebase.modules.iter().filter(|module| module.kind != ModuleKind::Test).find(|module| {
                 module.bindings.iter().any(|binding| {
                     binding.service.type_union.types.iter().any(|service| {
                         matches!(service, TAtomic::Object(TObject::Named(service))
-                            if codebase.class_key(service.name.as_bytes()) == key)
+                            if codebase.class_key(service.name) == key)
                     })
                 })
             })?;
@@ -379,7 +378,7 @@ impl<'input> Converter<'input, '_> {
             return None;
         };
 
-        self.input.codebase.get_declaring_method(self.static_call_class(call)?.as_bytes(), name.value)
+        self.input.codebase.get_declaring_method(self.static_call_class(call)?, word(name.value))
     }
 
     /// The class the static call `call` finds its method on: the one it names, the converted class for `self` and
@@ -585,8 +584,8 @@ impl<'input> Converter<'input, '_> {
     pub(super) fn function_of(&self, identifier: &Identifier<'_>) -> Option<&'input FunctionLikeMetadata> {
         let codebase = self.input.codebase;
 
-        codebase.get_function(self.input.names.get(identifier)).or_else(|| {
-            (!identifier.value().contains(&b'\\')).then(|| codebase.get_function(identifier.value())).flatten()
+        codebase.get_function(word(self.input.names.get(identifier))).or_else(|| {
+            (!identifier.value().contains(&b'\\')).then(|| codebase.get_function(word(identifier.value()))).flatten()
         })
     }
 
@@ -755,7 +754,7 @@ impl<'input> Converter<'input, '_> {
                     return;
                 };
                 let mut written = Vec::new();
-                if let Some(class) = self.input.codebase.get_class_like(self.input.names.get(identifier))
+                if let Some(class) = self.input.codebase.get_class_like(word(self.input.names.get(identifier)))
                     && !class.template_types.is_empty()
                 {
                     let declared = expected.and_then(|union| {
@@ -823,7 +822,8 @@ impl<'input> Converter<'input, '_> {
             Expression::Self_(_) => self.class.as_ref().map(|class| class.metadata.name.as_bytes()),
             _ => None,
         };
-        let constructor = class.and_then(|class| self.input.codebase.get_declaring_method(class, b"__construct"));
+        let constructor =
+            class.and_then(|class| self.input.codebase.get_declaring_method(word(class), word("__construct")));
         if let Some(arguments) = &instantiation.argument_list {
             self.arguments(arguments, constructor);
         }

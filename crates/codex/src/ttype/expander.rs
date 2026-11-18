@@ -414,7 +414,7 @@ fn resolve_array_key(key: ArrayKey, codebase: &CodebaseMetadata, options: &TypeE
             }
             b"parent" => {
                 if let Some(self_class) = options.self_class
-                    && let Some(class_metadata) = codebase.get_class_like(self_class.as_bytes())
+                    && let Some(class_metadata) = codebase.get_class_like(self_class)
                     && let Some(parent) = class_metadata.direct_parent_class
                 {
                     parent
@@ -426,7 +426,7 @@ fn resolve_array_key(key: ArrayKey, codebase: &CodebaseMetadata, options: &TypeE
         }
     };
 
-    let Some(class_like) = codebase.get_class_like(resolved_class_name.as_bytes()) else {
+    let Some(class_like) = codebase.get_class_like(resolved_class_name) else {
         return ArrayKey::ClassLikeConstant { class_like_name, constant_name };
     };
 
@@ -479,7 +479,7 @@ fn expand_member_reference(
         return;
     }
 
-    let Some(class_like) = codebase.get_class_like(class_like_name.as_bytes()) else {
+    let Some(class_like) = codebase.get_class_like(class_like_name) else {
         new_return_type_parts.push(TAtomic::Mixed(TMixed::new()));
         return;
     };
@@ -570,7 +570,7 @@ fn expand_object(object: &mut TObject, codebase: &CodebaseMetadata, options: &Ty
 
     if let TObject::Named(named) = object
         && named.intersection_types.is_none()
-        && let Some(class_metadata) = codebase.get_class_like(named.name.as_bytes())
+        && let Some(class_metadata) = codebase.get_class_like(named.name)
         && class_metadata.kind.is_enum()
     {
         *object = TObject::new_enum(class_metadata.original_name);
@@ -582,7 +582,7 @@ fn expand_object(object: &mut TObject, codebase: &CodebaseMetadata, options: &Ty
     };
 
     let has_params = named.type_parameters.as_ref().is_some_and(|p| !p.is_empty());
-    let class_metadata = codebase.get_class_like(named.name.as_bytes());
+    let class_metadata = codebase.get_class_like(named.name);
     let has_required_intersections =
         class_metadata.map(|m| !m.require_extends.is_empty() || !m.require_implements.is_empty()).unwrap_or(false);
     let needs_default_params = !has_params && class_metadata.map(|m| !m.template_types.is_empty()).unwrap_or(false);
@@ -643,10 +643,8 @@ fn generic_parameter_can_resolve_static(
     parameter.constraint.types.iter().any(|atomic| match atomic {
         TAtomic::Object(TObject::Named(object)) => std::iter::once(object.name)
             .chain(object.intersection_types.iter().flatten().filter_map(TAtomic::get_object_or_enum_name))
-            .any(|name| codebase.is_instance_of(name.as_bytes(), expected_class.as_bytes())),
-        TAtomic::Object(TObject::Enum(object)) => {
-            codebase.is_instance_of(object.name.as_bytes(), expected_class.as_bytes())
-        }
+            .any(|name| codebase.is_instance_of(name, expected_class)),
+        TAtomic::Object(TObject::Enum(object)) => codebase.is_instance_of(object.name, expected_class),
         TAtomic::GenericParameter(parameter) => {
             generic_parameter_can_resolve_static(parameter, expected_class, codebase)
         }
@@ -721,7 +719,7 @@ fn resolve_special_class_names(object: &mut TObject, codebase: &CodebaseMetadata
     if matches!(special, SpecialClassName::None)
         && named.is_static
         && let StaticClassType::Object(TObject::Enum(static_enum)) = &options.static_class_type
-        && (codebase.is_instance_of(static_enum.name.as_bytes(), named.name.as_bytes())
+        && (codebase.is_instance_of(static_enum.name, named.name)
             || (options.allow_mixin_static_rebind && reaches_through_mixins(static_enum.name, named.name, codebase)))
     {
         *object = TObject::Enum(static_enum.clone());
@@ -744,7 +742,7 @@ fn resolve_special_class_names(object: &mut TObject, codebase: &CodebaseMetadata
         }
         SpecialClassName::Parent => {
             if let Some(self_class) = options.self_class
-                && let Some(class_metadata) = codebase.get_class_like(self_class.as_bytes())
+                && let Some(class_metadata) = codebase.get_class_like(self_class)
                 && let Some(parent) = class_metadata.direct_parent_class
             {
                 named.name = parent;
@@ -768,7 +766,7 @@ fn resolve_static_type(
 ) {
     match &options.static_class_type {
         StaticClassType::Exact(static_class)
-            if !check_compatibility || codebase.is_instance_of(static_class.as_bytes(), named.name.as_bytes()) =>
+            if !check_compatibility || codebase.is_instance_of(*static_class, named.name) =>
         {
             named.name = *static_class;
             named.is_static = false;
@@ -780,9 +778,8 @@ fn resolve_static_type(
             // compatibility or mixin-reachability question arises.
             let mut crosses_mixin = false;
             if check_compatibility
-                && !codebase.is_instance_of(static_obj.name.as_bytes(), named.name.as_bytes())
-                && !intersection_object_names(static_obj)
-                    .any(|name| codebase.is_instance_of(name.as_bytes(), named.name.as_bytes()))
+                && !codebase.is_instance_of(static_obj.name, named.name)
+                && !intersection_object_names(static_obj).any(|name| codebase.is_instance_of(name, named.name))
             {
                 crosses_mixin = options.allow_mixin_static_rebind
                     && (reaches_through_mixins(static_obj.name, named.name, codebase)
@@ -805,10 +802,7 @@ fn resolve_static_type(
                 || (static_obj.type_parameters.is_some() && should_use_static_type_params(named, static_obj, codebase))
             {
                 named.type_parameters.clone_from(&static_obj.type_parameters);
-            } else if codebase
-                .get_class_like(static_obj.name.as_bytes())
-                .is_some_and(|class| class.template_types.is_empty())
-            {
+            } else if codebase.get_class_like(static_obj.name).is_some_and(|class| class.template_types.is_empty()) {
                 // The type arguments `named` holds are the declaring class's, and a receiver class that declares no
                 // templates takes none.
                 named.type_parameters = None;
@@ -820,7 +814,7 @@ fn resolve_static_type(
             named.is_this = !effectively_final && is_this_type;
         }
         StaticClassType::Name(static_class)
-            if (!check_compatibility || codebase.is_instance_of(static_class.as_bytes(), named.name.as_bytes())) =>
+            if (!check_compatibility || codebase.is_instance_of(*static_class, named.name)) =>
         {
             named.name = *static_class;
             let effectively_final = is_effectively_final(static_class, codebase, options);
@@ -843,7 +837,7 @@ fn is_effectively_final(class_name: &Word, codebase: &CodebaseMetadata, options:
         return true;
     }
 
-    codebase.get_class_like(class_name.as_bytes()).is_some_and(|meta| meta.name_span.is_none() || meta.flags.is_final())
+    codebase.get_class_like(*class_name).is_some_and(|meta| meta.name_span.is_none() || meta.flags.is_final())
 }
 
 /// Iterates the class names of an object's intersection types.
@@ -859,7 +853,7 @@ fn intersection_object_names(obj: &TNamedObject) -> impl Iterator<Item = Word> {
 /// to the mixin class, so rebinding them to the class carrying the tag must treat
 /// that class as compatible.
 fn reaches_through_mixins(class_name: Word, target_name: Word, codebase: &CodebaseMetadata) -> bool {
-    let Some(metadata) = codebase.get_class_like(class_name.as_bytes()) else {
+    let Some(metadata) = codebase.get_class_like(class_name) else {
         return false;
     };
 
@@ -870,7 +864,7 @@ fn reaches_through_mixins(class_name: Word, target_name: Word, codebase: &Codeba
     let mut current = metadata;
     loop {
         for (mixin_name, mixin_metadata) in direct_mixins(current, codebase) {
-            if codebase.is_instance_of(mixin_name.as_bytes(), target_name.as_bytes()) {
+            if codebase.is_instance_of(mixin_name, target_name) {
                 return true;
             }
 
@@ -904,7 +898,7 @@ fn direct_mixins<'ctx>(
 
         atomics.iter().filter_map(move |atomic| {
             let mixin_name = atomic.get_object_or_enum_name()?;
-            Some((mixin_name, codebase.get_class_like(mixin_name.as_bytes())))
+            Some((mixin_name, codebase.get_class_like(mixin_name)))
         })
     })
 }
@@ -916,7 +910,7 @@ fn should_use_static_type_params(named: &TNamedObject, static_obj: &TNamedObject
         return true;
     };
 
-    let Some(class_metadata) = codebase.get_class_like(static_obj.name.as_bytes()) else {
+    let Some(class_metadata) = codebase.get_class_like(static_obj.name) else {
         return false;
     };
 
@@ -936,7 +930,7 @@ fn expand_or_fill_type_parameters(
     codebase: &CodebaseMetadata,
     options: &TypeExpansionOptions,
 ) {
-    if let Some(class_metadata) = codebase.get_class_like(named.name.as_bytes()) {
+    if let Some(class_metadata) = codebase.get_class_like(named.name) {
         let template_count = class_metadata.template_types.len();
         let supplied_count = named.type_parameters.as_ref().map_or(0, Vec::len);
 
@@ -983,12 +977,10 @@ fn get_signature_of_function_like_identifier_with_options(
     preserve_parameter_dependencies: bool,
 ) -> Option<TCallableSignature> {
     let (function_like_metadata, options) = match function_like_identifier {
-        FunctionLikeIdentifier::Function(name) => {
-            (codebase.get_function(name.as_bytes())?, TypeExpansionOptions::default())
-        }
+        FunctionLikeIdentifier::Function(name) => (codebase.get_function(*name)?, TypeExpansionOptions::default()),
         FunctionLikeIdentifier::Closure(name) => (codebase.get_closure(name)?, TypeExpansionOptions::default()),
         FunctionLikeIdentifier::Method(classlike_name, method_name) => (
-            codebase.get_declaring_method(classlike_name.as_bytes(), method_name.as_bytes())?,
+            codebase.get_declaring_method(*classlike_name, *method_name)?,
             TypeExpansionOptions {
                 self_class: Some(*classlike_name),
                 static_class_type: StaticClassType::Name(*classlike_name),
@@ -1940,7 +1932,7 @@ mod tests {
             class Container {}
         ";
         let codebase = create_test_codebase(code);
-        let container = codebase.get_class_like(b"container").expect("Container is scanned");
+        let container = codebase.get_class_like(word("container")).expect("Container is scanned");
         let specialized = |template: &str| {
             crate::ttype::get_specialized_template_type(&codebase, word(template), container.name, container, None)
                 .expect("Container declares the template")

@@ -456,20 +456,21 @@ impl CodebaseMetadata {
     /// the namespace it names itself.
     fn imported_namespace<'name>(&self, name: &'name [u8]) -> &'name [u8] {
         let parent = name.iter().rposition(|byte| *byte == b'\\').map_or(&name[..0], |separator| &name[..separator]);
-        if !self.class_like_exists(name) && self.namespace_exists(name) { name } else { parent }
+        let named = word(name);
+        if !self.class_like_exists(named) && self.namespace_exists(named) { name } else { parent }
     }
 
     /// The class-like `alias` names in the end, by its key: a `class_alias()` declaration names its target as written,
     /// which [`Self::class_key`] keys, exact for a PHP# class-like, spec section 24, and lowercase for an alias.
     fn resolve_class_like_alias_declaration(&self, alias: Word) -> Option<Word> {
-        let mut current = self.class_key(self.class_like_alias_declarations.get(&alias)?.0.as_bytes());
+        let mut current = self.class_key(self.class_like_alias_declarations.get(&alias)?.0);
 
         for _ in 0..self.class_like_alias_declarations.len() {
             if self.class_likes.contains_key(&current) {
                 return Some(current);
             }
 
-            current = self.class_key(self.class_like_alias_declarations.get(&current)?.0.as_bytes());
+            current = self.class_key(self.class_like_alias_declarations.get(&current)?.0);
         }
 
         None
@@ -520,7 +521,7 @@ impl CodebaseMetadata {
     /// plain PHP one's lowercase name.
     #[inline]
     #[must_use]
-    pub fn class_key(&self, name: &[u8]) -> Word {
+    pub fn class_key(&self, name: Word) -> Word {
         self.symbols.class_key(name)
     }
 
@@ -529,9 +530,8 @@ impl CodebaseMetadata {
     /// otherwise, an unknown class-like's included.
     #[inline]
     #[must_use]
-    pub fn method_key(&self, class: Word, method: &[u8]) -> Word {
-        self.get_class_like(class.as_bytes())
-            .map_or_else(|| ascii_lowercase_word(method), |meta| meta.method_key(method))
+    pub fn method_key(&self, class: Word, method: Word) -> Word {
+        self.get_class_like(class).map_or_else(|| method.to_ascii_lowercase(), |meta| meta.method_key(method))
     }
 
     /// Checks if a class exists in the codebase, by [`Self::class_key`].
@@ -544,43 +544,43 @@ impl CodebaseMetadata {
     /// ```
     #[inline]
     #[must_use]
-    pub fn class_exists(&self, name: &[u8]) -> bool {
+    pub fn class_exists(&self, name: Word) -> bool {
         matches!(self.symbols.get_kind(self.class_key(name)), Some(SymbolKind::Class))
     }
 
     /// Checks if an interface exists in the codebase, by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn interface_exists(&self, name: &[u8]) -> bool {
+    pub fn interface_exists(&self, name: Word) -> bool {
         matches!(self.symbols.get_kind(self.class_key(name)), Some(SymbolKind::Interface))
     }
 
     /// Checks if a trait exists in the codebase, by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn trait_exists(&self, name: &[u8]) -> bool {
+    pub fn trait_exists(&self, name: Word) -> bool {
         matches!(self.symbols.get_kind(self.class_key(name)), Some(SymbolKind::Trait))
     }
 
     /// Checks if an enum exists in the codebase, by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn enum_exists(&self, name: &[u8]) -> bool {
+    pub fn enum_exists(&self, name: Word) -> bool {
         matches!(self.symbols.get_kind(self.class_key(name)), Some(SymbolKind::Enum))
     }
 
     /// Checks if a class-like (class, interface, trait, or enum) exists, by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn class_like_exists(&self, name: &[u8]) -> bool {
+    pub fn class_like_exists(&self, name: Word) -> bool {
         self.symbols.contains(self.class_key(name))
     }
 
     /// Checks if a namespace exists, in any case, as PHP finds a namespace.
     #[inline]
     #[must_use]
-    pub fn namespace_exists(&self, name: &[u8]) -> bool {
-        self.symbols.contains_namespace(ascii_lowercase_word(name))
+    pub fn namespace_exists(&self, name: Word) -> bool {
+        self.symbols.contains_namespace(name.to_ascii_lowercase())
     }
 
     /// The import at `span`, then the shortest chain of imports that leads from the namespace it imports back to its
@@ -595,21 +595,21 @@ impl CodebaseMetadata {
     /// like `Dom\Text`, only through an import, and one file can't import two classes of one short name without an
     /// alias. The prelude's `Sharp\` class-likes do count, as a `.sharp` file reaches them with no import.
     #[must_use]
-    pub fn shares_short_name(&self, name: &[u8]) -> bool {
-        self.short_names.get(&short_name_key(name)).is_some_and(|count| *count > 1)
+    pub fn shares_short_name(&self, name: Word) -> bool {
+        self.short_names.get(&short_name_key(name.as_bytes())).is_some_and(|count| *count > 1)
     }
 
     /// Checks if a class or trait exists in the codebase, by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn class_or_trait_exists(&self, name: &[u8]) -> bool {
+    pub fn class_or_trait_exists(&self, name: Word) -> bool {
         matches!(self.symbols.get_kind(self.class_key(name)), Some(SymbolKind::Class | SymbolKind::Trait))
     }
 
     /// Checks if a class or interface exists in the codebase, by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn class_or_interface_exists(&self, name: &[u8]) -> bool {
+    pub fn class_or_interface_exists(&self, name: Word) -> bool {
         matches!(self.symbols.get_kind(self.class_key(name)), Some(SymbolKind::Class | SymbolKind::Interface))
     }
 
@@ -617,34 +617,31 @@ impl CodebaseMetadata {
     #[inline]
     #[must_use]
     pub fn method_identifier_exists(&self, method_id: &MethodIdentifier) -> bool {
-        let class = self.class_key(method_id.get_class_name().as_bytes());
-        let method_key = self.method_key(class, method_id.get_method_name().as_bytes());
+        let class = self.class_key(method_id.get_class_name());
+        let method_key = self.method_key(class, method_id.get_method_name());
         self.get_method_by_words(class, method_key).is_some()
     }
 
     /// Checks if a global function exists in the codebase (case-insensitive).
     #[inline]
     #[must_use]
-    pub fn function_exists(&self, name: &[u8]) -> bool {
-        let lowercase_name = ascii_lowercase_word(name);
-        let identifier = (empty_word(), lowercase_name);
-        self.function_likes.contains_key(&identifier)
+    pub fn function_exists(&self, name: Word) -> bool {
+        self.function_likes.contains_key(&(empty_word(), name.to_ascii_lowercase()))
     }
 
     /// Checks if a global constant exists in the codebase.
     /// The namespace part is case-insensitive, but the constant name is case-sensitive.
     #[inline]
     #[must_use]
-    pub fn constant_exists(&self, name: &[u8]) -> bool {
-        let lowercase_name = ascii_lowercase_constant_name_word(name);
-        self.constants.contains_key(&lowercase_name)
+    pub fn constant_exists(&self, name: Word) -> bool {
+        self.constants.contains_key(&constant_key(name))
     }
 
     /// Checks if a method exists on a class-like, including inherited methods (case-insensitive, and exact for a
     /// class-like with `exact_names`).
     #[inline]
     #[must_use]
-    pub fn method_exists(&self, class: &[u8], method: &[u8]) -> bool {
+    pub fn method_exists(&self, class: Word, method: Word) -> bool {
         self.get_class_like(class).is_some_and(|meta| meta.appearing_method_ids.contains_key(&meta.method_key(method)))
     }
 
@@ -654,57 +651,53 @@ impl CodebaseMetadata {
     /// `ClassLikeMetadata::magic_property_ids`.
     #[inline]
     #[must_use]
-    pub fn property_exists(&self, class: &[u8], property: &[u8]) -> bool {
-        let property_name = word(property);
-        self.get_class_like(class).is_some_and(|meta| meta.appearing_property_ids.contains_key(&property_name))
+    pub fn property_exists(&self, class: Word, property: Word) -> bool {
+        self.get_class_like(class).is_some_and(|meta| meta.appearing_property_ids.contains_key(&property))
     }
 
     /// Checks if a magic `@property*` exists on a class-like, including inherited tags.
     /// The class is found by [`Self::class_key`], and the property name is case-sensitive.
     #[inline]
     #[must_use]
-    pub fn magic_property_exists(&self, class: &[u8], property: &[u8]) -> bool {
-        let property_name = word(property);
-        self.get_class_like(class).is_some_and(|meta| meta.magic_property_ids.contains_key(&property_name))
+    pub fn magic_property_exists(&self, class: Word, property: Word) -> bool {
+        self.get_class_like(class).is_some_and(|meta| meta.magic_property_ids.contains_key(&property))
     }
 
     /// Checks if a class constant or enum case exists on a class-like.
     /// The class is found by [`Self::class_key`], and the constant or case name is case-sensitive.
     #[inline]
     #[must_use]
-    pub fn class_constant_exists(&self, class: &[u8], constant: &[u8]) -> bool {
-        let constant_name = word(constant);
-        self.get_class_like(class).is_some_and(|meta| {
-            meta.constants.contains_key(&constant_name) || meta.enum_cases.contains_key(&constant_name)
-        })
+    pub fn class_constant_exists(&self, class: Word, constant: Word) -> bool {
+        self.get_class_like(class)
+            .is_some_and(|meta| meta.constants.contains_key(&constant) || meta.enum_cases.contains_key(&constant))
     }
 
     /// Retrieves metadata for a class, by [`Self::class_key`].
     /// Returns `None` if the name doesn't correspond to a class.
     #[inline]
     #[must_use]
-    pub fn get_class(&self, name: &[u8]) -> Option<&ClassLikeMetadata> {
+    pub fn get_class(&self, name: Word) -> Option<&ClassLikeMetadata> {
         self.get_class_like(name).filter(|metadata| metadata.kind.is_class())
     }
 
     /// Retrieves metadata for an interface, by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn get_interface(&self, name: &[u8]) -> Option<&ClassLikeMetadata> {
+    pub fn get_interface(&self, name: Word) -> Option<&ClassLikeMetadata> {
         self.get_class_like(name).filter(|metadata| metadata.kind.is_interface())
     }
 
     /// Retrieves metadata for a trait, by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn get_trait(&self, name: &[u8]) -> Option<&ClassLikeMetadata> {
+    pub fn get_trait(&self, name: Word) -> Option<&ClassLikeMetadata> {
         self.get_class_like(name).filter(|metadata| metadata.kind.is_trait())
     }
 
     /// Retrieves metadata for an enum, by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn get_enum(&self, name: &[u8]) -> Option<&ClassLikeMetadata> {
+    pub fn get_enum(&self, name: Word) -> Option<&ClassLikeMetadata> {
         self.get_class_like(name).filter(|metadata| metadata.kind.is_enum())
     }
 
@@ -712,23 +705,21 @@ impl CodebaseMetadata {
     /// a plain PHP one in any case.
     #[inline]
     #[must_use]
-    pub fn get_class_like(&self, name: &[u8]) -> Option<&ClassLikeMetadata> {
+    pub fn get_class_like(&self, name: Word) -> Option<&ClassLikeMetadata> {
         self.get_class_like_by_word(self.class_key(name))
     }
 
     /// Retrieves metadata for a global function (case-insensitive).
     #[inline]
     #[must_use]
-    pub fn get_function(&self, name: &[u8]) -> Option<&FunctionLikeMetadata> {
-        let lowercase_name = ascii_lowercase_word(name);
-        let identifier = (empty_word(), lowercase_name);
-        self.function_likes.get(&identifier).map(|metadata| &**metadata)
+    pub fn get_function(&self, name: Word) -> Option<&FunctionLikeMetadata> {
+        self.function_likes.get(&(empty_word(), name.to_ascii_lowercase())).map(|metadata| &**metadata)
     }
 
     /// Retrieves metadata for a method: the class by [`Self::class_key`], and the method by [`Self::method_key`].
     #[inline]
     #[must_use]
-    pub fn get_method(&self, class: &[u8], method: &[u8]) -> Option<&FunctionLikeMetadata> {
+    pub fn get_method(&self, class: Word, method: Word) -> Option<&FunctionLikeMetadata> {
         let class = self.class_key(class);
         self.get_method_by_words(class, self.method_key(class, method))
     }
@@ -756,13 +747,13 @@ impl CodebaseMetadata {
     /// the name the class answers to, so a trait's method under an alias is the alias. Of twins, as `total` and
     /// `Total`, the one that sorts first.
     #[must_use]
-    pub fn get_method_name_in_another_case(&self, class: &[u8], method: &[u8]) -> Option<Word> {
+    pub fn get_method_name_in_another_case(&self, class: Word, method: Word) -> Option<Word> {
         let class_meta = self.get_class_like(class).filter(|class_meta| class_meta.exact_names)?;
 
         class_meta
             .appearing_method_ids
             .keys()
-            .filter(|key| key.as_bytes() != method && key.as_bytes().eq_ignore_ascii_case(method))
+            .filter(|key| **key != method && key.as_bytes().eq_ignore_ascii_case(method.as_bytes()))
             .min_by_key(|key| key.as_bytes())
             .copied()
     }
@@ -771,29 +762,25 @@ impl CodebaseMetadata {
     #[inline]
     #[must_use]
     pub fn get_method_by_id(&self, method_id: &MethodIdentifier) -> Option<&FunctionLikeMetadata> {
-        self.get_method(method_id.get_class_name().as_bytes(), method_id.get_method_name().as_bytes())
+        self.get_method(method_id.get_class_name(), method_id.get_method_name())
     }
 
     /// Retrieves the declaring method metadata, following the inheritance chain.
     /// This finds where the method is actually implemented.
     #[inline]
     #[must_use]
-    pub fn get_declaring_method(&self, class: &[u8], method: &[u8]) -> Option<&FunctionLikeMetadata> {
-        let method_id = MethodIdentifier::new(word(class), word(method));
-        let declaring_method_id = self.get_declaring_method_identifier(&method_id);
-        self.get_method(
-            declaring_method_id.get_class_name().as_bytes(),
-            declaring_method_id.get_method_name().as_bytes(),
-        )
+    pub fn get_declaring_method(&self, class: Word, method: Word) -> Option<&FunctionLikeMetadata> {
+        let declaring_method_id = self.get_declaring_method_identifier(&MethodIdentifier::new(class, method));
+        self.get_method(declaring_method_id.get_class_name(), declaring_method_id.get_method_name())
     }
 
     /// Retrieves the constructor `parent::__construct` reaches from `class`: the one its direct parent class declares
     /// or inherits.
     #[inline]
     #[must_use]
-    pub fn get_parent_constructor(&self, class: &[u8]) -> Option<&FunctionLikeMetadata> {
+    pub fn get_parent_constructor(&self, class: Word) -> Option<&FunctionLikeMetadata> {
         let parent = self.get_class_like(class)?.direct_parent_class?;
-        let constructor = self.get_class_like(parent.as_bytes())?.declaring_method_ids.get(&word("__construct"))?;
+        let constructor = self.get_class_like(parent)?.declaring_method_ids.get(&word("__construct"))?;
 
         self.get_method_by_id(constructor)
     }
@@ -803,7 +790,7 @@ impl CodebaseMetadata {
     /// such method declares one. A trait's method counts only when it is abstract, since PHP checks a class's method
     /// against no other method of a trait it uses.
     #[must_use]
-    pub fn get_overridden_php_result(&self, class_like: &ClassLikeMetadata, method: &[u8]) -> Option<&TypeMetadata> {
+    pub fn get_overridden_php_result(&self, class_like: &ClassLikeMetadata, method: Word) -> Option<&TypeMetadata> {
         class_like.overridden_method_ids.get(&class_like.method_key(method)).and_then(|overridden| {
             overridden
                 .values()
@@ -838,8 +825,8 @@ impl CodebaseMetadata {
         interfaces
             .into_iter()
             .filter(|interface| !parent.is_some_and(|parent| parent.all_parent_interfaces.contains(interface)))
-            .filter_map(|interface| self.get_interface(interface.as_bytes()))
-            .filter_map(|interface| self.get_trait(defaults_trait_name(interface.original_name.as_bytes()).as_bytes()))
+            .filter_map(|interface| self.get_interface(interface))
+            .filter_map(|interface| self.get_trait(defaults_trait_name(interface.original_name.as_bytes())))
             .collect()
     }
 
@@ -853,7 +840,7 @@ impl CodebaseMetadata {
 
         let interface = class_like.original_name.as_bytes().strip_suffix(DEFAULTS_TRAIT_SUFFIX)?;
 
-        self.get_interface(interface)
+        self.get_interface(word(interface))
     }
 
     /// Retrieves metadata for any function-like construct (function, method, or closure).
@@ -866,8 +853,8 @@ impl CodebaseMetadata {
     ) -> Option<&FunctionLikeMetadata> {
         use crate::identifier::function_like::FunctionLikeIdentifier;
         match identifier {
-            FunctionLikeIdentifier::Function(name) => self.get_function(name.as_bytes()),
-            FunctionLikeIdentifier::Method(class, method) => self.get_method(class.as_bytes(), method.as_bytes()),
+            FunctionLikeIdentifier::Function(name) => self.get_function(*name),
+            FunctionLikeIdentifier::Method(class, method) => self.get_method(*class, *method),
             FunctionLikeIdentifier::Closure(name) => self.get_closure(name),
         }
     }
@@ -881,11 +868,11 @@ impl CodebaseMetadata {
     ) -> Option<&FunctionLikeMetadata> {
         use crate::identifier::function_like::FunctionLikeIdentifier;
         let key = match identifier {
-            FunctionLikeIdentifier::Function(name) => (empty_word(), ascii_lowercase_word(name.as_bytes())),
+            FunctionLikeIdentifier::Function(name) => (empty_word(), name.to_ascii_lowercase()),
             FunctionLikeIdentifier::Method(class, method) => {
-                let class = self.class_key(class.as_bytes());
+                let class = self.class_key(*class);
 
-                (class, self.method_key(class, method.as_bytes()))
+                (class, self.method_key(class, *method))
             }
             FunctionLikeIdentifier::Closure(_) => return None,
         };
@@ -897,16 +884,15 @@ impl CodebaseMetadata {
     /// Namespace lookup is case-insensitive, constant name is case-sensitive.
     #[inline]
     #[must_use]
-    pub fn get_constant(&self, name: &[u8]) -> Option<&ConstantMetadata> {
-        let lowercase_name = ascii_lowercase_constant_name_word(name);
-        self.constants.get(&lowercase_name)
+    pub fn get_constant(&self, name: Word) -> Option<&ConstantMetadata> {
+        self.constants.get(&constant_key(name))
     }
 
     /// Retrieves the constant an unqualified read reaches, as PHP finds it: `resolved`, the name in the reading file's
     /// namespace, or else the global constant named `written`, as the code wrote it.
     #[inline]
     #[must_use]
-    pub fn get_constant_or_global(&self, resolved: &[u8], written: &[u8]) -> Option<&ConstantMetadata> {
+    pub fn get_constant_or_global(&self, resolved: Word, written: Word) -> Option<&ConstantMetadata> {
         self.get_constant(resolved).or_else(|| self.get_constant(written))
     }
 
@@ -918,7 +904,7 @@ impl CodebaseMetadata {
     /// is case-insensitive, like every symbol lookup here.
     #[inline]
     #[must_use]
-    pub fn span_of(&self, name: &[u8]) -> Option<Span> {
+    pub fn span_of(&self, name: Word) -> Option<Span> {
         if let Some(meta) = self.get_class_like(name) {
             return Some(meta.name_span.unwrap_or(meta.span));
         }
@@ -971,8 +957,8 @@ impl CodebaseMetadata {
     /// namespace, one of PHP's built-ins, which has no folder, and a name nothing has.
     #[must_use]
     pub fn extern_namespace_folder(&self, declaration: &ExternNamespaceMetadata) -> Option<Word> {
-        let name = declaration.name.as_bytes();
-        if name.contains(&b'\\') {
+        let name = declaration.name;
+        if name.as_bytes().contains(&b'\\') {
             return None;
         }
         let class = self
@@ -992,7 +978,7 @@ impl CodebaseMetadata {
     /// beside it. A function's name reads first, then a constant's, then a class's. None for a name a line gives no
     /// namespace, and for one of PHP's built-ins, which has no folder.
     #[must_use]
-    pub fn extern_namespace_of(&self, name: &[u8]) -> Option<Word> {
+    pub fn extern_namespace_of(&self, name: Word) -> Option<Word> {
         let span = self
             .get_function(name)
             .map(|function| function.span)
@@ -1002,7 +988,7 @@ impl CodebaseMetadata {
                     .filter(|class_like| !class_like.flags.is_sharp() && !class_like.flags.is_module())
                     .map(|class_like| class_like.span)
             })
-            .filter(|_| !name.contains(&b'\\'))?;
+            .filter(|_| !name.as_bytes().contains(&b'\\'))?;
         let folder = self.folder(span.file_id)?;
 
         self.extern_namespaces
@@ -1025,17 +1011,16 @@ impl CodebaseMetadata {
                 let name = member.as_bytes();
                 match name.iter().rposition(|byte| *byte == b'\\') {
                     Some(separator) => declared((word(&name[..separator]), word(&name[separator + 1..]))),
-                    None => declared((ascii_lowercase_word(self.extern_namespace_of(name)?.as_bytes()), member)),
+                    None => declared((self.extern_namespace_of(member)?.to_ascii_lowercase(), member)),
                 }
             });
         }
 
         // The chain goes by the class-likes' keys, spec section 24, and an `extern` names a plain PHP class in lowercase.
-        let mut current = Some(self.class_key(class.as_bytes()));
-        let mut remaining =
-            self.get_class_like(class.as_bytes()).map_or(0, |metadata| metadata.all_parent_classes.len());
+        let mut current = Some(self.class_key(class));
+        let mut remaining = self.get_class_like(class).map_or(0, |metadata| metadata.all_parent_classes.len());
         while let Some(class) = current {
-            let named = ascii_lowercase_word(class.as_bytes());
+            let named = class.to_ascii_lowercase();
             if let Some(declaration) = declared((named, member)).or_else(|| declared((named, empty_word()))) {
                 return Some(declaration);
             }
@@ -1044,7 +1029,7 @@ impl CodebaseMetadata {
                 break;
             }
             remaining -= 1;
-            current = self.get_class_like(class.as_bytes()).and_then(|metadata| metadata.direct_parent_class);
+            current = self.get_class_like(class).and_then(|metadata| metadata.direct_parent_class);
         }
 
         None
@@ -1068,7 +1053,7 @@ impl CodebaseMetadata {
 
         declared((empty_word(), ascii_lowercase_word(&[class.as_bytes(), b"\\", member.as_bytes()].concat()))).or_else(
             || {
-                let namespace = self.extern_namespace_of(member.as_bytes())?;
+                let namespace = self.extern_namespace_of(member)?;
 
                 namespace.as_bytes().eq_ignore_ascii_case(class.as_bytes()).then_some(())?;
                 declared((empty_word(), member))
@@ -1080,17 +1065,15 @@ impl CodebaseMetadata {
     /// The class is found by [`Self::class_key`], and the constant name is case-sensitive.
     #[inline]
     #[must_use]
-    pub fn get_class_constant(&self, class: &[u8], constant: &[u8]) -> Option<&ClassLikeConstantMetadata> {
-        let constant_name = word(constant);
-        self.get_class_like(class).and_then(|meta| meta.constants.get(&constant_name))
+    pub fn get_class_constant(&self, class: Word, constant: Word) -> Option<&ClassLikeConstantMetadata> {
+        self.get_class_like(class).and_then(|meta| meta.constants.get(&constant))
     }
 
     /// Retrieves metadata for an enum case.
     #[inline]
     #[must_use]
-    pub fn get_enum_case(&self, class: &[u8], case: &[u8]) -> Option<&EnumCaseMetadata> {
-        let case_name = word(case);
-        self.get_class_like(class).and_then(|meta| meta.enum_cases.get(&case_name))
+    pub fn get_enum_case(&self, class: Word, case: Word) -> Option<&EnumCaseMetadata> {
+        self.get_class_like(class).and_then(|meta| meta.enum_cases.get(&case))
     }
 
     /// Retrieves metadata for a property directly from the class where it's declared.
@@ -1099,40 +1082,37 @@ impl CodebaseMetadata {
     /// `ClassLikeMetadata::magic_property_ids`.
     #[inline]
     #[must_use]
-    pub fn get_property(&self, class: &[u8], property: &[u8]) -> Option<&PropertyMetadata> {
-        let property_name = word(property);
-        self.get_class_like(class)?.properties.get(&property_name)
+    pub fn get_property(&self, class: Word, property: Word) -> Option<&PropertyMetadata> {
+        self.get_class_like(class)?.properties.get(&property)
     }
 
     /// Retrieves magic `@property*` metadata declared directly on a class-like.
     /// The class is found by [`Self::class_key`], and the property name is case-sensitive.
     #[inline]
     #[must_use]
-    pub fn get_magic_property(&self, class: &[u8], property: &[u8]) -> Option<&PropertyMetadata> {
-        let property_name = word(property);
-        self.get_class_like(class)?.magic_properties.get(&property_name)
+    pub fn get_magic_property(&self, class: Word, property: Word) -> Option<&PropertyMetadata> {
+        self.get_class_like(class)?.magic_properties.get(&property)
     }
 
     /// Retrieves the property metadata, potentially from a parent class if inherited.
     #[inline]
     #[must_use]
-    pub fn get_declaring_property(&self, class: &[u8], property: &[u8]) -> Option<&PropertyMetadata> {
-        let property_name = word(property);
-        let declaring_class = self.get_class_like(class)?.declaring_property_ids.get(&property_name)?;
-        self.class_likes.get(declaring_class)?.properties.get(&property_name)
+    pub fn get_declaring_property(&self, class: Word, property: Word) -> Option<&PropertyMetadata> {
+        let declaring_class = self.get_class_like(class)?.declaring_property_ids.get(&property)?;
+        self.class_likes.get(declaring_class)?.properties.get(&property)
     }
 
     /// Whether `class` has the `parse` spec section 10 gives a struct or a PHP# class, rather than one it declares,
     /// inherits from a parent that declares one, or none. The codex's spans the whole type, which no declared member
     /// does.
     #[must_use]
-    pub fn parses(&self, class: &[u8]) -> bool {
+    pub fn parses(&self, class: Word) -> bool {
         let Some(metadata) = self.get_class_like(class) else {
             return false;
         };
 
-        self.get_declaring_method_class(class, b"parse") == Some(metadata.name)
-            && self.get_method(class, b"parse").is_some_and(|parse| parse.span == metadata.span)
+        self.get_declaring_method_class(class, word("parse")) == Some(metadata.name)
+            && self.get_method(class, word("parse")).is_some_and(|parse| parse.span == metadata.span)
     }
 
     /// The family above `class`, spec section 10: the parent class, interface or enum marked `[Tag]` whose `parse`
@@ -1143,7 +1123,7 @@ impl CodebaseMetadata {
             .all_parent_classes
             .iter()
             .chain(&class.all_parent_interfaces)
-            .filter_map(|parent| self.get_class_like(parent.as_bytes()))
+            .filter_map(|parent| self.get_class_like(*parent))
             .find(|parent| parent.tag_key().is_some())
     }
 
@@ -1156,7 +1136,7 @@ impl CodebaseMetadata {
             .get(&family.name)
             .into_iter()
             .flatten()
-            .filter_map(|descendant| self.get_class_like(descendant.as_bytes()))
+            .filter_map(|descendant| self.get_class_like(*descendant))
             .filter(|descendant| descendant.flags.is_sharp() && descendant.is_variant_kind())
             .map(|variant| (variant.variant_name(), variant))
             .collect();
@@ -1170,11 +1150,11 @@ impl CodebaseMetadata {
     /// a `toString()` that takes no argument, as `Decimal` and `Instant` do, so `Json.encode` writes its `toString()`
     /// and a field `parse` reads gives a `string` to its `parse`.
     #[must_use]
-    pub fn is_text_value(&self, class: &[u8]) -> bool {
-        let Some(parse) = self.get_method(class, b"parse") else {
+    pub fn is_text_value(&self, class: Word) -> bool {
+        let Some(parse) = self.get_method(class, word("parse")) else {
             return false;
         };
-        let Some(to_string) = self.get_method(class, b"toString") else {
+        let Some(to_string) = self.get_method(class, word("toString")) else {
             return false;
         };
 
@@ -1187,8 +1167,8 @@ impl CodebaseMetadata {
     /// Whether the class `class` declares a static `parse` of one `Any?`, which reads any value, as `JsonValue` does,
     /// spec section 24, so a field `parse` reads gives it the value as it is.
     #[must_use]
-    pub fn parses_any_value(&self, class: &[u8]) -> bool {
-        self.get_method(class, b"parse").is_some_and(|parse| {
+    pub fn parses_any_value(&self, class: Word) -> bool {
+        self.get_method(class, word("parse")).is_some_and(|parse| {
             is_static_method(parse)
                 && matches!(parse.parameters.as_slice(), [value] if value.type_metadata.as_ref().is_some_and(|written| {
                     written.type_union.types.iter().any(|atomic| matches!(atomic, TAtomic::Mixed(mixed) if !mixed.is_non_null()))
@@ -1203,8 +1183,8 @@ impl CodebaseMetadata {
     /// the initializer, and is read once, by the parameter, when a parameter reads its key. Any other property a
     /// parameter's key names is a second field of that key, which the struct check refuses.
     #[must_use]
-    pub fn struct_parse_fields(&self, class: &[u8]) -> Vec<ParsedField<'_>> {
-        let constructor = self.get_declaring_method(class, b"__construct");
+    pub fn struct_parse_fields(&self, class: Word) -> Vec<ParsedField<'_>> {
+        let constructor = self.get_declaring_method(class, word("__construct"));
         let parameters: Vec<ParsedField<'_>> = constructor
             .into_iter()
             .flat_map(|constructor| {
@@ -1265,27 +1245,24 @@ impl CodebaseMetadata {
     /// The class is found by [`Self::class_key`], and the property name is case-sensitive.
     #[inline]
     #[must_use]
-    pub fn get_declaring_magic_property(&self, class: &[u8], property: &[u8]) -> Option<&PropertyMetadata> {
-        let property_name = word(property);
-        let declaring_class = self.get_class_like(class)?.magic_property_ids.get(&property_name)?;
-        self.class_likes.get(declaring_class)?.magic_properties.get(&property_name)
+    pub fn get_declaring_magic_property(&self, class: Word, property: Word) -> Option<&PropertyMetadata> {
+        let declaring_class = self.get_class_like(class)?.magic_property_ids.get(&property)?;
+        self.class_likes.get(declaring_class)?.magic_properties.get(&property)
     }
     // Type Resolution
 
     /// Gets the type of a property, resolving it from the declaring class if needed.
     #[inline]
     #[must_use]
-    pub fn get_property_type(&self, class: &[u8], property: &[u8]) -> Option<&TUnion> {
-        let property_name = word(property);
-        let declaring_class = self.get_class_like(class)?.declaring_property_ids.get(&property_name)?;
-        let property_meta = self.class_likes.get(declaring_class)?.properties.get(&property_name)?;
+    pub fn get_property_type(&self, class: Word, property: Word) -> Option<&TUnion> {
+        let declaring_class = self.get_class_like(class)?.declaring_property_ids.get(&property)?;
+        let property_meta = self.class_likes.get(declaring_class)?.properties.get(&property)?;
         property_meta.type_metadata.as_ref().map(|tm| &tm.type_union)
     }
 
     /// Gets the type of a class constant, considering both type hints and inferred types.
     #[must_use]
-    pub fn get_class_constant_type<'meta>(&'meta self, class: &[u8], constant: &[u8]) -> Option<Cow<'meta, TUnion>> {
-        let constant_name = word(constant);
+    pub fn get_class_constant_type(&self, class: Word, constant_name: Word) -> Option<Cow<'_, TUnion>> {
         let class_meta = self.get_class_like(class)?;
 
         // Check if it's an enum case
@@ -1310,7 +1287,7 @@ impl CodebaseMetadata {
     /// Checks if a child class extends a parent class, each found by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn class_extends(&self, child: &[u8], parent: &[u8]) -> bool {
+    pub fn class_extends(&self, child: Word, parent: Word) -> bool {
         let parent = self.class_key(parent);
         let Some(metadata) = self.get_class_like(child) else {
             return false;
@@ -1330,7 +1307,7 @@ impl CodebaseMetadata {
     /// Checks if a class implements an interface, each found by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn class_implements(&self, class: &[u8], interface: &[u8]) -> bool {
+    pub fn class_implements(&self, class: Word, interface: Word) -> bool {
         let interface = self.class_key(interface);
         let Some(metadata) = self.get_class_like(class) else {
             return false;
@@ -1350,7 +1327,7 @@ impl CodebaseMetadata {
     /// Checks if a class uses a trait, each found by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn class_uses_trait(&self, class: &[u8], trait_name: &[u8]) -> bool {
+    pub fn class_uses_trait(&self, class: Word, trait_name: Word) -> bool {
         let trait_key = self.class_key(trait_name);
         let Some(metadata) = self.get_class_like(class) else {
             return false;
@@ -1370,7 +1347,7 @@ impl CodebaseMetadata {
     /// Checks if child is an instance of parent (via extends or implements), each found by [`Self::class_key`].
     #[inline]
     #[must_use]
-    pub fn is_instance_of(&self, child: &[u8], parent: &[u8]) -> bool {
+    pub fn is_instance_of(&self, child: Word, parent: Word) -> bool {
         if child == parent {
             return true;
         }
@@ -1403,7 +1380,7 @@ impl CodebaseMetadata {
     /// Checks if the given name is an enum or final class.
     #[inline]
     #[must_use]
-    pub fn is_enum_or_final_class(&self, name: &[u8]) -> bool {
+    pub fn is_enum_or_final_class(&self, name: Word) -> bool {
         self.get_class_like(name).is_some_and(|meta| meta.kind.is_enum() || meta.flags.is_final())
     }
 
@@ -1411,7 +1388,7 @@ impl CodebaseMetadata {
     /// Generally, only final classes and enums cannot be intersected.
     #[inline]
     #[must_use]
-    pub fn is_inheritable(&self, name: &[u8]) -> bool {
+    pub fn is_inheritable(&self, name: Word) -> bool {
         let key = self.class_key(name);
         match self.symbols.get_kind(key) {
             Some(SymbolKind::Class) => self.get_class_like_by_word(key).is_some_and(|meta| !meta.flags.is_final()),
@@ -1423,7 +1400,7 @@ impl CodebaseMetadata {
     /// Gets all descendants of a class (recursive).
     #[inline]
     #[must_use]
-    pub fn get_class_descendants(&self, class: &[u8]) -> WordSet {
+    pub fn get_class_descendants(&self, class: Word) -> WordSet {
         let class_key = self.class_key(class);
         let class_key = self.resolve_class_like_word(class_key).unwrap_or(class_key);
         let mut all_descendants = WordSet::default();
@@ -1450,7 +1427,7 @@ impl CodebaseMetadata {
     /// `IteratorAggregate<int, T>`. A PHP# class whose plain PHP base implements PHP's `IteratorAggregate` is a
     /// `Traversable` of that base's `getIterator()`. An interface asks its classes for `elements()`, so it is none.
     #[must_use]
-    pub fn is_sharp_iterable(&self, class: &[u8]) -> bool {
+    pub fn is_sharp_iterable(&self, class: Word) -> bool {
         let iterated = word("iteratoraggregate");
         let names_iterable = |metadata: &ClassLikeMetadata| {
             metadata.flags.is_sharp() && metadata.direct_parent_interfaces.contains(&iterated)
@@ -1463,7 +1440,7 @@ impl CodebaseMetadata {
                         .all_parent_classes
                         .iter()
                         .chain(&metadata.all_parent_interfaces)
-                        .filter_map(|parent| self.get_class_like(parent.as_bytes()))
+                        .filter_map(|parent| self.get_class_like(*parent))
                         .any(names_iterable))
         })
     }
@@ -1476,7 +1453,7 @@ impl CodebaseMetadata {
     /// shows its bound, so it has the members its bound's classes have. A class below the type competes with no
     /// extension, which is chosen from the type the code shows.
     #[must_use]
-    pub fn get_classes_hidden_by_extension(&self, receiver: &TUnion, name: &[u8]) -> Vec<Word> {
+    pub fn get_classes_hidden_by_extension(&self, receiver: &TUnion, name: Word) -> Vec<Word> {
         /// The types a value of type `atomic` shows: a type parameter's bound's, at any depth, or `atomic` itself.
         fn shown(atomic: &TAtomic) -> Vec<&TAtomic> {
             match atomic {
@@ -1495,7 +1472,7 @@ impl CodebaseMetadata {
                 TAtomic::Object(object) => object.get_name(),
                 _ => None,
             })
-            .filter_map(|name| self.get_class_like(name.as_bytes()))
+            .filter_map(|name| self.get_class_like(name))
             .filter_map(|class| {
                 let method_name = class.method_key(name);
                 class
@@ -1520,7 +1497,7 @@ impl CodebaseMetadata {
     /// Gets all ancestors of a class (parents + interfaces).
     #[inline]
     #[must_use]
-    pub fn get_class_ancestors(&self, class: &[u8]) -> WordSet {
+    pub fn get_class_ancestors(&self, class: Word) -> WordSet {
         let mut ancestors = WordSet::default();
         if let Some(meta) = self.get_class_like(class) {
             ancestors.extend(meta.all_parent_classes.iter().copied());
@@ -1532,7 +1509,7 @@ impl CodebaseMetadata {
     /// Gets the class where a method is declared (following inheritance).
     #[inline]
     #[must_use]
-    pub fn get_declaring_method_class(&self, class: &[u8], method: &[u8]) -> Option<Word> {
+    pub fn get_declaring_method_class(&self, class: Word, method: Word) -> Option<Word> {
         let class_meta = self.get_class_like(class)?;
 
         class_meta.declaring_method_ids.get(&class_meta.method_key(method)).map(|method_id| method_id.get_class_name())
@@ -1541,10 +1518,10 @@ impl CodebaseMetadata {
     /// Gets the declaring method identifier for a method.
     #[must_use]
     pub fn get_declaring_method_identifier(&self, method_id: &MethodIdentifier) -> MethodIdentifier {
-        let Some(class_meta) = self.get_class_like(method_id.get_class_name().as_bytes()) else {
+        let Some(class_meta) = self.get_class_like(method_id.get_class_name()) else {
             return *method_id;
         };
-        let lowercase_method = class_meta.method_key(method_id.get_method_name().as_bytes());
+        let lowercase_method = class_meta.method_key(method_id.get_method_name());
 
         if let Some(declaring_method_id) = class_meta.declaring_method_ids.get(&lowercase_method) {
             return *declaring_method_id;
@@ -1579,14 +1556,14 @@ impl CodebaseMetadata {
     /// Checks if a method is overriding a parent method.
     #[inline]
     #[must_use]
-    pub fn method_is_overriding(&self, class: &[u8], method: &[u8]) -> bool {
+    pub fn method_is_overriding(&self, class: Word, method: Word) -> bool {
         self.get_class_like(class).is_some_and(|meta| meta.overridden_method_ids.contains_key(&meta.method_key(method)))
     }
 
     /// Checks if a method is abstract.
     #[inline]
     #[must_use]
-    pub fn method_is_abstract(&self, class: &[u8], method: &[u8]) -> bool {
+    pub fn method_is_abstract(&self, class: Word, method: Word) -> bool {
         self.get_method(class, method)
             .and_then(|meta| meta.method_metadata.as_ref())
             .is_some_and(|method_meta| method_meta.is_abstract)
@@ -1595,7 +1572,7 @@ impl CodebaseMetadata {
     /// Checks if a method is final.
     #[inline]
     #[must_use]
-    pub fn method_is_final(&self, class: &[u8], method: &[u8]) -> bool {
+    pub fn method_is_final(&self, class: Word, method: Word) -> bool {
         self.get_method(class, method)
             .and_then(|meta| meta.method_metadata.as_ref())
             .is_some_and(|method_meta| method_meta.is_final)
@@ -1608,7 +1585,7 @@ impl CodebaseMetadata {
     /// then falls back to the method's declared visibility.
     #[inline]
     #[must_use]
-    pub fn get_method_visibility(&self, class: &[u8], method: &[u8]) -> Option<Visibility> {
+    pub fn get_method_visibility(&self, class: Word, method: Word) -> Option<Visibility> {
         let class_meta = self.get_class_like(class)?;
         let method_key = class_meta.method_key(method);
         let declaring = class_meta.declaring_method_ids.get(&method_key)?;
@@ -1674,14 +1651,14 @@ impl CodebaseMetadata {
     /// `ClassLikeMetadata::magic_property_ids`.
     #[inline]
     #[must_use]
-    pub fn get_declaring_property_class(&self, class: &[u8], property: &[u8]) -> Option<Word> {
+    pub fn get_declaring_property_class(&self, class: Word, property: Word) -> Option<Word> {
         let property_name = word(property);
         self.get_class_like(class)?.declaring_property_ids.get(&property_name).copied()
     }
 
     /// Gets all descendants of a class (recursive).
     #[must_use]
-    pub fn get_all_descendants(&self, class: &[u8]) -> WordSet {
+    pub fn get_all_descendants(&self, class: Word) -> WordSet {
         let class_key = self.class_key(class);
         let class_key = self.resolve_class_like_word(class_key).unwrap_or(class_key);
         let mut all_descendants = WordSet::default();
@@ -1715,7 +1692,7 @@ impl CodebaseMetadata {
     #[must_use]
     pub fn get_anonymous_class(&self, file: &File, span: Span) -> Option<&ClassLikeMetadata> {
         let name = Self::get_anonymous_class_name(file, span);
-        self.get_class_like(name.as_bytes())
+        self.get_class_like(name)
     }
 
     /// Gets the file signature for a given file ID.
@@ -2711,6 +2688,18 @@ fn should_replace_metadata(
 }
 
 /// The lowercase short name of the class-like `name`, the part after its last `\`.
+/// The key of the global constant `name` in `constants`: its namespace in lowercase, as PHP finds a namespace in any
+/// case, and its own name exact. A name whose namespace is lowercase is its own key, so only another one interns.
+fn constant_key(name: Word) -> Word {
+    let bytes = name.as_bytes();
+    match bytes.iter().rposition(|byte| *byte == b'\\') {
+        Some(separator) if bytes[..separator].iter().any(u8::is_ascii_uppercase) => {
+            ascii_lowercase_constant_name_word(bytes)
+        }
+        _ => name,
+    }
+}
+
 fn short_name_key(name: &[u8]) -> Word {
     ascii_lowercase_word(name.rsplit(|byte| *byte == b'\\').next().unwrap_or(name))
 }
@@ -2924,9 +2913,7 @@ mod get_constant_or_global_tests {
     }
 
     fn found(codebase: &CodebaseMetadata, resolved: &str, written: &str) -> Option<String> {
-        codebase
-            .get_constant_or_global(resolved.as_bytes(), written.as_bytes())
-            .map(|constant| constant.name.to_string())
+        codebase.get_constant_or_global(word(resolved), word(written)).map(|constant| constant.name.to_string())
     }
 
     #[test]

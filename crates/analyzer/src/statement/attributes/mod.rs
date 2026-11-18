@@ -131,13 +131,13 @@ where
         let (class, member) = line.target;
         match codebase.extern_declaration(line) {
             Some((class, declared)) if declared.is_empty() => {
-                codebase.get_class_like(class.as_bytes()).map_or(Ok(()), |class_like_metadata| {
+                codebase.get_class_like(class).map_or(Ok(()), |class_like_metadata| {
                     analyze_class_like_attributes(context, artifacts, attribute_lists, class_like_metadata)
                 })?;
             }
             Some((class, _)) => {
                 let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class, member)));
-                scope.set_class_like(codebase.get_class_like(class.as_bytes()));
+                scope.set_class_like(codebase.get_class_like(class));
                 let mut block_context = BlockContext::new(scope, context.settings.register_super_globals);
                 let target = if class.is_empty() { AttributeTarget::Function } else { AttributeTarget::Method };
 
@@ -145,8 +145,7 @@ where
             }
             None => {
                 if !member.is_empty()
-                    && let Some(declaring_class) =
-                        codebase.get_declaring_method_class(class.as_bytes(), member.as_bytes())
+                    && let Some(declaring_class) = codebase.get_declaring_method_class(class, member)
                 {
                     let declaring_class = display_class_like_name(context, declaring_class);
                     context.collector.report_with_code(
@@ -211,7 +210,7 @@ where
             String::from_utf8_lossy(attribute_name_bytes).into_owned()
         };
 
-        let Some(metadata) = context.codebase.get_class_like(attribute_name_bytes) else {
+        let Some(metadata) = context.codebase.get_class_like(word(attribute_name_bytes)) else {
             if !report_missing_class(context, attribute_name_bytes, attribute.name.span()) {
                 context.collector.report_with_code(
                     IssueCode::NonExistentAttributeClass,
@@ -425,7 +424,7 @@ fn is_keyed_place(codebase: &CodebaseMetadata, block_context: &BlockContext<'_>,
             class.is_some_and(|class| class.tag_key().is_some() && !data_cases(codebase, class).is_empty())
         }
         AttributeTarget::Parameter | AttributeTarget::PromotedProperty => {
-            class.is_some_and(|class| codebase.parses(class.name.as_bytes()))
+            class.is_some_and(|class| codebase.parses(class.name))
                 && matches!(block_context.scope.get_function_like_identifier(),
                     Some(FunctionLikeIdentifier::Method(_, method)) if method.as_bytes().eq_ignore_ascii_case(b"__construct"))
         }
@@ -461,7 +460,7 @@ fn record_constructor<A>(
 {
     artifacts.symbol_references.add_attribute_reference(
         block_context.scope.get_reference_origin(),
-        (context.codebase.class_key(constructor.get_class_name().as_bytes()), constructor.get_method_name()),
+        (context.codebase.class_key(constructor.get_class_name()), constructor.get_method_name()),
         false,
     );
 }
@@ -556,8 +555,8 @@ where
     check_method_visibility(
         context,
         None,
-        declaring_constructor_id.get_class_name().as_bytes(),
-        declaring_constructor_id.get_method_name().as_bytes(),
+        declaring_constructor_id.get_class_name(),
+        declaring_constructor_id.get_method_name(),
         attribute.span(),
         Some(attribute.name.span()),
     );

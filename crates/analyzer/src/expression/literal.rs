@@ -40,7 +40,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Literal<'arena> {
                     &block_context.scope,
                     &MethodIdentifier::new(
                         word(class_part),
-                        context.codebase.method_key(word(class_part), method_part),
+                        context.codebase.method_key(word(class_part), word(method_part)),
                     ),
                 );
             }

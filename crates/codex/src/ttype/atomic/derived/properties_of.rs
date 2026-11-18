@@ -98,7 +98,7 @@ impl TPropertiesOf {
         for target in target_types {
             match target {
                 TAtomic::Object(TObject::Named(named)) => {
-                    let Some(class_like_metadata) = codebase.get_class_like(named.name.as_bytes()) else {
+                    let Some(class_like_metadata) = codebase.get_class_like(named.name) else {
                         continue;
                     };
 
@@ -109,7 +109,7 @@ impl TPropertiesOf {
                     }
 
                     for (prop_name, declaring_class) in &class_like_metadata.declaring_property_ids {
-                        let Some(declaring_metadata) = codebase.get_class_like(declaring_class.as_bytes()) else {
+                        let Some(declaring_metadata) = codebase.get_class_like(*declaring_class) else {
                             continue;
                         };
 
@@ -152,7 +152,7 @@ impl TPropertiesOf {
                     // - `name`: always present (the case name as a literal string)
                     // - `value`: only for backed enums (the backing value)
                     // Note: Enums are always final in PHP, so we don't need to make the array unsealed
-                    let Some(class_like_metadata) = codebase.get_class_like(enum_name.as_bytes()) else {
+                    let Some(class_like_metadata) = codebase.get_class_like(*enum_name) else {
                         continue;
                     };
 

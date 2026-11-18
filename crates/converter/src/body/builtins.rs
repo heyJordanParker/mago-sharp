@@ -23,6 +23,7 @@ use mago_syntax::cst::Argument;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::token::is_sharp_keyword;
+use mago_word::word;
 
 use super::is_primary;
 use crate::Converter;
@@ -193,7 +194,7 @@ impl<'input> Converter<'input, '_> {
         }
         let arguments = passed.ok_or_else(|| "takes no named or spread argument".to_owned())?;
         let method = codebase
-            .get_method(member.class.as_bytes(), member.name.as_bytes())
+            .get_method(member.class, member.name)
             .ok_or_else(|| "has no declaration in the analysis".to_owned())?;
         // The member's call of `function` may pass more than this call does, where each argument this call leaves out
         // is a parameter of the member with the default PHP's parameter has, as `x.trim()` passes `mb_trim` the `null`
@@ -235,8 +236,8 @@ impl<'input> Converter<'input, '_> {
                 }
                 PhpCallArgument::Constant(constant) => {
                     let own = matches!(argument.argument, Some(Expression::ConstantAccess(written)) if codebase
-                        .get_constant(self.input.names.get(&written.name))
-                        .or_else(|| codebase.get_constant(written.name.value()))
+                        .get_constant(word(self.input.names.get(&written.name)))
+                        .or_else(|| codebase.get_constant(word(written.name.value())))
                         .is_some_and(|metadata| metadata.name.as_bytes().eq_ignore_ascii_case(constant.as_bytes())));
                     if !own {
                         return Err(format!("passes `{constant}` where this call passes another value"));

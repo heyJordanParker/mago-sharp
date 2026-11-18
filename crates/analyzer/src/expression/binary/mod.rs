@@ -101,7 +101,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Binary<'arena> {
                     && artifacts.get_tested_type(self.rhs).is_none()
                 {
                     let class_name = context.resolved_names.get(identifier);
-                    if !context.codebase.class_like_exists(class_name) {
+                    if !context.codebase.class_like_exists(word(class_name)) {
                         report_non_existent_class_like(context, identifier.span(), word(class_name));
 
                         // A PHP# test of no class narrows to no type, so nothing that reads the value reports again.
@@ -181,8 +181,8 @@ where
 
     // Spec section 22: in PHP# a plain PHP trait is a type, which the engine tests by the traits of the class and its
     // parents, so a value of an open class may be one, through a subclass that uses the trait.
-    let is_trait = |atomic: &TAtomic| matches!(atomic, TAtomic::Object(TObject::Named(named)) if context.codebase.trait_exists(named.name.as_bytes()));
-    let is_open_class = |atomic: &TAtomic| matches!(atomic, TAtomic::Object(TObject::Named(named)) if context.codebase.is_inheritable(named.name.as_bytes()));
+    let is_trait = |atomic: &TAtomic| matches!(atomic, TAtomic::Object(TObject::Named(named)) if context.codebase.trait_exists(named.name));
+    let is_open_class = |atomic: &TAtomic| matches!(atomic, TAtomic::Object(TObject::Named(named)) if context.codebase.is_inheritable(named.name));
     if context.dialect.is_sharp() && target_type.types.iter().all(is_trait) && lhs_type.types.iter().any(is_open_class)
     {
         return get_bool();

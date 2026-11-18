@@ -209,7 +209,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                             // reads the class even where it names none of its members.
                             artifacts.symbol_references.add_reference_to_symbol(
                                 &block_context.scope,
-                                context.codebase.class_key(&php_name(&item.name)),
+                                context.codebase.class_key(word(php_name(&item.name))),
                                 false,
                             );
                         }
@@ -219,7 +219,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                         // names it.
                         for item in &sequence.items {
                             let name = php_name(&item.name);
-                            if let Some(class) = context.codebase.get_class_like(&name) {
+                            if let Some(class) = context.codebase.get_class_like(word(&name)) {
                                 check_internal_reach(context, class, None, |_| String::new(), item.name.span());
                             }
                         }
@@ -612,7 +612,7 @@ where
         let is_plain_php = context
             .resolved_names
             .resolve(&generic.name)
-            .and_then(|name| context.codebase.get_class_like(name))
+            .and_then(|name| context.codebase.get_class_like(word(name)))
             .is_some_and(|class| !class.flags.is_sharp());
         if !is_plain_php {
             continue;
@@ -786,7 +786,7 @@ fn is_event(codebase: &CodebaseMetadata, atomic: &TAtomic) -> bool {
 
     object
         .get_name()
-        .and_then(|name| codebase.get_class_like(name.as_bytes()))
+        .and_then(|name| codebase.get_class_like(name))
         .is_some_and(|class_like| is_event_class(codebase, class_like))
 }
 
@@ -1043,7 +1043,7 @@ fn detect_unused_statement_expressions<'ast, 'arena, A>(
         }
         Expression::Call(call) => {
             let Some(function) = NamedCall::from_call(context.resolved_names, context.codebase, call)
-                .and_then(|call| context.codebase.get_function(call.name.as_bytes()))
+                .and_then(|call| context.codebase.get_function(call.name))
             else {
                 return;
             };

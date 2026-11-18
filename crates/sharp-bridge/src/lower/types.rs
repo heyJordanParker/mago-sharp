@@ -269,7 +269,7 @@ impl<'analysis> Types<'analysis> {
     pub fn shows_plain_text(&self, value_type: &TUnion) -> bool {
         value_type.types.iter().any(|atomic| {
             matches!(atomic, TAtomic::Object(TObject::Named(object))
-                if self.codebase.get_declaring_method(object.name.as_bytes(), b"toString").is_none())
+                if self.codebase.get_declaring_method(object.name, word("toString")).is_none())
         })
     }
 
@@ -317,9 +317,9 @@ impl<'analysis> Types<'analysis> {
 
     /// The declaration the fully qualified class name `class` resolves to.
     #[must_use]
-    pub fn class_declaration(&self, class: &[u8]) -> Declaration {
+    pub fn class_declaration(&self, class: Word) -> Declaration {
         let metadata = self.codebase.get_class_like(class).unwrap_or_else(|| {
-            unreachable!("the checker refuses the unknown class `{}`", String::from_utf8_lossy(class))
+            unreachable!("the checker refuses the unknown class `{}`", String::from_utf8_lossy(class.as_bytes()))
         });
 
         let kind = if metadata.kind.is_interface() {
@@ -339,11 +339,11 @@ impl<'analysis> Types<'analysis> {
     /// names, then the traits of default bodies [`CodebaseMetadata::get_defaults_traits`] gives it. A subclass does not
     /// use its parent's traits again, as `ClassLikeMetadata::used_traits` lists them.
     #[must_use]
-    pub fn used_traits(&self, class: &[u8], header: Option<&Inheritance>) -> Vec<Word> {
+    pub fn used_traits(&self, class: Word, header: Option<&Inheritance>) -> Vec<Word> {
         let mut traits: Vec<Word> = header
             .into_iter()
             .flat_map(Inheritance::names)
-            .filter_map(|name| self.codebase.get_trait(self.names.get(&name)))
+            .filter_map(|name| self.codebase.get_trait(word(self.names.get(&name))))
             .map(|header_trait| header_trait.original_name)
             .collect();
         let metadata = self.scanned(class);
@@ -353,11 +353,11 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The metadata of the fully qualified class-like name `class`, which the bridge lowers.
-    fn scanned(&self, class: &[u8]) -> &'analysis ClassLikeMetadata {
+    fn scanned(&self, class: Word) -> &'analysis ClassLikeMetadata {
         let Some(metadata) = self.codebase.get_class_like(class) else {
             unreachable!(
                 "the codex scans each class-like the bridge lowers, `{}` included",
-                String::from_utf8_lossy(class)
+                String::from_utf8_lossy(class.as_bytes())
             );
         };
 
@@ -368,7 +368,7 @@ impl<'analysis> Types<'analysis> {
     /// gives itself: each one an interface whose trait [`CodebaseMetadata::get_defaults_traits`] gives it declares and
     /// the class does not, by its name with `$` and its interface's full name.
     #[must_use]
-    pub fn default_body_properties(&self, class: &[u8]) -> Vec<(Word, Word)> {
+    pub fn default_body_properties(&self, class: Word) -> Vec<(Word, Word)> {
         let metadata = self.scanned(class);
         let interfaces = self.defaults_interfaces(metadata);
         let mut properties = Vec::new();
@@ -393,7 +393,7 @@ impl<'analysis> Types<'analysis> {
     /// traits [`CodebaseMetadata::get_defaults_traits`] gives it, with its trait, its interface's full name, and the
     /// trait of a sub-interface whose body replaces it, in declaration order.
     #[must_use]
-    pub fn default_bodies(&self, class: &[u8]) -> Vec<(Word, Word, Word, Option<Word>)> {
+    pub fn default_bodies(&self, class: Word) -> Vec<(Word, Word, Word, Option<Word>)> {
         let metadata = self.scanned(class);
         let interfaces = self.defaults_interfaces(metadata);
 
@@ -402,14 +402,9 @@ impl<'analysis> Types<'analysis> {
             .flat_map(|(defaults, interface)| {
                 // A computed property's default body is already the protected `designKey@App\HasDesign`.
                 defaults.methods.iter().filter(|method| !method.as_bytes().contains(&b'@')).filter_map(|method| {
-                    let body = self.codebase.get_method(defaults.name.as_bytes(), method.as_bytes())?;
+                    let body = self.codebase.get_method(defaults.name, *method)?;
                     let replacing = Self::replacing(&interfaces, interface, |other| {
-                        self.codebase
-                            .get_method(
-                                defaults_trait_name(other.original_name.as_bytes()).as_bytes(),
-                                method.as_bytes(),
-                            )
-                            .is_some()
+                        self.codebase.get_method(defaults_trait_name(other.original_name.as_bytes()), *method).is_some()
                     });
 
                     Some((defaults.original_name, interface.original_name, body.original_name, replacing))
@@ -447,7 +442,7 @@ impl<'analysis> Types<'analysis> {
     /// type arguments: the [`type_text`] of each type parameter's bound in declaration order, joined by `, `. They are
     /// the type arguments of an object plain PHP creates, so a bound that names a type parameter of the class writes it
     /// as `Any?`: `Comparable<Any?>` for `Sorted<TItem : Comparable<TItem>>`.
-    pub(crate) fn bounds(&self, class: &[u8]) -> Option<String> {
+    pub(crate) fn bounds(&self, class: Word) -> Option<String> {
         let metadata = self.codebase.get_class_like(class)?;
         if !metadata.flags.is_sharp() || metadata.template_types.is_empty() {
             return None;
@@ -461,7 +456,7 @@ impl<'analysis> Types<'analysis> {
 
     /// How many type parameters the fully qualified class name `class` declares when it is a PHP# generic class, whose
     /// static members take its type arguments as their leading own ones. None for any other class.
-    pub(crate) fn static_type_parameters(&self, class: &[u8]) -> Option<usize> {
+    pub(crate) fn static_type_parameters(&self, class: Word) -> Option<usize> {
         let metadata = self.codebase.get_class_like(class)?;
 
         (metadata.flags.is_sharp() && !metadata.template_types.is_empty()).then_some(metadata.template_types.len())
@@ -470,7 +465,7 @@ impl<'analysis> Types<'analysis> {
     /// The variance of the type parameters of the fully qualified class name `class` when it is a PHP# class-like and
     /// one of them is `out` or `in`, spec section 11.1: `+` for `out`, `-` for `in` and `=` for neither, in declaration
     /// order, which the engine reads where it checks a value against a generic type.
-    pub(crate) fn variance(&self, class: &[u8]) -> Option<String> {
+    pub(crate) fn variance(&self, class: Word) -> Option<String> {
         let metadata = self.codebase.get_class_like(class)?;
         if !metadata.flags.is_sharp() || metadata.template_variance.iter().all(Variance::is_invariant) {
             return None;
@@ -500,7 +495,7 @@ impl<'analysis> Types<'analysis> {
     /// writes, in order, which the engine reads on the class that declares them, so an inherited one has no line. A type a declaration leaves out is `Any?`, and so is a plain PHP
     /// type a member takes over that PHP# can't write. A member of an enum or a final class is never `virtual`, and a
     /// hidden method, as `#statics`, has no line.
-    pub(crate) fn declared(&self, class: &[u8], overrides: &[&[u8]], constants: &[&[u8]]) -> Option<String> {
+    pub(crate) fn declared(&self, class: Word, overrides: &[&[u8]], constants: &[&[u8]]) -> Option<String> {
         let metadata = self.codebase.get_class_like(class).filter(|metadata| metadata.flags.is_sharp())?;
 
         let written = |r#type: Option<&TypeMetadata>| match r#type {
@@ -533,7 +528,7 @@ impl<'analysis> Types<'analysis> {
         }
         // Reflection never reads a hidden method, as `#statics`, so it has no line.
         let methods = metadata.methods.iter().filter(|method| !method.as_bytes().contains(&b'#'));
-        for method in methods.filter_map(|method| self.codebase.get_method(class, method.as_bytes())) {
+        for method in methods.filter_map(|method| self.codebase.get_method(class, *method)) {
             let parameters: Vec<String> =
                 method.parameters.iter().map(|parameter| written(parameter.type_metadata.as_ref())).collect();
             // A closed PHP# method is final in the codex, as a private one and a constructor are never replaced.
@@ -559,7 +554,7 @@ impl<'analysis> Types<'analysis> {
     /// written as `$` and its index, and sorted by their text: `App.PaginatedList<App.Order>` for
     /// `OrderPage : PaginatedList<Order>`, and `App.Base<List<$0>>` for `Sub<T> : Base<List<T>>`. None when the header
     /// gives none.
-    pub(crate) fn header(&self, class: &[u8]) -> Option<String> {
+    pub(crate) fn header(&self, class: Word) -> Option<String> {
         let metadata = self.codebase.get_class_like(class)?;
         let mut ancestors: Vec<String> = metadata
             .template_extended_offsets
@@ -581,7 +576,7 @@ impl<'analysis> Types<'analysis> {
     /// the class the `new` is in is written as `$` and its index, which the engine replaces with `this`'s type argument
     /// at that index, and one of the method it is in as `#` and its index, which the engine replaces with the method's
     /// own type argument. A lambda captures its method's type arguments, so a `new` in it writes them the same way.
-    pub(crate) fn type_arguments(&self, class: &[u8], span: Span) -> Option<String> {
+    pub(crate) fn type_arguments(&self, class: Word, span: Span) -> Option<String> {
         self.bounds(class)?;
         let arguments =
             self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset)).unwrap_or_else(|| {
@@ -602,7 +597,7 @@ impl<'analysis> Types<'analysis> {
         let span = call.span();
         let arguments = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?;
         let callee = self.call_target(call).class;
-        if self.codebase.get_class_like(callee.as_bytes()).is_none_or(|callee| callee.flags.is_built_in()) {
+        if self.codebase.get_class_like(callee).is_none_or(|callee| callee.flags.is_built_in()) {
             return None;
         }
 
@@ -720,7 +715,7 @@ impl<'analysis> Types<'analysis> {
     /// is None when the method declares no type parameter, or no parameter needs a check. A static method of a generic
     /// class, a named constructor among them, has no object to read its class's type arguments from, so its class's
     /// type parameters lead its own, with the class's bounds.
-    pub(crate) fn method_metadata(&self, class: &[u8], method: &[u8]) -> (Option<String>, Option<String>) {
+    pub(crate) fn method_metadata(&self, class: Word, method: Word) -> (Option<String>, Option<String>) {
         let Some(metadata) = self.codebase.get_method(class, method) else {
             return (None, None);
         };
@@ -777,7 +772,7 @@ impl<'analysis> Types<'analysis> {
 
     /// The whole type of the method `class::method`, which `is` tests a closure of it by: [`Self::function_type`] of its
     /// declared parameter types and its result type.
-    pub(crate) fn method_type(&self, class: &[u8], method: &[u8]) -> FunctionType {
+    pub(crate) fn method_type(&self, class: Word, method: Word) -> FunctionType {
         let function = FunctionLikeIdentifier::Method(word(class), word(method));
         let Some(metadata) = self.codebase.get_method(class, method) else {
             unreachable!("the codebase holds every method a PHP# file declares, not {}", function.as_string());
@@ -794,7 +789,7 @@ impl<'analysis> Types<'analysis> {
 
     /// The return type a plain PHP method that the method `method` of `class` overrides declares, as
     /// [`CodebaseMetadata::get_overridden_php_result`] gives it.
-    pub(crate) fn overridden_php_result(&self, class: &[u8], method: &[u8]) -> Option<&'analysis TUnion> {
+    pub(crate) fn overridden_php_result(&self, class: Word, method: Word) -> Option<&'analysis TUnion> {
         self.codebase.get_overridden_php_result(self.scanned(class), method).map(|declared| &declared.type_union)
     }
 
@@ -802,7 +797,7 @@ impl<'analysis> Types<'analysis> {
     /// overrides declares, where PHP would declare its own result `\Sharp\Map|array`, as
     /// [`declares_table_or_array`] says, which PHP refuses under that method. The method then returns the PHP array to
     /// every caller, as the plain PHP method does. None for any other method.
-    pub(crate) fn plain_result(&self, class: &[u8], method: &[u8]) -> Option<&'analysis TUnion> {
+    pub(crate) fn plain_result(&self, class: Word, method: Word) -> Option<&'analysis TUnion> {
         let own = &self.codebase.get_method(class, method)?.return_type_declaration_metadata.as_ref()?.type_union;
 
         declares_table_or_array(own, self.codebase).then(|| self.overridden_php_result(class, method)).flatten()
@@ -813,8 +808,8 @@ impl<'analysis> Types<'analysis> {
     pub(crate) fn runs_plain_result(&self, call: &Expression) -> bool {
         self.artifacts.get_callees(call).any(|target| {
             matches!(target, CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }
-                if self.codebase.get_declaring_method_class(class.as_bytes(), method.as_bytes())
-                    .is_some_and(|declaring| self.plain_result(declaring.as_bytes(), method.as_bytes()).is_some()))
+                if self.codebase.get_declaring_method_class(*class, *method)
+                    .is_some_and(|declaring| self.plain_result(declaring, *method).is_some()))
         })
     }
 
@@ -822,7 +817,7 @@ impl<'analysis> Types<'analysis> {
     /// `Model` serves its attributes, so plain PHP gives the value, as it gives one of a member it declares.
     pub(crate) fn plain_magic_member(&self, value: &Expression) -> bool {
         let plain =
-            |class: &[u8]| self.codebase.get_class_like(class).is_some_and(|metadata| !metadata.flags.is_sharp());
+            |class: &[u8]| self.codebase.get_class_like(word(class)).is_some_and(|metadata| !metadata.flags.is_sharp());
         match value.unparenthesized() {
             Expression::Call(Call::Method(MethodCall {
                 object,
@@ -830,11 +825,11 @@ impl<'analysis> Types<'analysis> {
                 ..
             })) => self.artifacts.get_expression_type(object).and_then(receiver_classes).is_some_and(|classes| {
                 classes.iter().any(|class| {
-                    self.codebase.get_declaring_method_class(class, method.value).is_none() && plain(class)
+                    self.codebase.get_declaring_method_class(word(class), word(method.value)).is_none() && plain(class)
                 })
             }),
             _ => self.accessed_property(value).is_some_and(|(class, property)| {
-                self.codebase.get_declaring_property_class(class, &property).is_none() && plain(class)
+                self.codebase.get_declaring_property_class(word(class), word(&property)).is_none() && plain(class)
             }),
         }
     }
@@ -842,19 +837,19 @@ impl<'analysis> Types<'analysis> {
     /// Whether the method `method` of `class` replaces a method a parent class or an interface of `class` has, which
     /// PHP's `#[\Override]` counts. PHP# takes `override` for a trait's method too, spec section 22, and PHP's attribute
     /// counts no trait the class uses itself, so a method that replaces only a trait's lowers without it.
-    pub(crate) fn replaces_inherited_method(&self, class: &[u8], method: &[u8]) -> bool {
+    pub(crate) fn replaces_inherited_method(&self, class: Word, method: Word) -> bool {
         self.codebase.get_class_like(class).is_some_and(|metadata| {
             metadata
                 .all_parent_classes
                 .iter()
                 .chain(&metadata.all_parent_interfaces)
-                .any(|ancestor| self.codebase.method_exists(ancestor.as_bytes(), method))
+                .any(|ancestor| self.codebase.method_exists(*ancestor, method))
         })
     }
 
     /// Whether each PHP# call of the method `method` of `class` checks its result, as
     /// [`ClassLikeMetadata::checks_results_at_call`] tells.
-    pub(crate) fn checks_results_at_call(&self, class: &[u8], method: &[u8]) -> bool {
+    pub(crate) fn checks_results_at_call(&self, class: Word, method: Word) -> bool {
         self.codebase
             .get_method(class, method)
             .is_some_and(|metadata| self.scanned(class).checks_results_at_call(metadata))
@@ -884,16 +879,16 @@ impl<'analysis> Types<'analysis> {
     /// The declared type of the property `variable`, `$`-prefixed, that the class `class` declares or inherits, with a
     /// type parameter as itself. A property of another file's class has no hint in this file, so
     /// [`Self::declared_type`] has no type of it.
-    pub(crate) fn declared_property_type(&self, class: &[u8], variable: &[u8]) -> Option<&'analysis TUnion> {
+    pub(crate) fn declared_property_type(&self, class: Word, variable: Word) -> Option<&'analysis TUnion> {
         Some(&self.codebase.get_declaring_property(class, variable)?.type_metadata.as_ref()?.type_union)
     }
 
     /// The type text of the result of the method `class::method`, as [`FunctionType::result`] writes it.
-    pub(crate) fn method_result(&self, class: &[u8], method: &[u8]) -> Option<String> {
+    pub(crate) fn method_result(&self, class: Word, method: Word) -> Option<String> {
         let Some(metadata) = self.codebase.get_method(class, method) else {
             unreachable!(
                 "the codebase holds every method a PHP# file declares, not {}",
-                String::from_utf8_lossy(method)
+                String::from_utf8_lossy(method.as_bytes())
             );
         };
 
@@ -921,16 +916,17 @@ impl<'analysis> Types<'analysis> {
     /// named `Class::$property::get` as PHP names a property hook: a `get` gives the property's type, and a `set` takes
     /// it and gives `void`, with the effects [`Effects::accessor_effects`] gives, which `Method.createDelegate` reads,
     /// spec section 25.
-    pub(crate) fn accessor_type(&self, class: &[u8], property: &[u8], accessor: &[u8]) -> FunctionType {
+    pub(crate) fn accessor_type(&self, class: Word, property: &[u8], accessor: Word) -> FunctionType {
         let variable = [b"$", property].concat();
-        let declared = self.declared_property_type(class, &variable);
+        let declared = self.declared_property_type(class, word(&variable));
         let void = get_void();
         let (parameters, result) =
-            if accessor == b"set" { (vec![declared], Some(&void)) } else { (Vec::new(), declared) };
-        let effects = self.effects.accessor_effects(self.codebase, class, property, accessor);
+            if accessor == word("set") { (vec![declared], Some(&void)) } else { (Vec::new(), declared) };
+        let effects = self.effects.accessor_effects(self.codebase, class, property, accessor.as_bytes());
 
         FunctionType {
-            name: String::from_utf8_lossy(&[class, b"::", &variable, b"::", accessor].concat()).into_owned(),
+            name: String::from_utf8_lossy(&[class.as_bytes(), b"::", &variable, b"::", accessor.as_bytes()].concat())
+                .into_owned(),
             text: self.function_type_text(effects.clone(), &parameters, result),
             result: self.result_text(result),
             effects: effects_fingerprint(effects, self.codebase),
@@ -1049,8 +1045,8 @@ impl<'analysis> Types<'analysis> {
     /// None for any other expression.
     fn extern_property_read(&self, read: &Expression) -> Option<String> {
         let (class, variable) = self.accessed_property(read)?;
-        let declaring = self.codebase.get_class_like(class)?.magic_property_ids.get(&word(&variable))?;
-        let owner = self.codebase.get_class_like(declaring.as_bytes()).filter(|owner| owner.flags.is_sharp())?;
+        let declaring = self.codebase.get_class_like(word(class))?.magic_property_ids.get(&word(&variable))?;
+        let owner = self.codebase.get_class_like(*declaring).filter(|owner| owner.flags.is_sharp())?;
 
         Some(format!("{}.{}", class_text(owner.name, self.codebase), String::from_utf8_lossy(&variable[1..])))
     }
@@ -1064,8 +1060,8 @@ impl<'analysis> Types<'analysis> {
         let (name, _) = self.plain_php_call(call)?;
         let is_lazy_source = |atomic: &TAtomic| match atomic {
             TAtomic::Object(TObject::Named(object)) => {
-                self.codebase.get_class_like(object.name.as_bytes()).is_some_and(|class| !class.flags.is_sharp())
-                    && self.codebase.is_instance_of(object.name.as_bytes(), b"Traversable")
+                self.codebase.get_class_like(object.name).is_some_and(|class| !class.flags.is_sharp())
+                    && self.codebase.is_instance_of(object.name, word("Traversable"))
             }
             atomic => atomic.is_null(),
         };
@@ -1122,7 +1118,7 @@ impl<'analysis> Types<'analysis> {
     /// The method `method` of the fully qualified class name `class` runs, where it declares it or inherits it, when
     /// PHP# declares it: `__construct` for `new`, a named constructor, or the static method an extension's member runs
     /// as.
-    pub(crate) fn sharp_method(&self, class: &[u8], method: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
+    pub(crate) fn sharp_method(&self, class: Word, method: Word) -> Option<&'analysis FunctionLikeMetadata> {
         self.codebase.get_declaring_method(class, method).filter(|metadata| metadata.flags.is_sharp())
     }
 
@@ -1139,7 +1135,7 @@ impl<'analysis> Types<'analysis> {
             }
             None => {
                 let (class, method) = self.artifacts.get_callees(call).find_map(called_method)?;
-                let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
+                let metadata = self.codebase.get_method(class, method)?;
 
                 ("Any?".to_owned(), format!("{}.{}()", class_text(class, self.codebase), metadata.original_name))
             }
@@ -1161,7 +1157,7 @@ impl<'analysis> Types<'analysis> {
         })?;
         let name = match callee {
             FunctionLikeIdentifier::Method(class, _) => {
-                let class = self.codebase.get_class_like(class.as_bytes()).map_or(*class, |class| class.original_name);
+                let class = self.codebase.get_class_like(*class).map_or(*class, |class| class.original_name);
                 format!("{class}::{}", metadata.original_name)
             }
             _ => metadata.original_name.to_string(),
@@ -1215,16 +1211,16 @@ impl<'analysis> Types<'analysis> {
         among: Option<&[Word]>,
     ) -> Option<(Word, &'analysis FunctionLikeMetadata)> {
         self.artifacts.get_callees(call).filter_map(called_method).find_map(|(class, method)| {
-            let member = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
-            let owner = self.scanned(class.as_bytes());
+            let member = self.codebase.get_method(class, method)?;
+            let owner = self.scanned(class);
 
             (owner.flags.is_sharp()
                 && !owner.flags.is_final()
                 && member.method_metadata.as_ref().is_some_and(|method| !method.visibility.is_private())
                 // A class-like is named by its key, spec section 24, so the PHP# `Box` is not `BOX`.
                 && among.is_none_or(|among| {
-                    let class = self.codebase.class_key(class.as_bytes());
-                    among.iter().any(|named| self.codebase.class_key(named.as_bytes()) == class)
+                    let class = self.codebase.class_key(class);
+                    among.iter().any(|named| self.codebase.class_key(*named) == class)
                 }))
             .then_some((class, member))
         })
@@ -1253,7 +1249,7 @@ impl<'analysis> Types<'analysis> {
         if r#type.is_void()
             || r#type.is_never()
             || (r#type.is_mixed() && r#type.can_be_null())
-            || (!self.scanned(class.as_bytes()).checks_results_at_call(member) && php_checks_whole(&r#type))
+            || (!self.scanned(class).checks_results_at_call(member) && php_checks_whole(&r#type))
         {
             return None;
         }
@@ -1291,7 +1287,7 @@ impl<'analysis> Types<'analysis> {
     /// the function, as `levenshtein()`. None for a method without the attribute, and no check for a `void` result or
     /// one of any value.
     #[must_use]
-    pub(crate) fn import(&self, class: &[u8], method: &[u8]) -> Option<(Word, Option<(String, String)>)> {
+    pub(crate) fn import(&self, class: Word, method: Word) -> Option<(Word, Option<(String, String)>)> {
         let metadata = self.codebase.get_method(class, method)?;
         // `[Import]` is a PHP# class-like of the standard library, keyed by its exact name, spec section 24.
         let mark = metadata.attributes.iter().find(|attribute| attribute.name.as_bytes() == IMPORT.as_bytes())?;
@@ -1350,7 +1346,7 @@ impl<'analysis> Types<'analysis> {
             return None;
         }
         let (class, method) = self.artifacts.get_callees(call).find_map(called_method)?;
-        let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
+        let metadata = self.codebase.get_method(class, method)?;
         let static_method = metadata.method_metadata.as_ref().is_some_and(|method| method.is_static);
         let binds = names_parameter(&metadata.return_type_metadata.as_ref()?.type_union, static_method);
 
@@ -1358,7 +1354,7 @@ impl<'analysis> Types<'analysis> {
         (metadata.flags.is_sharp()
             && binds
             && !is_collection_member(class, metadata)
-            && self.enum_case_class(class.as_bytes(), method.as_bytes()).is_none())
+            && self.enum_case_class(class, method).is_none())
         .then_some((class, metadata))
     }
 
@@ -1373,8 +1369,8 @@ impl<'analysis> Types<'analysis> {
         let FunctionLikeIdentifier::Method(class, method) = signature.get_source()? else {
             unreachable!("a method value's signature comes from its method, not the value at {:?}", value.span());
         };
-        let member = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
-        if !self.scanned(class.as_bytes()).checks_results_at_call(member) {
+        let member = self.codebase.get_method(class, method)?;
+        if !self.scanned(class).checks_results_at_call(member) {
             return None;
         }
         let (types, target) = self.returned_check(class, member, signature.get_return_type()?, false)?;
@@ -1417,8 +1413,8 @@ impl<'analysis> Types<'analysis> {
     /// against, as a parameter checks an argument: [`Self::checked_text`] of its type, a collection's elements included.
     /// PHP's typed property check tests it on every write plain PHP makes, through reflection too, whatever the
     /// property's visibility.
-    pub(crate) fn property_check(&self, class: &[u8], property: &[u8]) -> Option<String> {
-        let metadata = self.codebase.get_declaring_property(class, &[b"$", property].concat())?;
+    pub(crate) fn property_check(&self, class: Word, property: &[u8]) -> Option<String> {
+        let metadata = self.codebase.get_declaring_property(class, word([b"$", property].concat()))?;
         let r#type = &metadata.type_metadata.as_ref()?.type_union;
 
         // A property of a PHP enum, which only PHP# declares, a computed one, carries its type text always, which tells
@@ -1456,7 +1452,7 @@ impl<'analysis> Types<'analysis> {
             };
 
             std::iter::once(atomic).chain(object.get_intersection_types().unwrap_or_default()).any(|part| {
-                matches!(part, TAtomic::Object(TObject::Named(part)) if self.codebase.get_trait(part.name.as_bytes()).is_some())
+                matches!(part, TAtomic::Object(TObject::Named(part)) if self.codebase.get_trait(part.name).is_some())
             })
         };
         // A call from plain PHP gives a method's own type parameters no type arguments, so a value whose type is one of
@@ -1488,7 +1484,7 @@ impl<'analysis> Types<'analysis> {
             object
                 .get_type_parameters()
                 .is_some_and(|arguments| arguments.iter().any(|argument| !is_method_parameter(argument)))
-                && self.codebase.get_class_like(object.name.as_bytes()).is_some_and(|class| class.flags.is_sharp())
+                && self.codebase.get_class_like(object.name).is_some_and(|class| class.flags.is_sharp())
         };
         let checked = collections
             && r#type.types.iter().any(|atomic| match get_sharp_type(atomic) {
@@ -1530,15 +1526,17 @@ impl<'analysis> Types<'analysis> {
     /// The constructor `parent::__construct` reaches from the fully qualified class name `class`, as
     /// [`CodebaseMetadata::get_parent_constructor`] finds it.
     #[must_use]
-    pub fn parent_constructor(&self, class: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
+    pub fn parent_constructor(&self, class: Word) -> Option<&'analysis FunctionLikeMetadata> {
         self.codebase.get_parent_constructor(class)
     }
 
     /// The parameters of the main constructor the fully qualified class name `class` declares, which the container
     /// fills, spec section 32.
     #[must_use]
-    pub fn constructor_parameters(&self, class: &[u8]) -> &'analysis [FunctionLikeParameterMetadata] {
-        self.codebase.get_method(class, b"__construct").map_or(&[], |constructor| constructor.parameters.as_slice())
+    pub fn constructor_parameters(&self, class: Word) -> &'analysis [FunctionLikeParameterMetadata] {
+        self.codebase
+            .get_method(class, word("__construct"))
+            .map_or(&[], |constructor| constructor.parameters.as_slice())
     }
 
     /// The module the scanner recorded at `span`, with its bindings in the order the module declares them.
@@ -1562,13 +1560,14 @@ impl<'analysis> Types<'analysis> {
     /// declares none of them is it a property its `__get` serves, or its `__set` takes a write to. A read of an object
     /// is [`Self::read_member`]'s, and a call is [`Self::call_target`]'s.
     #[must_use]
-    pub fn member_declaration(&self, class: &[u8], member: &[u8]) -> Declaration {
+    pub fn member_declaration(&self, class: Word, member: Word) -> Declaration {
         self.declared_member(class, member).unwrap_or_else(|| {
-            if !self.codebase.method_exists(class, b"__get") && !self.codebase.method_exists(class, b"__set") {
+            if !self.codebase.method_exists(class, word("__get")) && !self.codebase.method_exists(class, word("__set"))
+            {
                 unreachable!(
                     "the checker refuses `{}.{}`, which names no member",
-                    String::from_utf8_lossy(class),
-                    String::from_utf8_lossy(member)
+                    String::from_utf8_lossy(class.as_bytes()),
+                    String::from_utf8_lossy(member.as_bytes())
                 )
             }
 
@@ -1583,7 +1582,7 @@ impl<'analysis> Types<'analysis> {
 
     /// The member `member` of the fully qualified class name `class` declares or inherits, as
     /// [`Self::member_declaration`] resolves it, leaving out a property its `__get` serves.
-    pub(crate) fn declared_member(&self, class: &[u8], member: &[u8]) -> Option<Declaration> {
+    pub(crate) fn declared_member(&self, class: Word, member: Word) -> Option<Declaration> {
         let declared = |kind, public| Declaration { kind, class: word(class), name: word(member), public };
 
         if let Some(case) = self.enum_case_class(class, member) {
@@ -1593,7 +1592,7 @@ impl<'analysis> Types<'analysis> {
         } else if let Some(constant) = self.codebase.get_class_constant(class, member) {
             Some(declared(DeclarationKind::Constant, constant.visibility.is_public()))
         } else {
-            self.property_declaration(class, member).or_else(|| self.method_declaration(class, member))
+            self.property_declaration(class, member.as_bytes()).or_else(|| self.method_declaration(class, member))
         }
     }
 
@@ -1601,10 +1600,10 @@ impl<'analysis> Types<'analysis> {
     /// [`Self::declared_member`] finds it, except that a class whose plain PHP code defines `__get`, itself or a parent,
     /// has the properties it reads, spec section 14.3: its `__get` serves a name the class declares a method of, or
     /// nothing of.
-    pub(crate) fn read_member(&self, class: &[u8], member: &[u8]) -> Option<Declaration> {
+    pub(crate) fn read_member(&self, class: Word, member: Word) -> Option<Declaration> {
         match self.declared_member(class, member) {
             None | Some(Declaration { kind: DeclarationKind::Method { .. } | DeclarationKind::StaticMethod, .. })
-                if self.codebase.method_exists(class, b"__get") =>
+                if self.codebase.method_exists(class, word("__get")) =>
             {
                 Some(Declaration {
                     kind: DeclarationKind::Property { typed: false },
@@ -1620,8 +1619,8 @@ impl<'analysis> Types<'analysis> {
     /// The full name of the class the case `case` of the enum whose full name is `class` runs as, when a case of the
     /// enum carries data, spec section 20: `App\PaymentResult\Paid` for `App\PaymentResult` and `Paid`.
     #[must_use]
-    pub fn enum_case_class(&self, class: &[u8], case: &[u8]) -> Option<Word> {
-        let metadata = self.codebase.get_class_like(&[class, b"\\", case].concat())?;
+    pub fn enum_case_class(&self, class: Word, case: Word) -> Option<Word> {
+        let metadata = self.codebase.get_class_like(word([class.as_bytes(), b"\\", case.as_bytes()].concat()))?;
 
         (metadata.flags.is_enum_case_class()
             && metadata.direct_parent_class.is_some_and(|parent| parent == self.codebase.class_key(class)))
@@ -1630,7 +1629,7 @@ impl<'analysis> Types<'analysis> {
 
     /// The full name the codebase declares the class `class` with, which outlives the lowering, as a case's class
     /// `App\PaymentResult\Paid`. None for a class the codebase does not declare.
-    pub(crate) fn class_name(&self, class: &[u8]) -> Option<&'analysis [u8]> {
+    pub(crate) fn class_name(&self, class: Word) -> Option<&'analysis [u8]> {
         self.codebase.get_class_like(class).map(|metadata| metadata.original_name.as_bytes())
     }
 
@@ -1677,11 +1676,11 @@ impl<'analysis> Types<'analysis> {
         else {
             return None;
         };
-        let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
+        let metadata = self.codebase.get_method(*class, *method)?;
 
         (metadata.flags.is_extension_method() || metadata.flags.is_extension_property()).then(|| Declaration {
             kind: DeclarationKind::StaticMethod,
-            class: self.class_declaration(class.as_bytes()).name,
+            class: self.class_declaration(*class).name,
             name: metadata.original_name,
             public: true,
         })
@@ -1689,7 +1688,7 @@ impl<'analysis> Types<'analysis> {
 
     /// Whether the member `member` of the class `class` a call runs is a property that holds a function, spec section
     /// 14.3, which the call calls, where it is no method.
-    pub(crate) fn holds_function(&self, class: &[u8], member: &[u8]) -> bool {
+    pub(crate) fn holds_function(&self, class: Word, member: Word) -> bool {
         matches!(self.declared_member(class, member), Some(Declaration { kind: DeclarationKind::Property { .. }, .. }))
     }
 
@@ -1700,7 +1699,7 @@ impl<'analysis> Types<'analysis> {
     pub(crate) fn own_member_classes(&self, access: &Expression) -> Option<Vec<Word>> {
         let classes = self.artifacts.get_own_member_classes(access)?;
 
-        Some(classes.iter().map(|class| self.class_declaration(class.as_bytes()).name).collect())
+        Some(classes.iter().map(|class| self.class_declaration(*class).name).collect())
     }
 
     /// The standard library's member `name` of the collection `kind`, a `List` or a `Map`, which an operation on it runs,
@@ -1717,7 +1716,7 @@ impl<'analysis> Types<'analysis> {
 
         Declaration {
             kind: DeclarationKind::StaticMethod,
-            class: self.class_declaration(class.as_bytes()).name,
+            class: self.class_declaration(class).name,
             name: member.original_name,
             public: true,
         }
@@ -1733,7 +1732,7 @@ impl<'analysis> Types<'analysis> {
         for callee in self.artifacts.get_callees(call) {
             if let CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(class, method), .. } =
                 callee
-                && let Some(metadata) = self.codebase.get_method(class.as_bytes(), method.as_bytes())
+                && let Some(metadata) = self.codebase.get_method(*class, *method)
                 && metadata.flags.is_extension_method()
             {
                 extensions.push((callee, *class, metadata));
@@ -1767,7 +1766,7 @@ impl<'analysis> Types<'analysis> {
                     runs_as,
                     declaration: Declaration {
                         kind: DeclarationKind::StaticMethod,
-                        class: self.class_declaration(class.as_bytes()).name,
+                        class: self.class_declaration(class).name,
                         name: metadata.original_name,
                         public: true,
                     },
@@ -1783,7 +1782,7 @@ impl<'analysis> Types<'analysis> {
     /// takes what the inlined call gives, past the arguments `written` passes: [`RESULT_TYPE_SLOT`] for one marked
     /// [`TAKES_RESULT_TYPE`], and [`KEY_ORDER_SLOT`] for one marked [`TAKES_KEY_ORDER`].
     pub(crate) fn call_slots(&self, function: Word, written: &MethodCall) -> Vec<&'static [u8]> {
-        let Some(metadata) = self.codebase.get_function(function.as_bytes()) else {
+        let Some(metadata) = self.codebase.get_function(function) else {
             unreachable!("the checker resolves the namespace call to the function `{function}`");
         };
 
@@ -1792,7 +1791,7 @@ impl<'analysis> Types<'analysis> {
             .iter()
             .skip(written.argument_list.arguments.len())
             .filter_map(|parameter| {
-                let marked = |mark: &[u8]| parameter.has_attribute(self.codebase, mark);
+                let marked = |mark: &[u8]| parameter.has_attribute(self.codebase, word(mark));
 
                 if marked(TAKES_RESULT_TYPE) {
                     Some(RESULT_TYPE_SLOT)
@@ -1807,7 +1806,7 @@ impl<'analysis> Types<'analysis> {
     /// collection member `declaration`, reads, as [`Self::plain_element_type`] gives it, so a value the member takes
     /// goes in as an element of it does. None for a receiver PHP# declares, and for any other extension member.
     pub(crate) fn plain_member_element(&self, declaration: &Declaration, receiver: &Expression) -> Option<TUnion> {
-        let member = self.codebase.get_method(declaration.class.as_bytes(), declaration.name.as_bytes())?;
+        let member = self.codebase.get_method(declaration.class, declaration.name)?;
 
         is_collection_member(declaration.class, member).then(|| self.plain_element_type(receiver)).flatten()
     }
@@ -1816,7 +1815,7 @@ impl<'analysis> Types<'analysis> {
     /// place of the receiver by reference.
     pub(crate) fn changes_receiver(&self, declaration: &Declaration) -> bool {
         self.codebase
-            .get_method(declaration.class.as_bytes(), declaration.name.as_bytes())
+            .get_method(declaration.class, declaration.name)
             .and_then(|metadata| metadata.parameters.first())
             .is_some_and(|receiver| receiver.flags.is_by_reference())
     }
@@ -1828,7 +1827,7 @@ impl<'analysis> Types<'analysis> {
             && matches!(
                 self.artifacts.get_callees(access).next(),
                 Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. })
-                    if self.codebase.get_method(class.as_bytes(), method.as_bytes())
+                    if self.codebase.get_method(*class, *method)
                         .is_some_and(|metadata| metadata.flags.is_extension_method())
             )
     }
@@ -1927,7 +1926,7 @@ impl<'analysis> Types<'analysis> {
     /// public, and overridable unless the class is an enum or final, since any subclass may declare it.
     fn target_declaration(&self, target: &CallTarget) -> Declaration {
         let method = |class: Word, method: Word| {
-            self.method_declaration(class.as_bytes(), method.as_bytes())
+            self.method_declaration(class, method)
                 .unwrap_or_else(|| unreachable!("the analysis resolved `{class}.{method}()` from the codebase"))
         };
 
@@ -1940,9 +1939,7 @@ impl<'analysis> Types<'analysis> {
             } => {
                 let kind = match method(magic_class, magic).kind {
                     DeclarationKind::StaticMethod => DeclarationKind::StaticMethod,
-                    _ => {
-                        DeclarationKind::Method { overridable: !self.codebase.is_enum_or_final_class(class.as_bytes()) }
-                    }
+                    _ => DeclarationKind::Method { overridable: !self.codebase.is_enum_or_final_class(class) },
                 };
 
                 Declaration { kind, class, name, public: true }
@@ -1950,18 +1947,17 @@ impl<'analysis> Types<'analysis> {
             CallTarget::Property { class, property } => property
                 .as_bytes()
                 .strip_prefix(b"$")
-                .and_then(|property| self.property_declaration(class.as_bytes(), property))
+                .and_then(|property| self.property_declaration(class, property))
                 .unwrap_or_else(|| unreachable!("the analysis resolved the property `{class}.{property}`")),
             target => unreachable!("a method call runs a method or a property's function, not {target:?}"),
         }
     }
 
     /// The name and type of each property `==` compares on the struct `class`, in the order the struct declares them.
-    pub(crate) fn struct_properties(&self, class: &[u8]) -> Vec<(&'analysis [u8], &'analysis TUnion)> {
-        let metadata = self
-            .codebase
-            .get_class_like(class)
-            .unwrap_or_else(|| unreachable!("the codex registers the struct `{}`", String::from_utf8_lossy(class)));
+    pub(crate) fn struct_properties(&self, class: Word) -> Vec<(&'analysis [u8], &'analysis TUnion)> {
+        let metadata = self.codebase.get_class_like(class).unwrap_or_else(|| {
+            unreachable!("the codex registers the struct `{}`", String::from_utf8_lossy(class.as_bytes()))
+        });
 
         metadata
             .struct_properties()
@@ -1979,41 +1975,41 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The backing type of the backed enum `class`, if it has one.
-    pub(crate) fn backing_type(&self, class: &[u8]) -> Option<&'analysis TAtomic> {
+    pub(crate) fn backing_type(&self, class: Word) -> Option<&'analysis TAtomic> {
         self.codebase.get_class_like(class)?.enum_type.as_ref()
     }
 
     /// Whether the class-like `class` has the `parse` the codex gives a struct or a PHP# class.
-    pub(crate) fn parses(&self, class: &[u8]) -> bool {
+    pub(crate) fn parses(&self, class: Word) -> bool {
         self.codebase.parses(class)
     }
 
     /// Whether the class `class` is a value as text, which a field `parse` reads through the class's `parse(string)`
     /// and `Json.encode` writes as its `toString()`, as the codex gives it.
-    pub(crate) fn is_text_value(&self, class: &[u8]) -> bool {
+    pub(crate) fn is_text_value(&self, class: Word) -> bool {
         self.codebase.is_text_value(class)
     }
 
     /// Whether the class `class` declares or inherits the property `name`, written without `$`.
-    pub(crate) fn has_property(&self, class: &[u8], name: &[u8]) -> bool {
-        self.codebase.get_declaring_property(class, &[b"$".as_slice(), name].concat()).is_some()
+    pub(crate) fn has_property(&self, class: Word, name: &[u8]) -> bool {
+        self.codebase.get_declaring_property(class, word([b"$".as_slice(), name].concat())).is_some()
     }
 
     /// Whether the class-like `class` is a family, marked `[Tag]`, whose `parse` builds a variant by its name.
-    pub(crate) fn is_family(&self, class: &[u8]) -> bool {
+    pub(crate) fn is_family(&self, class: Word) -> bool {
         self.codebase.get_class_like(class).is_some_and(|class| class.tag_key().is_some())
     }
 
     /// The key of the family above the class `class` and the class's name in it, which its encoding writes first, as
     /// `("type", "card")`. None for a class that is no named variant of a family.
     pub(crate) fn variant_tag(&self, class: &[u8]) -> Option<(&'analysis [u8], &'analysis [u8])> {
-        let class = self.codebase.get_class_like(class)?;
+        let class = self.codebase.get_class_like(word(class))?;
 
         Some((self.codebase.family_of(class)?.tag_key()?, class.variant_name()?))
     }
 
     /// The fields the `parse` of the struct or PHP# class `class` reads, as the codex gives them.
-    pub(crate) fn struct_parse_fields(&self, class: &[u8]) -> Vec<ParsedField<'analysis>> {
+    pub(crate) fn struct_parse_fields(&self, class: Word) -> Vec<ParsedField<'analysis>> {
         self.codebase.struct_parse_fields(class)
     }
 
@@ -2088,7 +2084,7 @@ impl<'analysis> Types<'analysis> {
 
     /// The full dotted name of the class `name`, as it is declared.
     fn class_text(&self, name: Word) -> String {
-        let declared = self.codebase.get_class_like(name.as_bytes()).map_or(name, |class| class.original_name);
+        let declared = self.codebase.get_class_like(name).map_or(name, |class| class.original_name);
 
         declared.as_str_lossy().trim_start_matches('\\').replace('\\', ".")
     }
@@ -2125,7 +2121,7 @@ impl<'analysis> Types<'analysis> {
             return None;
         };
 
-        Some(self.codebase.get_function(function.as_bytes()).map_or(*function, |metadata| metadata.original_name))
+        Some(self.codebase.get_function(*function).map_or(*function, |metadata| metadata.original_name))
     }
 
     /// The interface the call `call` runs the `parse` or `tryParse` of, a family's, spec section 10, with whether it is
@@ -2138,7 +2134,7 @@ impl<'analysis> Types<'analysis> {
         else {
             return None;
         };
-        let family = self.codebase.get_class_like(class.as_bytes())?;
+        let family = self.codebase.get_class_like(*class)?;
         let throws = match method.as_bytes() {
             b"parse" => true,
             b"tryParse" => false,
@@ -2160,7 +2156,7 @@ impl<'analysis> Types<'analysis> {
 
         let mark = self
             .codebase
-            .get_method(class.as_bytes(), method.as_bytes())?
+            .get_method(*class, *method)?
             .attributes
             .iter()
             .find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(LEAN_FUNCTION.as_bytes()))?;
@@ -2260,13 +2256,13 @@ impl<'analysis> Types<'analysis> {
 
     /// The parameters of the constructor `new` runs for the fully qualified class name `class`, as
     /// [`Self::call_parameters`] gives a call's.
-    pub(crate) fn new_parameters(&self, class: &[u8]) -> Option<Vec<PlainParameter<'analysis>>> {
-        plain_parameters(class, self.codebase.get_declaring_method(class, b"__construct"))
+    pub(crate) fn new_parameters(&self, class: Word) -> Option<Vec<PlainParameter<'analysis>>> {
+        plain_parameters(class.as_bytes(), self.codebase.get_declaring_method(class, word("__construct")))
     }
 
     /// The parameters of the constructor `parent::__construct` reaches from the fully qualified class name `class`, as
     /// [`Self::call_parameters`] gives a call's.
-    pub(crate) fn parent_constructor_parameters(&self, class: &[u8]) -> Option<Vec<PlainParameter<'analysis>>> {
+    pub(crate) fn parent_constructor_parameters(&self, class: Word) -> Option<Vec<PlainParameter<'analysis>>> {
         plain_parameters(b"", self.codebase.get_parent_constructor(class))
     }
 
@@ -2276,13 +2272,14 @@ impl<'analysis> Types<'analysis> {
     pub(crate) fn property_type(&self, target: &Expression) -> Option<&'analysis TUnion> {
         let (class, variable) = self.accessed_property(target)?;
 
-        self.declared_property_type(class, &variable)
+        self.declared_property_type(word(class), word(&variable))
     }
 
     /// Whether `target` reads a property plain PHP declares, which can hold a PHP array where PHP# reads a `Map` or a
     /// `Set`.
     pub(crate) fn plain_property(&self, target: &Expression) -> bool {
-        self.accessed_property(target).is_some_and(|(class, property)| self.plain_declares(class, &property))
+        self.accessed_property(target)
+            .is_some_and(|(class, property)| self.plain_declares(word(class), word(&property)))
     }
 
     /// The type plain PHP declares for the place `target` writes, a property it declares, as [`Self::plain_property`]
@@ -2294,7 +2291,7 @@ impl<'analysis> Types<'analysis> {
         }
         let (class, variable) = self.accessed_property(target)?;
 
-        self.plain_property_type(class, &variable)
+        self.plain_property_type(word(class), word(&variable))
     }
 
     /// The type plain PHP declares for an element of the place `holder`, as [`Self::plain_place_type`] gives the
@@ -2316,13 +2313,13 @@ impl<'analysis> Types<'analysis> {
     /// `class` declares or inherits, as [`Self::plain_place_type`] gives it. A write to a name the class has no
     /// property for runs its `__set`, so the place is the value parameter of a `__set` plain PHP declares, as Eloquent's
     /// `Model` does. None for a property PHP# declares first. A PHP# override's place is its own type's.
-    pub(crate) fn plain_property_type(&self, class: &[u8], variable: &[u8]) -> Option<TUnion> {
+    pub(crate) fn plain_property_type(&self, class: Word, variable: Word) -> Option<TUnion> {
         let declared = match self.codebase.get_declaring_property(class, variable) {
             Some(_) if !self.plain_declares(class, variable) => return None,
             Some(property) => property.type_metadata.as_ref().map(|declared| &declared.type_union),
-            None => {
-                plain_parameters(class, self.codebase.get_declaring_method(class, b"__set"))?.get(1)?.declared_type()
-            }
+            None => plain_parameters(class.as_bytes(), self.codebase.get_declaring_method(class, word("__set")))?
+                .get(1)?
+                .declared_type(),
         };
 
         Some(declared.cloned().unwrap_or_else(get_mixed))
@@ -2331,11 +2328,11 @@ impl<'analysis> Types<'analysis> {
     /// Whether plain PHP declares the property `variable`, `$`-prefixed, that `class` declares or inherits, spec section
     /// 12: on the class or a parent, so a PHP# override of a plain PHP parent's property keeps the parent's storage, which
     /// holds the PHP array plain PHP code reads, as Eloquent's `Model` reads `$casts`.
-    fn plain_declares(&self, class: &[u8], variable: &[u8]) -> bool {
+    fn plain_declares(&self, class: Word, variable: Word) -> bool {
         self.codebase.get_declaring_property_class(class, variable).is_some()
             && self
                 .codebase
-                .get_class_like(self.root_property(class, variable).0.as_bytes())
+                .get_class_like(self.root_property(class, variable).0)
                 .is_some_and(|root| !root.flags.is_sharp())
     }
 
@@ -2368,7 +2365,9 @@ impl<'analysis> Types<'analysis> {
         let variable = [b"$", property].concat();
 
         receiver_classes(r#type).into_iter().flatten().any(|class| {
-            self.codebase.get_declaring_property(class, &variable).is_some_and(|metadata| !metadata.hooks.is_empty())
+            self.codebase
+                .get_declaring_property(word(class), word(&variable))
+                .is_some_and(|metadata| !metadata.hooks.is_empty())
         })
     }
 
@@ -2378,13 +2377,15 @@ impl<'analysis> Types<'analysis> {
         let variable = [b"$", property].concat();
 
         receiver_classes(r#type).into_iter().flatten().any(|class| {
-            self.codebase.get_declaring_property(class, &variable).is_none_or(|metadata| !metadata.hooks.is_empty())
+            self.codebase
+                .get_declaring_property(word(class), word(&variable))
+                .is_none_or(|metadata| !metadata.hooks.is_empty())
         })
     }
 
     /// Whether the parameter named at `span` of a method of `class` is variadic in the codebase, as the parameter an
     /// override writes as the `List` a parent's variadic one arrives as is, spec section 7.
-    pub(crate) fn is_variadic_parameter(&self, class: &[u8], span: Span) -> bool {
+    pub(crate) fn is_variadic_parameter(&self, class: Word, span: Span) -> bool {
         self.codebase.get_class_like(class).is_some_and(|class_like| {
             class_like
                 .methods
@@ -2398,39 +2399,39 @@ impl<'analysis> Types<'analysis> {
     /// Whether the static property `property` of `class` runs accessors: a computed one, or one with an accessor body or
     /// an observer. PHP has no hooks on a static, so its class holds them as the hidden static methods `name#get` and
     /// `name#set`, which every read and write of it calls.
-    pub(crate) fn is_static_accessor(&self, class: &[u8], property: &[u8]) -> bool {
+    pub(crate) fn is_static_accessor(&self, class: Word, property: &[u8]) -> bool {
         let variable = [b"$", property].concat();
 
         self.codebase
-            .get_declaring_property(class, &variable)
+            .get_declaring_property(class, word(&variable))
             .is_some_and(|metadata| metadata.flags.is_static() && !metadata.hooks.is_empty())
     }
 
     /// Whether the static property `property` of `class` has an initial value that runs as code, which a throw leaves
     /// unset, spec section 6.
-    pub(crate) fn has_runtime_initial_value(&self, class: &[u8], property: &[u8]) -> bool {
+    pub(crate) fn has_runtime_initial_value(&self, class: Word, property: &[u8]) -> bool {
         let variable = [b"$", property].concat();
 
         self.codebase
-            .get_declaring_property(class, &variable)
+            .get_declaring_property(class, word(&variable))
             .is_some_and(|metadata| metadata.flags.has_runtime_initial_value())
     }
 
     /// The property `class` declares or inherits by the name `property`, if any.
-    fn property_declaration(&self, class: &[u8], property: &[u8]) -> Option<Declaration> {
+    fn property_declaration(&self, class: Word, property: &[u8]) -> Option<Declaration> {
         let variable = [b"$", property].concat();
-        let metadata = self.codebase.get_declaring_property(class, &variable)?;
+        let metadata = self.codebase.get_declaring_property(class, word(&variable))?;
         let kind = if metadata.flags.is_static() {
             DeclarationKind::StaticProperty
         } else {
             DeclarationKind::Property {
-                typed: self.root_property(class, &variable).1.type_declaration_metadata.is_some(),
+                typed: self.root_property(class, word(&variable)).1.type_declaration_metadata.is_some(),
             }
         };
 
         Some(Declaration {
             kind,
-            class: self.codebase.get_declaring_property_class(class, &variable).unwrap_or_else(|| word(class)),
+            class: self.codebase.get_declaring_property_class(class, word(&variable)).unwrap_or_else(|| word(class)),
             name: word(property),
             public: metadata.read_visibility.is_public(),
         })
@@ -2440,13 +2441,17 @@ impl<'analysis> Types<'analysis> {
     /// that root is a typed plain PHP property and `class` declares the property with a narrower type, spec section
     /// 6.1. PHP keeps a property's type through every override as the class links, so the property runs with it, and
     /// its own type checks each write. None for any other property, which runs with the type it writes.
-    pub(crate) fn narrowed_root_type(&self, class: &[u8], property: &[u8]) -> Option<&'analysis TUnion> {
+    pub(crate) fn narrowed_root_type(&self, class: Word, property: &[u8]) -> Option<&'analysis TUnion> {
         let variable = [b"$", property].concat();
-        let own =
-            &self.codebase.get_declaring_property(class, &variable)?.type_declaration_metadata.as_ref()?.type_union;
-        let (root_class, root) = self.root_property(class, &variable);
+        let own = &self
+            .codebase
+            .get_declaring_property(class, word(&variable))?
+            .type_declaration_metadata
+            .as_ref()?
+            .type_union;
+        let (root_class, root) = self.root_property(class, word(&variable));
         let root_type = &root.type_declaration_metadata.as_ref()?.type_union;
-        let is_plain = !self.codebase.get_class_like(root_class.as_bytes())?.flags.is_sharp();
+        let is_plain = !self.codebase.get_class_like(root_class)?.flags.is_sharp();
 
         (is_plain
             && !union_comparator::is_contained_by(
@@ -2461,15 +2466,15 @@ impl<'analysis> Types<'analysis> {
         .then_some(root_type)
     }
 
-    pub(crate) fn inherits_getter(&self, class: &[u8], property: &[u8]) -> bool {
+    pub(crate) fn inherits_getter(&self, class: Word, property: &[u8]) -> bool {
         let variable = [b"$", property].concat();
         let parent_of =
-            |class: &[u8]| self.codebase.get_class_like(class).and_then(|metadata| metadata.direct_parent_class);
-        let mut parent = parent_of(class);
+            |class: &[u8]| self.codebase.get_class_like(word(class)).and_then(|metadata| metadata.direct_parent_class);
+        let mut parent = parent_of(class.as_bytes());
         while let Some(ancestor) = parent {
             if self
                 .codebase
-                .get_declaring_property(ancestor.as_bytes(), &variable)
+                .get_declaring_property(ancestor, word(&variable))
                 .is_some_and(|metadata| metadata.hooks.values().any(|hook| hook.is_get() && !hook.is_abstract))
             {
                 return true;
@@ -2482,13 +2487,13 @@ impl<'analysis> Types<'analysis> {
 
     /// The root declaration of the property `variable` that `class` declares or inherits, the one in the class whose
     /// parent does not declare it, with that class.
-    fn root_property(&self, class: &[u8], variable: &[u8]) -> (Word, &'analysis PropertyMetadata) {
-        let declaring = |class: &[u8]| self.codebase.get_declaring_property_class(class, variable);
-        let mut root =
-            declaring(class).unwrap_or_else(|| unreachable!("`{}` declares or inherits the property", word(class)));
+    fn root_property(&self, class: Word, variable: Word) -> (Word, &'analysis PropertyMetadata) {
+        let declaring = |class: &[u8]| self.codebase.get_declaring_property_class(word(class), variable);
+        let mut root = declaring(class.as_bytes())
+            .unwrap_or_else(|| unreachable!("`{}` declares or inherits the property", word(class)));
         while let Some(parent) = self
             .codebase
-            .get_class_like(root.as_bytes())
+            .get_class_like(root)
             .and_then(|metadata| metadata.direct_parent_class)
             .and_then(|parent| declaring(parent.as_bytes()))
         {
@@ -2497,7 +2502,7 @@ impl<'analysis> Types<'analysis> {
 
         let metadata = self
             .codebase
-            .get_declaring_property(root.as_bytes(), variable)
+            .get_declaring_property(root, variable)
             .unwrap_or_else(|| unreachable!("`{root}` declares the property"));
 
         (root, metadata)
@@ -2507,8 +2512,8 @@ impl<'analysis> Types<'analysis> {
     /// as the checker chose it from those types, spec section 19, as `App\Money` for `op_Addition` on two `Order`s
     /// that inherit it, or `App\Priced` for `op_Comparison` on a `Rare` and a `Book`. Operands that no operator takes
     /// run none.
-    pub(crate) fn operator_owner(&self, name: &[u8], operands: &[&TUnion]) -> Option<Word> {
-        chosen_operator(self.codebase, name, operands).map(|owner| self.scanned(owner.as_bytes()).original_name)
+    pub(crate) fn operator_owner(&self, name: Word, operands: &[&TUnion]) -> Option<Word> {
+        chosen_operator(self.codebase, name, operands).map(|owner| self.scanned(owner).original_name)
     }
 
     /// How `==` compares a value of `lhs` with one of `rhs`, spec section 19, as the lowering writes it and the law
@@ -2546,7 +2551,7 @@ impl<'analysis> Types<'analysis> {
         }
         let name = php_operator_name(&BinaryOperator::Equal(Span::zero()), 2)?;
 
-        Some((self.operator_owner(name, &[lhs_type, rhs_type])?, name))
+        Some((self.operator_owner(word(name), &[lhs_type, rhs_type])?, name))
     }
 
     /// Whether `==` on a value of `lhs_type` and one of `rhs_type` is PHP's `===`, spec section 19: true for every value
@@ -2595,13 +2600,13 @@ impl<'analysis> Types<'analysis> {
         }
 
         php_operator_name(&BinaryOperator::Spaceship(Span::zero()), 2)
-            .and_then(|name| Some((self.operator_owner(name, &[key, key])?, name)))
+            .and_then(|name| Some((self.operator_owner(word(name), &[key, key])?, name)))
             .map_or(KeyOrder::Plain, |(owner, name)| KeyOrder::Operator(owner, name))
     }
 
     /// The method `class` declares or inherits by the name `method`, if any. A subclass overrides an instance method
     /// that is neither final nor private, of a class that is neither an enum nor final.
-    fn method_declaration(&self, class: &[u8], method: &[u8]) -> Option<Declaration> {
+    fn method_declaration(&self, class: Word, method: Word) -> Option<Declaration> {
         let metadata = self.codebase.get_declaring_method(class, method)?.method_metadata.as_ref()?;
         let kind = if metadata.is_static {
             DeclarationKind::StaticMethod
@@ -2822,7 +2827,7 @@ pub fn function_type_fingerprint(codebase: &CodebaseMetadata, effects: &Effects,
     let solved = if name.starts_with(b"{closure:") {
         effects.function_effects(codebase, &FunctionLikeIdentifier::Closure(word(name)))
     } else if let Some(accessor) = parts.next() {
-        effects.accessor_effects(codebase, class, member.strip_prefix(b"$").unwrap_or(member), accessor)
+        effects.accessor_effects(codebase, word(class), member.strip_prefix(b"$").unwrap_or(member), accessor)
     } else {
         effects.function_effects(codebase, &FunctionLikeIdentifier::Method(word(class), word(member)))
     };
@@ -3102,7 +3107,7 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
             (Parameter::Any, _) => "Any?".to_owned(),
             (Parameter::Index | Parameter::Bound | Parameter::Declared, GenericParent::ClassLike(class)) => {
                 let index = codebase
-                    .get_class_like(class.as_bytes())
+                    .get_class_like(class)
                     .and_then(|class| class.template_types.get_index_of(&name))
                     .unwrap_or_else(|| unreachable!("a class declares each of its type parameters, not `{name}`"));
 
@@ -3110,7 +3115,7 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
             }
             (Parameter::Index, GenericParent::FunctionLike((class, method))) => {
                 let index = codebase
-                    .get_method(class.as_bytes(), method.as_bytes())
+                    .get_method(class, method)
                     .and_then(|method| method.template_types.get_index_of(&name))
                     .unwrap_or_else(|| unreachable!("a method declares each of its type parameters, not `{name}`"));
 
@@ -3256,7 +3261,7 @@ fn raw_collection(name: Word) -> Option<&'static str> {
 
 /// The full dotted name of the class `name`, as it is declared.
 fn class_text(name: Word, codebase: &CodebaseMetadata) -> String {
-    let declared = codebase.get_class_like(name.as_bytes()).map_or(name, |class| class.original_name);
+    let declared = codebase.get_class_like(name).map_or(name, |class| class.original_name);
 
     declared.as_str_lossy().trim_start_matches('\\').replace('\\', ".")
 }

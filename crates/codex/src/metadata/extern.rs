@@ -96,7 +96,7 @@ pub fn extern_namespace_classes(scans: &[&CodebaseMetadata]) -> Vec<(Word, Vec<W
             let declared = |name: &[u8]| {
                 let full = [namespace, b"\\", name].concat();
 
-                scans.iter().any(|scan| scan.class_like_exists(&full))
+                scans.iter().any(|scan| scan.class_like_exists(mago_word::word(&full)))
             };
             let classes = scans
                 .iter()

@@ -84,14 +84,14 @@ impl Reach {
                 pending.extend(edges.get(&next).into_iter().flatten().copied());
                 if !next.1.is_empty() {
                     pending.push((next.0, empty_word()));
-                } else if let Some(metadata) = codebase.get_class_like(next.0.as_bytes()) {
+                } else if let Some(metadata) = codebase.get_class_like(next.0) {
                     pending.extend(metadata.properties.keys().map(|property| (next.0, *property)));
                 }
             }
 
             let mut files = vec![law_file];
             for &(class, member) in &reached {
-                let Some(metadata) = codebase.get_class_like(class.as_bytes()) else {
+                let Some(metadata) = codebase.get_class_like(class) else {
                     continue;
                 };
                 let file = metadata.span.file_id;
@@ -103,7 +103,7 @@ impl Reach {
                     exact_names: metadata.exact_names,
                 });
                 if member.is_empty() {
-                    reach.record_member(codebase, class, metadata.method_key(b"__construct"));
+                    reach.record_member(codebase, class, metadata.method_key(word("__construct")));
                 } else {
                     reach.record_member(codebase, class, member);
                 }
@@ -136,7 +136,7 @@ impl Reach {
     /// property's storage and type.
     fn record_member(&mut self, codebase: &CodebaseMetadata, class: Word, member: Word) {
         if let Some(property) = member.as_bytes().strip_prefix(b"$") {
-            let Some(metadata) = codebase.get_declaring_property(class.as_bytes(), member.as_bytes()) else {
+            let Some(metadata) = codebase.get_declaring_property(class, member) else {
                 return;
             };
             let field = (class, word(property));
@@ -147,7 +147,7 @@ impl Reach {
                 self.nullable_fields.insert(field);
             }
         } else if !member.is_empty()
-            && let Some(metadata) = codebase.get_method(class.as_bytes(), member.as_bytes())
+            && let Some(metadata) = codebase.get_method(class, member)
         {
             self.methods.insert(
                 (class, member),
@@ -219,9 +219,8 @@ impl Reach {
 /// The symbol with its class and a method as the codebase keys them, spec section 24: by their exact names on a PHP#
 /// class, and lowercase on a plain PHP one. A property keeps its name.
 fn keyed(codebase: &CodebaseMetadata, (class, member): SymbolIdentifier) -> SymbolIdentifier {
-    let class = codebase.class_key(class.as_bytes());
-    let member =
-        if member.as_bytes().starts_with(b"$") { member } else { codebase.method_key(class, member.as_bytes()) };
+    let class = codebase.class_key(class);
+    let member = if member.as_bytes().starts_with(b"$") { member } else { codebase.method_key(class, member) };
 
     (class, member)
 }

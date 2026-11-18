@@ -21,6 +21,7 @@ use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::Variable;
 use mago_syntax::walker::MutWalker;
+use mago_word::Word;
 use mago_word::word;
 
 use crate::Converter;
@@ -191,7 +192,7 @@ impl Converter<'_, '_> {
     /// The `: super(…)` of a subclass's constructor, which runs the parent's first (spec section 9): the arguments of
     /// the `parent::__construct(…)` its body starts with, which leaves the body, or none when no ancestor of `parent`
     /// declares a constructor. A parent's constructor that runs after other statements, or never, has no PHP# form.
-    pub(super) fn super_call(&mut self, method: &MethodDeclaration<'_>, block: &Block<'_>, parent: &[u8]) {
+    pub(super) fn super_call(&mut self, method: &MethodDeclaration<'_>, block: &Block<'_>, parent: Word) {
         let first = block.statements.first().and_then(|statement| match statement {
             Statement::Expression(expression) => match expression.expression {
                 Expression::Call(Call::StaticMethod(call))
@@ -205,7 +206,7 @@ impl Converter<'_, '_> {
             },
             _ => None,
         });
-        let constructor = self.input.codebase.get_declaring_method(parent, b"__construct");
+        let constructor = self.input.codebase.get_declaring_method(parent, word("__construct"));
         let arguments = match (first, constructor) {
             (Some((statement, call)), Some(constructor)) => {
                 self.arguments(&call.argument_list, Some(constructor));

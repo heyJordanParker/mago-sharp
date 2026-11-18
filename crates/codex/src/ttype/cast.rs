@@ -76,10 +76,7 @@ pub fn cast_atomic_to_callable<'atomic>(
 
         let method_identifier = MethodIdentifier::new(named_object.get_name(), word("__invoke"));
         let method_identifier = codebase.get_declaring_method_identifier(&method_identifier);
-        if codebase.method_exists(
-            method_identifier.get_class_name().as_bytes(),
-            method_identifier.get_method_name().as_bytes(),
-        ) {
+        if codebase.method_exists(method_identifier.get_class_name(), method_identifier.get_method_name()) {
             populate_template_result(
                 template_result.as_deref_mut(),
                 codebase,
@@ -122,7 +119,7 @@ pub fn can_atomic_be_callable(atomic: &TAtomic, codebase: &CodebaseMetadata) -> 
 
     match atomic {
         TAtomic::Scalar(TScalar::String(_)) | TAtomic::Array(TArray::List(_) | TArray::Keyed(_)) => true,
-        TAtomic::Object(TObject::Named(named_object)) => codebase.is_inheritable(named_object.get_name().as_bytes()),
+        TAtomic::Object(TObject::Named(named_object)) => codebase.is_inheritable(named_object.get_name()),
         TAtomic::Reference(TReference::Symbol { .. }) => true,
         TAtomic::GenericParameter(generic_parameter) => {
             generic_parameter.constraint.types.iter().any(|atomic| can_atomic_be_callable(atomic, codebase))
@@ -211,9 +208,7 @@ fn try_object_method(
     let method_identifier = MethodIdentifier::new(object_name, method_name);
     let method_identifier = codebase.get_declaring_method_identifier(&method_identifier);
 
-    if codebase
-        .method_exists(method_identifier.get_class_name().as_bytes(), method_identifier.get_method_name().as_bytes())
-    {
+    if codebase.method_exists(method_identifier.get_class_name(), method_identifier.get_method_name()) {
         populate_template_result(template_result, codebase, object_name, type_parameters);
         return Some(Cow::Owned(TCallable::Alias(method_identifier.into())));
     }
@@ -231,7 +226,7 @@ fn populate_template_result(
         return;
     };
 
-    let Some(class_metadata) = codebase.get_class_like(object_name.as_bytes()) else {
+    let Some(class_metadata) = codebase.get_class_like(object_name) else {
         return;
     };
 

@@ -113,9 +113,9 @@ fn give_case_type_arguments<A>(
         return;
     };
     let Some((case_class, r#enum)) = codebase
-        .get_class_like(case.name.as_bytes())
+        .get_class_like(case.name)
         .filter(|class| class.flags.is_enum_case_class() && !class.template_types.is_empty())
-        .and_then(|class| Some((class, codebase.get_class_like(class.direct_parent_class?.as_bytes())?)))
+        .and_then(|class| Some((class, codebase.get_class_like(class.direct_parent_class?)?)))
     else {
         return;
     };

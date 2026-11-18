@@ -901,7 +901,7 @@ fn check_constructor_early_return<'ctx, A>(
 ) where
     A: Arena,
 {
-    let Some(class_like_metadata) = context.codebase.get_class_like(class_name.as_bytes()) else {
+    let Some(class_like_metadata) = context.codebase.get_class_like(class_name) else {
         return;
     };
 
@@ -917,7 +917,7 @@ fn check_constructor_early_return<'ctx, A>(
     // Check each property that needs initialization
     for (prop_name, declaring_class) in &class_like_metadata.declaring_property_ids {
         // Get the property metadata from the declaring class
-        let Some(declaring_meta) = context.codebase.get_class_like(declaring_class.as_bytes()) else {
+        let Some(declaring_meta) = context.codebase.get_class_like(*declaring_class) else {
             continue;
         };
         let Some(prop) = declaring_meta.properties.get(prop_name) else {

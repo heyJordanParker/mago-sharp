@@ -311,7 +311,7 @@ where
     {
         // PHP# has no top-level functions, spec section 8, so a bare call that names no local calls nothing: a plain
         // PHP function is called through its namespace, and a bare call of one is the error a misspelled name gets.
-        if let Some(member) = bare_member_call(context, block_context, function_name.value()) {
+        if let Some(member) = bare_member_call(context, block_context, word(function_name.value())) {
             context.collector.report_with_code(
                 IssueCode::NonExistentFunction,
                 Issue::error(member)
@@ -493,7 +493,7 @@ where
 /// enclosing class declares a method of that name, returns the message that names the member call to write. When it
 /// states a law of that name, spec section 28, a law's body writes the call through the class name, as a static
 /// method's, and any other code is refused the call, for the call that finds no function.
-fn bare_member_call<A>(context: &Context<'_, '_, A>, block_context: &BlockContext<'_>, name: &[u8]) -> Option<String>
+fn bare_member_call<A>(context: &Context<'_, '_, A>, block_context: &BlockContext<'_>, name: Word) -> Option<String>
 where
     A: Arena,
 {
@@ -511,9 +511,9 @@ where
     // A name in another case names the method too, since the message writes the call as declared.
     let method = context
         .codebase
-        .get_method(class.name.as_bytes(), name)
+        .get_method(class.name, name)
         .map(|method| method.original_name)
-        .or_else(|| context.codebase.get_method_name_in_another_case(class.name.as_bytes(), name))?;
+        .or_else(|| context.codebase.get_method_name_in_another_case(class.name, name))?;
 
     Some(if block_context.scope.is_static() {
         format!(

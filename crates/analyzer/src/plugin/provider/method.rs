@@ -6,6 +6,7 @@ use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 use mago_word::concat_word;
 use mago_word::starts_with_ignore_case;
+use mago_word::word;
 
 use crate::plugin::context::InvocationInfo;
 use crate::plugin::context::ProviderContext;
@@ -39,24 +40,24 @@ impl MethodTarget {
     /// Whether the target names the method `method_name` of `class_name`, by the key rule, spec section 24: a class-like
     /// by its key, and a method by its class's rule, so the target `get` names no `Get` of a class with exact names.
     #[must_use]
-    pub fn matches(&self, codebase: &CodebaseMetadata, class_name: &[u8], method_name: &[u8]) -> bool {
+    pub fn matches(&self, codebase: &CodebaseMetadata, class_name: Word, method_name: &[u8]) -> bool {
         self.matches_class(codebase, class_name) && self.matches_method(codebase, class_name, method_name)
     }
 
-    fn matches_class(&self, codebase: &CodebaseMetadata, class_name: &[u8]) -> bool {
+    fn matches_class(&self, codebase: &CodebaseMetadata, class_name: Word) -> bool {
         if self.class == b"*" {
             return true;
         }
 
         // A built-in target's class prefix names a namespace of PHP or a plain PHP library, found in any case.
         if self.class.last() == Some(&b'*') {
-            starts_with_ignore_case(class_name, &self.class[..self.class.len() - 1])
+            starts_with_ignore_case(class_name.as_bytes(), &self.class[..self.class.len() - 1])
         } else {
-            codebase.class_key(class_name) == codebase.class_key(self.class)
+            codebase.class_key(class_name) == codebase.class_key(word(self.class))
         }
     }
 
-    fn matches_method(&self, codebase: &CodebaseMetadata, class_name: &[u8], method_name: &[u8]) -> bool {
+    fn matches_method(&self, codebase: &CodebaseMetadata, class_name: Word, method_name: &[u8]) -> bool {
         if self.method == b"*" {
             return true;
         }
@@ -110,9 +111,9 @@ mod tests {
         let codebase = CodebaseMetadata::new();
         let target = MethodTarget::any_class(b"get*");
 
-        assert!(target.matches(&codebase, b"Lib\\Box", b"getName"));
-        assert!(target.matches(&codebase, b"Lib\\Box", b"GETNAME"));
-        assert!(!target.matches(&codebase, b"Lib\\Box", b"ge"));
-        assert!(!target.matches(&codebase, b"Lib\\Box", b"setName"));
+        assert!(target.matches(&codebase, word(b"Lib\\Box"), b"getName"));
+        assert!(target.matches(&codebase, word(b"Lib\\Box"), b"GETNAME"));
+        assert!(!target.matches(&codebase, word(b"Lib\\Box"), b"ge"));
+        assert!(!target.matches(&codebase, word(b"Lib\\Box"), b"setName"));
     }
 }

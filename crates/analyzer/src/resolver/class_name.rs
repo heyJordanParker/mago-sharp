@@ -204,7 +204,7 @@ impl ResolvedClassname {
 
         let mut object_atomic = TAtomic::Object(match self.fqcn {
             Some(fqcn) => {
-                if codebase.symbols.contains_enum(codebase.class_key(fqcn.as_bytes())) {
+                if codebase.symbols.contains_enum(codebase.class_key(fqcn)) {
                     TObject::Enum(TEnum::new(fqcn))
                 } else if self.can_extend_static() {
                     TObject::Named(TNamedObject::new_static(fqcn))
@@ -238,11 +238,7 @@ where
     A: Arena,
 {
     let fqcn = word(context.resolved_names.get(name_node));
-    artifacts.symbol_references.add_reference_to_symbol(
-        &block_context.scope,
-        context.codebase.class_key(fqcn.as_bytes()),
-        false,
-    );
+    artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, context.codebase.class_key(fqcn), false);
 
     crate::utils::casing::check_class_like_casing(context, fqcn, name_node.span());
     crate::utils::experimental::check_experimental_class_like(context, block_context, fqcn, name_node.span());
@@ -250,7 +246,7 @@ where
     ResolvedClassname::new(
         Some(fqcn),
         ResolutionOrigin::Named { is_parent: false, is_self: false },
-        context.codebase.is_enum_or_final_class(fqcn.as_bytes()),
+        context.codebase.is_enum_or_final_class(fqcn),
     )
 }
 
@@ -262,7 +258,7 @@ fn defaults_user<'ctx>(
     interface: Word,
 ) -> Option<&'ctx ClassLikeMetadata> {
     std::iter::successors(Some(class), |class| {
-        class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
+        class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent))
     })
     .take_while(|class| class.all_parent_interfaces.contains(&interface))
     .last()
@@ -281,7 +277,7 @@ where
     A: Arena,
 {
     let interface_name = word(context.resolved_names.get(&super_of.interface));
-    let interface = context.codebase.get_interface(interface_name.as_bytes());
+    let interface = context.codebase.get_interface(interface_name);
     let interface_display =
         display_class_like_name(context, interface.map_or(interface_name, |interface| interface.original_name));
     let span = super_of.span();
@@ -307,8 +303,7 @@ where
             ))
         }
         (Some(class), _)
-            if let Some(user) =
-                defaults_user(context.codebase, class, context.codebase.class_key(interface_name.as_bytes()))
+            if let Some(user) = defaults_user(context.codebase, class, context.codebase.class_key(interface_name))
                 && !user.flags.is_sharp() =>
         {
             let user_display = display_class_like_name(context, user.original_name);
@@ -615,7 +610,7 @@ where
                 let mut found_parent = false;
 
                 if let Some(parent_metadata) =
-                    self_meta.direct_parent_class.as_ref().and_then(|id| context.codebase.get_class_like(id.as_bytes()))
+                    self_meta.direct_parent_class.as_ref().and_then(|id| context.codebase.get_class_like(*id))
                 {
                     let origin = ResolutionOrigin::Named { is_parent: true, is_self: false };
                     let mut classname = ResolvedClassname::new(Some(parent_metadata.original_name), origin, false);
@@ -801,7 +796,7 @@ pub fn get_class_name_from_atomic(codebase: &CodebaseMetadata, atomic: &TAtomic)
                     ResolvedClassname::new(
                         Some(named_object.name),
                         origin,
-                        codebase.is_enum_or_final_class(named_object.name.as_bytes()),
+                        codebase.is_enum_or_final_class(named_object.name),
                     )
                 }
                 TObject::WithProperties(_) | TObject::HasMethod(_) | TObject::HasProperty(_) => {
@@ -827,7 +822,7 @@ pub fn get_class_name_from_atomic(codebase: &CodebaseMetadata, atomic: &TAtomic)
                     TClassLikeString::Literal { value } => ResolvedClassname::new(
                         Some(*value),
                         ResolutionOrigin::LiteralClassString,
-                        codebase.is_enum_or_final_class(value.as_bytes()),
+                        codebase.is_enum_or_final_class(*value),
                     ),
                 }
             }
@@ -880,7 +875,7 @@ where
 
     let mut intersections = vec![];
     for required_interface in &metadata.require_implements {
-        let Some(interface_metadata) = context.codebase.get_interface(required_interface.as_bytes()) else {
+        let Some(interface_metadata) = context.codebase.get_interface(*required_interface) else {
             continue;
         };
 
@@ -893,7 +888,7 @@ where
     }
 
     for required_class in &metadata.require_extends {
-        let Some(parent_class_metadata) = context.codebase.get_class_like(required_class.as_bytes()) else {
+        let Some(parent_class_metadata) = context.codebase.get_class_like(*required_class) else {
             continue;
         };
 
@@ -958,7 +953,7 @@ where
     };
 
     if written.contains(&b'\\') {
-        return context.codebase.class_like_exists(written)
+        return context.codebase.class_like_exists(word(written))
             && !is_hidden_php_class(context, written)
             && report_full_class_name(context, written, span);
     }
@@ -1027,8 +1022,8 @@ where
         .into_iter()
         .filter_map(|(written_suffix, other)| Some([stem(written_suffix)?, other].concat()))
         .find(|other| {
-            (context.codebase.class_like_exists(other) && !is_hidden_php_class(context, other))
-                || context.codebase.class_like_exists(&[b"Sharp\\", other.as_slice()].concat())
+            (context.codebase.class_like_exists(word(other)) && !is_hidden_php_class(context, other))
+                || context.codebase.class_like_exists(word([b"Sharp\\", other.as_slice()].concat()))
         });
     let mut issue = Issue::error(format!("Cannot find type `{shown}`."))
         .with_annotation(Annotation::primary(span).with_message("No type of this name is declared."));

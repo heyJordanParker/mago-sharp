@@ -8,6 +8,7 @@
 //! A file converts whole or not at all. Each construct with no PHP# form yet, or none at all, is a [`Refusal`] that
 //! names its place and the construct, and the file then stays plain PHP.
 
+use mago_word::word;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
@@ -330,7 +331,7 @@ impl<'input> Converter<'input, '_> {
     /// The name this file writes for the class `identifier` names, as its resolved name gives it, or a refusal.
     fn class_name(&mut self, identifier: &Identifier<'_>) -> Option<String> {
         let resolved = self.input.names.get(identifier);
-        let declared = self.input.codebase.get_class_like(resolved).map_or_else(
+        let declared = self.input.codebase.get_class_like(word(resolved)).map_or_else(
             || String::from_utf8_lossy(resolved).into_owned(),
             |class| class.original_name.as_str_lossy().into_owned(),
         );

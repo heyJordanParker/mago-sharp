@@ -278,7 +278,7 @@ where
     if !context.dialect.is_sharp()
         || !context
             .codebase
-            .get_declaring_property(class.as_bytes(), property_name.as_bytes())
+            .get_declaring_property(class, property_name)
             .is_some_and(|property| property.flags.is_static())
     {
         return None;
@@ -306,8 +306,7 @@ where
         &mut result,
     ) else {
         // The read reported why the call can't reach the property, as for a private one, so the call runs nothing.
-        let declaring_class =
-            context.codebase.get_declaring_property_class(class.as_bytes(), property_name.as_bytes())?;
+        let declaring_class = context.codebase.get_declaring_property_class(class, property_name)?;
 
         return Some(CalledProperty {
             declaring_class,
@@ -355,7 +354,7 @@ fn find_static_property_in_class<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    let Some(class_metadata) = context.codebase.get_class_like(class_id.as_bytes()) else {
+    let Some(class_metadata) = context.codebase.get_class_like(class_id) else {
         if matches!(class_expr, Expression::Parent(_))
             && block_context.scope.get_class_like().is_some_and(|metadata| metadata.has_incomplete_hierarchy())
         {
@@ -368,12 +367,10 @@ where
         return None;
     };
 
-    let declaring_class_id = context
-        .codebase
-        .get_declaring_property_class(class_id.as_bytes(), property_name.as_bytes())
-        .unwrap_or(class_metadata.original_name);
+    let declaring_class_id =
+        context.codebase.get_declaring_property_class(class_id, property_name).unwrap_or(class_metadata.original_name);
 
-    let Some(declaring_class_metadata) = context.codebase.get_class_like(declaring_class_id.as_bytes()) else {
+    let Some(declaring_class_metadata) = context.codebase.get_class_like(declaring_class_id) else {
         // Should not happen if declaring_class_id is valid.
         result.has_error_path = true;
         return None;
@@ -383,15 +380,15 @@ where
         for required_class in
             declaring_class_metadata.require_extends.iter().chain(declaring_class_metadata.require_implements.iter())
         {
-            let Some(required_metadata) = context.codebase.get_class_like(required_class.as_bytes()) else {
+            let Some(required_metadata) = context.codebase.get_class_like(*required_class) else {
                 continue;
             };
             let required_declaring_id = context
                 .codebase
-                .get_declaring_property_class(required_class.as_bytes(), property_name.as_bytes())
+                .get_declaring_property_class(*required_class, property_name)
                 .unwrap_or(*required_class);
             let required_declaring_metadata =
-                context.codebase.get_class_like(required_declaring_id.as_bytes()).unwrap_or(required_metadata);
+                context.codebase.get_class_like(required_declaring_id).unwrap_or(required_metadata);
 
             if let Some(prop_meta) = required_declaring_metadata.properties.get(&property_name) {
                 if !prop_meta.flags.is_static() {
@@ -490,7 +487,7 @@ where
     if !check_static_property_read_visibility(
         context,
         block_context,
-        declaring_class_id.as_bytes(),
+        declaring_class_id,
         property_name.as_bytes(),
         class_expr.span(),
         Some(name_span),
@@ -589,7 +586,7 @@ fn report_non_existent_property<A>(
 ) where
     A: Arena,
 {
-    let class_kind_str = context.codebase.get_class_like(classname.as_bytes()).map_or("class", |m| m.kind.as_str());
+    let class_kind_str = context.codebase.get_class_like(classname).map_or("class", |m| m.kind.as_str());
 
     // PHP# writes a constant, an enum case and a static property alike, `Class.name`, so the read names no kind.
     let issue = if context.dialect.is_sharp() {

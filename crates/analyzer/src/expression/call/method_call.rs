@@ -254,8 +254,8 @@ where
     if !check_method_visibility(
         context,
         block_context.scope.get_class_like_name(),
-        method_identifier.get_class_name().as_bytes(),
-        method_identifier.get_method_name().as_bytes(),
+        method_identifier.get_class_name(),
+        method_identifier.get_method_name(),
         span,
         None,
     ) {
@@ -333,7 +333,7 @@ where
         && is_this_or_self_returning_chain(object, context, block_context)
         && let Some(class_like) = block_context.scope.get_class_like()
     {
-        let method_name = class_like.method_key(method_ident.value);
+        let method_name = class_like.method_key(word(method_ident.value));
         block_context.definitely_called_methods.insert(method_name);
         block_context.called_methods.insert(method_name);
     }
@@ -403,7 +403,7 @@ where
         && let ClassLikeMemberSelector::Identifier(name) = selector
         && let Some(receiver) = artifacts.get_expression_type(object)
     {
-        let classes = own_member_classes(context.codebase, receiver, name.value);
+        let classes = own_member_classes(context.codebase, receiver, word(name.value));
         if !classes.is_empty() {
             artifacts.record_own_member_classes(span, classes);
         }
@@ -484,7 +484,7 @@ where
     for resolved_method in method_resolution.resolved_methods {
         let metadata = context
             .codebase
-            .get_class_like(resolved_method.classname.as_bytes())
+            .get_class_like(resolved_method.classname)
             .expect("class-like metadata should exist for resolved method");
 
         let method_metadata = context
@@ -963,7 +963,7 @@ where
     targets.reserve(unresolved_methods.len());
     let mut has_invalid_target = false;
     for unresolved in unresolved_methods {
-        let Some(class_like_metadata) = context.codebase.get_class_like(unresolved.classname.as_bytes()) else {
+        let Some(class_like_metadata) = context.codebase.get_class_like(unresolved.classname) else {
             report_non_existent_method(
                 context,
                 unresolved.target_span,
@@ -1033,7 +1033,7 @@ where
         let magic_call_method = undocumented_method.magic_method;
         let class_like_metadata = context
             .codebase
-            .get_class_like(magic_call_method.classname.as_bytes())
+            .get_class_like(magic_call_method.classname)
             .expect("class-like metadata should exist for resolved magic call method");
 
         let method_metadata = context
@@ -1045,10 +1045,9 @@ where
         // and lowercase on any other, as PHP folds it.
         let requested_identifier = FunctionLikeIdentifier::Method(
             undocumented_method.classname,
-            context.codebase.method_key(
-                context.codebase.class_key(undocumented_method.classname.as_bytes()),
-                undocumented_method.method_name.as_bytes(),
-            ),
+            context
+                .codebase
+                .method_key(context.codebase.class_key(undocumented_method.classname), undocumented_method.method_name),
         );
         let magic_identifier = FunctionLikeIdentifier::Method(
             magic_call_method.method_identifier.get_class_name(),
@@ -1185,7 +1184,7 @@ where
                 return false;
             };
 
-            method_returns_self_or_static(context, class_like.name, class_like.method_key(method_ident.value))
+            method_returns_self_or_static(context, class_like.name, class_like.method_key(word(method_ident.value)))
         }
         Expression::Call(Call::NullSafeMethod(method_call)) => {
             if !is_this_or_self_returning_chain(method_call.object, context, block_context) {
@@ -1200,7 +1199,7 @@ where
                 return false;
             };
 
-            method_returns_self_or_static(context, class_like.name, class_like.method_key(method_ident.value))
+            method_returns_self_or_static(context, class_like.name, class_like.method_key(word(method_ident.value)))
         }
         Expression::Parenthesized(paren) => is_this_or_self_returning_chain(paren.expression, context, block_context),
         _ => false,
@@ -1223,7 +1222,7 @@ where
                 TAtomic::Object(TObject::Named(named_obj)) if named_obj.is_static => return true,
                 // A class-like is named by its key, spec section 24, so the PHP# `Order` is not `ORDER`.
                 TAtomic::Object(TObject::Named(named_obj))
-                    if context.codebase.class_key(named_obj.name.as_bytes()) == class_name =>
+                    if context.codebase.class_key(named_obj.name) == class_name =>
                 {
                     return true;
                 }

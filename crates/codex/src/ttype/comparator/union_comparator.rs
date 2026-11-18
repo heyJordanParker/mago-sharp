@@ -128,7 +128,7 @@ fn replace_erased_template_arguments(
                 return None;
             };
 
-            (codebase.class_key(input_object.name.as_bytes()) == codebase.class_key(container_object.name.as_bytes()))
+            (codebase.class_key(input_object.name) == codebase.class_key(container_object.name))
                 .then_some(input_object.type_parameters.as_deref())
                 .flatten()
         }) else {

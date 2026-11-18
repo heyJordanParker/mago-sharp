@@ -3,6 +3,7 @@ use mago_names::binding::Binding;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_word::Word;
+use mago_word::word;
 
 use mago_allocator::Arena;
 use mago_codex::metadata::CodebaseMetadata;
@@ -74,11 +75,11 @@ impl PatternNames for CodebasePatternNames<'_, '_> {
     }
 
     fn case_fields(&self, span: Span) -> Option<Vec<Vec<u8>>> {
-        let class = self.codebase.get_class_like(self.names.resolve(&span)?)?;
+        let class = self.codebase.get_class_like(word(self.names.resolve(&span)?))?;
         if !class.flags.is_enum_case_class() {
             return None;
         }
-        let Some(constructor) = self.codebase.get_method(class.name.as_bytes(), b"__construct") else {
+        let Some(constructor) = self.codebase.get_method(class.name, word("__construct")) else {
             unreachable!("a case's class has a constructor, which takes no field for a plain case")
         };
 

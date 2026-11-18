@@ -31,6 +31,7 @@ use mago_syntax::cst::Variable;
 use mago_syntax::cst::While;
 use mago_syntax::cst::WhileBody;
 use mago_syntax::walker::MutWalker;
+use mago_word::word;
 
 use super::Kind;
 use super::conditions::walk_guarded;
@@ -152,7 +153,7 @@ impl Converter<'_, '_> {
                 !union.types.is_empty()
                     && union.types.iter().all(|atomic| {
                         matches!(atomic, TAtomic::Object(TObject::Named(named))
-                        if codebase.is_instance_of(named.name.as_bytes(), b"Traversable"))
+                        if codebase.is_instance_of(named.name, word("Traversable")))
                     })
             });
         let values = list || traversable || self.is(iterable, &[Kind::Collection]);

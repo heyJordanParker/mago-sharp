@@ -759,10 +759,10 @@ where
                 }
 
                 // Each by its key, spec section 24: the class's in the codebase, and the method's in its class.
-                let class = context.codebase.class_key(class_name.as_bytes());
+                let class = context.codebase.class_key(*class_name);
                 artifacts.symbol_references.add_reference_to_class_member(
                     &block_context.scope,
-                    (class, context.codebase.method_key(class, method_name)),
+                    (class, context.codebase.method_key(class, word(method_name))),
                     false,
                 );
             }
@@ -1106,7 +1106,7 @@ where
 {
     let is_plain_class = |class: &[u8]| {
         !class.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"sharp\\"))
-            && context.codebase.get_class_like(class).is_some_and(|class| !class.flags.is_sharp())
+            && context.codebase.get_class_like(word(class)).is_some_and(|class| !class.flags.is_sharp())
     };
 
     match value.unparenthesized() {
@@ -1131,7 +1131,7 @@ where
                 object_type.types.iter().any(|atomic| match atomic {
                     TAtomic::Object(TObject::Named(object)) => context
                         .codebase
-                        .get_declaring_property_class(object.name.as_bytes(), &property)
+                        .get_declaring_property_class(object.name, word(&property))
                         .is_some_and(|declaring| is_plain_class(declaring.as_bytes())),
                     _ => false,
                 })

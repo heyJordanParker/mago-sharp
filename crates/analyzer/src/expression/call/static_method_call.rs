@@ -19,6 +19,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::StaticMethodCall;
 use mago_syntax::cst::TypeArgumentList;
 use mago_word::Word;
+use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -120,9 +121,9 @@ where
                 .scope
                 .get_class_like()
                 .and_then(|m| m.direct_parent_class)
-                .and_then(|p| context.codebase.get_class_like(p.as_bytes()));
+                .and_then(|p| context.codebase.get_class_like(p));
             if let Some(parent_meta) = parent_meta
-                && let method_name = parent_meta.method_key(method_ident.value)
+                && let method_name = parent_meta.method_key(word(method_ident.value))
                 && context.is_class_initializer_for(parent_meta, method_name)
             {
                 block_context.calls_parent_initializer = Some(method_name);
@@ -135,7 +136,7 @@ where
     if let Expression::ConstantAccess(class) = call.class
         && context.resolved_names.binding(&class.name) == Some(Binding::Class)
         && !context.resolved_names.is_imported(&class.name)
-        && !context.codebase.class_like_exists(context.resolved_names.get(&class.name))
+        && !context.codebase.class_like_exists(word(context.resolved_names.get(&class.name)))
     {
         report_unknown_member_owner(context, &class.name);
         artifacts.set_expression_type(&call.span, TUnion::from_atomic(TAtomic::Error));
@@ -178,7 +179,7 @@ where
 
         let metadata = context
             .codebase
-            .get_class_like(resolved_method.classname.as_bytes())
+            .get_class_like(resolved_method.classname)
             .expect("class-like metadata should exist for resolved method");
 
         let method_metadata = context
@@ -197,7 +198,7 @@ where
         // 24, so a `Parse` of its own is not the generated `parse`.
         let method_name = resolved_method.method_identifier.get_method_name();
         if context.dialect.is_sharp()
-            && context.codebase.parses(metadata.name.as_bytes())
+            && context.codebase.parses(metadata.name)
             && matches!(method_name.as_bytes(), b"parse" | b"tryParse")
         {
             check_struct_parse(
@@ -286,7 +287,7 @@ where
         };
 
         metadata
-            .has_attribute(context.codebase, STARTS_LISTENER.as_bytes())
+            .has_attribute(context.codebase, word(STARTS_LISTENER))
             .then(|| display_member(context, *class, metadata.original_name))
     });
     let parser = invocation_targets.iter().filter(|_| context.dialect.is_sharp()).find_map(|target| {
@@ -297,7 +298,7 @@ where
         };
 
         metadata
-            .has_attribute(context.codebase, PARSES_TYPE_ARGUMENT.as_bytes())
+            .has_attribute(context.codebase, word(PARSES_TYPE_ARGUMENT))
             .then(|| display_member(context, *class, metadata.original_name))
     });
 
@@ -310,7 +311,7 @@ where
         let position = metadata
             .parameters
             .iter()
-            .position(|parameter| parameter.has_attribute(context.codebase, ENCODED_AS_JSON.as_bytes()))?;
+            .position(|parameter| parameter.has_attribute(context.codebase, word(ENCODED_AS_JSON)))?;
 
         Some((display_member(context, *class, metadata.original_name), position))
     });
@@ -490,10 +491,10 @@ where
                 SharpType::Float => Some(UnwritableJson::KeyScalar("float")),
                 SharpType::Bool => Some(UnwritableJson::KeyScalar("bool")),
                 SharpType::Enum(name) | SharpType::Class(name, _) => {
-                    let class = codebase.get_class_like(name.as_bytes())?;
+                    let class = codebase.get_class_like(name)?;
                     let has_text = class.enum_type.is_some()
-                        || codebase.get_method(name.as_bytes(), b"toString").is_some()
-                        || codebase.get_method(name.as_bytes(), b"__toString").is_some();
+                        || codebase.get_method(name, word("toString")).is_some()
+                        || codebase.get_method(name, word("__toString")).is_some();
 
                     (!has_text).then_some(UnwritableJson::KeyClass(class.name))
                 }
@@ -502,7 +503,7 @@ where
             .or_else(|| unwritable_json(context, key, visiting))
             .or_else(|| unwritable_json(context, value, visiting)),
         SharpType::Class(name, _) if !visiting.contains(&name) => {
-            let class = codebase.get_class_like(name.as_bytes()).filter(|class| class.flags.is_sharp())?;
+            let class = codebase.get_class_like(name).filter(|class| class.flags.is_sharp())?;
             let written: Vec<&ClassLikeMetadata> = if class.tag_key().is_some() {
                 codebase.variants(class).into_iter().map(|(_, variant)| variant).collect()
             } else {
@@ -510,15 +511,12 @@ where
             };
             visiting.push(name);
             let unwritable = written.into_iter().find_map(|class| {
-                let parsed = if codebase.parses(class.name.as_bytes()) {
-                    codebase.struct_parse_fields(class.name.as_bytes())
-                } else {
-                    Vec::new()
-                };
+                let parsed =
+                    if codebase.parses(class.name) { codebase.struct_parse_fields(class.name) } else { Vec::new() };
                 let unheld = parsed.into_iter().find(|field| {
                     field.is_parameter
                         && codebase
-                            .get_declaring_property(class.name.as_bytes(), &[b"$".as_slice(), field.name].concat())
+                            .get_declaring_property(class.name, word([b"$".as_slice(), field.name].concat()))
                             .is_none()
                 });
                 if let Some(unheld) = unheld {

@@ -6,6 +6,7 @@
 //! lowers each of them with an empty [`InlineForms`], so in v1 one library form inlines no other, but the native call
 //! of an `extern` method of its own class.
 
+use mago_word::word;
 use std::collections::HashMap;
 
 use mago_analyzer::artifacts::MemberCall;
@@ -287,19 +288,19 @@ pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> 
                     if method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_))) =>
                 {
                     Lowering::new(&lines, checked.names(), checked.types())
-                        .method_form(name, method, None, &[], true)
+                        .method_form(word(name), method, None, &[], true)
                         .map(|form| (key(name, method.name.value), form))
                 }
                 _ => None,
             })
             .collect();
         let types = checked.types().with_inline_forms(&natives);
-        let public = |member: &[u8]| checked.types().member_declaration(name, member).public;
+        let public = |member: &[u8]| checked.types().member_declaration(word(name), word(member)).public;
         let lowering = || Lowering::new(&lines, checked.names(), &types);
         for member in &class.members {
             match member {
                 ClassLikeMember::Method(method) => {
-                    let built = method_forms(&lowering, name, method, None);
+                    let built = method_forms(&lowering, word(name), method, None);
                     if !built.is_empty() && public(method.name.value) {
                         forms.extend(built);
                     }
@@ -311,15 +312,15 @@ pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> 
                     for member in &extension.members {
                         match member {
                             ClassLikeMember::Method(method) => {
-                                let built = method_forms(&lowering, name, method, Some(receiver));
+                                let built = method_forms(&lowering, word(name), method, Some(receiver));
                                 if !built.is_empty() && public(method.name.value) {
                                     forms.extend(built);
                                 }
                             }
                             ClassLikeMember::Property(Property::Computed(property)) => {
                                 let form = lowering().form(
-                                    name,
-                                    property.variable.name,
+                                    word(name),
+                                    word(property.variable.name),
                                     &[receiver],
                                     Body::Expression(property.body.expression),
                                     true,
@@ -356,7 +357,7 @@ pub(crate) fn folded_key(class: &[u8], method: &[u8], arity: usize) -> Vec<u8> {
 /// `str_replace` where `old != ""` holds.
 fn method_forms<'lowering, 'arena, F>(
     lowering: &F,
-    class: &[u8],
+    class: Word,
     method: &Method,
     receiver: Option<&FunctionLikeParameter>,
 ) -> Vec<(Vec<u8>, InlineForm)>
@@ -380,9 +381,9 @@ where
                 .method_form(class, method, receiver, defaults, true)
                 .or_else(|| lowering().method_form(class, method, receiver, defaults, false))?;
             let name = if omitted == 0 {
-                key(class, method.name.value)
+                key(class.as_bytes(), method.name.value)
             } else {
-                folded_key(class, method.name.value, form.slots.len())
+                folded_key(class.as_bytes(), method.name.value, form.slots.len())
             };
 
             Some((name, form))
@@ -439,7 +440,7 @@ impl Lowering<'_, '_> {
     /// argument decides it so, as [`FixedArgument`] states.
     fn method_form(
         self,
-        class: &[u8],
+        class: Word,
         method: &Method,
         receiver: Option<&FunctionLikeParameter>,
         defaults: &[(&[u8], &Expression)],
@@ -481,7 +482,7 @@ impl Lowering<'_, '_> {
         };
 
         let fixed = known.fixed;
-        self.form(class, method.name.value, &parameters[..kept], body, receiver.is_some(), fixed)
+        self.form(class, word(method.name.value), &parameters[..kept], body, receiver.is_some(), fixed)
     }
 
     /// `expression` with each `?:` whose condition `known` decides folded to the branch it takes.
@@ -627,8 +628,8 @@ impl Lowering<'_, '_> {
     /// [`FixedArgument`] states.
     fn form(
         mut self,
-        class: &[u8],
-        name: &[u8],
+        class: Word,
+        name: Word,
         parameters: &[&FunctionLikeParameter],
         body: Body,
         extension: bool,
@@ -688,7 +689,7 @@ impl Lowering<'_, '_> {
                 (self.expression(expression), in_order)
             }
             // The native call reads each parameter once, in order, and then calls.
-            Body::Native(method) => (self.native_call(method, class), names.len()),
+            Body::Native(method) => (self.native_call(method, class.as_bytes()), names.len()),
         };
         let php_call = match body {
             Body::Expression(expression) => self.php_call(expression, &names),
@@ -1043,7 +1044,7 @@ impl Lowering<'_, '_> {
                 self.types.namespace_constant(expression).is_some()
                     || matches!(&access.property, ClassLikeMemberSelector::Identifier(name)
                     if self.static_classes(access).is_some_and(|classes| classes.iter().all(|class| matches!(
-                        self.types.member_declaration(class, name.value).kind,
+                        self.types.member_declaration(word(class), word(name.value)).kind,
                         DeclarationKind::Constant | DeclarationKind::EnumCase
                     ))))
             }

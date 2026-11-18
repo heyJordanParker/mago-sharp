@@ -153,7 +153,7 @@ where
     let extensions = codebase.extensions.get(&word(name.value))?;
     // A real member of the type the code shows wins over an extension, spec section 26. The access is analyzed again
     // when a class of the type gains or loses one, because its type traces to a signature that names the class.
-    if !codebase.get_classes_hidden_by_extension(receiver, name.value).is_empty() {
+    if !codebase.get_classes_hidden_by_extension(receiver, word(name.value)).is_empty() {
         return None;
     }
 
@@ -369,7 +369,7 @@ where
 /// Whether `part`, one type of a receiver, is a value that declares no member `name` of its own, so an extension of
 /// that name runs on it, spec section 26: anything but `null` and a class that declares or inherits the member, as
 /// [`CodebaseMetadata::get_classes_hidden_by_extension`] finds it.
-pub(crate) fn lacks_member(codebase: &CodebaseMetadata, part: &TAtomic, name: &[u8]) -> bool {
+pub(crate) fn lacks_member(codebase: &CodebaseMetadata, part: &TAtomic, name: Word) -> bool {
     !part.is_null() && codebase.get_classes_hidden_by_extension(&TUnion::from_atomic(part.clone()), name).is_empty()
 }
 
@@ -378,7 +378,7 @@ pub(crate) fn lacks_member(codebase: &CodebaseMetadata, part: &TAtomic, name: &[
 pub(crate) fn parts_without_member(
     codebase: &CodebaseMetadata,
     receiver: &TUnion,
-    name: &[u8],
+    name: Word,
 ) -> Option<(TUnion, bool)> {
     let parts: Vec<TAtomic> =
         receiver.types.iter().filter(|part| lacks_member(codebase, part, name)).cloned().collect();
@@ -394,7 +394,7 @@ pub(crate) fn parts_without_member(
 /// its bound, which a call or read of `name` runs on those parts beside an extension or a collection's member on the
 /// others, spec sections 12 and 26. Each is the part's own class, never the trait or the parent that declares the
 /// member, so a test of the value's class finds it.
-pub(crate) fn own_member_classes(codebase: &CodebaseMetadata, receiver: &TUnion, name: &[u8]) -> Vec<Word> {
+pub(crate) fn own_member_classes(codebase: &CodebaseMetadata, receiver: &TUnion, name: Word) -> Vec<Word> {
     let mut parts: Vec<&TAtomic> = receiver.types.iter().collect();
     let mut classes = Vec::new();
     while let Some(part) = parts.pop() {
@@ -502,9 +502,7 @@ where
             TAtomic::GenericParameter(parameter) => {
                 parameter.constraint.types.iter().flat_map(|atomic| kinds(atomic, codebase)).collect()
             }
-            TAtomic::Object(TObject::Named(named))
-                if codebase.class_implements(named.name.as_bytes(), b"Traversable") =>
-            {
+            TAtomic::Object(TObject::Named(named)) if codebase.class_implements(named.name, word("Traversable")) => {
                 vec![CollectionKind::Iterable]
             }
             _ => CollectionKind::of(atomic).into_iter().collect(),
@@ -598,7 +596,7 @@ where
         if is_in_namespace(context, class) {
             own.push(named);
         } else if let Some(alias) = context.imported_names.get(&ascii_lowercase_word(class.as_bytes())) {
-            let full = context.codebase.get_class_like(class.as_bytes()).map_or(class, |class| class.original_name);
+            let full = context.codebase.get_class_like(class).map_or(class, |class| class.original_name);
             // Only PHP# declares an extension, spec section 26, so its class is renamed by any alias but its exact
             // name, spec section 24.
             let renamed =

@@ -67,7 +67,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for MethodPartialApplication<'arena>
 
                 let class_metadata = context
                     .codebase
-                    .get_class_like(resolved_method.classname.as_bytes())
+                    .get_class_like(resolved_method.classname)
                     .expect("class-like metadata should exist for resolved method");
 
                 let invocation_target = InvocationTarget::FunctionLike {
@@ -121,7 +121,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for MethodPartialApplication<'arena>
 
                 let class_metadata = context
                     .codebase
-                    .get_class_like(resolved_method.classname.as_bytes())
+                    .get_class_like(resolved_method.classname)
                     .expect("class-like metadata should exist for resolved method");
 
                 let method_target_context = MethodTargetContext {

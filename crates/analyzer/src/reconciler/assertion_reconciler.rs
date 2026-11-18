@@ -409,8 +409,7 @@ where
 
     match (first_type, second_type) {
         (TAtomic::Object(TObject::Enum(first_enum)), TAtomic::Object(TObject::Enum(second_enum))) => {
-            if context.codebase.is_instance_of(first_enum.name.as_bytes(), second_enum.name.as_bytes())
-                && first_enum.case == second_enum.case
+            if context.codebase.is_instance_of(first_enum.name, second_enum.name) && first_enum.case == second_enum.case
             {
                 return Some(first_type.clone());
             }
@@ -423,12 +422,12 @@ where
             // A subclass of an open class may implement an interface, and in PHP# use a plain PHP trait, which spec
             // section 22 makes a type the engine tests by the class's traits.
             let is_implemented = |name: Word| {
-                context.codebase.interface_exists(name.as_bytes())
-                    || (context.dialect.is_sharp() && context.codebase.trait_exists(name.as_bytes()))
+                context.codebase.interface_exists(name)
+                    || (context.dialect.is_sharp() && context.codebase.trait_exists(name))
             };
 
-            if (is_implemented(first_object_name) && context.codebase.is_inheritable(second_object_name.as_bytes()))
-                || (is_implemented(second_object_name) && context.codebase.is_inheritable(first_object_name.as_bytes()))
+            if (is_implemented(first_object_name) && context.codebase.is_inheritable(second_object_name))
+                || (is_implemented(second_object_name) && context.codebase.is_inheritable(first_object_name))
             {
                 let mut first_type = first_type.clone();
                 first_type.add_intersection_type(second_type.clone());

@@ -1,5 +1,6 @@
 //! Worker-backed analyzer plugins.
 
+use mago_word::word;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -530,8 +531,8 @@ struct MethodTarget {
 }
 
 impl MethodTarget {
-    fn matches(&self, codebase: &CodebaseMetadata, class: &[u8], method: &[u8]) -> bool {
-        class_pattern_matches(codebase, &self.class, class)
+    fn matches(&self, codebase: &CodebaseMetadata, class: Word, method: &[u8]) -> bool {
+        class_pattern_matches(codebase, word(&self.class), class)
             && method_pattern_matches(codebase, class, &self.method, method)
     }
 }
@@ -589,8 +590,8 @@ struct PropertyTarget {
 }
 
 impl PropertyTarget {
-    fn matches(&self, codebase: &CodebaseMetadata, class: &[u8], property: &[u8]) -> bool {
-        class_pattern_matches(codebase, &self.class, class) && property_pattern_matches(&self.property, property)
+    fn matches(&self, codebase: &CodebaseMetadata, class: Word, property: &[u8]) -> bool {
+        class_pattern_matches(codebase, word(&self.class), class) && property_pattern_matches(&self.property, property)
     }
 }
 
@@ -1087,7 +1088,7 @@ impl<T> Backend<T> {
     fn matching_call_forwarding_providers(
         &self,
         codebase: &CodebaseMetadata,
-        class: &[u8],
+        class: Word,
         member: &[u8],
     ) -> (Option<ProviderIndices>, usize) {
         matching_method_provider_indices(
@@ -1123,7 +1124,7 @@ impl<T> Backend<T> {
     fn matching_method_providers(
         &self,
         codebase: &CodebaseMetadata,
-        class: &[u8],
+        class: Word,
         method: &[u8],
         declared: bool,
     ) -> (Option<ProviderIndices>, usize) {
@@ -1162,7 +1163,7 @@ impl<T> Backend<T> {
     fn matching_method_signature_providers(
         &self,
         codebase: &CodebaseMetadata,
-        class: &[u8],
+        class: Word,
         method: &[u8],
         declared: bool,
     ) -> (Option<ProviderIndices>, usize) {
@@ -1190,7 +1191,7 @@ impl<T> Backend<T> {
     fn matching_method_assertion_providers(
         &self,
         codebase: &CodebaseMetadata,
-        class: &[u8],
+        class: Word,
         method: &[u8],
     ) -> (Option<ProviderIndices>, usize) {
         matching_method_provider_indices(
@@ -1213,7 +1214,7 @@ impl<T> Backend<T> {
     fn matching_property_providers(
         &self,
         codebase: &CodebaseMetadata,
-        class: &[u8],
+        class: Word,
         property: &[u8],
     ) -> (Option<ProviderIndices>, usize) {
         matching_property_provider_indices(&self.property_exact, &self.property_wildcard, codebase, class, property)
@@ -1222,7 +1223,7 @@ impl<T> Backend<T> {
     fn matching_property_initialization_providers(
         &self,
         codebase: &CodebaseMetadata,
-        class: &[u8],
+        class: Word,
         property: &[u8],
     ) -> (Option<ProviderIndices>, usize) {
         matching_property_provider_indices(
@@ -1237,20 +1238,20 @@ impl<T> Backend<T> {
     fn matching_class_initializer_providers(
         &self,
         codebase: &CodebaseMetadata,
-        class: &[u8],
+        class: Word,
     ) -> (Option<ProviderIndices>, usize) {
         let (exact, exact_candidates) = matching_target_providers(
             &self.class_initializer_exact,
             codebase,
             class,
             |candidate| candidate,
-            |target: &Vec<u8>| class_pattern_matches(codebase, target, class),
+            |target: &Vec<u8>| class_pattern_matches(codebase, word(target), class),
         );
         let candidates = exact_candidates + self.class_initializer_wildcard.len();
         let wildcards = self
             .class_initializer_wildcard
             .iter()
-            .filter(|(_, targets)| targets.iter().any(|target| class_pattern_matches(codebase, target, class)))
+            .filter(|(_, targets)| targets.iter().any(|target| class_pattern_matches(codebase, word(target), class)))
             .map(|(index, _)| *index);
 
         (ProviderIndices::add_wildcards(exact, wildcards), candidates)
@@ -1271,22 +1272,17 @@ impl<T> Backend<T> {
             .registration
             .attributed_entry_points
             .iter()
-            .map(|entry_point| codebase.class_key(&entry_point.attribute))
+            .map(|entry_point| codebase.class_key(word(&entry_point.attribute)))
             .collect::<Vec<_>>();
         for class in codebase.class_likes.values() {
             for entry_point in &self.registration.entry_points {
-                if !class_pattern_matches(codebase, &entry_point.target.class, class.name.as_bytes()) {
+                if !class_pattern_matches(codebase, word(&entry_point.target.class), class.name) {
                     continue;
                 }
 
                 let mut matched_class = false;
                 for (method, declaring_method) in &class.declaring_method_ids {
-                    if !method_pattern_matches(
-                        codebase,
-                        class.name.as_bytes(),
-                        &entry_point.target.method,
-                        method.as_bytes(),
-                    ) {
+                    if !method_pattern_matches(codebase, class.name, &entry_point.target.method, method.as_bytes()) {
                         continue;
                     }
 
@@ -1304,7 +1300,7 @@ impl<T> Backend<T> {
             }
 
             for (entry_point, attribute_key) in self.registration.attributed_entry_points.iter().zip(&attributes) {
-                if !class_pattern_matches(codebase, &entry_point.class, class.name.as_bytes()) {
+                if !class_pattern_matches(codebase, word(&entry_point.class), class.name) {
                     continue;
                 }
 
@@ -1313,11 +1309,7 @@ impl<T> Backend<T> {
                     let Some(method) = codebase.get_method_by_id(declaring_method) else {
                         continue;
                     };
-                    if !method
-                        .attributes
-                        .iter()
-                        .any(|attribute| codebase.class_key(attribute.name.as_bytes()) == *attribute_key)
-                    {
+                    if !method.attributes.iter().any(|attribute| codebase.class_key(attribute.name) == *attribute_key) {
                         continue;
                     }
 
@@ -1442,7 +1434,7 @@ fn matching_method_provider_indices(
     exact_index: &ProviderTargetIndex<MethodTarget>,
     wildcard_index: &ProviderWildcardIndex<MethodTarget>,
     codebase: &CodebaseMetadata,
-    class: &[u8],
+    class: Word,
     method: &[u8],
 ) -> (Option<ProviderIndices>, usize) {
     let bucket = ascii_lowercase_word(method);
@@ -1522,7 +1514,7 @@ fn matching_property_provider_indices(
     exact_index: &ProviderTargetIndex<PropertyTarget>,
     wildcard_index: &ProviderWildcardIndex<PropertyTarget>,
     codebase: &CodebaseMetadata,
-    class: &[u8],
+    class: Word,
     property: &[u8],
 ) -> (Option<ProviderIndices>, usize) {
     let (exact, exact_candidates) = matching_target_providers(
@@ -1546,7 +1538,7 @@ fn matching_property_provider_indices(
 fn matching_target_providers<T>(
     index: &ProviderTargetIndex<T>,
     codebase: &CodebaseMetadata,
-    class: &[u8],
+    class: Word,
     bucket: impl Fn(Word) -> Word,
     meets: impl Fn(&T) -> bool,
 ) -> (Option<ProviderIndices>, usize) {
@@ -1569,11 +1561,8 @@ fn matching_target_providers<T>(
 }
 
 /// `class` and each class-like above it, in lowercase, as [`ProviderTargetIndex`] buckets the targets that name them.
-fn class_hierarchy<'codebase>(
-    codebase: &'codebase CodebaseMetadata,
-    class: &[u8],
-) -> impl Iterator<Item = Word> + 'codebase {
-    std::iter::once(ascii_lowercase_word(class)).chain(codebase.get_class_like(class).into_iter().flat_map(
+fn class_hierarchy(codebase: &CodebaseMetadata, class: Word) -> impl Iterator<Item = Word> + '_ {
+    std::iter::once(ascii_lowercase_word(class.as_bytes())).chain(codebase.get_class_like(class).into_iter().flat_map(
         |metadata| {
             metadata
                 .all_parent_classes
@@ -2591,7 +2580,7 @@ where
             let (indices, candidates) = match target {
                 CallableTarget::Function(function) => backend.matching_function_assertion_providers(function),
                 CallableTarget::Method { class, method } => {
-                    backend.matching_method_assertion_providers(codebase, class, method)
+                    backend.matching_method_assertion_providers(codebase, word(class), method)
                 }
             };
             if self.trace_enabled {
@@ -2618,7 +2607,9 @@ where
             let protocol_target = match target {
                 CallableTarget::Function(function) => protocol::ProviderTarget::Function(function),
                 CallableTarget::Method { class, method } => protocol::ProviderTarget::Method {
-                    class: codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name.as_bytes()),
+                    class: codebase
+                        .get_class_like(word(class))
+                        .map_or(class, |metadata| metadata.original_name.as_bytes()),
                     method,
                 },
             };
@@ -2765,14 +2756,13 @@ where
         for backend in &self.backends {
             let matching_start = self.trace_enabled.then(Instant::now);
             let (indices, candidates) = match target {
-                CallableTarget::Function(function) => {
-                    backend.matching_function_signature_providers(function, codebase.get_function(function).is_some())
-                }
+                CallableTarget::Function(function) => backend
+                    .matching_function_signature_providers(function, codebase.get_function(word(function)).is_some()),
                 CallableTarget::Method { class, method } => backend.matching_method_signature_providers(
                     codebase,
-                    class,
+                    word(class),
                     method,
-                    codebase.get_declaring_method(class, method).is_some(),
+                    codebase.get_declaring_method(word(class), word(method)).is_some(),
                 ),
             };
             if self.trace_enabled {
@@ -2801,7 +2791,9 @@ where
             let protocol_target = match target {
                 CallableTarget::Function(function) => protocol::ProviderTarget::Function(function),
                 CallableTarget::Method { class, method } => protocol::ProviderTarget::Method {
-                    class: codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name.as_bytes()),
+                    class: codebase
+                        .get_class_like(word(class))
+                        .map_or(class, |metadata| metadata.original_name.as_bytes()),
                     method,
                 },
             };
@@ -2925,8 +2917,10 @@ where
         }
 
         let declared = match target {
-            CallableTarget::Function(function) => codebase.get_function(function).is_some(),
-            CallableTarget::Method { class, method } => codebase.get_declaring_method(class, method).is_some(),
+            CallableTarget::Function(function) => codebase.get_function(word(function)).is_some(),
+            CallableTarget::Method { class, method } => {
+                codebase.get_declaring_method(word(class), word(method)).is_some()
+            }
         };
         let mut dispatched = false;
         for backend in &self.backends {
@@ -2934,7 +2928,7 @@ where
             let (indices, candidates) = match target {
                 CallableTarget::Function(function) => backend.matching_function_providers(function, declared),
                 CallableTarget::Method { class, method } => {
-                    backend.matching_method_providers(codebase, class, method, declared)
+                    backend.matching_method_providers(codebase, word(class), method, declared)
                 }
             };
             if self.trace_enabled {
@@ -2963,7 +2957,9 @@ where
             let protocol_target = match target {
                 CallableTarget::Function(function) => protocol::ProviderTarget::Function(function),
                 CallableTarget::Method { class, method } => protocol::ProviderTarget::Method {
-                    class: codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name.as_bytes()),
+                    class: codebase
+                        .get_class_like(word(class))
+                        .map_or(class, |metadata| metadata.original_name.as_bytes()),
                     method,
                 },
             };
@@ -3041,7 +3037,7 @@ where
 
     pub(crate) fn get_property_type(
         &self,
-        class: &[u8],
+        class: Word,
         property: &[u8],
         access: PropertyAccessKind,
         receiver_type: &TUnion,
@@ -3077,12 +3073,11 @@ where
                 self.telemetry.matched_providers.fetch_add(indices.as_slice().len() as u64, Ordering::Relaxed);
             }
 
-            let original_class =
-                codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name.as_bytes());
+            let original_class = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
             let encode_start = self.trace_enabled.then(Instant::now);
             let request = protocol::encode_property_type_request(
                 indices.as_slice(),
-                original_class,
+                original_class.as_bytes(),
                 property,
                 access,
                 receiver_type,
@@ -3111,7 +3106,7 @@ where
                 backend,
                 request.payload,
                 &running,
-                class,
+                class.as_bytes(),
                 codebase,
                 session,
                 |handle| protocol::resolve_type_handle(&request.types, handle),
@@ -3131,7 +3126,7 @@ where
                 && start.elapsed() >= SLOW_PROVIDER_THRESHOLD
             {
                 tracing::trace!(
-                    class = %mago_bytes::BytesDisplay(class),
+                    class = %mago_bytes::BytesDisplay(class.as_bytes()),
                     property = %mago_bytes::BytesDisplay(property),
                     access = ?access,
                     providers = indices.as_slice().len(),
@@ -3164,7 +3159,7 @@ where
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn get_forwarded_call(
         &self,
-        class: &[u8],
+        class: Word,
         member: &[u8],
         property: bool,
         receiver_type: &TUnion,
@@ -3178,11 +3173,10 @@ where
                 continue;
             };
 
-            let original_class =
-                codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name.as_bytes());
+            let original_class = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
             let request = protocol::encode_call_forwarding_request(
                 indices.as_slice(),
-                original_class,
+                original_class.as_bytes(),
                 member,
                 property,
                 receiver_type,
@@ -3202,7 +3196,7 @@ where
                 backend,
                 request.payload,
                 &running,
-                class,
+                class.as_bytes(),
                 codebase,
                 session,
                 |handle| protocol::resolve_type_handle(&request.types, handle),
@@ -3224,7 +3218,7 @@ where
 
     pub(crate) fn is_property_initialized(
         &self,
-        declaring_class: &[u8],
+        declaring_class: Word,
         property: &mago_codex::metadata::property::PropertyMetadata,
         source_file: &File,
         codebase: &CodebaseMetadata,
@@ -3260,13 +3254,12 @@ where
                 self.telemetry.matched_providers.fetch_add(indices.as_slice().len() as u64, Ordering::Relaxed);
             }
 
-            let original_class = codebase
-                .get_class_like(declaring_class)
-                .map_or(declaring_class, |metadata| metadata.original_name.as_bytes());
+            let original_class =
+                codebase.get_class_like(declaring_class).map_or(declaring_class, |metadata| metadata.original_name);
             let encode_start = self.trace_enabled.then(Instant::now);
             let request = protocol::encode_property_initialization_request(
                 indices.as_slice(),
-                original_class,
+                original_class.as_bytes(),
                 property,
                 session.generation(),
                 codebase,
@@ -3290,7 +3283,7 @@ where
                     backend,
                     request,
                     &running,
-                    declaring_class,
+                    declaring_class.as_bytes(),
                     codebase,
                     session,
                     |_| None,
@@ -3309,7 +3302,7 @@ where
                 && start.elapsed() >= SLOW_PROVIDER_THRESHOLD
             {
                 tracing::trace!(
-                    class = %mago_bytes::BytesDisplay(declaring_class),
+                    class = %mago_bytes::BytesDisplay(declaring_class.as_bytes()),
                     property = %mago_bytes::BytesDisplay(property_name),
                     providers = indices.as_slice().len(),
                     response_bytes = response.len(),
@@ -3356,7 +3349,7 @@ where
         let mut dispatched = false;
         for backend in &self.backends {
             let matching_start = self.trace_enabled.then(Instant::now);
-            let (indices, candidates) = backend.matching_class_initializer_providers(codebase, class.name.as_bytes());
+            let (indices, candidates) = backend.matching_class_initializer_providers(codebase, class.name);
             if self.trace_enabled {
                 self.telemetry.backend_checks.fetch_add(1, Ordering::Relaxed);
                 self.telemetry.candidate_providers.fetch_add(candidates as u64, Ordering::Relaxed);
@@ -3886,22 +3879,22 @@ fn pattern_matches(pattern: &[u8], name: &[u8], exact: bool) -> bool {
 /// Whether the class pattern `pattern` names `class` or a class-like above it, by the key rule, spec section 24. A whole
 /// name names a PHP# class-like as written and a plain PHP one in any case, as the codebase keys them. A prefix's
 /// namespace, as `App\` in `App\*`, is found in any case, and the start of a class name it holds by the same rule.
-fn class_pattern_matches(codebase: &CodebaseMetadata, pattern: &[u8], class: &[u8]) -> bool {
-    if !pattern.ends_with(b"*") {
+fn class_pattern_matches(codebase: &CodebaseMetadata, pattern: Word, class: Word) -> bool {
+    if !pattern.as_bytes().ends_with(b"*") {
         return codebase.is_instance_of(class, pattern);
     }
 
-    let namespace = pattern.iter().rposition(|byte| *byte == b'\\').map_or(0, |separator| separator + 1);
+    let namespace = pattern.as_bytes().iter().rposition(|byte| *byte == b'\\').map_or(0, |separator| separator + 1);
     let sharp = codebase.get_class_like(class).is_some_and(|metadata| metadata.flags.is_sharp());
 
-    starts_with_ignore_case(class, &pattern[..namespace])
-        && pattern_matches(&pattern[namespace..], &class[namespace..], sharp)
+    starts_with_ignore_case(class.as_bytes(), &pattern.as_bytes()[..namespace])
+        && pattern_matches(&pattern.as_bytes()[namespace..], &class.as_bytes()[namespace..], sharp)
 }
 
 /// Whether the method pattern `pattern` names the method `method` of `class`, by `class`'s rule, spec section 24: as
 /// declared in a class-like with exact names, so `total` names no `Total`, and in any case otherwise, as PHP finds a
 /// method.
-fn method_pattern_matches(codebase: &CodebaseMetadata, class: &[u8], pattern: &[u8], method: &[u8]) -> bool {
+fn method_pattern_matches(codebase: &CodebaseMetadata, class: Word, pattern: &[u8], method: &[u8]) -> bool {
     let exact = codebase.get_class_like(class).is_some_and(|metadata| metadata.exact_names);
 
     pattern_matches(pattern, method, exact)
@@ -4236,7 +4229,7 @@ mod tests {
             let span = Span::new(file.id, Position::new(0), Position::new(1));
             let property = analyzer
                 .get_property_type(
-                    b"Lib\\Shelf",
+                    word(b"Lib\\Shelf"),
                     b"stock",
                     PropertyAccessKind::Read,
                     &receiver,
@@ -4246,7 +4239,7 @@ mod tests {
                 )
                 .expect("the request should succeed");
             let forwarded = analyzer
-                .get_forwarded_call(b"Lib\\Shelf", b"stock", true, &receiver, file, &codebase, &session)
+                .get_forwarded_call(word(b"Lib\\Shelf"), b"stock", true, &receiver, file, &codebase, &session)
                 .expect("the request should succeed");
 
             assert_eq!((property, forwarded), (None, None));
@@ -4276,7 +4269,7 @@ mod tests {
 
         analyzer
             .get_property_type(
-                b"Lib\\Shelf",
+                word(b"Lib\\Shelf"),
                 b"stock",
                 PropertyAccessKind::Read,
                 &get_mixed(),
@@ -4286,7 +4279,7 @@ mod tests {
             )
             .expect("the request should succeed");
         analyzer
-            .get_forwarded_call(b"Lib\\Shelf", b"stock", true, &get_mixed(), &php, &codebase, &session)
+            .get_forwarded_call(word(b"Lib\\Shelf"), b"stock", true, &get_mixed(), &php, &codebase, &session)
             .expect("the request should succeed");
 
         assert_eq!(
@@ -4408,11 +4401,19 @@ mod tests {
             analyzer.get_function_assertions(b"demo_fn", &function, &artifacts, &file, &codebase, &session, None).err(),
             analyzer.get_method_assertions(class, member, &method, &artifacts, &file, &codebase, &session, None).err(),
             analyzer
-                .get_property_type(class, member, PropertyAccessKind::Read, &get_mixed(), span, &codebase, &session)
+                .get_property_type(
+                    word(class),
+                    member,
+                    PropertyAccessKind::Read,
+                    &get_mixed(),
+                    span,
+                    &codebase,
+                    &session,
+                )
                 .err(),
-            analyzer.is_property_initialized(class, &stock, &file, &codebase, &session).err(),
+            analyzer.is_property_initialized(word(class), &stock, &file, &codebase, &session).err(),
             analyzer.get_class_initializers(&shelf, &file, &codebase, &session).err(),
-            analyzer.get_forwarded_call(class, member, true, &get_mixed(), &file, &codebase, &session).err(),
+            analyzer.get_forwarded_call(word(class), member, true, &get_mixed(), &file, &codebase, &session).err(),
             analyzer.filter_issues(&file, issues, &codebase, &session).err(),
             analyzer.run_after_file_analysis_hooks(&file, program, &names, &artifacts, &codebase, &session).err(),
         ];
@@ -4551,7 +4552,7 @@ mod tests {
 
         protocol::testing::analyzed(&[POST, MODEL], |analysis| {
             let found = |class: &[u8]| {
-                matching_method_provider_indices(&exact, &wildcard, analysis.codebase, class, b"find")
+                matching_method_provider_indices(&exact, &wildcard, analysis.codebase, word(class), b"find")
                     .0
                     .map(|indices| indices.as_slice().to_vec())
             };

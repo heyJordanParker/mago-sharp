@@ -448,7 +448,7 @@ impl TUnion {
                             .any(|(input, declared)| declared.drops_readonly_of(codebase, input))
                     }
                     (TAtomic::Object(TObject::Named(input)), TAtomic::Object(TObject::Named(declared)))
-                        if codebase.class_key(input.name.as_bytes()) == codebase.class_key(declared.name.as_bytes()) =>
+                        if codebase.class_key(input.name) == codebase.class_key(declared.name) =>
                     {
                         input
                             .type_parameters
@@ -834,7 +834,7 @@ impl TUnion {
     }
 
     #[must_use]
-    pub fn extends_or_implements(&self, codebase: &CodebaseMetadata, interface: &[u8]) -> bool {
+    pub fn extends_or_implements(&self, codebase: &CodebaseMetadata, interface: Word) -> bool {
         for atomic in self.types.as_ref() {
             if !atomic.extends_or_implements(codebase, interface) {
                 return false;

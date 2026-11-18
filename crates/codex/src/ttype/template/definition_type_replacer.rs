@@ -194,12 +194,11 @@ fn replace_atomic(
 
             if let Some(type_parameters) = named_object.get_type_parameters_mut() {
                 for (offset, type_param) in type_parameters.iter_mut().enumerate() {
-                    let is_covariant =
-                        if let Some(class_like_metadata) = codebase.get_class_like(object_name.as_bytes()) {
-                            matches!(class_like_metadata.template_variance.get(offset), Some(Variance::Covariant))
-                        } else {
-                            false
-                        };
+                    let is_covariant = if let Some(class_like_metadata) = codebase.get_class_like(object_name) {
+                        matches!(class_like_metadata.template_variance.get(offset), Some(Variance::Covariant))
+                    } else {
+                        false
+                    };
 
                     *type_param = self::replace(
                         type_param,

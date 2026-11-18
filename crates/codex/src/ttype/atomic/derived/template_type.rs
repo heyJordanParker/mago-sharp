@@ -123,12 +123,12 @@ fn resolve_template_from_atomic(
 ) -> Option<TUnion> {
     match atomic {
         TAtomic::Object(TObject::Enum(named)) => {
-            let instantiated_class_metadata = codebase.get_class_like(named.name.as_bytes())?;
+            let instantiated_class_metadata = codebase.get_class_like(named.name)?;
 
             get_specialized_template_type(codebase, template_name, class_name, instantiated_class_metadata, None)
         }
         TAtomic::Object(TObject::Named(named)) => {
-            let instantiated_class_metadata = codebase.get_class_like(named.name.as_bytes())?;
+            let instantiated_class_metadata = codebase.get_class_like(named.name)?;
 
             let mut merged: Option<TUnion> = get_specialized_template_type(
                 codebase,

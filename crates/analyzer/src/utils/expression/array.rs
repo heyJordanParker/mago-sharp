@@ -1497,15 +1497,15 @@ where
             };
 
             let array_access = word(b"ArrayAccess");
-            if !context.codebase.is_instance_of(named_object.name.as_bytes(), array_access.as_bytes()) {
+            if !context.codebase.is_instance_of(named_object.name, array_access) {
                 break 'metadata None;
             }
 
-            let Some(metadata) = context.codebase.get_class_like(named_object.name.as_bytes()) else {
+            let Some(metadata) = context.codebase.get_class_like(named_object.name) else {
                 break 'metadata None;
             };
 
-            let Some(array_access_metadata) = context.codebase.get_class_like(array_access.as_bytes()) else {
+            let Some(array_access_metadata) = context.codebase.get_class_like(array_access) else {
                 break 'metadata None;
             };
 
@@ -1598,7 +1598,7 @@ where
             class.flags.is_sharp()
                 && context
                     .codebase
-                    .get_method(class.name.as_bytes(), b"offsetSet")
+                    .get_method(class.name, word("offsetSet"))
                     .is_some_and(|method| !method.flags.is_user_defined())
         })
     {

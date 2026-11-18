@@ -33,13 +33,13 @@ pub fn is_contained_by(
         TClassLikeString::Literal { value } => {
             if let Some(str_value) = input_scalar.get_known_literal_string_value()
                 && is_valid_class_string(str_value)
-                && codebase.class_key(str_value) == codebase.class_key(value.as_bytes())
+                && codebase.class_key(mago_word::word(str_value)) == codebase.class_key(*value)
             {
                 return true;
             }
 
             if let Some(literal_class_string) = input_scalar.get_literal_class_string_value()
-                && codebase.class_key(literal_class_string.as_bytes()) == codebase.class_key(value.as_bytes())
+                && codebase.class_key(literal_class_string) == codebase.class_key(*value)
             {
                 return true;
             }
@@ -97,7 +97,7 @@ pub fn is_contained_by(
 }
 
 fn class_name_object(codebase: &CodebaseMetadata, name: Word) -> TAtomic {
-    if codebase.enum_exists(name.as_bytes()) {
+    if codebase.enum_exists(name) {
         TAtomic::Object(TObject::Enum(TEnum::new(name)))
     } else {
         TAtomic::Object(TObject::Named(TNamedObject::new(name)))

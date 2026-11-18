@@ -131,7 +131,7 @@ pub(crate) fn values_have_no_effects(effects: &Effects, codebase: &CodebaseMetad
             {
                 return None;
             }
-            let metadata = codebase.get_class_like(class.as_bytes())?;
+            let metadata = codebase.get_class_like(class)?;
             // An enum with a case that carries data runs as a class, and each such case as its final subclass.
             let (kind, value_class) = if metadata.flags.is_struct() {
                 ("a struct", metadata.original_name)
@@ -173,7 +173,7 @@ pub(crate) fn attributes_have_no_effects(effects: &Effects, codebase: &CodebaseM
                 Body::InitialValue(class, _) => (class, false),
                 _ => return None,
             };
-            let declaring = codebase.get_class_like(class.as_bytes())?;
+            let declaring = codebase.get_class_like(class)?;
             let attribute = created_attribute(codebase, declaring, runs_constructor)?;
 
             let class_name = |class| sharp_class_like_name(codebase, imports, class);
@@ -217,17 +217,17 @@ fn created_attribute(codebase: &CodebaseMetadata, declaring: &ClassLikeMetadata,
         attribute.flags.is_sharp()
             && attribute.attribute_flags.is_some()
             && (!constructor
-                || codebase.get_declaring_method_class(attribute.name.as_bytes(), b"__construct").is_some_and(|runs| {
-                    codebase.class_key(runs.as_bytes()) == codebase.class_key(declaring.name.as_bytes())
-                }))
+                || codebase
+                    .get_declaring_method_class(attribute.name, word("__construct"))
+                    .is_some_and(|runs| codebase.class_key(runs) == codebase.class_key(declaring.name)))
     };
     if creates(declaring) {
         return Some(declaring.original_name);
     }
     let mut descendants: Vec<&ClassLikeMetadata> = codebase
-        .get_all_descendants(declaring.name.as_bytes())
+        .get_all_descendants(declaring.name)
         .iter()
-        .filter_map(|descendant| codebase.get_class_like(descendant.as_bytes()))
+        .filter_map(|descendant| codebase.get_class_like(*descendant))
         .filter(|descendant| creates(descendant))
         .collect();
     descendants.sort_by_key(|descendant| descendant.original_name.as_bytes());
@@ -241,7 +241,7 @@ pub(crate) fn laws_must_be_pure(effects: &Effects, codebase: &CodebaseMetadata) 
         .impure_bodies()
         .filter(|(body, ..)| {
             matches!(body, Body::Method(class, method)
-                if codebase.get_class_like(class.as_bytes()).is_some_and(|class| class.laws.contains_key(method)))
+                if codebase.get_class_like(*class).is_some_and(|class| class.laws.contains_key(method)))
         })
         .map(|(_, member, imports, scope, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, class);
@@ -341,8 +341,7 @@ pub(crate) fn implementations_must_fit_their_declarations(
             let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
-            let ancestor =
-                codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |ancestor| ancestor.original_name);
+            let ancestor = codebase.get_class_like(ancestor).map_or(ancestor, |ancestor| ancestor.original_name);
             let declared = display_sharp_member(class_name(ancestor), declaration.original_name);
             let uses: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
             let allows = allows(&declared, &uses);
@@ -394,8 +393,8 @@ pub(crate) fn check_declaration_uses<A>(
             .uses
             .iter()
             .filter(|effect| {
-                let effect = codebase.class_key(effect.as_bytes());
-                !declaration.uses.iter().any(|allowed| codebase.class_key(allowed.as_bytes()) == effect)
+                let effect = codebase.class_key(**effect);
+                !declaration.uses.iter().any(|allowed| codebase.class_key(*allowed) == effect)
             })
             .copied()
             .collect();
@@ -409,7 +408,7 @@ pub(crate) fn check_declaration_uses<A>(
     let class_name = |class| sharp_class_like_name(codebase, &context.imported_names, class);
     let effect_name = |effect| sharp_effect_name(codebase, &context.imported_names, effect);
     let declared = display_sharp_member(
-        class_name(codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |ancestor| ancestor.original_name)),
+        class_name(codebase.get_class_like(ancestor).map_or(ancestor, |ancestor| ancestor.original_name)),
         declaration.original_name,
     );
     let allowed: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
@@ -625,7 +624,7 @@ where
         // standard library alone names one of PHP's root namespace through `global`, as `extern global.now`.
         let declared = context.source_file.is_standard_library
             && written.starts_with("global.")
-            && context.codebase.function_exists(member.as_bytes());
+            && context.codebase.function_exists(member);
         if !declared {
             context.collector.report_with_code(
                 IssueCode::NonExistentFunction,
@@ -639,10 +638,11 @@ where
 
     // An `extern` is keyed by its class's lowercase name, as plain PHP finds the class, and the code finds the class by
     // its name as written, which names a PHP# class only exactly, spec section 24.
-    let Some(class_metadata) = context.codebase.get_class_like(context.resolved_names.get(&r#extern.target)) else {
+    let Some(class_metadata) = context.codebase.get_class_like(word(context.resolved_names.get(&r#extern.target)))
+    else {
         // `extern Pdf.render` after `import Vendor.Pdf;` declares the function `render` of that namespace, spec
         // section 23, as `extern Foundation.now` declares Laravel's `now()`.
-        if namespace_function(context.codebase, class, member.as_bytes()).is_some() {
+        if namespace_function(context.codebase, class, member).is_some() {
             check_extern_signature(context, r#extern, own, &written);
 
             return;
@@ -681,8 +681,7 @@ where
             Issue::error(format!("`extern event` marks a class, and `{written}` is {kind}."))
                 .with_annotation(Annotation::primary(target)),
         );
-    } else if !member.is_empty() && context.codebase.get_declaring_method(class.as_bytes(), member.as_bytes()).is_none()
-    {
+    } else if !member.is_empty() && context.codebase.get_declaring_method(class, member).is_none() {
         context.collector.report_with_code(
             IssueCode::NonExistentMethod,
             Issue::error(format!("Method `{written}` does not exist.")).with_annotation(Annotation::primary(target)),
@@ -715,7 +714,7 @@ fn check_extern_signature<A>(
     else {
         // `check_extern` found the method, so the class only inherits it, and its declaring class's line states it, as
         // its attributes are.
-        let declaring_class = codebase.get_declaring_method_class(class.as_bytes(), member.as_bytes()).unwrap_or(class);
+        let declaring_class = codebase.get_declaring_method_class(class, member).unwrap_or(class);
         let declaring_class = display_class_like_name(context, declaring_class);
         let member = BytesDisplay(r#extern.member_name().unwrap_or_default());
         context.collector.report_with_code(
@@ -733,7 +732,7 @@ fn check_extern_signature<A>(
 
         String::from_utf8_lossy(name.strip_prefix(b"$").unwrap_or(name)).into_owned()
     };
-    let class_metadata = (!class.is_empty()).then(|| codebase.get_class_like(class.as_bytes())).flatten();
+    let class_metadata = (!class.is_empty()).then(|| codebase.get_class_like(class)).flatten();
     // The class's own type, its type parameters as its type arguments, is what the declaration's `self` and `static`
     // are, so `static` fits a stated `Builder<TModel>`.
     let own_type = class_metadata.map(|class| {
@@ -825,7 +824,7 @@ fn check_extern_signature<A>(
                 TAtomic::Object(TObject::Enum(object)) => Some(object.name),
                 _ => None,
             }
-            .and_then(|name| codebase.get_class_like(name.as_bytes())?.enum_type.clone());
+            .and_then(|name| codebase.get_class_like(name)?.enum_type.clone());
 
             fits(&TUnion::from_atomic(atomic.clone()), &native_type)
                 || backing.is_some_and(|backing| fits(&TUnion::from_atomic(backing), &native_type))
@@ -923,9 +922,12 @@ where
         .values()
         .map(|class_like| &**class_like)
         .filter(|class_like| {
-            let name = class_like.original_name.as_bytes();
+            let name = class_like.original_name;
 
-            name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(namespace))
+            name.as_bytes()
+                .iter()
+                .rposition(|byte| *byte == b'\\')
+                .is_some_and(|end| name.as_bytes()[..end].eq_ignore_ascii_case(namespace))
         })
         .collect();
     if let Some(holder) = holders.first()
@@ -1014,10 +1016,10 @@ pub(crate) fn check_uses<A>(
         let effect = context.resolved_names.get(name);
         artifacts.symbol_references.add_reference_to_symbol(
             &block_context.scope,
-            context.codebase.class_key(effect),
+            context.codebase.class_key(word(effect)),
             false,
         );
-        if is_effect(context.codebase, effect) {
+        if is_effect(context.codebase, word(effect)) {
             continue;
         }
 
@@ -1031,12 +1033,16 @@ pub(crate) fn check_uses<A>(
             .class_likes
             .values()
             .filter(|class| {
-                let name = class.original_name.as_bytes();
-                let class_namespace = name.iter().rposition(|byte| *byte == b'\\').map_or(&b""[..], |end| &name[..end]);
+                let name = class.original_name;
+                let class_namespace = name
+                    .as_bytes()
+                    .iter()
+                    .rposition(|byte| *byte == b'\\')
+                    .map_or(&b""[..], |end| &name.as_bytes()[..end]);
 
                 is_sharp_namespace(class_namespace)
                     || class_namespace.eq_ignore_ascii_case(namespace)
-                    || context.imported_names.contains_key(&ascii_lowercase_word(name))
+                    || context.imported_names.contains_key(&ascii_lowercase_word(name.as_bytes()))
             })
             .collect();
         for class in &nameable {
@@ -1160,7 +1166,7 @@ pub(crate) fn check_foreign_static_write<A>(
 ) where
     A: Arena,
 {
-    let class = context.codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+    let class = context.codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
 
     report_foreign_in_static(context, class, property, value_type, span);
 }
@@ -1179,7 +1185,7 @@ fn report_foreign_in_static<A>(
     let held = held_type.get_all_child_nodes().into_iter().find_map(|node| match node {
         TypeRef::Atomic(TAtomic::Object(object)) => object
             .get_name()
-            .and_then(|name| context.codebase.get_class_like(name.as_bytes()))
+            .and_then(|name| context.codebase.get_class_like(name))
             .filter(|held| held.flags.is_foreign()),
         _ => None,
     });
@@ -1431,7 +1437,7 @@ where
             self.artifacts.get_expression_type(object)?.types.iter().find_map(TAtomic::get_object_or_enum_name)?;
         let codebase: &'ctx CodebaseMetadata = self.context.codebase;
 
-        codebase.get_property_type(class.as_bytes(), php_variable_name(name.value).as_bytes())
+        codebase.get_property_type(class, php_variable_name(name.value))
     }
 
     /// Records `value` as escaping to `place` when it holds a parameter that takes on effects.
@@ -1485,7 +1491,7 @@ where
         let codebase: &'ctx CodebaseMetadata = self.context.codebase;
         let (metadata, sharp, callee) = match target {
             CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(class, method), .. } => {
-                let metadata = codebase.get_method(class.as_bytes(), method.as_bytes());
+                let metadata = codebase.get_method(*class, *method);
                 // A collection's method is written on its PHP# type, as `List.add`.
                 let collection = metadata.and_then(|metadata| collection_member_kind(*class, metadata));
                 let callee = collection.map_or_else(
@@ -1495,17 +1501,11 @@ where
                     },
                 );
 
-                (
-                    metadata,
-                    codebase.get_class_like(class.as_bytes()).is_some_and(|class| class.flags.is_sharp()),
-                    callee,
-                )
+                (metadata, codebase.get_class_like(*class).is_some_and(|class| class.flags.is_sharp()), callee)
             }
-            CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Function(function), .. } => (
-                codebase.get_function(function.as_bytes()),
-                false,
-                display_function_like_identifier(self.context, callee),
-            ),
+            CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Function(function), .. } => {
+                (codebase.get_function(*function), false, display_function_like_identifier(self.context, callee))
+            }
             CallTarget::Property { class, property } | CallTarget::MagicMethod { class, method: property, .. } => {
                 return Some((Some(display_member(self.context, *class, property)), None));
             }
@@ -1615,7 +1615,7 @@ where
             .artifacts
             .get_expression_type(instantiation)
             .and_then(|created| created.types.iter().find_map(TAtomic::get_object_or_enum_name))
-            .and_then(|class| codebase.get_method(class.as_bytes(), name));
+            .and_then(|class| codebase.get_method(class, word(name)));
         let arguments = instantiation.argument_list.iter().flat_map(|arguments| arguments.arguments.iter());
         for (position, argument) in arguments.enumerate() {
             let stated = constructor

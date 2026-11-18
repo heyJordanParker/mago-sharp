@@ -272,8 +272,8 @@ fn to_string_methods<'codebase>(
 ) -> impl Iterator<Item = &'codebase FunctionLikeMetadata> {
     part_type.types.iter().filter_map(|atomic| match get_sharp_type(atomic) {
         Some(SharpType::Class(name, _) | SharpType::Enum(name)) => {
-            codebase.get_declaring_method(name.as_bytes(), b"toString").or_else(|| {
-                let class = codebase.get_class_like(name.as_bytes())?;
+            codebase.get_declaring_method(name, word("toString")).or_else(|| {
+                let class = codebase.get_class_like(name)?;
 
                 codebase.get_method_by_id(&plain_text_method(codebase, class)?)
             })
@@ -381,7 +381,7 @@ where
         "Test it with `!= null` first."
     } else if part_type.types.iter().all(|atomic| match get_sharp_type(atomic) {
         Some(SharpType::Class(name, _) | SharpType::Enum(name)) => {
-            context.codebase.get_class_like(name.as_bytes()).is_some_and(|class| class.flags.is_sharp())
+            context.codebase.get_class_like(name).is_some_and(|class| class.flags.is_sharp())
         }
         _ => false,
     }) {

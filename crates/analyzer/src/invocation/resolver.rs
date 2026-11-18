@@ -167,7 +167,7 @@ where
 {
     method_context
         .declaring_method_id
-        .and_then(|method| context.codebase.get_class_like(method.get_class_name().as_bytes()))
+        .and_then(|method| context.codebase.get_class_like(method.get_class_name()))
         .unwrap_or(method_context.class_like_metadata)
 }
 
@@ -236,7 +236,7 @@ pub(crate) fn rename_trait_objects(
 
     for atomic in union.types.to_mut() {
         if let TAtomic::Object(TObject::Named(named_object)) = atomic
-            && codebase.class_key(named_object.name.as_bytes()) == declaring_class.name
+            && codebase.class_key(named_object.name) == declaring_class.name
         {
             named_object.name = calling_class;
         }

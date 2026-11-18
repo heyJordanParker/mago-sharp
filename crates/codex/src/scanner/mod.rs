@@ -435,7 +435,7 @@ impl Scanner {
         let mut class_like_metadata =
             self.codebase.class_likes.remove(&current_class).expect("Expected class-like metadata to be present");
 
-        let name = class_like_metadata.method_key(method.name);
+        let name = class_like_metadata.method_key(word(method.name));
 
         if class_like_metadata.methods.contains(&name) {
             if class_like_metadata.pseudo_methods.contains(&name)
@@ -613,7 +613,7 @@ impl Scanner {
             }
 
             // The interface and its trait are PHP#'s, so each keys the method by its exact name.
-            let method_name = defaults.method_key(method.name.value);
+            let method_name = defaults.method_key(word(method.name.value));
             let Some(signature) = self.codebase.function_likes.get(&(interface_name, method_name)) else {
                 continue;
             };
@@ -670,7 +670,7 @@ impl Scanner {
         self.register_method(&parts, context);
 
         if let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
-            && let name = class.method_key(parts.name)
+            && let name = class.method_key(word(parts.name))
             && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, name))
             && method.span == parts.span
         {
@@ -1262,7 +1262,8 @@ where
         self.register_method(&parts, context);
 
         if let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
-            && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, class.method_key(parts.name)))
+            && let Some(method) =
+                self.codebase.function_likes.get_mut(&(class.name, class.method_key(word(parts.name))))
         {
             method.flags |= MetadataFlags::OPERATOR;
             // `operator ==` runs as `op_Equality(?Money $a, ?Money $b)`, which lifts `null` itself, so the PHP method
@@ -1332,7 +1333,8 @@ where
         self.register_method(&parts, context);
 
         if let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
-            && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, class.method_key(parts.name)))
+            && let Some(method) =
+                self.codebase.function_likes.get_mut(&(class.name, class.method_key(word(parts.name))))
             && let Some(method_metadata) = &mut method.method_metadata
         {
             method_metadata.is_static = true;
@@ -1976,7 +1978,7 @@ mod tests {
         ));
 
         let default_type = codebase
-            .get_property(b"Report", b"$total")
+            .get_property(word("Report"), word("$total"))
             .and_then(|property| property.default_type_metadata.as_ref())
             .expect("the default is inferred");
         assert_eq!(default_type.type_union.get_single_literal_int_value(), Some(100_000));

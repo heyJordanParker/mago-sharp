@@ -56,7 +56,8 @@ pub fn is_contained_by(
                     if let Some(literal) = i.get_known_literal_value() {
                         // if it contains `::` - thats enough, no need to check class/method further
                         // unless we need to at some point..
-                        memchr::memmem::find(literal, b"::").is_some() || codebase.function_exists(literal)
+                        memchr::memmem::find(literal, b"::").is_some()
+                            || codebase.function_exists(mago_word::word(literal))
                     } else {
                         false
                     }
@@ -105,7 +106,7 @@ pub fn is_contained_by(
         }
         (TAtomic::Scalar(TScalar::String(c)), TAtomic::Scalar(TScalar::ClassLikeString(i))) if c.is_callable => {
             return i.literal_value().is_some_and(|value| {
-                codebase.function_exists(value.as_bytes())
+                codebase.function_exists(value)
                     && match c.casing {
                         TStringCasing::Lowercase => value.as_bytes().iter().all(|byte| !byte.is_ascii_uppercase()),
                         TStringCasing::Uppercase => value.as_bytes().iter().all(|byte| !byte.is_ascii_lowercase()),

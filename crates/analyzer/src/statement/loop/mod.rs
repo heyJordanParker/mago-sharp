@@ -1822,7 +1822,7 @@ where
                         let enum_name = enum_instance.get_name();
                         let enum_backing_type = context
                             .codebase
-                            .get_enum(enum_instance.get_name().as_bytes())
+                            .get_enum(enum_instance.get_name())
                             .and_then(|class_like| class_like.enum_type.as_ref());
                         let cases = display_code_member(context, enum_instance.get_name(), "cases()");
                         let (instance, case_loop) = ("$instance->", format!("foreach ({cases} as $case)"));

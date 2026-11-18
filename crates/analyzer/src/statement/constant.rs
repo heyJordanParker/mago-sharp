@@ -4,6 +4,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_syntax::cst::Constant;
+use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -36,7 +37,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Constant<'arena> {
             let name_bytes = context.resolved_names.get(&item.name);
             let name = mago_bytes::BytesDisplay(name_bytes);
 
-            let Some(constant_metadata) = context.codebase.get_constant(name_bytes) else {
+            let Some(constant_metadata) = context.codebase.get_constant(word(name_bytes)) else {
                 return Err(AnalysisError::InternalError(
                     format!("Constant metadata for `{name}` not found during analysis."),
                     item.name.span(),

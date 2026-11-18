@@ -2062,7 +2062,7 @@ fn add_method(
     class_like_metadata: &mut ClassLikeMetadata,
     mut function_like_metadata: FunctionLikeMetadata,
 ) {
-    let name = class_like_metadata.method_key(name);
+    let name = class_like_metadata.method_key(word(name));
     function_like_metadata.name = name;
     let method_id = (class_like_metadata.name, name);
 

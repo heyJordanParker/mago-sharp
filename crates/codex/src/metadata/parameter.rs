@@ -142,10 +142,10 @@ impl FunctionLikeParameterMetadata {
     /// section 24: a PHP# attribute only as written, and a plain PHP one in any case.
     #[inline]
     #[must_use]
-    pub fn has_attribute(&self, codebase: &CodebaseMetadata, name: &[u8]) -> bool {
+    pub fn has_attribute(&self, codebase: &CodebaseMetadata, name: Word) -> bool {
         let name = codebase.class_key(name);
 
-        self.attributes.iter().any(|attribute| codebase.class_key(attribute.name.as_bytes()) == name)
+        self.attributes.iter().any(|attribute| codebase.class_key(attribute.name) == name)
     }
 
     /// Sets the attributes, replacing any existing ones.

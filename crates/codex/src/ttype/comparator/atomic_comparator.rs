@@ -262,7 +262,7 @@ pub fn is_contained_by(
     if let TAtomic::Object(TObject::Enum(enum_container)) = container_type_part {
         return match input_type_part {
             TAtomic::Object(TObject::Enum(enum_input)) => {
-                if !codebase.is_instance_of(enum_input.get_name().as_bytes(), enum_container.get_name().as_bytes()) {
+                if !codebase.is_instance_of(enum_input.get_name(), enum_container.get_name()) {
                     return false;
                 }
 
@@ -276,7 +276,7 @@ pub fn is_contained_by(
                 true
             }
             TAtomic::Object(TObject::Named(named_object)) if enum_container.case.is_none() => {
-                if !codebase.is_instance_of(named_object.get_name().as_bytes(), enum_container.get_name().as_bytes()) {
+                if !codebase.is_instance_of(named_object.get_name(), enum_container.get_name()) {
                     return false;
                 }
 
@@ -357,10 +357,10 @@ pub fn is_contained_by(
     if let TAtomic::Object(TObject::HasMethod(container_has_method)) = container_type_part {
         return match input_type_part {
             TAtomic::Object(TObject::Named(input_object)) => {
-                codebase.method_exists(input_object.get_name().as_bytes(), container_has_method.get_method().as_bytes())
+                codebase.method_exists(input_object.get_name(), container_has_method.get_method())
             }
             TAtomic::Object(TObject::Enum(input_enum)) => {
-                codebase.method_exists(input_enum.get_name().as_bytes(), container_has_method.get_method().as_bytes())
+                codebase.method_exists(input_enum.get_name(), container_has_method.get_method())
             }
             TAtomic::Object(TObject::HasMethod(input_has_method)) => {
                 input_has_method.has_method(container_has_method.get_method().as_bytes())
@@ -415,7 +415,7 @@ pub fn is_contained_by(
             }
             TObject::Named(TNamedObject { name: input_object_name, .. })
             | TObject::Enum(TEnum { name: input_object_name, .. }) => {
-                let Some(class_like_metadata) = codebase.get_class_like(input_object_name.as_bytes()) else {
+                let Some(class_like_metadata) = codebase.get_class_like(*input_object_name) else {
                     return false;
                 };
 
@@ -427,7 +427,7 @@ pub fn is_contained_by(
                     let real_property = class_like_metadata
                         .declaring_property_ids
                         .get(&property_name)
-                        .and_then(|declaring_class| codebase.get_class_like(declaring_class.as_bytes()))
+                        .and_then(|declaring_class| codebase.get_class_like(*declaring_class))
                         .and_then(|declaring_metadata| declaring_metadata.properties.get(&property_name));
 
                     // Structural containment is an external view: a publicly readable real
@@ -439,7 +439,7 @@ pub fn is_contained_by(
                         real => class_like_metadata
                             .magic_property_ids
                             .get(&property_name)
-                            .and_then(|tag_class| codebase.get_class_like(tag_class.as_bytes()))
+                            .and_then(|tag_class| codebase.get_class_like(*tag_class))
                             .and_then(|tag_metadata| tag_metadata.magic_properties.get(&property_name))
                             .or(real),
                     };
@@ -600,7 +600,7 @@ fn is_forwarded_template_parameter(
 
     input_class != container_class
         && codebase
-            .get_class_like(input_class.as_bytes())
+            .get_class_like(*input_class)
             .and_then(|metadata| metadata.template_extended_parameters.get(container_class))
             .is_some_and(|parameters| parameters.contains_key(&container_generic.parameter_name))
 }
@@ -641,7 +641,7 @@ pub(crate) fn can_be_identical(
     {
         return match (class_string, string.get_known_literal_value()) {
             (TClassLikeString::Literal { value }, Some(str_value)) => {
-                codebase.class_key(value.as_bytes()) == codebase.class_key(str_value)
+                codebase.class_key(*value) == codebase.class_key(word(str_value))
             }
             _ => true,
         };
@@ -657,7 +657,7 @@ pub(crate) fn can_be_identical(
     if let (TAtomic::Object(TObject::Enum(first_enum)), TAtomic::Object(TObject::Enum(second_enum))) =
         (first_part, second_part)
     {
-        if codebase.class_key(first_enum.name.as_bytes()) != codebase.class_key(second_enum.name.as_bytes()) {
+        if codebase.class_key(first_enum.name) != codebase.class_key(second_enum.name) {
             return false;
         }
 
@@ -854,7 +854,7 @@ pub(crate) fn can_be_identical(
     if let (TAtomic::Object(first_object), TAtomic::Object(second_object)) = (first_part, second_part)
         && let (Some(first_name), Some(second_name)) = (first_object.get_name(), second_object.get_name())
     {
-        return match (codebase.get_class_like(first_name.as_bytes()), codebase.get_class_like(second_name.as_bytes())) {
+        return match (codebase.get_class_like(first_name), codebase.get_class_like(second_name)) {
             (Some(c1), Some(c2)) => c1.kind.is_interface() || c2.kind.is_interface(),
             _ => true,
         };
@@ -884,7 +884,7 @@ fn class_values_can_be_identical(
         matches!(
             (class, interface),
             (TAtomic::Object(TObject::Named(class)), TAtomic::Object(TObject::Named(interface)))
-                if codebase.interface_exists(interface.name.as_bytes()) && codebase.is_inheritable(class.name.as_bytes())
+                if codebase.interface_exists(interface.name) && codebase.is_inheritable(class.name)
         )
     };
 

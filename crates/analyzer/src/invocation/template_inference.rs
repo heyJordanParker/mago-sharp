@@ -169,7 +169,7 @@ where
                 // strings that name a real class. Only do this when the literal really
                 // names a class-like in the codebase, otherwise leave inference alone.
                 if let Some(literal) = string.get_known_literal_value()
-                    && context.codebase.class_like_exists(literal)
+                    && context.codebase.class_like_exists(word(literal))
                 {
                     input_objects.push(TClassLikeString::literal(word(literal)).get_object_type(context.codebase));
                 }
@@ -786,7 +786,7 @@ pub fn infer_templates_from_input_and_container_types<A>(
                     continue;
                 };
 
-                let Some(container_meta) = context.codebase.get_class_like(container_obj.name.as_bytes()) else {
+                let Some(container_meta) = context.codebase.get_class_like(container_obj.name) else {
                     continue;
                 };
 
@@ -795,11 +795,11 @@ pub fn infer_templates_from_input_and_container_types<A>(
                         continue;
                     };
 
-                    let Some(input_meta) = context.codebase.get_class_like(input_obj.name.as_bytes()) else {
+                    let Some(input_meta) = context.codebase.get_class_like(input_obj.name) else {
                         continue;
                     };
 
-                    if !context.codebase.is_instance_of(input_obj.name.as_bytes(), container_obj.name.as_bytes()) {
+                    if !context.codebase.is_instance_of(input_obj.name, container_obj.name) {
                         continue;
                     }
 

@@ -9,6 +9,7 @@
 //! A plain PHP library's function, constant or class of PHP's root namespace is reached through the namespace an
 //! `extern namespace` line gives its folder (spec section 23), and the library also says which namespace that is.
 
+use mago_word::word;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -86,7 +87,7 @@ impl Library {
         let mut members: HashMap<Vec<u8>, Vec<Member>> = HashMap::new();
         for (class, member, form) in forms.iter() {
             let (Some(call), Some(declaring), Some(method)) =
-                (form.php_call(), codebase.get_class_like(class), codebase.get_method(class, member))
+                (form.php_call(), codebase.get_class_like(word(class)), codebase.get_method(word(class), word(member)))
             else {
                 continue;
             };
@@ -162,7 +163,7 @@ impl Library {
 /// extension member (spec section 26).
 #[must_use]
 pub fn differs(member: &Member, function: &FunctionLikeMetadata, codebase: &CodebaseMetadata) -> Option<String> {
-    let method = codebase.get_method(member.class.as_bytes(), member.name.as_bytes())?;
+    let method = codebase.get_method(member.class, member.name)?;
     let returned = |metadata: &Option<mago_codex::metadata::ttype::TypeMetadata>| {
         metadata.as_ref().map_or_else(get_mixed, |metadata| metadata.type_union.clone())
     };

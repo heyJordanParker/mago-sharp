@@ -130,7 +130,7 @@ where
             };
 
             // Handle regular constants and enum cases
-            let Some(metadata) = context.codebase.get_class_like(fq_class_id.as_bytes()) else {
+            let Some(metadata) = context.codebase.get_class_like(fq_class_id) else {
                 if class_resolution.is_parent()
                     && block_context.scope.get_class_like().is_some_and(ClassLikeMetadata::has_incomplete_hierarchy)
                 {
@@ -228,14 +228,14 @@ where
     let class_string = match class_resolution.fqcn {
         Some(fq_class_id) => {
             if matches!(class_resolution.origin, ResolutionOrigin::Named { is_self: false, is_parent: false })
-                && context.codebase.get_class_like(fq_class_id.as_bytes()).is_none()
+                && context.codebase.get_class_like(fq_class_id).is_none()
             {
                 report_non_existent_class(context, fq_class_id, class_expr.span());
             }
 
             artifacts.symbol_references.add_reference_to_symbol(
                 &block_context.scope,
-                context.codebase.class_key(fq_class_id.as_bytes()),
+                context.codebase.class_key(fq_class_id),
                 false,
             );
 
@@ -365,7 +365,7 @@ where
     }
 
     for required_class in metadata.require_extends.iter().chain(metadata.require_implements.iter()) {
-        let Some(required_metadata) = context.codebase.get_class_like(required_class.as_bytes()) else {
+        let Some(required_metadata) = context.codebase.get_class_like(*required_class) else {
             continue;
         };
 

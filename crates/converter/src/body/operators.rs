@@ -25,6 +25,7 @@ use mago_syntax::cst::Literal;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::Variable;
+use mago_word::word;
 
 use super::Kind;
 use super::atomic_kinds;
@@ -203,7 +204,7 @@ impl Converter<'_, '_> {
         // A method the converted class declares itself gets its PHP# return type in the PHP it compiles to.
         let declared_here = |function: &FunctionLikeMetadata| {
             current
-                .and_then(|class| codebase.get_method(class.as_bytes(), function.name.as_bytes()))
+                .and_then(|class| codebase.get_method(class, function.name))
                 .is_some_and(|own| std::ptr::eq(own, function))
         };
         let returns = |function: Option<&FunctionLikeMetadata>| {
@@ -265,7 +266,7 @@ impl Converter<'_, '_> {
                     return false;
                 };
                 let property = [b"$".as_slice(), name.value].concat();
-                let declaring = self.input.codebase.get_declaring_property(class.name.as_bytes(), &property);
+                let declaring = self.input.codebase.get_declaring_property(class.name, word(&property));
                 let own = self.class.as_ref().is_some_and(|own| {
                     own.metadata.name == class.name && own.metadata.properties.contains_key(&mago_word::word(&property))
                 });
@@ -290,7 +291,7 @@ impl Converter<'_, '_> {
                 && union.types.iter().all(|atomic| {
                     matches!(atomic, TAtomic::Object(TObject::Named(named))
                         if codebase
-                            .get_declaring_method(named.name.as_bytes(), b"__tostring")
+                            .get_declaring_method(named.name, word("__tostring"))
                             .is_some_and(|method| !method.flags.is_sharp()))
                 })
         })
@@ -330,7 +331,7 @@ impl Converter<'_, '_> {
             return false;
         };
 
-        self.input.codebase.get_class_like(value.as_bytes()).is_some_and(|class| class.template_types.is_empty())
+        self.input.codebase.get_class_like(*value).is_some_and(|class| class.template_types.is_empty())
     }
 
     /// Whether `side`, a class value, may be the class of an object of a PHP# generic class, as `Class.of(box)` is,
@@ -352,7 +353,7 @@ impl Converter<'_, '_> {
                     && candidate.kind.is_class()
                     && !candidate.flags.is_abstract()
                     && !candidate.template_types.is_empty()
-                    && class.is_none_or(|class| codebase.is_instance_of(candidate.name.as_bytes(), class))
+                    && class.is_none_or(|class| codebase.is_instance_of(candidate.name, word(class)))
             })
         };
         let object_may = |atomic: &TAtomic| match atomic {

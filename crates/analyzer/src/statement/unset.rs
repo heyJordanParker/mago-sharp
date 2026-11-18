@@ -363,14 +363,13 @@ fn check_property_unset<'arena, A>(
         };
 
         let qualified_property_name = concat_word!(b"$", property_name.value);
-        let Some(property_metadata) =
-            context.codebase.get_declaring_property(class_name.as_bytes(), qualified_property_name.as_bytes())
+        let Some(property_metadata) = context.codebase.get_declaring_property(class_name, qualified_property_name)
         else {
             continue;
         };
 
         let class_is_readonly =
-            context.codebase.get_class_like(class_name.as_bytes()).is_some_and(|class| class.flags.is_readonly());
+            context.codebase.get_class_like(class_name).is_some_and(|class| class.flags.is_readonly());
 
         let qualified = display_member(context, class_name, qualified_property_name);
 

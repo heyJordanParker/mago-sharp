@@ -75,7 +75,7 @@ pub(crate) fn check_property_write<A>(
 ) where
     A: Arena,
 {
-    let Some(declaring_class_metadata) = context.codebase.get_class_like(declaring_class.as_bytes()) else {
+    let Some(declaring_class_metadata) = context.codebase.get_class_like(declaring_class) else {
         return;
     };
 
@@ -124,7 +124,7 @@ pub(crate) fn check_property_write<A>(
     let is_class_initializer = method_metadata.is_some()
         && context
             .codebase
-            .get_class_like(current_class.as_bytes())
+            .get_class_like(current_class)
             .is_some_and(|metadata| context.is_class_initializer_for(metadata, current_method));
 
     let mut local_state = if guard_proves_uninitialized {
@@ -333,7 +333,7 @@ fn check_parent_constructor_reinitializations<A>(
     let Some(parent_name) = class_metadata.direct_parent_class else {
         return;
     };
-    let Some(parent_metadata) = context.codebase.get_class_like(parent_name.as_bytes()) else {
+    let Some(parent_metadata) = context.codebase.get_class_like(parent_name) else {
         return;
     };
     let Some(parent_constructor_id) = parent_metadata.declaring_method_ids.get(&constructor_name) else {
@@ -341,7 +341,7 @@ fn check_parent_constructor_reinitializations<A>(
     };
 
     let parent_constructor_class = parent_constructor_id.get_class_name();
-    let Some(parent_constructor_metadata) = context.codebase.get_class_like(parent_constructor_class.as_bytes()) else {
+    let Some(parent_constructor_metadata) = context.codebase.get_class_like(parent_constructor_class) else {
         return;
     };
     let parent_constructor_writes =
@@ -359,7 +359,7 @@ fn check_parent_constructor_reinitializations<A>(
         let Some(parent_property_class) = parent_constructor_metadata
             .declaring_property_ids
             .get(&property_name)
-            .and_then(|class_name| context.codebase.get_class_like(class_name.as_bytes()))
+            .and_then(|class_name| context.codebase.get_class_like(*class_name))
         else {
             continue;
         };
@@ -404,7 +404,7 @@ where
             continue;
         }
 
-        let Some(class_metadata) = context.codebase.get_class_like(class_name.as_bytes()) else {
+        let Some(class_metadata) = context.codebase.get_class_like(class_name) else {
             continue;
         };
         let Some(constructor_id) = class_metadata.declaring_method_ids.get(&constructor_name) else {
@@ -446,7 +446,7 @@ where
         let Some(parent_name) = class_metadata.direct_parent_class else {
             continue;
         };
-        let Some(parent_metadata) = context.codebase.get_class_like(parent_name.as_bytes()) else {
+        let Some(parent_metadata) = context.codebase.get_class_like(parent_name) else {
             continue;
         };
         let Some(parent_constructor_id) = parent_metadata.declaring_method_ids.get(&constructor_name) else {
@@ -594,7 +594,7 @@ where
 {
     if !context
         .codebase
-        .get_method_visibility(class_metadata.name.as_bytes(), target_method.as_bytes())
+        .get_method_visibility(class_metadata.name, target_method)
         .is_some_and(|visibility| visibility.is_private())
     {
         return false;
@@ -632,7 +632,7 @@ fn report_invalid_write<A>(
 
     let declaring_class = context
         .codebase
-        .get_class_like(pending.declaring_class.as_bytes())
+        .get_class_like(pending.declaring_class)
         .map_or(pending.declaring_class, |metadata| metadata.original_name);
 
     let (title, primary, note, help) = match reason {
@@ -695,7 +695,7 @@ where
 {
     let declaring_class = context
         .codebase
-        .get_class_like(pending.declaring_class.as_bytes())
+        .get_class_like(pending.declaring_class)
         .map_or(pending.declaring_class, |metadata| metadata.original_name);
 
     let property = display_member(context, declaring_class, pending.property_name);

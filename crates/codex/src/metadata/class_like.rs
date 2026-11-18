@@ -439,15 +439,15 @@ impl ClassLikeMetadata {
     /// each adaptation's names as written, so this keys them by the class-like's rule, which it knows only once its
     /// hierarchy is populated, spec section 24.
     #[must_use]
-    pub fn trait_visibility(&self, codebase: &CodebaseMetadata, name: &[u8], declaring: Word) -> Option<Visibility> {
+    pub fn trait_visibility(&self, codebase: &CodebaseMetadata, name: Word, declaring: Word) -> Option<Visibility> {
         if declaring == self.name {
             return None;
         }
 
         let key = self.method_key(name);
         self.trait_visibility_map.iter().find_map(|(written, (trait_name, visibility))| {
-            (self.method_key(written.as_bytes()) == key
-                && trait_name.is_none_or(|trait_name| codebase.class_key(trait_name.as_bytes()) == declaring))
+            (self.method_key(*written) == key
+                && trait_name.is_none_or(|trait_name| codebase.class_key(trait_name) == declaring))
             .then_some(*visibility)
         })
     }
@@ -508,7 +508,7 @@ impl ClassLikeMetadata {
     /// its docblock names, by [`Symbols::class_key`], once every file is scanned, spec section 24: a file names a PHP#
     /// class-like exactly and a plain PHP one in any case, and only the whole codebase tells which one a name is.
     pub fn key_header_names(&mut self, symbols: &Symbols) {
-        let key = |name: Word| symbols.class_key(name.as_bytes());
+        let key = |name: Word| symbols.class_key(name);
         let key_set = |set: &mut WordSet| {
             if set.iter().any(|name| key(*name) != *name) {
                 *set = set.iter().map(|name| key(*name)).collect();
@@ -547,8 +547,8 @@ impl ClassLikeMetadata {
     /// `exact_names`, and its lowercase otherwise, as PHP folds a method name's case.
     #[inline]
     #[must_use]
-    pub fn method_key(&self, name: &[u8]) -> Word {
-        if self.exact_names { mago_word::word(name) } else { mago_word::ascii_lowercase_word(name) }
+    pub fn method_key(&self, name: Word) -> Word {
+        if self.exact_names { name } else { name.to_ascii_lowercase() }
     }
 
     /// The class-likes it is an instance of besides itself, by key: its parent classes, its interfaces, its traits, and
@@ -569,10 +569,10 @@ impl ClassLikeMetadata {
     /// spec section 24: a PHP# attribute only as written, and a plain PHP one in any case.
     #[inline]
     #[must_use]
-    pub fn has_attribute(&self, codebase: &CodebaseMetadata, name: &[u8]) -> bool {
+    pub fn has_attribute(&self, codebase: &CodebaseMetadata, name: Word) -> bool {
         let name = codebase.class_key(name);
 
-        self.attributes.iter().any(|attribute| codebase.class_key(attribute.name.as_bytes()) == name)
+        self.attributes.iter().any(|attribute| codebase.class_key(attribute.name) == name)
     }
 
     /// The key `[Tag("…")]` names on the class-like, a family, spec section 10, whose value names the variant its
@@ -1196,7 +1196,7 @@ fn collect_ancestor_methods_inner(
         .iter()
         .chain(&class_meta.direct_parent_interfaces)
         .chain(&class_meta.used_traits)
-        .filter_map(|name| class_likes.get(&symbols.class_key(name.as_bytes())));
+        .filter_map(|name| class_likes.get(&symbols.class_key(*name)));
     for ancestor in ancestors {
         methods.extend(ancestor.methods.iter().copied());
         collect_ancestor_methods_inner(ancestor, class_likes, symbols, visited, methods);

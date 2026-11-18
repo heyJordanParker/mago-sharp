@@ -461,8 +461,7 @@ where
 
     let has_unpacked_arguments = !unpacked_arguments.is_empty();
 
-    let calling_class_like_metadata =
-        calling_class_like.and_then(|(id, _)| context.codebase.get_class_like(id.as_bytes()));
+    let calling_class_like_metadata = calling_class_like.and_then(|(id, _)| context.codebase.get_class_like(id));
     let method_call_context = invocation.target.get_method_context();
     let base_class_metadata = method_call_context.map(|ctx| ctx.class_like_metadata).or(calling_class_like_metadata);
     let calling_instance_type = calling_class_like.and_then(|(_, atomic)| atomic);
@@ -1438,8 +1437,8 @@ where
                     invocation.target.get_function_like_identifier(),
                     Some(FunctionLikeIdentifier::Method(class, method)) if context
                         .codebase
-                        .get_declaring_method_class(class.as_bytes(), method.as_bytes())
-                        .and_then(|declaring| context.codebase.get_class_like(declaring.as_bytes()))
+                        .get_declaring_method_class(*class, *method)
+                        .and_then(|declaring| context.codebase.get_class_like(declaring))
                         .is_some_and(|declaring| !declaring.flags.is_built_in())
                 );
         if carries_type_arguments
@@ -1820,7 +1819,7 @@ where
         .types
         .iter()
         .filter_map(|atomic| match atomic {
-            TAtomic::Object(TObject::Named(named)) => codebase.get_class_like(named.name.as_bytes()),
+            TAtomic::Object(TObject::Named(named)) => codebase.get_class_like(named.name),
             _ => None,
         })
         .collect();
@@ -1863,7 +1862,7 @@ where
     };
     let class = method_context
         .declaring_method_id
-        .and_then(|method| context.codebase.get_class_like(method.get_class_name().as_bytes()))
+        .and_then(|method| context.codebase.get_class_like(method.get_class_name()))
         .filter(|class| {
             context.dialect.is_sharp()
                 && class.flags.is_sharp()
@@ -2854,7 +2853,7 @@ where
                 return Some(name);
             }
             TAtomic::Scalar(TScalar::String(TString { literal: Some(TStringLiteral::Value(value)), .. }))
-                if context.codebase.get_class_like(value.as_bytes()).is_some() =>
+                if context.codebase.get_class_like(*value).is_some() =>
             {
                 return Some(*value);
             }

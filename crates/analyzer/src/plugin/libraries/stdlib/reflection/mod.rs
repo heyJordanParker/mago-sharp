@@ -57,10 +57,10 @@ fn receiver_named_object<'ctx>(invocation: &InvocationInfo<'ctx, '_, '_>) -> Opt
 fn reflected_class_name(
     context: &ProviderContext<'_, '_, '_>,
     invocation: &InvocationInfo<'_, '_, '_>,
-    expected_receiver: &[u8],
+    expected_receiver: Word,
 ) -> Option<Word> {
     let receiver = receiver_named_object(invocation)?;
-    if !context.is_instance_of(receiver.get_name().as_bytes(), expected_receiver) {
+    if !context.is_instance_of(receiver.get_name(), expected_receiver) {
         return None;
     }
 
@@ -73,13 +73,11 @@ fn reflected_class_name(
 /// `class_name` (including inherited methods). `None` if the class is unknown
 /// or has no methods.
 fn method_name_union(codebase: &CodebaseMetadata, class_name: Word) -> Option<TUnion> {
-    let class_metadata = codebase.get_class_like(class_name.as_bytes())?;
+    let class_metadata = codebase.get_class_like(class_name)?;
 
     let mut atomics = Vec::new();
     for method_id in class_metadata.appearing_method_ids.values() {
-        if let Some(metadata) =
-            codebase.get_method(method_id.get_class_name().as_bytes(), method_id.get_method_name().as_bytes())
-        {
+        if let Some(metadata) = codebase.get_method(method_id.get_class_name(), method_id.get_method_name()) {
             atomics.push(TAtomic::Scalar(TScalar::literal_string(metadata.original_name)));
         }
     }
@@ -96,13 +94,11 @@ fn method_name_union(codebase: &CodebaseMetadata, class_name: Word) -> Option<TU
 /// return type contribute `mixed`. `None` if the class is unknown or has no
 /// methods.
 fn method_return_union(codebase: &CodebaseMetadata, class_name: Word) -> Option<TUnion> {
-    let class_metadata = codebase.get_class_like(class_name.as_bytes())?;
+    let class_metadata = codebase.get_class_like(class_name)?;
 
     let mut result: Option<TUnion> = None;
     for method_id in class_metadata.appearing_method_ids.values() {
-        let Some(metadata) =
-            codebase.get_method(method_id.get_class_name().as_bytes(), method_id.get_method_name().as_bytes())
-        else {
+        let Some(metadata) = codebase.get_method(method_id.get_class_name(), method_id.get_method_name()) else {
             continue;
         };
 

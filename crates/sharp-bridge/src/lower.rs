@@ -883,7 +883,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.extend(self.test_hooks(class));
         }
         members.extend(self.generic_statics(&class.name, &class.members));
-        members.extend(self.class_metadata(self.class, self.line(class.name), class.members.as_slice()));
+        members.extend(self.class_metadata(word(self.class), self.line(class.name), class.members.as_slice()));
         members.splice(0..0, self.trait_members(class.inheritance.as_ref(), class.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
         let attributes = self.attributes(&class.attribute_lists, None, &[]);
@@ -910,7 +910,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             _ => None,
         });
         let start = declared.or_else(|| {
-            let defaults = self.types.default_bodies(self.class);
+            let defaults = self.types.default_bodies(word(self.class));
 
             defaults.iter().any(|(_, _, method, _)| method.as_bytes() == b"toString").then_some(start)
         })?;
@@ -991,7 +991,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             r#struct.inheritance.as_ref().and_then(|inheritance| self.iteration(inheritance, r#struct.right_brace)),
         );
         members.extend(self.generic_statics(&r#struct.name, &r#struct.members));
-        members.extend(self.class_metadata(self.class, self.line(r#struct.name.span), r#struct.members.as_slice()));
+        members.extend(self.class_metadata(
+            word(self.class),
+            self.line(r#struct.name.span),
+            r#struct.members.as_slice(),
+        ));
         members.splice(0..0, self.trait_members(r#struct.inheritance.as_ref(), r#struct.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
         let attributes = self.attributes(&r#struct.attribute_lists, None, &[]);
@@ -1003,7 +1007,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         // A header trait is the `use` above, spec section 22.
         for name in r#struct.inheritance.iter().flat_map(Inheritance::names) {
             let full_name = self.names.get(&name);
-            if self.types.class_declaration(full_name).kind != DeclarationKind::Trait {
+            if self.types.class_declaration(word(full_name)).kind != DeclarationKind::Trait {
                 interfaces.push(self.string(ZEND_NAME_FQ, self.line(name), full_name));
             }
         }
@@ -1052,7 +1056,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let both = self.node(SHARP_AST_AND, 0, line, &instances);
 
             let mut equal = None;
-            for (property, r#type) in self.types.struct_properties(class) {
+            for (property, r#type) in self.types.struct_properties(word(class)) {
                 let side = |object| Side::Property { span, object, property, r#type };
                 let property_equal = self.equality(line, side(b"a"), side(b"b"), false);
                 equal = Some(match equal {
@@ -1089,10 +1093,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// them, and the checker refuses its call. Each carries its whole type, as a declared method does, with the effects
     /// the analysis records for it, so `is` and `methods()` read it.
     fn parse_methods(&mut self, members: &Sequence<ClassLikeMember>, span: Span) -> Vec<u32> {
-        if !self.types.parses(self.class) {
+        if !self.types.parses(word(self.class)) {
             return Vec::new();
         }
-        if self.types.is_family(self.class) {
+        if self.types.is_family(word(self.class)) {
             return vec![self.family_parse(span), self.try_parse(span)];
         }
         let Some(fields) = self.parse_fields(members, span) else {
@@ -1116,7 +1120,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let parameters = self.parse_parameters(span);
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed]);
         let return_type = self.string(ZEND_NAME_FQ, line, self.class);
-        let return_type = self.function_type(return_type, self.types.method_type(self.class, b"parse"), 0, line);
+        let return_type =
+            self.function_type(return_type, self.types.method_type(word(self.class), word("parse")), 0, line);
 
         self.declaration(
             SHARP_AST_METHOD,
@@ -1150,7 +1155,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(span);
         let mut statements = Vec::new();
         let taken = self.temporaries;
-        if self.types.is_text_value(self.class) {
+        if self.types.is_text_value(word(self.class)) {
             let this = self.variable(span, b"this");
             let method = self.string(0, line, b"toString");
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
@@ -1158,7 +1163,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             statements.push(self.node(SHARP_AST_RETURN, 0, line, &[text]));
         } else {
             let tag = self.types.variant_tag(self.class);
-            let parses = self.types.parses(self.class) && !self.types.is_family(self.class);
+            let parses = self.types.parses(word(self.class)) && !self.types.is_family(word(self.class));
             if !parses && tag.is_none() {
                 return None;
             }
@@ -1171,9 +1176,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let name = self.string(0, line, name);
                 statements.push(self.json_write(span, &json, key, name));
             }
-            let fields = if parses { self.types.struct_parse_fields(self.class) } else { Vec::new() };
+            let fields = if parses { self.types.struct_parse_fields(word(self.class)) } else { Vec::new() };
             for field in fields {
-                if !self.types.has_property(self.class, field.name) {
+                if !self.types.has_property(word(self.class), field.name) {
                     continue;
                 }
                 let value = self.this_property(span, field.name);
@@ -1239,7 +1244,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// }
     /// ```
     fn parse_fields(&mut self, members: &Sequence<ClassLikeMember>, span: Span) -> Option<u32> {
-        let fields = self.types.struct_parse_fields(self.class);
+        let fields = self.types.struct_parse_fields(word(self.class));
         let texts = fields.iter().map(|field| self.types.type_text(field.r#type)).collect::<Option<Vec<_>>>()?;
         let line = self.line(span);
         let mut rows = Vec::new();
@@ -1296,7 +1301,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
         };
         let mut add_class = |name: Option<&[u8]>| {
-            if let Some(class) = name.and_then(|name| self.types.codebase().get_class_like(name)) {
+            if let Some(class) = name.and_then(|name| self.types.codebase().get_class_like(word(name))) {
                 add(class.original_name.as_str_lossy().trim_start_matches('\\').replace('\\', "."));
             }
         };
@@ -1334,7 +1339,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// ```
     fn parse(&mut self, span: Span) -> u32 {
         self.enter(b"parse");
-        self.static_type_parameters = self.types.static_type_parameters(self.class);
+        self.static_type_parameters = self.types.static_type_parameters(word(self.class));
         let line = self.line(span);
         let own = match self.static_type_parameters {
             Some(count) => {
@@ -1354,7 +1359,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.static_type_parameters = None;
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed]);
         let return_type = self.string(ZEND_NAME_FQ, line, self.class);
-        let return_type = self.function_type(return_type, self.types.method_type(self.class, b"parse"), 0, line);
+        let return_type =
+            self.function_type(return_type, self.types.method_type(word(self.class), word("parse")), 0, line);
 
         self.declaration(
             SHARP_AST_METHOD,
@@ -1377,7 +1383,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// ```
     fn try_parse(&mut self, span: Span) -> u32 {
         self.enter(b"tryParse");
-        self.static_type_parameters = self.types.static_type_parameters(self.class);
+        self.static_type_parameters = self.types.static_type_parameters(word(self.class));
         let line = self.line(span);
         let class = self.string(ZEND_NAME_FQ, line, self.class);
         let method = self.string(0, line, b"parse");
@@ -1403,7 +1409,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#try]);
         let return_type = self.string(ZEND_NAME_FQ, line, self.class);
         self.nodes[return_type as usize].attr |= ZEND_TYPE_NULLABLE;
-        let return_type = self.function_type(return_type, self.types.method_type(self.class, b"tryParse"), 0, line);
+        let return_type =
+            self.function_type(return_type, self.types.method_type(word(self.class), word("tryParse")), 0, line);
 
         self.declaration(
             SHARP_AST_METHOD,
@@ -1424,7 +1431,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let hint = self.node(SHARP_AST_TYPE_UNION, 0, line, &[array, object]);
         let name = self.string(0, line, b"value");
         let mut parameters = vec![self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL])];
-        parameters.extend(self.parameter_metadata((self.types.bounds(self.class), None), line));
+        parameters.extend(self.parameter_metadata((self.types.bounds(word(self.class)), None), line));
 
         self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters)
     }
@@ -1460,7 +1467,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn type_parameter_names(&self) -> Vec<&'lowering [u8]> {
         self.types
             .codebase()
-            .get_class_like(self.class)
+            .get_class_like(word(self.class))
             .map(|class| class.template_types.keys().map(|name| name.as_bytes()).collect())
             .unwrap_or_default()
     }
@@ -1499,7 +1506,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         let mut members = Vec::new();
         let mut has_constructor = false;
-        let keeps_statics = self.types.bounds(self.class).is_some();
+        let keeps_statics = self.types.bounds(word(self.class)).is_some();
         // A law, spec section 28, is checked and never runs, so the engine gets no node for it.
         for member in class_members.iter().filter(|member| !matches!(member, ClassLikeMember::Law(_))) {
             let member = match member {
@@ -1567,7 +1574,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 // Spec section 23: an `[Import]` method's body is the call of the PHP function it names.
                 ClassLikeMember::Method(method)
-                    if let Some(import) = self.types.import(self.class, method.name.value) =>
+                    if let Some(import) = self.types.import(word(self.class), word(method.name.value)) =>
                 {
                     let body = self.imported_call(method, import);
 
@@ -1617,7 +1624,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         if !has_constructor && !initial_values.is_empty() {
             let line = self.line(left_brace);
-            if self.types.parent_constructor(self.class).is_some() {
+            if self.types.parent_constructor(word(self.class)).is_some() {
                 let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
                 initial_values.push(self.parent_construct(line, arguments));
             }
@@ -1651,7 +1658,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// its own, as any static method of the class does.
     fn initial_value_methods(&mut self, members: &[ClassLikeMember]) -> Vec<u32> {
         let type_parameters = self.type_parameter_names();
-        let keeps_statics = self.types.bounds(self.class).is_some();
+        let keeps_statics = self.types.bounds(word(self.class)).is_some();
         let mut methods = Vec::new();
         for member in members {
             let ClassLikeMember::Property(property) = member else {
@@ -1665,7 +1672,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 continue;
             };
             let variable = property.first_variable();
-            self.static_type_parameters = self.types.static_type_parameters(self.class);
+            self.static_type_parameters = self.types.static_type_parameters(word(self.class));
             let method = self.accessor_bodies(variable.name, |lowering| {
                 let line = lowering.line(variable);
                 let value = lowering.expression(value);
@@ -1759,7 +1766,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The [`Self::statics_store`] and [`Self::statics_init`] of a generic PHP# class or struct named `name` with
     /// `members` that declares static fields, spec section 11, or none.
     fn generic_statics(&mut self, name: &LocalIdentifier, members: &Sequence<ClassLikeMember>) -> Vec<u32> {
-        if self.types.bounds(self.class).is_none() {
+        if self.types.bounds(word(self.class)).is_none() {
             return Vec::new();
         }
         let Some(store) = self.statics_store(name, members) else {
@@ -1853,7 +1860,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let line = self.line(name);
-        let count = self.types.static_type_parameters(self.class);
+        let count = self.types.static_type_parameters(word(self.class));
         self.static_type_parameters = count;
         let own = type_parameters_text(
             count.unwrap_or_else(|| unreachable!("a class keeps statics per type argument only when it is generic")),
@@ -1866,7 +1873,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             };
             let field_line = self.line(variable);
             let value = self.expression(value);
-            let field = self.statics_field(field_line, self.class, &own, variable.name, PlaceUse::Write);
+            let field = self.statics_field(field_line, word(self.class), &own, variable.name, PlaceUse::Write);
             writes.push(self.node(SHARP_AST_ASSIGN, 0, field_line, &[field, value]));
         }
         if let Some(MethodBody::Concrete(block)) = constructor.map(|constructor| &constructor.body) {
@@ -1898,15 +1905,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// that reads such a static names it, `\Sharp\Internal\statics(\App\Counter::class, <…>, 'made')['made']`, and
     /// the engine throws PHP's own error for a typed static read before it is set, as in a class that isn't generic. A
     /// write alone sets the field.
-    fn statics_field(
-        &mut self,
-        line: u32,
-        class: &[u8],
-        type_arguments: &str,
-        name: &[u8],
-        place_use: PlaceUse,
-    ) -> u32 {
-        let class_name = self.string(ZEND_NAME_FQ, line, class);
+    fn statics_field(&mut self, line: u32, class: Word, type_arguments: &str, name: &[u8], place_use: PlaceUse) -> u32 {
+        let class_name = self.string(ZEND_NAME_FQ, line, class.as_bytes());
         let mut arguments =
             vec![self.node(SHARP_AST_CLASS_NAME, 0, line, &[class_name]), self.type_list_text(line, type_arguments)];
         if place_use == PlaceUse::Read && self.types.has_runtime_initial_value(class, name) {
@@ -1923,7 +1923,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The type text `$0, $1, …` of the type parameters of the generic class being lowered, which a static member reads
     /// as its own leading type arguments, as a `SHARP_TYPE_OF` list: the text of the type arguments the code runs with.
     fn own_type_arguments(&mut self, line: u32) -> u32 {
-        let count = self.types.static_type_parameters(self.class).unwrap_or_else(|| {
+        let count = self.types.static_type_parameters(word(self.class)).unwrap_or_else(|| {
             unreachable!("a static member reads its own type arguments only in a generic PHP# class")
         });
 
@@ -1944,7 +1944,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// holds no PHP# declaration of. A generic class also declares from it the hidden slot that holds each object's
     /// type arguments, which start as its bounds. `members` are the class-like's declarations, whose `override` and
     /// constants reflection reads.
-    fn class_metadata(&mut self, class: &[u8], line: u32, members: &[ClassLikeMember]) -> Option<u32> {
+    fn class_metadata(&mut self, class: Word, line: u32, members: &[ClassLikeMember]) -> Option<u32> {
         let overrides: Vec<&[u8]> = members
             .iter()
             .filter_map(|member| match member {
@@ -1984,7 +1984,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut parent_name = None;
         for name in inheritance.names() {
             let full_name = self.names.get(&name);
-            if self.types.class_declaration(full_name).kind == DeclarationKind::Class {
+            if self.types.class_declaration(word(full_name)).kind == DeclarationKind::Class {
                 parent = self.string(ZEND_NAME_FQ, self.line(name), full_name);
                 parent_name = Some(full_name);
             }
@@ -2024,7 +2024,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         for name in inheritance.names() {
             let full_name = self.names.get(&name);
-            match self.types.class_declaration(full_name).kind {
+            match self.types.class_declaration(word(full_name)).kind {
                 DeclarationKind::Interface => names.push(self.string(ZEND_NAME_FQ, self.line(name), full_name)),
                 DeclarationKind::Class | DeclarationKind::Trait => {}
                 kind => unreachable!("the checker refuses a {kind:?} in a header"),
@@ -2059,7 +2059,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             });
         }
 
-        members.extend(self.class_metadata(self.class, self.line(interface.name), interface.members.as_slice()));
+        members.extend(self.class_metadata(word(self.class), self.line(interface.name), interface.members.as_slice()));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(interface.left_brace), &members);
         let header = interface.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
         let header = self.with_array_access(header, interface.members.as_slice(), interface.name.span);
@@ -2155,7 +2155,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `label`. The property of each computed property with a default body the class does not declare follows it.
     fn trait_members(&mut self, header: Option<&Inheritance>, span: Span) -> Vec<u32> {
         let line = self.line(span);
-        let traits = self.types.used_traits(self.class, header);
+        let traits = self.types.used_traits(word(self.class), header);
         if traits.is_empty() {
             return Vec::new();
         }
@@ -2163,7 +2163,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let names: Vec<u32> = traits.iter().map(|name| self.string(ZEND_NAME_FQ, line, name.as_bytes())).collect();
         let names = self.node(SHARP_AST_NAME_LIST, 0, line, &names);
         let mut adaptations = Vec::new();
-        for (defaults, interface, method, replacing) in self.types.default_bodies(self.class) {
+        for (defaults, interface, method, replacing) in self.types.default_bodies(word(self.class)) {
             let reference = |lowering: &mut Self, defaults: Word| {
                 let defaults = lowering.string(ZEND_NAME_FQ, line, defaults.as_bytes());
                 let name = lowering.string(0, line, method.as_bytes());
@@ -2184,7 +2184,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let adaptations =
             if adaptations.is_empty() { NULL } else { self.node(SHARP_AST_TRAIT_ADAPTATIONS, 0, line, &adaptations) };
         let mut members = vec![self.node(SHARP_AST_USE_TRAIT, 0, line, &[names, adaptations])];
-        for (property, interface) in self.types.default_body_properties(self.class) {
+        for (property, interface) in self.types.default_body_properties(word(self.class)) {
             let name = property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes());
             let this = self.variable(span, b"this");
             let method = self.string(0, line, &super_alias(interface, word(name)));
@@ -2242,7 +2242,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut members = self.trait_members(event.inheritance.as_ref(), event.parameter_list.span());
         members.extend(self.promoted_constructor(event.name.span, &event.parameter_list));
         members.extend(self.string_conversion(&[], event.parameter_list.span(), event.terminator.span()));
-        members.extend(self.class_metadata(self.class, self.line(event.name), &[]));
+        members.extend(self.class_metadata(word(self.class), self.line(event.name), &[]));
         let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
         let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
         let attributes = self.attributes(&event.attribute_lists, None, &[]);
@@ -2286,7 +2286,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let line = self.line(parameter_list);
-        let metadata = self.types.method_metadata(self.class, b"__construct");
+        let metadata = self.types.method_metadata(word(self.class), word("__construct"));
         parameters.extend(self.parameter_metadata(metadata, line));
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
         let mut statements = Vec::new();
@@ -2348,7 +2348,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 _ => unreachable!("check_slice refuses the enum member `{member}`"),
             });
         }
-        members.extend(self.class_metadata(self.class, self.line(r#enum.name), r#enum.members.as_slice()));
+        members.extend(self.class_metadata(word(self.class), self.line(r#enum.name), r#enum.members.as_slice()));
         members.extend(self.parse_methods(&r#enum.members, r#enum.name.span));
         let cases: Vec<Vec<u8>> = r#enum
             .members
@@ -2383,7 +2383,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let name = case.item.name();
             let line = self.line(name.span);
             let case_class = [enum_name, b"\\", name.value].concat();
-            let Some(class) = self.types.class_name(&case_class) else {
+            let Some(class) = self.types.class_name(word(&case_class)) else {
                 unreachable!("the codex declares a class for each case of an enum that runs as classes");
             };
             let mut members = match &case.item {
@@ -2398,7 +2398,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     members
                 }
                 EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => {
-                    let mut members = self.case_object(&case_class, name.span);
+                    let mut members = self.case_object(word(&case_class), name.span);
                     self.class = class;
                     members.extend(self.json_encoding(name.span));
                     self.class = enum_name;
@@ -2407,7 +2407,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
             };
             // A case of a generic enum passes its type arguments to the enum, as `Ok<T, TError>` to `Result<T, TError>`.
-            members.extend(self.class_metadata(&case_class, line, &[]));
+            members.extend(self.class_metadata(word(&case_class), line, &[]));
             let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
             let marker = self.string(ZEND_NAME_FQ, line, b"Sharp\\Struct");
             let header = self.node(SHARP_AST_NAME_LIST, 0, line, &[marker]);
@@ -2432,7 +2432,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// spec section 31, which it keeps as a static field of its own, spec section 11: `instance()` takes them as its
     /// leading own type arguments, as any static method of a generic class does, and makes the object with them,
     /// `\Sharp\Internal\statics(Case::class, '#0')['instance'] ??= new self<#0>()`.
-    fn case_object(&mut self, class: &[u8], name: Span) -> Vec<u32> {
+    fn case_object(&mut self, class: Word, name: Span) -> Vec<u32> {
         self.enter(b"instance");
         let line = self.line(name);
         let type_arguments = self
@@ -2446,7 +2446,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let field = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[null, property_name]);
                 let property = self.statics_property(line, &[field]);
 
-                let declaring = self.string(ZEND_NAME_FQ, line, class);
+                let declaring = self.string(ZEND_NAME_FQ, line, class.as_bytes());
                 let declaring = self.node(SHARP_AST_CLASS_NAME, 0, line, &[declaring]);
                 let text = self.type_text(line, type_arguments);
                 let key = self.node(SHARP_AST_SHARP_TYPE_OF, ZEND_SHARP_TYPE_OF_LIST, line, &[text]);
@@ -2485,7 +2485,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             &[parameters, NULL, body, NULL, NULL],
         );
 
-        let metadata = self.types.method_metadata(class, b"instance");
+        let metadata = self.types.method_metadata(word(class), word("instance"));
         let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
         let object = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
@@ -2535,7 +2535,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             });
         }
 
-        members.extend(self.class_metadata(self.class, self.line(r#enum.name), r#enum.members.as_slice()));
+        members.extend(self.class_metadata(word(self.class), self.line(r#enum.name), r#enum.members.as_slice()));
         members.splice(0..0, self.trait_members(r#enum.inheritance.as_ref(), r#enum.left_brace));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
         let attributes = self.attributes(&r#enum.attribute_lists, None, &[]);
@@ -2589,17 +2589,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn method_declaration(&mut self, method: &Method, flags: u32, first_statements: Option<&[u32]>) -> u32 {
         self.enter(method.name.value);
         if flags & ZEND_ACC_STATIC != 0 {
-            self.static_type_parameters = self.types.static_type_parameters(self.class);
+            self.static_type_parameters = self.types.static_type_parameters(word(self.class));
         }
         // Spec section 32: the container builds a class through its main constructor.
-        let services =
-            if php_method_name(method) == b"__construct" { self.types.constructor_parameters(self.class) } else { &[] };
+        let services = if php_method_name(method) == b"__construct" {
+            self.types.constructor_parameters(word(self.class))
+        } else {
+            &[]
+        };
         let mut parameters = Vec::new();
         for (index, parameter) in method.parameter_list.parameters.iter().enumerate() {
             parameters.push(self.parameter(parameter, services.get(index)));
         }
         let line = self.line(&method.parameter_list);
-        let metadata = self.types.method_metadata(self.class, php_method_name(method));
+        let metadata = self.types.method_metadata(word(self.class), word(php_method_name(method)));
         parameters.extend(self.parameter_metadata(metadata, line));
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
         let body = match first_statements {
@@ -2612,11 +2615,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 };
                 statements.extend_from_slice(first_statements);
                 if let Some(initializer) = &method.initializer
-                    && self.types.parent_constructor(self.class).is_some()
+                    && self.types.parent_constructor(word(self.class)).is_some()
                 {
-                    let parameters = self.types.parent_constructor_parameters(self.class);
-                    let callee =
-                        self.types.parent_constructor(self.class).filter(|constructor| constructor.flags.is_sharp());
+                    let parameters = self.types.parent_constructor_parameters(word(self.class));
+                    let callee = self
+                        .types
+                        .parent_constructor(word(self.class))
+                        .filter(|constructor| constructor.flags.is_sharp());
                     let line = self.line(initializer);
                     let construct = self.call(
                         Some(initializer.keyword.span),
@@ -2632,7 +2637,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     .return_type_hint
                     .as_ref()
                     .map(|return_type| self.types.declared_type(&return_type.hint).clone());
-                self.plain_result = self.types.plain_result(self.class, php_method_name(method)).cloned();
+                self.plain_result = self.types.plain_result(word(self.class), word(php_method_name(method))).cloned();
                 let body = self.method_body(&method.body, method.returns_value(), statements);
                 self.returns = None;
                 self.plain_result = None;
@@ -2642,11 +2647,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         // A method that returns plain PHP's array gives every caller that array, so no caller's array is made of it.
         let crossing = self.crossing_result(method.return_type_hint.as_ref().map(|return_type| &return_type.hint))
-            && self.types.plain_result(self.class, php_method_name(method)).is_none();
+            && self.types.plain_result(word(self.class), word(php_method_name(method))).is_none();
         let (start, return_type) = match &method.return_type_hint {
-            Some(return_type_hint) => {
-                (return_type_hint.span(), self.return_hint(php_method_name(method), &return_type_hint.hint, crossing))
-            }
+            Some(return_type_hint) => (
+                return_type_hint.span(),
+                self.return_hint(word(php_method_name(method)), &return_type_hint.hint, crossing),
+            ),
             None => (method.name.span, NULL),
         };
         let mut attr = if crossing { ZEND_SHARP_RESULT_CROSSES } else { 0 };
@@ -2654,7 +2660,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         // method that declares no return type under it.
         if return_type != NULL
             && first_statements.is_none()
-            && self.types.checks_results_at_call(self.class, php_method_name(method))
+            && self.types.checks_results_at_call(word(self.class), word(php_method_name(method)))
         {
             attr |= ZEND_SHARP_RESULT_CALLER_CHECKED;
         }
@@ -2663,7 +2669,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let return_type = if matches!(php_method_name(method), b"__construct" | b"#statics") {
             return_type
         } else {
-            let function_type = self.types.method_type(self.class, php_method_name(method));
+            let function_type = self.types.method_type(word(self.class), word(php_method_name(method)));
 
             self.function_type(return_type, function_type, attr, self.line(start))
         };
@@ -2674,8 +2680,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let r#override =
             method.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_))).filter(|_| {
                 (first_statements.is_none()
-                    || self.types.class_declaration(self.class).kind != DeclarationKind::Interface)
-                    && self.types.replaces_inherited_method(self.class, php_method_name(method))
+                    || self.types.class_declaration(word(self.class)).kind != DeclarationKind::Interface)
+                    && self.types.replaces_inherited_method(word(self.class), word(php_method_name(method)))
             });
         let internal = self.internal_attribute(&method.modifiers);
         let attributes = self.attributes(&method.attribute_lists, r#override, internal.as_slice());
@@ -2877,7 +2883,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let line = self.line(&operator.parameter_list);
-        let metadata = self.types.method_metadata(self.class, name);
+        let metadata = self.types.method_metadata(word(self.class), word(name));
         parameters.extend(self.parameter_metadata(metadata, line));
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
         let mut prologue = self.collection_parameters(&operator.parameter_list.parameters);
@@ -2912,7 +2918,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             ClassLikeMember::Method(method) => {
                 self.enter(method.name.value);
                 let (parameters, statements) = self.extension_parameters(
-                    method.name.value,
+                    word(method.name.value),
                     std::iter::once(receiver).chain(&method.parameter_list.parameters),
                 );
                 let body = self.method_body(&method.body, method.returns_value(), statements);
@@ -2926,7 +2932,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 };
                 // An extension member carries its result alone, which a generator's elements are read from, spec
                 // section 12, and no function type, since no function value names it.
-                let result = self.types.method_result(self.class, method.name.value).as_deref().map(result_alone);
+                let result =
+                    self.types.method_result(word(self.class), word(method.name.value)).as_deref().map(result_alone);
                 let attr = if crossing { ZEND_SHARP_RESULT_CROSSES } else { 0 };
                 let return_type = self.carried_type(return_type, result, attr, self.line(start));
                 let internal = self.internal_attribute(&method.modifiers);
@@ -2946,7 +2953,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     unreachable!("semantics refuses a computed property without a type");
                 };
                 self.enter(property.variable.name);
-                let (parameters, mut statements) = self.extension_parameters(property.variable.name, [receiver]);
+                let (parameters, mut statements) = self.extension_parameters(word(property.variable.name), [receiver]);
                 let line = self.line(&property.body);
                 let value = self.expression(property.body.expression);
                 statements.push(self.node(SHARP_AST_RETURN, 0, line, &[value]));
@@ -2973,7 +2980,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// gives the object, as a method's body starts with.
     fn extension_parameters<'parameter, 'ast>(
         &mut self,
-        name: &[u8],
+        name: Word,
         parameters: impl IntoIterator<Item = &'parameter FunctionLikeParameter<'ast>> + Clone,
     ) -> (u32, Vec<u32>)
     where
@@ -2988,7 +2995,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let Some(line) = line else {
             unreachable!("an extension's member takes its receiver");
         };
-        let metadata = self.types.method_metadata(self.class, name);
+        let metadata = self.types.method_metadata(word(self.class), name);
         lowered.extend(self.parameter_metadata(metadata, line));
 
         (self.node(SHARP_AST_PARAM_LIST, 0, line, &lowered), self.collection_parameters(parameters))
@@ -3004,20 +3011,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// its parameter list with their bounds, and gives them to the object.
     fn named_constructor(&mut self, constructor: &NamedConstructor, initializer: &ConstructorInitializer) -> u32 {
         self.enter(constructor.name.value);
-        self.static_type_parameters = self.types.static_type_parameters(self.class);
+        self.static_type_parameters = self.types.static_type_parameters(word(self.class));
         let mut parameters = Vec::new();
         for parameter in &constructor.parameter_list.parameters {
             parameters.push(self.parameter(parameter, None));
         }
         let line = self.line(&constructor.parameter_list);
-        let metadata = self.types.method_metadata(self.class, constructor.name.value);
+        let metadata = self.types.method_metadata(word(self.class), word(constructor.name.value));
         parameters.extend(self.parameter_metadata(metadata, line));
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
         let mut statements = self.collection_parameters(&constructor.parameter_list.parameters);
         let line = self.line(initializer);
         let object = self.variable(initializer.keyword.span, b"this#1");
         let class = self.string(ZEND_NAME_FQ, line, self.class);
-        let callee = self.types.sharp_method(self.class, b"__construct");
+        let callee = self.types.sharp_method(word(self.class), word("__construct"));
         let arguments = self.call(
             Some(initializer.keyword.span),
             &initializer.argument_list,
@@ -3117,7 +3124,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::Self_(_) if instantiation.constructor.is_some() => Some(self.class),
             _ => class_name,
         };
-        let type_arguments = constructor_class.and_then(|name| self.types.type_arguments(name, instantiation.span()));
+        let type_arguments =
+            constructor_class.and_then(|name| self.types.type_arguments(word(name), instantiation.span()));
         let class_value = match instantiation.class {
             Expression::Parenthesized(value) => Some(self.expression(value.expression)),
             _ => None,
@@ -3125,14 +3133,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let arguments = match &instantiation.argument_list {
             Some(arguments) => match (class_name, &instantiation.constructor) {
                 (Some(name), None) => {
-                    let parameters = self.types.new_parameters(name);
-                    let callee = self.types.sharp_method(name, b"__construct");
+                    let parameters = self.types.new_parameters(word(name));
+                    let callee = self.types.sharp_method(word(name), word("__construct"));
 
                     self.call(Some(instantiation.span()), arguments, None, parameters, callee, |_, arguments| arguments)
                 }
                 (_, Some(constructor)) => {
-                    let callee =
-                        constructor_class.and_then(|name| self.types.sharp_method(name, constructor.name.value));
+                    let callee = constructor_class
+                        .and_then(|name| self.types.sharp_method(word(name), word(constructor.name.value)));
 
                     self.call(
                         Some(instantiation.span()),
@@ -3186,7 +3194,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let type_arguments = instantiation.type_arguments.as_ref().and_then(|_| {
                     let classes = class_value_classes(self.types.expression_type(value.expression))?;
 
-                    self.types.type_arguments(classes.first()?, instantiation.span())
+                    self.types.type_arguments(word(classes.first()?), instantiation.span())
                 });
 
                 match type_arguments {
@@ -3208,7 +3216,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let class = self.string(ZEND_NAME_NOT_FQ, self.line(keyword), b"static");
                 let new = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
 
-                if self.types.bounds(self.class).is_some() {
+                if self.types.bounds(word(self.class)).is_some() {
                     self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[new, NULL])
                 } else {
                     new
@@ -3298,7 +3306,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let class = receiver_classes(self.types.expression_type(built)).and_then(|classes| classes.first().copied());
         for value in initializer.values.iter() {
             let variable = [b"$", value.name.value].concat();
-            let declared = class.and_then(|class| self.types.plain_property_type(class, &variable));
+            let declared = class.and_then(|class| self.types.plain_property_type(word(class), word(&variable)));
             let stored = self.stored_in_plain_place(line, value.value, declared);
             arguments.push(stored.unwrap_or_else(|| self.expression(value.value)));
 
@@ -3470,7 +3478,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let element = match hint {
             Hint::Generic(list)
                 if !parameter.is_variadic()
-                    && self.types.is_variadic_parameter(self.class, parameter.variable.span) =>
+                    && self.types.is_variadic_parameter(word(self.class), parameter.variable.span) =>
             {
                 list.type_arguments.arguments.first()
             }
@@ -3657,7 +3665,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// gives it, which PHP keeps on the property and checks a write from plain PHP against in its typed property
     /// check. `hint` alone when the type needs no text, or when the property has no type.
     fn property_hint(&mut self, hint: u32, property: &[u8], line: u32) -> u32 {
-        match self.types.property_check(self.class, property) {
+        match self.types.property_check(word(self.class), property) {
             Some(text) if hint != NULL => {
                 let text = self.string(0, line, text.as_bytes());
 
@@ -3753,7 +3761,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(variable);
         let hint = match (r#override, parent) {
             (Some(_), Some(parent))
-                if self.types.member_declaration(parent, variable.name).kind
+                if self.types.member_declaration(word(parent), word(variable.name)).kind
                     == (DeclarationKind::Property { typed: false }) =>
             {
                 NULL
@@ -3764,7 +3772,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let type_parameters = self.type_parameter_names();
         // An override of a property plain PHP declares keeps plain PHP's storage, which holds the PHP array plain PHP
         // code reads, with no crossing of its own, spec section 12.
-        let stored = self.types.plain_property_type(self.class, &[b"$", variable.name].concat());
+        let stored = self.types.plain_property_type(word(self.class), word([b"$", variable.name].concat()));
         let default = match property.initial_value() {
             Some(value)
                 if !property.initial_value_runs_in_constructor(&type_parameters)
@@ -3868,7 +3876,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             && accessor.attribute_lists.is_empty()
             && matches!(returned.unparenthesized(), Expression::ConstantAccess(access)
                 if self.names.binding(&access.name) == Some(Binding::Field))
-            && !self.types.inherits_getter(self.class, property)
+            && !self.types.inherits_getter(word(self.class), property)
     }
 
     /// The hooks of an interface property or an abstract one: each accessor is a hook with no body, as php-src's
@@ -3908,7 +3916,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
         let attributes = self.accessor_attributes(accessor, observers, false);
         let property = self.property.clone();
-        let r#type = self.hook_type(&property, name, body, self.line(accessor));
+        let r#type = self.hook_type(&property, word(name), body, self.line(accessor));
 
         self.declaration(
             SHARP_AST_PROPERTY_HOOK,
@@ -3923,11 +3931,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The whole type the `accessor` hook, `get` or `set`, of `property` carries when it has a `body`, as a method
     /// carries its own, [`Types::accessor_type`], in the slot of its result type, which PHP fills with the property's
     /// type, or null for an abstract hook, whose implementations each carry their own.
-    fn hook_type(&mut self, property: &[u8], accessor: &[u8], body: u32, line: u32) -> u32 {
+    fn hook_type(&mut self, property: &[u8], accessor: Word, body: u32, line: u32) -> u32 {
         if body == NULL {
             return NULL;
         }
-        let function_type = self.types.accessor_type(self.class, property, accessor);
+        let function_type = self.types.accessor_type(word(self.class), property, accessor);
 
         self.function_type(NULL, function_type, 0, line)
     }
@@ -4001,7 +4009,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// [`Self::hook_type`] gives it.
     fn get_hook(&mut self, property: &[u8], start: impl HasSpan, end: impl HasSpan, body: u32) -> u32 {
         let line = self.line(start.span());
-        let r#type = self.hook_type(property, b"get", body, line);
+        let r#type = self.hook_type(property, word("get"), body, line);
 
         self.declaration(SHARP_AST_PROPERTY_HOOK, 0, start, end, b"get", &[NULL, NULL, body, r#type, NULL])
     }
@@ -4148,7 +4156,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let class = self.string(ZEND_NAME_FQ, line, name);
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
         let created = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
-        let type_arguments = self.types.type_arguments(name, behavior.span());
+        let type_arguments = self.types.type_arguments(word(name), behavior.span());
 
         self.with_type_arguments(line, created, type_arguments)
     }
@@ -4231,7 +4239,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// \App\Trimmed())`, created on the property's first read or write.
     fn behavior_call(&mut self, line: u32, index: usize, behavior: &Hint, accessor: &[u8], value: u32) -> u32 {
         let property = self.property.clone();
-        let object = if self.types.is_static_accessor(self.class, &property) {
+        let object = if self.types.is_static_accessor(word(self.class), &property) {
             let name = behavior_slot_name(&property, index);
             self.kept(&name, behavior, behavior, |lowering| lowering.behavior_new(line, behavior))
         } else {
@@ -4279,11 +4287,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn storage(&mut self, line: u32, place_use: PlaceUse) -> u32 {
         // A static property's storage is its class's own static, `self::$name`, or in a generic class the field of the
         // entry of the accessor's own type arguments, which are the class's.
-        if self.types.is_static_accessor(self.class, &self.property) {
+        if self.types.is_static_accessor(word(self.class), &self.property) {
             if let Some(count) = self.static_type_parameters {
                 let property = self.property.clone();
 
-                return self.statics_field(line, self.class, &type_parameters_text(count), &property, place_use);
+                return self.statics_field(line, word(self.class), &type_parameters_text(count), &property, place_use);
             }
             let name = store_text(&mut self.texts, &self.property);
             let name = self.zval(line, sharp_value::SHARP_STRING, |node| node.text = name);
@@ -4319,7 +4327,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let span = r#extern.span();
         let declared = codebase.externs.values().flatten().find(|declaration| declaration.span == span)?;
         let key = codebase.extern_declaration(declared)?;
-        let class = codebase.get_class_like(key.0.as_bytes()).map(|class| class.original_name.as_bytes());
+        let class = codebase.get_class_like(key.0).map(|class| class.original_name.as_bytes());
         let (target, name) = match codebase.function_likes.get(&key) {
             None => (ZEND_ATTRIBUTE_TARGET_CLASS, class?.to_vec()),
             Some(member) => match class {
@@ -4451,7 +4459,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             None => NULL,
         };
 
-        let flags = if self.types.class_declaration(self.class).kind == DeclarationKind::Interface {
+        let flags = if self.types.class_declaration(word(self.class)).kind == DeclarationKind::Interface {
             ZEND_ACC_PUBLIC
         } else {
             modifier_flags_or_private(&constant.modifiers)
@@ -4546,7 +4554,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// class does, and the storage is a field of their entry of `statics_store`.
     fn static_accessors(&mut self, property: &Property, parent: Option<&[u8]>) -> Vec<u32> {
         let mut members = Vec::new();
-        let generic = self.types.static_type_parameters(self.class);
+        let generic = self.types.static_type_parameters(word(self.class));
         let (accessors, behaviors) = match property {
             Property::Hooked(hooked) => {
                 if self.names.has_storage(&hooked.hook_list) && generic.is_none() {
@@ -4595,7 +4603,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
             };
             let return_type = lowering.hint(hint);
-            let function_type = lowering.types.accessor_type(lowering.class, variable.name, b"get");
+            let function_type = lowering.types.accessor_type(word(lowering.class), variable.name, word("get"));
             let return_type = lowering.function_type(return_type, function_type, 0, line);
             let attributes = getter.map_or(NULL, |getter| lowering.accessor_attributes(getter, &[], false));
 
@@ -4634,7 +4642,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let parameter =
                 lowering.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, value_attributes, NULL, NULL]);
             let attributes = lowering.accessor_attributes(setter, &observers, false);
-            let function_type = lowering.types.accessor_type(lowering.class, variable.name, b"set");
+            let function_type = lowering.types.accessor_type(word(lowering.class), variable.name, word("set"));
             let return_type = lowering.function_type(NULL, function_type, 0, line);
 
             lowering.accessor_method(variable, b"set", write_visibility, &[parameter], body, return_type, attributes)
@@ -4718,7 +4726,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         self.static_classes(access)?
             .iter()
-            .any(|class| self.types.is_static_accessor(class, name.value))
+            .any(|class| self.types.is_static_accessor(word(class), name.value))
             .then_some((access, name.value))
     }
 
@@ -4810,7 +4818,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(variable);
         let mut parameters = parameters.to_vec();
         if self.static_type_parameters.is_some() {
-            let bounds = self.types.bounds(self.class);
+            let bounds = self.types.bounds(word(self.class));
             parameters.extend(self.parameter_metadata((bounds, None), line));
         }
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
@@ -4834,7 +4842,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let variable = property.first_variable();
         let line = self.line(variable);
         let name = self.string(0, line, variable.name);
-        let stored = self.types.plain_property_type(self.class, &[b"$", variable.name].concat());
+        let stored = self.types.plain_property_type(word(self.class), word([b"$", variable.name].concat()));
         let value = self.stored_in_plain_place(line, value, stored).unwrap_or_else(|| self.expression(value));
         let this = self.variable(variable.span, b"this");
         let runs_set_hook = matches!(property, Property::Hooked(hooked) if hooked.behaviors.is_none()
@@ -4910,8 +4918,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// it. PHP# checks the result itself. An override of a plain PHP method that declares a return type keeps `mixed`,
     /// which PHP requires of it, and one whose result PHP would declare `\Sharp\Map|array` keeps that method's type, as
     /// [`Types::plain_result`] says. A result plain PHP gets the PHP array of, `crossing`, is [`Self::result_hint`]'s.
-    fn return_hint(&mut self, method: &[u8], hint: &Hint, crossing: bool) -> u32 {
-        if let Some(plain) = self.types.plain_result(self.class, method) {
+    fn return_hint(&mut self, method: Word, hint: &Hint, crossing: bool) -> u32 {
+        if let Some(plain) = self.types.plain_result(word(self.class), method) {
             return self.declared_type(plain, self.line(hint));
         }
         let union = match without_readonly(hint) {
@@ -4920,7 +4928,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             hint => hint,
         };
         if union_members(union).into_iter().any(|member| matches!(self.erase(member), PhpType::Mixed))
-            && self.types.overridden_php_result(self.class, method).is_none()
+            && self.types.overridden_php_result(word(self.class), method).is_none()
         {
             return NULL;
         }
@@ -5004,7 +5012,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The PHP type of the property `property`, which PHP# declares with the type `hint`, the type the parent declares
     /// for an override of a typed plain PHP property, as [`Self::property_type`] has it without its type text.
     fn php_property_type(&mut self, hint: &Hint, property: &[u8], line: u32) -> u32 {
-        match self.types.narrowed_root_type(self.class, property) {
+        match self.types.narrowed_root_type(word(self.class), property) {
             Some(root) => self.declared_type(root, line),
             None => self.hint(hint),
         }
@@ -5924,7 +5932,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::UnaryPrefix(unary) => {
                 if let UnaryPrefixOperator::Negation(operator) = unary.operator
                     && let Some(name) = php_operator_name(&BinaryOperator::Subtraction(operator), 1)
-                    && let Some(owner) = self.types.operator_owner(name, &[self.types.expression_type(unary.operand)])
+                    && let Some(owner) =
+                        self.types.operator_owner(word(name), &[self.types.expression_type(unary.operand)])
                 {
                     let operand = self.expression(unary.operand);
 
@@ -6394,10 +6403,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let ClassLikeMemberSelector::Identifier(name) = member else {
             unreachable!("check_slice refuses the member name `{member}`");
         };
-        let kind = agreed_kind(classes.iter().map(|class| self.types.member_declaration(class, name.value).kind));
+        let kind =
+            agreed_kind(classes.iter().map(|class| self.types.member_declaration(word(class), word(name.value)).kind));
         let line = self.line(read);
         if kind == DeclarationKind::CaseObject {
-            let case = self.types.member_declaration(classes[0], name.value);
+            let case = self.types.member_declaration(word(classes[0]), word(name.value));
             let case_class = self.string(ZEND_NAME_FQ, line, case.class.as_bytes());
             let instance = self.string(0, line, case.name.as_bytes());
             // A plain case of a generic enum is the object of the type arguments the read gives it, spec section 31.
@@ -6422,7 +6432,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(SHARP_AST_CLASS_CONST, 0, line, &[class, member])
             }
             DeclarationKind::StaticProperty => {
-                self.static_property(read, class, classes, name.value, member, line, PlaceUse::Read)
+                self.static_property(read, class, classes, word(name.value), member, line, PlaceUse::Read)
             }
             DeclarationKind::StaticMethod => self.method_value(read, SHARP_AST_STATIC_CALL, class, member),
             kind => unreachable!("a class's member read names a static member, not a {kind:?}"),
@@ -6471,15 +6481,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         access: &Expression,
         class: u32,
         classes: &[&[u8]],
-        name: &[u8],
+        name: Word,
         member: u32,
         line: u32,
         place_use: PlaceUse,
     ) -> u32 {
         let type_arguments = self.types.statics_type_arguments(access);
         // A static that runs accessors is read through its hidden `name#get`, `Class::{'name#get'}()`.
-        if classes.iter().any(|class| self.types.is_static_accessor(class, name)) {
-            let method = self.string(0, line, &[name, b"#get"].concat());
+        if classes.iter().any(|class| self.types.is_static_accessor(word(class), name.as_bytes())) {
+            let method = self.string(0, line, &[name.as_bytes(), b"#get"].concat());
             let arguments: Vec<u32> = type_arguments
                 .map(|type_arguments| self.type_arguments_argument(line, &type_arguments))
                 .into_iter()
@@ -6492,10 +6502,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, member]);
         };
 
-        let declaring = self.types.member_declaration(classes[0], name).class;
-        let declaring = self.types.class_declaration(declaring.as_bytes()).name;
+        let declaring = self.types.member_declaration(word(classes[0]), name).class;
+        let declaring = self.types.class_declaration(declaring).name;
 
-        self.statics_field(line, declaring.as_bytes(), &type_arguments, name, place_use)
+        self.statics_field(line, declaring, &type_arguments, name.as_bytes(), place_use)
     }
 
     /// The class name node of `typeof(X)` of a class `X`, which PHP writes `X::class`: the name `X`, without the type
@@ -6525,8 +6535,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let kind = agreed_kind(receivers.into_iter().map(|classes| {
             classes
                 .iter()
-                .find_map(|class| self.types.read_member(class, name.value))
-                .unwrap_or_else(|| self.types.member_declaration(classes[0], name.value))
+                .find_map(|class| self.types.read_member(word(class), word(name.value)))
+                .unwrap_or_else(|| self.types.member_declaration(word(classes[0]), word(name.value)))
                 .kind
         }));
 
@@ -7048,8 +7058,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let operator = compound_operator(&assignment.operator)?;
         let name = php_operator_name(&operator, 2)?;
         let types = self.types;
-        let owner = types
-            .operator_owner(name, &[types.expression_type(assignment.lhs), types.expression_type(assignment.rhs)])?;
+        let owner = types.operator_owner(
+            word(name),
+            &[types.expression_type(assignment.lhs), types.expression_type(assignment.rhs)],
+        )?;
 
         Some((owner, name))
     }
@@ -7150,8 +7162,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let name = php_operator_name(&declared, 2)?;
         let types = self.types;
-        let owner =
-            types.operator_owner(name, &[types.expression_type(binary.lhs), types.expression_type(binary.rhs)])?;
+        let owner = types
+            .operator_owner(word(name), &[types.expression_type(binary.lhs), types.expression_type(binary.rhs)])?;
         let operands = [self.expression(binary.lhs), self.expression(binary.rhs)];
         let call = self.operator_call(line, owner, name, &operands);
 
@@ -7181,7 +7193,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// a `CALLABLE_CONVERT`, its first-class callable. An interface's operator, spec section 19, is the method of its
     /// trait that no class replaces, reached on the trait: `\App\Priced\Defaults::{'op_Comparison@App\Priced'}`.
     fn operator_method(&mut self, line: u32, class: Word, name: &[u8], arguments: u32) -> u32 {
-        let (class, name) = if self.types.class_declaration(class.as_bytes()).kind == DeclarationKind::Interface {
+        let (class, name) = if self.types.class_declaration(class).kind == DeclarationKind::Interface {
             (defaults_trait_name(class.as_bytes()), super_alias(class, word(name)))
         } else {
             (class, name.to_vec())
@@ -7463,7 +7475,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let class = self.string(ZEND_NAME_FQ, line, ERR);
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[error]);
         let new = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
-        let type_arguments = self.types.type_arguments(ERR, expression.span());
+        let type_arguments = self.types.type_arguments(word(ERR), expression.span());
         let new = self.with_type_arguments(line, new, type_arguments);
         let returned = self.node(SHARP_AST_RETURN, 0, line, &[new]);
 
@@ -7842,7 +7854,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.crossing_array(self.types.expression_type(value)).is_some()
             && self
                 .types
-                .declared_member(self.names.get(&class.name), name.value)
+                .declared_member(word(self.names.get(&class.name)), word(name.value))
                 .is_some_and(|member| member.kind == DeclarationKind::Constant)
     }
 
@@ -7986,16 +7998,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         });
         let name = names.next().flatten()?;
 
-        (names.all(|other| other == Some(name)) && self.types.backing_type(name).is_some()).then_some(name)
+        (names.all(|other| other == Some(name)) && self.types.backing_type(word(name)).is_some()).then_some(name)
     }
 
     /// `\App\Status::from($value)`, its value cast to a `string` for a `string`-backed enum, as PHP holds an all-digit
     /// `string` key as an `int`.
-    fn backed_case(&mut self, line: u32, class: &[u8], mut value: u32) -> u32 {
+    fn backed_case(&mut self, line: u32, class: Word, mut value: u32) -> u32 {
         if !self.types.backing_type(class).is_some_and(TAtomic::is_int) {
             value = self.node(SHARP_AST_CAST, IS_STRING, line, &[value]);
         }
-        let name = self.string(ZEND_NAME_FQ, line, class);
+        let name = self.string(ZEND_NAME_FQ, line, class.as_bytes());
         let method = self.string(0, line, b"from");
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
 
@@ -8096,7 +8108,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let [key, value] = ["key", "value"].map(|base| self.hidden(base));
                 let key_read = self.variable(span, &key);
                 let key_text = match crossing {
-                    KeyCrossing::Case(class) => self.backed_case(line, class, key_read),
+                    KeyCrossing::Case(class) => self.backed_case(line, word(class), key_read),
                     _ => self.node(SHARP_AST_CAST, IS_STRING, line, &[key_read]),
                 };
                 let key_text = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[key_text, NULL]);
@@ -8368,7 +8380,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let line = self.line(target);
                     let property = self.member(&access.property);
 
-                    self.static_property(target, class, &classes, name.value, property, line, place_use)
+                    self.static_property(target, class, &classes, word(name.value), property, line, place_use)
                 }
                 // A plain PHP property the checker reads as a `List` is written as itself.
                 None => self.arriving(target, Arrival::Plain),
@@ -8526,7 +8538,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         // enum gets the type arguments the call fixed, spec section 31.
         if let Some(class) = self.names.static_call_class(call)
             && let ClassLikeMemberSelector::Identifier(method) = &call.method
-            && let Some(case) = self.types.enum_case_class(self.names.get(&class.name), method.value)
+            && let Some(case) = self.types.enum_case_class(word(self.names.get(&class.name)), word(method.value))
         {
             let name = self.string(ZEND_NAME_FQ, self.line(method), case.as_bytes());
             let arguments = self.arguments(&call.argument_list);
@@ -8579,7 +8591,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             if static_property_call && let ClassLikeMemberSelector::Identifier(name) = &call.method {
                 let property =
-                    this.static_property(expression, object, &classes, name.value, method, line, PlaceUse::Read);
+                    this.static_property(expression, object, &classes, word(name.value), method, line, PlaceUse::Read);
 
                 return this.node(SHARP_AST_CALL, 0, line, &[property, arguments]);
             }
@@ -8716,13 +8728,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         self.with_held_receiver(line, receiver, |this| {
             let is_object = this.instance_of_any(line, receiver, classes);
-            let name = extension.name.as_bytes();
+            let name = extension.name;
             let own_kind = agreed_kind(classes.iter().map(|class| {
-                let class = class.as_bytes();
-                this.types.read_member(class, name).unwrap_or_else(|| this.types.member_declaration(class, name)).kind
+                this.types.read_member(*class, name).unwrap_or_else(|| this.types.member_declaration(*class, name)).kind
             }));
             let object = this.expression(receiver);
-            let member = this.string(0, line, name);
+            let member = this.string(0, line, name.as_bytes());
             let own = match own_kind {
                 DeclarationKind::Method { .. } | DeclarationKind::StaticMethod => {
                     this.method_value(access, SHARP_AST_METHOD_CALL, object, member)
@@ -9081,7 +9092,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             _ => unreachable!("check_slice refuses the member name `{method}`"),
         };
         let (properties, methods): (Vec<Word>, Vec<Word>) =
-            kinds.objects.iter().copied().partition(|class| self.types.holds_function(class.as_bytes(), name));
+            kinds.objects.iter().copied().partition(|class| self.types.holds_function(*class, word(name)));
         let mut own = Vec::new();
         for (classes, property) in [(methods, false), (properties, true)] {
             if classes.is_empty() {
@@ -9218,7 +9229,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         // The receiver is the static method's first parameter.
         if let Some(list) = arguments
-            && let Some(callee) = self.types.sharp_method(extension.class.as_bytes(), extension.name.as_bytes())
+            && let Some(callee) = self.types.sharp_method(extension.class, extension.name)
         {
             values.extend(self.caller_positions(access.span(), list, callee, 1));
         }

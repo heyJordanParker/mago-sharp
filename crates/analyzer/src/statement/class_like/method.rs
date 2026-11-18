@@ -114,7 +114,7 @@ fn check_to_string<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadat
 where
     A: Arena,
 {
-    let Some(method) = context.codebase.get_method(class.name.as_bytes(), b"toString") else {
+    let Some(method) = context.codebase.get_method(class.name, word("toString")) else {
         unreachable!("the codex scans each method the analyzer analyzes");
     };
     let Some(fault) = text_method_fault(method) else {
@@ -165,7 +165,7 @@ where
         || block_context
             .scope
             .get_class_like()
-            .is_some_and(|class| context.codebase.method_is_overriding(class.name.as_bytes(), name))
+            .is_some_and(|class| context.codebase.method_is_overriding(class.name, word(name)))
     {
         return;
     }
@@ -291,7 +291,7 @@ fn check_hidden_member<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMet
 where
     A: Arena,
 {
-    let extension = MethodIdentifier::new(class.name, class.method_key(member.name));
+    let extension = MethodIdentifier::new(class.name, class.method_key(word(member.name)));
     let Some(receiver) = context
         .codebase
         .get_method_by_id(&extension)
@@ -309,7 +309,7 @@ where
         let part = TUnion::from_atomic(part.clone());
         let hidden = context
             .codebase
-            .get_classes_hidden_by_extension(&part, member.name)
+            .get_classes_hidden_by_extension(&part, word(member.name))
             .first()
             .copied()
             .or_else(|| (!library).then(|| collection_member_hiding(context, &part, member.name)).flatten());
@@ -326,8 +326,8 @@ where
     let name = mago_bytes::BytesDisplay(member.name);
     let property = [b"$", member.name].concat();
     let codebase = context.codebase;
-    let real_member = if codebase.property_exists(declaring_class.as_bytes(), &property)
-        || codebase.magic_property_exists(declaring_class.as_bytes(), &property)
+    let real_member = if codebase.property_exists(*declaring_class, word(&property))
+        || codebase.magic_property_exists(*declaring_class, word(&property))
     {
         name.to_string()
     } else {
@@ -372,7 +372,7 @@ where
     };
 
     let method_name = word(name);
-    let method_name_key = class_like_metadata.method_key(name);
+    let method_name_key = class_like_metadata.method_key(word(name));
     if context.settings.diff
         && context.codebase.safe_symbol_members.contains(&(class_like_metadata.name, method_name_key))
     {
@@ -517,8 +517,7 @@ where
             artifacts.method_calls_parent_initializer.insert(method_key, parent_initializer_name);
         }
 
-        let is_overriding =
-            context.codebase.method_is_overriding(class_like_metadata.name.as_bytes(), method_name.as_bytes());
+        let is_overriding = context.codebase.method_is_overriding(class_like_metadata.name, method_name);
 
         // An override keeps the parameter types of the method it overrides, so only a method that declares its
         // own parameters can drop a `?`.
@@ -612,9 +611,9 @@ where
         (Expression::Parent(initializer.keyword), class.direct_parent_class)
     };
 
-    if constructed.is_some_and(|constructed| {
-        context.codebase.get_declaring_method(constructed.as_bytes(), b"__construct").is_some()
-    }) {
+    if constructed
+        .is_some_and(|constructed| context.codebase.get_declaring_method(constructed, word("__construct")).is_some())
+    {
         let method = ClassLikeMemberSelector::Identifier(LocalIdentifier {
             span: initializer.keyword.span,
             value: b"__construct",
@@ -665,12 +664,12 @@ pub(super) fn check_super_call<A>(
     A: Arena,
 {
     let (Some(base), Some(constructor_of_base)) =
-        (class.direct_parent_class, context.codebase.get_parent_constructor(class.name.as_bytes()))
+        (class.direct_parent_class, context.codebase.get_parent_constructor(class.name))
     else {
         return;
     };
     // A struct can't be inherited, which `check_class_like_extends` reports, so its constructor isn't the class's to call.
-    if context.codebase.get_class_like(base.as_bytes()).is_some_and(|base| base.flags.is_struct()) {
+    if context.codebase.get_class_like(base).is_some_and(|base| base.flags.is_struct()) {
         return;
     }
     let constructor = members.iter().find_map(|member| match member {
@@ -778,7 +777,7 @@ fn check_hash<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, op
 where
     A: Arena,
 {
-    let has_hash = context.codebase.get_declaring_method(class.name.as_bytes(), b"hash").is_some_and(|hash| {
+    let has_hash = context.codebase.get_declaring_method(class.name, word("hash")).is_some_and(|hash| {
         hash.method_metadata.as_ref().is_some_and(|method| method.visibility.is_public() && !method.is_static)
             && hash.return_type_declaration_metadata.as_ref().is_some_and(|returned| returned.type_union.is_int())
     });

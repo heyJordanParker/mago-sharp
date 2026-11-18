@@ -35,17 +35,17 @@ where
         return;
     }
 
-    let class = class_like_metadata.name.as_bytes();
+    let class = class_like_metadata.name;
     let parent_constructors = class_like_metadata
         .all_parent_classes
         .iter()
-        .filter_map(|parent| context.codebase.get_method(parent.as_bytes(), b"__construct"));
+        .filter_map(|parent| context.codebase.get_method(*parent, word("__construct")));
     let assigned: WordSet = class_like_metadata
         .methods
         .iter()
-        .filter_map(|method| context.codebase.get_method(class, method.as_bytes()))
+        .filter_map(|method| context.codebase.get_method(class, *method))
         .filter(|method| method.flags.is_named_constructor())
-        .chain(context.codebase.get_declaring_method(class, b"__construct"))
+        .chain(context.codebase.get_declaring_method(class, word("__construct")))
         .chain(parent_constructors)
         .filter_map(|constructor| constructor.method_metadata.as_ref())
         .flat_map(|constructor| constructor.assigned_properties.iter().copied())
@@ -53,7 +53,7 @@ where
     for (name, declaring) in class_like_metadata.declaring_property_ids.iter().sorted_by_key(|(name, _)| **name) {
         let Some((declaring, property)) = context
             .codebase
-            .get_class_like(declaring.as_bytes())
+            .get_class_like(*declaring)
             .filter(|declaring| declaring.flags.is_sharp())
             .and_then(|declaring| Some((declaring, declaring.properties.get(name)?)))
         else {
@@ -135,7 +135,7 @@ where
 
     let mut uninitialized_properties = Vec::new();
     for (&name, declaring_class) in class_like_metadata.declaring_property_ids.iter().sorted_by_key(|(k, _)| *k) {
-        let Some(declaring_meta) = context.codebase.get_class_like(declaring_class.as_bytes()) else {
+        let Some(declaring_meta) = context.codebase.get_class_like(*declaring_class) else {
             continue;
         };
 
@@ -217,7 +217,7 @@ where
         // Due to per-file artifacts, we can't verify trait constructor behavior across files,
         // so we trust that a trait's constructor initializes properties declared by the same trait
         let constructor_is_from_trait =
-            context.codebase.get_class_like(constructor_declaring_class.as_bytes()).is_some_and(|m| m.kind.is_trait());
+            context.codebase.get_class_like(constructor_declaring_class).is_some_and(|m| m.kind.is_trait());
 
         // For inherited properties, check if the parent constructor, trait constructor, or class initializers initialize them
         if !inherited_uninitialized.is_empty() {
@@ -243,10 +243,8 @@ where
                         && let Some(prop_declaring_class) =
                             class_like_metadata.declaring_property_ids.get(prop_name).copied()
                     {
-                        let prop_is_from_trait = context
-                            .codebase
-                            .get_class_like(prop_declaring_class.as_bytes())
-                            .is_some_and(|m| m.kind.is_trait());
+                        let prop_is_from_trait =
+                            context.codebase.get_class_like(prop_declaring_class).is_some_and(|m| m.kind.is_trait());
                         if prop_is_from_trait {
                             return false; // Trait constructor + trait property - trust it
                         }
@@ -446,7 +444,7 @@ where
             if let Some(props) = artifacts.method_initialized_properties.get(&method_key) {
                 if current_class == origin_class {
                     all_initialized.extend(props.iter().copied());
-                } else if let Some(origin_meta) = context.codebase.get_class_like(origin_class.as_bytes()) {
+                } else if let Some(origin_meta) = context.codebase.get_class_like(origin_class) {
                     for prop_name in props {
                         let is_inherited = origin_meta
                             .declaring_property_ids
@@ -459,12 +457,12 @@ where
                 }
             } else if method == word("__construct")
                 && current_class != origin_class
-                && !context.codebase.method_is_abstract(current_class.as_bytes(), b"__construct")
+                && !context.codebase.method_is_abstract(current_class, word("__construct"))
             {
                 // The constructor's body is in another file, so nothing was recorded for it here.
                 // Defer responsibility for initializing its class's properties to that constructor.
                 // A class that only inherits a constructor initializes nothing itself.
-                if let Some(current_meta) = context.codebase.get_class_like(current_class.as_bytes())
+                if let Some(current_meta) = context.codebase.get_class_like(current_class)
                     && current_meta
                         .declaring_method_ids
                         .get(&word("__construct"))
@@ -495,25 +493,25 @@ where
 
         let method_key = (current_class, current_method);
         if artifacts.method_calls_parent_constructor.get(&method_key) == Some(&true)
-            && let Some(class_meta) = context.codebase.get_class_like(current_class.as_bytes())
+            && let Some(class_meta) = context.codebase.get_class_like(current_class)
             && let Some(parent_name) = &class_meta.direct_parent_class
-            && let Some(parent_meta) = context.codebase.get_class_like(parent_name.as_bytes())
+            && let Some(parent_meta) = context.codebase.get_class_like(*parent_name)
             && let Some(method_id) = parent_meta.declaring_method_ids.get(&word("__construct"))
         {
             // Find closest constructor-declaring ancestor
             let declaring_class_name = method_id.get_class_name();
             let declaring_class_is_final = context
                 .codebase
-                .get_class_like(declaring_class_name.as_bytes())
+                .get_class_like(declaring_class_name)
                 .is_some_and(|declaring_meta| declaring_meta.flags.is_final());
 
             work_queue.push((declaring_class_name, word("__construct"), declaring_class_is_final, false, origin_class));
         }
 
         if let Some(parent_initializer_name) = artifacts.method_calls_parent_initializer.get(&method_key)
-            && let Some(class_meta) = context.codebase.get_class_like(current_class.as_bytes())
+            && let Some(class_meta) = context.codebase.get_class_like(current_class)
             && let Some(parent_name) = &class_meta.direct_parent_class
-            && let Some(parent_meta) = context.codebase.get_class_like(parent_name.as_bytes())
+            && let Some(parent_meta) = context.codebase.get_class_like(*parent_name)
             && let Some(method_id) = parent_meta.declaring_method_ids.get(parent_initializer_name)
         {
             let declaring_class_name = method_id.get_class_name();
@@ -566,7 +564,7 @@ where
 
     let mut current_class = class_like_metadata.direct_parent_class.as_ref();
     while let Some(parent_name) = current_class {
-        let Some(parent_meta) = context.codebase.get_class_like(parent_name.as_bytes()) else {
+        let Some(parent_meta) = context.codebase.get_class_like(*parent_name) else {
             break;
         };
 
@@ -608,7 +606,7 @@ where
             let mut found = false;
             let mut check_class = class_like_metadata.direct_parent_class.as_ref();
             while let Some(parent_name) = check_class {
-                let Some(parent_meta) = context.codebase.get_class_like(parent_name.as_bytes()) else {
+                let Some(parent_meta) = context.codebase.get_class_like(*parent_name) else {
                     break;
                 };
                 if context
@@ -627,7 +625,7 @@ where
     if has_any_initializer {
         let mut current_class = class_like_metadata.direct_parent_class.as_ref();
         while let Some(parent_name) = current_class {
-            let Some(parent_meta) = context.codebase.get_class_like(parent_name.as_bytes()) else {
+            let Some(parent_meta) = context.codebase.get_class_like(*parent_name) else {
                 break;
             };
 
@@ -665,19 +663,19 @@ where
         return true;
     }
 
-    if let Some(class_meta) = context.codebase.get_class_like(class_name.as_bytes())
+    if let Some(class_meta) = context.codebase.get_class_like(class_name)
         && context.is_class_initializer_for(class_meta, method_name)
     {
         return true;
     }
 
-    if let Some(visibility) = context.codebase.get_method_visibility(class_name.as_bytes(), method_name.as_bytes())
+    if let Some(visibility) = context.codebase.get_method_visibility(class_name, method_name)
         && visibility.is_private()
     {
         return true;
     }
 
-    context.codebase.method_is_final(class_name.as_bytes(), method_name.as_bytes())
+    context.codebase.method_is_final(class_name, method_name)
 }
 
 /// Check if parent class constructor initializes the required properties.
@@ -699,7 +697,7 @@ where
     let mut current_class = class_like_metadata.direct_parent_class.as_ref();
 
     while let Some(parent_name) = current_class {
-        let Some(parent_meta) = context.codebase.get_class_like(parent_name.as_bytes()) else {
+        let Some(parent_meta) = context.codebase.get_class_like(*parent_name) else {
             return false;
         };
 
@@ -795,7 +793,7 @@ fn report_uninitialized_property<A>(
     if let Some(span) = prop_span {
         let message = if is_inherited
             && let Some(decl_class) = declaring_class
-            && let Some(decl_meta) = context.codebase.get_class_like(decl_class.as_bytes())
+            && let Some(decl_meta) = context.codebase.get_class_like(decl_class)
         {
             format!("Property declared in `{}`", display_class_like_name(context, decl_meta.original_name))
         } else {

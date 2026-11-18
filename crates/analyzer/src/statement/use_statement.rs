@@ -42,13 +42,18 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Use<'arena> {
             UseItems::Sequence(sequence) => {
                 for item in sequence.items.iter() {
                     let name = php_name(&item.name);
-                    check_class_like_import(context, &item.name, trim_start_byte(&name, b'\\'));
+                    check_class_like_import(context, &item.name, word(trim_start_byte(&name, b'\\')));
                 }
             }
             UseItems::TypedSequence(typed_sequence) => {
                 for item in typed_sequence.items.iter() {
                     let name = php_name(&item.name);
-                    check_typed_import(context, &item.name, trim_start_byte(&name, b'\\'), &typed_sequence.r#type);
+                    check_typed_import(
+                        context,
+                        &item.name,
+                        word(trim_start_byte(&name, b'\\')),
+                        &typed_sequence.r#type,
+                    );
                 }
             }
             UseItems::TypedList(typed_list) => {
@@ -56,7 +61,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Use<'arena> {
                 let prefix = trim_start_byte(&namespace, b'\\');
                 for item in typed_list.items.iter() {
                     let fqn = concat_word!(prefix, b"\\", item.name.value());
-                    check_typed_import(context, &item.name, fqn.as_bytes(), &typed_list.r#type);
+                    check_typed_import(context, &item.name, fqn, &typed_list.r#type);
                 }
             }
             UseItems::MixedList(mixed_list) => {
@@ -67,7 +72,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Use<'arena> {
                     check_maybe_typed_import(
                         context,
                         &maybe_typed_item.item.name,
-                        fqn.as_bytes(),
+                        fqn,
                         maybe_typed_item.r#type.as_ref(),
                     );
                 }
@@ -78,12 +83,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Use<'arena> {
     }
 }
 
-fn check_class_like_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>, fqn: &[u8])
+fn check_class_like_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>, fqn: Word)
 where
     A: Arena,
 {
     if !context.codebase.class_like_exists(fqn) && !context.codebase.namespace_exists(fqn) {
-        report_non_existent_import(context, name.span(), fqn, "class, interface, trait, or enum");
+        report_non_existent_import(context, name.span(), fqn.as_bytes(), "class, interface, trait, or enum");
     }
 }
 
@@ -101,7 +106,9 @@ where
     // The class the import names, which a namespace the project gives a library maps to PHP's root class, as
     // `WordPress.WP_Post` to `WP_Post`.
     let class = context.resolved_names.get(name);
-    if (context.codebase.class_like_exists(class) && !is_php_closure(class) && !is_hidden_php_class(context, class))
+    if (context.codebase.class_like_exists(word(class))
+        && !is_php_closure(class)
+        && !is_hidden_php_class(context, class))
         || holds_function_or_constant(context.codebase, &fqn)
     {
         return false;
@@ -114,7 +121,7 @@ where
     // The namespace PHP# code reaches the function or constant `last` through: the namespace the import writes, or
     // for one of PHP's root namespace, the namespace an `extern namespace` line gives it. One of PHP's built-ins has
     // neither, unless a line names it, which is an error of its own, so PHP# code names none of them.
-    let reached = || namespace.or_else(|| context.codebase.extern_namespace_of(last));
+    let reached = || namespace.or_else(|| context.codebase.extern_namespace_of(word(last)));
     let reach = |namespace: Word, form: &dyn Fn(&str) -> String| {
         let namespace = namespace.to_string().replace('\\', ".");
         let short = namespace.rsplit('.').next().unwrap_or(&namespace).to_owned();
@@ -123,14 +130,14 @@ where
     };
     let last_name = String::from_utf8_lossy(last);
     let function = match namespace {
-        Some(namespace) => namespace_function(context.codebase, namespace, last),
-        None => context.codebase.get_function(last),
+        Some(namespace) => namespace_function(context.codebase, namespace, word(last)),
+        None => context.codebase.get_function(word(last)),
     }
     .filter(|_| last.first().is_some_and(u8::is_ascii_lowercase))
     .and_then(|_| reached());
     let constant = match namespace {
-        Some(namespace) => namespace_constant(context.codebase, namespace, last),
-        None => context.codebase.get_constant(last),
+        Some(namespace) => namespace_constant(context.codebase, namespace, word(last)),
+        None => context.codebase.get_constant(word(last)),
     }
     .and_then(|_| reached());
 
@@ -257,19 +264,19 @@ where
     );
 }
 
-fn check_typed_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>, fqn: &[u8], use_type: &UseType<'_>)
+fn check_typed_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>, fqn: Word, use_type: &UseType<'_>)
 where
     A: Arena,
 {
     match use_type {
         UseType::Function(_) => {
             if !context.codebase.function_exists(fqn) {
-                report_non_existent_import(context, name.span(), fqn, "function");
+                report_non_existent_import(context, name.span(), fqn.as_bytes(), "function");
             }
         }
         UseType::Const(_) => {
             if !context.codebase.constant_exists(fqn) {
-                report_non_existent_import(context, name.span(), fqn, "constant");
+                report_non_existent_import(context, name.span(), fqn.as_bytes(), "constant");
             }
         }
     }
@@ -278,7 +285,7 @@ where
 fn check_maybe_typed_import<A>(
     context: &mut Context<'_, '_, A>,
     name: &Identifier<'_>,
-    fqn: &[u8],
+    fqn: Word,
     use_type: Option<&UseType<'_>>,
 ) where
     A: Arena,
@@ -286,17 +293,17 @@ fn check_maybe_typed_import<A>(
     match use_type {
         Some(UseType::Function(_)) => {
             if !context.codebase.function_exists(fqn) {
-                report_non_existent_import(context, name.span(), fqn, "function");
+                report_non_existent_import(context, name.span(), fqn.as_bytes(), "function");
             }
         }
         Some(UseType::Const(_)) => {
             if !context.codebase.constant_exists(fqn) {
-                report_non_existent_import(context, name.span(), fqn, "constant");
+                report_non_existent_import(context, name.span(), fqn.as_bytes(), "constant");
             }
         }
         None => {
             if !context.codebase.class_like_exists(fqn) && !context.codebase.namespace_exists(fqn) {
-                report_non_existent_import(context, name.span(), fqn, "class, interface, trait, or enum");
+                report_non_existent_import(context, name.span(), fqn.as_bytes(), "class, interface, trait, or enum");
             }
         }
     }
