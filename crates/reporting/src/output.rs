@@ -4,6 +4,10 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
 
+/// The bytes a report gathers before it writes them. Standard output writes each line on its own and standard error
+/// each piece of a line, one system call apiece; a report of 104,000 issues wrote 13 MB in 0.75 s of the main thread.
+const REPORT_BUFFER: usize = 64 * 1024;
+
 /// Target for report output.
 #[derive(strum::Display, strum::EnumString, strum::VariantNames)]
 #[strum(serialize_all = "kebab-case")]
@@ -64,8 +68,8 @@ impl ReportingTarget {
     /// A boxed writer that can be written to.
     pub(crate) fn resolve(&self) -> Box<dyn Write + '_> {
         match self {
-            ReportingTarget::Stdout => Box::new(io::stdout()),
-            ReportingTarget::Stderr => Box::new(io::stderr()),
+            ReportingTarget::Stdout => Box::new(io::BufWriter::with_capacity(REPORT_BUFFER, io::stdout().lock())),
+            ReportingTarget::Stderr => Box::new(io::BufWriter::with_capacity(REPORT_BUFFER, io::stderr().lock())),
             ReportingTarget::Writer(writer) => Box::new(LockedWriter { writer: Arc::clone(writer) }),
         }
     }
