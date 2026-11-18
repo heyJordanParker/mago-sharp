@@ -80,6 +80,14 @@ impl Server {
         self
     }
 
+    /// Keep, from each analysis from scratch, what it gives the lowering of each PHP# file, so [`Server::compile`]
+    /// lowers each file from the analysis it already made instead of analyzing it again.
+    #[must_use]
+    pub fn keeping_lowering_inputs(mut self) -> Self {
+        self.service = self.service.keeping_lowering_inputs();
+        self
+    }
+
     /// Analyze the whole workspace, but report only the issues in the files `scope` holds, plus the
     /// issues that name no file. An issue is reported in its primary annotation's file, else in its
     /// first annotation's. The node-analysis hooks report only in the file they inspect, so they run

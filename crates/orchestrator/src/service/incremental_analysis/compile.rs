@@ -12,14 +12,13 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use mago_allocator::LocalArena;
 use mago_analyzer::analysis_result::AnalysisResult;
-use mago_analyzer::artifacts::AnalysisArtifacts;
+use mago_analyzer::artifacts::LoweringInput;
 use mago_analyzer::code::IssueCode;
 use mago_analyzer::effects::EffectSummary;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::FileReads;
 use mago_analyzer::external::Listing;
-use mago_analyzer::is_collection_member;
 use mago_build_id::BUILD_ID;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
@@ -514,8 +513,9 @@ impl IncrementalAnalysisService {
             lowered_again.len(),
             translated_only.len(),
         );
-        // Lowering analyzes each PHP# file again against the codebase its last analysis saw, so it sends the provider
-        // requests that analysis sent, and every read their answers rest on is one the analysis already holds.
+        // A file the last analysis kept no lowering input for is analyzed again against the codebase that analysis saw,
+        // so it sends the provider requests that analysis sent, and every read their answers rest on is one the
+        // analysis already holds.
         debug_assert!(
             session.as_ref().is_none_or(|session| {
                 let lowering = session.take_reads();
@@ -1125,14 +1125,15 @@ impl IncrementalAnalysisService {
         })
     }
 
-    /// Analyzes each of `files` again with `forms` to inline and gives what `output` makes of its checked program, with
-    /// the class-likes of its namespace that would win over a default class-like it names and whether its code reaches
-    /// a PHP# extension member, the files with errors that refuse them refused. A file with a parse error or an error
-    /// that refuses it is refused without being analyzed again, since its refusal holds only those errors. A file with
-    /// only `unrefused` errors is checked as far as its code allows. The checked program assumes the checker accepted it, so one `output` can't
-    /// handle is refused with those errors and the panic's own text, [`LOWERING_PANIC`], as rust-analyzer turns a panic
-    /// on broken code into a failed request. A panic on a file with no error is a defect of the checker, which the same
-    /// refusal names.
+    /// Gives what `output` makes of the checked program of each of `files`, with `forms` to inline, the class-likes of
+    /// its namespace that would win over a default class-like it names and whether its code reaches a PHP# extension
+    /// member, the files with errors that refuse them refused. Each file is checked from what the last analysis gave
+    /// its lowering, or, where that analysis kept none, as an incremental one keeps none, from an analysis of the file
+    /// alone. A file with a parse error or an error that refuses it is refused without being analyzed again, since its
+    /// refusal holds only those errors. A file with only `unrefused` errors is checked as far as its code allows. The
+    /// checked program assumes the checker accepted it, so one `output` can't handle is refused with those errors and
+    /// the panic's own text, [`LOWERING_PANIC`], as rust-analyzer turns a panic on broken code into a failed request. A
+    /// panic on a file with no error is a defect of the checker, which the same refusal names.
     fn checked_all<T>(
         &self,
         files: &[&Arc<File>],
@@ -1159,25 +1160,38 @@ impl IncrementalAnalysisService {
                     &self.extern_namespaces,
                 );
                 let namespace_classes = names.namespace_classes().map(mago_word::word).collect();
-                let mut result = AnalysisResult::new(SymbolReferences::new());
-                let artifacts = if issues.is_empty() && program.errors.is_empty() {
-                    self.file_analyzer(&arena, file, &names, session).analyze_with_artifacts(program, &mut result)?
-                } else {
-                    AnalysisArtifacts::new()
+                let kept = self
+                    .file_states
+                    .get(&file.id)
+                    .and_then(|state| Some((state.lowering_input.as_ref()?, state.reaches_extension)));
+                let analyzed;
+                let (input, reaches_extension) = match kept {
+                    Some(kept) => kept,
+                    None if issues.is_empty() && program.errors.is_empty() => {
+                        #[cfg(test)]
+                        self.analyzed_to_lower
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(file.id);
+                        // This analysis of the one file records exactly what its code reaches, unlike the references
+                        // the warm path keeps from a method it analyzed before.
+                        let mut result = AnalysisResult::new(SymbolReferences::new());
+                        let artifacts = self
+                            .file_analyzer(&arena, file, &names, session)
+                            .analyze_with_artifacts(program, &mut result)?;
+                        analyzed = (
+                            artifacts.into_lowering_input(),
+                            super::reaches_extension(&self.codebase, &result.symbol_references),
+                        );
+                        (&analyzed.0, analyzed.1)
+                    }
+                    None => {
+                        analyzed = (LoweringInput::default(), false);
+                        (&analyzed.0, analyzed.1)
+                    }
                 };
-                // This analysis of the one file records exactly what its code reaches, unlike the references the warm
-                // path keeps from a method it analyzed before. A collection's member is the collection's own, which no
-                // extension of the namespace replaces.
-                let mut reaches_extension = false;
-                result.symbol_references.for_each_reference(|_, (class, member), _| {
-                    reaches_extension |= !member.is_empty()
-                        && self.codebase.get_method(class, member).is_some_and(|method| {
-                            (method.flags.is_extension_method() || method.flags.is_extension_property())
-                                && !is_collection_member(class, method)
-                        });
-                });
 
-                Ok(match check(file, program, names, &artifacts, &self.codebase, effects, forms, &issues) {
+                Ok(match check(file, program, names, input, &self.codebase, effects, forms, &issues) {
                     Ok(checked) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         output(&checked, namespace_classes, reaches_extension)
                     }))
@@ -1502,6 +1516,33 @@ mod tests {
     /// The service after a full analysis of `database`.
     fn analyzed(database: &Database<'static>) -> IncrementalAnalysisService {
         analyzed_with(database, Settings::default())
+    }
+
+    /// The service after a full analysis of `database` that kept what it gave the lowering of each PHP# file.
+    fn analyzed_for_lowering(database: &Database<'static>) -> IncrementalAnalysisService {
+        let mut service = IncrementalAnalysisService::new(
+            database.read_only(),
+            prelude,
+            Settings::default(),
+            ParserSettings::default(),
+            Arc::clone(&PLUGIN_REGISTRY),
+        )
+        .keeping_lowering_inputs();
+        service.analyze().expect("the analysis runs");
+
+        service
+    }
+
+    /// The name of each file the compiles of `service` analyzed again to lower it.
+    fn analyzed_to_lower(service: &IncrementalAnalysisService) -> BTreeSet<String> {
+        let analyzed = service.analyzed_to_lower.lock().expect("no compile panicked while it held the files");
+
+        analyzed
+            .iter()
+            .map(|file_id| {
+                String::from_utf8_lossy(&service.database().get(file_id).expect("the file exists").name).into()
+            })
+            .collect()
     }
 
     /// The service after a full analysis of `database` under `settings`.
@@ -2473,6 +2514,60 @@ mod tests {
                 assert_eq!(bodies(&warm_compiled), bodies(&clean_compiled), "diff {diff}: {}", edit.name);
             }
         }
+    }
+
+    /// A compile after a full analysis that kept what it gave the lowering of each PHP# file lowers each file from it,
+    /// analyzing none again, and writes the bytes and refuses the files a compile that analyzes each file again does.
+    #[test]
+    fn a_compile_lowers_each_file_from_the_analysis_before_it_as_analyzing_the_file_again_lowers_it() {
+        let generated = generated_project(40, 11);
+        let fixtures = [
+            shop_project(&shop(MONEY, RATE)),
+            shop_project(&headers()),
+            shop_project(&bounds()),
+            shop_project(&constants()),
+            project(&[(TEXT_PATH, TEXT), ("app/Title.sharp", TITLE)]),
+            project(&generated.iter().map(|(name, contents)| (name.as_str(), contents.as_str())).collect::<Vec<_>>()),
+        ];
+
+        for database in &fixtures {
+            let mut from_analysis = analyzed_for_lowering(database);
+            let mut analyzing_again = analyzed(database);
+            let lowered = compile(&mut from_analysis, empty_stamp);
+            let lowered_again = compile(&mut analyzing_again, empty_stamp);
+
+            assert_eq!(whole(&lowered), whole(&lowered_again));
+            assert_eq!(analyzed_to_lower(&from_analysis), BTreeSet::new());
+            assert_eq!(
+                analyzed_to_lower(&analyzing_again),
+                lowered
+                    .iter()
+                    .filter(|(_, compilation)| matches!(compilation, Compilation::Accepted(_)))
+                    .map(|(name, _)| name.clone())
+                    .collect::<BTreeSet<_>>()
+            );
+        }
+    }
+
+    /// An incremental analysis keeps nothing for the lowering, since it skips the methods it keeps, so the compile
+    /// after it analyzes each file it lowers again, and writes what a clean compile writes.
+    #[test]
+    fn a_compile_after_an_incremental_analysis_analyzes_each_file_it_lowers_again() {
+        let edited = shop_project(&shop(&MONEY.replace("return 1;", "return 2;"), RATE));
+        let mut warm = analyzed_for_lowering(&shop_project(&shop(MONEY, RATE)));
+        warm.update_database(edited.read_only());
+        warm.analyze_incremental(None).expect("the warm path runs");
+
+        let warm_compiled = compile(&mut warm, empty_stamp);
+
+        assert_eq!(
+            analyzed_to_lower(&warm),
+            BTreeSet::from(
+                ["app/Cash.sharp", "app/Money.sharp", "app/Order.sharp", "app/Rates.sharp", "app/Unrelated.sharp"]
+                    .map(str::to_owned)
+            )
+        );
+        assert_eq!(whole(&warm_compiled), whole(&compile(&mut analyzed_for_lowering(&edited), empty_stamp)));
     }
 
     /// The compiled files and the [`CompiledFiles`] of a compile of `service` that keeps each file `last` and

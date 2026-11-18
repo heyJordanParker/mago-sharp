@@ -344,7 +344,8 @@ fn compile_into(
     let (database, _) = project_database(orchestrator, &configuration.source.workspace)?;
 
     let library = standard_library(root, &database).map_err(OrchestratorError::General)?;
-    let mut server = Server::new(database.into_static(), decode_prelude, server_settings(orchestrator));
+    let mut server =
+        Server::new(database.into_static(), decode_prelude, server_settings(orchestrator)).keeping_lowering_inputs();
     server.analyze()?;
     // A file whose errors the lowering does not survive is refused, whatever panic message its lowering printed.
     let printing = std::panic::take_hook();
@@ -735,8 +736,9 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
             return finish(record, &record_path, outcome, &database, Vec::new(), configuration, color_choice);
         }
     };
-    let mut server =
-        Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator)).scoped_to(is_lowered);
+    let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator))
+        .keeping_lowering_inputs()
+        .scoped_to(is_lowered);
     server.analyze()?;
     // The compile hides what `mago analyze` hides: a host rule's error an `ignore` entry or the baseline targets.
     let ignored =

@@ -79,7 +79,8 @@ fn main() {
 
         let forms = InlineForms::default();
         let effects = Effects::solve(&metadata, &artifacts.effect_summaries);
-        let checked = check(&file, program, names, &artifacts, &metadata, &effects, &forms, &issues)
+        let input = artifacts.into_lowering_input();
+        let checked = check(&file, program, names, &input, &metadata, &effects, &forms, &issues)
             .unwrap_or_else(|refusal| panic!("{path} is accepted: {refusal:?}"));
         println!("{path}: {} nodes", lower(&checked).nodes().len());
     }

@@ -10428,7 +10428,7 @@ fn assignment_kind(operator: &AssignmentOperator) -> (sharp_kind, u32) {
 mod tests {
     use std::borrow::Cow;
 
-    use mago_analyzer::artifacts::AnalysisArtifacts;
+    use mago_analyzer::artifacts::LoweringInput;
     use mago_analyzer::effects::Effects;
     use mago_codex::metadata::CodebaseMetadata;
     use mago_database::file::File;
@@ -10447,13 +10447,13 @@ mod tests {
         let file = File::ephemeral(Cow::Borrowed(b"src/Report.sharp"), Cow::Owned(source.into_bytes()));
         let arena = LocalArena::new();
         let program = parse_file_with_dialect(&arena, &file, Dialect::Sharp, ParserSettings::default());
-        let (artifacts, codebase, forms) = (AnalysisArtifacts::new(), CodebaseMetadata::new(), InlineForms::default());
+        let (input, codebase, forms) = (LoweringInput::default(), CodebaseMetadata::new(), InlineForms::default());
         let effects = Effects::solve(&codebase, &[]);
         let checked = CheckedProgram::unchecked(
             &file,
             program,
             NameResolver::new(&arena).resolve(program),
-            &artifacts,
+            &input,
             &codebase,
             &effects,
             &forms,

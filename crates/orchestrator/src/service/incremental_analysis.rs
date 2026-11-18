@@ -17,6 +17,7 @@ use mago_analyzer::Analyzer;
 use mago_analyzer::analysis_result::AnalysisResult;
 use mago_analyzer::analysis_result::LateSymbolReferenceIssueReconciler;
 use mago_analyzer::artifacts::AnalysisArtifacts;
+use mago_analyzer::artifacts::LoweringInput;
 use mago_analyzer::effects::EffectSummary;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::external::AFTER_FILE_ANALYSIS_BATCH_SIZE;
@@ -31,6 +32,7 @@ use mago_analyzer::external::FileReads;
 use mago_analyzer::external::Listing;
 use mago_analyzer::external::SessionReads;
 use mago_analyzer::external::apply_refinements;
+use mago_analyzer::is_collection_member;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
 #[cfg(not(target_arch = "wasm32"))]
@@ -112,6 +114,11 @@ struct FileState {
     /// The issues in the file of the last run's project passes, which read every file: the effect rules' solve and the
     /// too-wide warning.
     project_issues: IssueCollection,
+    /// What the last analysis gave the lowering of the file, a PHP# file, when the service keeps lowering inputs and
+    /// that analysis ran from scratch. An incremental analysis skips the methods it keeps, so it gives none.
+    lowering_input: Option<LoweringInput>,
+    /// Whether the code of the file `lowering_input` holds the analysis of reaches a PHP# extension member.
+    reaches_extension: bool,
 }
 
 /// What one file's analysis read from the codebase.
@@ -140,6 +147,9 @@ struct SelectiveAnalysisOutput {
     per_file_effect_summaries: HashMap<FileId, Vec<EffectSummary>>,
     /// The project passes' issues of every file, analyzed or skipped.
     per_file_project_issues: HashMap<FileId, IssueCollection>,
+    /// What the analysis gave the lowering of each PHP# file it analyzed, with whether the file's code reaches a PHP#
+    /// extension member, when it kept lowering inputs.
+    lowering_inputs: HashMap<FileId, (LoweringInput, bool)>,
 }
 
 /// A self-contained incremental analysis service.
@@ -186,6 +196,9 @@ pub struct IncrementalAnalysisService {
     extern_namespaces: ExternNamespaces,
     use_progress_bars: bool,
     scan_only: bool,
+    /// Whether each analysis from scratch keeps what it gives the lowering of each PHP# file, which a compile lowers
+    /// the file from without analyzing it again.
+    keeps_lowering_inputs: bool,
     node_analysis_files: Option<HashSet<FileId>>,
     /// Composer's autoload maps, which serve each analysis from scratch the plain PHP vendor files its files reach.
     autoloader: Option<Arc<Autoloader>>,
@@ -199,6 +212,9 @@ pub struct IncrementalAnalysisService {
     /// The files the last analysis analyzed, which the fanout tests compare with the inputs.
     #[cfg(test)]
     analyzed_files: HashSet<FileId>,
+    /// The files a compile analyzed again to lower them, which the tests of what the lowering reads count.
+    #[cfg(test)]
+    analyzed_to_lower: std::sync::Mutex<HashSet<FileId>>,
 }
 
 #[cfg_attr(test, allow(clippy::missing_fields_in_debug))]
@@ -228,6 +244,7 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("extern_namespaces", &self.extern_namespaces)
             .field("use_progress_bars", &self.use_progress_bars)
             .field("scan_only", &self.scan_only)
+            .field("keeps_lowering_inputs", &self.keeps_lowering_inputs)
             .field("node_analysis_files", &self.node_analysis_files.as_ref().map(HashSet::len))
             .field("autoloader", &self.autoloader.is_some())
             .field("autoloaded", &self.autoloaded.len())
@@ -291,6 +308,7 @@ impl IncrementalAnalysisService {
             extern_namespaces: ExternNamespaces::default(),
             use_progress_bars: false,
             scan_only: false,
+            keeps_lowering_inputs: false,
             node_analysis_files: None,
             autoloader: None,
             autoloaded: Vec::new(),
@@ -298,6 +316,8 @@ impl IncrementalAnalysisService {
             class_logs: ClassLogs::default(),
             #[cfg(test)]
             analyzed_files: HashSet::default(),
+            #[cfg(test)]
+            analyzed_to_lower: std::sync::Mutex::default(),
         }
     }
 
@@ -314,6 +334,15 @@ impl IncrementalAnalysisService {
     #[must_use]
     pub fn autoloaded(&self) -> &[Arc<File>] {
         &self.autoloaded
+    }
+
+    /// Keeps, from each analysis from scratch, what it gives the lowering of each PHP# file, so a compile lowers each
+    /// file from the analysis it already made. A compile after an incremental analysis analyzes each file it lowers
+    /// again.
+    #[must_use]
+    pub fn keeping_lowering_inputs(mut self) -> Self {
+        self.keeps_lowering_inputs = true;
+        self
     }
 
     /// Draws a progress bar for each file pass when `use_progress_bars` is set.
@@ -788,6 +817,8 @@ impl IncrementalAnalysisService {
                     reads: AnalysisReads::default(),
                     effect_summaries: Vec::new(),
                     project_issues: IssueCollection::default(),
+                    lowering_input: None,
+                    reaches_extension: false,
                 },
             );
         }
@@ -807,8 +838,14 @@ impl IncrementalAnalysisService {
             codebase_issues: all_codebase_issues,
             per_file_effect_summaries,
             per_file_project_issues,
-        } =
-            self.run_analyzer_selective(&mut merged_codebase, symbol_references, &self.settings, &HashSet::default())?;
+            lowering_inputs,
+        } = self.run_analyzer_selective(
+            &mut merged_codebase,
+            symbol_references,
+            &self.settings,
+            &HashSet::default(),
+            self.keeps_lowering_inputs,
+        )?;
         #[cfg(test)]
         {
             self.analyzed_files = per_file_issues.keys().copied().collect();
@@ -833,6 +870,12 @@ impl IncrementalAnalysisService {
                 state.late_symbol_references =
                     late_symbol_references_by_file.get(&file_id).cloned().unwrap_or_default();
                 state.reads = reads_by_file.remove(&file_id).unwrap_or_default();
+            }
+        }
+        for (file_id, (input, reaches_extension)) in lowering_inputs {
+            if let Some(state) = self.file_states.get_mut(&file_id) {
+                state.lowering_input = Some(input);
+                state.reaches_extension = reaches_extension;
             }
         }
         self.store_project_passes(per_file_effect_summaries, per_file_project_issues);
@@ -872,6 +915,10 @@ impl IncrementalAnalysisService {
             return Err(OrchestratorError::General(
                 "analyze() must be called before analyze_incremental()".to_string(),
             ));
+        }
+        // What the last analysis gave the lowering holds for the files it saw, and this one may change any of them.
+        for state in self.file_states.values_mut() {
+            state.lowering_input = None;
         }
 
         let source_files: Vec<_> = self.database.files().filter(|f| f.file_type != FileType::Builtin).collect();
@@ -1354,7 +1401,14 @@ impl IncrementalAnalysisService {
                 codebase_issues: new_codebase_issues,
                 per_file_effect_summaries,
                 per_file_project_issues,
-            } = self.run_analyzer_selective(&mut merged_codebase, symbol_references, &self.settings, &files_to_skip)?;
+                ..
+            } = self.run_analyzer_selective(
+                &mut merged_codebase,
+                symbol_references,
+                &self.settings,
+                &files_to_skip,
+                false,
+            )?;
             self.before_analysis_reads = before_analysis_reads;
             self.class_logs.extend(class_logs);
             #[cfg(test)]
@@ -1422,6 +1476,8 @@ impl IncrementalAnalysisService {
                         reads: reads_by_file.remove(&file_id).unwrap_or_default(),
                         effect_summaries: Vec::new(),
                         project_issues: IssueCollection::default(),
+                        lowering_input: None,
+                        reaches_extension: false,
                     },
                 );
             }
@@ -1634,7 +1690,14 @@ impl IncrementalAnalysisService {
             codebase_issues: new_codebase_issues,
             per_file_effect_summaries,
             per_file_project_issues,
-        } = self.run_analyzer_selective(&mut merged_codebase, symbol_references, &self.settings, &files_to_skip)?;
+            ..
+        } = self.run_analyzer_selective(
+            &mut merged_codebase,
+            symbol_references,
+            &self.settings,
+            &files_to_skip,
+            false,
+        )?;
         #[cfg(test)]
         {
             self.analyzed_files = per_file_issues.keys().copied().collect();
@@ -1702,6 +1765,8 @@ impl IncrementalAnalysisService {
                     reads: reads_by_file.remove(&file_id).unwrap_or_default(),
                     effect_summaries: Vec::new(),
                     project_issues: IssueCollection::default(),
+                    lowering_input: None,
+                    reaches_extension: false,
                 },
             );
         }
@@ -1898,6 +1963,7 @@ impl IncrementalAnalysisService {
         current_symbol_references: SymbolReferences,
         settings: &Settings,
         skip_files: &HashSet<FileId>,
+        keep_lowering_inputs: bool,
     ) -> Result<SelectiveAnalysisOutput, OrchestratorError> {
         #[cfg(not(target_arch = "wasm32"))]
         const ANALYSIS_DURATION_THRESHOLD: Duration = Duration::from_secs(5);
@@ -2000,7 +2066,7 @@ impl IncrementalAnalysisService {
                     analysis_result.issues.extend(program.errors.iter().map(Issue::from));
                     arena.reset();
 
-                    return Ok((file_id, analysis_result, None, Vec::new(), HashSet::default()));
+                    return Ok((file_id, analysis_result, None, Vec::new(), HashSet::default(), None));
                 }
                 let resolved_names = NameResolver::new(arena).resolve_in(
                     program,
@@ -2023,7 +2089,8 @@ impl IncrementalAnalysisService {
                 }
 
                 let semantic_issues = semantics_checker.check(&source_file, program, &resolved_names);
-                let mut artifacts = if program.dialect.is_sharp() {
+                let is_sharp = program.dialect.is_sharp();
+                let mut artifacts = if is_sharp {
                     let artifacts = analyzer.analyze_with_artifacts(program, &mut analysis_result)?;
                     let analyzer_issues = std::mem::take(&mut analysis_result.issues);
                     let analyzer_issues =
@@ -2083,13 +2150,13 @@ impl IncrementalAnalysisService {
                     analyzing_bar.inc(1);
                 }
 
-                Ok((
-                    file_id,
-                    analysis_result,
-                    snapshot,
-                    std::mem::take(&mut artifacts.effect_summaries),
-                    std::mem::take(&mut artifacts.listings),
-                ))
+                let effect_summaries = std::mem::take(&mut artifacts.effect_summaries);
+                let listings = std::mem::take(&mut artifacts.listings);
+                let lowering_input = (keep_lowering_inputs && is_sharp).then(|| {
+                    (artifacts.into_lowering_input(), reaches_extension(codebase, &analysis_result.symbol_references))
+                });
+
+                Ok((file_id, analysis_result, snapshot, effect_summaries, listings, lowering_input))
             })
             .collect::<Result<Vec<_>, OrchestratorError>>()?;
         if let Some(analyzing_bar) = analyzing_bar {
@@ -2120,8 +2187,12 @@ impl IncrementalAnalysisService {
         let mut per_file_effect_summaries: HashMap<FileId, Vec<EffectSummary>> = HashMap::default();
         // The sets each file's analysis read whole, which join what its extensions read from the codebase.
         let mut reads_by_file: HashMap<FileId, AnalysisReads> = HashMap::default();
+        let mut lowering_inputs: HashMap<FileId, (LoweringInput, bool)> = HashMap::default();
 
-        for (file_id, result, snapshot, effect_summaries, listings) in results {
+        for (file_id, result, snapshot, effect_summaries, listings, lowering_input) in results {
+            if let Some(lowering_input) = lowering_input {
+                lowering_inputs.insert(file_id, lowering_input);
+            }
             aggregated_result.symbol_references.extend(result.symbol_references);
             per_file_issues.insert(file_id, result.issues);
             per_file_effect_summaries.insert(file_id, effect_summaries);
@@ -2315,8 +2386,25 @@ impl IncrementalAnalysisService {
             codebase_issues,
             per_file_effect_summaries,
             per_file_project_issues,
+            lowering_inputs,
         })
     }
+}
+
+/// Whether the code an analysis recorded `references` of reaches a PHP# extension member, which the extensions of its
+/// file's namespace give it with no import. A collection's member is the collection's own, which no extension of the
+/// namespace replaces.
+fn reaches_extension(codebase: &CodebaseMetadata, references: &SymbolReferences) -> bool {
+    let mut reaches_extension = false;
+    references.for_each_reference(|_, (class, member), _| {
+        reaches_extension |= !member.is_empty()
+            && codebase.get_method(class, member).is_some_and(|method| {
+                (method.flags.is_extension_method() || method.flags.is_extension_property())
+                    && !is_collection_member(class, method)
+            });
+    });
+
+    reaches_extension
 }
 
 /// Whether a PHP# bound of a populated declaration in `codebase` names a type that population left missing and that

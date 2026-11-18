@@ -293,7 +293,8 @@ fn checked_file_with_effects<R>(
 
     // The library is scanned, not analyzed, so only the file's own bodies have effects.
     let effects = Effects::solve(&metadata, &artifacts.effect_summaries);
-    match check(file, program, names, &artifacts, &metadata, &effects, forms, &issues) {
+    let input = artifacts.into_lowering_input();
+    match check(file, program, names, &input, &metadata, &effects, forms, &issues) {
         Ok(checked) => Ok(then(&checked, &metadata, &effects)),
         Err(Refusal::Parse(errors)) => {
             Err(errors.iter().map(|error| diagnostic(&code, Some(error.span()), "parse", &error.to_string())).collect())

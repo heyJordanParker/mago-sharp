@@ -16,7 +16,10 @@ use mago_extension::WorkerCommand;
 use mago_extension::WorkerPool;
 use mago_extension::WorkerPoolOptions;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
+use mago_orchestrator::service::incremental_analysis::compile::Compilation;
+use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
 use mago_php_version::PHPVersion;
+use mago_sharp_bridge::unit::Library;
 use mago_syntax::settings::ParserSettings;
 
 use crate::common;
@@ -1081,6 +1084,73 @@ fn a_provider_and_a_hook_of_a_sharp_method_reach_it_and_not_its_twin() -> Result
     assert_eq!(observation.invocations, ["twin-provided-total", "twin-hook-box.Total()"]);
 
     Ok(())
+}
+
+/// A compile lowers each PHP# file from the analysis that checked it, so a provider of a PHP# method runs once for each
+/// call, in that analysis, and never again while the compile lowers the file. Without what that analysis gave the
+/// lowering, the compile analyzes each file again, which asks the provider again and runs no hook.
+#[test]
+fn a_compile_runs_each_provider_and_hook_of_a_sharp_file_once() -> Result<(), Box<dyn std::error::Error>> {
+    if !php_sdk_is_available() {
+        return Ok(());
+    }
+
+    const BOX: (&str, &str) = (
+        "src/Box.sharp",
+        "namespace Demo;\n\npublic class Box\n{\n    public int total() => 1;\n\n    public int Total() => 2;\n}\n",
+    );
+    const SHELF: (&str, &str) = (
+        "src/Shelf.sharp",
+        "namespace Demo;\n\npublic class Shelf\n{\n    public static int count(Box box) => box.total() + box.Total();\n}\n",
+    );
+    let switches = ["MAGO_INVOCATION_FUNCTION_ONLY", "MAGO_INVOCATION_TWINS"];
+
+    assert_eq!(compile_with_fixture(&[BOX, SHELF], &switches, true)?, ["twin-provided-total", "twin-hook-box.Total()"]);
+    assert_eq!(
+        compile_with_fixture(&[BOX, SHELF], &switches, false)?,
+        ["twin-provided-total", "twin-hook-box.Total()", "twin-provided-total"]
+    );
+
+    Ok(())
+}
+
+/// The invocations the fixture worker records through an analysis and a compile of `files`, with each name in `switches`
+/// a fixture environment variable set to `1`, and the analysis keeping what it gives the lowering when
+/// `keeping_lowering_inputs` is set.
+fn compile_with_fixture(
+    files: &[(&'static str, &str)],
+    switches: &[&str],
+    keeping_lowering_inputs: bool,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let audit = temporary.path().join("invocations.txt");
+    std::fs::write(&audit, [])?;
+    let database = fixture_database(files);
+    let mut service = IncrementalAnalysisService::new(
+        database.read_only(),
+        Default::default,
+        fixture_settings(),
+        ParserSettings::default(),
+        Arc::new(fixture_registry(&audit, switches)?),
+    );
+    if keeping_lowering_inputs {
+        service = service.keeping_lowering_inputs();
+    }
+    service.analyze()?;
+    let (compiled, _) = service.compile(
+        &CompiledFiles::default(),
+        |_| Ok(None),
+        |_| Ok(None),
+        |_, _| Ok(Default::default()),
+        &Library::default(),
+        |issues| issues,
+    )?;
+    assert!(
+        compiled.iter().all(|(_, compilation)| matches!(compilation, Compilation::Accepted(_))),
+        "every file is accepted: {compiled:?}"
+    );
+
+    Ok(std::fs::read_to_string(audit)?.lines().map(str::to_owned).collect())
 }
 
 /// Analyzes `source`, saved as `file`, with the invocation fixture worker. Each name in `switches` is a fixture

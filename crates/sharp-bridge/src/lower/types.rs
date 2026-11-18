@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use mago_analyzer::CodebasePatternNames;
 use mago_analyzer::CollectionKind;
-use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::artifacts::CallTarget;
+use mago_analyzer::artifacts::LoweringInput;
 use mago_analyzer::artifacts::MemberCall;
 use mago_analyzer::chosen_operator;
 use mago_analyzer::collection_member;
@@ -97,7 +97,8 @@ pub struct Types<'analysis> {
     file: &'analysis File,
     /// The file's resolved names, which name the class of a `Class.m()` call.
     names: ResolvedNames<'analysis>,
-    artifacts: &'analysis AnalysisArtifacts,
+    /// What the file's analysis gave the lowering.
+    artifacts: &'analysis LoweringInput,
     codebase: &'analysis CodebaseMetadata,
     /// The effects of every PHP# body, which a function's type lists.
     effects: &'analysis Effects,
@@ -205,7 +206,7 @@ impl<'analysis> Types<'analysis> {
     pub(crate) fn new(
         file: &'analysis File,
         names: ResolvedNames<'analysis>,
-        artifacts: &'analysis AnalysisArtifacts,
+        artifacts: &'analysis LoweringInput,
         codebase: &'analysis CodebaseMetadata,
         effects: &'analysis Effects,
         inline_forms: &'analysis InlineForms,
@@ -246,7 +247,7 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// What the PHP of a pattern depends on, as the analysis answered it.
-    pub(crate) fn pattern_names(&self) -> CodebasePatternNames<'_, 'analysis> {
+    pub(crate) fn pattern_names(&self) -> CodebasePatternNames<'_, 'analysis, LoweringInput> {
         CodebasePatternNames { names: &self.names, codebase: self.codebase, artifacts: self.artifacts }
     }
 
