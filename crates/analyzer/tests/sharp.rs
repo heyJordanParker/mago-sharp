@@ -4803,6 +4803,21 @@ fn a_loop_never_ends_on_its_condition_only_when_the_condition_is_true() {
     );
 }
 
+/// A `for` loop's update step runs after a pass whose condition held, so it reads the locals as the condition narrowed
+/// them whenever the body leaves them alone: an empty body, one that only calls something, and one that always breaks
+/// each walk a list with `node = node.next`, as an update step that only reads `node` does. A body that writes `node`
+/// again leaves the update step a node that may be `null`.
+#[test]
+fn a_for_update_step_reads_what_its_condition_proved() {
+    let node = "namespace Demo;\n\npublic class Node\n{\n    public Node? next { get; set; } = null;\n\n    public void touch()\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Walker\n{\n    public static void empty(Node? head)\n    {\n        for (Node? node = head; node != null; node = node.next) {\n        }\n    }\n\n    public static void called(Node? head)\n    {\n        for (Node? node = head; node != null; node = node.next) {\n            Walker.note();\n        }\n    }\n\n    public static void touched(Node? head)\n    {\n        for (Node? node = head; node != null; node = node.next) {\n            node.touch();\n        }\n    }\n\n    public static void broken(Node? head)\n    {\n        for (Node? node = head; node != null; node = node.next) {\n            break;\n        }\n    }\n\n    public static void read(Node? head)\n    {\n        for (Node? node = head; node != null; Walker.last(node.next == null)) {\n        }\n    }\n\n    public static void reassigned(Node? head, Node? other)\n    {\n        for (Node? node = head; node != null; node = node.next) {\n            node = other;\n        }\n    }\n\n    private static void note()\n    {\n    }\n\n    private static void last(bool last)\n    {\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Walker.sharp", sharp), &[("src/Demo/Node.sharp", node)]),
+        ["40:54 possibly-null-property-access"]
+    );
+}
+
 /// Spec section 7 refuses a statement that can never run, as Java and Zig do: one after `return`, `throw`, a call that
 /// never returns, `break` or `continue` in its block, one after an `if` whose every branch ends the block, one after
 /// a loop that never ends, and a block after a condition that never finishes, which is refused at the condition. The

@@ -483,11 +483,11 @@ where
         update_loop_scope_contexts(&loop_scope, loop_context, &mut continue_context, loop_parent_context, context);
 
         loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
-            loop_context.flags.set_inside_loop_expressions(true);
+            continue_context.flags.set_inside_loop_expressions(true);
             for post_expression in post_expressions {
-                post_expression.analyze(context, loop_context, artifacts)?;
+                post_expression.analyze(context, &mut continue_context, artifacts)?;
             }
-            loop_context.flags.set_inside_loop_expressions(true);
+            continue_context.flags.set_inside_loop_expressions(false);
 
             Ok(())
         })?;
@@ -763,16 +763,6 @@ where
 
             // if there are no changes to the types, no need to re-examine
             if !has_changes {
-                loop_scope = in_loop_scope(artifacts, loop_scope, |artifacts| {
-                    continue_context.flags.set_inside_loop_expressions(true);
-                    for post_expression in &post_expressions {
-                        post_expression.analyze(context, &mut continue_context, artifacts)?;
-                    }
-                    continue_context.flags.set_inside_loop_expressions(false);
-
-                    Ok(())
-                })?;
-
                 break;
             }
 
