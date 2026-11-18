@@ -4445,6 +4445,45 @@ mod tests {
         unreachable!("the worker reads every request and sends nothing")
     }
 
+    /// A transport with no worker process holds no class, so an analyzer over transports that run none starts nothing
+    /// again when a class changes.
+    #[test]
+    fn an_analyzer_whose_transports_run_no_worker_reloads_none() {
+        let registration = protocol::decode_registration(&protocol::testing::registration_response())
+            .expect("the registration should decode");
+        let analyzer = ExternalAnalyzer {
+            backends: Box::new([
+                Backend::new(Arc::new(DecliningTransport::default()), registration.clone()),
+                Backend::new(Arc::new(DecliningTransport::default()), registration),
+            ]),
+            extensions: Box::default(),
+            initialization_stubs: Box::default(),
+            trace_enabled: false,
+            telemetry: ExternalAnalyzerTelemetry::default(),
+            started_at: None,
+        };
+
+        assert_eq!(analyzer.reload_workers_holding(&[b"app\\order"]).ok(), Some(0));
+    }
+
+    /// Mago's worker pool asks its workers which classes they loaded only for a class that changed, so a reload for no
+    /// class sends nothing to a worker that would never answer.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_pool_reloads_for_no_class_without_asking_its_workers() {
+        use mago_extension::WorkerCommand;
+        use mago_extension::WorkerPoolOptions;
+
+        let options = WorkerPoolOptions { request_timeout: Duration::from_millis(50), ..WorkerPoolOptions::default() };
+        let worker = WorkerCommand::new("sh").with_arguments(["-c", "cat > /dev/null"]);
+        let pool = WorkerPool::spawn(worker, std::num::NonZeroUsize::MIN, options).expect("the worker should start");
+
+        let reloaded = AnalyzerTransport::reload_holding(&pool, &[]);
+        pool.shutdown();
+
+        assert_eq!(reloaded.ok(), Some(0));
+    }
+
     /// Mago's worker pool hands the name of a request to the worker that runs it, so a worker that never answers is
     /// named in the deadline's error, whichever way Mago sends the request.
     #[cfg(unix)]

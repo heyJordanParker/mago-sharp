@@ -21,7 +21,7 @@ final class ClassLoadsTest extends TestCase
     {
         $loads = new ClassLoads();
         $before = $loads->end();
-        class_exists('App\Missing\Order');
+        self::assertFalse(class_exists('App\Missing\Order'));
         $end = $loads->end();
 
         self::assertSame($before + 1, $end);

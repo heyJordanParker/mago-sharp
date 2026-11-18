@@ -407,6 +407,19 @@ mod tests {
         assert!(!reads.is_empty());
     }
 
+    /// Reads of one file that arrive apart read each worker's class log up to the furthest end either read, since the
+    /// file's callbacks read every class their worker loaded before the last of them ended.
+    #[test]
+    fn reads_that_arrive_apart_read_each_class_log_to_the_furthest_end() {
+        let (mut reads, _) =
+            decoded_with(&written_with(&[], &[], 0, &[b"app\\rule", b"app\\order"])).expect("two class loads");
+        let (earlier, _) = decoded_with(&written_with(&[], &[], 0, &[b"app\\rule"])).expect("one class load");
+
+        reads.extend(earlier);
+
+        assert_eq!(reads.classes, HashMap::from_iter([(7, 2)]));
+    }
+
     /// Reads include another's when they hold each of its symbols and listings, and not when either misses one.
     #[test]
     fn reads_include_another_only_when_they_hold_every_read_of_it() {

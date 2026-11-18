@@ -7,19 +7,23 @@ namespace Mago\Sdk\Internal;
 use Mago\Sdk\Internal\Protocol\PayloadWriter;
 use ReflectionClass;
 
+use function array_diff;
+use function array_filter;
+use function array_intersect;
+use function array_map;
+use function array_merge;
 use function array_slice;
-use function class_exists;
+use function array_unique;
+use function array_values;
 use function count;
 use function get_declared_classes;
 use function get_declared_interfaces;
 use function get_declared_traits;
-use function interface_exists;
 use function max;
 use function random_int;
 use function spl_autoload_register;
 use function str_ends_with;
 use function strtolower;
-use function trait_exists;
 
 use const PHP_INT_MAX;
 
@@ -36,16 +40,13 @@ final class ClassLoads
     /** The id this worker drew at its start, which names its log to Mago. */
     private readonly int $worker;
 
-    /** @var list<string> each entry's lowercase class name */
+    /** @var list<lowercase-string> each entry's lowercase class name */
     private array $log = [];
-
-    /** @var array<string, true> */
-    private array $logged = [];
 
     /** @var list<string> the classes asked of the autoloaders since the log last caught up */
     private array $asked = [];
 
-    /** @var array{int, int, int} how many declared classes, interfaces and traits the log has seen */
+    /** @var list<int> how many declared classes, interfaces and traits the log has seen */
     private array $seen = [0, 0, 0];
 
     /** How many entries Mago has been sent. */
@@ -65,28 +66,35 @@ final class ClassLoads
 
     /**
      * Catches the log up with what the worker declared and failed to load, and returns how many entries it holds: the
-     * end the callbacks that just finished read up to.
+     * end the callbacks that just finished read up to. The autoloaders are asked only for a name no class, interface
+     * or trait holds, so a name asked since the last catch-up that none of them declared since is one that never
+     * loaded.
      */
     public function end(): int
     {
-        foreach ([get_declared_classes(), get_declared_interfaces(), get_declared_traits()] as $kind => $declared) {
-            foreach (array_slice($declared, $this->seen[$kind]) as $class) {
-                $file = (new ReflectionClass($class))->getFileName();
-                if ($file !== false && str_ends_with($file, '.sharp')) {
-                    $this->add($class);
-                }
-            }
-
-            $this->seen[$kind] = count($declared);
-        }
-
-        foreach ($this->asked as $class) {
-            if (!class_exists($class, false) && !interface_exists($class, false) && !trait_exists($class, false)) {
-                $this->add($class);
-            }
-        }
-
+        $declared = [get_declared_classes(), get_declared_interfaces(), get_declared_traits()];
+        $new = array_merge(...array_map(
+            /**
+             * @param list<class-string> $names
+             *
+             * @return list<class-string>
+             */
+            static fn(array $names, int $seen): array => array_slice($names, $seen),
+            $declared,
+            $this->seen,
+        ));
+        $this->seen = array_map(count(...), $declared);
+        $sharp = array_filter(
+            $new,
+            /** @param class-string $class */
+            static fn(string $class): bool => str_ends_with(
+                (string) (new ReflectionClass($class))->getFileName(),
+                '.sharp',
+            ),
+        );
+        $missing = array_diff(array_map(strtolower(...), $this->asked), array_map(strtolower(...), $new));
         $this->asked = [];
+        $this->log = array_values(array_unique([...$this->log, ...array_map(strtolower(...), $sharp), ...$missing]));
 
         return count($this->log);
     }
@@ -116,23 +124,7 @@ final class ClassLoads
     public function holdsAny(array $classes): bool
     {
         $this->end();
-        foreach ($classes as $class) {
-            if (isset($this->logged[$class])) {
-                return true;
-            }
-        }
 
-        return false;
-    }
-
-    private function add(string $class): void
-    {
-        $class = strtolower($class);
-        if (isset($this->logged[$class])) {
-            return;
-        }
-
-        $this->logged[$class] = true;
-        $this->log[] = $class;
+        return array_intersect($classes, $this->log) !== [];
     }
 }

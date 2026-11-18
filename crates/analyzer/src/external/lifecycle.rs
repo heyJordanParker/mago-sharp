@@ -2204,8 +2204,9 @@ mod tests {
     }
 
     /// A lifecycle response of `kind` with no issue and no reference, and a read entry for each of `files`: the file
-    /// it names, if any, then an issue read of the class `Issue` and a code read of the class `Code`.
-    fn response_with_reads(kind: u16, files: &[Option<&[u8]>]) -> Vec<u8> {
+    /// it names, if any, then an issue read of the class `Issue` and a code read of the class `Code`, then the entries
+    /// `loads` from the start of worker 1's class log.
+    fn response_with_reads(kind: u16, files: &[Option<&[u8]>], loads: &[&[u8]]) -> Vec<u8> {
         let mut writer = protocol::message_writer(kind);
         writer.write_u32(0);
         writer.write_u32(0);
@@ -2220,10 +2221,12 @@ mod tests {
                 writer.write_u8(0);
                 writer.write_bytes(class).expect("the class should fit in a frame");
             }
-            // The worker's class loads, of which it has none.
             writer.write_u64(1);
             writer.write_u32(0);
-            writer.write_u32(0);
+            writer.write_u32(loads.len() as u32);
+            for class in loads {
+                writer.write_bytes(class).expect("the class should fit in a frame");
+            }
         }
 
         writer.finish()
@@ -2251,11 +2254,12 @@ mod tests {
         // A class-like read stays as written, for the codebase to key.
         let sorted = ExtensionReads { issues: class(b"Issue"), code: class(b"Code"), ..ExtensionReads::default() };
 
-        let before = decoded_reads(BEFORE_ANALYSIS_REQUEST, &response_with_reads(BEFORE_ANALYSIS_RESPONSE, &[None]))
-            .expect("before-analysis hooks may read");
+        let before =
+            decoded_reads(BEFORE_ANALYSIS_REQUEST, &response_with_reads(BEFORE_ANALYSIS_RESPONSE, &[None], &[]))
+                .expect("before-analysis hooks may read");
         let after_file = decoded_reads(
             AFTER_FILE_ANALYSIS_REQUEST,
-            &response_with_reads(AFTER_FILE_ANALYSIS_RESPONSE, &[Some(b"src/a.php")]),
+            &response_with_reads(AFTER_FILE_ANALYSIS_RESPONSE, &[Some(b"src/a.php")], &[]),
         )
         .expect("after-file hooks may read");
 
@@ -2265,15 +2269,30 @@ mod tests {
         assert!(after_file.before_analysis.is_empty());
     }
 
+    /// The classes a file's hooks report their worker loaded go to the session's class logs, so a watch knows the file
+    /// read each of them and checks it again when the compiled file of one changes.
+    #[test]
+    fn a_lifecycle_response_records_the_classes_its_worker_loaded() {
+        let reads = decoded_reads(
+            AFTER_FILE_ANALYSIS_REQUEST,
+            &response_with_reads(AFTER_FILE_ANALYSIS_RESPONSE, &[Some(b"src/a.php")], &[b"app\\order"]),
+        )
+        .expect("after-file hooks may load classes");
+        let file = reads.files.values().next().expect("the file's reads");
+
+        assert!(reads.class_logs.read_any(file, &HashSet::from_iter([word(b"app\\order")])));
+        assert!(!reads.class_logs.read_any(file, &HashSet::from_iter([word(b"app\\other")])));
+    }
+
     /// An after-analysis hook reads for no analysis that could run again, and a read of a file the session does not
     /// hold names nothing Mago analyzed, so either is refused.
     #[test]
     fn a_lifecycle_response_with_a_read_no_analysis_can_take_is_refused() {
         let after_analysis =
-            decoded_reads(AFTER_ANALYSIS_REQUEST, &response_with_reads(AFTER_ANALYSIS_RESPONSE, &[None]));
+            decoded_reads(AFTER_ANALYSIS_REQUEST, &response_with_reads(AFTER_ANALYSIS_RESPONSE, &[None], &[]));
         let unknown = decoded_reads(
             AFTER_FILE_ANALYSIS_REQUEST,
-            &response_with_reads(AFTER_FILE_ANALYSIS_RESPONSE, &[Some(b"src/b.php")]),
+            &response_with_reads(AFTER_FILE_ANALYSIS_RESPONSE, &[Some(b"src/b.php")], &[]),
         );
 
         assert_eq!(
