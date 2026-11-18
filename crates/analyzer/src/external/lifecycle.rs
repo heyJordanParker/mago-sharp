@@ -2284,6 +2284,21 @@ mod tests {
         assert!(!reads.class_logs.read_any(file, &HashSet::from_iter([word(b"app\\other")])));
     }
 
+    /// A response whose class log ends before the entries it counts is cut short, so it is refused, as any malformed
+    /// response is.
+    #[test]
+    fn a_lifecycle_response_whose_class_log_is_cut_short_is_refused() {
+        let mut response = response_with_reads(AFTER_FILE_ANALYSIS_RESPONSE, &[Some(b"src/a.php")], &[b"app\\order"]);
+        response.truncate(response.len() - 1);
+
+        let error = decoded_reads(AFTER_FILE_ANALYSIS_REQUEST, &response).expect_err("a cut-short log is refused");
+
+        assert_eq!(
+            error,
+            "external analyzer protocol error: payload ended while reading class load: needed 9 bytes, found 8"
+        );
+    }
+
     /// An after-analysis hook reads for no analysis that could run again, and a read of a file the session does not
     /// hold names nothing Mago analyzed, so either is refused.
     #[test]
