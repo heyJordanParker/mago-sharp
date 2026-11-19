@@ -225,7 +225,7 @@ fn analyze_refuses_a_public_member_nothing_outside_its_namespace_uses() {
     write(
         directory.path(),
         "src/App/Shop/Priced.sharp",
-        "namespace App.Shop;\n\npublic interface Priced\n{\n    int price();\n}\n",
+        "namespace App.Shop;\n\ninternal interface Priced\n{\n    int price();\n}\n",
     );
     write(
         directory.path(),

@@ -4389,7 +4389,7 @@ mod tests {
     #[test]
     fn test_watch_an_edit_of_a_method_of_a_plain_class_with_exact_names_drops_the_uses_it_made() {
         let cart = "namespace App.Shop;\n\npublic class Cart\n{\n    public int total() => 1;\n}\n";
-        let synced = "namespace App.Web;\n\npublic interface Synced\n{\n    int? syncedId();\n}\n";
+        let synced = "namespace App.Web;\n\ninternal interface Synced\n{\n    int? syncedId();\n}\n";
         let room = |returns: &str, body: &str| {
             format!(
                 "<?php\n\nnamespace App\\Web;\n\nuse App\\Shop\\Cart;\n\nfinal class Room implements Synced\n{{\n    public function __construct(private Cart $cart) {{}}\n\n    #[\\Override]\n    public function syncedId(): {returns}\n    {{\n        return {body};\n    }}\n}}\n"

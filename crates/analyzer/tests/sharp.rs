@@ -614,10 +614,10 @@ fn a_class_plain_php_names_is_used_whichever_class_declares_the_member_it_reache
 #[test]
 fn a_public_member_nothing_outside_its_namespace_uses_is_too_wide() {
     let cart = "namespace App.Shop;\n\npublic class Cart : Priced\n{\n    public const int LIMIT = 3;\n    public const int FLOOR = 0;\n    public string name { get; set; } = \"\";\n    public string label { get; set; } = \"\";\n    internal string code { get; set; } = \"\";\n    private const int SEED = 1;\n\n    public Cart()\n    {\n    }\n\n    public int total() => this.count();\n    public int count() => 1;\n    public int price() => 2;\n    public int spare() => 3;\n    internal int hidden() => 4;\n}\n";
-    let priced = "namespace App.Shop;\n\npublic interface Priced\n{\n    int price();\n}\n";
+    let priced = "namespace App.Shop;\n\ninternal interface Priced\n{\n    int price();\n}\n";
     let point = "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n";
     let quiet = "namespace App.Shop;\n\ninternal class Quiet\n{\n    public int unused() => 1;\n}\n";
-    let page = "namespace App.Web;\n\nimport App.Shop.Cart;\nimport App.Shop.Point;\n\npublic class Page\n{\n    internal int show(Cart cart, Point point) => cart.total() + Cart.LIMIT + cart.name.length + point.x;\n}\n";
+    let page = "namespace App.Web;\n\nimport App.Shop.Cart;\nimport App.Shop.Point;\n\ninternal class Page\n{\n    internal int show(Cart cart, Point point) => cart.total() + Cart.LIMIT + cart.name.length + point.x;\n}\n";
     let boot = "<?php\n\n$cart = new \\App\\Shop\\Cart();\n$cart->spare();\n";
 
     assert_eq!(
@@ -665,16 +665,16 @@ fn a_plain_php_use_outside_the_namespace_keeps_a_public_member() {
 }
 
 /// Spec sections 5 and 15: an event's parameters are its payload, public get-only properties that take no modifier,
-/// so no use makes them too wide: `Changed`, created in another namespace that reads neither `id` nor `name`, and
-/// `Quiet`, which only its namespace uses, report nothing. An event nothing uses, as `Lost`, is still refused, since
-/// it never runs.
+/// so no use makes them too wide: `Changed`, created in another namespace that reads neither `id` nor `name`, reports
+/// nothing, and `Quiet`, which only its namespace uses, is refused as a type, as a class would be, and never for its
+/// parameter. An event nothing uses, as `Lost`, is refused as a type too, and as a class that never runs.
 #[test]
 fn an_event_s_parameters_are_never_too_wide() {
     let changed = "namespace App.Shop;\n\npublic event Changed(int id, string name);\n";
     let quiet = "namespace App.Shop;\n\npublic event Quiet(int id);\n";
     let lost = "namespace App.Shop;\n\npublic event Lost(int id);\n";
-    let cart = "namespace App.Shop;\n\npublic class Cart\n{\n    internal Quiet quiet() => new Quiet(1);\n}\n";
-    let page = "namespace App.Web;\n\nimport App.Shop.Changed;\n\npublic class Page\n{\n    internal Changed changed() => new Changed(1, \"a\");\n}\n";
+    let cart = "namespace App.Shop;\n\ninternal class Cart\n{\n    internal Quiet quiet() => new Quiet(1);\n}\n";
+    let page = "namespace App.Web;\n\nimport App.Shop.Changed;\n\ninternal class Page\n{\n    internal Changed changed() => new Changed(1, \"a\");\n}\n";
     let files = [
         ("src/App/Shop/Changed.sharp", changed),
         ("src/App/Shop/Quiet.sharp", quiet),
@@ -683,13 +683,19 @@ fn an_event_s_parameters_are_never_too_wide() {
         ("src/App/Web/Page.sharp", page),
     ];
 
-    assert_eq!(too_wide(&files), Vec::<String>::new());
+    assert_eq!(
+        too_wide(&files),
+        [
+            "src/App/Shop/Quiet.sharp 3:14 `Quiet` is public, and nothing outside `App.Shop` uses it. | Declare it `internal`.",
+            "src/App/Shop/Lost.sharp 3:14 `Lost` is public, and nothing outside `App.Shop` uses it. | Declare it `internal`.",
+        ]
+    );
     assert_eq!(
         unused_classes(&files),
         [
             "src/App/Shop/Lost.sharp 3:14 Nothing uses `Lost`, so it never runs.",
-            "src/App/Shop/Cart.sharp 3:14 Nothing uses `Cart`, so it never runs.",
-            "src/App/Web/Page.sharp 5:14 Nothing uses `Page`, so it never runs.",
+            "src/App/Shop/Cart.sharp 3:16 Nothing uses `Cart`, so it never runs.",
+            "src/App/Web/Page.sharp 5:16 Nothing uses `Page`, so it never runs.",
         ]
     );
 }
@@ -703,7 +709,7 @@ fn a_struct_s_fields_are_used_where_it_is_encoded_or_parsed() {
     let row = "namespace Demo;\n\npublic struct Row\n{\n    public int id { get; init; }\n    public string name { get; init; }\n    public int unused { get; } = 0;\n}\n";
     let line = "namespace Demo;\n\npublic struct Line\n{\n    public int amount { get; init; }\n}\n";
     let item = "namespace Demo;\n\npublic struct Item\n{\n    public int cents { get; init; }\n}\n";
-    let wire = "namespace Other;\n\nimport Demo.Item;\nimport Demo.Line;\nimport Demo.Row;\nimport Sharp.Encoding.Json;\n\npublic class Wire\n{\n    internal string sent(Row row) => Json.encode(row);\n\n    internal Line got(Map<string, Any?> input) => Line.parse(input);\n\n    internal List<Item> items(string text) => Json.decode<List<Item>>(text);\n}\n";
+    let wire = "namespace Other;\n\nimport Demo.Item;\nimport Demo.Line;\nimport Demo.Row;\nimport Sharp.Encoding.Json;\n\ninternal class Wire\n{\n    internal string sent(Row row) => Json.encode(row);\n\n    internal Line got(Map<string, Any?> input) => Line.parse(input);\n\n    internal List<Item> items(string text) => Json.decode<List<Item>>(text);\n}\n";
 
     assert_eq!(
         too_wide(&[
@@ -725,7 +731,7 @@ fn a_struct_s_fields_are_used_where_it_is_encoded_or_parsed() {
 fn a_member_inherited_from_a_plain_php_parent_is_not_too_wide() {
     let store = "<?php\n\nnamespace Lib;\n\nclass Store\n{\n    public const string A = 'a';\n\n    public const string B = 'b';\n}\n";
     let cache = "namespace App.Shop;\n\nimport Lib.Store;\n\npublic class Cache : Store\n{\n    public const string C = \"c\";\n\n    public static string name() => Cache.A;\n}\n";
-    let page = "namespace App.Web;\n\nimport App.Shop.Cache;\n\npublic class Page\n{\n    internal string show() => Cache.name();\n}\n";
+    let page = "namespace App.Web;\n\nimport App.Shop.Cache;\n\ninternal class Page\n{\n    internal string show() => Cache.name();\n}\n";
     let boot = "<?php\n\necho \\Lib\\Store::A;\n";
 
     assert_eq!(
@@ -749,7 +755,7 @@ fn a_member_inherited_from_a_plain_php_parent_is_not_too_wide() {
 fn a_member_a_class_outside_its_namespace_overrides_is_not_too_wide() {
     let base = "namespace App.Shop;\n\npublic abstract class Base\n{\n    public abstract string name();\n    public abstract string invoke();\n    public virtual string label() => \"base\";\n    public virtual string title() => \"base\";\n}\n";
     let runner = "namespace App.Shop;\n\ninternal class Runner\n{\n    internal string run(Base base) => base.name() + base.invoke() + base.label() + base.title();\n}\n";
-    let one = "namespace App.Web;\n\nimport App.Shop.Base;\n\npublic class One : Base\n{\n    public override string name() => \"one\";\n    public override string invoke() => \"one\";\n    public override string label() => \"one\";\n}\n";
+    let one = "namespace App.Web;\n\nimport App.Shop.Base;\n\ninternal class One : Base\n{\n    public override string name() => \"one\";\n    public override string invoke() => \"one\";\n    public override string label() => \"one\";\n}\n";
     let two = "namespace App.Shop.Deep;\n\nimport App.Shop.Base;\n\ninternal abstract class Two : Base\n{\n    public override string title() => \"two\";\n}\n";
 
     assert_eq!(
@@ -775,9 +781,9 @@ fn a_member_a_class_outside_its_namespace_overrides_is_not_too_wide() {
 fn a_public_member_takes_the_narrowest_access_that_reaches_every_use() {
     let report = "namespace App.Shop;\n\npublic abstract class Report\n{\n    public virtual string heading { get; } = \"report\";\n\n    public string render() => \"<h1>\" + this.title() + this.header() + \"</h1>\";\n\n    public abstract string title();\n\n    public virtual string header() => \"\";\n\n    public string stamp() => \"2026\";\n\n    public string footer() => \"\";\n}\n";
     let mailer = "namespace App.Shop;\n\ninternal class Mailer\n{\n    internal string send(Report report) => report.footer() + report.heading;\n}\n";
-    let sales = "namespace App.Web;\n\nimport App.Shop.Report;\n\npublic class Sales : Report\n{\n    public override string heading { get; } = \"sales\";\n\n    public override string title() => \"Sales \" + this.stamp();\n}\n";
+    let sales = "namespace App.Web;\n\nimport App.Shop.Report;\n\ninternal class Sales : Report\n{\n    public override string heading { get; } = \"sales\";\n\n    public override string title() => \"Sales \" + this.stamp();\n}\n";
     let page =
-        "namespace App.Web;\n\npublic class Page\n{\n    internal string show(Sales sales) => sales.render();\n}\n";
+        "namespace App.Web;\n\ninternal class Page\n{\n    internal string show(Sales sales) => sales.render();\n}\n";
     let protected = |member: &str| {
         format!(
             "`Report.{member}` is public, and nothing outside `Report` and its subclasses uses it. | Declare it `protected`."
@@ -796,6 +802,47 @@ fn a_public_member_takes_the_narrowest_access_that_reaches_every_use() {
             format!("src/App/Shop/Report.sharp 11:27 {}", protected("header")),
             format!("src/App/Shop/Report.sharp 13:19 {}", protected("stamp")),
             "src/App/Shop/Report.sharp 15:19 `Report.footer` is public, and nothing outside `App.Shop` uses it. | Declare it `internal`.".to_owned(),
+        ]
+    );
+}
+
+/// Spec section 5: a type is as wide as its uses, as a member is, so a `public` event, class, interface, struct or
+/// enum that nothing outside its namespace uses is too wide, and each kind is refused alike. `Shelf`, which `Page` of
+/// `App.Web` names, and `Till`, which plain PHP creates, are used from outside and stay `public`.
+#[test]
+fn a_public_type_nothing_outside_its_namespace_uses_is_too_wide() {
+    let quiet = "namespace App.Shop;\n\npublic event Quiet(int id);\n";
+    let basket = "namespace App.Shop;\n\npublic class Basket\n{\n}\n";
+    let priced = "namespace App.Shop;\n\npublic interface Priced\n{\n}\n";
+    let point = "namespace App.Shop;\n\npublic struct Point\n{\n}\n";
+    let size = "namespace App.Shop;\n\npublic enum Size\n{\n    case Small;\n}\n";
+    let shelf = "namespace App.Shop;\n\npublic class Shelf\n{\n}\n";
+    let till = "namespace App.Shop;\n\npublic class Till\n{\n}\n";
+    let cart = "namespace App.Shop;\n\ninternal class Cart\n{\n    internal Quiet quiet() => new Quiet(1);\n\n    internal int total(Basket basket, Priced priced, Point point, Size size) => 0;\n}\n";
+    let page = "namespace App.Web;\n\nimport App.Shop.Shelf;\n\ninternal class Page\n{\n    internal int show(Shelf shelf) => 0;\n}\n";
+    let boot = "<?php\n\n$till = new \\App\\Shop\\Till();\n";
+    let refused =
+        |name: &str| format!("`{name}` is public, and nothing outside `App.Shop` uses it. | Declare it `internal`.");
+
+    assert_eq!(
+        too_wide(&[
+            ("src/App/Shop/Quiet.sharp", quiet),
+            ("src/App/Shop/Basket.sharp", basket),
+            ("src/App/Shop/Priced.sharp", priced),
+            ("src/App/Shop/Point.sharp", point),
+            ("src/App/Shop/Size.sharp", size),
+            ("src/App/Shop/Shelf.sharp", shelf),
+            ("src/App/Shop/Till.sharp", till),
+            ("src/App/Shop/Cart.sharp", cart),
+            ("src/App/Web/Page.sharp", page),
+            ("src/boot.php", boot),
+        ]),
+        [
+            format!("src/App/Shop/Quiet.sharp 3:14 {}", refused("Quiet")),
+            format!("src/App/Shop/Basket.sharp 3:14 {}", refused("Basket")),
+            format!("src/App/Shop/Priced.sharp 3:18 {}", refused("Priced")),
+            format!("src/App/Shop/Point.sharp 3:15 {}", refused("Point")),
+            format!("src/App/Shop/Size.sharp 3:13 {}", refused("Size")),
         ]
     );
 }
@@ -902,7 +949,7 @@ fn a_marked_attribute_on_a_class_or_a_member_counts_it_as_used_and_the_mark_goes
     );
     let controller = "namespace App.Web;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_CLASS)]\n[DynamicallyAccessed]\npublic class Controller\n{\n}\n";
     let handles = "namespace App.Events;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_METHOD)]\n[DynamicallyAccessed]\npublic class Handles\n{\n}\n";
-    let dispatcher = "namespace App.Events;\n\npublic class Dispatcher\n{\n    internal void dispatch<TListener : Object>(TListener listener, string order)\n    {\n        for (const method of typeof(TListener).methods())\n        {\n            if (method.attributes<Handles>().isNotEmpty())\n            {\n                method.invoke(listener, [order]);\n            }\n        }\n    }\n}\n";
+    let dispatcher = "namespace App.Events;\n\ninternal class Dispatcher\n{\n    internal void dispatch<TListener : Object>(TListener listener, string order)\n    {\n        for (const method of typeof(TListener).methods())\n        {\n            if (method.attributes<Handles>().isNotEmpty())\n            {\n                method.invoke(listener, [order]);\n            }\n        }\n    }\n}\n";
     let pages = "namespace App.Shop;\n\nimport App.Web.Controller;\n\n[Controller]\npublic class Pages\n{\n    public const int LIMIT = 3;\n\n    public string title { get; } = \"shop\";\n\n    public string index() => \"index\";\n}\n";
     let receipts = "namespace App.Shop;\n\nimport App.Events.Handles;\n\npublic class Receipts\n{\n    [Handles]\n    public void paid(string order) { }\n\n    public void voided(string order) { }\n}\n";
 

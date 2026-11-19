@@ -12,7 +12,8 @@
 //! since they all start with double underscore.
 //!
 //! [`too_wide_members`] refuses, once the whole project is analyzed, a PHP# `public`
-//! member whose every use a narrower access level reaches, which spec section 5 calls too wide.
+//! member whose every use a narrower access level reaches, and a `public` type that nothing
+//! outside its namespace uses, which spec section 5 calls too wide.
 
 use foldhash::HashMap;
 use foldhash::HashSet;
@@ -591,11 +592,15 @@ enum Access {
     Internal,
 }
 
-/// Refuses each `public` member whose uses a narrower access level reaches, and names the narrowest one.
+/// Refuses each `public` member whose uses a narrower access level reaches, and names the narrowest one, and each
+/// `public` type that nothing outside its namespace uses.
 ///
-/// Spec section 5 calls such a member too wide, a compile error in an application. The pass reads `references` of
-/// every file, so it runs once the whole project is analyzed, beside [`Effects::solve`](crate::effects::Effects::solve).
-/// The levels are tried as [`Access`] orders them, so a member nothing uses is `private`. A use from code outside any
+/// Spec section 5 calls such a member or type too wide, a compile error in an application. A type is as wide as its
+/// uses, as a member is, and each kind alike: a class, an interface, a struct, an enum and an event. A use of a type is
+/// a use of it or of a member of it, an `extends` or an `implements` included, and plain PHP reaching an `[Export]`
+/// method or a framework reading a marked attribute of a member is one from outside the namespace. A module and an
+/// enum's case are no types anyone names. The pass reads `references` of every file, so it runs once the whole project
+/// is analyzed, beside [`Effects::solve`](crate::effects::Effects::solve). The levels are tried as [`Access`] orders them, so a member nothing uses is `private`. A use from code outside any
 /// class or function needs `public`, because its namespace is not known here. A member must be visible to each class
 /// that overrides or implements it, so an override is a use from the class that declares it. A `virtual` or
 /// `abstract` member is never `private`, since a private member is never replaced.
@@ -640,10 +645,12 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
         }
     }
     // The same uses by the member and each class-like the class the code names it on is an instance of, as
-    // `CodebaseMetadata::is_instance_of` decides.
+    // `CodebaseMetadata::is_instance_of` decides, and the uses of each type, a use of the type or of a member of it.
     let mut member_uses = HashMap::<(Word, Word), Vec<&[Option<Word>]>>::default();
+    let mut type_uses = HashMap::<Word, Vec<&[Option<Word>]>>::default();
     for ((member, on), code_in) in &uses_on {
         let on = codebase.class_key(*on);
+        type_uses.entry(on).or_default().push(code_in);
         let metadata = codebase.get_class_like(on);
         let instance_of = metadata.into_iter().flat_map(|metadata| {
             std::iter::once(metadata.name).chain(metadata.instance_of().into_iter().flatten().copied())
@@ -655,21 +662,19 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
 
     let mut issues = IssueCollection::default();
     for (class_name, class) in &codebase.class_likes {
-        if !class.flags.is_user_defined()
-            || !class.flags.is_project()
-            || class.flags.is_internal_reach()
-            || class.kind.is_interface()
-        {
+        if !class.flags.is_user_defined() || !class.flags.is_project() || class.flags.is_internal_reach() {
             continue;
         }
 
-        // A marked attribute on the class says its framework reaches every public member of it.
+        // A marked attribute on the class says its framework reaches it and every public member of it.
         if is_dynamically_accessed(codebase, &class.attributes) {
             continue;
         }
 
         let namespace = namespace_of(class.original_name.as_bytes());
+        let dotted_namespace = String::from_utf8_lossy(namespace).replace('\\', ".");
         let class_key = codebase.class_key(*class_name);
+        let class_label = sharp_class_like_name(codebase, &WordMap::default(), *class_name);
         // Whether `access` reaches the code a use is in, spec section 5's table.
         let reaches = |access: Access, code_in: Option<Word>| {
             code_in.is_some_and(|symbol| match access {
@@ -678,6 +683,35 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
                 Access::Internal => is_within_namespace(namespace_of(symbol.as_bytes()), namespace),
             })
         };
+
+        let is_used_outside = || {
+            type_uses
+                .get(&class_key)
+                .into_iter()
+                .flatten()
+                .flat_map(|uses| uses.iter())
+                .any(|code_in| !reaches(Access::Internal, *code_in))
+        };
+        if !class.flags.is_module()
+            && !class.flags.is_enum_case_class()
+            && !is_reached_by_its_members(codebase, *class_name, class)
+            && !is_used_outside()
+        {
+            issues.push(
+                Issue::error(format!("`{class_label}` is public, and nothing outside `{dotted_namespace}` uses it."))
+                    .with_code(IssueCode::TooWideMember)
+                    .with_annotation(
+                        Annotation::primary(class.name_span.unwrap_or(class.span))
+                            .with_message("Declared `public` here."),
+                    )
+                    .with_note("A type is as wide as its uses, so one that only its namespace uses is `internal`.")
+                    .with_help("Declare it `internal`."),
+            );
+        }
+
+        if class.kind.is_interface() {
+            continue;
+        }
 
         for (member, label, span, is_open) in public_members(codebase, *class_name, class) {
             let uses: Vec<Option<Word>> = member_uses
@@ -694,7 +728,6 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
                 continue;
             };
 
-            let class_label = sharp_class_like_name(codebase, &WordMap::default(), *class_name);
             let (keyword, reach, note) = match access {
                 Access::Private => (
                     "private",
@@ -708,7 +741,7 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
                 ),
                 Access::Internal => (
                     "internal",
-                    format!("`{}`", String::from_utf8_lossy(namespace).replace('\\', ".")),
+                    format!("`{dotted_namespace}`"),
                     "A member is as wide as its uses, so one that only its namespace uses is `internal`.",
                 ),
             };
@@ -774,6 +807,11 @@ pub fn unused_classes(
             || used.contains(class_name)
             || is_dynamically_accessed(codebase, &class.attributes)
             || is_reached_by_its_members(codebase, *class_name, class)
+            || class
+                .methods
+                .iter()
+                .filter_map(|name| codebase.function_likes.get(&(*class_name, *name)))
+                .any(|method| !method.listens.is_empty())
         {
             continue;
         }
@@ -790,16 +828,14 @@ pub fn unused_classes(
     issues
 }
 
-/// Whether the engine, plain PHP or a framework reaches `class` through one of its members: PHP# creates a class that
-/// declares an `on` method, spec section 15, plain PHP calls an `[Export]` method through the global function it
-/// declares, spec section 23, and the code that reads a member's marked attribute reaches the member's class.
+/// Whether plain PHP or a framework reaches `class` through one of its members, from outside any namespace: plain PHP
+/// calls an `[Export]` method through the global function it declares, spec section 23, and the code that reads a
+/// member's marked attribute reaches the member's class.
 fn is_reached_by_its_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLikeMetadata) -> bool {
     class.properties.values().any(|property| is_dynamically_accessed(codebase, &property.attributes))
         || class.constants.values().any(|constant| is_dynamically_accessed(codebase, &constant.attributes))
         || class.methods.iter().filter_map(|name| codebase.function_likes.get(&(class_name, *name))).any(|method| {
-            !method.listens.is_empty()
-                || method.has_attribute(codebase, word(EXPORT))
-                || is_dynamically_accessed(codebase, &method.attributes)
+            method.has_attribute(codebase, word(EXPORT)) || is_dynamically_accessed(codebase, &method.attributes)
         })
 }
 

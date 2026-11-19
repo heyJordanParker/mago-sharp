@@ -277,7 +277,8 @@ mod tests {
 
     /// The analysis of one file, which the playground runs: the file is the whole project, so spec section 5's
     /// too-wide warning reads its uses alone. A `public` member nothing outside its namespace uses warns, an `internal` or `private` one
-    /// does not, and the prelude's classes, which the project does not declare, get none.
+    /// does not, a `public` class nothing outside its namespace uses warns too, and the prelude's classes, which the
+    /// project does not declare, get none.
     #[test]
     fn oneshot_warns_on_a_public_member_nothing_outside_its_namespace_uses() {
         let source = "namespace App.Shop;\n\npublic class Cart\n{\n    public int total() => this.count();\n\n    internal int count() => this.spare();\n\n    private int spare() => 2;\n}\n";
@@ -303,6 +304,12 @@ mod tests {
             .map(|issue| (issue.primary_span().map(|span| span.file_id), issue.message.as_str()))
             .collect();
 
-        assert_eq!(too_wide, [(Some(file_id), "`Cart.total` is public, and nothing outside `Cart` uses it.")]);
+        assert_eq!(
+            too_wide,
+            [
+                (Some(file_id), "`Cart` is public, and nothing outside `App.Shop` uses it."),
+                (Some(file_id), "`Cart.total` is public, and nothing outside `Cart` uses it."),
+            ]
+        );
     }
 }
