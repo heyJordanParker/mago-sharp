@@ -5103,13 +5103,87 @@ fn compile_proves_a_law_whose_calls_leave_out_defaulted_arguments() {
     }
 }
 
-/// Spec section 19: a struct with a field whose `==` a law can't read, as a nullable struct's, keeps the class operator
-/// refusal for the `==` it gets with no code.
+/// Spec section 19: a struct with a field whose `==` a law can't read, as a `List` of a class's values, keeps the class
+/// operator refusal for the `==` it gets with no code.
 #[test]
 fn a_law_comparing_structs_whose_field_has_no_equality_a_law_reads_is_refused() {
     assert_unmodeled(
-        "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic struct Shape\n{\n    public Shape(public Instant? closedAt { get; }) { }\n\n    law same(Shape shape) => shape == shape;\n}\n",
+        "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic struct Shape\n{\n    public Shape(public List<Instant> closedAt { get; }) { }\n\n    law same(Shape shape) => shape == shape;\n}\n",
         "Law same reaches the class operator `==` in Shape.operator ==. Compare the values the objects hold, such as their properties.",
+    );
+}
+
+/// Spec section 28: `==` and `!=` with a nullable value of a class run as spec section 19 lifts them: null equals only
+/// null, and two values compare by the class's own `==`, whichever side is nullable. A false claim is not proven.
+#[test]
+fn a_law_compares_a_nullable_instant_with_eq() {
+    let stamp = |laws: &str| {
+        format!(
+            "namespace App;\n\nimport Sharp.Time.Instant;\n\npublic struct Stamp\n{{\n    public Stamp(public Instant? at {{ get; }}) {{ }}\n\n    {laws}\n}}\n"
+        )
+    };
+    let directory = library_project(&[(
+        "app/Stamp.sharp",
+        &stamp(
+            "law keepsTheInstant(Instant at) => new Stamp(at).at == at;\n    law heldOnTheRight(Instant at) => at == new Stamp(at).at;\n    law keepsANullableInstant(Instant? at) => new Stamp(at).at == at;\n    law nullDiffersFromAnInstant(Instant at) => new Stamp(null).at != at;",
+        ),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Stamp.sharp").exists());
+
+    let directory = library_project(&[(
+        "app/Stamp.sharp",
+        &stamp("law nullEqualsAnInstant(Instant at) => new Stamp(null).at == at;"),
+    )]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law nullEqualsAnInstant is not proven\n"),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// Spec section 28: `==` on two values of a struct with an `Instant?` field compares that field as spec section 19 lifts
+/// `==` on a nullable value. A false claim is not proven.
+#[test]
+fn a_law_compares_structs_whose_field_is_a_nullable_instant() {
+    let shape = |laws: &str| {
+        format!(
+            "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic struct Shape\n{{\n    public Shape(public Instant? closedAt {{ get; }}) {{ }}\n\n    {laws}\n}}\n"
+        )
+    };
+    let directory = library_project(&[(
+        "app/Shared/Shape.sharp",
+        &shape(
+            "law same(Shape shape) => shape == shape;\n    law openDiffersFromClosed(Instant at) => new Shape(null) != new Shape(at);",
+        ),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Shape.sharp").exists());
+
+    let directory = library_project(&[(
+        "app/Shared/Shape.sharp",
+        &shape("law openEqualsClosed(Instant at) => new Shape(null) == new Shape(at);"),
+    )]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law openEqualsClosed is not proven\n"),
+        "{}",
+        printed(&output)
     );
 }
 

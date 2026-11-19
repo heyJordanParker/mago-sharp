@@ -683,7 +683,8 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// `==`, or `!=` when `negated`, of the values `lhs` and `rhs` of the types `types`, as spec section 19 compares
     /// them, the way the bridge's [`Equality`] tells: Lean's `==` on values that hold no object, and the `==` a class
-    /// declares, or a struct gets with no code, as its `op_Equality` gives it. `span` is where a refusal stands.
+    /// declares, or a struct gets with no code, as its `op_Equality` gives it. A nullable side is lifted: null equals
+    /// only null, and two values run that `==`. `span` is where a refusal stands.
     pub(crate) fn equal(
         &mut self,
         span: Span,
@@ -694,14 +695,15 @@ impl<'body, 'program> Body<'body, 'program> {
         let (what, reason) = match self.checked.types().equality(types.0, types.1) {
             Equality::Identical if negated => return format!("({lhs} != {rhs})"),
             Equality::Identical => return format!("({lhs} == {rhs})"),
-            Equality::Declared(owner, name) if !types.0.is_nullable() && !types.1.is_nullable() => {
+            Equality::Declared(owner, name) => {
                 if !self.is_translated_class(span, owner.as_bytes()) {
                     return "default".to_owned();
                 }
-                let equal = self.operator(owner.as_bytes(), name, "==", (lhs, rhs));
+                let equal =
+                    self.lifted(owner.as_bytes(), name, (types.0.is_nullable(), types.1.is_nullable()), (lhs, rhs));
                 return if negated { format!("(!{equal})") } else { equal };
             }
-            Equality::Declared(..) | Equality::Elements => {
+            Equality::Elements => {
                 (format!("the class operator `{}`", if negated { "!=" } else { "==" }), issues::CLASS_OPERATOR)
             }
             Equality::Numbers => ("a float".to_owned(), issues::FLOAT),
@@ -713,6 +715,23 @@ impl<'body, 'program> Body<'body, 'program> {
         };
 
         self.unmodeled(span, what, reason)
+    }
+
+    /// `==` of `lhs` and `rhs` by the `==` `class` declares as the static method `name`, where `nullable` tells which
+    /// side may be null, as spec section 19 lifts it: null equals only null, and two values run the method.
+    fn lifted(&mut self, class: &[u8], name: &[u8], nullable: (bool, bool), (lhs, rhs): (&str, &str)) -> String {
+        let (held, absent) = match nullable {
+            (false, false) => return self.operator(class, name, "==", (lhs, rhs)),
+            (true, true) => (format!("({lhs}.isSome && {rhs}.isSome)"), format!("pure ({lhs}.isNone && {rhs}.isNone)")),
+            (true, false) => (format!("{lhs}.isSome"), "pure false".to_owned()),
+            (false, true) => (format!("{rhs}.isSome"), "pure false".to_owned()),
+        };
+        let value =
+            |side: &str, nullable: bool| if nullable { format!("({side}.getD default)") } else { side.to_owned() };
+        let values = (value(lhs, nullable.0), value(rhs, nullable.1));
+        let present = self.nested_lines(|body| body.operator(class, name, "==", (&values.0, &values.1)));
+
+        self.choose(&Choice::If(held, Box::new(Choice::Branch(present)), Box::new(Choice::Branch(vec![absent]))))
     }
 
     /// Whether the field `field`, of the declared type `r#type`, holds equal values in `a` and `b`, two values of the
