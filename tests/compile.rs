@@ -5051,6 +5051,7 @@ fn analyze_refuses_a_law_that_reaches_an_unmodeled_construct_as_compile_does_and
     let analyzed = process::output(
         Command::new(env!("CARGO_BIN_EXE_mago"))
             .args(["--no-version-check", "--colors", "never", "analyze"])
+            .env("MAGO_REPORTING_FORMAT", "medium")
             .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
             .current_dir(root),
     )
