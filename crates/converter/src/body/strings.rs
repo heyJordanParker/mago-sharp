@@ -112,9 +112,13 @@ impl Converter<'_, '_> {
     /// an `int` that may be null has no part. PHP shows an object of a plain PHP class by its `__toString`, which a
     /// template shows it by, as its `toString()` (spec section 18).
     fn shown_value(&mut self, value: &Expression<'_>) -> Option<String> {
-        let shows = self.plain_stringable(value) || self.is(value, &[Kind::Int, Kind::Float, Kind::String]);
+        let stringable = self.plain_stringable(value);
+        let shows = stringable || self.is(value, &[Kind::Int, Kind::Float, Kind::String]);
         if !shows && !self.is(value, &[Kind::String, Kind::Null]) {
             return None;
+        }
+        if stringable {
+            self.undeclared_to_string(value);
         }
         self.expression(value, None);
         let rendered = self.render(value);

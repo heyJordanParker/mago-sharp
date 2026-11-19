@@ -169,6 +169,7 @@ impl Converter<'_, '_> {
         // PHP's `(string)` of an object calls its `__toString`, which is a plain PHP class's `toString()` (spec section
         // 18).
         if kind == Kind::String && self.plain_stringable(operand) {
+            self.undeclared_to_string(operand);
             let rendered = self.render(operand);
             let rendered = if super::is_primary(operand) { rendered } else { format!("({rendered})") };
             return self.edits.replace(expression.span(), format!("{rendered}.toString()"));
@@ -295,6 +296,19 @@ impl Converter<'_, '_> {
                             .is_some_and(|method| !method.flags.is_sharp()))
                 })
         })
+    }
+
+    /// Records the class that declares the `__toString` of each class `value` may be, which showing `value` as text
+    /// calls, so it needs that class's `extern` line (spec section 29).
+    pub(super) fn undeclared_to_string(&mut self, value: &Expression<'_>) {
+        let codebase = self.input.codebase;
+        for atomic in self.type_of(value).map_or(&[][..], |union| union.types.as_ref()) {
+            if let TAtomic::Object(TObject::Named(named)) = atomic
+                && let Some(method) = codebase.get_declaring_method(named.name, word("__tostring"))
+            {
+                self.undeclared_callee(method, Some(named.name));
+            }
+        }
     }
 
     /// The PHP# string literal of the class name `X::class` gives, for `X` a class's name or `self`, which name the

@@ -922,9 +922,12 @@ fn check_extern_signature<A>(
         &r#extern.return_type_hint,
     ) {
         let (native, stated) = (expanded(&native.type_union), expanded(&stated.type_union));
+        // A function plain PHP gives has no PHP# type (spec section 21), so a stated function type states it, as a
+        // stated `List` states the elements of an `array`.
         let takes = native.types.iter().all(|atomic| {
             fits(&TUnion::from_atomic(atomic.clone()), &stated)
                 || (atomic.is_array() && stated.types.iter().any(TAtomic::is_array))
+                || (atomic.is_callable() && stated.types.iter().any(TAtomic::is_callable))
         });
         if !takes {
             context.collector.report_with_code(

@@ -312,7 +312,7 @@ impl<'input> Converter<'input, '_> {
     /// Records the class that declares `callee`, a method reached through `class`, or the function `callee`, when it is
     /// plain PHP no `extern` line declares, as the call takes the line of the class that declares its method (spec
     /// section 29). PHP's own and the converted file's own need none.
-    fn undeclared_callee(&mut self, callee: &FunctionLikeMetadata, class: Option<Word>) {
+    pub(super) fn undeclared_callee(&mut self, callee: &FunctionLikeMetadata, class: Option<Word>) {
         let codebase = self.input.codebase;
         if callee.flags.is_sharp() || callee.flags.is_built_in() || callee.span.file_id == self.input.file.id {
             return;

@@ -13,4 +13,9 @@ internal final class Mailer
     {
         return `to ${to}${` (${to})`}`;
     }
+
+    internal string tagged(Tag tag)
+    {
+        return tag.toString() + ` ${tag}`;
+    }
 }

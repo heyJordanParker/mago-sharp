@@ -17,4 +17,9 @@ final class Mailer
     {
         return 'to ' . $to . " ({$to})";
     }
+
+    public function tagged(Tag $tag): string
+    {
+        return (string) $tag . " {$tag}";
+    }
 }

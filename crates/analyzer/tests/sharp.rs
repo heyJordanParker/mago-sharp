@@ -24576,7 +24576,8 @@ fn a_function_type_test_of_a_plain_php_function_value_is_unknown() {
 
 /// Spec section 21: a function plain PHP gives has no PHP# type, so a call of it is refused, naming the `extern` line
 /// that states its type: the line of the method that returns it, or any line for a function a local holds. Once the
-/// line states the type, the call compiles.
+/// line states the type, the call compiles, and the line itself compiles, since a `Closure` PHP declares states no
+/// parameter or result type for the stated function type to take.
 #[test]
 fn a_call_of_a_function_of_unknown_type_is_refused_and_names_the_extern_line_that_states_its_type() {
     let legacy = (
@@ -24596,6 +24597,7 @@ fn a_call_of_a_function_of_unknown_type_is_refused_and_names_the_extern_line_tha
             "14:16 invalid-callable The type of `tripler`'s function is unknown, so it is never called. | State its type on the `extern` line of the plain PHP that gives it, as `extern Function<int(int) uses none> Legacy.doubler() uses none;` states a method's.",
         ]
     );
+    assert_eq!(refusals(stubs, &[legacy]), Vec::<String>::new());
 }
 
 /// Spec section 11: a plain PHP class's objects carry no type arguments while the code runs, so a type test that gives
