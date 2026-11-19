@@ -11,10 +11,8 @@ use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_codex::graph::strongly_connected_parts;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
-use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
-use mago_codex::ttype::atomic::TAtomic;
 use mago_database::file::FileId;
 use mago_names::ACCEPTS_ANY_EFFECT;
 use mago_names::EMIT_EFFECT;
@@ -25,7 +23,6 @@ use mago_reporting::IssueCollection;
 use mago_span::Span;
 use mago_word::Word;
 use mago_word::WordMap;
-use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
 use mago_word::word;
 
@@ -39,30 +36,23 @@ pub(crate) mod summary;
 /// A reason a body is impure other than a change of state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Effect {
-    /// An effect an `extern` declaration lists for the plain PHP called, named by its class, such as `Sharp\Http`.
+    /// An effect an `extern` line lists for the plain PHP called, named by its class, such as `Sharp\Http`.
     Foreign(Word),
-    /// A call into plain PHP that no `extern` declaration covers, with the callee an `extern` would declare as its full
-    /// class name and its member: `Lib\Bag` and `__call`, an empty class and `trim` for a function, and the class and
-    /// an empty member for a constructor. A call of a plain PHP property holding a function has none, because an
-    /// `extern` declares a class's members, not the code a property holds, and nor does a call of any other function
-    /// plain PHP wrote, whose cause has an empty class and the function value as the call writes it.
-    Unknown(Option<(Word, Word)>),
-    /// The effect `effect` of a call into a plain PHP class without an `extern`, which the class carries because `by`,
-    /// a call an `extern` declares, returns it: a full class name and a member, or an empty class and a function.
-    Carried { effect: Word, by: (Word, Word) },
+    /// A call into plain PHP whose `extern` line says `uses any`, which may have any effect, spec section 29.
+    Any,
     /// An `emit`, spec section 15, which has the effect `Sharp\Events` whatever its listeners do. Its cause is the
     /// event's class and an empty member.
     Emit,
 }
 
 impl Effect {
-    /// The effect as a `uses` names it, by full class name: a foreign or carried effect's class, and `Sharp\Events`
-    /// for an `emit`. `None` for a plain PHP call that no `extern` declares, which no `uses` names.
+    /// The effect as a `uses` names it, by full class name: a foreign effect's class, and `Sharp\Events` for an
+    /// `emit`. `None` for a call whose `extern` line says `uses any`, which no `uses` names.
     pub(crate) fn named(self) -> Option<Word> {
         match self {
-            Effect::Foreign(effect) | Effect::Carried { effect, .. } => Some(effect),
+            Effect::Foreign(effect) => Some(effect),
             Effect::Emit => Some(events()),
-            Effect::Unknown(_) => None,
+            Effect::Any => None,
         }
     }
 }
@@ -120,9 +110,12 @@ pub(crate) enum Runs {
     /// A PHP# lambda or method, whose effects only the solve knows.
     Body(Body),
     /// A method whose effects need no solve, as its full class name and its member, with the effects a call of it has:
-    /// a plain PHP method's, which its `extern` declares or `Unknown` without one, a `foreign` class's method's, and a
-    /// PHP# method's without a body, which its `uses` lists.
+    /// a plain PHP method's, which its `extern` line declares, a `foreign` class's method's, and a PHP# method's
+    /// without a body, which its `uses` lists.
     Foreign { callee: (Word, Word), effects: Vec<Effect> },
+    /// A plain PHP method or function that no `extern` line declares, as its full class name and its member, and the
+    /// line it needs, as [`EffectSummary::undeclared`] holds one.
+    Undeclared { callee: (Word, Word), line: (Word, Word) },
 }
 
 /// A lambda or a method value a body gives a place whose PHP# function type lists its effects. Spec section 29 holds
@@ -182,6 +175,10 @@ pub struct EffectSummary {
     pub(crate) changes: Vec<(Changed, Span, Word)>,
     pub(crate) function_values: Vec<FunctionValue>,
     pub(crate) readonly_calls: Vec<ReadonlyCall>,
+    /// Each call, `new` or property read of plain PHP that no `extern` line declares, spec section 29, with the line
+    /// it needs: the full name of the class that declares the member reached, and an empty member, or an empty class
+    /// and the full name of a function.
+    pub(crate) undeclared: Vec<(Span, (Word, Word))>,
     /// The name each import of the body's file gives its class, and the file's namespace and imports, as
     /// `Context::imported_names` and `Context::scope` hold them, shared by the file's bodies. A message about the body
     /// names classes, and the imports its code needs, as its file does.
@@ -203,7 +200,7 @@ pub(crate) struct Impurity {
     /// The effect of the call, or `None` when the cause is a place written.
     pub(crate) effect: Option<Effect>,
     /// Whether the path ends at a member of the standard library that may have every effect, spec section 29, as
-    /// `Property.get`, whose plain PHP call with no `extern` the caller can't declare.
+    /// `Property.get`, whose plain PHP call with `uses any` the caller can't state otherwise.
     pub(crate) every_effect: bool,
 }
 
@@ -214,8 +211,8 @@ pub(crate) fn member_of_foreign_class() -> (Word, Word) {
 }
 
 impl Impurity {
-    /// The reason as a sentence's predicate, such as "calls `Pdf.render`, which has no `extern` declaration", with each
-    /// class named by `class_name` and each effect by `effect_name`.
+    /// The reason as a sentence's predicate, such as "calls `Pdf.render`, which may have any effect", with each class
+    /// named by `class_name` and each effect by `effect_name`.
     pub(crate) fn describe(&self, class_name: &dyn Fn(Word) -> String, effect_name: &dyn Fn(Word) -> String) -> String {
         if self.cause == member_of_foreign_class()
             && let Some(Effect::Foreign(effect)) = self.effect
@@ -239,19 +236,7 @@ impl Impurity {
             (None, Some(Effect::Foreign(effect))) => {
                 format!("calls `{cause}`, which has the effect `{}`", effect_name(effect))
             }
-            (None, Some(Effect::Carried { effect, by })) => {
-                format!(
-                    "calls `{cause}`, which has the effect `{}` {}",
-                    effect_name(effect),
-                    self.carried_by(by, class_name)
-                )
-            }
-            (Some(body), Some(Effect::Carried { effect, by })) => format!(
-                "reaches `{body}`, which calls `{cause}` with the effect `{}` {}",
-                effect_name(effect),
-                self.carried_by(by, class_name)
-            ),
-            (None, Some(Effect::Unknown(_))) => format!("calls `{cause}`, which has no `extern` declaration"),
+            (None, Some(Effect::Any)) => format!("calls `{cause}`, which may have any effect"),
             (None, Some(Effect::Emit)) => {
                 format!("emits `{cause}`, which has the effect `{}`", effect_name(events()))
             }
@@ -259,9 +244,7 @@ impl Impurity {
             (Some(body), Some(Effect::Foreign(effect))) => {
                 format!("reaches `{body}`, which calls `{cause}` with the effect `{}`", effect_name(effect))
             }
-            (Some(body), Some(Effect::Unknown(_))) => {
-                format!("reaches `{body}`, which calls `{cause}` with no `extern` declaration")
-            }
+            (Some(body), Some(Effect::Any)) => format!("reaches `{body}`, which calls `{cause}` with any effect"),
             (Some(body), Some(Effect::Emit)) => {
                 format!("reaches `{body}`, which emits `{cause}` with the effect `{}`", effect_name(events()))
             }
@@ -276,12 +259,6 @@ impl Impurity {
             Some(body) => format!("reaches `{}`, which changes `{cause}`", written(*body, class_name)),
             None => format!("changes `{cause}`"),
         }
-    }
-
-    /// Where a carried effect comes from, as "that `Desk.open` declares for the `Session` it returns", for the class of
-    /// the cause, which the declared call `by` returns.
-    pub(crate) fn carried_by(&self, by: (Word, Word), class_name: &dyn Fn(Word) -> String) -> String {
-        format!("that `{}` declares for the `{}` it returns", written(by, class_name), class_name(self.cause.0))
     }
 }
 
@@ -338,6 +315,10 @@ pub struct Effects {
     function_values: Vec<(FunctionValue, usize)>,
     /// Each call of a method without `readonly` through a readonly value, with the position of the body that makes it.
     readonly_calls: Vec<(ReadonlyCall, usize)>,
+    /// Each use of plain PHP no `extern` line declares, once, with the line it needs and the position of the body that
+    /// makes it, whose file names the line's class: the body's own, and a value of the plain PHP method or function a
+    /// function value gives a place.
+    undeclared: Vec<(Span, (Word, Word), usize)>,
     /// The file of each call, with the position of each body it reaches.
     calls: Vec<(FileId, Vec<usize>)>,
 }
@@ -400,9 +381,7 @@ impl Effects {
         let successors: Vec<Vec<usize>> =
             targets.iter().map(|calls| calls.iter().flatten().copied().collect()).collect();
 
-        let carried = carried_effects(codebase);
-        let mut solved: Vec<Vec<(Item, Origin)>> =
-            summaries.iter().map(|summary| own_items(summary, &carried)).collect();
+        let mut solved: Vec<Vec<(Item, Origin)>> = summaries.iter().map(own_items).collect();
         for part in strongly_connected_parts(&successors) {
             loop {
                 let mut grew = false;
@@ -466,17 +445,8 @@ impl Effects {
             function_values: summaries
                 .iter()
                 .enumerate()
-                .flat_map(|(position, summary)| summary.function_values.iter().map(move |value| (value, position)))
-                .map(|(value, position)| {
-                    let runs = match &value.runs {
-                        Runs::Foreign { callee, effects } => Runs::Foreign {
-                            callee: *callee,
-                            effects: effects.iter().flat_map(|effect| carried_through(*effect, &carried)).collect(),
-                        },
-                        runs => runs.clone(),
-                    };
-
-                    (FunctionValue { runs, ..value.clone() }, position)
+                .flat_map(|(position, summary)| {
+                    summary.function_values.iter().map(move |value| (value.clone(), position))
                 })
                 .collect(),
             readonly_calls: summaries
@@ -484,6 +454,7 @@ impl Effects {
                 .enumerate()
                 .flat_map(|(position, summary)| summary.readonly_calls.iter().map(move |call| (call.clone(), position)))
                 .collect(),
+            undeclared: undeclared(summaries),
             calls: summaries
                 .iter()
                 .zip(targets)
@@ -549,9 +520,9 @@ impl Effects {
     /// The effects of the PHP# method or lambda `function`, by full class name, each once, as a function type's `uses`
     /// lists them: each effect of the plain PHP and the `foreign` classes it reaches, and `Sharp\Events` when it emits.
     /// A change of state is no effect. A method without a body has the effects its `uses` lists, as a call of it does,
-    /// when it holds each implementation to them, spec section 29. `None` when it calls plain PHP no `extern` declares,
-    /// which no function type lists, and for a function no summary records and no such declaration holds, such as a
-    /// plain PHP one.
+    /// when it holds each implementation to them, spec section 29. `None` when it calls plain PHP whose `extern` line
+    /// says `uses any`, which no function type lists, and for a function no summary records and no such declaration
+    /// holds, such as a plain PHP one.
     #[must_use]
     pub fn function_effects(
         &self,
@@ -576,8 +547,8 @@ impl Effects {
     /// The effects of the accessor `accessor`, `get` or `set`, of the property `property` of the PHP# class `class`, as
     /// [`Self::function_effects`] gives a method's: those of its body and, for a `set`, of the observers that run inside
     /// it, spec section 6.2. An auto accessor runs no body of its own, so it has the effects of the observers alone.
-    /// `None` when one of them calls plain PHP no `extern` declares, and for a property the class neither declares nor
-    /// inherits.
+    /// `None` when one of them calls plain PHP whose `extern` line says `uses any`, and for a property the class neither
+    /// declares nor inherits.
     #[must_use]
     pub fn accessor_effects(
         &self,
@@ -599,7 +570,7 @@ impl Effects {
     }
 
     /// The effects the bodies at `positions` reach, each once, as [`Self::function_effects`] lists them, or `None` when
-    /// one calls plain PHP no `extern` declares.
+    /// one calls plain PHP whose `extern` line says `uses any`.
     fn effects_of(&self, positions: &[usize]) -> Option<Vec<Word>> {
         let mut effects = Vec::new();
         for (item, _) in positions.iter().flat_map(|position| &self.solved[*position]) {
@@ -619,7 +590,8 @@ impl Effects {
     /// laws from `codebase`. Each message names classes as the file of the getter or law it refuses does.
     #[must_use]
     pub fn issues(&self, codebase: &CodebaseMetadata) -> IssueCollection {
-        let mut issues = check::getters_never_write_this(self, codebase);
+        let mut issues = check::plain_php_has_extern_lines(self, codebase);
+        issues.extend(check::getters_never_write_this(self, codebase));
         issues.extend(check::laws_must_be_pure(self, codebase));
         issues.extend(check::function_values_must_fit_their_types(self, codebase));
         issues.extend(check::implementations_must_fit_their_declarations(self, codebase));
@@ -640,6 +612,14 @@ impl Effects {
 
             (call, &*self.imports[*caller], change)
         })
+    }
+
+    /// Each use of plain PHP no `extern` line declares, with the line it needs, as [`EffectSummary::undeclared`] holds
+    /// it, and the imports and the scope of the file that makes it.
+    fn undeclared_uses(&self) -> impl Iterator<Item = (Span, (Word, Word), &WordMap<Word>, &NamespaceScope)> + '_ {
+        self.undeclared
+            .iter()
+            .map(|(span, line, position)| (*span, *line, &*self.imports[*position], &*self.scopes[*position]))
     }
 
     fn body_impurity(&self, body: Body) -> Option<Impurity> {
@@ -676,12 +656,11 @@ impl Effects {
             path.push(self.names[callee]);
             item = callee_item;
             origin = *callee_origin;
-            // A plain PHP call with no `extern` in the standard library is the member's own, as `Property.get` runs
-            // any `get`, so for code outside the library the chain ends at the member it calls. The library's own
-            // code is told the `extern` to write.
+            // A plain PHP call with `uses any` in the standard library is the member's own, as `Property.get` runs any
+            // `get`, so for code outside the library the chain ends at the member it calls.
             if !self.standard_library[position]
                 && self.standard_library[callee]
-                && matches!(item, Item::Effect(Effect::Unknown(_)))
+                && matches!(item, Item::Effect(Effect::Any))
             {
                 every_effect = true;
                 break;
@@ -728,6 +707,8 @@ impl Effects {
 
                     (*callee, impurity)
                 }
+                // Its missing `extern` line is refused on its own.
+                Runs::Undeclared { .. } => return None,
             };
             reported.push(value.span);
 
@@ -798,18 +779,8 @@ impl Effects {
         self.bodies_with(Self::body_impurity)
     }
 
-    /// Each body that has an effect a `uses` names, and the first call that leads to one, as [`Self::bodies_with`] gives
-    /// them, without the scope. A change of state is no effect, and a plain PHP call no `extern` declares has none
-    /// that a `uses` names.
-    fn effectful_bodies(&self) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, Impurity)> + '_ {
-        self.bodies_with(|effects, body| {
-            effects.first_item(body, |item| matches!(item, Item::Effect(effect) if effect.named().is_some()))
-        })
-        .map(|(body, member, imports, _, impurity)| (body, member, imports, impurity))
-    }
-
-    /// Each body that has an effect, a plain PHP call no `extern` declares included, and the first call that leads to
-    /// one, as [`Self::bodies_with`] gives them. A change of state is no effect.
+    /// Each body that has an effect, a plain PHP call whose `extern` line says `uses any` included, and the first call
+    /// that leads to one, as [`Self::bodies_with`] gives them. A change of state is no effect.
     fn bodies_with_effects(
         &self,
     ) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
@@ -825,14 +796,14 @@ impl Effects {
     }
 }
 
-/// Whether `allowed` does not list `effect`: a foreign effect it does not name, an unknown one, or an `emit` when it
-/// does not name `Sharp\Events`. An effect is a class-like, named by its key, spec section 24, so the PHP# `Db` and
+/// Whether `allowed` does not list `effect`: a foreign effect it does not name, one of `uses any`, or an `emit` when
+/// it does not name `Sharp\Events`. An effect is a class-like, named by its key, spec section 24, so the PHP# `Db` and
 /// `DB` are two effects.
 fn is_outside(codebase: &CodebaseMetadata, effect: Effect, allowed: &[Word]) -> bool {
     let named = match effect {
-        Effect::Foreign(effect) | Effect::Carried { effect, .. } => effect,
+        Effect::Foreign(effect) => effect,
         Effect::Emit => events(),
-        Effect::Unknown(_) => return true,
+        Effect::Any => return true,
     };
     let named = codebase.class_key(named);
 
@@ -868,112 +839,38 @@ fn is_effect(codebase: &CodebaseMetadata, name: Word) -> bool {
         || codebase.get_class_like(name).is_some_and(|class| class.flags.is_foreign())
 }
 
-/// An effect a plain PHP class carries, with the declared call that returns the class: a full class name and a member,
-/// or an empty class and a function.
-type CarriedEffect = (Word, (Word, Word));
-
-/// The effects each plain PHP class carries because a call an `extern` declares returns it, spec section 29, by the
-/// class's lowercase name: the effects of every such call, and through a chain, those of every class whose method
-/// returns it, as `Builder.where(): static` keeps the builder's, each with the declared call that starts its chain. A
-/// call into the class finds no `extern`, so it reads these in place of an unknown effect, and an `extern` on the class
-/// wins because its calls are never unknown.
-fn carried_effects(codebase: &CodebaseMetadata) -> HashMap<Word, Vec<CarriedEffect>> {
-    let mut carried: HashMap<Word, Vec<CarriedEffect>> = HashMap::default();
-    let mut pending: Vec<(&FunctionLikeMetadata, Vec<CarriedEffect>)> = Vec::new();
-    for declaration in codebase.externs.values().filter_map(|declarations| declarations.first()) {
-        let (class, member) = declaration.target;
-        let returning: Vec<(Word, &FunctionLikeMetadata)> = if class.is_empty() {
-            codebase.get_function(member).map(|function| (empty_word(), function)).into_iter().collect()
-        } else if member.is_empty() {
-            methods_of(codebase, class)
-        } else {
-            let declaring = codebase.get_declaring_method_identifier(&MethodIdentifier::new(class, member));
-            codebase
-                .get_method_by_id(&declaring)
-                .map(|method| (declaring.get_class_name(), method))
-                .into_iter()
-                .collect()
-        };
-        for (class, function) in returning {
-            let by = (class, function.original_name);
-            pending.push((function, declaration.effects.iter().map(|effect| (*effect, by)).collect()));
-        }
-    }
-
-    while let Some((function, effects)) = pending.pop() {
-        for returned in returned_classes(function) {
-            let known = carried.entry(returned).or_default();
-            let before = known.len();
-            for (effect, by) in &effects {
-                if !known.iter().any(|(known, _)| known == effect) {
-                    known.push((*effect, *by));
-                }
-            }
-            if known.len() != before {
-                let known = known.clone();
-                pending.extend(methods_of(codebase, returned).into_iter().map(|(_, method)| (method, known.clone())));
-            }
-        }
-    }
-
-    carried
-}
-
-/// Every method a call through `class` can reach, with the class that declares it: its own, the ones it inherits,
-/// and the ones its docblock gives it.
-fn methods_of(codebase: &CodebaseMetadata, class: Word) -> Vec<(Word, &FunctionLikeMetadata)> {
-    codebase
-        .get_class_like(class)
-        .into_iter()
-        .flat_map(|metadata| {
-            metadata
-                .declaring_method_ids
-                .values()
-                .filter_map(|method| codebase.get_method_by_id(method).map(|found| (method.get_class_name(), found)))
-                .chain(
-                    metadata
-                        .pseudo_methods
-                        .iter()
-                        .filter_map(|method| codebase.get_method(class, *method))
-                        .map(|found| (metadata.original_name, found)),
-                )
-        })
-        .collect()
-}
-
-/// The lowercase name of each class `function` declares it returns.
-fn returned_classes(function: &FunctionLikeMetadata) -> impl Iterator<Item = Word> + '_ {
-    function
-        .return_type_metadata
+/// Each use of plain PHP no `extern` line declares, spec section 29, once, with the line it needs and the position of
+/// the body that makes it: each body's own, then each value of an undeclared plain PHP method or function a body gives
+/// a place whose function type lists effects. A lambda runs inside each call it is passed to, so its uses are each
+/// body's that walks it, and are kept once.
+fn undeclared(summaries: &[EffectSummary]) -> Vec<(Span, (Word, Word), usize)> {
+    let own = summaries
         .iter()
-        .flat_map(|returned| returned.type_union.types.iter())
-        .filter_map(|atomic| match atomic {
-            TAtomic::Object(object) => object.get_name(),
+        .enumerate()
+        .flat_map(|(position, summary)| summary.undeclared.iter().map(move |(span, line)| (*span, *line, position)));
+    let values = summaries.iter().enumerate().flat_map(|(position, summary)| {
+        summary.function_values.iter().filter_map(move |value| match value.runs {
+            Runs::Undeclared { line, .. } => Some((value.span, line, position)),
             _ => None,
         })
-        .map(|name| ascii_lowercase_word(name.as_bytes()))
-}
-
-/// `effect`, or the effects its class carries when it is an unknown call into a class a declared call returns.
-fn carried_through(effect: Effect, carried: &HashMap<Word, Vec<CarriedEffect>>) -> Vec<Effect> {
-    match effect {
-        Effect::Unknown(Some((class, _))) if !class.is_empty() => {
-            match carried.get(&ascii_lowercase_word(class.as_bytes())) {
-                Some(effects) => effects.iter().map(|&(effect, by)| Effect::Carried { effect, by }).collect(),
-                None => vec![effect],
-            }
-        }
-        effect => vec![effect],
-    }
-}
-
-/// A body's own effects and changes, in source order, an effect before a change at the same place, with an unknown call
-/// into a class a declared call returns read as the effects it carries.
-fn own_items(summary: &EffectSummary, carried: &HashMap<Word, Vec<CarriedEffect>>) -> Vec<(Item, Origin)> {
-    let mut items: Vec<(Item, Origin)> = Vec::new();
-    let effects = summary.effects.iter().flat_map(|(effect, span, cause)| {
-        carried_through(*effect, carried).into_iter().map(move |effect| (Item::Effect(effect), *span, *cause))
     });
+
+    // A chain of calls into one class, as `Client.make().next().send()`, starts each call at one place, so the class
+    // is reported there once.
+    let mut undeclared: Vec<(Span, (Word, Word), usize)> = Vec::new();
+    for (span, line, position) in own.chain(values) {
+        if !undeclared.iter().any(|(known, known_line, _)| known.start == span.start && *known_line == line) {
+            undeclared.push((span, line, position));
+        }
+    }
+
+    undeclared
+}
+
+/// A body's own effects and changes, in source order, an effect before a change at the same place.
+fn own_items(summary: &EffectSummary) -> Vec<(Item, Origin)> {
+    let mut items: Vec<(Item, Origin)> = Vec::new();
+    let effects = summary.effects.iter().map(|(effect, span, cause)| (Item::Effect(*effect), *span, *cause));
     let changes =
         summary.changes.iter().map(|(changed, span, place)| (Item::Changed(*changed), *span, (empty_word(), *place)));
     for (item, span, cause) in effects.chain(changes) {

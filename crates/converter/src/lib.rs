@@ -76,11 +76,23 @@ pub struct Refusal {
     pub reason: String,
 }
 
-/// A converted file: its PHP# text, and the `extern namespace` lines it needs that the project lacks.
+/// A converted file: its PHP# text, the `extern namespace` lines it needs that the project lacks, and the plain PHP it
+/// reaches that no `extern` line declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Converted {
     pub text: Vec<u8>,
     pub extern_namespaces: Vec<ExternNamespace>,
+    pub undeclared: Vec<Undeclared>,
+}
+
+/// A plain PHP class or function a converted file reaches that no `extern` line declares, by the namespace PHP# reaches
+/// it through, which `mago convert` declares `uses any` (spec section 29).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Undeclared {
+    /// A class, by its full name as PHP writes it: `Mailchimp\Mailchimp`.
+    Class(String),
+    /// A function, by its namespace as PHP writes it and its name: `Vendor\Pdf` and `render`.
+    Function(String, String),
 }
 
 /// An `extern namespace` line a converted file needs.
@@ -97,6 +109,13 @@ pub struct ExternNamespace {
     pub name: String,
 }
 
+/// Whether a `.sharp` file names no imported class by `alias`: PHP# reserves it for a type, or a root class of
+/// `Builtins.sharp` takes it in every file (spec section 23).
+#[must_use]
+pub fn is_reserved_alias(alias: &str) -> bool {
+    types::reserved(alias) || Imports::is_default(alias)
+}
+
 impl ExternNamespace {
     /// The line, with the full namespace and no import: `extern namespace Illuminate.Foundation for abort;`.
     #[must_use]
@@ -105,8 +124,8 @@ impl ExternNamespace {
     }
 }
 
-/// The PHP# text of `input`'s file with the `extern namespace` lines it needs, or every construct that keeps it plain
-/// PHP.
+/// The PHP# text of `input`'s file with the `extern namespace` lines and the `extern` lines it needs, or every construct
+/// that keeps it plain PHP.
 ///
 /// # Errors
 ///
@@ -148,7 +167,11 @@ pub fn convert(input: &Input<'_, '_>) -> Result<Converted, Vec<Refusal>> {
         vec![Refusal { span: input.program.span(), reason: "two of the converter's rewrites overlap".to_owned() }]
     })?;
 
-    Ok(Converted { text, extern_namespaces: converter.imports.extern_namespaces().to_vec() })
+    Ok(Converted {
+        text,
+        extern_namespaces: converter.imports.extern_namespaces().to_vec(),
+        undeclared: converter.imports.undeclared().to_vec(),
+    })
 }
 
 /// Where the `import` lines the conversion adds go.

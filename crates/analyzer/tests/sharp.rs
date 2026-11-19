@@ -883,7 +883,8 @@ fn a_public_member_whose_attribute_a_framework_reads_by_reflection_is_not_too_wi
 /// carries as its own. So a library attribute whose source carries no mark is marked on the project's `extern` line,
 /// and a `[AsEventListener]` method never warns, as a `[Listen]` method doesn't. A method's and a function's line check
 /// their attributes as a method's and a function's own, and a method the class only inherits takes them on the line of
-/// the class that declares it. A line of a method that doesn't exist reports that alone, and an `extern namespace`
+/// the class that declares it, so a line of an inherited method is refused. A line of a method that doesn't exist
+/// reports that alone, and an `extern namespace`
 /// line, which declares nothing, takes no attribute.
 #[test]
 fn an_attribute_on_an_extern_line_is_the_declaration_s_own() {
@@ -892,7 +893,7 @@ fn an_attribute_on_an_extern_line_is_the_declaration_s_own() {
         include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
     );
     let listener = "<?php\n\nnamespace Symfony\\Component\\EventDispatcher\\Attribute;\n\n#[\\Attribute(\\Attribute::TARGET_CLASS | \\Attribute::TARGET_METHOD)]\nclass AsEventListener\n{\n}\n";
-    let stubs = "namespace App.Stubs;\n\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\n[DynamicallyAccessed]\nextern AsEventListener;\n";
+    let stubs = "namespace App.Stubs;\n\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\n[DynamicallyAccessed]\nextern AsEventListener uses none;\n";
     let hooks = "namespace App.Payments;\n\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\npublic class Hooks\n{\n    [AsEventListener]\n    public void paid() { }\n\n    public void settled() { }\n}\n";
 
     assert_eq!(
@@ -919,10 +920,10 @@ fn an_attribute_on_an_extern_line_is_the_declaration_s_own() {
         ("src/Lib/Group.php", group),
         ("src/Lib/Only.php", only),
     ];
-    let stubs = "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Group;\nimport Lib.Mailer;\n\n[Group(\"time\")]\nextern Lib.now;\n\n[method: Group(\"mail\")]\nextern Mailer.send;\n\n[type: Group(\"mailer\")]\nextern Mailer;\n";
+    let stubs = "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Group;\nimport Lib.Mailer;\n\n[Group(\"time\")]\nextern Lib.now uses none;\n\n[method: Group(\"mail\")]\nextern Mailer.send uses none;\n\n[type: Group(\"mailer\")]\nextern Mailer uses none;\n";
     assert_eq!(refusals(("src/App/Stubs/Stubs.sharp", stubs), &plain), Vec::<String>::new());
 
-    let stubs = "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Group;\nimport Lib.Mailer;\nimport Lib.Only;\nimport Lib.Queue;\n\n[Only]\nextern Lib.now;\n\n[Group(\"queue\")]\nextern Queue.send;\n\n[type: Group(\"mail\")]\nextern Mailer.close;\n\n[Group(\"gone\")]\nextern Mailer.resend;\n\n[Group(\"legacy\")]\nextern namespace Legacy for legacy_now;\n";
+    let stubs = "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Group;\nimport Lib.Mailer;\nimport Lib.Only;\nimport Lib.Queue;\n\n[Only]\nextern Lib.now uses none;\n\n[Group(\"queue\")]\nextern Queue.send uses none;\n\n[type: Group(\"mail\")]\nextern Mailer.close uses none;\n\n[Group(\"gone\")]\nextern Mailer.resend uses none;\n\n[Group(\"legacy\")]\nextern namespace Legacy for legacy_now;\n";
     let mut plain = plain.to_vec();
     plain.push(("src/legacy.php", "<?php\n\nfunction legacy_now(): int\n{\n    return 1;\n}\n"));
     assert_eq!(
@@ -930,7 +931,7 @@ fn an_attribute_on_an_extern_line_is_the_declaration_s_own() {
         [
             "15:2 semantics `type:` names no part of a method's or a function's `extern` line, whose targets are `method:`. | ",
             "9:2 invalid-attribute-target Attribute `Only` cannot be used on a function. | Remove `[Only]` here, or add a function to the targets in the `[Attribute(…)]` of the `Only` class.",
-            "12:1 invalid-attribute-target `Queue.send` is a method of `Mailer`, so an `extern` line of `Mailer`'s method gives it attributes. | Write the attributes on `extern Mailer.send;`.",
+            "13:8 non-existent-method `Queue.send` is a method of `Mailer`, so `extern Mailer.send` declares it. | ",
             "19:8 non-existent-method Method `Mailer.resend` does not exist. | ",
             "21:1 invalid-attribute-target An `extern namespace` line gives `legacy_now` a namespace and declares nothing, so it takes no attribute. | ",
         ]
@@ -4634,9 +4635,9 @@ fn an_extern_namespace_names_a_namespace_less_library() {
 }
 
 /// Jordan's ruling of 10-22: `global` does not exist in a project's PHP# code, so `global.levenshtein(a, b)`,
-/// `global.CURLOPT_TIMEOUT`, the value `global.strlen` and `extern global.levenshtein;` each get what any name that
-/// names nothing gets, as `gadget` does, and a file that declares a namespace under `Sharp` is no exception. Only the
-/// standard library reaches PHP's own functions through `global`.
+/// `global.CURLOPT_TIMEOUT`, the value `global.strlen` and `extern global.levenshtein uses none;` each get what any
+/// name that names nothing gets, as `gadget` does, and a file that declares a namespace under `Sharp` is no exception.
+/// Only the standard library reaches PHP's own functions through `global`.
 #[test]
 fn global_is_an_ordinary_name_in_a_project_s_code() {
     let written = |name: &str, namespace: &str| -> &'static str {
@@ -4644,8 +4645,9 @@ fn global_is_an_ordinary_name_in_a_project_s_code() {
             "namespace {namespace};\n\npublic class Probe\n{{\n    public int distance(string a, string b) => {name}.levenshtein(a, b);\n    public int timeout() => {name}.CURLOPT_TIMEOUT;\n    public Any length() => {name}.strlen;\n}}\n"
         ))
     };
-    let declared =
-        |name: &str| -> &'static str { leak(format!("namespace App.Stubs;\n\nextern {name}.levenshtein;\n")) };
+    let declared = |name: &str| -> &'static str {
+        leak(format!("namespace App.Stubs;\n\nextern {name}.levenshtein uses none;\n"))
+    };
     let unknown = |at: &str, name: &str| {
         format!(
             "{at} non-existent-class-like `{name}` names no class, and no namespace this file imports. | Check the spelling of `{name}`, or import the class or the namespace whose member this names."
@@ -7355,13 +7357,15 @@ fn a_wrong_call_of_a_function_value_names_the_function_value() {
     );
 }
 
-/// Spec section 14.1: a `Closure` that plain PHP returns arrives as a function value of the type its declaration gives,
-/// as a plain PHP array arrives as a `List`: it is called, held and passed as one.
+/// Spec sections 14.1 and 21: a `Closure` that plain PHP returns arrives as a function value of the type its `extern`
+/// line states, as a plain PHP array arrives as a `List`: it is called, held and passed as one. Its docblock states no
+/// effects, so without the line each call of it is refused.
 #[test]
 fn a_closure_plain_php_returns_arrives_as_a_function_value() {
     let legacy = "<?php\n\nnamespace Lib;\n\nfinal class Legacy\n{\n    /**\n     * @return \\Closure(int): int\n     */\n    public static function typed(): \\Closure\n    {\n        return fn (int $x): int => $x * 2;\n    }\n\n    public static function doubler(): \\Closure\n    {\n        return fn ($x) => $x * 2;\n    }\n}\n";
     let sharp = "namespace Demo;\n\nimport Lib.Legacy;\n\nclass Report\n{\n    public int run(List<int> numbers)\n    {\n        Function<int(int)> held = Legacy.typed();\n        const typed = Legacy.typed();\n        const doubled = numbers.map(Legacy.typed());\n        Function<int(int)> untyped = Legacy.doubler();\n        return held(1) + typed(2) + doubled.count() + Legacy.typed()(3) + untyped(4);\n    }\n\n    public int wrong()\n    {\n        Function<string(string)> held = Legacy.typed();\n        return Legacy.typed()(\"x\");\n    }\n}\n";
-    let others = [("src/Lib/Legacy.php", legacy)];
+    let stubs = "namespace Demo;\n\nimport Lib.Legacy;\n\nextern Legacy uses none;\nextern Function<int(int) uses none> Legacy.typed() uses none;\n";
+    let others = [("src/Lib/Legacy.php", legacy), ("src/Demo/Stubs.sharp", stubs)];
 
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &others),
@@ -7370,6 +7374,16 @@ fn a_closure_plain_php_returns_arrives_as_a_function_value() {
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &others)[2],
         "Invalid argument type for argument #1 of `Legacy.typed()`: expected `int`, but found `string`."
+    );
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &others[..1]),
+        [
+            "12:38 invalid-local-assignment-value",
+            "13:26 invalid-callable",
+            "13:55 invalid-callable",
+            "18:41 invalid-local-assignment-value",
+            "19:16 invalid-callable",
+        ]
     );
 }
 
@@ -7503,7 +7517,7 @@ fn a_method_value_of_a_collection_an_extension_or_a_plain_php_function_has_its_f
 #[test]
 fn a_plain_php_method_of_a_property_s_name_is_its_value_where_a_function_is_taken() {
     let gadget = "<?php\n\nnamespace Lib;\n\nfinal class Gadget\n{\n    public string $label = 'gadget';\n\n    /** @var Closure(string): string */\n    public \\Closure $format;\n\n    public function label(string $prefix): string\n    {\n        return $prefix . $this->label;\n    }\n\n    public function format(string $text): string\n    {\n        return $text;\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Gadget;\nimport Lib.Words;\nextern Gadget.label;\n\nclass Labels\n{\n    public int run(Gadget gadget, Gadget? maybe)\n    {\n        string read = gadget.label;\n        List<string> mapped = [\"a\"].map(gadget.label);\n        Function<string(string)> typed = gadget.label;\n        Function<string(string)>? nullSafe = maybe?.label;\n        Function<int(string)> wrong = gadget.label;\n        gadget.label = \"b\";\n        Function<string(string)> held = gadget.format;\n        return Words.length(read) + mapped.count() + Words.length(typed(\"c\")) + wrong(\"d\") + Words.length(held(\"e\"));\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Gadget;\nimport Lib.Words;\nextern Gadget.label uses none;\n\nclass Labels\n{\n    public int run(Gadget gadget, Gadget? maybe)\n    {\n        string read = gadget.label;\n        List<string> mapped = [\"a\"].map(gadget.label);\n        Function<string(string)> typed = gadget.label;\n        Function<string(string)>? nullSafe = maybe?.label;\n        Function<int(string)> wrong = gadget.label;\n        gadget.label = \"b\";\n        Function<string(string)> held = gadget.format;\n        return Words.length(read) + mapped.count() + Words.length(typed(\"c\")) + wrong(\"d\") + Words.length(held(\"e\"));\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Labels.sharp", sharp), &[("src/Lib/Gadget.php", gadget), WORDS]),
@@ -7518,7 +7532,7 @@ fn a_plain_php_method_of_a_property_s_name_is_its_value_where_a_function_is_take
 fn a_plain_php_class_with_get_has_the_properties_it_reads() {
     let row = "<?php\n\nnamespace Lib;\n\n/** @property-read Contact $contact */\nclass Row\n{\n    public function contact(): Contact\n    {\n        return new Contact('relation');\n    }\n\n    public function owner(): Contact\n    {\n        return new Contact('relation');\n    }\n\n    public function __get(string $name): mixed\n    {\n        return new Contact($name);\n    }\n}\n";
     let contact = "<?php\n\nnamespace Lib;\n\nfinal class Contact\n{\n    public function __construct(public string $name)\n    {\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Contact;\nimport Lib.Row;\nimport Lib.Words;\nextern Row.owner;\n\nclass Report\n{\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        const owner = row.owner;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        const loaded = owner as Contact;\n        return Words.length(contact.name + relation().name + called.name + (loaded?.name ?? \"\"));\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Contact;\nimport Lib.Row;\nimport Lib.Words;\nextern Row.owner uses none;\n\nclass Report\n{\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        const owner = row.owner;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        const loaded = owner as Contact;\n        return Words.length(contact.name + relation().name + called.name + (loaded?.name ?? \"\"));\n    }\n}\n";
 
     let (issues, artifacts) = analyze_with_artifacts(
         &PLUGIN_REGISTRY,
@@ -7684,7 +7698,8 @@ fn a_collection_method_refuses_a_lambda_of_another_element_type() {
 
 /// Spec section 14 calls a property that holds a function as a method: `x.priceOf(line)` calls the property when the
 /// class has a property `priceOf` and no method `priceOf`, on `this`, on another object and on an inherited
-/// property, and checks the call against the property's function type as `($x->priceOf)($line)` is checked in PHP.
+/// property, and checks the call against the property's function type as `($x->priceOf)($line)` is checked in PHP, a
+/// plain PHP property's included.
 #[test]
 fn a_call_of_a_property_holding_a_function_is_checked_against_its_function_type() {
     let pricing = "<?php\n\nnamespace Lib;\n\nabstract class BasePricing\n{\n    /** @var \\Closure(int): int */\n    public \\Closure $priceOf;\n}\n\nfinal class Pricing extends BasePricing\n{\n    public function __construct()\n    {\n        $this->priceOf = fn (int $amount): int => $amount * 2;\n    }\n}\n";
@@ -11065,7 +11080,7 @@ fn a_typed_extern_checks_each_call_against_the_signature_it_states() {
     let routing = "<?php\n\nnamespace Lib\\Routing;\n\nfunction route(string $name, array $parameters = []): string\n{\n    return '/' . $name;\n}\n";
     let elements = "<?php\n\nnamespace Lib;\n\nfinal class Elements\n{\n    /** @param array $element */\n    public static function render($element = null): string\n    {\n        return 'element';\n    }\n}\n";
     let builder = "<?php\n\nnamespace Lib\\Database;\n\n/** @template TModel */\nfinal class Builder\n{\n    /** @return static */\n    public function where($column, $value = null): static\n    {\n        return $this;\n    }\n}\n";
-    let stubs = "namespace Stubs;\n\nimport Lib.Database.Builder;\nimport Lib.Elements;\nimport Lib.Routing;\nimport Shop.Element;\nimport Shop.RouteName;\n\nextern string Routing.route(RouteName name);\nextern string Elements.render(Element element);\nextern Builder<TModel> Builder<TModel>.where(keyof TModel column, Any? value);\n";
+    let stubs = "namespace Stubs;\n\nimport Lib.Database.Builder;\nimport Lib.Elements;\nimport Lib.Routing;\nimport Shop.Element;\nimport Shop.RouteName;\n\nextern string Routing.route(RouteName name) uses none;\nextern string Elements.render(Element element) uses none;\nextern Builder<TModel> Builder<TModel>.where(keyof TModel column, Any? value) uses none;\n";
     let route_name = "namespace Shop;\n\npublic enum RouteName : string\n{\n    case Checkout = \"checkout\";\n}\n";
     let element = "namespace Shop;\n\npublic class Element\n{\n    public Element(public int id { get; }) { }\n}\n";
     let order = "namespace Shop;\n\npublic class Order\n{\n    public Order(public string status { get; }) { }\n}\n";
@@ -11093,13 +11108,13 @@ fn a_typed_extern_checks_each_call_against_the_signature_it_states() {
 /// does not cross to the native one, a native parameter without a default the line leaves out, a stated parameter the
 /// native method has no place for, a stated return type that does not take the native one and a generic class's type
 /// parameters written other than as it declares them are refused at the line, and so is a method the class only
-/// inherits, whose declaring class's line states it. A `List` takes the array a library returns, and a variadic
+/// inherits, whose declaring class's line declares it (spec section 29). A `List` takes the array a library returns, and a variadic
 /// parameter takes each stated parameter after it.
 #[test]
 fn a_typed_extern_that_misfits_the_native_types_is_refused_at_its_line() {
     let library = "<?php\n\nnamespace Lib;\n\nclass Mailer\n{\n    public static function send(int $id, string $to): ?string\n    {\n        return null;\n    }\n\n    public static function count(int $id): int\n    {\n        return $id;\n    }\n\n    public static function ping(): bool\n    {\n        return true;\n    }\n\n    public static function tags(string ...$tags): array\n    {\n        return $tags;\n    }\n\n    public static function flush(): void\n    {\n    }\n}\n\nfinal class QueuedMailer extends Mailer\n{\n}\n";
     let bag = "<?php\n\nnamespace Lib;\n\n/**\n * @template TKey\n * @template TValue\n */\nfinal class Bag\n{\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n";
-    let stubs = "namespace Stubs;\n\nimport Lib.Bag;\nimport Lib.Mailer;\nimport Lib.QueuedMailer;\n\nextern string Mailer.send(string id, string to);\nextern int Mailer.count();\nextern bool Mailer.ping(int id);\nextern List<string> Mailer.tags(string first, string second);\nextern Any? Bag<TValue>.first();\nextern void Mailer<T>.flush();\nextern bool QueuedMailer.ping();\n";
+    let stubs = "namespace Stubs;\n\nimport Lib.Bag;\nimport Lib.Mailer;\nimport Lib.QueuedMailer;\n\nextern string Mailer.send(string id, string to) uses none;\nextern int Mailer.count() uses none;\nextern bool Mailer.ping(int id) uses none;\nextern List<string> Mailer.tags(string first, string second) uses none;\nextern Any? Bag<TValue>.first() uses none;\nextern void Mailer<T>.flush() uses none;\nextern bool QueuedMailer.ping() uses none;\n";
 
     assert_eq!(
         package_errors(&[
@@ -11114,7 +11129,7 @@ fn a_typed_extern_that_misfits_the_native_types_is_refused_at_its_line() {
             "`Mailer.ping` has no parameter where its `extern` line states `id`.",
             "`Bag` declares the type parameters `TKey, TValue`, so its `extern` line writes `Bag<TKey, TValue>`.",
             "`Mailer` declares no type parameters, so its `extern` line writes `Mailer` alone.",
-            "`QueuedMailer.ping` is a method of `Mailer`, so `extern Mailer.ping` states its signature.",
+            "`QueuedMailer.ping` is a method of `Mailer`, so `extern Mailer.ping` declares it.",
         ]
     );
 }
@@ -11126,7 +11141,7 @@ fn a_typed_extern_that_misfits_the_native_types_is_refused_at_its_line() {
 #[test]
 fn an_extern_callable_parameter_takes_a_function_value_and_an_extern_default_fits_its_type() {
     let hooks = "<?php\n\nnamespace Lib;\n\nfinal class Hooks\n{\n    public static function add_action(string $hook_name, callable $callback, int $priority = 10, int $accepted_args = 1): bool\n    {\n        return true;\n    }\n\n    public static function remove_action(string $hook_name, \\Closure $callback): bool\n    {\n        return true;\n    }\n\n    public static function later(int $priority): void\n    {\n    }\n}\n";
-    let stubs = "namespace Stubs;\n\nimport Lib.Hooks;\n\nextern bool Hooks.add_action(string hookName, callable callback, int priority = 10, int acceptedArgs = 1);\nextern bool Hooks.remove_action(string hookName, callable callback);\nextern void Hooks.later(int priority = \"10\");\n";
+    let stubs = "namespace Stubs;\n\nimport Lib.Hooks;\n\nextern bool Hooks.add_action(string hookName, callable callback, int priority = 10, int acceptedArgs = 1) uses none;\nextern bool Hooks.remove_action(string hookName, callable callback) uses none;\nextern void Hooks.later(int priority = \"10\") uses none;\n";
     let saving = "namespace Shop;\n\nimport Lib.Hooks;\n\npublic class Saving\n{\n    public void register()\n    {\n        Function<void(int)> handler = this.deleted;\n        Hooks.add_action(\"save_post\", this.saved, 10, 3);\n        Hooks.add_action(\"deleted_post\", this.deleted);\n        Hooks.add_action(\"init\", handler);\n        Hooks.remove_action(\"init\", handler);\n        Hooks.add_action(\"init\", \"my_function\");\n        Hooks.later();\n    }\n\n    public void saved(int id, string title, bool update) { }\n\n    public void deleted(int id) { }\n}\n";
 
     assert_eq!(
@@ -11149,7 +11164,7 @@ fn an_extern_callable_parameter_takes_a_function_value_and_an_extern_default_fit
 #[test]
 fn an_extern_line_states_any_return_type_a_method_declares() {
     let factory = "<?php\n\nnamespace Lib;\n\nfinal class Factory\n{\n    public static function make(): \\Closure\n    {\n        return static function (): void {};\n    }\n\n    public static function pair(): array\n    {\n        return [1, 2];\n    }\n\n    public static function either(): int|string|null\n    {\n        return 1;\n    }\n\n    public static function name(): ?string\n    {\n        return null;\n    }\n}\n";
-    let stubs = "namespace Stubs;\n\nimport Lib.Factory;\n\nextern Function<void()> Factory.make();\nextern [int, int] Factory.pair();\nextern (int|string)? Factory.either();\nextern string? Factory.name();\n";
+    let stubs = "namespace Stubs;\n\nimport Lib.Factory;\n\nextern Function<void()> Factory.make() uses none;\nextern [int, int] Factory.pair() uses none;\nextern (int|string)? Factory.either() uses none;\nextern string? Factory.name() uses none;\n";
     let shop = "namespace Shop;\n\nimport Lib.Factory;\n\npublic class Shop\n{\n    public int run()\n    {\n        Factory.make()();\n        Factory.make()(1);\n        [int, int] pair = Factory.pair();\n        (int|string)? either = Factory.either();\n        string? name = Factory.name();\n        return pair[0] + pair[1];\n    }\n}\n";
 
     assert_eq!(
@@ -14942,23 +14957,12 @@ fn a_literal_of_the_other_collection_passed_to_a_function_property_is_an_error()
 }
 
 /// A call through a local, a parameter or a property declared as a `Function` takes the literals its parameters
-/// declare, and a PHP `\Closure` declares no collection, so a call through one takes either literal.
+/// declare.
 #[test]
 fn a_literal_of_the_declared_collection_passed_to_a_function_value_is_accepted() {
-    let hooks = "<?php\n\nnamespace Lib;\n\nfinal class Hooks\n{\n    public \\Closure $run;\n\n    public function __construct()\n    {\n        $this->run = fn (mixed ...$values): int => 0;\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Hooks;\n\nclass Counter\n{\n    private Function<int(List<int>)> size;\n\n    public Counter()\n    {\n        this.size = sizes => sizes.count();\n    }\n\n    public int run(Function<int(Map<string, int>)> total, Hooks hooks)\n    {\n        Function<int(List<string>)> names = values => values.count();\n        hooks.run([:]);\n        return names([]) + names([\"a\"]) + total([:]) + total([\"a\": 1]) + this.size([]) + this.size([1, 2]);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Counter\n{\n    private Function<int(List<int>)> size;\n\n    public Counter()\n    {\n        this.size = sizes => sizes.count();\n    }\n\n    public int run(Function<int(Map<string, int>)> total)\n    {\n        Function<int(List<string>)> names = values => values.count();\n        return names([]) + names([\"a\"]) + total([:]) + total([\"a\": 1]) + this.size([]) + this.size([1, 2]);\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Counter.sharp", sharp), &[("src/Lib/Hooks.php", hooks)]), Vec::<String>::new());
-}
-
-/// A PHP closure's docblock names PHP types, and a plain PHP `array` names neither a `List` nor a `Map`, so a call
-/// through one takes either literal, as a PHP method's `array` parameter does.
-#[test]
-fn a_php_closure_whose_docblock_names_a_php_array_takes_either_literal() {
-    let hooks = "<?php\n\nnamespace Lib;\n\nfinal class Hooks\n{\n    /** @var \\Closure(array): int */\n    public \\Closure $run;\n\n    public function __construct()\n    {\n        $this->run = fn (array $values): int => count($values);\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Hooks;\n\nclass Counter\n{\n    public int run(Hooks hooks) => hooks.run([]) + hooks.run([:]);\n}\n";
-
-    assert_eq!(issues(("src/Demo/Counter.sharp", sharp), &[("src/Lib/Hooks.php", hooks)]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Counter.sharp", sharp), &[]), Vec::<String>::new());
 }
 
 /// A `Function` value and a PHP closure of the same signature are assignable to each other both ways: whether PHP#
@@ -14993,8 +14997,8 @@ fn a_value_that_may_be_a_function_value_or_a_php_closure_of_one_signature_keeps_
 }
 
 /// A method value of a PHP# class is a function PHP# wrote, so a call through it checks literals as a call of the
-/// method does, also when the value may be a PHP closure of the same signature. A method value of a PHP class takes
-/// either literal, as the PHP method does.
+/// method does. A method value of a PHP class takes either literal, as the PHP method does. A value that may be a PHP
+/// closure has no PHP# type, so its call is refused (spec section 21).
 #[test]
 fn a_literal_of_the_other_collection_passed_to_a_method_value_is_an_error() {
     let adder = "<?php\n\nnamespace Lib;\n\nfinal class Adder\n{\n    public function add(array $names): int\n    {\n        return count($names);\n    }\n}\n";
@@ -15006,14 +15010,18 @@ fn a_literal_of_the_other_collection_passed_to_a_method_value_is_an_error() {
         [
             format!("13:20 {message}"),
             format!("13:34 {message}"),
+            "20:16 invalid-callable The type of `own`'s function is unknown, so it is never called.".to_owned(),
             format!("20:20 {message}"),
-            format!("20:34 {message}")
+            "20:27 invalid-callable The type of `shared`'s function is unknown, so it is never called.".to_owned(),
+            format!("20:34 {message}"),
+            "20:41 invalid-callable The type of `own`'s function is unknown, so it is never called.".to_owned(),
+            "20:51 invalid-callable The type of `shared`'s function is unknown, so it is never called.".to_owned(),
         ]
     );
 }
 
-/// A lambda's parameters are types PHP# wrote, so a call through a lambda checks literals as a call of a method does,
-/// also when the value may be a PHP closure of the same signature.
+/// A lambda's parameters are types PHP# wrote, so a call through a lambda checks literals as a call of a method does. A
+/// value that may be a PHP closure has no PHP# type, so its call is refused (spec section 21).
 #[test]
 fn a_literal_of_the_other_collection_passed_to_a_lambda_is_an_error() {
     let sharp = "namespace Demo;\n\nimport Lib.Hooks;\n\nclass Counter\n{\n    public int run(bool pick, Hooks hooks)\n    {\n        const size = (List<string> names) => names.count();\n        const either = pick ? size : hooks.counted;\n        const other = pick ? hooks.counted : size;\n        return size([:]) + either([:]) + other([:]) + size([]) + either([]);\n    }\n}\n";
@@ -15021,7 +15029,14 @@ fn a_literal_of_the_other_collection_passed_to_a_lambda_is_an_error() {
     let message = "invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.";
     assert_eq!(
         reported(("src/Demo/Counter.sharp", sharp), &[("src/Lib/Hooks.php", HOOKS)]),
-        [format!("12:21 {message}"), format!("12:35 {message}"), format!("12:48 {message}")]
+        [
+            format!("12:21 {message}"),
+            "12:28 invalid-callable The type of `either`'s function is unknown, so it is never called.".to_owned(),
+            format!("12:35 {message}"),
+            "12:42 invalid-callable The type of `other`'s function is unknown, so it is never called.".to_owned(),
+            format!("12:48 {message}"),
+            "12:66 invalid-callable The type of `either`'s function is unknown, so it is never called.".to_owned(),
+        ]
     );
 }
 
@@ -15337,12 +15352,13 @@ fn a_php_parents_static_method_called_on_a_sharp_class_takes_either_literal() {
 }
 
 /// PHP# has no partial application, so a plain PHP parent's method partially applied through a PHP# class is refused at
-/// its `?`, and the refusal shows alone.
+/// its `?`, and no argument it takes is checked. The function it gives has no PHP# type, so its call is refused too
+/// (spec section 21).
 #[test]
 fn a_php_parents_method_partially_applied_on_a_sharp_class_shows_its_refusal_alone() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Rows rows)\n    {\n        const keep = rows.pair(?, [:]);\n        return keep([]);\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[STORE, ROWS]), ["7:32 parse"]);
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[STORE, ROWS]), ["7:32 parse", "8:16 invalid-callable"]);
 }
 
 /// A plain PHP trait's method that a PHP# class inherits keeps its PHP `array` parameter, so it takes either literal.
@@ -16327,7 +16343,7 @@ fn map_get_has_and_remove_take_a_backed_enum_key() {
 /// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
 /// keys are `int` or `string`. A `Map` keyed by a unit enum, a struct or a `float` has no such array, so the call is
 /// refused, naming the parameter and the key type, whether the parameter's type is native, of a method or a function, or
-/// from a docblock. A parameter of a plain PHP closure a local holds, which has no name, is named by its position.
+/// from a docblock. A plain PHP closure a local holds has no PHP# type, so its call is refused (spec section 21).
 /// A spread into a variadic parameter is refused as each `Map` it passes would be. A `Map<string, int>` crosses, and so
 /// does a `Map<Status, int>` of a backed enum, with each case's backing value as its key, into a parameter typed
 /// `array`, `iterable`, `mixed` or nothing, so an `iterable<string, int>` takes both. Such a parameter takes a `Map`
@@ -16353,7 +16369,7 @@ fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
         [
             "14:53 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.documented`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
             "14:73 invalid-argument `Map<Spot, int>` can't be passed to the parameter `values` of function `Sums.total`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "14:176 invalid-argument `Map<Spot, int>` can't be passed to the argument #1 of function value `counter`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "14:168 invalid-callable The type of `counter`'s function is unknown, so it is never called.",
             "14:237 invalid-argument `Map<float, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `float`.",
             "14:258 invalid-argument `Map<Pure, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Pure`.",
             "14:281 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.merged`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
@@ -22794,7 +22810,7 @@ fn a_member_whose_kind_differs_across_the_receivers_classes_is_an_error() {
 /// the code takes a function, the read is the method on both.
 #[test]
 fn a_name_a_plain_php_class_s_get_serves_and_another_class_has_a_method_of_differs_in_kind() {
-    let sharp = "namespace Demo;\n\nimport Lib.Order;\nimport Lib.Row;\nextern Order.total;\nextern Row.total;\n\nclass Report\n{\n    public int run(Order|Row doc)\n    {\n        const read = doc.total;\n        Function<int()> total = doc.total;\n        return total() + doc.total();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Order;\nimport Lib.Row;\nextern Order.total uses none;\nextern Row.total uses none;\n\nclass Report\n{\n    public int run(Order|Row doc)\n    {\n        const read = doc.total;\n        Function<int()> total = doc.total;\n        return total() + doc.total();\n    }\n}\n";
     let library = "<?php\n\nnamespace Lib;\n\nfinal class Order\n{\n    public function total(): int\n    {\n        return 1;\n    }\n}\n\nfinal class Row\n{\n    public function total(): int\n    {\n        return 2;\n    }\n\n    public function __get(string $name): mixed\n    {\n        return 3;\n    }\n}\n";
 
     assert_eq!(
@@ -24558,28 +24574,26 @@ fn a_function_type_test_of_a_plain_php_function_value_is_unknown() {
     );
 }
 
-/// Spec section 21: a call of a `Closure` whose plain PHP source declares no signature compiles, as an undeclared plain
-/// PHP call does: its arguments are unchecked, its result is `Any?`, and it runs code no `extern` declares, so a law
-/// over it is impure. Only a function-type test of it stays refused.
+/// Spec section 21: a function plain PHP gives has no PHP# type, so a call of it is refused, naming the `extern` line
+/// that states its type: the line of the method that returns it, or any line for a function a local holds. Once the
+/// line states the type, the call compiles.
 #[test]
-fn a_call_of_a_plain_php_closure_without_a_signature_compiles_as_a_plain_php_call() {
+fn a_call_of_a_function_of_unknown_type_is_refused_and_names_the_extern_line_that_states_its_type() {
     let legacy = (
         "src/Lib/Legacy.php",
-        "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    public \\Closure $handler;\n\n    public static function doubler(): \\Closure\n    {\n        return fn($x) => $x * 2;\n    }\n}\n",
+        "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    public static function doubler(): \\Closure\n    {\n        return fn($x) => $x * 2;\n    }\n\n    public static function tripler(): \\Closure\n    {\n        return fn($x) => $x * 3;\n    }\n}\n",
     );
-    let code = "namespace App;\n\nimport Lib.Legacy;\n\npublic class Shows\n{\n    private Legacy legacy = new Legacy();\n\n    public Any? returned() => Legacy.doubler()(2);\n\n    public Any? unchecked()\n    {\n        const doubler = Legacy.doubler();\n        return doubler(\"two\", 3);\n    }\n\n    public int typed() => Legacy.doubler()(2);\n\n    public bool tested() => Legacy.doubler() is Function<int(int)>;\n\n    public Any? held\n    {\n        get\n        {\n            const handler = this.legacy.handler;\n            return handler(1);\n        }\n    }\n\n    law handled(Shows shows) => shows.held != null;\n}\n";
+    let stubs = (
+        "src/App/Stubs.sharp",
+        "namespace App;\n\nimport Lib.Legacy;\n\nextern Legacy uses none;\nextern Function<int(int) uses none> Legacy.doubler() uses none;\n",
+    );
+    let code = "namespace App;\n\nimport Lib.Legacy;\n\npublic class Shows\n{\n    public int doubled() => Legacy.doubler()(2);\n\n    public Any? tripled() => Legacy.tripler()(2);\n\n    public Any? held()\n    {\n        const tripler = Legacy.tripler();\n        return tripler(2);\n    }\n}\n";
 
     assert_eq!(
-        reported(("src/App/Shows.sharp", code), &[legacy]),
+        refusals(("src/App/Shows.sharp", code), &[legacy, stubs]),
         [
-            "17:27 mixed-return-statement Could not infer a precise return type for method `Shows.typed`. Saw type `Any?`.",
-            "19:29 unknown-function-type The type of `Legacy.doubler()`'s function is unknown: its source declares no parameter or result types.",
-        ]
-    );
-    assert_eq!(
-        effect_issues(&[("src/App/Shows.sharp", code), legacy]),
-        [
-            "src/App/Shows.sharp:30:33 impure-law: Law `handled` reaches `Shows.held`, which calls `handler` with no `extern` declaration. Laws hold only over pure code. Help: `handler` is a function plain PHP wrote, which no `extern` can declare. Call it outside the law."
+            "9:30 invalid-callable The type of `Legacy.tripler()`'s function is unknown, so it is never called. | State its type on the `extern` line of `Legacy.tripler`, as in `extern Function<int(int) uses none> Legacy.tripler() uses none;`.",
+            "14:16 invalid-callable The type of `tripler`'s function is unknown, so it is never called. | State its type on the `extern` line of the plain PHP that gives it, as `extern Function<int(int) uses none> Legacy.doubler() uses none;` states a method's.",
         ]
     );
 }
@@ -27835,7 +27849,8 @@ fn a_php_caller_keeps_the_element_types_of_a_sharp_methods_collection_parameters
 /// A call runs the member the declaring class wrote, so the declaring class decides whether the call is PHP#, whatever
 /// class the call goes through. A plain PHP parent's method keeps its docblock type through a PHP# subclass, also for an
 /// argument spread from a list whose count is known, a PHP# method keeps its PHP declaration through a plain PHP
-/// subclass, and `new` runs the constructor its declaring class wrote.
+/// subclass, and `new` of a PHP# class takes the `extern` line of the plain PHP class it extends, whose constructor
+/// runs.
 #[test]
 fn a_call_is_checked_by_the_class_that_declares_the_member_not_the_class_it_goes_through() {
     let store = (
@@ -27875,10 +27890,17 @@ fn a_call_is_checked_by_the_class_that_declares_the_member_not_the_class_it_goes
     assert_eq!(issues(("src/App/Check.php", through_money), &[MONEY_OPERATORS, coin]), Vec::<String>::new());
     assert_eq!(issues(("src/App/Check.php", through_coin), &[MONEY_OPERATORS, coin]), Vec::<String>::new());
     assert_eq!(
-        effect_issues(&[shelf, store, rows, MONEY_OPERATORS, coin]),
+        effect_issues(&[
+            shelf,
+            store,
+            rows,
+            MONEY_OPERATORS,
+            coin,
+            ("src/App/Stubs.sharp", "namespace App;\n\nimport Lib.Store;\n\nextern Store uses Database;\n"),
+        ]),
         [
-            "src/App/Shelf.sharp:16:32 impure-law: Law `stored` reaches `Shelf.store`, which calls `Store` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
-            "src/App/Shelf.sharp:18:31 impure-law: Law `rowed` reaches `Shelf.rows`, which calls `Store` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
+            "src/App/Shelf.sharp:16:32 impure-law: Law `stored` reaches `Shelf.store`, which calls `Store` with the effect `Database`. Laws hold only over pure code.",
+            "src/App/Shelf.sharp:18:31 impure-law: Law `rowed` reaches `Shelf.rows`, which calls `Store` with the effect `Database`. Laws hold only over pure code.",
         ]
     );
 }
@@ -27915,7 +27937,7 @@ const RELAY: (&str, &str) = (
 );
 
 const RELAY_STUB: (&str, &str) =
-    ("app/Stubs/Relay.sharp", "namespace App.Stubs;\n\nimport Acme.Relay;\n\nextern Relay.run;\n");
+    ("app/Stubs/Relay.sharp", "namespace App.Stubs;\n\nimport Acme.Relay;\n\nextern Relay.run uses none;\n");
 
 /// A plain PHP library's string functions, which no `extern` declares.
 const LETTERS: (&str, &str) = (
@@ -28017,15 +28039,18 @@ fn effect_issues(files: &[(&'static str, &'static str)]) -> Vec<String> {
 /// Spec sections 10, 20 and 29: a struct and an enum are values, so their methods, `get` bodies and operators have no
 /// effects, a data case's included. A struct method that calls a `foreign` parameter, an `Http` or a `Dns`, an enum
 /// method that emits, and a struct method and a method of an enum with a data case that call plain PHP with an `extern`
-/// effect are refused, naming the member and the effect. A pure struct method, a struct method that calls plain PHP no `extern` declares,
-/// which has no effect a `uses` names, and a class method with the same effect, compile.
+/// effect are refused, naming the member and the effect. A pure struct method, a struct method that calls plain PHP its
+/// `extern` line declares `uses none`, and a class method with the same effect, compile.
 #[test]
 fn a_struct_or_an_enum_has_no_effects() {
     let rates = (
         "src/Lib/Rates.php",
         "<?php\n\nnamespace Lib;\n\nfinal class Rates\n{\n    public static function euro(): int\n    {\n        return 1;\n    }\n}\n",
     );
-    let stubs = ("src/App/Stubs/Rates.sharp", "namespace App.Stubs;\n\nimport Lib.Rates;\n\nextern Rates uses Http;\n");
+    let stubs = (
+        "src/App/Stubs/Rates.sharp",
+        "namespace App.Stubs;\n\nimport Lib.Rates;\nimport Lib.Words;\n\nextern Rates uses Http;\nextern Words uses none;\n",
+    );
     let money = (
         "src/App/Shop/Money.sharp",
         "namespace App.Shop;\n\nimport Lib.Rates;\nimport Lib.Words;\nimport Sharp.Net.Dns;\nimport Sharp.Net.Http;\n\npublic struct Money\n{\n    public int cents { get; init; } = 0;\n\n    public int fetched(Http http) => http.get(\"https://rates\").status;\n\n    public int resolved(Dns dns) => dns.addresses(\"rates\").count();\n\n    public int inEuros() => this.cents * Rates.euro();\n\n    public int doubled() => this.cents * 2;\n\n    public string label() => Words.upper(\"eur\");\n}\n",
@@ -28079,8 +28104,10 @@ fn a_second_extern_of_a_target_in_another_file_is_refused_on_the_second() {
         "app/Stubs/Payments.sharp",
         "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient uses Http;\n",
     );
-    let second =
-        ("app/Stubs/Stripe.sharp", "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient;\n");
+    let second = (
+        "app/Stubs/Stripe.sharp",
+        "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient uses none;\n",
+    );
 
     assert_eq!(issues(first, &[second, STRIPE]), Vec::<String>::new());
     let refused = analyze(&PLUGIN_REGISTRY, settings(), second, &[first, STRIPE]);
@@ -28113,8 +28140,10 @@ fn a_second_extern_of_a_target_in_another_file_is_refused_on_the_second() {
 /// names no member the library declares, which are `DateTimeImmutable`'s, a class only the library names (decision 83).
 #[test]
 fn a_project_s_extern_of_what_the_standard_library_declares_is_refused_on_the_project_s_line() {
-    let stubs =
-        ("app/Stubs/Exceptions.sharp", "namespace App.Stubs;\n\nimport LogicException;\n\nextern LogicException;\n");
+    let stubs = (
+        "app/Stubs/Exceptions.sharp",
+        "namespace App.Stubs;\n\nimport LogicException;\n\nextern LogicException uses none;\n",
+    );
 
     assert_eq!(
         reported(stubs, &[BUILTINS]),
@@ -28131,8 +28160,10 @@ fn an_extern_written_with_a_renamed_import_declares_the_same_target() {
         "app/Stubs/Payments.sharp",
         "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient uses Http;\n",
     );
-    let second =
-        ("app/Stubs/Stripe.sharp", "namespace App.Stubs;\n\nimport Stripe.StripeClient as Client;\n\nextern Client;\n");
+    let second = (
+        "app/Stubs/Stripe.sharp",
+        "namespace App.Stubs;\n\nimport Stripe.StripeClient as Client;\n\nextern Client uses none;\n",
+    );
 
     assert_eq!(
         reported(second, &[first, STRIPE]),
@@ -28146,7 +28177,7 @@ fn an_extern_written_with_a_renamed_import_declares_the_same_target() {
 fn an_extern_target_that_names_nothing_is_a_non_existent_class_method_or_function() {
     let stub = (
         "app/Stubs/Stripe.sharp",
-        "namespace App.Stubs;\n\nimport Stripe.StripeClient;\nimport Stripe.Missing;\n\nextern Missing;\nextern StripeClient.refund;\nextern event Nowhere;\n",
+        "namespace App.Stubs;\n\nimport Stripe.StripeClient;\nimport Stripe.Missing;\n\nextern Missing uses none;\nextern StripeClient.refund uses none;\nextern event Nowhere uses none;\n",
     );
 
     assert_eq!(
@@ -28168,7 +28199,7 @@ fn an_extern_target_that_names_nothing_is_a_non_existent_class_method_or_functio
     );
     let functions = (
         "app/Stubs/Pdf.sharp",
-        "namespace App.Stubs;\n\nimport Vendor.Pdf;\n\nextern Pdf.render;\nextern Pdf.no_such_function;\n",
+        "namespace App.Stubs;\n\nimport Vendor.Pdf;\n\nextern Pdf.render uses none;\nextern Pdf.no_such_function uses none;\n",
     );
 
     assert_eq!(
@@ -28181,7 +28212,7 @@ fn an_extern_target_that_names_nothing_is_a_non_existent_class_method_or_functio
 #[test]
 fn an_extern_of_a_php_sharp_class_is_refused() {
     let order = ("app/Shop/Order.sharp", "namespace App.Shop;\n\npublic class Order\n{\n}\n");
-    let stub = ("app/Stubs/Shop.sharp", "namespace App.Stubs;\n\nimport App.Shop.Order;\n\nextern Order;\n");
+    let stub = ("app/Stubs/Shop.sharp", "namespace App.Stubs;\n\nimport App.Shop.Order;\n\nextern Order uses none;\n");
 
     assert_eq!(messages(stub, &[order]), ["`Order` is PHP# code, so it needs no `extern`: PHP# infers its effects."]);
     assert_eq!(issues(stub, &[order]), ["5:8 extern-on-sharp"]);
@@ -28189,8 +28220,10 @@ fn an_extern_of_a_php_sharp_class_is_refused() {
 
 #[test]
 fn an_extern_of_a_plain_php_class_is_accepted() {
-    let stub =
-        ("app/Stubs/Stripe.sharp", "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient;\n");
+    let stub = (
+        "app/Stubs/Stripe.sharp",
+        "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient uses none;\n",
+    );
 
     assert_eq!(issues(stub, &[STRIPE]), Vec::<String>::new());
 }
@@ -28750,7 +28783,7 @@ fn a_plain_php_method_value_has_its_extern_s_effects_where_it_runs() {
 
 /// Spec section 14.3: a plain PHP function's value has the effects its `extern` declares wherever it runs, as a call of
 /// the function does, and an extension method's value has the effects of its body, passed to a function parameter, to
-/// a collection method, or to plain PHP. A function with no `extern` is refused where a function type lists effects.
+/// a collection method, or to plain PHP. A function value with no `extern` line is refused, as any plain PHP is.
 #[test]
 fn a_function_or_extension_method_value_has_its_effects_where_it_runs() {
     let stub = (
@@ -28771,10 +28804,10 @@ fn a_function_or_extension_method_value_has_its_effects_where_it_runs() {
     assert_eq!(
         effect_issues(&[&[pricing][..], &others].concat()),
         [
+            "app/Shop/Pricing.sharp:18:42 incompatible-effects: `Letters.whisper` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Letters.whisper uses any;`, and name its effects in place of `any` when you know them.",
             "app/Shop/Pricing.sharp:20:39 impure-law: Law `parameter` reaches `Pricing.viaParameter`, which calls `Letters.shout` with the effect `Clock`. Laws hold only over pure code.",
             "app/Shop/Pricing.sharp:22:35 impure-law: Law `plain` reaches `Pricing.viaPlain`, which calls `Letters.shout` with the effect `Clock`. Laws hold only over pure code.",
             "app/Shop/Pricing.sharp:24:40 impure-law: Law `collection` reaches `Stamps.stamped`, which calls `Chrono.now` with the effect `Clock`. Laws hold only over pure code.",
-            "app/Shop/Pricing.sharp:18:42 invalid-argument: `Letters.whisper` has no `extern` declaration, so a `Function<string(string) uses Mail>` cannot hold it. Help: Declare its effect in a .sharp file, such as `extern Letters.whisper uses Mail;`.",
         ]
     );
 }
@@ -28814,7 +28847,7 @@ fn an_extern_event_gives_its_class_the_effects_it_lists() {
     );
     let pure = (
         "app/Stubs/Queue.sharp",
-        "namespace App.Stubs;\n\nimport Illuminate.Queue.Events.JobFailed;\n\nextern event JobFailed;\n",
+        "namespace App.Stubs;\n\nimport Illuminate.Queue.Events.JobFailed;\n\nextern event JobFailed uses none;\n",
     );
     let database = (
         "app/Stubs/Queue.sharp",
@@ -28850,7 +28883,7 @@ fn listened() -> [(&'static str, &'static str); 7] {
         ),
         (
             "app/Stubs/Queue.sharp",
-            "namespace App.Stubs;\n\nimport Illuminate.Queue.Events.JobFailed;\n\nextern event JobFailed;\n",
+            "namespace App.Stubs;\n\nimport Illuminate.Queue.Events.JobFailed;\n\nextern event JobFailed uses none;\n",
         ),
         ("app/Shop/Logger.sharp", "namespace App.Shop;\n\npublic class Logger\n{\n}\n"),
     ]
@@ -29106,19 +29139,27 @@ const LABEL: (&str, &str) = (
 
 #[test]
 fn a_getter_calling_a_function_an_extern_declares_pure_passes() {
-    let stub = ("app/Stubs/Letters.sharp", "namespace App.Stubs;\n\nimport Acme.Letters;\n\nextern Letters.whisper;\n");
+    let stub = (
+        "app/Stubs/Letters.sharp",
+        "namespace App.Stubs;\n\nimport Acme.Letters;\n\nextern Letters.whisper uses none;\n",
+    );
 
     assert_eq!(effect_issues(&[LABEL, LETTERS, stub]), Vec::<String>::new());
 }
 
 /// A getter may call anything, spec section 6, and a read of it carries what it calls, so a law reading it is held to
-/// the getter's call.
+/// the getter's call: refused when the call's `extern` line says `uses any`.
 #[test]
-fn a_law_reading_a_getter_that_calls_a_function_with_no_extern_is_refused_and_names_the_missing_declaration() {
+fn a_law_reading_a_getter_that_calls_a_function_of_any_effect_is_refused_and_names_the_line() {
+    let stub = (
+        "app/Stubs/Letters.sharp",
+        "namespace App.Stubs;\n\nimport Acme.Letters;\n\nextern Letters.whisper uses any;\n",
+    );
+
     assert_eq!(
-        effect_issues(&[LABEL, LETTERS]),
+        effect_issues(&[LABEL, LETTERS, stub]),
         [
-            "app/Shop/Label.sharp:11:31 impure-law: Law `named` reaches `Label.text`, which calls `Letters.whisper` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Letters.whisper;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Label.sharp:11:31 impure-law: Law `named` reaches `Label.text`, which calls `Letters.whisper` with any effect. Laws hold only over pure code. Help: Its `extern` line says `uses any`. State its effects in place of `any`, or call it outside the law, as with `extern Letters.whisper uses none;`."
         ]
     );
 }
@@ -29126,7 +29167,7 @@ fn a_law_reading_a_getter_that_calls_a_function_with_no_extern_is_refused_and_na
 /// Spec sections 23 and 29: an `extern` names a plain PHP function a library declares in PHP's root namespace through
 /// the namespace an `extern namespace` line gives it, as `extern Foundation.now uses Clock;` after
 /// `extern namespace Foundation for now;`, and the effects it lists reach each call of `Foundation.now()`. A bare
-/// `extern now;` names no function, as a misspelled name does.
+/// `extern now uses Clock;` names no function, as a misspelled name does.
 #[test]
 fn an_extern_declares_a_library_s_root_function_through_its_library_s_namespace() {
     let helpers = ("vendor/laravel/Foundation/helpers.php", "<?php\n\nfunction now(): int\n{\n    return time();\n}\n");
@@ -29158,8 +29199,9 @@ fn an_extern_declares_a_library_s_root_function_through_its_library_s_namespace(
 }
 
 /// Spec section 23 names a plain PHP function through its namespace in an `extern` as in a call: `Pdf.render` after
-/// `import Vendor.Pdf;`. The effects it lists reach each call of the function, a function with no `extern` names the one
-/// to write, and a bare `extern trim;` of PHP's own function names no function, as a misspelled name does.
+/// `import Vendor.Pdf;`. The effects it lists reach each call of the function, a function with no `extern` line names
+/// the one to write, and a bare `extern trim uses none;` of PHP's own function names no function, as a misspelled name
+/// does.
 #[test]
 fn an_extern_declares_a_plain_php_function_through_its_namespace() {
     let pdf = (
@@ -29171,7 +29213,7 @@ fn an_extern_declares_a_plain_php_function_through_its_namespace() {
         "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Page\n{\n    public Page(private string html) { }\n\n    public string printed => Pdf.render(this.html);\n\n    law printable(Page page) => page.printed != \"\";\n}\n",
     );
     let stub = ("app/Stubs/Pdf.sharp", "namespace App.Stubs;\n\nimport Vendor.Pdf;\n\nextern Pdf.render uses Files;\n");
-    let bare = ("app/Stubs/Text.sharp", "namespace App.Stubs;\n\nextern trim;\n");
+    let bare = ("app/Stubs/Text.sharp", "namespace App.Stubs;\n\nextern trim uses none;\n");
 
     assert_eq!(
         effect_issues(&[page, pdf, stub]),
@@ -29182,7 +29224,7 @@ fn an_extern_declares_a_plain_php_function_through_its_namespace() {
     assert_eq!(
         effect_issues(&[page, pdf]),
         [
-            "app/Shop/Page.sharp:11:33 impure-law: Law `printable` reaches `Page.printed`, which calls `Pdf.render` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Pdf.render;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Page.sharp:9:30 incompatible-effects: `Pdf.render` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Pdf.render uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
     assert_eq!(refusals(bare, &[]), ["3:8 non-existent-function Function `trim` does not exist. | "]);
@@ -29199,24 +29241,24 @@ const SHELF: (&str, &str) = (
 );
 
 /// A method no class declares runs the class's `__call` or `__callStatic`, so its call has the effects the `extern` on
-/// that magic method declares, and an unknown effect without one, as any call of a plain PHP method does. A law
-/// reading a getter that makes the call has them too.
+/// that magic method declares, and is refused without one, as any call of a plain PHP method is. A law reading a getter
+/// that makes the call has them too.
 #[test]
 fn a_call_of_a_method_a_magic_method_serves_has_the_effects_of_the_magic_method() {
     let pure = (
         "app/Stubs/Magic.sharp",
-        "namespace App.Stubs;\n\nimport Lib.Bag;\nimport Lib.Codes;\n\nextern Bag.__call;\nextern Codes.__callStatic;\n",
+        "namespace App.Stubs;\n\nimport Lib.Bag;\nimport Lib.Codes;\n\nextern Bag.__call uses none;\nextern Codes.__callStatic uses none;\n",
     );
     let timed = (
         "app/Stubs/Magic.sharp",
-        "namespace App.Stubs;\n\nimport Lib.Bag;\nimport Lib.Codes;\n\nextern Bag.__call uses Clock;\nextern Codes.__callStatic;\n",
+        "namespace App.Stubs;\n\nimport Lib.Bag;\nimport Lib.Codes;\n\nextern Bag.__call uses Clock;\nextern Codes.__callStatic uses none;\n",
     );
 
     assert_eq!(
         effect_issues(&[SHELF, MAGIC]),
         [
-            "app/Shop/Shelf.sharp:14:33 impure-law: Law `counted` reaches `Shelf.count`, which calls `Bag.__call` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Bag;` when it has no effect, or name its effects after `uses`.",
-            "app/Shop/Shelf.sharp:16:31 impure-law: Law `coded` reaches `Shelf.code`, which calls `Codes.__callStatic` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Codes;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Shelf.sharp:10:25 incompatible-effects: `Bag` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Bag uses any;`, and name its effects in place of `any` when you know them.",
+            "app/Shop/Shelf.sharp:12:24 incompatible-effects: `Codes` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Codes uses any;`, and name its effects in place of `any` when you know them.",
         ]
     );
     assert_eq!(issues(pure, &[MAGIC]), Vec::<String>::new());
@@ -29336,8 +29378,9 @@ fn an_implementation_has_only_the_effects_its_declaration_allows() {
     );
 }
 
-/// An implementation that calls plain PHP with no `extern` is refused like a getter that does: the help names the
-/// `extern` of the class to write, with the effects the declaration's `uses` lists, and the import its file lacks.
+/// An implementation that calls plain PHP with no `extern` line is refused at the call, as any code is, and the help
+/// names the line to write and the import its file lacks. A class a call returns takes no effect from that call, so a
+/// call through it needs the class's own line.
 #[test]
 fn an_implementation_calling_plain_php_with_no_extern_names_the_extern_to_write() {
     let sync = (
@@ -29351,7 +29394,7 @@ fn an_implementation_calling_plain_php_with_no_extern_names_the_extern_to_write(
     assert_eq!(
         effect_issues(&[mailchimp, sync, METER]),
         [
-            "app/Shop/MailchimpSync.sharp:9:37 incompatible-effects: `MailchimpSync.sync` calls `Meter.read`, which has no `extern` declaration, so `uses Http, Mail` on `AudienceSync.sync` cannot accept it. Help: Declare its effect in a .sharp file, such as `extern Meter uses Http, Mail;`."
+            "app/Shop/MailchimpSync.sharp:9:37 incompatible-effects: `Meter` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Meter uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
 
@@ -29369,13 +29412,13 @@ fn an_implementation_calling_plain_php_with_no_extern_names_the_extern_to_write(
     assert_eq!(
         effect_issues(&[implementation, rates, gauge, METER]),
         [
-            "app/Shop/MeterRates.sharp:7:32 incompatible-effects: `MeterRates.rate` calls `Meter.read`, which has no `extern` declaration, so the pure `Rates.rate` cannot accept it. Help: Declare it in a .sharp file: `extern Meter;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
+            "app/Shop/MeterRates.sharp:7:32 incompatible-effects: `Meter` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Meter uses any;`, and name its effects in place of `any` when you know them. Add `import Lib.Meter;` to the file."
         ]
     );
 }
 
-/// The plain PHP a returned-object row calls: `Client` and `Desk` return a `Session`, which has no `extern` of its own,
-/// as `DB::table()` returns a query builder through `Facade::__callStatic`.
+/// The plain PHP a returned-object row calls: `Client` and `Desk` return a `Session`, as `DB::table()` returns a query
+/// builder through `Facade::__callStatic`, and `Desk`'s `@method` declares `open` on the facade.
 const RETURNED: [(&str, &str); 4] = [
     (
         "src/Lib/Client.php",
@@ -29395,11 +29438,12 @@ const RETURNED: [(&str, &str); 4] = [
     ),
 ];
 
-/// Spec section 29: an object a declared plain PHP call returns carries that call's effect, through a chain, a local, a
-/// field, a `static` return and a facade's `__callStatic`, and an `extern` on the returned class wins over it. A class
-/// two declared calls return carries the effects of both.
+/// Spec section 29: a call takes the `extern` line of the class that declares its method, and nothing from the call
+/// that returned the object, so a call through an object a declared call returns, through a chain, a local, a field
+/// and a `static` return, is refused, naming the returned class, until the class has its own line, whose effects the
+/// call then has. A facade's `@method` declares the method on the facade, so `Desk.open()` takes `Desk`'s line.
 #[test]
-fn an_object_a_declared_call_returns_carries_its_effect() {
+fn a_call_through_a_returned_object_takes_the_line_of_the_returned_class() {
     let stub = |externs: &'static str| {
         (
             "app/Stubs/Lib.sharp",
@@ -29426,33 +29470,29 @@ fn an_object_a_declared_call_returns_carries_its_effect() {
     let opens =
         ("app/Shop/Opens.sharp", "namespace App.Shop;\n\npublic interface Opens\n{\n    void open() uses Http;\n}\n");
     let [client, session, facade, desk_class] = RETURNED;
+    let with = |externs: &'static str| {
+        effect_issues(&[client_sender, sender, stub(externs), client, session, facade, desk_class, desk, opens])
+    };
+    let missing = " has no `extern` line. Help: Declare it in a .sharp file, such as `extern Session uses any;`, and name its effects in place of `any` when you know them.";
 
     assert_eq!(
-        effect_issues(&[
-            client_sender,
-            sender,
-            stub("extern Client uses Http;\nextern Desk uses Http;\n"),
-            client,
-            session,
-            facade,
-            desk_class,
-            desk,
-            opens
-        ]),
+        with("extern Client uses Http;\nextern Desk uses Http;\n"),
+        [
+            format!("app/Shop/ClientSender.sharp:10:27 incompatible-effects: `Session`{missing}"),
+            format!("app/Shop/ClientSender.sharp:15:9 incompatible-effects: `Session`{missing}"),
+            format!("app/Shop/ClientSender.sharp:18:27 incompatible-effects: `Session`{missing}"),
+            format!("app/Shop/ClientSender.sharp:20:26 incompatible-effects: `Session`{missing}"),
+            format!(
+                "app/Shop/DeskSender.sharp:7:26 incompatible-effects: `Session`{missing} Add `import Lib.Session;` to the file."
+            ),
+        ]
+    );
+    assert_eq!(
+        with("extern Client uses Http;\nextern Desk uses Http;\nextern Session uses none;\n"),
         Vec::<String>::new()
     );
     assert_eq!(
-        effect_issues(&[
-            client_sender,
-            sender,
-            stub("extern Client uses Http;\nextern Desk uses Http;\nextern Session uses Mail;\n"),
-            client,
-            session,
-            facade,
-            desk_class,
-            desk,
-            opens
-        ]),
+        with("extern Client uses Http;\nextern Desk uses Http;\nextern Session uses Mail;\n"),
         [
             "app/Shop/ClientSender.sharp:10:27 incompatible-effects: `ClientSender.chain` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.chain` cannot accept it.",
             "app/Shop/ClientSender.sharp:15:9 incompatible-effects: `ClientSender.local` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Sender.local` cannot accept it.",
@@ -29461,39 +29501,196 @@ fn an_object_a_declared_call_returns_carries_its_effect() {
             "app/Shop/DeskSender.sharp:7:26 incompatible-effects: `DeskSender.open` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Opens.open` cannot accept it.",
         ]
     );
-    // A body that reaches the call, and a method value of it, name the declared call too.
-    let relay = (
-        "app/Shop/Relay.sharp",
-        "namespace App.Shop;\n\nimport Lib.Desk;\nimport Lib.Session;\n\npublic class Relay : Opens\n{\n    public void open() { this.send(Desk.open()); }\n\n    public void send(Session session) { session.send(); }\n\n    public void later(Function<void() uses Http> f) { f(); }\n\n    public void valued() { this.later(Desk.open().send); }\n}\n",
-    );
     assert_eq!(
-        effect_issues(&[relay, desk, opens, stub("extern Desk uses Mail;\n"), client, session, facade, desk_class]),
+        with("extern Client uses Http;\nextern Desk uses Mail;\nextern Session uses none;\n"),
         [
-            "app/Shop/Relay.sharp:14:39 invalid-argument: `Session.send` has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so a `Function<void() uses Http>` cannot hold it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file.",
-            "app/Shop/Relay.sharp:8:26 incompatible-effects: `Relay.open` reaches `Relay.send`, which calls `Session.send` with the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Opens.open` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file.",
-            "app/Shop/DeskSender.sharp:7:26 incompatible-effects: `DeskSender.open` calls `Session.send`, which has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Opens.open` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file. Add `import Lib.Session;` to the file.",
+            "app/Shop/DeskSender.sharp:7:26 incompatible-effects: `DeskSender.open` calls `Desk.open`, which has the effect `Mail`, so `uses Http` on `Opens.open` cannot accept it."
         ]
     );
-    // `Desk` returns a `Session` with `Mail`, and `Client` one with `Http`, so every `Session` has both. The message
-    // names the declared call a carried effect comes from, and the help the `extern` on the class that overrides it.
+}
+
+/// Spec section 29: every `extern` line ends in `uses`: `uses none`, a list of effects, or `uses any`, and a line without
+/// it is refused. A call of plain PHP no line declares is refused, naming the class, once for a chain of calls into it.
+#[test]
+fn every_extern_line_states_its_effects_and_undeclared_plain_php_is_refused() {
+    let formatter = (
+        "src/Lib/Formatter.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Formatter\n{\n    public static function format(string $text): string\n    {\n        return $text;\n    }\n}\n",
+    );
+    let container = (
+        "src/Lib/Container.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Container\n{\n    public function make(string $id): int\n    {\n        return 0;\n    }\n}\n",
+    );
+    let mailchimp = (
+        "src/Mailchimp/Mailchimp.php",
+        "<?php\n\nnamespace Mailchimp;\n\nfinal class Mailchimp\n{\n    public static function lists(): self\n    {\n        return new self();\n    }\n\n    public function addListMember(string $id): void\n    {\n    }\n}\n",
+    );
+    let stubs = (
+        "app/Stubs/Lib.sharp",
+        "namespace App.Stubs;\n\nimport Lib.Container;\nimport Lib.Formatter;\nimport Stripe.StripeClient;\n\nextern StripeClient uses Http;\nextern Formatter.format uses none;\nextern Container.make uses any;\n",
+    );
+    let bare = ("app/Stubs/Bare.sharp", "namespace App.Stubs;\n\nimport Lib.Formatter;\n\nextern Formatter.format;\n");
+    let sync = (
+        "app/Shop/Sync.sharp",
+        "namespace App.Shop;\n\nimport Mailchimp.Mailchimp;\n\npublic class Sync\n{\n    public void sync() { Mailchimp.lists().addListMember(\"a\"); }\n}\n",
+    );
+
+    assert_eq!(refusals(stubs, &[formatter, container, STRIPE]), Vec::<String>::new());
     assert_eq!(
-        effect_issues(&[
-            client_sender,
-            sender,
-            stub("extern Client uses Http;\nextern Desk uses Mail;\n"),
-            client,
-            session,
-            facade,
-            desk_class,
-            desk,
-            opens
-        ]),
+        refusals(bare, &[formatter]),
+        ["5:1 semantics State its effects: `uses none`, `uses <effects>`, or `uses any`. | "]
+    );
+    assert_eq!(
+        effect_issues(&[sync, mailchimp, stubs, formatter, container, STRIPE]),
         [
-            "app/Shop/ClientSender.sharp:10:27 incompatible-effects: `ClientSender.chain` calls `Session.send`, which has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Sender.chain` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file.",
-            "app/Shop/ClientSender.sharp:15:9 incompatible-effects: `ClientSender.local` calls `Session.send`, which has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Sender.local` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file.",
-            "app/Shop/ClientSender.sharp:18:27 incompatible-effects: `ClientSender.field` calls `Session.send`, which has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Sender.field` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file.",
-            "app/Shop/ClientSender.sharp:20:26 incompatible-effects: `ClientSender.next` calls `Session.send`, which has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Sender.next` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file.",
-            "app/Shop/DeskSender.sharp:7:26 incompatible-effects: `DeskSender.open` calls `Session.send`, which has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Opens.open` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file. Add `import Lib.Session;` to the file.",
+            "app/Shop/Sync.sharp:7:26 incompatible-effects: `Mailchimp` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Mailchimp uses any;`, and name its effects in place of `any` when you know them."
+        ]
+    );
+}
+
+/// Spec section 29: a struct calls only plain PHP its `extern` line declares `uses none`, so a call with no line, with
+/// an effect or with `uses any` is refused.
+#[test]
+fn a_struct_calls_only_plain_php_declared_uses_none() {
+    let validator = (
+        "src/Lib/Validator.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Validator\n{\n    public static function check(string $value): bool\n    {\n        return $value !== '';\n    }\n}\n",
+    );
+    let sku = (
+        "app/Shop/Sku.sharp",
+        "namespace App.Shop;\n\nimport Lib.Validator;\n\npublic struct Sku\n{\n    public string code { get; init; } = \"\";\n\n    public bool isValid() => Validator.check(this.code);\n}\n",
+    );
+    let declared = |uses: &str| {
+        (
+            "app/Stubs/Rules.sharp",
+            leak(format!("namespace App.Stubs;\n\nimport Lib.Validator;\n\nextern Validator.check uses {uses};\n")),
+        )
+    };
+    let help = " Help: Do the work in a class that takes the value, and keep the value's members pure.";
+
+    assert_eq!(effect_issues(&[sku, validator, declared("none")]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[sku, validator]),
+        [
+            "app/Shop/Sku.sharp:9:30 incompatible-effects: `Validator` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Validator uses any;`, and name its effects in place of `any` when you know them."
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[sku, validator, declared("Database")]),
+        [format!(
+            "app/Shop/Sku.sharp:9:30 incompatible-effects: `Sku.isValid` has the effect `Database`, and a struct has no effects.{help}"
+        )]
+    );
+    assert_eq!(
+        effect_issues(&[sku, validator, declared("any")]),
+        [format!(
+            "app/Shop/Sku.sharp:9:30 incompatible-effects: `Sku.isValid` may have any effect, and a struct has no effects.{help}"
+        )]
+    );
+}
+
+/// Spec section 29: `uses any` declares plain PHP that may have any effect, so code that reaches it fits no `uses` and
+/// takes no part in a law.
+#[test]
+fn code_reaching_a_uses_any_call_fits_no_uses_and_no_law() {
+    let container = (
+        "src/Lib/Container.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Container\n{\n    public function make(string $id): int\n    {\n        return 0;\n    }\n}\n",
+    );
+    let stub =
+        ("app/Stubs/Lib.sharp", "namespace App.Stubs;\n\nimport Lib.Container;\n\nextern Container.make uses any;\n");
+    let builds =
+        ("app/Shop/Builds.sharp", "namespace App.Shop;\n\npublic interface Builds\n{\n    int build() uses Http;\n}\n");
+    let builder = (
+        "app/Shop/Builder.sharp",
+        "namespace App.Shop;\n\nimport Lib.Container;\n\npublic class Builder : Builds\n{\n    public Builder(private Container container) { }\n\n    public int build() => this.container.make(\"a\");\n\n    public int made => this.container.make(\"b\");\n\n    law built(Builder builder) => builder.made > 0;\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[builder, builds, container, stub]),
+        [
+            "app/Shop/Builder.sharp:13:35 impure-law: Law `built` reaches `Builder.made`, which calls `Container.make` with any effect. Laws hold only over pure code. Help: Its `extern` line says `uses any`. State its effects in place of `any`, or call it outside the law, as with `extern Container.make uses none;`.",
+            "app/Shop/Builder.sharp:9:27 incompatible-effects: `Builder.build` calls `Container.make`, which may have any effect, so `uses Http` on `Builds.build` cannot accept it. Help: Its `extern` line says `uses any`. State its effects in place of `any`, or call it outside the method, as with `extern Container.make uses Http;`.",
+        ]
+    );
+}
+
+/// The plain PHP of an Eloquent-like model: `Model.all()` reads the database and returns a `Collection`, whose `map`
+/// runs the function it is given, and `Db.save` writes a row.
+const ELOQUENT: [(&str, &str); 4] = [
+    (
+        "src/Lib/Model.php",
+        "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    public static function all(): Collection\n    {\n        return new Collection();\n    }\n}\n",
+    ),
+    ("src/Lib/Order.php", "<?php\n\nnamespace Lib;\n\nfinal class Order extends Model\n{\n}\n"),
+    (
+        "src/Lib/Collection.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Collection\n{\n    public function sum(string $key): int\n    {\n        return 0;\n    }\n\n    public function map(callable $callback): static\n    {\n        return $this;\n    }\n}\n",
+    ),
+    (
+        "src/Lib/Db.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Db\n{\n    public function save(mixed $row): void\n    {\n    }\n}\n",
+    ),
+];
+
+/// Spec section 29: a call has only the effects of its own class's line, so `Order.all().sum("total")` has only the
+/// `Database` of `all()` under `extern Collection uses none;`, and passing a function into plain PHP adds that
+/// function's effects, so `orders.map(o => this.db.save(o))` has `Database`: it fits `uses Database` and no pure
+/// declaration.
+#[test]
+fn a_call_has_the_effects_of_its_class_s_line_and_of_the_functions_it_is_given() {
+    let stub = (
+        "app/Stubs/Lib.sharp",
+        "namespace App.Stubs;\n\nimport Lib.Collection;\nimport Lib.Db;\nimport Lib.Model;\n\nextern Model uses Database;\nextern Collection uses none;\nextern Db uses Database;\n",
+    );
+    let report = (
+        "app/Shop/Report.sharp",
+        "namespace App.Shop;\n\nimport Lib.Order;\n\npublic class Report\n{\n    public int total => Order.all().sum(\"total\");\n\n    law totals(Report report) => report.total >= 0;\n}\n",
+    );
+    let archives = (
+        "app/Shop/Archives.sharp",
+        "namespace App.Shop;\n\nimport Lib.Collection;\n\npublic interface Archives\n{\n    Collection saved(Collection orders) uses Database;\n\n    Collection checked(Collection orders);\n}\n",
+    );
+    let archive = (
+        "app/Shop/Archive.sharp",
+        "namespace App.Shop;\n\nimport Lib.Collection;\nimport Lib.Db;\n\npublic class Archive : Archives\n{\n    public Archive(private Db db) { }\n\n    public Collection saved(Collection orders) => orders.map(o => this.db.save(o));\n\n    public Collection checked(Collection orders) => orders.map(o => this.db.save(o));\n}\n",
+    );
+    let [model, order, collection, db] = ELOQUENT;
+
+    assert_eq!(
+        effect_issues(&[report, archive, archives, stub, model, order, collection, db]),
+        [
+            "app/Shop/Report.sharp:9:34 impure-law: Law `totals` reaches `Report.total`, which calls `Order.all` with the effect `Database`. Laws hold only over pure code.",
+            "app/Shop/Archive.sharp:12:69 incompatible-effects: `Archive.checked` calls `Db.save`, which has the effect `Database`, so the pure `Archives.checked` cannot accept it.",
+        ]
+    );
+}
+
+/// Spec section 29: a method's own `extern` line overrides its class's line, so after `extern CarbonImmutable uses
+/// none;` and `extern CarbonImmutable.now uses Clock;`, `now()` has `Clock` and `addDays()` is pure.
+#[test]
+fn a_method_s_line_overrides_its_class_s_line() {
+    let carbon = (
+        "src/Carbon/CarbonImmutable.php",
+        "<?php\n\nnamespace Carbon;\n\nclass CarbonImmutable\n{\n    public static function now(): static\n    {\n        return new static();\n    }\n\n    public function addDays(int $days): static\n    {\n        return $this;\n    }\n}\n",
+    );
+    let stub = (
+        "app/Stubs/Carbon.sharp",
+        "namespace App.Stubs;\n\nimport Carbon.CarbonImmutable;\n\nextern CarbonImmutable uses none;\nextern CarbonImmutable.now uses Clock;\n",
+    );
+    let dates = (
+        "app/Shop/Dates.sharp",
+        "namespace App.Shop;\n\nimport Carbon.CarbonImmutable;\n\npublic interface Dates\n{\n    CarbonImmutable today();\n\n    CarbonImmutable later(CarbonImmutable date);\n}\n",
+    );
+    let calendar = (
+        "app/Shop/Calendar.sharp",
+        "namespace App.Shop;\n\nimport Carbon.CarbonImmutable;\n\npublic class Calendar : Dates\n{\n    public CarbonImmutable today() => CarbonImmutable.now();\n\n    public CarbonImmutable later(CarbonImmutable date) => date.addDays(1);\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[calendar, dates, carbon, stub]),
+        [
+            "app/Shop/Calendar.sharp:7:39 incompatible-effects: `Calendar.today` calls `CarbonImmutable.now`, which has the effect `Clock`, so the pure `Dates.today` cannot accept it."
         ]
     );
 }
@@ -29526,9 +29723,9 @@ fn creating_a_built_in_exception_is_pure() {
     assert_eq!(
         effect_issues(&[gauge, seeds]),
         [
-            "app/Shop/Gauge.sharp:9:36 impure-law: Law `firstOfOne` reaches `Gauge.first`, which calls `ValueError` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern ValueError;` when it has no effect, or name its effects after `uses`.",
-            "app/Shop/Gauge.sharp:11:37 impure-law: Law `parsedOfOne` reaches `Gauge.parsed`, which calls `JsonException` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern JsonException;` when it has no effect, or name its effects after `uses`.",
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/Seeds.sharp:9:37 impure-law: Law `seededOfOne` reaches `Seeds.seeded`, which calls `RandomException` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern RandomException;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Gauge.sharp:5:82 incompatible-effects: `ValueError` has no `extern` line. Help: Declare it in a .sharp file, such as `extern ValueError uses any;`, and name its effects in place of `any` when you know them.",
+            "app/Shop/Gauge.sharp:7:62 incompatible-effects: `JsonException` has no `extern` line. Help: Declare it in a .sharp file, such as `extern JsonException uses any;`, and name its effects in place of `any` when you know them.",
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/Seeds.sharp:7:60 incompatible-effects: `RandomException` has no `extern` line. Help: Declare it in a .sharp file, such as `extern RandomException uses any;`, and name its effects in place of `any` when you know them.",
         ]
     );
 }
@@ -29694,9 +29891,9 @@ fn the_standard_library_names_the_interfaces_a_plain_php_library_needs_with_no_i
 }
 
 /// The standard classes are the class-likes `Builtins.sharp` names: each root class it declares with no import, which a
-/// bare name names, and each class of a namespace it imports and declares nothing of, as `Dom\HTMLDocument`, by its
-/// full name. A class it imports and declares, as `DateTimeImmutable` and `Random\RandomException`, only takes the
-/// effects its lines give.
+/// bare name names, and each class of a namespace it imports and declares `uses any`, the DOM's, as
+/// `Dom\HTMLDocument`, by its full name. A class of a namespace it declares with its effects, as
+/// `Random\RandomException`, and a root class it imports, as `DateTimeImmutable`, only take the effects its lines give.
 #[test]
 fn the_standard_classes_are_the_classes_the_standard_library_names() {
     let imported: HashMap<&str, String> = BUILTINS
@@ -29708,18 +29905,17 @@ fn the_standard_classes_are_the_classes_the_standard_library_names() {
             (alias, full.replace('.', "\\"))
         })
         .collect();
-    let declared: HashSet<&str> =
-        BUILTINS.1.lines().filter_map(|line| line.strip_prefix("extern ")?.split([' ', '.', ';']).next()).collect();
-    let mut root: Vec<&str> = BUILTINS
-        .1
-        .lines()
-        .filter_map(|line| line.strip_prefix("extern ")?.strip_suffix(';'))
+    let classes =
+        || BUILTINS.1.lines().filter_map(|line| line.strip_prefix("extern ")?.strip_suffix(';')?.split_once(" uses "));
+    let any: HashSet<&str> = classes().filter(|(_, uses)| *uses == "any").map(|(name, _)| name).collect();
+    let mut root: Vec<&str> = classes()
+        .map(|(name, _)| name)
         .filter(|name| !name.contains(['.', ' ']) && !imported.contains_key(name))
         .collect();
     root.sort_unstable();
     let mut named: Vec<String> = imported
         .iter()
-        .filter(|(name, full)| full.contains('\\') && !declared.contains(*name))
+        .filter(|(name, full)| full.contains('\\') && any.contains(*name))
         .map(|(_, full)| full.clone())
         .chain(root.iter().map(|name| (*name).to_owned()))
         .collect();
@@ -29901,7 +30097,7 @@ fn running_a_function_value_through_plain_php_or_a_local_has_the_value_s_effects
     );
     let stub = (
         "app/Stubs/Lists.sharp",
-        "namespace App.Stubs;\n\nimport Acme.Lists;\nimport Lib.Runner;\n\nextern Runner;\nextern Lists.map;\nextern Lists.sorted;\nextern Lists.size;\n",
+        "namespace App.Stubs;\n\nimport Acme.Lists;\nimport Lib.Runner;\n\nextern Runner uses none;\nextern Lists.map uses none;\nextern Lists.sorted uses none;\nextern Lists.size uses none;\n",
     );
 
     assert_eq!(
@@ -30108,8 +30304,8 @@ fn a_lambda_with_an_effect_in_either_branch_of_a_conditional_is_refused() {
 
 /// Spec section 29: a file that imports a plain PHP class named like a standard effect, as Laravel's `Http` facade,
 /// writes the effect in `uses` under the name it imports the effect as, since its bare name is the facade, and a
-/// function type that lists it holds a lambda calling a class an `extern` gives that effect, the facade too, and
-/// refuses one calling a class with no `extern`.
+/// function type that lists it holds a lambda calling a class an `extern` gives that effect, the facade too. A lambda
+/// calling a class with no `extern` line is refused at the call, as any code is.
 #[test]
 fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect_by_its_import() {
     for (name, effect) in sharp_effects() {
@@ -30145,8 +30341,8 @@ fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect_
         assert_eq!(
             effect_issues(&files),
             [
+                "app/Shop/Checkout.sharp:16:26 incompatible-effects: `Store` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Store uses any;`, and name its effects in place of `any` when you know them.",
                 "app/Shop/Checkout.sharp:25:36 impure-law: Law `positive` calls `Client.get`, which has the effect `Effect`. Laws hold only over pure code.",
-                "app/Shop/Checkout.sharp:16:21 invalid-property-assignment-value: This lambda calls `Store.get`, which has no `extern` declaration, so a `Function<int(int) uses Effect>` cannot hold it. Help: Declare its effect in a .sharp file, such as `extern Store uses Effect;`.",
             ],
             "{name}"
         );
@@ -30162,12 +30358,12 @@ const SERVICES: (&str, &str) = (
 
 const SERVICES_STUB: (&str, &str) = (
     "app/Stubs/Services.sharp",
-    "namespace App.Stubs;\n\nimport Lib.Cache;\nimport Lib.Client;\n\nextern Client uses Http;\nextern Cache;\n",
+    "namespace App.Stubs;\n\nimport Lib.Cache;\nimport Lib.Client;\n\nextern Client uses Http;\nextern Cache uses none;\n",
 );
 
 /// A plain PHP method value runs the method, so a function type holds it only when it lists every effect the method's
-/// `extern` declares, as a call of the method has them. A method with no `extern` has an unknown effect, and a method
-/// of the `foreign` class `Sharp\System\Environment` has the effect `Environment`.
+/// `extern` declares, as a call of the method has them. A method with no `extern` line is refused as any plain PHP is,
+/// and a method of the `foreign` class `Sharp\System\Environment` has the effect `Environment`.
 #[test]
 fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
     let pricing = (
@@ -30179,25 +30375,26 @@ fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
     assert_eq!(
         effect_issues(&[pricing, SERVICES, SERVICES_STUB]),
         [
+            "app/Shop/Pricing.sharp:16:104 incompatible-effects: `Store` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Store uses any;`, and name its effects in place of `any` when you know them.",
             "app/Shop/Pricing.sharp:16:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int) uses Mail>` cannot hold it.",
-            "app/Shop/Pricing.sharp:16:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int) uses Mail>` cannot hold it. Help: Declare its effect in a .sharp file, such as `extern Store uses Mail;`.",
             "app/Shop/Pricing.sharp:18:43 invalid-argument: `Environment.variable` has the effect `Environment`, so a `Function<string?(string) uses Mail>` cannot hold it.",
         ]
     );
 }
 
-/// A method value and a call of the method find the same `extern`: the one on the class it is read through, before its
-/// parent's that declares the method, however the value reaches its place. `RemoteFeed`'s `extern` gives `get` the
-/// effect `Http` that `Feed`'s does not, and `QuietChild`'s declares the `get` of `Quiet`, which has none, pure.
+/// Spec section 29: a method value and a call of the method take the same `extern` line, the one of the class that
+/// declares the method, whatever class it is read through and however the value reaches its place. `Feed`'s line gives
+/// the `get` read through `RemoteFeed` the effect `Http`, and `Quiet`'s declares the `get` read through `QuietChild`
+/// pure, whatever `QuietChild`'s own line says.
 #[test]
-fn a_plain_php_method_value_read_through_a_subclass_is_held_to_the_subclass_extern() {
+fn a_plain_php_method_value_read_through_a_subclass_takes_the_line_of_the_class_that_declares_it() {
     let feeds = (
         "src/Lib/Feeds.php",
         "<?php\n\nnamespace Lib;\n\nclass Feed\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class RemoteFeed extends Feed\n{\n}\n\nclass Quiet\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class QuietChild extends Quiet\n{\n}\n",
     );
     let stub = (
         "app/Stubs/Feeds.sharp",
-        "namespace App.Stubs;\n\nimport Lib.Feed;\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\nextern Feed;\nextern RemoteFeed uses Http;\nextern QuietChild;\n",
+        "namespace App.Stubs;\n\nimport Lib.Feed;\nimport Lib.Quiet;\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\nextern Feed uses Http;\nextern RemoteFeed uses none;\nextern Quiet uses none;\nextern QuietChild uses Http;\n",
     );
     let pricing = (
         "app/Shop/Pricing.sharp",
@@ -30299,39 +30496,49 @@ const HOLDER: (&str, &str) = (
     "<?php\n\nnamespace Lib;\n\nfinal class Formatter\n{\n    public function __invoke(int $amount): int\n    {\n        return $amount;\n    }\n}\n\nfinal class Holder\n{\n    /** @var \\Closure(int): int */\n    public \\Closure $closure;\n\n    /** @var callable(int): int */\n    public $callback;\n\n    public Formatter $format;\n}\n",
 );
 
-/// A plain PHP property holding a closure or a callable declares no effect, and an `extern` on its class declares the
-/// class's own members, not the code the property holds, so calling it always has an unknown effect. An object with
-/// `__invoke` has the effects of its `__invoke`. A law reading a getter that makes such a call has them too.
+/// Spec section 29: a plain PHP property is a member of the class that declares it, so a call of the function it holds,
+/// a closure or a callable, has the effects of that class's `extern` line, and is refused without one. An object with
+/// `__invoke` takes the line of its own class.
 #[test]
-fn a_call_of_a_plain_php_property_holding_a_function_has_an_unknown_effect() {
-    let holder = HOLDER;
+fn a_call_of_a_plain_php_property_holding_a_function_has_its_class_line_effects() {
     let till = (
         "app/Shop/Till.sharp",
         "namespace App.Shop;\n\nimport Lib.Holder;\n\npublic class Till\n{\n    public Till(private Holder holder) { }\n\n    public int closed => this.holder.closure(2);\n\n    public int called => this.holder.callback(2);\n\n    public int formatted => this.holder.format(2);\n\n    law closes(Till till) => till.closed > 0;\n\n    law calls(Till till) => till.called > 0;\n\n    law formats(Till till) => till.formatted > 0;\n}\n",
     );
-    let class_extern = ("app/Stubs/Holder.sharp", "namespace App.Stubs;\n\nimport Lib.Holder;\n\nextern Holder;\n");
-    let refused = [
-        "app/Shop/Till.sharp:15:30 impure-law: Law `closes` reaches `Till.closed`, which calls `Holder.closure` with no `extern` declaration. Laws hold only over pure code. Help: Property `Holder.closure` holds plain PHP code, which no `extern` can declare. Call it outside the law, or through a method of `Holder` that an `extern` declares.",
-        "app/Shop/Till.sharp:17:29 impure-law: Law `calls` reaches `Till.called`, which calls `Holder.callback` with no `extern` declaration. Laws hold only over pure code. Help: Property `Holder.callback` holds plain PHP code, which no `extern` can declare. Call it outside the law, or through a method of `Holder` that an `extern` declares.",
-        "app/Shop/Till.sharp:19:31 impure-law: Law `formats` reaches `Till.formatted`, which calls `Formatter.__invoke` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Formatter;` when it has no effect, or name its effects after `uses`. Add `import Lib.Formatter;` to the file.",
-    ];
+    let class_extern =
+        ("app/Stubs/Holder.sharp", "namespace App.Stubs;\n\nimport Lib.Holder;\n\nextern Holder uses none;\n");
+    let database =
+        ("app/Stubs/Holder.sharp", "namespace App.Stubs;\n\nimport Lib.Holder;\n\nextern Holder uses Database;\n");
+    let missing = |class: &str, at: &str, import: &str| {
+        format!(
+            "app/Shop/Till.sharp:{at} incompatible-effects: `{class}` has no `extern` line. Help: Declare it in a .sharp file, such as `extern {class} uses any;`, and name its effects in place of `any` when you know them.{import}"
+        )
+    };
+    let formatter = missing("Formatter", "13:29", " Add `import Lib.Formatter;` to the file.");
 
-    assert_eq!(effect_issues(&[till, holder]), refused);
-    assert_eq!(effect_issues(&[till, holder, class_extern]), refused);
-}
-
-/// A law calling a plain PHP property that holds a closure is refused as a getter is, and its help names the law.
-#[test]
-fn a_law_calling_a_plain_php_property_holding_a_closure_has_an_unknown_effect() {
-    let rule = (
-        "app/Shop/Rule.sharp",
-        "namespace App.Shop;\n\nimport Lib.Holder;\n\npublic class Rule\n{\n    law positive(Holder holder) => holder.closure(2) > 0;\n}\n",
-    );
-
+    assert_eq!(issues(till, &[HOLDER, class_extern]), Vec::<String>::new());
     assert_eq!(
-        effect_issues(&[rule, HOLDER]),
+        effect_issues(&[till, HOLDER]),
         [
-            "app/Shop/Rule.sharp:7:36 impure-law: Law `positive` calls `Holder.closure`, which has no `extern` declaration. Laws hold only over pure code. Help: Property `Holder.closure` holds plain PHP code, which no `extern` can declare. Call it outside the law, or through a method of `Holder` that an `extern` declares."
+            missing("Holder", "9:26", ""),
+            missing("Holder", "11:26", ""),
+            missing("Holder", "13:29", ""),
+            formatter.clone()
+        ]
+    );
+    assert_eq!(effect_issues(&[till, HOLDER, class_extern]), std::slice::from_ref(&formatter));
+    let law = |at: &str, law: &str, getter: &str, member: &str| {
+        format!(
+            "app/Shop/Till.sharp:{at} impure-law: Law `{law}` reaches `Till.{getter}`, which calls `Holder.{member}` with the effect `Database`. Laws hold only over pure code."
+        )
+    };
+    assert_eq!(
+        effect_issues(&[till, HOLDER, database]),
+        [
+            formatter,
+            law("15:30", "closes", "closed", "closure"),
+            law("17:29", "calls", "called", "callback"),
+            law("19:31", "formats", "formatted", "format"),
         ]
     );
 }
@@ -30658,7 +30865,8 @@ fn a_getter_writing_this_or_calling_a_method_that_writes_it_is_refused() {
         "namespace Demo;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\") as Address; set => this.setAttribute(\"shipping\", value); }\n}\n",
     );
     let address = ("src/Demo/Address.sharp", "namespace Demo;\n\nclass Address\n{\n}\n");
-    assert_eq!(effect_issues(&[order, address, ("src/Lib/Model.php", MODEL)]), Vec::<String>::new());
+    let stub = ("src/Demo/Stubs.sharp", "namespace Demo;\n\nimport Lib.Model;\n\nextern Model uses none;\n");
+    assert_eq!(effect_issues(&[order, address, ("src/Lib/Model.php", MODEL), stub]), Vec::<String>::new());
 
     let counter = (
         "app/Shop/Counter.sharp",
@@ -30828,19 +31036,23 @@ fn a_call_of_a_virtual_method_has_the_effects_of_its_overrides() {
     );
 }
 
-/// A collection method has the effects of the lambda passed to it, as a function parameter of a PHP# method takes them on, and the lambda is part of
-/// the law, so the error points into it.
+/// A collection method has the effects of the lambda passed to it, as a function parameter of a PHP# method takes them
+/// on, and the lambda is part of the law, so the error points into it: a call whose `extern` line says `uses any`
+/// takes no part in a law.
 #[test]
-fn a_law_whose_list_map_lambda_calls_an_undeclared_function_is_refused() {
+fn a_law_whose_list_map_lambda_calls_a_function_of_any_effect_is_refused() {
     let names = (
         "app/Shop/Names.sharp",
         "namespace App.Shop;\n\nimport Acme.Letters;\n\npublic class Names\n{\n    law loud(List<string> all) => all.map(name => Letters.shout(name)).count() == all.count();\n}\n",
     );
 
+    let stub =
+        ("app/Stubs/Letters.sharp", "namespace App.Stubs;\n\nimport Acme.Letters;\n\nextern Letters.shout uses any;\n");
+
     assert_eq!(
-        effect_issues(&[names, LETTERS]),
+        effect_issues(&[names, LETTERS, stub]),
         [
-            "app/Shop/Names.sharp:7:51 impure-law: Law `loud` calls `Letters.shout`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Letters.shout;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Names.sharp:7:51 impure-law: Law `loud` calls `Letters.shout`, which may have any effect. Laws hold only over pure code. Help: Its `extern` line says `uses any`. State its effects in place of `any`, or call it outside the law, as with `extern Letters.shout uses none;`."
         ]
     );
 }
@@ -32252,7 +32464,7 @@ fn an_effect_in_a_law_s_condition_or_body_is_refused() {
     }
 }
 
-/// A law that calls plain PHP with no `extern` names the declaration it lacks, as the getter rule does.
+/// A call of plain PHP with no `extern` line is refused, naming the line it lacks, in a law as anywhere.
 #[test]
 fn a_law_calling_plain_php_with_no_extern_names_the_missing_declaration() {
     let refund = (
@@ -32263,7 +32475,7 @@ fn a_law_calling_plain_php_with_no_extern_names_the_missing_declaration() {
     assert_eq!(
         effect_issues(&[refund, GATEWAY]),
         [
-            "app/Shop/Refund.sharp:7:38 impure-law: Law `refundAllowed` calls `Gateway.charge`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Gateway;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Refund.sharp:7:38 incompatible-effects: `Gateway` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Gateway uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
 }
@@ -32296,12 +32508,12 @@ fn a_call_of_a_method_of_a_class_that_shares_its_short_name_names_the_class_in_f
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Clock;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
+            "app/Shop/Timer.sharp:7:27 incompatible-effects: `Vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Clock uses any;`, and name its effects in place of `any` when you know them. Add `import Vendor.Clock;` to the file."
         ]
     );
 }
 
-/// The help for a plain PHP property names its class by the same rule as the message.
+/// A read of a plain PHP property takes its class's `extern` line, and the refusal names the class by the same rule.
 #[test]
 fn a_call_of_a_plain_php_property_of_a_class_that_shares_its_short_name_names_the_class_in_full() {
     let timer = (
@@ -32312,7 +32524,7 @@ fn a_call_of_a_plain_php_property_of_a_class_that_shares_its_short_name_names_th
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:32 impure-law: Law `begins` reaches `Timer.ticked`, which calls `Vendor.Clock.tick` with no `extern` declaration. Laws hold only over pure code. Help: Property `Vendor.Clock.tick` holds plain PHP code, which no `extern` can declare. Call it outside the law, or through a method of `Vendor.Clock` that an `extern` declares."
+            "app/Shop/Timer.sharp:7:26 incompatible-effects: `Vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Clock uses any;`, and name its effects in place of `any` when you know them. Add `import Vendor.Clock;` to the file."
         ]
     );
 }
@@ -32328,7 +32540,7 @@ fn a_call_of_a_method_of_a_class_imported_under_another_name_names_the_class_by_
     assert_eq!(
         effect_issues(&[timer, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `VendorClock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Timer.sharp:9:27 incompatible-effects: `VendorClock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
 }
@@ -32354,8 +32566,8 @@ fn reaching_a_method_of_a_php_sharp_class_that_shares_its_short_name_names_the_c
     );
 }
 
-/// The message is the law's, so it names a class as the law's file does, whatever the file of the method that
-/// makes the call imports.
+/// The refusal is at the call, so it names a class as the file that makes the call does, whatever the file of a law
+/// that reaches it imports.
 #[test]
 fn a_law_reaching_a_call_in_another_file_names_the_class_as_the_law_file_does() {
     let order = (
@@ -32370,7 +32582,7 @@ fn a_law_reaching_a_call_in_another_file_names_the_class_as_the_law_file_does() 
     assert_eq!(
         effect_issues(&[cart, order, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Cart.sharp:9:30 impure-law: Law `stamps` reaches `Order.stamp`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Clock;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
+            "app/Shop/Order.sharp:9:27 incompatible-effects: `VendorClock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
 }
@@ -32396,14 +32608,15 @@ fn a_call_of_a_class_its_file_does_not_import_names_the_import_the_extern_needs(
     assert_eq!(
         effect_issues(&[panel, gauge, METER]),
         [
-            "app/Shop/Panel.sharp:9:32 impure-law: Law `levels` reaches `Panel.level`, which calls `Meter.read` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Meter;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
+            "app/Shop/Panel.sharp:7:25 incompatible-effects: `Meter` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Meter uses any;`, and name its effects in place of `any` when you know them. Add `import Lib.Meter;` to the file."
         ]
     );
 }
 
-/// A class of the file's own namespace is bound without an import, so the help names none.
+/// A class of the file's own namespace is bound without an import, but a bare name in an `extern` line that no import
+/// binds is a function, so the help names the class through an alias, and the line it gives declares the class.
 #[test]
-fn a_call_of_a_class_of_its_own_namespace_names_no_import() {
+fn a_call_of_a_class_of_its_own_namespace_names_it_through_an_alias() {
     let printer = (
         "src/App/Shop/Printer.php",
         "<?php\n\nnamespace App\\Shop;\n\nfinal class Printer\n{\n    public function print(): int\n    {\n        return 0;\n    }\n}\n",
@@ -32416,9 +32629,14 @@ fn a_call_of_a_class_of_its_own_namespace_names_no_import() {
     assert_eq!(
         effect_issues(&[kiosk, printer]),
         [
-            "app/Shop/Kiosk.sharp:9:32 impure-law: Law `prints` reaches `Kiosk.printed`, which calls `Printer.print` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Printer;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Kiosk.sharp:7:27 incompatible-effects: `Printer` has no `extern` line. Help: Declare it in a .sharp file, such as `extern ShopPrinter uses any;`, and name its effects in place of `any` when you know them. Add `import App.Shop.Printer as ShopPrinter;` to the file."
         ]
     );
+    let line = (
+        "app/Shop/Printers.sharp",
+        "namespace App.Shop;\n\nimport App.Shop.Printer as ShopPrinter;\n\nextern ShopPrinter uses none;\n",
+    );
+    assert_eq!(effect_issues(&[kiosk, printer, line]), Vec::<String>::new());
 }
 
 /// An import of the class's short name would clash with the file's import of another class, and `Clock` in the
@@ -32432,13 +32650,13 @@ fn a_call_of_a_class_whose_short_name_its_file_imports_names_an_aliased_import()
     );
     let declared = (
         "app/Shop/Timer.sharp",
-        "namespace App.Shop;\n\nimport App.Clock;\nimport Vendor.Clock as VendorClock;\n\nextern VendorClock.now;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
+        "namespace App.Shop;\n\nimport App.Clock;\nimport Vendor.Clock as VendorClock;\n\nextern VendorClock.now uses none;\n\npublic class Timer\n{\n    public Timer(private Source source, private Clock clock) { }\n\n    public int started => this.source.clock().now();\n\n    law begins(Timer timer) => timer.started > 0;\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock;` to the file."
+            "app/Shop/Timer.sharp:9:27 incompatible-effects: `Vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock uses any;`, and name its effects in place of `any` when you know them. Add `import Vendor.Clock as VendorClock;` to the file."
         ]
     );
     assert_eq!(effect_issues(&[declared, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]), Vec::<String>::new());
@@ -32464,7 +32682,7 @@ fn an_aliased_import_capitalizes_each_part_of_a_lowercase_namespace() {
     assert_eq!(
         effect_issues(&[timer, source, clock, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:11:32 impure-law: Law `begins` reaches `Timer.started`, which calls `vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock;` when it has no effect, or name its effects after `uses`. Add `import vendor.Clock as VendorClock;` to the file."
+            "app/Shop/Timer.sharp:9:27 incompatible-effects: `vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock uses any;`, and name its effects in place of `any` when you know them. Add `import vendor.Clock as VendorClock;` to the file."
         ]
     );
 }
@@ -32481,7 +32699,7 @@ fn an_aliased_import_whose_alias_the_file_binds_takes_the_first_free_number() {
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:12:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock1;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock1;` to the file."
+            "app/Shop/Timer.sharp:10:27 incompatible-effects: `Vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock1 uses any;`, and name its effects in place of `any` when you know them. Add `import Vendor.Clock as VendorClock1;` to the file."
         ]
     );
 }
@@ -33580,7 +33798,7 @@ fn emit_takes_an_event() {
     let money = ("app/Shop/Money.sharp", "namespace App.Shop;\n\npublic class Money\n{\n}\n");
     let raiser = (
         "app/Shop/Raiser.sharp",
-        "namespace App.Shop;\n\nimport Queue.JobFailed;\nimport Queue.Ledger;\n\nextern event JobFailed;\nextern Ledger;\n\npublic class Raiser\n{\n    public void raise(OrderPaid paid, JobFailed failed, OrderEvent family, Money amount, Ledger ledger, int count, Missing missing)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit failed;\n        emit family;\n        emit amount;\n        emit ledger;\n        emit count;\n        emit null;\n        emit new Missing(3);\n        emit missing;\n    }\n\n    public void choose(OrderPaid? maybe, OrderPaid|Money mixed, OrderPaid|OrderRefunded either, Spot spot)\n    {\n        emit maybe;\n        emit mixed;\n        emit either;\n        emit spot;\n    }\n}\n",
+        "namespace App.Shop;\n\nimport Queue.JobFailed;\nimport Queue.Ledger;\n\nextern event JobFailed uses none;\nextern Ledger uses none;\n\npublic class Raiser\n{\n    public void raise(OrderPaid paid, JobFailed failed, OrderEvent family, Money amount, Ledger ledger, int count, Missing missing)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit failed;\n        emit family;\n        emit amount;\n        emit ledger;\n        emit count;\n        emit null;\n        emit new Missing(3);\n        emit missing;\n    }\n\n    public void choose(OrderPaid? maybe, OrderPaid|Money mixed, OrderPaid|OrderRefunded either, Spot spot)\n    {\n        emit maybe;\n        emit mixed;\n        emit either;\n        emit spot;\n    }\n}\n",
     );
     let spot = (
         "app/Shop/Spot.sharp",
@@ -33592,7 +33810,7 @@ fn emit_takes_an_event() {
     );
     let notice = (
         "app/Stubs/Notices.sharp",
-        "namespace App.Stubs;\n\nimport Queue.Notice;\nimport Queue.Tracer;\nimport Queue.Level;\n\nextern event Notice;\nextern event Tracer;\nextern event Level;\n",
+        "namespace App.Stubs;\n\nimport Queue.Notice;\nimport Queue.Tracer;\nimport Queue.Level;\n\nextern event Notice uses none;\nextern event Tracer uses none;\nextern event Level uses none;\n",
     );
     let noticed = (
         "app/Shop/Noticed.sharp",

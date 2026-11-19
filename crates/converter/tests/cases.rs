@@ -6,8 +6,9 @@
 //! issue the command keeps the file plain PHP for refuses it. The converted text must equal `output.sharp` byte for
 //! byte, or the refusals the lines of `refusal.txt`: the converter's, each `line:column: reason`, or else the
 //! analysis's, each as the command reports it, `at line <n> of its PHP#: <level> <code>: <message>`. The
-//! `extern namespace` lines of a conversion must equal the lines of `extern-namespaces.txt`, or be none when the case
-//! has no such file.
+//! `extern namespace` lines of a conversion must equal the lines of `extern-namespaces.txt`, and the plain PHP it reaches
+//! that no `extern` line declares, each class or function by its dotted name, the lines of `undeclared.txt`, or be none
+//! when the case has no such file. The case's analysis holds the `uses any` line `mago convert` writes for each.
 
 #![allow(
     clippy::unwrap_used,
@@ -39,6 +40,7 @@ use mago_converter::Converted;
 use mago_converter::ExternNamespace;
 use mago_converter::Input;
 use mago_converter::Library;
+use mago_converter::Undeclared;
 use mago_converter::convert;
 use mago_database::Database;
 use mago_database::DatabaseConfiguration;
@@ -100,7 +102,8 @@ fn declared(folder: &Path) -> String {
 }
 
 /// The project of the case at `folder`, analyzed: its `.php` and `.sharp` files, with `converted`'s text in place of
-/// `input.php`, under its class's `.sharp` name, and a file of its `extern namespace` lines, when it is given.
+/// `input.php`, under its class's `.sharp` name, and a file of its `extern namespace` and `uses any` lines, when it is
+/// given.
 fn analyzed(folder: &Path, converted: Option<&Converted>) -> Server {
     let mut database = Database::new(DatabaseConfiguration::new(folder, vec![], vec![], vec![], vec![]));
     // The PHP# standard library gives `List`, `Map` and the rest their members, and its files are the project's own, as
@@ -119,8 +122,28 @@ fn analyzed(folder: &Path, converted: Option<&Converted>) -> Server {
         database.add(file);
     }
     // The lines `mago convert` writes into the project's declarations file.
-    if let Some(converted) = converted.filter(|converted| !converted.extern_namespaces.is_empty()) {
-        let lines: Vec<String> = converted.extern_namespaces.iter().map(ExternNamespace::line).collect();
+    if let Some(converted) =
+        converted.filter(|converted| !converted.extern_namespaces.is_empty() || !converted.undeclared.is_empty())
+    {
+        let short = |name: &str| name.rsplit('\\').next().unwrap_or(name).to_owned();
+        let (imports, externs): (Vec<String>, Vec<String>) = converted
+            .undeclared
+            .iter()
+            .map(|undeclared| match undeclared {
+                Undeclared::Class(class) => {
+                    (format!("import {};", class.replace('\\', ".")), format!("extern {} uses any;", short(class)))
+                }
+                Undeclared::Function(namespace, function) => (
+                    format!("import {};", namespace.replace('\\', ".")),
+                    format!("extern {}.{function} uses any;", short(namespace)),
+                ),
+            })
+            .unzip();
+        let lines: Vec<String> = imports
+            .into_iter()
+            .chain(converted.extern_namespaces.iter().map(ExternNamespace::line))
+            .chain(externs)
+            .collect();
         let path = folder.join("AddedExterns.sharp");
         let contents = format!("namespace App;\n\n{}\n", lines.join("\n")).into_bytes();
         let mut file =
@@ -237,15 +260,29 @@ fn run(folder: &Path) -> Result<(), Failed> {
             match checked(folder, &converted) {
                 issues if issues.is_empty() => {
                     let lines = converted.extern_namespaces.iter().map(ExternNamespace::line).collect::<Vec<_>>();
-                    let expected_lines =
-                        std::fs::read_to_string(folder.join("extern-namespaces.txt")).unwrap_or_default();
-                    let (lines, expected_lines) = (lines.join("\n"), expected_lines.trim_end());
-                    if lines != expected_lines {
-                        return Err(format!(
-                            "{} adds the extern namespace lines:\n{lines}\n--- expected, from extern-namespaces.txt:\n{expected_lines}",
-                            folder.display()
-                        )
-                        .into());
+                    let undeclared = converted
+                        .undeclared
+                        .iter()
+                        .map(|undeclared| match undeclared {
+                            Undeclared::Class(class) => class.replace('\\', "."),
+                            Undeclared::Function(namespace, function) => {
+                                format!("{}.{function}", namespace.replace('\\', "."))
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    for (kind, file, lines) in [
+                        ("extern namespace lines", "extern-namespaces.txt", lines),
+                        ("undeclared plain PHP", "undeclared.txt", undeclared),
+                    ] {
+                        let expected_lines = std::fs::read_to_string(folder.join(file)).unwrap_or_default();
+                        let (lines, expected_lines) = (lines.join("\n"), expected_lines.trim_end());
+                        if lines != expected_lines {
+                            return Err(format!(
+                                "{} adds the {kind}:\n{lines}\n--- expected, from {file}:\n{expected_lines}",
+                                folder.display()
+                            )
+                            .into());
+                        }
                     }
 
                     (text, true, String::new())

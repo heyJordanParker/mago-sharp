@@ -23,6 +23,7 @@ use mago_word::word;
 
 use super::Kind;
 use super::builtins::runs_nothing;
+use super::calls::object_class;
 use super::is_primary;
 use super::natively_checked;
 use crate::Converter;
@@ -168,11 +169,13 @@ impl<'input> Converter<'input, '_> {
                 self.member_of(access.object, "a property access");
                 self.edits.replace(access.arrow, ".");
                 self.member(&access.property);
+                self.undeclared_property(access.object, &access.property);
             }
             Access::NullSafeProperty(access) => {
                 self.member_of(access.object, "a property access");
                 self.edits.replace(access.question_mark_arrow, "?.");
                 self.member(&access.property);
+                self.undeclared_property(access.object, &access.property);
             }
             Access::StaticProperty(access) => {
                 if !self.static_class(access.class) {
@@ -220,6 +223,24 @@ impl<'input> Converter<'input, '_> {
                     self.edits.replace(access.double_colon, ".");
                 }
             }
+        }
+    }
+
+    /// Records the class that declares the property `property` of `object` when it is plain PHP no `extern` line
+    /// declares, as a read takes its class's line (spec section 29).
+    fn undeclared_property(&mut self, object: &Expression<'_>, property: &ClassLikeMemberSelector<'_>) {
+        let (Some(class), ClassLikeMemberSelector::Identifier(name)) = (object_class(self.type_of(object)), property)
+        else {
+            return;
+        };
+        let property = word(format!("${}", String::from_utf8_lossy(name.value)));
+        if let Some(declaring) = self
+            .input
+            .codebase
+            .get_class_like(class)
+            .and_then(|metadata| metadata.declaring_property_ids.get(&property).copied())
+        {
+            self.undeclared_class(declaring);
         }
     }
 

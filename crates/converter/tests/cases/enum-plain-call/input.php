@@ -6,8 +6,8 @@ namespace App;
 
 use function Acme\Slug\slugify;
 
-// A plain PHP function no `extern` declares has no effect the checker names, so an enum that calls it converts, as a
-// struct does (spec section 29).
+// A plain PHP function no `extern` line declares may have any effect, as the `uses any` line `mago convert` writes
+// for it says, so an enum that calls it stays plain PHP (spec section 29).
 enum Topic: string
 {
     case Billing = 'Billing';

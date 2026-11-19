@@ -790,7 +790,7 @@ mod tests {
         write(
             root.path(),
             "vendor/acme/effects/Clocks.sharp",
-            "namespace Acme.Effects;\n\nimport Acme.Clock;\n\nextern Clock.now;\n",
+            "namespace Acme.Effects;\n\nimport Acme.Clock;\n\nextern Clock.now uses none;\n",
         );
 
         let (loaded, read, issues) = analyzed(root.path());

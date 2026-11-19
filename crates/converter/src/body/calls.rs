@@ -41,6 +41,7 @@ use super::access::HELD_CLASS;
 use super::is_primary;
 use super::natively_checked;
 use crate::Converter;
+use crate::Undeclared;
 use crate::library::type_test;
 use crate::types::raw_generic;
 use crate::types::type_text;
@@ -72,7 +73,7 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for CalledClass {
 }
 
 /// The class of an object of the type `object`, where it is one named class.
-fn object_class(object: Option<&TUnion>) -> Option<Word> {
+pub(super) fn object_class(object: Option<&TUnion>) -> Option<Word> {
     match object?.types.as_ref() {
         [TAtomic::Object(TObject::Named(class))] => Some(class.name),
         _ => None,
@@ -280,15 +281,13 @@ impl<'input> Converter<'input, '_> {
         let Some(callee) = callee else {
             return;
         };
+        self.undeclared_callee(callee, class);
         let in_enum = self.class.as_ref().is_some_and(|class| class.metadata.kind.is_enum());
         if in_enum && let Some(effect) = self.declared_effect(callee, class) {
             // The call as PHP writes it up to its arguments, as `Translator::get`.
             let written = String::from_utf8_lossy(self.text(call)).into_owned();
             let shown = written.split('(').next().unwrap_or(&written).trim().to_owned();
-            self.refuse(
-                call,
-                format!("`{shown}` has the effect `{effect}`, and a PHP# enum has no effects (spec section 29)"),
-            );
+            self.refuse(call, format!("`{shown}` {effect}, and a PHP# enum has no effects (spec section 29)"));
         }
         if callee.flags.is_sharp() {
             return;
@@ -310,22 +309,77 @@ impl<'input> Converter<'input, '_> {
         }
     }
 
+    /// Records the class that declares `callee`, a method reached through `class`, or the function `callee`, when it is
+    /// plain PHP no `extern` line declares, as the call takes the line of the class that declares its method (spec
+    /// section 29). PHP's own and the converted file's own need none.
+    fn undeclared_callee(&mut self, callee: &FunctionLikeMetadata, class: Option<Word>) {
+        let codebase = self.input.codebase;
+        if callee.flags.is_sharp() || callee.flags.is_built_in() || callee.span.file_id == self.input.file.id {
+            return;
+        }
+        if let Some(class) = class {
+            let declaring = codebase.get_declaring_method_class(class, callee.name).unwrap_or(class);
+            if codebase.extern_of_method(declaring, callee.name).is_none() {
+                self.undeclared_class(declaring);
+            }
+
+            return;
+        }
+        if codebase.extern_of(empty_word(), ascii_lowercase_word(callee.name.as_bytes())).is_some() {
+            return;
+        }
+        let name = callee.original_name.as_str_lossy().into_owned();
+        let reached = match name.rsplit_once('\\') {
+            Some((namespace, member)) => Some((namespace.to_owned(), member.to_owned())),
+            None => self.imports.root_namespace(&name, callee.span).ok().map(|namespace| (namespace, name.clone())),
+        };
+        if let Some((namespace, member)) = reached {
+            self.imports.declare(Undeclared::Function(namespace, member));
+        }
+    }
+
+    /// Records `class` when it is plain PHP no `extern` line declares: a call, a `new` or a property read through it
+    /// needs a line (spec section 29).
+    pub(super) fn undeclared_class(&mut self, class: Word) {
+        let codebase = self.input.codebase;
+        let Some(class) = codebase.get_class_like(class) else {
+            return;
+        };
+        if class.flags.is_sharp()
+            || class.flags.is_built_in()
+            || class.span.file_id == self.input.file.id
+            || codebase.extern_of(class.name, empty_word()).is_some()
+        {
+            return;
+        }
+        let name = class.original_name.as_str_lossy().into_owned();
+        let reached = if name.contains('\\') {
+            Some(name)
+        } else {
+            self.imports.root_namespace(&name, class.span).ok().map(|namespace| format!("{namespace}\\{name}"))
+        };
+        if let Some(reached) = reached {
+            self.imports.declare(Undeclared::Class(reached));
+        }
+    }
+
     /// The effect a call of `callee`, a function or a method it reaches through `class`, has as the checker reads it
-    /// (spec section 29): the effect of a `foreign` class `class` is or extends, or the first effect the `extern`
-    /// declaration the call falls under lists, as [`CodebaseMetadata::extern_of_method`] finds it for a method and
-    /// [`CodebaseMetadata::extern_of`] for a function. A call no `extern` covers has no effect the checker names, and
-    /// neither does PHP's own function, the converted file's own code or another PHP# body, whose effects the proof's
-    /// analysis reads.
+    /// (spec section 29), as a refusal names it: "has the effect `Translator`" for the effect of a `foreign` class
+    /// `class` is or extends, or the first effect the `extern` line the call falls under lists, as
+    /// [`CodebaseMetadata::extern_of_method`] finds it for a method and [`CodebaseMetadata::extern_of`] for a function,
+    /// "may have any effect" for a line that says `uses any`, and "has no `extern` line" for a call no line covers,
+    /// which the command declares `uses any`. PHP's own function, the converted file's own code and another PHP# body
+    /// have no effect it names: the proof's analysis reads theirs.
     ///
     /// [`CodebaseMetadata::extern_of_method`]: mago_codex::metadata::CodebaseMetadata::extern_of_method
     /// [`CodebaseMetadata::extern_of`]: mago_codex::metadata::CodebaseMetadata::extern_of
-    fn declared_effect(&self, callee: &FunctionLikeMetadata, class: Option<Word>) -> Option<Word> {
+    fn declared_effect(&self, callee: &FunctionLikeMetadata, class: Option<Word>) -> Option<String> {
         let codebase = self.input.codebase;
         let class = class.and_then(|class| codebase.get_class_like(class));
         if let Some(class) = class {
             let parents = class.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(*parent));
             if let Some(foreign) = std::iter::once(class).chain(parents).find(|class| class.flags.is_foreign()) {
-                return Some(foreign.original_name);
+                return Some(format!("has the effect `{}`", foreign.original_name));
             }
         }
         if callee.flags.is_sharp() || callee.flags.is_built_in() || callee.span.file_id == self.input.file.id {
@@ -336,12 +390,18 @@ impl<'input> Converter<'input, '_> {
                 let declaring_class =
                     codebase.get_declaring_method_class(class.name, callee.name).unwrap_or(class.name);
 
-                codebase.extern_of_method(class.name, declaring_class, callee.name)
+                codebase.extern_of_method(declaring_class, callee.name)
             }
             None => codebase.extern_of(empty_word(), ascii_lowercase_word(callee.name.as_bytes())),
-        }?;
+        };
+        let Some(declaration) = declaration else {
+            return Some("has no `extern` line, so it may have any effect".to_owned());
+        };
+        if declaration.uses_any {
+            return Some("may have any effect".to_owned());
+        }
 
-        declaration.effects.first().copied()
+        declaration.effects.first().map(|effect| format!("has the effect `{effect}`"))
     }
 
     /// The short name of the first class `result` holds an object of that a module binds as a service, and the
@@ -523,8 +583,8 @@ impl<'input> Converter<'input, '_> {
     /// It gives `result`, or `Any?` with none, and lists the effects the engine holds `method` to where the code makes
     /// it, which it refuses a type for that doesn't list each (spec section 29): those the analysis solves for a PHP#
     /// method, and those its `extern` line declares for a plain PHP one. `None` after refusing `span`, written `shown`,
-    /// for a method that may have every effect, which no `uses` lists: plain PHP no `extern` declares, or a PHP# method
-    /// that calls it.
+    /// for a method that may have every effect, which no `uses` lists: plain PHP whose `extern` line says `uses any`,
+    /// or that has none, or a PHP# method that calls it.
     pub(super) fn invoker(
         &mut self,
         span: Span,
@@ -535,18 +595,21 @@ impl<'input> Converter<'input, '_> {
     ) -> Option<String> {
         let codebase = self.input.codebase;
         let declaring = codebase.get_declaring_method_class(held, method.name).unwrap_or(held);
+        let declaration = codebase.extern_of_method(declaring, method.name);
         let effects = if method.flags.is_sharp() {
             self.input.effects.function_effects(codebase, &FunctionLikeIdentifier::Method(declaring, method.name))
         } else {
-            codebase.extern_of_method(held, declaring, method.name).map(|declaration| declaration.effects.clone())
+            declaration.filter(|declaration| !declaration.uses_any).map(|declaration| declaration.effects.clone())
         };
         let Some(effects) = effects else {
             let class = codebase.get_class_like(declaring).map_or(declaring, |class| class.original_name);
             let named = format!("{}.{}", class.as_str_lossy().replace('\\', "."), method.original_name.as_str_lossy());
             let reason = if method.flags.is_sharp() {
-                format!("`{named}` calls plain PHP no `extern` declares")
+                format!("`{named}` calls plain PHP that may have any effect")
+            } else if declaration.is_some() {
+                format!("`{named}` is plain PHP whose `extern` line says `uses any`")
             } else {
-                format!("`{named}` is plain PHP no `extern` declares, as `extern {named};` declares it pure")
+                format!("`{named}` is plain PHP no `extern` line declares")
             };
             self.refuse(
                 span,
@@ -897,6 +960,20 @@ impl<'input> Converter<'input, '_> {
         };
         let constructor =
             class.and_then(|class| self.input.codebase.get_declaring_method(word(class), word("__construct")));
+        // `new` takes the line of the class it creates, or of the nearest plain PHP class a PHP# class extends (spec
+        // section 29).
+        let codebase = self.input.codebase;
+        let created = class.and_then(|class| {
+            std::iter::successors(codebase.get_class_like(word(class)), |class| {
+                class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent))
+            })
+            .find(|class| !class.flags.is_sharp())
+        });
+        if let Some(created) = created
+            && codebase.extern_of_method(created.name, word("__construct")).is_none()
+        {
+            self.undeclared_class(created.name);
+        }
         if let Some(arguments) = &instantiation.argument_list {
             self.arguments(arguments, constructor);
         }

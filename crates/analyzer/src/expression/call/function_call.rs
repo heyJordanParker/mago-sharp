@@ -25,6 +25,7 @@ use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -47,6 +48,7 @@ use crate::statement::class_like::law::uncallable_law;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_code_member;
+use crate::utils::names::display_function_like_identifier;
 use crate::utils::quoted_source;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
@@ -119,6 +121,7 @@ where
 
     let function_type = artifacts.get_expression_type(call.function).cloned().unwrap_or_else(get_mixed);
     check_redundant_nullsafe(context, call.question_mark_dot, call.function, &function_type, true);
+    let given_by = returned_by(context, artifacts, call.function);
 
     analyze_through_value(
         context,
@@ -133,6 +136,7 @@ where
                 context,
                 &function_type.to_non_nullable(),
                 call.function.span(),
+                given_by.as_deref().map_or(Given::Other, Given::Call),
                 &mut template_result,
             );
 
@@ -355,8 +359,32 @@ where
     let Some(expression_type) = artifacts.get_expression_type(expression) else {
         return Ok((vec![], false));
     };
+    let given_by = returned_by(context, artifacts, expression);
 
-    Ok(resolve_callable_targets(context, &expression_type.clone(), expression.span(), template_result))
+    Ok(resolve_callable_targets(
+        context,
+        &expression_type.clone(),
+        expression.span(),
+        given_by.as_deref().map_or(Given::Other, Given::Call),
+        template_result,
+    ))
+}
+
+/// The method or function whose result `expression` is, as code names it, `Legacy.doubler` for `Legacy.doubler()`,
+/// when the analysis resolved the call to one.
+pub(super) fn returned_by<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    expression: &Expression<'_>,
+) -> Option<String>
+where
+    A: Arena,
+{
+    let span = expression.unparenthesized().span();
+    artifacts.call_targets.get(&(span.start.offset, span.end.offset))?.iter().find_map(|target| match target {
+        CallTarget::FunctionLike { callee, .. } => Some(display_function_like_identifier(context, callee)),
+        CallTarget::MagicMethod { .. } | CallTarget::Property { .. } => None,
+    })
 }
 
 /// Reports a call of `function` by `used_name` in a casing other than its declared one, and a call of a function marked
@@ -374,12 +402,25 @@ fn check_function_use<A>(
     crate::utils::experimental::check_experimental_function_with_metadata(context, block_context, function, span);
 }
 
+/// What gives a called function value, which decides whether PHP# knows the effects of a function plain PHP gives,
+/// spec section 21.
+pub(super) enum Given<'name> {
+    /// A property, whose class's `extern` line states the effects of each of its members when plain PHP declares it.
+    Property,
+    /// The result of the method or function code names, as `Legacy.doubler`, whose `extern` line states its type.
+    Call(&'name str),
+    /// Any other value, as a local's or a parameter's.
+    Other,
+}
+
 /// The targets a call of a value of `expression_type` runs: the function a closure or a callable names, or the
-/// callable's signature. Reports a value that cannot be called, and returns whether one was found.
+/// callable's signature. Reports a value that cannot be called, and returns whether one was found. A function plain
+/// PHP gives is one, unless it is a property's, as `given` says.
 pub(super) fn resolve_callable_targets<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     expression_type: &TUnion,
     span: Span,
+    given: Given<'_>,
     template_result: &mut TemplateResult,
 ) -> (Vec<InvocationTarget<'ctx>>, bool)
 where
@@ -397,6 +438,17 @@ where
 
         if let Some(callable) = cast_atomic_to_callable(atomic, context.codebase, Some(template_result)) {
             match callable.as_ref() {
+                // Spec section 21: a function plain PHP gives has no PHP# type, which states its effects, so a call of
+                // it is refused until an `extern` line states one.
+                TCallable::Signature(callable_signature)
+                    if context.dialect.is_sharp()
+                        && !matches!(given, Given::Property)
+                        && callable_signature.effects.is_none()
+                        && callable_signature.get_source().is_none() =>
+                {
+                    report_unknown_function_type(context, span, &given);
+                    encountered_invalid_targets = true;
+                }
                 TCallable::Signature(callable_signature) => {
                     // An extension method's value takes the method's arguments after its receiver, spec section 14.3,
                     // so its own signature checks the call.
@@ -487,6 +539,31 @@ where
     }
 
     (targets, encountered_invalid_targets)
+}
+
+/// Refuses the call at `span` of a function plain PHP gives, whose type and effects no `extern` line states, spec
+/// section 21, naming the line that states them when the function is the result of a call `given` names.
+fn report_unknown_function_type<A>(context: &mut Context<'_, '_, A>, span: Span, given: &Given<'_>)
+where
+    A: Arena,
+{
+    let written = quoted_source(context, span);
+    let line = match given {
+        Given::Call(given_by) => format!(
+            "the `extern` line of `{given_by}`, as in `extern Function<int(int) uses none> {given_by}() uses none;`"
+        ),
+        Given::Property | Given::Other => "the `extern` line of the plain PHP that gives it, as `extern Function<int(int) uses none> Legacy.doubler() uses none;` states a method's".to_owned(),
+    };
+
+    context.collector.report_with_code(
+        IssueCode::InvalidCallable,
+        Issue::error(format!("The type of `{written}`'s function is unknown, so it is never called."))
+            .with_annotation(Annotation::primary(span).with_message("Called here."))
+            .with_note(
+                "Plain PHP gives a function no PHP# type, so its parameters, its result and its effects are unknown.",
+            )
+            .with_help(format!("State its type on {line}.")),
+    );
 }
 
 /// Spec section 4 writes every member as `this.m()` or `Class.m()`, so a bare call is the global function's. When the

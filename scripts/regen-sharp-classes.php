@@ -93,17 +93,17 @@ foreach ($imports as $import) {
     $imported[$import[2] ?? basename(str_replace('.', '/', $full))] = str_replace('.', '\\', $full);
 }
 $externs = [];
-preg_match_all('/^extern (\w+);$/m', $builtins, $externs);
-$declared = [];
-preg_match_all('/^extern (\w+)[.; ]/m', $builtins, $declared);
-$declared = array_flip($declared[1]);
+preg_match_all('/^extern (\w+) uses [\w, ]+;$/m', $builtins, $externs);
+$any = [];
+preg_match_all('/^extern (\w+) uses any;$/m', $builtins, $any);
+$any = array_flip($any[1]);
 // Each root class `Builtins.sharp` declares with no import, by its name, and each class of a namespace it imports and
-// declares nothing of, as `Dom\HTMLDocument`, by its full name, which a `.sharp` file names through its import. A
-// class it imports and declares, as `DateTimeImmutable` and `Random\RandomException`, takes the effects its lines give,
-// and stays out.
+// declares `uses any`, the DOM's, as `Dom\HTMLDocument`, by its full name, which a `.sharp` file names through its
+// import. A class of a namespace it declares with its effects, as `Random\RandomException`, stays out, and so does a
+// root class it imports, as `DateTimeImmutable`.
 $roots = array_values(array_diff($externs[1], array_keys($imported)));
 foreach ($imported as $name => $class) {
-    if (!str_contains($class, '\\') || array_key_exists($name, $declared)) {
+    if (!str_contains($class, '\\') || !array_key_exists($name, $any)) {
         continue;
     }
     $roots[] = $class;

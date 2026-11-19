@@ -1,0 +1,1 @@
+17:16: `slugify` has no `extern` line, so it may have any effect, and a PHP# enum has no effects (spec section 29)

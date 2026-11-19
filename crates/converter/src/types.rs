@@ -31,12 +31,13 @@ use mago_span::Span;
 
 use crate::ExternNamespace;
 use crate::Library;
+use crate::Undeclared;
 use crate::library::short;
 use mago_names::default_root_classes;
 use mago_word::Word;
 
 /// The names a file reaches classes and library namespaces by: its namespace, its `import` lines, the imports the
-/// conversion adds, and the `extern namespace` lines it adds for the project.
+/// conversion adds, and the `extern namespace` and `extern` lines it adds for the project.
 #[derive(Debug)]
 pub struct Imports<'input> {
     codebase: &'input CodebaseMetadata,
@@ -48,6 +49,8 @@ pub struct Imports<'input> {
     added: BTreeMap<String, String>,
     /// Each `extern namespace` line the conversion adds, one for each folder.
     extern_namespaces: Vec<ExternNamespace>,
+    /// Each plain PHP class and function the file reaches that no `extern` line declares, once.
+    undeclared: Vec<Undeclared>,
 }
 
 impl<'input> Imports<'input> {
@@ -59,12 +62,25 @@ impl<'input> Imports<'input> {
             taken: HashMap::default(),
             added: BTreeMap::new(),
             extern_namespaces: Vec::new(),
+            undeclared: Vec::new(),
         }
     }
 
     /// The `extern namespace` lines the conversion adds, the project's lines giving none of their folders a namespace.
     pub fn extern_namespaces(&self) -> &[ExternNamespace] {
         &self.extern_namespaces
+    }
+
+    /// The plain PHP classes and functions the file reaches that no `extern` line declares.
+    pub fn undeclared(&self) -> &[Undeclared] {
+        &self.undeclared
+    }
+
+    /// Records that the file reaches `undeclared`.
+    pub fn declare(&mut self, undeclared: Undeclared) {
+        if !self.undeclared.contains(&undeclared) {
+            self.undeclared.push(undeclared);
+        }
     }
 
     /// The namespace, as PHP writes it, of `name`, a plain PHP function, constant or class of PHP's root namespace
@@ -189,7 +205,7 @@ impl<'input> Imports<'input> {
 /// Whether PHP# reserves `name` for a type where a plain PHP class may take it: `Any`, PHP#'s `mixed`, `Equatable`,
 /// its built-in bound (spec section 11), and `Error`, its interface of every failure, which a `.sharp` file's `Error`
 /// always names (spec section 31). PHP reserves every other type name itself.
-fn reserved(name: &str) -> bool {
+pub(crate) fn reserved(name: &str) -> bool {
     ["Any", EQUATABLE, "Error"].iter().any(|reserved| reserved.eq_ignore_ascii_case(name))
 }
 

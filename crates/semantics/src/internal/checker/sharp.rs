@@ -699,9 +699,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Terminator(Terminator::Semicolon(_) | Terminator::Missing(_)) | Node::MissingTerminator(_), _) => {
             Some(place)
         }
-        (Node::Extern(r#extern), File) if r#extern.event.is_some() => check_extern_event(r#extern, context),
-        (Node::Extern(r#extern), File) if r#extern.parameter_list.is_some() => check_extern_signature(r#extern, context),
-        (Node::UseItem(item), File) if imports_error(item) => {
+        (Node::Extern(r#extern), File) if r#extern.namespaced.is_none() => check_extern_line(r#extern, context),
+        // The standard library names it once, to state the effects of its members, spec section 29.
+        (Node::UseItem(item), File) if imports_error(item) && !is_standard_library_namespace(context.program) => {
             context.report(
                 Issue::error("PHP's engine class `Error` is a bug, which PHP# catches as `Throwable`, so no import names it.")
                     .with_annotation(Annotation::primary(item.span()).with_message("Imported here.")),
@@ -3404,8 +3404,29 @@ fn imports_error(item: &UseItem) -> bool {
     name.strip_prefix(b"\\").unwrap_or(name) == b"Error"
 }
 
-/// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, whose
-/// effects its `uses` lists.
+/// Decides an `extern` line other than `extern namespace`, spec section 29: it ends in `uses`, which states its effects
+/// as `uses none`, a list of effects or `uses any`, so no line claims a plain PHP member pure by leaving `uses` out. An
+/// `extern event` and a line that states a signature are decided further.
+fn check_extern_line(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    if r#extern.uses.is_none() {
+        context.report(
+            Issue::error("State its effects: `uses none`, `uses <effects>`, or `uses any`.")
+                .with_annotation(
+                    Annotation::primary(r#extern.span()).with_message("This `extern` line states no effects."),
+                )
+                .with_note("`uses none` declares it pure, and `uses any` that it may have any effect."),
+        );
+    }
+
+    if r#extern.event.is_some() {
+        check_extern_event(r#extern, context)
+    } else if r#extern.parameter_list.is_some() {
+        check_extern_signature(r#extern, context)
+    } else {
+        Some(Place::File)
+    }
+}
+
 /// Spec section 23: an `extern` line states the signature of a method or a function, `Class.method` or
 /// `Namespace.function`. Its parameters and return type are checked as an interface method's are, and each default is
 /// a literal, which a PHP# call that leaves its parameter out passes to plain PHP.
@@ -3416,7 +3437,7 @@ fn check_extern_signature(r#extern: &Extern, context: &mut Context<'_, '_, '_>) 
             BytesDisplay(r#extern.target.value())
         ))
         .with_annotation(Annotation::primary(r#extern.target.span()).with_message("Named here."))
-        .with_help("Name the method, as in `extern string Foundation.route(RouteName name);`.");
+        .with_help("Name the method, as in `extern string Foundation.route(RouteName name) uses none;`.");
         context.report(issue);
 
         return None;
@@ -3464,6 +3485,8 @@ fn is_literal(expression: &Expression) -> bool {
     }
 }
 
+/// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, whose
+/// effects its `uses` lists.
 fn check_extern_event(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> Option<Place> {
     let Identifier::Dotted(target) = &r#extern.target else {
         return Some(Place::File);
@@ -3472,7 +3495,7 @@ fn check_extern_event(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> O
     let issue =
         Issue::error(format!("An `extern event` names a class, and `{}` names a member.", BytesDisplay(target.value)))
             .with_annotation(Annotation::primary(target.span).with_message("Named here."))
-            .with_help("Name the event's class, as in `extern event JobFailed;`.");
+            .with_help("Name the event's class, as in `extern event JobFailed uses none;`.");
 
     report_refusal(issue, r#extern.span(), Place::File, context)
 }

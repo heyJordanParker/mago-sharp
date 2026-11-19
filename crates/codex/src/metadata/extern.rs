@@ -27,8 +27,11 @@ pub struct ExternMetadata {
     /// What it declares, keyed as `CodebaseMetadata::function_likes` keys its entries, in lowercase: `(class, "")` for
     /// a class, `(class, method)` for a method, and `("", function)` for a function.
     pub target: (Word, Word),
-    /// The fully qualified class names of the effects its `uses` names. Empty when it declares its target pure.
+    /// The fully qualified class names of the effects its `uses` names. Empty for `uses none`, which declares its
+    /// target pure, and for `uses any`.
     pub effects: Vec<Word>,
+    /// Whether it ends in `uses any`, which declares that its target may have any effect, spec section 29.
+    pub uses_any: bool,
     /// Whether it is an `extern event`, which marks its plain PHP class as an event, spec section 15.
     pub event: bool,
     /// The attributes written before it, which what it declares carries as its own, spec section 29.
@@ -48,6 +51,7 @@ impl Ord for ExternMetadata {
         key(self)
             .cmp(&key(other))
             .then_with(|| self.effects.cmp(&other.effects))
+            .then_with(|| self.uses_any.cmp(&other.uses_any))
             .then_with(|| self.event.cmp(&other.event))
     }
 }

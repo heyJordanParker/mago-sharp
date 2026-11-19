@@ -1061,7 +1061,7 @@ fn detect_unused_statement_expressions<'ast, 'arena, A>(
                     && context
                         .codebase
                         .extern_of(empty_word(), ascii_lowercase_word(function.original_name.as_bytes()))
-                        .is_some_and(|declaration| !declaration.effects.is_empty()))
+                        .is_some_and(|declaration| declaration.uses_any || !declaration.effects.is_empty()))
             {
                 return;
             }

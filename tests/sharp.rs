@@ -74,6 +74,7 @@ fn analyze_reports_a_string_passed_to_a_php_int_parameter_at_the_sharp_position(
 #[test]
 fn analyze_finds_no_issues_once_the_argument_is_an_int() {
     let directory = workspace(&valid_report());
+    write(directory.path(), "src/Demo/Stubs.sharp", "namespace Demo;\n\nimport Lib.Calc;\n\nextern Calc uses none;\n");
 
     let output = run(directory.path(), "analyze", &[]);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -495,12 +496,16 @@ const STRING_MEMBERS: &str = include_str!("../../composer/library/Sharp/Text/Str
 /// The standard library's forms of Unicode normalization, which a member of `string` takes.
 const NORMALIZATION_FORM: &str = include_str!("../../composer/library/Sharp/Text/NormalizationForm.sharp");
 
+/// The standard library's `extern` lines of the PHP built-ins its code calls, spec section 29.
+const BUILTINS: &str = include_str!("../../composer/library/Sharp/Internal/Builtins.sharp");
+
 /// The standard library's package under `root`: its `composer.json`, its members of `string` and the enum they take,
-/// its `Float` and `Bool`, and its effect classes.
+/// its `Float` and `Bool`, its effect classes, and the `extern` lines of the built-ins they call.
 fn write_library(root: &Path) {
     write(root, "composer.json", LIBRARY_PACKAGE);
     write(root, "library/Sharp/Text/StringMembers.sharp", STRING_MEMBERS);
     write(root, "library/Sharp/Text/NormalizationForm.sharp", NORMALIZATION_FORM);
+    write(root, "library/Sharp/Internal/Builtins.sharp", BUILTINS);
     for (class, source) in TYPE_CLASSES {
         write(root, &format!("library/Sharp/{class}.sharp"), source);
     }
@@ -632,7 +637,7 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Compiled 44 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
+    assert!(printed.contains("Compiled 45 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
     assert!(root.join(".sharp/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
     assert!(root.join(".sharp/library/Sharp/System/Environment.sharpc").is_file(), "{printed}");
     let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();
@@ -763,6 +768,11 @@ fn a_tested_list_passes_where_a_non_empty_list_is_required() {
         "src/Lib/Lists.php",
         "<?php\n\nnamespace Lib;\n\nfinal class Lists\n{\n    public static function filled(array $items): bool\n    {\n        return count($items) > 0;\n    }\n}\n",
     );
+    write(
+        directory.path(),
+        "src/App/Stubs.sharp",
+        "namespace App;\n\nimport Lib.CheckedType;\nimport Lib.Lists;\n\nextern CheckedType uses none;\nextern Lists uses none;\n",
+    );
 
     let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -798,6 +808,11 @@ fn a_mixin_method_that_returns_this_gives_the_receivers_type() {
         directory.path(),
         "vendor/acme/query/src/QueryBuilder.php",
         "<?php\n\nnamespace Acme\\Query;\n\nclass QueryBuilder\n{\n    /**\n     * @return $this\n     */\n    public function orderBy(string $column)\n    {\n        return $this;\n    }\n}\n",
+    );
+    write(
+        directory.path(),
+        "src/App/Stubs.sharp",
+        "namespace App;\n\nimport Acme.Query.Builder;\nimport Acme.Query.QueryBuilder;\n\nextern Builder uses none;\nextern QueryBuilder uses none;\n",
     );
 
     let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
@@ -1530,7 +1545,7 @@ fn extern_workspace(stripe: &str) -> tempfile::TempDir {
     write(
         root,
         "app/Stubs/Clock.sharp",
-        "namespace App.Stubs;\n\nimport Acme.Chrono;\nimport Carbon.Carbon;\nimport Brick.Math.BigDecimal;\n\nextern namespace Acme.Chrono for now;\nextern Carbon.now uses Clock;\nextern Chrono.now uses Clock;\nextern BigDecimal;\n",
+        "namespace App.Stubs;\n\nimport Acme.Chrono;\nimport Carbon.Carbon;\nimport Brick.Math.BigDecimal;\n\nextern namespace Acme.Chrono for now;\nextern Carbon.now uses Clock;\nextern Chrono.now uses Clock;\nextern BigDecimal uses none;\n",
     );
     write(root, "app/Lib/StripeClient.php", "<?php\n\nnamespace Stripe;\n\nclass StripeClient\n{\n}\n");
     write(
@@ -1558,7 +1573,7 @@ fn analyze_finds_no_issues_in_extern_declarations_of_plain_php() {
 
 #[test]
 fn analyze_reports_only_the_second_extern_of_a_class() {
-    let directory = extern_workspace(&stripe_stub("extern StripeClient;\n"));
+    let directory = extern_workspace(&stripe_stub("extern StripeClient uses none;\n"));
 
     let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1589,7 +1604,7 @@ fn compile_takes_a_function_value_for_an_extern_callable_parameter_and_refuses_c
     write(
         root,
         "app/Stubs/Hooks.sharp",
-        "namespace App.Stubs;\n\nimport Vendor.Hooks;\n\nextern bool Hooks.add_action(string hookName, callable callback, int priority = 10, int acceptedArgs = 1);\n",
+        "namespace App.Stubs;\n\nimport Vendor.Hooks;\n\nextern bool Hooks.add_action(string hookName, callable callback, int priority = 10, int acceptedArgs = 1) uses none;\n",
     );
     let refused = "        Hooks.add_action(\"init\", \"my_function\");\n        callable later = this.saved;\n";
     let saving = format!(
@@ -1676,7 +1691,7 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
         root,
         "app/Shop/Stop.sharp",
         &format!(
-            "namespace App.Shop;\n\nimport LogicException;\n\npublic class Stop\n{{\n    public static void first()\n    {{\n        if (Stop.halt(1)) {{\n            Stop.say(\"never\");\n        }} else {{\n            Stop.say(\"never either\");\n        }}\n    }}\n\n    public static void second(bool up)\n    {{\n        if (up) {{\n            Stop.say(\"up\");\n        }} else if (Stop.halt(1)) {{\n            Stop.say(\"never\");\n        }} else {{\n            Stop.say(\"never either\");\n        }}\n    }}\n\n    public static void third()\n    {{\n        for (const item of Stop.halt(1)) {{\n            Stop.say(\"never\");\n        }}\n    }}\n{STOP_MEMBERS}}}\n"
+            "namespace App.Shop;\n\nimport LogicException;\n\nextern LogicException uses none;\n\npublic class Stop\n{{\n    public static void first()\n    {{\n        if (Stop.halt(1)) {{\n            Stop.say(\"never\");\n        }} else {{\n            Stop.say(\"never either\");\n        }}\n    }}\n\n    public static void second(bool up)\n    {{\n        if (up) {{\n            Stop.say(\"up\");\n        }} else if (Stop.halt(1)) {{\n            Stop.say(\"never\");\n        }} else {{\n            Stop.say(\"never either\");\n        }}\n    }}\n\n    public static void third()\n    {{\n        for (const item of Stop.halt(1)) {{\n            Stop.say(\"never\");\n        }}\n    }}\n{STOP_MEMBERS}}}\n"
         ),
     );
 
@@ -1696,7 +1711,7 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
         root,
         "app/Shop/Stop.sharp",
         &format!(
-            "namespace App.Shop;\n\nimport LogicException;\n\npublic class Stop\n{{\n    public static void first()\n    {{\n        Stop.halt(1);\n    }}\n\n    public static void second(bool up)\n    {{\n        if (up) {{\n            Stop.say(\"up\");\n        }} else Stop.halt(1);\n    }}\n\n    public static void third()\n    {{\n        Stop.halt(1);\n    }}\n{STOP_MEMBERS}}}\n"
+            "namespace App.Shop;\n\nimport LogicException;\n\nextern LogicException uses none;\n\npublic class Stop\n{{\n    public static void first()\n    {{\n        Stop.halt(1);\n    }}\n\n    public static void second(bool up)\n    {{\n        if (up) {{\n            Stop.say(\"up\");\n        }} else Stop.halt(1);\n    }}\n\n    public static void third()\n    {{\n        Stop.halt(1);\n    }}\n{STOP_MEMBERS}}}\n"
         ),
     );
 
@@ -1711,7 +1726,7 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
         root,
         "app/Shop/Stop.sharp",
         &format!(
-            "namespace App.Shop;\n\nimport LogicException;\n\npublic class Stop\n{{\n    public static void first()\n    {{\n        Stop.halt(1);\n    }}\n\n    public static void second(bool up)\n    {{\n        if (up) {{\n            Stop.say(\"up\");\n        }} else {{ Stop.halt(1); }}\n    }}\n\n    public static void third()\n    {{\n        Stop.halt(1);\n    }}\n{STOP_MEMBERS}}}\n"
+            "namespace App.Shop;\n\nimport LogicException;\n\nextern LogicException uses none;\n\npublic class Stop\n{{\n    public static void first()\n    {{\n        Stop.halt(1);\n    }}\n\n    public static void second(bool up)\n    {{\n        if (up) {{\n            Stop.say(\"up\");\n        }} else {{ Stop.halt(1); }}\n    }}\n\n    public static void third()\n    {{\n        Stop.halt(1);\n    }}\n{STOP_MEMBERS}}}\n"
         ),
     );
 

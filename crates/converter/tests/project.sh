@@ -7,7 +7,8 @@ set -uo pipefail
 # - `--dry-run` changes no file
 # - each file mago convert refuses stays plain PHP, and every other file converts
 # - the report names the selection by a string fixed at compile time that keeps src/Shop/Reply.php plain PHP
-# - src/Externs.sharp holds the one `extern namespace` line the converted files need, for acme/format's `shout()`
+# - src/Stubs/Externs.sharp holds the one `extern namespace` line the converted files need, for acme/format's
+#   `shout()`, and a `uses any` line for each plain PHP class and function they reach that no `extern` line declares
 # - the index holds each conversion as a rename alone, `R100`, and `git log --follow` reaches the plain PHP file
 # - `mago compile` accepts every file, the plain PHP subclasses of converted classes included
 # - `mago analyze` has no new error, and only the warnings decision 9 expects
@@ -70,8 +71,10 @@ for file in "${converted[@]}"; do
     [ ! -f "$file" ] || fail "$file is still there"
 done
 grep -q "Converted ${#converted[@]} files to PHP#, and ${#plain[@]} files stay plain PHP." ../convert || fail "the summary"
-printf 'namespace Proof;\n\nextern namespace Acme.Format for shout;\n' | diff - src/Externs.sharp ||
-    fail "src/Externs.sharp holds other lines than the one shout() needs"
+grep -qx 'namespace Proof.Stubs;' src/Stubs/Externs.sharp && grep -qx 'extern namespace Acme.Format for shout;' src/Stubs/Externs.sharp ||
+    fail "src/Stubs/Externs.sharp lacks the extern namespace line shout() needs"
+grep '^extern ' src/Stubs/Externs.sharp | grep -vE '^extern (namespace Acme\.Format for shout|[A-Za-z]+(\.[a-z_]+)? uses any);$' &&
+    fail "src/Stubs/Externs.sharp holds an extern line mago convert doesn't write"
 
 step git diff --cached -M --stat
 step git diff --cached -M --name-status | tee ../renames

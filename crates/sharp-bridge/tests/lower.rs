@@ -929,7 +929,7 @@ fn a_file_with_extern_declarations_lowers_to_the_nodes_it_lowers_to_without_them
         "<?php\n\nnamespace Acme;\n\nclass Mailer\n{\n}\n\nclass Failed\n{\n}\n\nfunction send(): void\n{\n}\n",
     )];
     let with = Lowered::with(
-        "namespace App.Tenant;\n\nimport Acme;\nimport Acme.Failed;\nimport Acme.Mailer;\n\nextern Mailer uses Mail, Http;\nextern Acme.send;\nextern event Failed;\n\nclass Report\n{\n}\n",
+        "namespace App.Tenant;\n\nimport Acme;\nimport Acme.Failed;\nimport Acme.Mailer;\n\nextern Mailer uses Mail, Http;\nextern Acme.send uses none;\nextern event Failed uses none;\n\nclass Report\n{\n}\n",
         &library,
     );
     let without = Lowered::with(
@@ -2230,7 +2230,7 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_methods() {
     let lowered = Lowered::with(
         "class Meter\n{\n    public static int twice { get => 2; }\n    public static int thrice { get { return 3; } }\n    public static int hits { get; set; willSet => Meter.log(\"hit\"); } = 0;\n    public static string label { get; private set; didSet => Meter.log(field); } = Words.of(1);\n    public static string? note { get; set; didSet => Meter.log(field); } = null;\n\n    public static void log(string? text)\n    {\n    }\n\n    public static void run()\n    {\n        ++Meter.hits;\n        --Meter.hits;\n        Meter.hits--;\n        Meter.note ??= \"n\";\n        Meter.label += \"l\";\n    }\n}\n",
-        &[WORDS],
+        &[WORDS, ("src/Stubs/Words.sharp", "namespace Stubs;\n\nimport Words;\n\nextern Words uses none;\n")],
     );
 
     assert_eq!(
@@ -2520,7 +2520,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                           ZVAL "value#1"
                     SHARP_TYPE_ARGS
                       ZVAL [1] "void"
-                      ZVAL ": void"
+                      ZVAL "Function<void()>"
                     null
                   METHOD [20] "#statics" @6-6
                     PARAM_LIST
@@ -3669,7 +3669,7 @@ fn a_generic_behavior_is_created_with_its_type_arguments() {
 fn observers_run_inside_the_set_hook_once_the_object_is_built() {
     let lowered = Lowered::with(
         "class Report\n{\n    public string name { get; set; willSet => this.log(field); didSet => this.log(field); } = \"\";\n    public int count { get; set { field = value * 2; } didSet { this.log(\"count\"); } } = 0;\n    public string title { get; set => field = Words.trim(value); } = Words.of(1);\n\n    public void log(Any? text)\n    {\n    }\n}\n",
-        &[WORDS],
+        &[WORDS, ("src/Stubs/Words.sharp", "namespace Stubs;\n\nimport Words;\n\nextern Words uses none;\n")],
     );
 
     assert_eq!(
@@ -3817,7 +3817,7 @@ fn observers_run_inside_the_set_hook_once_the_object_is_built() {
                                     ZVAL "value"
                           SHARP_TYPE_ARGS
                             null
-                            ZVAL ": void"
+                            ZVAL "Function<void(string)>"
                           null
                   null
             "#},
@@ -4057,7 +4057,11 @@ fn an_auto_accessor_beside_a_body_without_field_is_the_hook_over_the_storage() {
 fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() {
     let lowered = Lowered::with(
         "import Lib.Model;\nimport InvalidArgumentException;\n\nclass Order : Model\n{\n    public int price { get; set { if (value < 0) { throw new InvalidArgumentException(\"negative\"); } field = value; } } = 0;\n    public Address shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n}\n",
-        &[common::MODEL, common::ADDRESS],
+        &[
+            common::MODEL,
+            common::ADDRESS,
+            ("src/Stubs/Model.sharp", "namespace Stubs;\n\nimport Lib.Model;\n\nextern Model uses none;\n"),
+        ],
     );
 
     assert_eq!(
@@ -4097,7 +4101,7 @@ fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() 
                                 ZVAL "value"
                           SHARP_TYPE_ARGS
                             null
-                            ZVAL ": void"
+                            ZVAL "Function<void(int)>"
                           null
                   null
             "#},
@@ -4122,7 +4126,7 @@ fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() 
                                 ZVAL "shipping"
                           SHARP_TYPE_ARGS
                             null
-                            ZVAL ": Address"
+                            ZVAL "Function<Address()>"
                           null
                         PROPERTY_HOOK "set" @7-7
                           null
@@ -4138,7 +4142,7 @@ fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() 
                                   ZVAL "value"
                           SHARP_TYPE_ARGS
                             null
-                            ZVAL ": void"
+                            ZVAL "Function<void(Address)>"
                           null
                   null
             "#},
@@ -4162,7 +4166,11 @@ fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() 
 fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
     let lowered = Lowered::with(
         "import Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n",
-        &[common::MODEL, common::ADDRESS],
+        &[
+            common::MODEL,
+            common::ADDRESS,
+            ("src/Stubs/Model.sharp", "namespace Stubs;\n\nimport Lib.Model;\n\nextern Model uses none;\n"),
+        ],
     );
 
     assert_eq!(
@@ -4189,7 +4197,7 @@ fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
                                 ZVAL "shipping"
                           SHARP_TYPE_ARGS
                             null
-                            ZVAL ": Address?"
+                            ZVAL "Function<Address?()>"
                           null
                         PROPERTY_HOOK "set" @5-5
                           null
@@ -4205,7 +4213,7 @@ fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
                                   ZVAL "value"
                           SHARP_TYPE_ARGS
                             null
-                            ZVAL ": void"
+                            ZVAL "Function<void(Address?)>"
                           null
                   null
             "#},
@@ -13805,10 +13813,19 @@ fn any_and_nullable_any_are_mixed() {
 fn a_never_method_is_php_never() {
     let lowered = Lowered::with(
         &method_with("never run(int extra)", "        throw new Failure();\n"),
-        &[("src/App/Tenant/Failure.php", "<?php namespace App\\Tenant; final class Failure extends \\Exception {}")],
+        &[
+            ("src/App/Tenant/Failure.php", "<?php namespace App\\Tenant; final class Failure extends \\Exception {}"),
+            (
+                "src/Stubs/Failure.sharp",
+                "namespace Stubs;\n\nimport App.Tenant.Failure;\n\nextern Failure uses none;\n",
+            ),
+        ],
     );
 
-    assert_eq!(member_in(&[lowered], "Report", &[0, 3]), "ZVAL [1] \"never\"\n");
+    assert_eq!(
+        member_in(&[lowered], "Report", &[0, 3]),
+        "SHARP_TYPE_ARGS\n  ZVAL [1] \"never\"\n  ZVAL \"Function<never(int)>\"\n"
+    );
 }
 
 /// ```php
@@ -16182,10 +16199,13 @@ fn a_parameter_of_a_methods_own_type_parameter_checks_its_bound_from_plain_php()
 fn a_trait_type_is_object_and_its_test_reads_the_trait() {
     let lowered = Lowered::with(
         "namespace App;\n\nimport Lib.HasLabel;\n\npublic class Seeder\n{\n    public bool seed(HasLabel owner, List<HasLabel> owners, Any other) => other is HasLabel;\n}\n",
-        &[(
-            "src/Lib/HasLabel.php",
-            "<?php namespace Lib; trait HasLabel { public function label(): string { return 'label'; } }",
-        )],
+        &[
+            (
+                "src/Lib/HasLabel.php",
+                "<?php namespace Lib; trait HasLabel { public function label(): string { return 'label'; } }",
+            ),
+            ("src/Stubs/HasLabel.sharp", "namespace Stubs;\n\nimport Lib.HasLabel;\n\nextern HasLabel uses none;\n"),
+        ],
     );
 
     assert_eq!(
@@ -16269,7 +16289,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
                     ARG_LIST
               SHARP_TYPE_ARGS
                 ZVAL [1] "string"
-                ZVAL ": string"
+                ZVAL "Function<string(#0)>"
               null
             METHOD [1] "both" @9-9
               PARAM_LIST
@@ -16307,7 +16327,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
                       ARG_LIST
               SHARP_TYPE_ARGS
                 ZVAL [1] "string"
-                ZVAL ": string"
+                ZVAL "Function<string(#0)>"
               null
         "#}
     );
@@ -18076,10 +18096,13 @@ fn an_override_runs_with_each_php_type_its_plain_php_parent_declares() {
 fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks() {
     let lowered = Lowered::with(
         "abstract class Order : Model\n{\n    protected override string table { get; set => field = Model.clean(value); } = \"orders\";\n    public abstract string kind { get; }\n}\n",
-        &[(
-            "src/Model.php",
-            "<?php class Model { protected $table = ''; public static function clean(string $text): string { return trim($text); } }",
-        )],
+        &[
+            (
+                "src/Model.php",
+                "<?php class Model { protected $table = ''; public static function clean(string $text): string { return trim($text); } }",
+            ),
+            ("src/Stubs/Model.sharp", "namespace Stubs;\n\nimport Model;\n\nextern Model uses none;\n"),
+        ],
     );
     let class = lowered.child(lowered.root(), 1);
 
@@ -18112,7 +18135,7 @@ fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks
                                   ZVAL "value"
                         SHARP_TYPE_ARGS
                           null
-                          ZVAL ": void"
+                          ZVAL "Function<void(string)>"
                         null
                 ATTRIBUTE_LIST
                   ATTRIBUTE_GROUP
@@ -18493,10 +18516,13 @@ fn an_override_of_an_override_of_a_typed_property_keeps_its_type() {
 fn a_subclass_method_with_a_union_variadic_spreads_it_into_the_parent_method() {
     let lowered = Lowered::with(
         "namespace App.Tenant;\n\nimport Lib.Ledger;\n\nclass Account : Ledger\n{\n    public override int|float total(string label, int|float ...amounts)\n    {\n        return super.total(label, ...amounts);\n    }\n}\n",
-        &[(
-            "src/Lib/Ledger.php",
-            "<?php namespace Lib; class Ledger { public function total(string $label, int|float ...$amounts): int|float { return 0; } }",
-        )],
+        &[
+            (
+                "src/Lib/Ledger.php",
+                "<?php namespace Lib; class Ledger { public function total(string $label, int|float ...$amounts): int|float { return 0; } }",
+            ),
+            ("src/Stubs/Ledger.sharp", "namespace Stubs;\n\nimport Lib.Ledger;\n\nextern Ledger uses none;\n"),
+        ],
     );
 
     assert_eq!(
@@ -18551,7 +18577,7 @@ fn a_subclass_method_with_a_union_variadic_spreads_it_into_the_parent_method() {
                       TYPE_UNION
                         ZVAL [1] "int"
                         ZVAL [1] "float"
-                      ZVAL ": float|int"
+                      ZVAL "Function<float|int(string, float|int)>"
                     ATTRIBUTE_LIST
                       ATTRIBUTE_GROUP
                         ATTRIBUTE
@@ -27876,6 +27902,16 @@ const ARRAYS: (&str, &str) = (
     }",
 );
 
+/// The `extern` line that states the type of the function `Calc.counter` gives (spec section 21).
+const COUNTER_LINE: (&str, &str) = (
+    "src/Stubs/Calc.sharp",
+    "namespace Stubs;\n\nimport Lib.Calc;\n\nextern Function<int(Map<int, string>)> Calc.counter() uses none;\n",
+);
+
+/// The `extern` line of `Lib\Doubler`, whose `__invoke` takes an array.
+const DOUBLER_LINE: (&str, &str) =
+    ("src/Stubs/Doubler.sharp", "namespace Stubs;\n\nimport Lib.Doubler;\n\nextern Doubler uses none;\n");
+
 /// The statements of `run` at `positions` in `code`, lowered beside `ARRAYS` and the `library` files.
 fn statements_at(code: &str, library: &[(&str, &str)], positions: std::ops::Range<u32>) -> Vec<String> {
     let files: Vec<(&str, &str)> = std::iter::once(ARRAYS).chain(library.iter().copied()).collect();
@@ -27902,7 +27938,7 @@ fn a_call_passes_the_default_an_extern_line_states_for_each_parameter_it_leaves_
     );
     let stubs = (
         "src/Stubs/Hooks.sharp",
-        "namespace Stubs;\n\nimport Lib.Hooks;\n\nextern bool Hooks.add_action(string hookName, callable callback, int priority = 10, int acceptedArgs = 1);\n",
+        "namespace Stubs;\n\nimport Lib.Hooks;\n\nextern bool Hooks.add_action(string hookName, callable callback, int priority = 10, int acceptedArgs = 1) uses none;\n",
     );
     let code = "namespace App.Tenant;\n\nimport Lib.Hooks;\n\nclass Report\n{\n    public void run(Function<void(int)> handler)\n    {\n        Hooks.add_action(\"deleted_post\", handler);\n        Hooks.add_action(\"save_post\", handler, 20);\n        Hooks.add_action(\"init\", handler, 30, 2);\n    }\n}\n";
 
@@ -27968,7 +28004,7 @@ fn a_backed_case_goes_into_a_scalar_plain_php_parameter_as_its_value() {
     );
     let stubs = (
         "src/Stubs/Routing.sharp",
-        "namespace Stubs;\n\nimport App.Tenant.RouteName;\nimport Lib.Routing;\n\nextern string Routing.route(RouteName name);\nextern string Routing.label(RouteName? name);\nextern string Routing.keep(RouteName name);\n",
+        "namespace Stubs;\n\nimport App.Tenant.RouteName;\nimport Lib.Routing;\n\nextern string Routing.route(RouteName name) uses none;\nextern string Routing.label(RouteName? name) uses none;\nextern string Routing.keep(RouteName name) uses none;\n",
     );
     let route_name = (
         "src/App/Tenant/RouteName.sharp",
@@ -28062,7 +28098,7 @@ fn a_plain_php_method_of_a_property_s_name_read_as_a_function_is_a_first_class_c
         "src/Lib/Gadget.php",
         "<?php\n\nnamespace Lib;\n\nfinal class Gadget\n{\n    public string $label = 'gadget';\n\n    /** @var Closure(string): string */\n    public \\Closure $format;\n\n    public function label(string $prefix): string\n    {\n        return $prefix . $this->label;\n    }\n\n    public function format(string $text): string\n    {\n        return $text;\n    }\n}\n",
     );
-    let code = "namespace App.Tenant;\n\nimport Lib.Gadget;\nextern Gadget.label;\n\nclass Report\n{\n    public string run(Gadget gadget)\n    {\n        Function<string(string)> typed = gadget.label;\n        Function<string(string)> held = gadget.format;\n        return typed(\"a\") + held(\"b\");\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Gadget;\nextern Gadget.label uses none;\n\nclass Report\n{\n    public string run(Gadget gadget)\n    {\n        Function<string(string)> typed = gadget.label;\n        Function<string(string)> held = gadget.format;\n        return typed(\"a\") + held(\"b\");\n    }\n}\n";
 
     assert_eq!(
         statements_at(code, &[gadget], 0..2),
@@ -28223,7 +28259,7 @@ fn a_read_of_a_plain_php_class_with_get_reads_the_property_and_takes_the_method_
         "<?php\n\nnamespace Lib;\n\n/** @property-read Contact $contact */\nclass Row\n{\n    public function contact(): Contact\n    {\n        return new Contact();\n    }\n\n    public function owner(): Contact\n    {\n        return new Contact();\n    }\n\n    public function __get(string $name): mixed\n    {\n        return new Contact();\n    }\n}\n",
     );
     let contact = ("src/Lib/Contact.php", "<?php\n\nnamespace Lib;\n\nfinal class Contact\n{\n}\n");
-    let code = "namespace App.Tenant;\n\nimport Lib.Contact;\nimport Lib.Row;\nextern Row.owner;\n\nclass Report\n{\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        const owner = row.owner;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        return [contact, relation(), called].count() + (owner is Contact ? 1 : 0);\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Contact;\nimport Lib.Row;\nextern Row.owner uses none;\n\nclass Report\n{\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        const owner = row.owner;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        return [contact, relation(), called].count() + (owner is Contact ? 1 : 0);\n    }\n}\n";
 
     assert_eq!(
         statements_at(code, &[row, contact], 0..4),
@@ -29053,19 +29089,17 @@ fn a_typed_local_crosses_into_and_back_from_a_plain_php_reference_parameter() {
 }
 
 /// ```php
-/// $count(\Sharp\Internal\arrayOf($names, $count), \Sharp\Internal\arrayOf($names, $count), \Sharp\Internal\arrayOf($names, $count));
-/// $count(items: \Sharp\Internal\arrayOf($names, $count));
-/// $plain(\Sharp\Internal\arrayOf($names, $plain));
+/// $count(\Sharp\Internal\arrayOf($names, $count));
 /// $doubler(\Sharp\Internal\arrayOf($names));
 /// ```
 ///
 /// A call of a closure a local holds crosses each `Map` by the parameters of the closure's signature, as a call of a
-/// plain PHP method does: by position, by name and into its variadic parameter, and a closure whose signature its type
-/// doesn't give takes any value. `\Sharp\Internal\arrayOf` reads the closure, and keeps the object for a closure of
-/// PHP#, spec section 12. A plain PHP object a local holds crosses each by its `__invoke`.
+/// plain PHP method does, once the `extern` line of the call that gives it states its type (spec section 21).
+/// `\Sharp\Internal\arrayOf` reads the closure, and keeps the object for a closure of PHP#, spec section 12. A plain
+/// PHP object a local holds crosses each by its `__invoke`.
 #[test]
 fn a_call_of_a_plain_php_callable_a_local_holds_crosses_each_map_by_its_parameters() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Doubler;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<int, string> names = this.names();\n        const count = Calc.counter();\n        const plain = Calc.plain();\n        const doubler = new Doubler();\n        count(names, names, names);\n        count(items: names);\n        plain(names);\n        doubler(names);\n        return 0;\n    }\n\n    private Map<int, string> names() => [:];\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Doubler;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<int, string> names = this.names();\n        const count = Calc.counter();\n        const doubler = new Doubler();\n        count(names);\n        doubler(names);\n        return 0;\n    }\n\n    private Map<int, string> names() => [:];\n}\n";
     let doubler = (
         "src/Lib/Doubler.php",
         "<?php namespace Lib; final class Doubler { public function __invoke(array $items): int { return 0; } }",
@@ -29086,16 +29120,10 @@ fn a_call_of_a_plain_php_callable_a_local_holds_crosses_each_map_by_its_paramete
 
         call
     };
-    let named = format!("NAMED_ARG\n  ZVAL \"items\"\n{}", nested(&counted, 1));
 
     assert_eq!(
-        statements_at(code, &[doubler], 4..8),
-        [
-            called("count", &[&counted, &counted, &counted]),
-            called("count", &[named.as_str()]),
-            called("plain", &[&crossed(Some("plain"))]),
-            called("doubler", &[&crossed(None)]),
-        ]
+        statements_at(code, &[doubler, COUNTER_LINE, DOUBLER_LINE], 3..5),
+        [called("count", &[&counted]), called("doubler", &[&crossed(None)])]
     );
 }
 
@@ -29104,13 +29132,14 @@ fn a_call_of_a_plain_php_callable_a_local_holds_crosses_each_map_by_its_paramete
 /// ```
 ///
 /// A call of any other expression that gives a closure holds the closure first, so `\Sharp\Internal\arrayOf` reads it
-/// as it reads a closure a local holds, spec section 12.
+/// as it reads a closure a local holds, spec section 12. The `extern` line of `Calc.counter` states the function's
+/// type, which a call of it needs (spec section 21).
 #[test]
 fn a_call_of_a_closure_an_expression_gives_holds_it_for_each_map_it_crosses() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<int, string> names = this.names();\n        Calc.counter()(names);\n        return 0;\n    }\n\n    private Map<int, string> names() => [:];\n}\n";
 
     assert_eq!(
-        statements_at(code, &[], 1..2),
+        statements_at(code, &[COUNTER_LINE], 1..2),
         [indoc! {r#"
             CALL
               ASSIGN
@@ -35783,7 +35812,7 @@ fn an_extern_line_with_attributes_lowers_to_the_declaration_and_its_attributes()
     let files = lowered_each(
         &[(
             "src/App/Stubs/Stubs.sharp",
-            "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Group;\nimport Lib.Mailer;\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\n[Group(\"events\")]\nextern AsEventListener;\nextern Group;\n[Group(\"mail\")]\nextern Mailer.sendLater;\n[Group(\"time\")]\nextern Lib.sentAt;\n",
+            "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Group;\nimport Lib.Mailer;\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\n[Group(\"events\")]\nextern AsEventListener uses none;\nextern Group uses none;\n[Group(\"mail\")]\nextern Mailer.sendLater uses none;\n[Group(\"time\")]\nextern Lib.sentAt uses none;\n",
         )],
         &[listener, group, mailer, functions],
     );

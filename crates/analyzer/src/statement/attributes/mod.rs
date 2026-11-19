@@ -29,7 +29,6 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
-use crate::effects::check::written_target;
 use crate::error::AnalysisError;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
@@ -117,8 +116,8 @@ where
 }
 
 /// Analyzes the attributes written before an `extern` line, spec section 29, which the class, method or function the
-/// line declares carries as its own, so they are checked as its own are. A method the class only inherits takes them
-/// through its declaring class's line. A declaration `check_extern` found missing is reported there.
+/// line declares carries as its own, so they are checked as its own are. A declaration `check_extern` found missing,
+/// or a method the class only inherits, is reported there.
 pub fn analyze_extern_attributes<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -147,7 +146,7 @@ where
     let attribute_lists = r#extern.attribute_lists.as_slice();
     // The scan records each `extern` line of the analyzed file once.
     for line in codebase.externs.values().flatten().filter(|declaration| declaration.span == span) {
-        let (class, member) = line.target;
+        let member = line.target.1;
         match codebase.extern_declaration(line) {
             Some((class, declared)) if declared.is_empty() => {
                 codebase.get_class_like(class).map_or(Ok(()), |class_like_metadata| {
@@ -162,26 +161,7 @@ where
 
                 analyze_attributes(context, &mut block_context, artifacts, attribute_lists, target)?;
             }
-            None => {
-                if !member.is_empty()
-                    && let Some(declaring_class) = codebase.get_declaring_method_class(class, member)
-                {
-                    let declaring_class = display_class_like_name(context, declaring_class);
-                    context.collector.report_with_code(
-                        IssueCode::InvalidAttributeTarget,
-                        Issue::error(format!(
-                            "`{}` is a method of `{declaring_class}`, so an `extern` line of `{declaring_class}`'s method gives it attributes.",
-                            written_target(r#extern),
-                        ))
-                        .with_help(format!(
-                            "Write the attributes on `extern {declaring_class}.{};`.",
-                            BytesDisplay(r#extern.member_name().unwrap_or_default())
-                        ))
-                        .with_annotation(Annotation::primary(first.span()).with_message("Written here."))
-                        .with_annotation(Annotation::secondary(r#extern.target.span()).with_message("Declared here.")),
-                    );
-                }
-            }
+            None => {}
         }
     }
 

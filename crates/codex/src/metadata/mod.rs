@@ -1001,12 +1001,13 @@ impl CodebaseMetadata {
             .map(|declaration| declaration.namespace)
     }
 
-    /// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a function)
-    /// falls under, spec section 29: the member's, then the class's, then the same for each parent class, nearest
-    /// first. A function in a namespace is declared as `extern Pdf.render`, which the binder reads as a class and its
-    /// member, spec section 23, and so is one a library declares in PHP's root namespace, through the namespace an
-    /// `extern namespace` line gives it, as `extern Foundation.now` declares Laravel's `now()` after
-    /// `extern namespace Foundation for now;`.
+    /// The `extern` declaration a use of `member` (empty for a function's own name) that `class` (empty for a function)
+    /// declares falls under, spec section 29: the member's line, which overrides the class's, then the class's. Nothing
+    /// passes from another class, so a member a class inherits takes the line of the class that declares it, as
+    /// [`Self::extern_of_method`] finds it. A function in a namespace is declared as `extern Pdf.render`, which the
+    /// binder reads as a class and its member, spec section 23, and so is one a library declares in PHP's root
+    /// namespace, through the namespace an `extern namespace` line gives it, as `extern Foundation.now` declares
+    /// Laravel's `now()` after `extern namespace Foundation for now;`.
     #[must_use]
     pub fn extern_of(&self, class: Word, member: Word) -> Option<&ExternMetadata> {
         let declared = |key: (Word, Word)| self.externs.get(&key).and_then(|declarations| declarations.first());
@@ -1020,37 +1021,19 @@ impl CodebaseMetadata {
             });
         }
 
-        // The chain goes by the class-likes' keys, spec section 24, and an `extern` names a plain PHP class in lowercase.
-        let mut current = Some(self.class_key(class));
-        let mut remaining = self.get_class_like(class).map_or(0, |metadata| metadata.all_parent_classes.len());
-        while let Some(class) = current {
-            let named = class.to_ascii_lowercase();
-            if let Some(declaration) = declared((named, member)).or_else(|| declared((named, empty_word()))) {
-                return Some(declaration);
-            }
+        // A class is found by its key, spec section 24, and an `extern` names a plain PHP class in lowercase.
+        let named = self.class_key(class).to_ascii_lowercase();
 
-            if remaining == 0 {
-                break;
-            }
-            remaining -= 1;
-            current = self.get_class_like(class).and_then(|metadata| metadata.direct_parent_class);
-        }
-
-        None
+        declared((named, member)).or_else(|| declared((named, empty_word())))
     }
 
-    /// The `extern` declaration a call of `method` through `class` falls under, spec section 29. A call runs the body of
-    /// `declaring_class`, so where `class` takes the method from a plain PHP trait, the trait's line for the member, or
-    /// for the whole trait, declares that body's effects. Without one the lookup starts at `class`, as
-    /// [`Self::extern_of`] walks it.
+    /// The `extern` declaration a call of `method` falls under, spec section 29: a call runs the body of
+    /// `declaring_class`, the class, trait or interface that declares the method, as a facade's docblock `@method`
+    /// declares one on the facade, so that class's line for the method, or else its line for the whole class, declares
+    /// the call's effects, as [`Self::extern_of`] finds them.
     #[must_use]
-    pub fn extern_of_method(&self, class: Word, declaring_class: Word, method: Word) -> Option<&ExternMetadata> {
-        let method = ascii_lowercase_word(method.as_bytes());
-
-        self.get_class_like(declaring_class)
-            .filter(|declaring| declaring.kind.is_trait())
-            .and_then(|declaring| self.extern_of(declaring.name, method))
-            .or_else(|| self.extern_of(class, method))
+    pub fn extern_of_method(&self, declaring_class: Word, method: Word) -> Option<&ExternMetadata> {
+        self.extern_of(declaring_class, ascii_lowercase_word(method.as_bytes()))
     }
 
     /// What the `extern` line `declaration` declares, keyed as `class_likes` keys a class and `function_likes` a method

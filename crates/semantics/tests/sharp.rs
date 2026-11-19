@@ -104,7 +104,7 @@ fn the_slice_fixtures_have_no_semantic_issues() {
 /// `extern` declares the effects of plain PHP at file level, spec section 29, and nowhere else.
 #[test]
 fn extern_is_a_declaration_of_the_file_and_of_no_method_body() {
-    let code = "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient uses Http;\nextern Carbon.now uses Clock, Random;\nextern trim;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        extern trim;\n        return extra;\n    }\n}\n";
+    let code = "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient uses Http;\nextern Carbon.now uses Clock, Random;\nextern trim uses none;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        extern trim;\n        return extra;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -112,11 +112,28 @@ fn extern_is_a_declaration_of_the_file_and_of_no_method_body() {
     );
 }
 
-/// `extern event` marks a plain PHP class as an event, spec section 15, so it names a class, with or without the
-/// effects its `uses` lists.
+/// Spec section 29: every `extern` line but `extern namespace` ends in `uses`, which states its effects as `uses none`,
+/// a list of effects or `uses any`, so a line written only for its signature never claims its target pure. A line
+/// without `uses` is refused, whatever else it states.
+#[test]
+fn every_extern_line_states_its_effects() {
+    let code = "namespace App.Stubs;\n\nimport Lib.Formatter;\nimport Lib.Container;\nimport Illuminate.Foundation;\nimport Illuminate.Queue.Events.JobFailed;\n\nextern namespace Illuminate.Foundation for now;\nextern Formatter.format uses none;\nextern Container.make uses any;\nextern Foundation.now uses Clock;\nextern Formatter;\nextern string Container.name();\nextern event JobFailed;\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "12:1 State its effects: `uses none`, `uses <effects>`, or `uses any`.",
+            "13:1 State its effects: `uses none`, `uses <effects>`, or `uses any`.",
+            "14:1 State its effects: `uses none`, `uses <effects>`, or `uses any`.",
+        ]
+    );
+}
+
+/// `extern event` marks a plain PHP class as an event, spec section 15, so it names a class, with the effects its
+/// `uses` lists.
 #[test]
 fn an_extern_event_names_a_class() {
-    let code = "namespace App.Stubs;\n\nimport Carbon.Carbon;\nimport Illuminate.Queue.Events.JobFailed;\nimport Illuminate.Queue.Events.JobQueued;\n\nextern event JobFailed;\nextern event JobQueued uses Database;\nextern event Carbon.now;\n";
+    let code = "namespace App.Stubs;\n\nimport Carbon.Carbon;\nimport Illuminate.Queue.Events.JobFailed;\nimport Illuminate.Queue.Events.JobQueued;\n\nextern event JobFailed uses none;\nextern event JobQueued uses Database;\nextern event Carbon.now uses none;\n";
 
     assert_eq!(issues(code), ["9:14 An `extern event` names a class, and `Carbon.now` names a member."]);
 }
@@ -125,7 +142,7 @@ fn an_extern_event_names_a_class() {
 /// and `keyof`, and a literal default. A class is no signature.
 #[test]
 fn an_extern_signature_names_a_member() {
-    let code = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Builder;\nimport Illuminate.Foundation;\nimport Illuminate.Mail.Mailer;\n\nextern string Foundation.route(string name);\nextern Builder<TModel> Builder<TModel>.where(keyof TModel column, Any? value) uses Database;\nextern void Mailer(string to);\nextern void Mailer.send(string to = \"\");\n";
+    let code = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Builder;\nimport Illuminate.Foundation;\nimport Illuminate.Mail.Mailer;\n\nextern string Foundation.route(string name) uses none;\nextern Builder<TModel> Builder<TModel>.where(keyof TModel column, Any? value) uses Database;\nextern void Mailer(string to) uses none;\nextern void Mailer.send(string to = \"\") uses none;\n";
 
     assert_eq!(
         issues(code),
@@ -139,7 +156,7 @@ fn an_extern_signature_names_a_member() {
 /// leaves it out passes to plain PHP, so a default that runs code is refused.
 #[test]
 fn callable_is_only_an_extern_parameter_s_type_and_an_extern_default_is_a_literal() {
-    let code = "namespace App.Stubs;\n\nimport Lib.Hooks;\n\nextern bool Hooks.add_action(string hookName, callable callback, int priority = 10, int acceptedArgs = 1);\nextern void Hooks.remove_action(string hookName, callable? callback = null, int priority = -10);\nextern callable Hooks.current();\nextern void Hooks.later(string hookName, int at = Hooks.now());\nextern void Hooks.either(callable|string callback);\n\npublic class Saving\n{\n    callable held;\n\n    public callable kept() => this.saved;\n\n    public void keep(callable value) { }\n\n    public List<callable> all() => [];\n\n    public void run()\n    {\n        callable later = this.saved;\n    }\n\n    public void saved(int id) { }\n}\n";
+    let code = "namespace App.Stubs;\n\nimport Lib.Hooks;\n\nextern bool Hooks.add_action(string hookName, callable callback, int priority = 10, int acceptedArgs = 1) uses none;\nextern void Hooks.remove_action(string hookName, callable? callback = null, int priority = -10) uses none;\nextern callable Hooks.current() uses none;\nextern void Hooks.later(string hookName, int at = Hooks.now()) uses none;\nextern void Hooks.either(callable|string callback) uses none;\n\npublic class Saving\n{\n    callable held;\n\n    public callable kept() => this.saved;\n\n    public void keep(callable value) { }\n\n    public List<callable> all() => [];\n\n    public void run()\n    {\n        callable later = this.saved;\n    }\n\n    public void saved(int id) { }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -160,7 +177,7 @@ fn callable_is_only_an_extern_parameter_s_type_and_an_extern_default_is_a_litera
 /// a nullable union, and `void` is still no parameter of a function type, and a union in parentheses still takes `?`.
 #[test]
 fn an_extern_signature_takes_any_type_a_method_declares() {
-    let code = "namespace App.Stubs;\n\nimport Lib.Factory;\n\nextern Function<void()> Factory.make();\nextern [int, int] Factory.pair();\nextern (int|string)? Factory.either();\nextern Function<int(void)> Factory.broken();\nextern (int|string) Factory.bare();\n";
+    let code = "namespace App.Stubs;\n\nimport Lib.Factory;\n\nextern Function<void()> Factory.make() uses none;\nextern [int, int] Factory.pair() uses none;\nextern (int|string)? Factory.either() uses none;\nextern Function<int(void)> Factory.broken() uses none;\nextern (int|string) Factory.bare() uses none;\n";
 
     assert_eq!(
         issues(code),
@@ -382,7 +399,7 @@ fn module_sharp_holds_only_its_folders_module() {
         "public class Module\n{\n}\n",
         "public interface Priced\n{\n}\n",
         "public enum Status\n{\n    case Open;\n}\n",
-        "extern trim;\n",
+        "extern trim uses none;\n",
         "module\n{\n    law other(int a) => a == a;\n}\n",
     ] {
         let code = leak(format!("namespace App.Shop;\n\nimport App.Mail.Mailer;\n\n{module}\n{declaration}"));
@@ -488,8 +505,7 @@ fn a_sharp_file_is_named_like_its_type() {
 /// An `extern` declaration file and a test file that states only its module declare no type, so any name is theirs.
 #[test]
 fn a_sharp_file_without_a_type_takes_any_name() {
-    let externs =
-        "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient uses Http;\nextern trim;\n";
+    let externs = "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient uses Http;\nextern trim uses none;\n";
     let test = "namespace App.Shop;\n\nmodule : App.Shop\n{\n    singleton Mailer = SmtpMailer;\n}\n";
 
     assert_eq!(issues_in("app/Stubs/Effects.sharp", externs), Vec::<String>::new());
@@ -6408,7 +6424,8 @@ fn an_enum_declares_type_parameters_without_a_backing_type() {
 }
 
 /// Spec section 31: no import names PHP's engine class `Error`, and another library's `Error`, imported as it is or
-/// under another name, shadows the standard library's as every default name is shadowed, as in Kotlin and Java.
+/// under another name, shadows the standard library's as every default name is shadowed, as in Kotlin and Java. The
+/// standard library alone names it, to state its members' effects on an `extern` line (spec section 29).
 #[test]
 fn an_import_shadows_error_but_never_names_the_engine_class() {
     let refused =
@@ -6423,6 +6440,10 @@ fn an_import_shadows_error_but_never_names_the_engine_class() {
 
         assert_eq!(issues(code), expected, "{import}");
     }
+    assert_eq!(
+        issues("namespace Sharp.Internal;\n\nimport Error as PhpError;\n\nextern PhpError uses none;\n"),
+        Vec::<String>::new()
+    );
 }
 
 #[test]

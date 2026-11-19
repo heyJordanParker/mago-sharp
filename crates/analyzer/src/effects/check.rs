@@ -28,6 +28,7 @@ use mago_names::binding::Binding;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
 use mago_names::display_sharp_member;
+use mago_names::scope::NamespaceScope;
 use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -59,6 +60,7 @@ use mago_syntax::cst::Return;
 use mago_syntax::cst::Uses;
 use mago_syntax::walker::Walker;
 use mago_word::Word;
+use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
@@ -119,11 +121,12 @@ pub(crate) fn getters_never_write_this(effects: &Effects, codebase: &CodebaseMet
 /// Spec sections 10, 20 and 29: a struct and an enum are values, so their methods, `get` bodies and operators have no
 /// effects, as a Swift value type's computed members are pure by convention and Rust's `Copy` values carry no I/O. A
 /// data case is its enum's. A change of state is no effect, so only an effect is refused, naming the member and the
-/// effect: "`Money.inEuros` has the effect `Http`, and a struct has no effects".
+/// effect: "`Money.inEuros` has the effect `Http`, and a struct has no effects", or "`Money.check` may have any effect"
+/// for a plain PHP call whose `extern` line says `uses any`.
 pub(crate) fn values_have_no_effects(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
     effects
-        .effectful_bodies()
-        .filter_map(|(body, member, imports, impurity)| {
+        .bodies_with_effects()
+        .filter_map(|(body, member, imports, _, impurity)| {
             let (Body::Method(class, _) | Body::Accessor(class, _, _)) = body else {
                 return None;
             };
@@ -145,10 +148,13 @@ pub(crate) fn values_have_no_effects(effects: &Effects, codebase: &CodebaseMetad
             let class_name = |class| sharp_class_like_name(codebase, imports, class);
             let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
             let member = display_sharp_member(class_name(value_class), member);
-            let effect = effect_name(impurity.effect.and_then(Effect::named)?);
+            let has = match impurity.effect?.named() {
+                Some(effect) => format!("has the effect `{}`", effect_name(effect)),
+                None => "may have any effect".to_owned(),
+            };
 
             Some(
-                Issue::error(format!("`{member}` has the effect `{effect}`, and {kind} has no effects."))
+                Issue::error(format!("`{member}` {has}, and {kind} has no effects."))
                     .with_code(IssueCode::IncompatibleEffects.as_str())
                     .with_annotation(Annotation::primary(impurity.span).with_message("The effect comes from here."))
                     .with_note(format!("`{member}` {}.", impurity.describe(&class_name, &effect_name)))
@@ -160,10 +166,10 @@ pub(crate) fn values_have_no_effects(effects: &Effects, codebase: &CodebaseMetad
 
 /// Spec section 1: an attribute is data, so creating one has no effect: the constructor a PHP# attribute class runs, the
 /// defaults of its parameters, which run for each argument the attribute leaves out, and the initial values of the
-/// class and of each class it extends have no effect, a plain PHP call no `extern` declares included, so reading a PHP#
-/// class's attributes with `attributes<T>()` is pure. A change of state is no effect. The refusal names the code and the
-/// effect: "The constructor of `Column` calls `Store.load`, which has the effect `Database`, and an attribute has no
-/// effects".
+/// class and of each class it extends have no effect, so a plain PHP call whose `extern` line names an effect or says
+/// `uses any` is refused there, and reading a PHP# class's attributes with `attributes<T>()` is pure. A change of state
+/// is no effect. The refusal names the code and the effect: "The constructor of `Column` calls `Store.load`, which has
+/// the effect `Database`, and an attribute has no effects".
 pub(crate) fn attributes_have_no_effects(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
     effects
         .bodies_with_effects()
@@ -263,7 +269,6 @@ pub(crate) fn laws_must_be_pure(effects: &Effects, codebase: &CodebaseMetadata) 
                 "law",
                 &impurity,
                 &[],
-                &class_name,
                 &code_class_name,
                 &missing_import,
             )
@@ -298,13 +303,8 @@ pub(crate) fn function_values_must_fit_their_types(effects: &Effects, codebase: 
                 (Runs::Foreign { .. }, Some(Effect::Foreign(effect))) => {
                     format!("{} has the effect `{}`", method(), effect_name(effect))
                 }
-                (Runs::Foreign { .. }, Some(Effect::Carried { effect, by })) => format!(
-                    "{} has the effect `{}` {}",
-                    method(),
-                    effect_name(effect),
-                    impurity.carried_by(by, &class_name)
-                ),
-                (Runs::Foreign { .. }, _) => format!("{} has no `extern` declaration", method()),
+                (Runs::Foreign { .. }, _) => format!("{} may have any effect", method()),
+                (Runs::Undeclared { .. }, _) => unreachable!("a value of undeclared plain PHP is refused on its own"),
             };
             let body = if matches!(value.runs, Runs::Body(Body::Lambda(_))) { "lambda" } else { "method" };
             let allowed: Vec<String> = value.allowed.iter().map(|effect| effect_name(*effect)).collect();
@@ -316,14 +316,13 @@ pub(crate) fn function_values_must_fit_their_types(effects: &Effects, codebase: 
                 body,
                 &impurity,
                 &allowed,
-                &class_name,
                 &code_class_name,
                 &missing_import,
             );
 
             match value.runs {
                 Runs::Body(_) => issue.with_annotation(Annotation::secondary(impurity.span)),
-                Runs::Foreign { .. } => issue,
+                Runs::Foreign { .. } | Runs::Undeclared { .. } => issue,
             }
         })
         .collect()
@@ -358,7 +357,6 @@ pub(crate) fn implementations_must_fit_their_declarations(
                 "method",
                 &impurity,
                 &uses,
-                &class_name,
                 &code_class_name,
                 &missing_import,
             )
@@ -469,10 +467,9 @@ pub(crate) fn readonly_values_call_readonly_methods(effects: &Effects, codebase:
 }
 
 /// The error at `span` on the `impurity` of the `body` it refuses, a getter, a law, a lambda or a method, with the
-/// `extern` to write when the callee has none, or how to call a plain PHP property's code from outside `body`. The
-/// `extern` names the callee's class, or its function, and the effects `allowed` lists, as the place's `uses` names
-/// them. `class_name` names each class in prose, `code_class_name` names it in the `extern`, and `missing_import`
-/// names the import the `extern` needs when the body's file doesn't bind its class.
+/// `extern` line to write when the callee's says `uses any`. The line names the callee, a method or a function, and
+/// the effects `allowed` lists, as the place's `uses` names them, or `none`. `code_class_name` names each class in the
+/// line, and `missing_import` names the import the line needs when the body's file doesn't bind its class.
 #[allow(clippy::too_many_arguments)]
 fn impure(
     code: IssueCode,
@@ -481,60 +478,87 @@ fn impure(
     body: &str,
     impurity: &Impurity,
     allowed: &[String],
-    class_name: &dyn Fn(Word) -> String,
     code_class_name: &dyn Fn(Word) -> String,
     missing_import: &dyn Fn(Word) -> Option<String>,
 ) -> Issue {
     let issue = Issue::error(message).with_code(code.as_str()).with_annotation(Annotation::primary(span));
 
     match impurity.effect {
-        Some(Effect::Unknown(_)) if impurity.every_effect => {
+        Some(Effect::Any) if impurity.every_effect => {
             issue.with_help("It runs code no `uses` can name, so call it where no `uses` limits the effects.")
         }
-        Some(Effect::Unknown(Some((class, member)))) => {
+        Some(Effect::Any) => {
+            let (class, member) = impurity.cause;
             let (target, import) = if class.is_empty() {
                 let (target, namespace) = written_function(member, code_class_name);
 
                 (target, namespace.and_then(missing_import))
             } else {
-                (code_class_name(class), missing_import(class))
+                (display_sharp_member(code_class_name(class), member), missing_import(class))
             };
             let import = import.map(|import| format!(" {import}")).unwrap_or_default();
-
-            issue.with_help(if allowed.is_empty() {
-                format!(
-                    "Declare it in a .sharp file: `extern {target};` when it has no effect, or name its effects after `uses`.{import}"
-                )
-            } else {
-                format!("Declare its effect in a .sharp file, such as `extern {target} uses {};`.{import}", allowed.join(", "))
-            })
-        }
-        Some(Effect::Carried { .. }) => {
-            let class = impurity.cause.0;
-            let import = missing_import(class).map(|import| format!(" {import}")).unwrap_or_default();
-            let uses = if allowed.is_empty() { String::new() } else { format!(" uses {}", allowed.join(", ")) };
+            let uses = if allowed.is_empty() { "none".to_owned() } else { allowed.join(", ") };
 
             issue.with_help(format!(
-                "An `extern` on `{}` overrides the effects it carries: write `extern {}{uses};` in a .sharp file.{import}",
-                class_name(class),
-                code_class_name(class)
-            ))
-        }
-        Some(Effect::Unknown(None)) if impurity.cause.0.is_empty() => issue.with_help(format!(
-            "`{}` is a function plain PHP wrote, which no `extern` can declare. Call it outside the {body}.",
-            impurity.cause.1
-        )),
-        Some(Effect::Unknown(None)) => {
-            let (class, property) = impurity.cause;
-            let class = class_name(class);
-            let property = display_sharp_member(&class, property);
-
-            issue.with_help(format!(
-                "Property `{property}` holds plain PHP code, which no `extern` can declare. Call it outside the {body}, or through a method of `{class}` that an `extern` declares."
+                "Its `extern` line says `uses any`. State its effects in place of `any`, or call it outside the {body}, as with `extern {target} uses {uses};`.{import}"
             ))
         }
         _ => issue,
     }
+}
+
+/// Spec section 29: every plain PHP class, method and function PHP# code reaches has an `extern` line, which states its
+/// effects, so no effect goes unwritten. A call takes the line of the class that declares the method it calls, so the
+/// refusal names that class, or the function, as "`Mailchimp` has no `extern` line", with the line to write.
+pub(crate) fn plain_php_has_extern_lines(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
+    effects
+        .undeclared_uses()
+        .map(|(span, (class, function), imports, scope)| {
+            let class_name = |class| sharp_class_like_name(codebase, imports, class);
+            let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
+            let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
+            let (shown, target, import) = if class.is_empty() {
+                let (target, namespace) = written_function(function, &code_class_name);
+
+                (written_function(function, &class_name).0, target, namespace.and_then(missing_import))
+            } else if let Some(alias) = namespace_mate_alias(codebase, imports, scope, class) {
+                (class_name(class), alias.1, Some(alias.0))
+            } else {
+                (class_name(class), code_class_name(class), missing_import(class))
+            };
+            let import = import.map(|import| format!(" {import}")).unwrap_or_default();
+
+            Issue::error(format!("`{shown}` has no `extern` line."))
+                .with_code(IssueCode::IncompatibleEffects.as_str())
+                .with_annotation(Annotation::primary(span).with_message("Plain PHP is reached here."))
+                .with_note("Every plain PHP class and function PHP# code reaches states its effects on an `extern` line.")
+                .with_help(format!(
+                    "Declare it in a .sharp file, such as `extern {target} uses any;`, and name its effects in place of `any` when you know them.{import}"
+                ))
+        })
+        .collect()
+}
+
+/// The import and the name an `extern` line takes for `class`, a plain PHP class of the file's own namespace that the
+/// file names without an import, spec section 23: a bare name in an `extern` line that no import binds is a function,
+/// so the line names the class through an alias of its namespace's last part and its name, as `DemoCell` for
+/// `Demo.Cell`.
+fn namespace_mate_alias(
+    codebase: &CodebaseMetadata,
+    imports: &WordMap<Word>,
+    scope: &NamespaceScope,
+    class: Word,
+) -> Option<(String, String)> {
+    let name = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
+    let full = String::from_utf8_lossy(name.as_bytes().strip_prefix(b"\\").unwrap_or(name.as_bytes())).into_owned();
+    let (namespace, short) = full.rsplit_once('\\')?;
+    let own = scope.namespace_name().is_some_and(|own| own.eq_ignore_ascii_case(namespace.as_bytes()));
+    if !own || imports.contains_key(&ascii_lowercase_word(full.as_bytes())) {
+        return None;
+    }
+    let alias = format!("{}{short}", namespace.rsplit('\\').next().unwrap_or(namespace));
+
+    Some((format!("Add `import {} as {alias};` to the file.", full.replace('\\', ".")), alias))
 }
 
 /// The plain PHP function `function`, as the cause of a call of it names it, written as the code names it through its
@@ -600,10 +624,15 @@ where
     if let Some(first) = declarations.first()
         && first.span != span
     {
-        let message = match (first.is_standard_library, first.effects.as_slice()) {
-            (false, _) => format!("`{written}` already has an `extern` declaration."),
-            (true, []) => format!("`{written}` is already declared pure by the standard library: delete this line."),
-            (true, effects) => format!(
+        let message = match (first.is_standard_library, first.uses_any, first.effects.as_slice()) {
+            (false, ..) => format!("`{written}` already has an `extern` declaration."),
+            (true, true, _) => {
+                format!("`{written}` is already declared by the standard library, with `uses any`: delete this line.")
+            }
+            (true, false, []) => {
+                format!("`{written}` is already declared pure by the standard library: delete this line.")
+            }
+            (true, false, effects) => format!(
                 "`{written}` is already declared by the standard library, with `uses {}`: delete this line.",
                 effects.iter().map(short_name).collect::<Vec<_>>().join(", ")
             ),
@@ -687,6 +716,22 @@ where
             IssueCode::NonExistentMethod,
             Issue::error(format!("Method `{written}` does not exist.")).with_annotation(Annotation::primary(target)),
         );
+    } else if let Some(declaring_class) = (!member.is_empty())
+        .then(|| context.codebase.get_declaring_method_class(class, member))
+        .flatten()
+        .filter(|declaring_class| !declaring_class.as_bytes().eq_ignore_ascii_case(class_metadata.name.as_bytes()))
+    {
+        // Spec section 29: a call takes the line of the class that declares its method, so a line of a method the class
+        // only inherits would declare nothing.
+        let declaring_class = display_class_like_name(context, declaring_class);
+        let member = BytesDisplay(r#extern.member_name().unwrap_or_default());
+        context.collector.report_with_code(
+            IssueCode::NonExistentMethod,
+            Issue::error(format!(
+                "`{written}` is a method of `{declaring_class}`, so `extern {declaring_class}.{member}` declares it."
+            ))
+            .with_annotation(Annotation::primary(target).with_message("Inherited here.")),
+        );
     } else {
         check_extern_signature(context, r#extern, own, &written);
     }
@@ -708,24 +753,11 @@ fn check_extern_signature<A>(
     let Some(parameter_list) = &r#extern.parameter_list else {
         return;
     };
-    let (class, member) = own.target;
+    let class = own.target.0;
     let Some((declared, stated)) = codebase
         .extern_declaration(own)
         .and_then(|key| Some((codebase.function_likes.get(&key)?, codebase.extern_signatures.get(&key)?)))
     else {
-        // `check_extern` found the method, so the class only inherits it, and its declaring class's line states it, as
-        // its attributes are.
-        let declaring_class = codebase.get_declaring_method_class(class, member).unwrap_or(class);
-        let declaring_class = display_class_like_name(context, declaring_class);
-        let member = BytesDisplay(r#extern.member_name().unwrap_or_default());
-        context.collector.report_with_code(
-            IssueCode::NonExistentMethod,
-            Issue::error(format!(
-                "`{written}` is a method of `{declaring_class}`, so `extern {declaring_class}.{member}` states its signature."
-            ))
-            .with_annotation(Annotation::primary(r#extern.target.span()).with_message("Inherited here.")),
-        );
-
         return;
     };
     let parameter_name = |name: Word| {
@@ -1037,6 +1069,15 @@ pub(crate) fn check_uses<A>(
         );
     }
 
+    for any in found.beside_any {
+        context.collector.report_with_code(
+            IssueCode::InvalidEffect,
+            Issue::error("`any` states that the plain PHP may have any effect, so `uses` lists nothing beside it.")
+                .with_annotation(Annotation::primary(any.span).with_message("Written here."))
+                .with_help("Delete `any` to declare only the other effects, or delete them to allow any effect."),
+        );
+    }
+
     for name in found.names {
         let effect = context.resolved_names.get(name);
         artifacts.symbol_references.add_reference_to_symbol(
@@ -1096,15 +1137,17 @@ pub(crate) fn check_uses<A>(
 
 /// The names every effect `uses` of a program writes. A method with a body names none, and a function parameter named
 /// in any method's is no effect, as the semantics checker holds them to. A function type's `uses none` names none, and
-/// is refused beside another effect. A method without a body is pure without `uses`, so its `uses none` is refused.
+/// is refused beside another effect. A method without a body is pure without `uses`, so its `uses none` is refused. An
+/// `extern` line's `uses none` and `uses any` name none, and each is refused beside another effect.
 struct UsesWalker;
 
-/// The names [`UsesWalker`] collects, each `none` written beside another effect or on a method without a body, and the
-/// `uses` of the methods and function types it read already.
+/// The names [`UsesWalker`] collects, each `none` or `any` written beside another effect, each `none` on a method
+/// without a body, and the `uses` of the methods, function types and `extern` lines it read already.
 #[derive(Default)]
 struct UsesNames<'ast, 'arena> {
     names: Vec<&'ast LocalIdentifier<'arena>>,
     beside_none: Vec<&'ast LocalIdentifier<'arena>>,
+    beside_any: Vec<&'ast LocalIdentifier<'arena>>,
     none_on_method: Vec<&'ast LocalIdentifier<'arena>>,
     read: Vec<Span>,
 }
@@ -1147,6 +1190,23 @@ impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker 
             found.beside_none.push(none);
         }
         found.names.extend(uses.names.iter().filter(|name| !is_none(name)));
+    }
+
+    fn walk_in_extern(&self, r#extern: &'ast Extern<'arena>, found: &mut UsesNames<'ast, 'arena>) {
+        let Some(uses) = &r#extern.uses else {
+            return;
+        };
+
+        found.read.push(uses.span());
+        let beside = uses.names.len() > 1;
+        for name in uses.names.iter() {
+            match (name.value, beside) {
+                (b"none" | b"any", false) => {}
+                (b"none", true) => found.beside_none.push(name),
+                (b"any", true) => found.beside_any.push(name),
+                _ => found.names.push(name),
+            }
+        }
     }
 
     fn walk_in_uses(&self, uses: &'ast Uses<'arena>, found: &mut UsesNames<'ast, 'arena>) {

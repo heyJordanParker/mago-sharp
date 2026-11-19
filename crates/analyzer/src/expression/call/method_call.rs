@@ -51,6 +51,7 @@ use crate::expression::assignment::static_property_assignment;
 use crate::expression::call::analyze_extension_access;
 use crate::expression::call::analyze_extension_call;
 use crate::expression::call::analyze_invocation_targets;
+use crate::expression::call::function_call::Given;
 use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
@@ -938,7 +939,7 @@ where
         );
 
         let (targets, has_invalid_target) =
-            resolve_callable_targets(context, &property.property_type, callee, template_result);
+            resolve_callable_targets(context, &property.property_type, callee, Given::Property, template_result);
         invocation_targets.extend(targets);
         has_invalid_targets |= has_invalid_target;
     }

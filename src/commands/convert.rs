@@ -13,10 +13,12 @@
 //! never the tracked one. A file's shape and git decide before any analysis, so a run with nothing to prove runs none.
 //!
 //! A converted file that reaches a library's function, constant or class of PHP's root namespace needs an
-//! `extern namespace` line for its folder (spec section 23). The command owns one declarations file for them,
-//! `Externs.sharp` in the first PSR-4 folder, in that folder's namespace: it creates the file or adds to it, one line for
-//! each folder, sorted, and each proof holds the lines its converted files need. A run writes it before the converted
-//! files and never stages it, as it never stages a converted file's new text, so the index holds only the renames.
+//! `extern namespace` line for its folder (spec section 23), and one that reaches plain PHP no `extern` line declares
+//! needs a line for it, which the command writes `uses any` (spec section 29). The command owns one declarations file
+//! for them, `Stubs/Externs.sharp` in the first PSR-4 folder, in that folder's `Stubs` namespace: it creates the file or
+//! adds to it, one line for each folder, class and function, sorted, with the imports its lines need, and each proof
+//! holds the lines its converted files need. A run writes it before the converted files and never stages it, as it
+//! never stages a converted file's new text, so the index holds only the renames.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -42,7 +44,9 @@ use mago_converter::Converted;
 use mago_converter::Input;
 use mago_converter::Library;
 use mago_converter::Refusal;
+use mago_converter::Undeclared;
 use mago_converter::convert;
+use mago_converter::is_reserved_alias;
 use mago_database::Database;
 use mago_database::DatabaseReader;
 use mago_database::ReadDatabase;
@@ -162,15 +166,20 @@ struct Candidate {
     text: Vec<u8>,
     /// The `extern namespace` lines it needs, each folder's as the run's first file that needs one names it.
     extern_namespaces: Vec<String>,
+    /// The plain PHP it reaches that no `extern` line declares.
+    undeclared: Vec<Undeclared>,
+    /// The full names of the classes it declares, as PHP writes them, which turn PHP# with it.
+    declares: Vec<String>,
 }
 
-/// The project's declarations file the command owns, `Externs.sharp` in the first PSR-4 folder, in that folder's
-/// namespace, which holds the `extern namespace` lines of the converted files (spec section 23).
+/// The project's declarations file the command owns, `Stubs/Externs.sharp` in the first PSR-4 folder, in that folder's
+/// `Stubs` namespace, which holds the `extern namespace` lines of the converted files (spec section 23) and the
+/// `uses any` line of each plain PHP class and function they reach that no line declares (spec section 29).
 struct Externs {
-    /// Its name from the workspace, as `src/Externs.sharp`.
+    /// Its name from the workspace, as `src/Stubs/Externs.sharp`.
     name: Vec<u8>,
     path: PathBuf,
-    /// The namespace a new file declares, as `App`.
+    /// The namespace a new file declares, as `App.Stubs`.
     namespace: String,
     /// The text the file held when the run started, empty when it was missing.
     held: Vec<u8>,
@@ -370,7 +379,15 @@ impl ConvertCommand {
                 continue;
             };
             match session.convert(file, &library, &effects) {
-                Ok(Converted { text, extern_namespaces }) => {
+                Ok(Converted { text, extern_namespaces, undeclared }) => {
+                    let declares = session
+                        .server
+                        .codebase()
+                        .class_likes
+                        .values()
+                        .filter(|class| class.span.file_id == file.id)
+                        .map(|class| class.original_name.as_str_lossy().trim_start_matches('\\').to_owned())
+                        .collect();
                     let extern_namespaces = extern_namespaces
                         .iter()
                         .map(|needed| {
@@ -383,6 +400,8 @@ impl ConvertCommand {
                         original: file.contents.to_vec(),
                         text,
                         extern_namespaces,
+                        undeclared,
+                        declares,
                     });
                 }
                 Err(reasons) => outcome.refused.entry(name).or_default().extend(reasons),
@@ -730,9 +749,9 @@ impl<'configuration> Session<'configuration> {
             .collect()
     }
 
-    /// The PHP# text of `file` with the `extern namespace` lines it needs, or each construct that keeps it plain PHP, by
-    /// its place. A built-in's call becomes the member of `library` that runs it, and an invoker lists the `effects`
-    /// of the method it calls.
+    /// The PHP# text of `file` with the `extern namespace` and `extern` lines it needs, or each construct that keeps it
+    /// plain PHP, by its place. A built-in's call becomes the member of `library` that runs it, and an invoker lists the
+    /// `effects` of the method it calls.
     fn convert(&self, file: &File, library: &Library, effects: &Effects) -> Result<Converted, Vec<String>> {
         let arena = LocalArena::new();
         let program = parse_file(&arena, file);
@@ -766,7 +785,6 @@ fn load(
     if let Some(external_analyzer) = start_external_analyzer(
         &configuration.extension_hosts,
         configuration.php_version,
-        configuration.threads,
         &configuration.analyzer.plugins,
         configuration.analyzer.disable_default_plugins,
     ) {
@@ -887,7 +905,7 @@ impl Outcome {
         if let Some((name, before, after)) = &self.externs
             && !self.converted.is_empty()
         {
-            println!("{} holds the extern namespace lines of the converted files", display(name));
+            println!("{} holds the extern lines of the converted files", display(name));
             if dry_run {
                 let (before, after) = (String::from_utf8_lossy(before), String::from_utf8_lossy(after));
                 println!("{}", formatter.fmt_patch(&diffy::create_patch(&before, &after)));
@@ -1199,7 +1217,7 @@ impl Externs {
     /// The declarations file of the PSR-4 folder `root` of the project at `workspace`, with its namespace, and the
     /// text it holds now, which is none when it is missing.
     fn new(workspace: &Path, (namespace, folder): &(String, PathBuf)) -> Result<Self, Error> {
-        let name = folder.join("Externs.sharp").to_string_lossy().into_owned().into_bytes();
+        let name = folder.join("Stubs").join("Externs.sharp").to_string_lossy().into_owned().into_bytes();
         let path = workspace.join(display(&name));
         let held = match std::fs::read(&path) {
             Ok(held) => held,
@@ -1207,45 +1225,138 @@ impl Externs {
             Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &path, error).into()),
         };
 
-        Ok(Self { name, path, namespace: namespace.replace('\\', "."), held })
+        Ok(Self { name, path, namespace: format!("{}.Stubs", namespace.replace('\\', ".")), held })
     }
 
     /// The text the file holds now, and its text with each line `candidates` need that it lacks, or `None` when it
-    /// holds every one. A new file declares its namespace. A line goes before the first `extern namespace` line that
-    /// sorts after it, or after the last one, so lines that are sorted stay sorted.
+    /// holds every one. A new file declares its namespace. Each `import`, `extern namespace` and `extern` line goes
+    /// among the lines of its kind, before the first that sorts after it, or after the last one, so lines that are
+    /// sorted stay sorted. A class or a namespace whose short name another import takes is imported under its
+    /// namespace's last parts before it, as `import Vendor.Clock as VendorClock;`. A class one of the candidates
+    /// declares takes no line.
     fn text(&self, candidates: &[&Candidate]) -> Option<(Vec<u8>, Vec<u8>)> {
-        let needed: BTreeSet<&str> =
-            candidates.iter().flat_map(|candidate| &candidate.extern_namespaces).map(String::as_str).collect();
         let held = String::from_utf8_lossy(&self.held);
         let mut lines: Vec<String> = if held.trim().is_empty() {
             vec![format!("namespace {};", self.namespace)]
         } else {
             held.lines().map(str::to_owned).collect()
         };
-        let is_extern_namespace = |line: &String| line.trim_start().starts_with("extern namespace ");
         let mut added = false;
-        for line in needed {
-            if lines.iter().any(|held| held.trim() == line) {
-                continue;
-            }
-            let at = match lines.iter().position(|held| is_extern_namespace(held) && held.trim() > line) {
-                Some(at) => at,
-                None => match lines.iter().rposition(is_extern_namespace) {
-                    Some(last) => last + 1,
-                    None => {
-                        if lines.last().is_some_and(|last| !last.trim().is_empty()) {
-                            lines.push(String::new());
-                        }
-                        lines.len()
-                    }
-                },
+        let namespaces: BTreeSet<&str> =
+            candidates.iter().flat_map(|candidate| &candidate.extern_namespaces).map(String::as_str).collect();
+        for line in namespaces {
+            added |= put_line(&mut lines, Line::ExternNamespace, line.to_owned());
+        }
+        // A class that converts with the candidates is PHP#, which takes no line.
+        let converts = |class: &str| {
+            candidates
+                .iter()
+                .flat_map(|candidate| &candidate.declares)
+                .any(|declared| declared.eq_ignore_ascii_case(class))
+        };
+        let undeclared: BTreeSet<&Undeclared> = candidates
+            .iter()
+            .flat_map(|candidate| &candidate.undeclared)
+            .filter(|undeclared| !matches!(undeclared, Undeclared::Class(class) if converts(class)))
+            .collect();
+        for undeclared in undeclared {
+            let line = match undeclared {
+                Undeclared::Class(class) => format!("extern {} uses any;", imported(&mut lines, class, &mut added)),
+                Undeclared::Function(namespace, function) => {
+                    format!("extern {}.{function} uses any;", imported(&mut lines, namespace, &mut added))
+                }
             };
-            lines.insert(at, line.to_owned());
-            added = true;
+            added |= put_line(&mut lines, Line::Extern, line);
         }
 
         added.then(|| (self.held.clone(), format!("{}\n", lines.join("\n")).into_bytes()))
     }
+}
+
+/// The kinds of line a declarations file holds, in the order they stand in it.
+#[derive(Clone, Copy, PartialEq, PartialOrd)]
+enum Line {
+    Namespace,
+    Import,
+    ExternNamespace,
+    Extern,
+}
+
+impl Line {
+    fn of(line: &str) -> Option<Self> {
+        let line = line.trim_start();
+        if line.starts_with("namespace ") {
+            Some(Self::Namespace)
+        } else if line.starts_with("import ") {
+            Some(Self::Import)
+        } else if line.starts_with("extern namespace ") {
+            Some(Self::ExternNamespace)
+        } else {
+            line.starts_with("extern ").then_some(Self::Extern)
+        }
+    }
+}
+
+/// Puts `line`, of the kind `kind`, in `lines` unless it is there: before the first line of its kind that sorts after
+/// it, or after the last one, or, as the first of its kind, after the lines of the kinds before it, past a blank line.
+/// Whether it was put.
+fn put_line(lines: &mut Vec<String>, kind: Line, line: String) -> bool {
+    if lines.iter().any(|held| held.trim() == line) {
+        return false;
+    }
+    let of_kind = |held: &String| Line::of(held) == Some(kind);
+    let at = match lines.iter().position(|held| of_kind(held) && held.trim() > line.as_str()) {
+        Some(at) => at,
+        None => match lines.iter().rposition(of_kind) {
+            Some(last) => last + 1,
+            None => {
+                let after = lines.iter().rposition(|held| Line::of(held).is_some_and(|held| held < kind));
+                let at = after.map_or(lines.len(), |after| after + 1);
+                lines.insert(at, String::new());
+                at + 1
+            }
+        },
+    };
+    lines.insert(at, line);
+
+    true
+}
+
+/// The name the file's lines write for `name`, a class or a namespace as PHP writes it: the alias an `import` line of
+/// it gives, or the one a new `import` line gives, its last part, or its namespace's last parts before it when another
+/// import or PHP# takes that, as `PaymentsError` for `Lib\Payments\Error`.
+fn imported(lines: &mut Vec<String>, name: &str, added: &mut bool) -> String {
+    let dotted = name.trim_start_matches('\\').replace('\\', ".");
+    let imports: Vec<(String, String)> = lines
+        .iter()
+        .filter_map(|line| {
+            let import = line.trim().strip_prefix("import ")?.strip_suffix(';')?;
+            Some(match import.split_once(" as ") {
+                Some((target, alias)) => (target.trim().to_owned(), alias.trim().to_owned()),
+                None => (import.to_owned(), import.rsplit('.').next().unwrap_or(import).to_owned()),
+            })
+        })
+        .collect();
+    if let Some((_, alias)) = imports.iter().find(|(target, _)| target.eq_ignore_ascii_case(&dotted)) {
+        return alias.clone();
+    }
+    let parts: Vec<&str> = dotted.split('.').collect();
+    let mut alias = parts[parts.len() - 1].to_owned();
+    let mut prefix = parts.len() - 1;
+    while prefix > 0
+        && (is_reserved_alias(&alias) || imports.iter().any(|(_, taken)| taken.eq_ignore_ascii_case(&alias)))
+    {
+        prefix -= 1;
+        alias = format!("{}{alias}", parts[prefix]);
+    }
+    let line = if alias == parts[parts.len() - 1] {
+        format!("import {dotted};")
+    } else {
+        format!("import {dotted} as {alias};")
+    };
+    *added |= put_line(lines, Line::Import, line);
+
+    alias
 }
 
 /// `path`, as the command line names it, relative to the workspace.
@@ -1487,10 +1598,10 @@ mod tests {
         assert_eq!(outcome.proofs, 2);
     }
 
-    /// An extension host whose one plugin appends to the log its second argument names: `start` and the worker's
-    /// process id as the worker starts, `exit` and the id as it exits, and `proof` and how many workers the log names
-    /// alive as each analysis starts. Its after-analysis hooks never finish, and log `hang`, in the proof its third
-    /// argument names: `the second proof of one sink`, logging `one sink` and the sink of each analysis that converts one,
+    /// An extension host whose one plugin appends to the log `HOST_LOG` names: `start` and the worker's process id as
+    /// an interpreter starts the worker, `exit` and the id as it ends, and `proof` and how many workers the log names
+    /// alive as each analysis starts. Its after-analysis hooks never finish, and log `hang`, in the proof `HANGS_IN`
+    /// names: `the second proof of one sink`, logging `one sink` and the sink of each analysis that converts one,
     /// or `the proof of the written files`, the first whose converted files are on disk.
     const HOST_COUNTING_ITS_WORKERS: &str = r#"<?php
 
@@ -1506,10 +1617,8 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-require $argv[1];
-
-$log = $argv[2];
-$worker = getmypid();
+$log = getenv('HOST_LOG');
+$worker = random_int(1, 0xFFFFFFFF);
 file_put_contents($log, "start {$worker}\n", FILE_APPEND | LOCK_EX);
 register_shutdown_function(static fn() => file_put_contents($log, "exit {$worker}\n", FILE_APPEND | LOCK_EX));
 
@@ -1587,40 +1696,33 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
 }
 
 (new Worker(new Extension('counts-workers', 'Counts workers', '0.0.0', analyzerPlugins: [
-    new CountsWorkers($log, $argv[3] ?? null),
+    new CountsWorkers($log, getenv('HANGS_IN') ?: null),
 ])))->run();
 "#;
 
-    /// The PHP SDK's autoloader, or `None` when PHP or the SDK's Composer dependencies are missing and
-    /// `MAGO_REQUIRE_PHP_SDK_TESTS` doesn't require them.
-    fn php_sdk() -> Option<PathBuf> {
-        let autoload = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/autoload.php");
-        let available = autoload.is_file()
-            && mago_database::process::output(std::process::Command::new("php").arg("--version"))
-                .is_ok_and(|output| output.status.success());
+    /// Whether the PHP SDK's Composer dependencies are installed, which `MAGO_REQUIRE_PHP_SDK_TESTS` requires.
+    fn php_sdk() -> bool {
+        let available = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/autoload.php").is_file();
         assert!(
             available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
-            "PHP and vendor dependencies are required for the extension host tests"
+            "vendor dependencies are required for the extension host tests"
         );
-        available.then_some(autoload)
+        available
     }
 
     /// The configuration of a project at `root` of `files`, as [`project`] builds it, with an extension host `counter` of
-    /// one worker that runs [`HOST_COUNTING_ITS_WORKERS`] with a deadline of 15 s, logs to `host.log`, and never
-    /// finishes the after-analysis hooks of the proof `hangs_in` names. A worker starts in about 0.1 s and answers
-    /// each proof in under 1 s, and the deadline counts from its start, so with 3 s a worker stopped for 4 s after its
-    /// start, as a loaded machine can stop it, failed its own proof too. Its workers have 30 s to exit once stopped, so
-    /// one that exits slowly on a loaded machine still logs its exit rather than being killed and counted alive.
-    fn hosted(root: &Path, autoload: &Path, files: &[(String, String)], hangs_in: Option<&str>) -> Configuration {
+    /// [`HOST_COUNTING_ITS_WORKERS`] with a deadline of 15 s, which logs to `host.log`, and never finishes the
+    /// after-analysis hooks of the proof `hangs_in` names. Each proof's hooks finish in under 1 s, so a loaded machine
+    /// that stops one for seconds still lets it finish.
+    fn hosted(root: &Path, files: &[(String, String)], hangs_in: Option<&str>) -> Configuration {
         project(root, files);
         std::fs::create_dir_all(root.join("tools")).unwrap();
         std::fs::write(root.join("tools/host.php"), HOST_COUNTING_ITS_WORKERS).unwrap();
         let mut toml = std::fs::read_to_string(root.join("mago.toml")).unwrap();
         toml.push_str(&format!(
-            "\n[extension-hosts.counter]\nworkers = 1\nrequest-timeout-ms = 15000\nshutdown-timeout-ms = 30000\ncommand = [\"php\", \"tools/host.php\", {:?}, {:?}{}]\n",
-            autoload.display().to_string(),
+            "\n[extension-hosts.counter]\nfile = \"tools/host.php\"\nrequest-timeout-ms = 15000\nenvironment = {{ HOST_LOG = {:?}{} }}\n",
             root.join("host.log").display().to_string(),
-            hangs_in.map(|proof| format!(", {proof:?}")).unwrap_or_default(),
+            hangs_in.map(|proof| format!(", HANGS_IN = {proof:?}")).unwrap_or_default(),
         ));
         std::fs::write(root.join("mago.toml"), toml).unwrap();
 
@@ -1658,14 +1760,14 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     /// proofs of three sinks, each split kept with its hosts while it proved its parts, had 1, 2, 3, 4, 3 and 2.
     #[test]
     fn each_proof_stops_its_hosts_before_the_next_proof_starts_its_own() {
-        let Some(autoload) = php_sdk() else {
+        if !php_sdk() {
             return;
-        };
+        }
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let mut files: Vec<(String, String)> = (0..5).map(clean).collect();
         files.extend((0..3).flat_map(sink));
-        let configuration = hosted(&root, &autoload, &files, None);
+        let configuration = hosted(&root, &files, None);
 
         let (_, outcome) = ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true }
             .run(configuration, ColorChoice::Never)
@@ -1682,14 +1784,14 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     /// on top of the five clean interfaces accepted, and the host's after-analysis hooks make no progress there.
     #[test]
     fn a_proof_that_cannot_finish_keeps_its_files_plain_php_and_the_run_reports_the_rest() {
-        let Some(autoload) = php_sdk() else {
+        if !php_sdk() {
             return;
-        };
+        }
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let mut files: Vec<(String, String)> = (0..5).map(clean).collect();
         files.extend((0..3).flat_map(sink));
-        let configuration = hosted(&root, &autoload, &files, Some("the second proof of one sink"));
+        let configuration = hosted(&root, &files, Some("the second proof of one sink"));
 
         let ((exit_code, outcome), logged) = logged(|| {
             ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true }
@@ -1719,19 +1821,19 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     }
 
     /// The error the host of [`hosted`] gives when its after-analysis hooks make no progress.
-    const TIMEOUT: &str = "Orchestrator error: Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `counter` made no progress for 15000 ms on the after-analysis hooks of plugin `counts-workers` (worker 0): raise its `request-timeout-ms` for hooks that run that long";
+    const TIMEOUT: &str = "Orchestrator error: Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `counter` made no progress for 15000 ms on the after-analysis hooks of plugin `counts-workers`: raise its `request-timeout-ms` for hooks that run that long";
 
     /// Once a run writes its files, fresh hosts that load them prove the project again. When that proof can't finish,
     /// the files are written and git holds their plain PHP, so the run still names them, logs the error, and fails as
     /// when those hosts find an issue.
     #[test]
     fn a_proof_of_the_written_files_that_cannot_finish_still_reports_them_and_fails() {
-        let Some(autoload) = php_sdk() else {
+        if !php_sdk() {
             return;
-        };
+        }
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
-        let configuration = hosted(&root, &autoload, &[clean(0), clean(1)], Some("the proof of the written files"));
+        let configuration = hosted(&root, &[clean(0), clean(1)], Some("the proof of the written files"));
 
         let ((exit_code, outcome), logged) = logged(|| {
             ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: false }
@@ -1759,12 +1861,12 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     /// the run still names them, logs the error, and fails as when those hosts find an issue.
     #[test]
     fn a_compile_of_the_written_files_for_the_hosts_that_fails_still_reports_them_and_fails() {
-        let Some(autoload) = php_sdk() else {
+        if !php_sdk() {
             return;
-        };
+        }
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
-        let configuration = hosted(&root, &autoload, &[clean(0), clean(1)], None);
+        let configuration = hosted(&root, &[clean(0), clean(1)], None);
         let project: String =
             unit::source_hash(root.as_os_str().as_encoded_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
         let folder = mago_sharp_lean::cache_root().unwrap().join("hosts").join(project);
@@ -1957,11 +2059,17 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             ("Contracts/helpers.php".to_owned(), "<?php\n\nfunction helper(): int\n{\n    return 1;\n}\n".to_owned());
         project(&root, &[script]);
         let started = root.join("host-started");
+        std::fs::create_dir_all(root.join("tools")).unwrap();
+        std::fs::write(
+            root.join("tools/host.php"),
+            "<?php\n\nfile_put_contents(getenv('STARTED'), \"started\\n\", FILE_APPEND);\n",
+        )
+        .unwrap();
         std::fs::write(
             root.join("mago.toml"),
             format!(
-                "php-version = \"8.5\"\n\n[source]\npaths = [\"src\"]\n\n[extension-hosts.proof]\ncommand = [\"sh\", \"-c\", \"echo started >> '{}'\"]\nworkers = 1\n",
-                started.display()
+                "php-version = \"8.5\"\n\n[source]\npaths = [\"src\"]\n\n[extension-hosts.proof]\nfile = \"tools/host.php\"\nenvironment = {{ STARTED = {:?} }}\n",
+                started.display().to_string()
             ),
         )
         .unwrap();
@@ -2073,15 +2181,16 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         ]
     }
 
-    /// The `extern namespace` lines a converted file needs go in `src/Externs.sharp`, the first PSR-4 folder's, which
-    /// the run creates in that folder's namespace: one line for each folder, naming the first of its names the file
-    /// meets. A run whose files need no line it lacks leaves the file as it is, and one that needs one more adds that
-    /// line alone, in its sorted place. Each converted file compiles with them, as its proof held them.
+    /// The `extern namespace` lines a converted file needs go in `src/Stubs/Externs.sharp`, the first PSR-4 folder's,
+    /// which the run creates in that folder's `Stubs` namespace: one line for each folder, naming the first of its names
+    /// the file meets, and a `uses any` line, with its import, for each function the file calls that no `extern` line
+    /// declares. A run whose files need no line it lacks leaves the file as it is, and one that needs more adds those
+    /// lines alone, each in its sorted place. Each converted file compiles with them, as its proof held them.
     #[test]
     fn the_extern_namespace_lines_converted_files_need_go_in_the_declarations_file_once() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
-        let externs = root.join("src/Externs.sharp");
+        let externs = root.join("src/Stubs/Externs.sharp");
         let run = |name: &str, body: &str| {
             let configuration = project(&root, &root_names(name, body));
             let path = root.join(format!("src/Contracts/{name}.php"));
@@ -2095,7 +2204,10 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         };
 
         let first = run("Pages", "        abort(404);");
-        assert_eq!(first, "namespace Generated;\n\nextern namespace Acme.Foundation for abort;\n");
+        assert_eq!(
+            first,
+            "namespace Generated.Stubs;\n\nimport Acme.Foundation;\n\nextern namespace Acme.Foundation for abort;\n\nextern Foundation.abort uses any;\n"
+        );
 
         let second = run("Banner", "        return ACME_VERSION;");
         assert_eq!(second, first);
@@ -2103,12 +2215,49 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         let third = run("Greeter", "        return str_shout(ACME_VERSION);");
         assert_eq!(
             third,
-            "namespace Generated;\n\nextern namespace Acme.Foundation for abort;\nextern namespace Acme.StringHelpers for str_shout;\n"
+            "namespace Generated.Stubs;\n\nimport Acme.Foundation;\nimport Acme.StringHelpers;\n\nextern namespace Acme.Foundation for abort;\nextern namespace Acme.StringHelpers for str_shout;\n\nextern Foundation.abort uses any;\nextern StringHelpers.str_shout uses any;\n"
         );
     }
 
-    /// The declarations file goes in the first PSR-4 folder `composer.json` lists, in its namespace, whatever the
-    /// order of the namespaces.
+    /// Spec section 29: every plain PHP class a converted file reaches needs an `extern` line, so the run writes one that
+    /// says `uses any` for each class the project's lines leave out, with its import, under its namespace's last part
+    /// before its name where another import takes its name, and the converted file compiles with them.
+    #[test]
+    fn a_converted_file_that_calls_plain_php_classes_compiles_with_their_uses_any_lines() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let message = |namespace: &str| {
+            format!(
+                "<?php\n\nnamespace Acme\\{namespace};\n\nfinal class Message\n{{\n    public function text(): string\n    {{\n        return '{namespace}';\n    }}\n}}\n"
+            )
+        };
+        let files = [
+            (
+                "Lib/Mail/Mailchimp.php".to_owned(),
+                "<?php\n\nnamespace Acme\\Mail;\n\nfinal class Mailchimp\n{\n    public static function lists(): self\n    {\n        return new self();\n    }\n\n    public function name(): string\n    {\n        return 'lists';\n    }\n}\n".to_owned(),
+            ),
+            ("Lib/Mail/Message.php".to_owned(), message("Mail")),
+            ("Lib/Chat/Message.php".to_owned(), message("Chat")),
+            (
+                "Contracts/Sync.php".to_owned(),
+                "<?php\n\nnamespace Generated\\Contracts;\n\nfinal class Sync\n{\n    public function run(): string\n    {\n        return \\Acme\\Mail\\Mailchimp::lists()->name() . (new \\Acme\\Mail\\Message())->text() . (new \\Acme\\Chat\\Message())->text();\n    }\n}\n".to_owned(),
+            ),
+        ];
+        let configuration = project(&root, &files);
+        let path = root.join("src/Contracts/Sync.php");
+        let (exit_code, outcome) =
+            ConvertCommand { paths: vec![path], dry_run: false }.run(configuration, ColorChoice::Never).unwrap();
+
+        assert_eq!(exit_code, ExitCode::SUCCESS);
+        assert_eq!(outcome.converted.len(), 1, "{:#?}", outcome.refused);
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/Stubs/Externs.sharp")).unwrap(),
+            "namespace Generated.Stubs;\n\nimport Acme.Chat.Message;\nimport Acme.Mail.Mailchimp;\nimport Acme.Mail.Message as MailMessage;\n\nextern MailMessage uses any;\nextern Mailchimp uses any;\nextern Message uses any;\n"
+        );
+    }
+
+    /// The declarations file goes in the `Stubs` folder of the first PSR-4 folder `composer.json` lists, in its
+    /// namespace, whatever the order of the namespaces.
     #[test]
     fn the_declarations_file_goes_in_the_first_psr4_folder_composer_json_lists() {
         let directory = tempfile::tempdir().unwrap();
@@ -2119,7 +2268,10 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         let roots = psr4_roots(&root).unwrap();
         assert_eq!(roots, [("Zoo".to_owned(), PathBuf::from("zoo")), ("App".to_owned(), PathBuf::from("app"))]);
         let externs = Externs::new(&root, &roots[0]).unwrap();
-        assert_eq!((display(&externs.name), externs.namespace), ("zoo/Externs.sharp".to_owned(), "Zoo".to_owned()));
+        assert_eq!(
+            (display(&externs.name), externs.namespace),
+            ("zoo/Stubs/Externs.sharp".to_owned(), "Zoo.Stubs".to_owned())
+        );
     }
 
     /// A file the compile refuses once converted fails its proof with the compile's first error, and a converted file
@@ -2132,6 +2284,8 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             original: b"<?php\n\nnamespace App;\n\nfinal class Box\n{\n}\n".to_vec(),
             text: Vec::new(),
             extern_namespaces: Vec::new(),
+            undeclared: Vec::new(),
+            declares: Vec::new(),
         };
         let panicked = IssueCollection::from(vec![
             Issue::error("Invalid return.").with_code("invalid-return-statement"),
@@ -2183,6 +2337,8 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             original: b"<?php\n\nnamespace App;\n\nfinal class Box\n{\n    public function size(): int\n    {\n        return 1;\n    }\n}\n".to_vec(),
             text: Vec::new(),
             extern_namespaces: Vec::new(),
+            undeclared: Vec::new(),
+            declares: Vec::new(),
         };
         let issue = |line: u32, members: &[&str]| {
             let key = (b"src/Box.sharp".to_vec(), Level::Error, Some("code".to_owned()), "Wrong.".to_owned(), line);

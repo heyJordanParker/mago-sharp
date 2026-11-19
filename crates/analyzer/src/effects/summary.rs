@@ -155,6 +155,7 @@ pub(crate) fn record_behaviors<A>(
             changes: Vec::new(),
             function_values: Vec::new(),
             readonly_calls: Vec::new(),
+            undeclared: Vec::new(),
             imports: Arc::clone(&context.imported_names),
             scope: Arc::clone(&context.scope),
         });
@@ -191,6 +192,7 @@ pub(crate) fn record_parse<A>(
             changes: Vec::new(),
             function_values: Vec::new(),
             readonly_calls: Vec::new(),
+            undeclared: Vec::new(),
             imports: Arc::clone(&context.imported_names),
             scope: Arc::clone(&context.scope),
         }
@@ -233,11 +235,13 @@ pub(crate) fn record_parse<A>(
         if constructor.flags.is_sharp() {
             reach(&mut parsing, class.name, Body::Method(constructor.name, word(b"__construct")), b"__construct");
         } else {
+            // The bridge writes `parse`, so a plain PHP constructor no line declares is no use of the code's to
+            // refuse, and `parse` may have any effect.
             let callee = (constructor.original_name, empty_word());
-            let declaration = codebase.extern_of_method(class.name, constructor.name, word(b"__construct"));
-            parsing
-                .effects
-                .extend(plain_php_effects(declaration, callee).into_iter().map(|effect| (effect, span, callee)));
+            let effects = codebase
+                .extern_of_method(constructor.name, word(b"__construct"))
+                .map_or_else(|| vec![Effect::Any], plain_php_effects);
+            parsing.effects.extend(effects.into_iter().map(|effect| (effect, span, callee)));
         }
     }
     let mut nested = Vec::new();
@@ -375,7 +379,7 @@ fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: Word) -> 
     let declaring = codebase.get_class_like(declaring_class)?;
     let metadata = codebase.get_method(declaring_class, method)?;
 
-    // `class` is the class the value is read through, where a call's `extern` lookup starts too.
+    // A message names the method through `class`, the class the value is read through.
     let class_name = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
     let callee = (class_name, metadata.original_name);
 
@@ -388,19 +392,18 @@ fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: Word) -> 
     } else if is_prelude_stub(declaring_class) {
         Runs::Foreign { callee, effects: Vec::new() }
     } else {
-        Runs::Foreign {
-            callee,
-            effects: plain_php_effects(codebase.extern_of_method(class, declaring_class, method), callee),
-        }
+        let line = class_line(codebase, declaring_class);
+
+        plain_php_runs(codebase.extern_of_method(declaring_class, method), callee, line)
     })
 }
 
 /// What a value of the plain PHP function `function` runs wherever it is called, spec section 14.3: the effects its
-/// `extern` declares, as a call of the function has them.
+/// `extern` line declares, as a call of the function has them.
 fn function_value_runs(codebase: &CodebaseMetadata, function: Word) -> Runs {
     let (callee, declaration) = function_extern(codebase, function);
 
-    Runs::Foreign { callee, effects: plain_php_effects(declaration, callee) }
+    plain_php_runs(declaration, callee, callee)
 }
 
 /// The summary of `body`, a body of the class `class`, and the summaries of the lambdas written in it.
@@ -428,6 +431,7 @@ where
         changes: Vec::new(),
         function_values: Vec::new(),
         readonly_calls: Vec::new(),
+        undeclared: Vec::new(),
         imports: Arc::clone(&imports),
         scope: Arc::clone(&scope),
     };
@@ -761,16 +765,21 @@ where
         let ClassLikeMemberSelector::Identifier(name) = property else {
             return Vec::new();
         };
-        let classes = match object.unparenthesized() {
+
+        self.member_classes(object).into_iter().filter_map(|class| self.accessor(class, name.value, accessor)).collect()
+    }
+
+    /// The classes a member read through `object` reaches: the class `Class.member` names, for a static, or each class
+    /// the value may hold an object of.
+    fn member_classes(&self, object: &Expression<'arena>) -> Vec<Word> {
+        match object.unparenthesized() {
             Expression::ConstantAccess(class)
                 if self.context.resolved_names.binding(&class.name) == Some(Binding::Class) =>
             {
                 vec![word(self.context.resolved_names.get(&class.name))]
             }
             _ => self.object_classes(object),
-        };
-
-        classes.into_iter().filter_map(|class| self.accessor(class, name.value, accessor)).collect()
+        }
     }
 
     /// The `accessor` body of `property` that a read or write through `class` runs, by the class that declares the
@@ -795,6 +804,11 @@ where
             if let Some(effect) = foreign_class(codebase, class) {
                 let class = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
                 self.summary.effects.push((Effect::Foreign(effect), span, (class, member)));
+            }
+        }
+        for class in self.member_classes(object) {
+            if codebase.get_class_like(class).is_some_and(|metadata| !metadata.flags.is_sharp()) {
+                self.plain_property(class, php_variable_name(name.value), span);
             }
         }
 
@@ -963,9 +977,8 @@ where
         };
 
         // A call of a lambda written in this body runs the lambda here. A call of any other function value, such as a
-        // local's or a parameter's, has the effects its function type lists. One whose plain PHP source declares no
-        // PHP# type runs code no `extern` declares, so it is `Unknown`, as a plain PHP call without one is, spec
-        // section 21.
+        // local's or a parameter's, has the effects its function type lists. A call of one whose type plain PHP gives,
+        // with no effects, is refused where the analysis reads it, spec section 21.
         if let Some(lambda) = function.and_then(|function| self.lambda(function)) {
             let roots: Vec<Roots> = arguments.arguments.iter().map(|argument| self.roots(argument.value())).collect();
             self.inline(lambda, |index| roots.get(index).cloned().unwrap_or_default());
@@ -980,9 +993,6 @@ where
             let cause = (empty_word(), self.text(function.span()));
             for effect in declared_effects(self.context.codebase, function_type) {
                 self.summary.effects.push((Effect::Foreign(effect), span, cause));
-            }
-            if function_type.types.iter().any(is_undeclared_function) {
-                self.summary.effects.push((Effect::Unknown(None), span, cause));
             }
         }
 
@@ -1007,7 +1017,7 @@ where
             match *target {
                 CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function_name), .. } => {
                     let (cause, declaration) = function_extern(self.codebase(), function_name);
-                    self.plain_php(declaration, span, cause);
+                    self.plain_php(declaration, span, cause, cause);
                     self.callbacks(arguments);
                 }
                 CallTarget::FunctionLike {
@@ -1100,41 +1110,58 @@ where
     }
 
     /// Records a call of the property `property` of `class` that holds a function. A PHP# class declares it with a
-    /// `Function` type, which has the effects its `uses` lists. A plain PHP closure or callable is `Unknown`, because an
-    /// `extern` declares a class's members, not the code a property holds. An object's `__invoke` is recorded as the
-    /// method it is.
+    /// `Function` type, which has the effects its `uses` lists. A plain PHP class's property is one of its members, so
+    /// the code it holds has the effects of the `extern` line of the class that declares it, spec section 29, as its
+    /// read records them. An object's `__invoke` is recorded as the method it is.
     fn property_call(&mut self, class: Word, property: Word, span: Span) {
         let codebase = self.codebase();
         let Some(class_like) = codebase.get_class_like(class) else {
             return;
         };
-        let property_type = codebase
-            .get_property(class, property)
-            .and_then(|metadata| metadata.type_metadata.as_ref())
-            .map(|metadata| &metadata.type_union);
+        if !class_like.flags.is_sharp() {
+            self.plain_property(class, property, span);
+
+            return;
+        }
+
         let cause =
             (class_like.original_name, word(property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes())));
-        if class_like.flags.is_sharp() {
-            for effect in
-                property_type.map(|property_type| declared_effects(codebase, property_type)).unwrap_or_default()
-            {
-                self.summary.effects.push((Effect::Foreign(effect), span, cause));
-            }
+        let effects = codebase
+            .get_property(class, property)
+            .and_then(|metadata| metadata.type_metadata.as_ref())
+            .map(|metadata| declared_effects(codebase, &metadata.type_union))
+            .unwrap_or_default();
+        for effect in effects {
+            self.summary.effects.push((Effect::Foreign(effect), span, cause));
+        }
+    }
 
+    /// Records a read at `span` of the property `property`, a PHP name such as `$id`, through the plain PHP class
+    /// `class`, spec section 29: it takes the `extern` line of the class that declares the property, whose effects
+    /// cover the class's members. A read of a property no class declares, as a constant, a case or a method value is
+    /// read, is no read of a property.
+    fn plain_property(&mut self, class: Word, property: Word, span: Span) {
+        let codebase = self.codebase();
+        if is_prelude_stub(class) {
             return;
         }
-
-        let holds_object = property_type.is_some_and(|property_type| {
-            property_type.types.iter().all(|atomic| {
-                matches!(atomic, TAtomic::Object(object)
-                    if object.get_name().is_some_and(|name| !name.as_bytes().eq_ignore_ascii_case(b"Closure")))
-            })
-        });
-        if holds_object {
+        let Some(declaring) = codebase
+            .get_class_like(class)
+            .and_then(|metadata| metadata.declaring_property_ids.get(&property))
+            .and_then(|declaring| codebase.get_class_like(*declaring))
+            .filter(|declaring| !declaring.flags.is_sharp())
+        else {
             return;
-        }
+        };
 
-        self.summary.effects.push((Effect::Unknown(None), span, cause));
+        let cause =
+            (declaring.original_name, word(property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes())));
+        self.plain_php(
+            codebase.extern_of(declaring.name, empty_word()),
+            span,
+            cause,
+            class_line(codebase, declaring.name),
+        );
     }
 
     /// Records a PHP# operator on instances at `span`: it runs the static method its class declares, which takes
@@ -1221,8 +1248,8 @@ where
         if is_prelude_stub(declaring_class) {
             self.prelude_stub_call(metadata, span, receiver);
         } else {
-            let declaration = codebase.extern_of_method(class, declaring_class, method_name);
-            self.plain_php(declaration, span, cause);
+            let declaration = codebase.extern_of_method(declaring_class, method_name);
+            self.plain_php(declaration, span, cause, class_line(codebase, declaring_class));
             self.callbacks(arguments);
         }
     }
@@ -1341,10 +1368,9 @@ where
     }
 
     /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the
-    /// effects of the `extern` of the class `new` names, which an error names as `new` does, or its nearest plain PHP
-    /// parent when PHP# declares it. The class that declares the constructor decides between the two, and the class
-    /// `new` names decides when no class declares one. A named constructor is the class's own, spec section
-    /// 9.1, and its body runs on the object its `: this(…)` creates.
+    /// effects of the `extern` line of the class `new` creates, or of its nearest plain PHP parent when PHP# declares
+    /// that class, and takes on the effects of each function it is given, spec section 29. A named constructor is the
+    /// class's own, spec section 9.1, and its body runs on the object its `: this(…)` creates.
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
         let resolved_names = self.context.resolved_names;
         let class_name = match instantiation.class.unparenthesized() {
@@ -1385,14 +1411,19 @@ where
             let callee = Body::Method(declaring.name, constructor);
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: roots });
         } else if !is_prelude_stub(class.name) {
-            let declaration = codebase.extern_of_method(class.name, declaring.name, constructor);
-            // Only plain PHP takes an `extern`, so a PHP# class's error names its nearest plain PHP parent.
+            // `new` takes the line of the class it creates, as `new ValueError(…)` takes `ValueError`'s, and only plain
+            // PHP takes an `extern` line, so a PHP# class takes its nearest plain PHP parent's.
             let named = std::iter::successors(Some(class), |class| {
                 class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent))
             })
             .find(|class| !class.flags.is_sharp())
             .unwrap_or(declaring);
-            self.plain_php(declaration, span, (named.original_name, empty_word()));
+            let declaration = codebase.extern_of_method(named.name, constructor);
+            let line = class_line(codebase, named.name);
+            self.plain_php(declaration, span, (named.original_name, empty_word()), line);
+            if let Some(arguments) = &instantiation.argument_list {
+                self.callbacks(arguments);
+            }
         }
     }
 
@@ -1405,9 +1436,16 @@ where
         }
     }
 
-    /// Records a call into plain PHP, of the callee `cause`, with the effects `declaration` gives it.
-    fn plain_php(&mut self, declaration: Option<&ExternMetadata>, span: Span, cause: (Word, Word)) {
-        for effect in plain_php_effects(declaration, cause) {
+    /// Records a use of plain PHP at `span`, of the callee `cause`, with the effects its `extern` line `declaration`
+    /// gives it, or, without one, as a use that needs the line `line`.
+    fn plain_php(&mut self, declaration: Option<&ExternMetadata>, span: Span, cause: (Word, Word), line: (Word, Word)) {
+        let Some(declaration) = declaration else {
+            self.summary.undeclared.push((span, line));
+
+            return;
+        };
+
+        for effect in plain_php_effects(declaration) {
             self.summary.effects.push((effect, span, cause));
         }
     }
@@ -1476,6 +1514,7 @@ where
                         self.summary.effects.push((effect, span, callee));
                     }
                 }
+                Runs::Undeclared { line, .. } => self.summary.undeclared.push((span, line)),
             }
         }
     }
@@ -1677,13 +1716,27 @@ fn function_extern(codebase: &CodebaseMetadata, function: Word) -> ((Word, Word)
     ((empty_word(), cause), codebase.extern_of(empty_word(), ascii_lowercase_word(function.as_bytes())))
 }
 
-/// The effects of a call into plain PHP of the callee `cause`: the effects its declaration lists, or `Unknown` without
-/// one.
-fn plain_php_effects(declaration: Option<&ExternMetadata>, cause: (Word, Word)) -> Vec<Effect> {
+/// The effects a call into plain PHP has under its `extern` line `declaration`: each effect its `uses` lists, or
+/// [`Effect::Any`] for `uses any`.
+fn plain_php_effects(declaration: &ExternMetadata) -> Vec<Effect> {
+    let any = declaration.uses_any.then_some(Effect::Any);
+
+    declaration.effects.iter().map(|effect| Effect::Foreign(*effect)).chain(any).collect()
+}
+
+/// What a value of plain PHP runs wherever it is called: the `callee`, with the effects its `extern` line
+/// `declaration` declares, or, without one, the line it needs, `line`.
+fn plain_php_runs(declaration: Option<&ExternMetadata>, callee: (Word, Word), line: (Word, Word)) -> Runs {
     match declaration {
-        Some(declaration) => declaration.effects.iter().map(|effect| Effect::Foreign(*effect)).collect(),
-        None => vec![Effect::Unknown(Some(cause))],
+        Some(declaration) => Runs::Foreign { callee, effects: plain_php_effects(declaration) },
+        None => Runs::Undeclared { callee, line },
     }
+}
+
+/// The `extern` line a use of a member the plain PHP class-like `class` declares needs, spec section 29: the class's
+/// own, by its full name and an empty member.
+fn class_line(codebase: &CodebaseMetadata, class: Word) -> (Word, Word) {
+    (codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name), empty_word())
 }
 
 /// The `foreign` class an object of `class` is, spec section 29: `class` itself or a parent marked `foreign`, by its
@@ -1718,12 +1771,6 @@ fn lambda_literal<'ast, 'arena>(expression: &'ast Expression<'arena>) -> Option<
     let expression = expression.unparenthesized();
 
     matches!(expression, Expression::ArrowFunction(_) | Expression::Closure(_)).then_some(expression)
-}
-
-/// Whether `atomic` is a function plain PHP wrote with no PHP# type and no function it names, as a `Closure` its
-/// declaration gives.
-fn is_undeclared_function(atomic: &TAtomic) -> bool {
-    matches!(atomic, TAtomic::Callable(TCallable::Signature(signature)) if signature.effects.is_none() && signature.source.is_none())
 }
 
 /// The effects the function types of `value_type` list, each once. A function value with a `source` runs a PHP# body,

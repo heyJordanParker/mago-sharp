@@ -739,12 +739,14 @@ where
         } else {
             (empty_word(), name)
         };
-        let effects = r#extern
-            .uses
-            .iter()
-            .flat_map(|uses| uses.names.iter())
+        // `uses none` and `uses any` name no effect: the first declares the target pure, the second that it may have any
+        // effect, spec section 29.
+        let names = || r#extern.uses.iter().flat_map(|uses| uses.names.iter());
+        let effects = names()
+            .filter(|effect| !matches!(effect.value, b"none" | b"any"))
             .map(|effect| word(context.resolved_names.get(effect)))
             .collect();
+        let uses_any = names().any(|effect| effect.value == b"any");
         let mut type_context = TypeResolutionContext::new();
         if let Some(type_parameters) = &r#extern.type_parameters {
             scan_type_parameters(
@@ -775,6 +777,7 @@ where
             span: r#extern.span(),
             target,
             effects,
+            uses_any,
             event: r#extern.event.is_some(),
             attributes: scan_attribute_lists(&r#extern.attribute_lists, context, &self.scope, None),
             parameters,

@@ -575,8 +575,6 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-require $argv[1];
-
 final class ReadsTheCompiledFile implements Plugin, BeforeAnalysisHook
 {
     public function getDefinition(): PluginDefinition
@@ -624,10 +622,7 @@ fn a_host_sees_each_php_sharp_file_compiled_from_its_current_source() {
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
     );
 
     compile_succeeds(root);
@@ -662,10 +657,7 @@ fn analyses_that_start_together_after_an_edit_each_give_their_hosts_the_current_
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
     );
     let cache = tempfile::tempdir().unwrap();
     let analyze = || {
@@ -723,8 +715,6 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-require $argv[1];
-
 final class ReadsTheCompiledFileTwice implements Plugin, BeforeAnalysisHook
 {
     public function getDefinition(): PluginDefinition
@@ -779,10 +769,7 @@ fn a_later_run_rewrites_the_hosts_folder_only_once_the_hosts_reading_it_are_done
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
     );
     write(root, "hold", "");
     let cache = tempfile::tempdir().unwrap();
@@ -838,10 +825,7 @@ fn a_compile_with_a_host_enabled_runs_every_time() {
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
     );
     compile_succeeds(root);
     compile_succeeds(root);
@@ -862,8 +846,6 @@ use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
-
-require $argv[1];
 
 final class DeletesASource implements Plugin, BeforeAnalysisHook
 {
@@ -899,10 +881,7 @@ fn a_source_deleted_while_the_compile_runs_fails_nothing_and_the_next_compile_le
         write(
             root,
             "mago.toml",
-            &format!(
-                "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.deleter]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-                repository.join("vendor/autoload.php").display().to_string()
-            ),
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.deleter]\nfile = \"tools/host.php\"\n",
         );
     };
     let directory = project(ORDER, MONEY);
@@ -938,10 +917,7 @@ fn the_hosts_compile_keeps_its_record_whatever_its_worker_threads_log() {
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
     );
     for file in 0..64 {
         write(root, &format!("vendor/acme/torn/src/Torn{file}.php"), "<?php\n\nfunction torn( {\n");
@@ -984,8 +960,6 @@ use Mago\Sdk\Linter\RuleDefinition;
 use Mago\Sdk\Reporting\Level;
 use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Worker;
-
-require $argv[1];
 
 final class ReadsTheCompiledFile implements Rule
 {
@@ -1030,10 +1004,7 @@ fn a_linter_host_sees_each_php_sharp_file_compiled_on_a_fresh_tree() {
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
     );
 
     let linted = process::output(
@@ -1065,7 +1036,7 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-require $argv[1];
+define('MAGO_TEST_WORKER', random_int(1, 0xFFFFFFFF));
 
 final class LogsItsProcess implements Plugin, BeforeAnalysisHook
 {
@@ -1084,7 +1055,7 @@ final class LogsItsProcess implements Plugin, BeforeAnalysisHook
         class_exists('App\Word');
         $compiled = (string) @file_get_contents(getenv('SHARP_COMPILED') . '/app/Word.sharpc');
         $word = str_contains($compiled, 'second') ? 'second' : (str_contains($compiled, 'first') ? 'first' : 'nothing');
-        file_put_contents('host.log', getmypid() . " {$word}\n", FILE_APPEND);
+        file_put_contents('host.log', MAGO_TEST_WORKER . " {$word}\n", FILE_APPEND);
     }
 }
 
@@ -1109,10 +1080,7 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nfile = \"tools/host.php\"\n",
     );
     let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
     let wait_for_lines = |lines: usize| {
@@ -1163,7 +1131,7 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-require $argv[1];
+define('MAGO_TEST_WORKER', random_int(1, 0xFFFFFFFF));
 
 final class LogsEachFile implements Plugin, AfterFileAnalysisHook
 {
@@ -1184,7 +1152,7 @@ final class LogsEachFile implements Plugin, AfterFileAnalysisHook
 
     public function afterFileAnalysis(AfterFileAnalysisContext $context): void
     {
-        file_put_contents('host.log', getmypid() . " {$context->analysis->file}\n", FILE_APPEND);
+        file_put_contents('host.log', MAGO_TEST_WORKER . " {$context->analysis->file}\n", FILE_APPEND);
     }
 }
 
@@ -1210,10 +1178,7 @@ fn a_watch_keeps_a_worker_that_never_loaded_the_edited_class() {
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.rule]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.rule]\nfile = \"tools/host.php\"\n",
     );
     let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
     let watch_log = tempfile::NamedTempFile::new().unwrap();
@@ -1439,10 +1404,7 @@ fn a_watch_whose_changes_hold_a_deleted_file_reports_its_dependents_and_keeps_wa
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nfile = \"tools/host.php\"\n",
     );
 
     // The watch's reports and log, outside the watched project, so a failure shows what the watch saw.
@@ -1514,10 +1476,7 @@ fn a_watch_starts_the_hosts_again_when_another_run_compiled_an_edit_while_it_wai
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nfile = \"tools/host.php\"\n",
     );
     let cache = tempfile::tempdir().unwrap();
     let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
@@ -1605,7 +1564,7 @@ fn a_typing_host_loads_a_class_only_its_typing_makes_correct_on_a_fresh_tree() {
     write(
         root,
         "app/Greeting.sharp",
-        "namespace App;\n\nimport App.Helpers;\n\npublic class Greeting\n{\n    public static string hello() => Helpers.untyped();\n}\n",
+        "namespace App;\n\nimport App.Helpers;\n\nextern Helpers.untyped uses none;\n\npublic class Greeting\n{\n    public static string hello() => Helpers.untyped();\n}\n",
     );
     write(
         root,
@@ -1616,10 +1575,7 @@ fn a_typing_host_loads_a_class_only_its_typing_makes_correct_on_a_fresh_tree() {
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.typing]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.typing]\nfile = \"tools/host.php\"\n",
     );
 
     compile_succeeds(root);
@@ -1643,8 +1599,6 @@ use Mago\Sdk\Reporting\Level;
 use Mago\Sdk\SourceLocation;
 use Mago\Sdk\Span;
 use Mago\Sdk\Worker;
-
-require $argv[1];
 
 final class MarkerRule implements Plugin, AfterFileAnalysisHook
 {
@@ -1702,8 +1656,7 @@ fn compile_hides_the_host_errors_an_ignore_entry_or_the_baseline_hides_from_anal
     );
     let config = |analyzer: &str| {
         format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[analyzer]\n{analyzer}\n\n[extension-hosts.acme]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[analyzer]\n{analyzer}\n\n[extension-hosts.acme]\nfile = \"tools/host.php\"\n"
         )
     };
 
@@ -1733,8 +1686,6 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Worker;
-
-require $argv[1];
 
 final class SharpOnlyRule implements Plugin, NodeAnalysisHook
 {
@@ -1784,10 +1735,7 @@ fn compile_runs_the_node_hooks_only_in_the_php_sharp_files_it_lowers() {
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.acme]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.acme]\nfile = \"tools/host.php\"\n",
     );
 
     compile_succeeds(root);
@@ -1815,10 +1763,7 @@ fn compile_reports_a_hosts_issue_only_on_the_projects_own_files() {
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.acme]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.acme]\nfile = \"tools/host.php\"\n",
     );
 
     let output = compile(root);
@@ -1850,10 +1795,7 @@ fn compile_reports_a_hosts_issue_on_a_file_of_an_includes_folder_outside_vendor(
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\", \"lib\"]\n\n[extension-hosts.acme]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\", \"lib\"]\n\n[extension-hosts.acme]\nfile = \"tools/host.php\"\n",
     );
 
     let output = compile(root);
@@ -1883,8 +1825,6 @@ use Mago\Sdk\Analyzer\ReturnTypeProviderContext;
 use Mago\Sdk\Analyzer\Type;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
-
-require $argv[1];
 
 final class TypesHelpers implements FunctionReturnTypeProvider
 {
@@ -1942,8 +1882,6 @@ use Mago\Sdk\Analyzer\Type;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-require $argv[1];
-
 final class Signing implements Plugin, MethodReturnTypeProvider, CallableSignatureProvider
 {
     public function getDefinition(): PluginDefinition
@@ -1994,10 +1932,7 @@ fn a_missing_collection_method_names_the_collection_type_when_a_host_signs_metho
     write(
         root,
         "mago.toml",
-        &format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.signing]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
-            repository.join("vendor/autoload.php").display().to_string()
-        ),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.signing]\nfile = \"tools/host.php\"\n",
     );
 
     let output = compile(root);
@@ -2640,7 +2575,7 @@ fn a_compiled_file_goes_stale_only_when_a_file_it_reads_changes() {
     write(
         root,
         "app/Paced.sharp",
-        "namespace App;\n\nimport Lib.Pace;\n\npublic class Paced\n{\n    public int percent()\n    {\n        return Pace.percent();\n    }\n}\n",
+        "namespace App;\n\nimport Lib.Pace;\nimport Lib.Rate;\n\nextern Rate uses none;\n\npublic class Paced\n{\n    public int percent()\n    {\n        return Pace.percent();\n    }\n}\n",
     );
     let root = std::fs::canonicalize(root).unwrap();
     let stale = |name: &str| inputs_changed(&root, &std::fs::read(compiled(&root, name)).unwrap()).unwrap();
@@ -2775,7 +2710,7 @@ fn compile_refuses_a_php_sharp_file_after_an_edit_of_the_vendor_file_it_calls() 
     write(
         root,
         "app/Paced.sharp",
-        "namespace App;\n\nimport Acme.Rate;\n\npublic class Paced\n{\n    public int percent() => Rate.percent();\n}\n",
+        "namespace App;\n\nimport Acme.Rate;\n\nextern Rate uses none;\n\npublic class Paced\n{\n    public int percent() => Rate.percent();\n}\n",
     );
     compile_succeeds(root);
 
@@ -3797,7 +3732,7 @@ fn compile_lists_the_files_whose_extern_lines_give_a_declaration_attributes() {
     let group = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_ALL | \\Attribute::IS_REPEATABLE)]\nfinal class Group\n{\n    public function __construct(public string $name) {}\n}\n";
     let mailer = "<?php\n\nnamespace Lib;\n\nfinal class Mailer\n{\n    public function sendLater(): void {}\n}\n";
     let functions = "<?php\n\nnamespace Lib;\n\nfunction sentAt(): int\n{\n    return 1;\n}\n";
-    let first = "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Group;\nimport Lib.Mailer;\n\n[Group(\"mail\")]\nextern Mailer;\nextern Group;\n[Group(\"later\")]\nextern Mailer.sendLater;\n[Group(\"time\")]\nextern Lib.sentAt;\n\npublic class First\n{\n}\n";
+    let first = "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Group;\nimport Lib.Mailer;\n\n[Group(\"mail\")]\nextern Mailer uses none;\nextern Group uses none;\n[Group(\"later\")]\nextern Mailer.sendLater uses none;\n[Group(\"time\")]\nextern Lib.sentAt uses none;\n\npublic class First\n{\n}\n";
     let directory = lawful_project(&[
         ("vendor/acme/lib/Group.php", group),
         ("vendor/acme/lib/Mailer.php", mailer),
@@ -3825,7 +3760,7 @@ fn compile_lists_the_effects_each_extern_line_declares_for_a_class_and_a_method(
     let mailer = "<?php\n\nnamespace Lib;\n\nfinal class Mailer\n{\n    public function send(): void {}\n\n    public function count(): int\n    {\n        return 0;\n    }\n}\n";
     let functions = "<?php\n\nnamespace Lib;\n\nfunction sentAt(): int\n{\n    return 1;\n}\n";
     let smtp = "namespace App.Mail;\n\npublic foreign class Smtp\n{\n}\n";
-    let stubs = "namespace App.Stubs;\n\nimport App.Mail.Smtp;\nimport Lib;\nimport Lib.Mailer;\n\nextern Mailer;\nextern Mailer.send uses Smtp;\nextern Lib.sentAt uses Smtp;\n\npublic class Stubs\n{\n}\n";
+    let stubs = "namespace App.Stubs;\n\nimport App.Mail.Smtp;\nimport Lib;\nimport Lib.Mailer;\n\nextern Mailer uses none;\nextern Mailer.send uses Smtp;\nextern Lib.sentAt uses Smtp;\n\npublic class Stubs\n{\n}\n";
     let directory = lawful_project(&[
         ("vendor/acme/lib/Mailer.php", mailer),
         ("vendor/acme/lib/functions.php", functions),
@@ -3850,7 +3785,7 @@ fn compile_lists_the_effects_each_extern_line_declares_for_a_class_and_a_method(
 #[test]
 fn an_extern_parameter_takes_the_functions_whose_effects_its_function_type_lists() {
     let extension = "<?php\n\nnamespace Cel;\n\nfinal readonly class CallableExtension\n{\n    /** @param array<non-empty-string, callable> $functions */\n    public function __construct(\n        private array $functions,\n        private bool $idempotent = false,\n    ) {}\n}\n";
-    let stubs = "namespace App.Stubs;\n\nimport Cel.CallableExtension;\n\nextern void CallableExtension.__construct(Map<string, Function<Any?(Any?) uses Database, Files, Clock>> functions);\n";
+    let stubs = "namespace App.Stubs;\n\nimport Cel.CallableExtension;\n\nextern void CallableExtension.__construct(Map<string, Function<Any?(Any?) uses Database, Files, Clock>> functions) uses none;\n";
     let value = "namespace App.Schema;\n\npublic class CelValue\n{\n    public CelValue(public Any? value { get; }) { }\n\n    public static CelValue of(Any? value) => new CelValue(value);\n}\n";
     let function = "namespace App.Schema;\n\npublic abstract class ExpressionFunction\n{\n    public abstract (string|int|float|bool)? invoke(CelValue ...arguments) uses Database, Files, Clock;\n}\n";
     let runtime = "namespace App.Schema;\n\nimport Cel.CallableExtension;\n\npublic class Runtime\n{\n    public Runtime(private Map<string, ExpressionFunction> functions) { }\n\n    public CallableExtension extension()\n    {\n        Map<string, Function<Any?(Any?) uses Database, Files, Clock>> callables = [:];\n        for (const [name, function] of this.functions) {\n            callables[name] = (Any? ...arguments) => function.invoke(...arguments.map((Any? argument) => CelValue.of(argument)));\n        }\n        return new CallableExtension(callables);\n    }\n}\n";
@@ -6869,7 +6804,7 @@ fn a_law_reaching_a_value_pattern_on_a_list_is_refused() {
 /// the value is out of a law's reach.
 #[test]
 fn each_refusal_a_law_reaches_says_what_to_write_instead() {
-    let source = "namespace App.Shared;\n\nextern InvalidArgumentException;\n\npublic class Shape\n{\n    public Shape(public int value { get; }) { }\n    public static bool operator ==(Shape a, Shape b) => a.value == b.value;\n    public int hash() => this.value;\n\n    public static int union(int|string x) => 1;\n    public static int power(int a) => a ** 2;\n    public static int complement(int a) => ~a;\n    public static string template(int a) => `n ${a}`;\n    public static int guard(int a) => match (a) {\n        int m when m + 1 > 2 => 1,\n        default => 0,\n    };\n    public static int defaulted(int a = 1) => a;\n    public static int named(int a) => Shape.defaulted(a: a);\n    public static int thrown(int a) => a > 0 ? a : throw new InvalidArgumentException(\"no\");\n    public static int compound(int a)\n    {\n        let x = a;\n        x **= 2;\n        return x;\n    }\n    public static int inner(int a)\n    {\n        let x = 0;\n        return (x = a) + 1;\n    }\n\n    law l1(int a) => Shape.union(a) == 1;\n    law l2(int a) => Shape.power(a) == Shape.power(a);\n    law l3(int a) => Shape.complement(a) == Shape.complement(a);\n    law l4(int a) => Shape.template(a) == Shape.template(a);\n    law l5(int a) => Shape.guard(a) == Shape.guard(a);\n    law l6(int a) => Shape.named(a) == a;\n    law l7(int a) => Shape.thrown(a) == Shape.thrown(a);\n    law l8(int a) => Shape.compound(a) == Shape.compound(a);\n    law l9(int a) => Shape.inner(a) == Shape.inner(a);\n}\n";
+    let source = "namespace App.Shared;\n\nextern InvalidArgumentException uses none;\n\npublic class Shape\n{\n    public Shape(public int value { get; }) { }\n    public static bool operator ==(Shape a, Shape b) => a.value == b.value;\n    public int hash() => this.value;\n\n    public static int union(int|string x) => 1;\n    public static int power(int a) => a ** 2;\n    public static int complement(int a) => ~a;\n    public static string template(int a) => `n ${a}`;\n    public static int guard(int a) => match (a) {\n        int m when m + 1 > 2 => 1,\n        default => 0,\n    };\n    public static int defaulted(int a = 1) => a;\n    public static int named(int a) => Shape.defaulted(a: a);\n    public static int thrown(int a) => a > 0 ? a : throw new InvalidArgumentException(\"no\");\n    public static int compound(int a)\n    {\n        let x = a;\n        x **= 2;\n        return x;\n    }\n    public static int inner(int a)\n    {\n        let x = 0;\n        return (x = a) + 1;\n    }\n\n    law l1(int a) => Shape.union(a) == 1;\n    law l2(int a) => Shape.power(a) == Shape.power(a);\n    law l3(int a) => Shape.complement(a) == Shape.complement(a);\n    law l4(int a) => Shape.template(a) == Shape.template(a);\n    law l5(int a) => Shape.guard(a) == Shape.guard(a);\n    law l6(int a) => Shape.named(a) == a;\n    law l7(int a) => Shape.thrown(a) == Shape.thrown(a);\n    law l8(int a) => Shape.compound(a) == Shape.compound(a);\n    law l9(int a) => Shape.inner(a) == Shape.inner(a);\n}\n";
     let directory = lawful_project(&[("app/Shared/Shape.sharp", source)]);
     let root = directory.path();
 
@@ -6907,7 +6842,7 @@ fn each_refusal_of_code_a_law_cannot_read_says_what_to_write_instead() {
     );
     let stub = (
         "app/Stubs/Clock.sharp",
-        "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Clock;\n\nextern namespace Lib for measure;\nextern Clock;\nextern Lib.measure;\n",
+        "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Clock;\n\nextern namespace Lib for measure;\nextern Clock uses none;\nextern Lib.measure uses none;\n",
     );
     let shape = (
         "app/Shared/Shape.sharp",
@@ -7070,7 +7005,7 @@ fn a_law_reading_what_a_plain_php_parent_declares_is_refused_where_it_reads_it()
         ),
         (
             "app/Shared/Shape.sharp",
-            "namespace App.Shared;\n\nimport Acme.Orm.Base;\n\nextern Base;\n\npublic class Shape : Base\n{\n    public Shape(public int sides { get; }) : super() { }\n\n    law readsBase(Shape shape) => shape.x == shape.x;\n    law callsBase(Shape shape) => shape.size() == shape.size();\n    law builds(int sides) => new Shape(sides).sides == sides;\n}\n",
+            "namespace App.Shared;\n\nimport Acme.Orm.Base;\n\nextern Base uses none;\n\npublic class Shape : Base\n{\n    public Shape(public int sides { get; }) : super() { }\n\n    law readsBase(Shape shape) => shape.x == shape.x;\n    law callsBase(Shape shape) => shape.size() == shape.size();\n    law builds(int sides) => new Shape(sides).sides == sides;\n}\n",
         ),
     ]);
     let root = directory.path();
