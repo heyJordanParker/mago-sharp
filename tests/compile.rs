@@ -5033,6 +5033,47 @@ fn a_law_reaching_a_type_test_over_an_open_interface_is_refused() {
     );
 }
 
+/// `mago analyze` refuses a law that reaches a construct the law translation does not model with the issue `mago
+/// compile` refuses it with, and proves no law: it writes no Lean package and no record of proofs, beside a law that
+/// would prove.
+#[test]
+fn analyze_refuses_a_law_that_reaches_an_unmodeled_construct_as_compile_does_and_starts_no_lean() {
+    let directory = library_project(&[
+        (
+            "app/Shared/Shape.sharp",
+            "namespace App.Shared;\n\npublic class Shape : Figure\n{\n    public static bool isShape(Figure figure) => figure is Shape;\n\n    law shapeIsShape(Shape s) => Shape.isShape(s);\n    law sameValue(int value) => value == value;\n}\n",
+        ),
+        ("app/Shared/Figure.sharp", "namespace App.Shared;\n\npublic interface Figure\n{\n}\n"),
+    ]);
+    let root = directory.path();
+    let refusal = "Law shapeIsShape reaches a type test of the interface Figure in Shape.isShape. A law tells apart only the implementers of a sealed interface. Declare `Figure` sealed.";
+
+    let analyzed = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "analyze"])
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root),
+    )
+    .unwrap();
+
+    assert_eq!(analyzed.status.code(), Some(1), "{}", printed(&analyzed));
+    assert!(
+        printed(&analyzed).contains(&format!("app/Shared/Shape.sharp:5:60: error[unmodeled-construct]: {refusal}")),
+        "{}",
+        printed(&analyzed)
+    );
+    assert!(!root.join(".sharp").join(PACKAGE_FOLDER).exists(), "{}", printed(&analyzed));
+    assert!(!root.join(".sharp/proofs.json").exists(), "{}", printed(&analyzed));
+
+    let compiled = compile_without_lean(root);
+
+    assert!(
+        printed(&compiled).contains(&format!("app/Shared/Shape.sharp:5:60:error - unmodeled-construct: {refusal}")),
+        "{}",
+        printed(&compiled)
+    );
+}
+
 /// Spec section 28's `app/Tenant/Store/Module.sharp`, whose law spans `Receipts` and `Refunds`.
 const STORE_MODULE: &str = "namespace App.Tenant.Store;\n\nmodule\n{\n    law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);\n}\n";
 

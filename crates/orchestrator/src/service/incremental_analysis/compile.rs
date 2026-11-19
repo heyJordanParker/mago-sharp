@@ -62,6 +62,7 @@ use mago_sharp_bridge::unit::encode;
 use mago_sharp_bridge::unit::key;
 use mago_sharp_bridge::unit::source_hash;
 use mago_sharp_lean::Reach;
+use mago_sharp_lean::refusals;
 use mago_sharp_lean::Translation;
 use mago_sharp_lean::translate;
 use mago_syntax::dialect::Dialect;
@@ -1206,6 +1207,38 @@ impl IncrementalAnalysisService {
     }
 
     /// The last analysis's errors, by file: those that refuse their file, as `refusing` keeps them, and those of each
+    /// The issues that refuse the laws of the last analysis before any proof, as [`Self::compile`]'s `check` reports them.
+    ///
+    /// They are the [`refusals`] of the translation of each file a law reaches, each in the file that states its law, and
+    /// no Lean process starts. Each file with an error the analysis reported is left untranslated, as `compile` leaves a
+    /// file its errors refuse, so a law that reaches one is refused for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError`] when no analysis ran yet, or when re-analyzing a file fails.
+    pub fn law_refusals(&self) -> Result<HashMap<FileId, IssueCollection>, OrchestratorError> {
+        if !self.initialized {
+            return Err(OrchestratorError::General("analyze() must be called before law_refusals()".to_string()));
+        }
+
+        let reach = Reach::new(&self.codebase, &self.native_symbol_references);
+        let reached: HashSet<FileId> = reach.law_files().flat_map(|law_file| reach.files(law_file)).copied().collect();
+        let files = self.sharp_files();
+        let reached_files: Vec<&Arc<File>> = files.iter().filter(|file| reached.contains(&file.id)).collect();
+        let (errors, unrefused) = self.errors(|issues| issues);
+        let session = self.plugin_registry.create_external_analysis_session(self.database.files());
+        let translations = self.checked_all(
+            &reached_files,
+            &InlineForms::default(),
+            (&errors, &unrefused),
+            &self.effects(),
+            session.as_ref(),
+            |checked, _, _| translate(checked, &reach),
+        )?;
+
+        Ok(refusals(&translations.into_iter().filter_map(Result::ok).collect::<Vec<_>>()))
+    }
+
     /// other file, which refuse nothing.
     fn errors(
         &self,

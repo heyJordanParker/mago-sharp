@@ -357,6 +357,7 @@ impl AnalyzeCommand {
             server = server.scoped_to(named_by(scope));
         }
         let mut issues = server.analyze()?.issues;
+        issues.extend(server.law_refusals()?);
         let service_run_duration = service_run_start.map(|s| s.elapsed());
         let report_start = trace_enabled.then(Instant::now);
         let ignore_set = self.compile_ignore_set(&configuration);
@@ -529,6 +530,7 @@ impl AnalyzeCommand {
         tracing::info!("Running initial analysis...");
 
         let mut issues = server.analyze()?.issues;
+        issues.extend(server.law_refusals()?);
 
         let ignore_set = self.compile_ignore_set(configuration);
 
@@ -589,6 +591,7 @@ impl AnalyzeCommand {
                 None => server.analyze()?,
             }
             .issues;
+            issues.extend(server.law_refusals()?);
             issues.filter_out_ignored(&ignore_set, |file_id| {
                 server.database().get_ref(&file_id).ok().map(|f| String::from_utf8_lossy(&f.name).into_owned())
             });

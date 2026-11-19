@@ -220,6 +220,27 @@ impl Server {
 
     /// The standard library's inline forms, which `mago convert` reads to find the library member that runs a PHP
     /// function: those of the library files [`Self::compile`] lowers and doesn't refuse, by `refusing` as `compile`
+    /// The issues that refuse the laws of the last analysis before any proof, as `mago compile` reports them, in the
+    /// files the scope holds.
+    ///
+    /// No Lean process starts, so `mago analyze` reports every refusal of a law but its proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a file fails.
+    pub fn law_refusals(&self) -> Result<IssueCollection, ServerError> {
+        let in_scope =
+            |file_id: &FileId| self.scope.as_ref().is_none_or(|scope| self.database.get_ref(file_id).is_ok_and(scope));
+
+        Ok(self
+            .service
+            .law_refusals()?
+            .into_iter()
+            .filter(|(file_id, _)| in_scope(file_id))
+            .flat_map(|(_, issues)| issues)
+            .collect())
+    }
+
     /// takes it.
     ///
     /// # Errors

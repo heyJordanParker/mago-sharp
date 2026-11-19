@@ -240,38 +240,11 @@ impl Lean {
         for translation in translations.iter().filter(|translation| !translation.laws.is_empty()) {
             let mut proving = Vec::new();
             for law in &translation.laws {
-                let problems = program.problems(&law.statement);
-                for construct in &problems.unmodeled {
-                    report(&mut issues, translation, issues::unmodeled(law, construct));
-                }
-                for missing in &problems.missing {
-                    let issue = if missing.file.is_some_and(|file| translated.contains(&file)) {
-                        issues::untranslated(law, &missing.place)
-                    } else {
-                        issues::refused_reach(law, &missing.place)
-                    };
-                    report(&mut issues, translation, issue);
-                }
-                // Every file a law reaches is translated unless it has errors, so a law a body calls that no
-                // translation states is in a file with errors.
-                let refused: Vec<&str> = law
-                    .proof
-                    .laws
-                    .iter()
-                    .map(|(called, _)| called.as_str())
-                    .filter(|called| !laws.position.contains_key(called))
-                    .collect();
-                for called in &refused {
-                    report(&mut issues, translation, issues::refused_reach(law, &place_of(called)));
-                }
-                if laws.cyclic.contains(law.statement.as_str()) {
-                    for (called, span) in
-                        law.proof.laws.iter().filter(|(called, _)| laws.cyclic.contains(called.as_str()))
-                    {
-                        report(&mut issues, translation, issues::law_cycle(*span, called));
+                let refusals = refused(law, &program, &laws, &translated);
+                if !refusals.is_empty() {
+                    for issue in refusals {
+                        report(&mut issues, translation, issue);
                     }
-                }
-                if !problems.is_empty() || !refused.is_empty() || laws.cyclic.contains(law.statement.as_str()) {
                     continue;
                 }
 
@@ -603,6 +576,54 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
 }
 
 fn report(issues: &mut HashMap<FileId, IssueCollection>, translation: &Translation, issue: Issue) {
+/// The issues that refuse the laws of `translations` before any proof, as [`Lean::check`] reports them.
+///
+/// Each issue is in the file that states its law, and no Lean process starts. `translations` hold each file whose laws
+/// are checked and each file those laws reach.
+#[must_use]
+pub fn refusals(translations: &[Translation]) -> HashMap<FileId, IssueCollection> {
+    let program = Program::new(translations);
+    let laws = Laws::new(translations);
+    let translated: HashSet<FileId> = translations.iter().map(|translation| translation.file).collect();
+    let mut issues: HashMap<FileId, IssueCollection> = HashMap::default();
+    for translation in translations {
+        for law in &translation.laws {
+            for issue in refused(law, &program, &laws, &translated) {
+                report(&mut issues, translation, issue);
+            }
+        }
+    }
+
+    issues
+}
+
+/// The issues that refuse `law` before any proof: each construct it reaches that the translation does not model, each
+/// declaration it reaches that no translation holds, each law it calls that a file with errors states, and each call it
+/// makes in a cycle of laws. A law with none is proved.
+fn refused(law: &Law, program: &Program<'_>, laws: &Laws<'_>, translated: &HashSet<FileId>) -> Vec<Issue> {
+    let problems = program.problems(&law.statement);
+    let mut issues: Vec<Issue> = problems.unmodeled.iter().map(|construct| issues::unmodeled(law, construct)).collect();
+    for missing in &problems.missing {
+        issues.push(if missing.file.is_some_and(|file| translated.contains(&file)) {
+            issues::untranslated(law, &missing.place)
+        } else {
+            issues::refused_reach(law, &missing.place)
+        });
+    }
+    // Every file a law reaches is translated unless it has errors, so a law a body calls that no translation states is
+    // in a file with errors.
+    for (called, _) in law.proof.laws.iter().filter(|(called, _)| !laws.position.contains_key(called.as_str())) {
+        issues.push(issues::refused_reach(law, &place_of(called)));
+    }
+    if laws.cyclic.contains(law.statement.as_str()) {
+        for (called, span) in law.proof.laws.iter().filter(|(called, _)| laws.cyclic.contains(called.as_str())) {
+            issues.push(issues::law_cycle(*span, called));
+        }
+    }
+
+    issues
+}
+
     issues.entry(translation.file).or_default().push(issue);
 }
 
