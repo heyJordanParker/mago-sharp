@@ -7000,12 +7000,11 @@ fn a_list_literal_beside_a_map_or_beside_both_a_list_and_a_set_is_refused_before
 
 /// ```php
 /// $owning = $maybe ?? $fallback;
-/// $named = \is_array($crossing#1 = $given ?? \Sharp\Internal\returned(\Lib\Calc::names(), …)) ? … : $crossing#1;
 /// ```
 ///
 /// A `??` or a `match` bound for a `Set` or a `Map` crosses its value only where one of its sides may be a PHP array,
-/// spec section 12, as a `? :` does, so a value whose every side holds the object runs with no `is_array` test. A side
-/// plain PHP gives still crosses into the object.
+/// spec section 12, as a `? :` does, so a value whose every side holds the object runs with no `is_array` test, as
+/// `a_plain_php_call_beside_a_map_in_a_coalesce_a_conditional_or_a_match_is_read_as_the_map` shows of a plain PHP side.
 #[test]
 fn a_coalesce_or_a_match_bound_for_a_collection_crosses_only_where_a_side_may_be_a_php_array() {
     let sets = "Set<string> run(Set<string>? maybe, Set<string> fallback, int extra)";
@@ -7013,11 +7012,6 @@ fn a_coalesce_or_a_match_bound_for_a_collection_crosses_only_where_a_side_may_be
         sets,
         "        Set<string> owning = match (extra) {\n            0 => fallback,\n            default => maybe ?? fallback,\n        };\n        return owning;\n",
         &[],
-    );
-    let plain = body_in(
-        "Map<int, string> run(Map<int, string>? given)",
-        "        Map<int, string> named = given ?? Calc.names();\n        return named;\n",
-        &[ARRAYS],
     );
 
     assert_eq!(
@@ -7075,7 +7069,6 @@ fn a_coalesce_or_a_match_bound_for_a_collection_crosses_only_where_a_side_may_be
     );
     assert_eq!(matched.matches("ZVAL \"is_array\"\n").count(), 2, "{matched}");
     assert!(!matched.contains("crossing#"), "{matched}");
-    assert!(plain.contains("ZVAL \"crossing#1\"\n"), "{plain}");
 
     let emptied = body_in(sets, "        Set<string> owning = maybe ?? [];\n        return owning;\n", &[]);
     assert!(!emptied.contains("crossing#"), "{emptied}");
@@ -7083,13 +7076,13 @@ fn a_coalesce_or_a_match_bound_for_a_collection_crosses_only_where_a_side_may_be
 }
 
 /// ```php
-/// $named = \is_array($crossing#1 = $given ?? \Sharp\Internal\returned(\Lib\Calc::names(), null, '',
-///     'Map<int, string>', 'Lib\Calc::names()')) ? \Sharp\Map::from($crossing#1, 'int, string') : $crossing#1;
+/// $named = $given ?? \Sharp\Internal\returned(\Lib\Calc::names(), null, '', 'Map<int, string>', 'Lib\Calc::names()');
 /// ```
 ///
 /// A plain PHP call on a side of `??`, in a branch of `? :` or in a `match` arm, bound for a `Map`, is read as the
 /// `Map` the place declares, spec section 12, as the call bound there alone is, so it keeps the keys plain PHP gave it.
-/// It is never renumbered as a `List` with `\array_values`.
+/// It is never renumbered as a `List` with `\array_values`, and the value runs with no `\is_array` test, since the call
+/// already gives the object. A plain PHP property beside it, which nothing reads at the `Map` type, still crosses.
 #[test]
 fn a_plain_php_call_beside_a_map_in_a_coalesce_a_conditional_or_a_match_is_read_as_the_map() {
     let signature = "Map<int, string> run(Map<int, string>? given, bool empty, int extra)";
@@ -7103,6 +7096,7 @@ fn a_plain_php_call_beside_a_map_in_a_coalesce_a_conditional_or_a_match_is_read_
         let lowered = body_in(signature, statements, &[ARRAYS]);
 
         assert!(!lowered.contains("array_values"), "{lowered}");
+        assert!(!lowered.contains("crossing#"), "{lowered}");
         assert_eq!(lowered.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"\n").count(), 1, "{lowered}");
         assert_eq!(lowered.matches("ZVAL \"Map<int, string>\"\n").count(), 1, "{lowered}");
     }
@@ -7131,41 +7125,36 @@ fn a_plain_php_call_beside_a_map_in_a_coalesce_a_conditional_or_a_match_is_read_
               ASSIGN
                 VAR
                   ZVAL "named"
-                CONDITIONAL
-                  CALL
-                    ZVAL "is_array"
-                    ARG_LIST
-                      ASSIGN
-                        VAR
-                          ZVAL "crossing#1"
-                        COALESCE
-                          VAR
-                            ZVAL "given"
-                          CALL
-                            ZVAL "Sharp\\Internal\\returned"
-                            ARG_LIST
-                              STATIC_CALL
-                                ZVAL "Lib\\Calc"
-                                ZVAL "names"
-                                ARG_LIST
-                              ZVAL null
-                              ZVAL ""
-                              ZVAL "Map<int, string>"
-                              ZVAL "Lib\\Calc::names()"
-                  STATIC_CALL
-                    ZVAL "Sharp\\Map"
-                    ZVAL "from"
-                    ARG_LIST
-                      VAR
-                        ZVAL "crossing#1"
-                      ZVAL "int, string"
+                COALESCE
                   VAR
-                    ZVAL "crossing#1"
+                    ZVAL "given"
+                  CALL
+                    ZVAL "Sharp\\Internal\\returned"
+                    ARG_LIST
+                      STATIC_CALL
+                        ZVAL "Lib\\Calc"
+                        ZVAL "names"
+                        ARG_LIST
+                      ZVAL null
+                      ZVAL ""
+                      ZVAL "Map<int, string>"
+                      ZVAL "Lib\\Calc::names()"
               RETURN
                 VAR
                   ZVAL "named"
         "#}
     );
+
+    let shelf = (
+        "src/App/Tenant/Shelf.php",
+        "<?php namespace App\\Tenant; final class Shelf { /** @var array<int, string> */ public array $names = []; }",
+    );
+    let property = body_in(
+        "Map<int, string> run(Map<int, string>? given, Shelf shelf)",
+        "        Map<int, string> named = given ?? shelf.names;\n        return named;\n",
+        &[shelf],
+    );
+    assert!(property.contains("ZVAL \"crossing#1\"\n"), "{property}");
 }
 
 /// ```php

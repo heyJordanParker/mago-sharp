@@ -5626,15 +5626,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return None;
         }
         let read = |this: &Self| read.unwrap_or_else(|| this.types.expression_type(expression)).clone();
-        // Plain PHP's call gives the PHP array of each `Map` and `Set` its result holds. A result PHP# can't write, as
-        // a PHP docblock's shape, crosses where a place that declares its type takes it.
         if self.plain_value(expression) {
-            let read = with_written_keys(&read(self));
-            if !is_written_in_sharp(&read) {
-                return None;
-            }
-            self.crossing_array(&read)?;
-            let check = self.types.plain_returned_check(expression, &read)?;
+            let check = self.plain_read_check(expression, &read(self))?;
             let lowered = self.unchecked_expression(line, expression);
             let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
 
@@ -5686,6 +5679,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some((text, target)) => self.verified(line, returned, &text, target.as_bytes()),
             None => returned,
         })
+    }
+
+    /// The type text and the name `\Sharp\Internal\returned` takes for plain PHP's call `expression` read as `read`, as
+    /// [`Types::plain_returned_check`] says, since the call gives the PHP array of each `Map` and `Set` `read` holds. A
+    /// result PHP# can't write, as a PHP docblock's shape, has none, and crosses where a place that declares its type
+    /// takes it.
+    fn plain_read_check(&self, expression: &Expression, read: &TUnion) -> Option<(String, String)> {
+        let read = with_written_keys(read);
+        if !is_written_in_sharp(&read) || self.crossing_array(&read).is_none() {
+            return None;
+        }
+
+        self.types.plain_returned_check(expression, &read)
     }
 
     /// `call`, the own method `expression` runs on `receiver` when it is an object of one of `classes`, as
@@ -9681,24 +9687,30 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             return self.verified(line, lowered, &text, target.as_bytes());
         }
-        let Some(r#type) =
-            declared.filter(|declared| self.may_be_php_array(value) && self.crossing_array(declared).is_some())
-        else {
+        let Some(r#type) = declared.filter(|declared| self.crossing_array(declared).is_some()) else {
             return self.expression(value);
         };
+        let bound = self.bound_sides.len();
+        self.bind_sides(value, r#type);
+        let lowered = self.crossed_bound(value, r#type);
+        self.bound_sides.truncate(bound);
 
+        lowered
+    }
+
+    /// `value`, whose sides [`Self::bind_sides`] bound for `r#type`, as [`Self::crossed_value`] lowers it.
+    fn crossed_bound(&mut self, value: &Expression, r#type: &TUnion) -> u32 {
+        if !self.may_be_php_array(value) {
+            return self.expression(value);
+        }
         // A call of plain PHP crosses where it is written, into the type the place declares.
         let line = self.line(value);
         if let Some(returned) = self.returned_call(line, value, Some(r#type)) {
             return returned;
         }
         let arrival = self.declared_arrival(r#type);
-        let bound = self.bound_sides.len();
-        self.bind_sides(value, r#type);
-        let crossed = self.crossed_from(value.span(), r#type, |this| this.arriving(value, arrival));
-        self.bound_sides.truncate(bound);
 
-        crossed
+        self.crossed_from(value.span(), r#type, |this| this.arriving(value, arrival))
     }
 
     /// How a value enters a place that declares `r#type`, a `Map` or a `Set` it may hold as a PHP array: as that `Map`
@@ -9713,7 +9725,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// Marks each side of `??`, branch of `? :` and `match` arm that gives `value`, at any depth, that may be a PHP
     /// array, as [`Self::may_be_php_array`] says, as bound for `r#type`, the type of the place `value` enters. Each is
     /// then read as [`Self::crossed_value`] reads a value written there alone, so a call of plain PHP in
-    /// `Map<int, string> named = given ?? Calc.names();` keeps its keys, as in `Map<int, string> named = Calc.names();`.
+    /// `Map<int, string> named = given ?? Calc.names();` keeps its keys, as in `Map<int, string> named = Calc.names();`,
+    /// and the value takes no `\is_array` test where no other side may be a PHP array.
     fn bind_sides(&mut self, value: &Expression, r#type: &TUnion) {
         ensure_sufficient_stack(|| {
             let sides: Vec<&Expression> = match value.unparenthesized() {
@@ -9773,7 +9786,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// property it declares, and what a local declared without a type holds. A literal, a `new`, any other call of
     /// PHP#, which reads plain PHP's result as `Self::returned_call` says, a property PHP# declares, a parameter and a
     /// typed local hold the object, as does an element of any of them. `??`, `? :` and a `match` give one of their
-    /// sides, so they may be a PHP array where a side may be one. An arm with a block body may be one.
+    /// sides, so they may be a PHP array where a side may be one. An arm with a block body may be one. A call of plain
+    /// PHP on a side [`Self::bind_sides`] bound for a place's type is the object, where [`Self::returned_call`] reads
+    /// it as that type.
     fn may_be_php_array(&self, value: &Expression) -> bool {
         ensure_sufficient_stack(|| match value.unparenthesized() {
             Expression::Array(_) | Expression::Instantiation(_) | Expression::Literal(_) => false,
@@ -9789,7 +9804,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 PatternMatchArmBody::Expression(arm_value) => self.may_be_php_array(arm_value),
                 PatternMatchArmBody::Block(_) => true,
             }),
-            Expression::Call(_) => self.plain_value(value),
+            Expression::Call(_) => self.plain_value(value) && !self.read_as_bound(value),
             Expression::Access(Access::Property(_)) => self.plain_value(value),
             Expression::ConstantAccess(access) => match self.names.binding(&access.name) {
                 Some(Binding::Local(local)) => local.kind != LocalKind::Parameter && self.typed_local(value).is_none(),
@@ -9797,6 +9812,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             },
             _ => true,
         })
+    }
+
+    /// Whether [`Self::returned_call`] reads the call `value`, a side [`Self::bind_sides`] bound for a place's type, as
+    /// that type, which gives the object. A call a hidden local holds is read where the local took it.
+    fn read_as_bound(&self, value: &Expression) -> bool {
+        let span = value.unparenthesized().span();
+
+        !self.held_receivers.iter().any(|(held, _)| *held == span)
+            && self
+                .bound_sides
+                .iter()
+                .find(|(side, _)| *side == span)
+                .is_some_and(|(_, r#type)| self.plain_read_check(value, r#type).is_some())
     }
 
     /// Whether plain PHP gives `value` itself, the result of a call of plain PHP or a property plain PHP declares,
