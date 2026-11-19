@@ -141,7 +141,7 @@ use crate::invocation::MethodTargetContext;
 
 pub const ANALYZER_PROTOCOL_MAGIC: [u8; 4] = *b"MANA";
 pub const ANALYZER_PROTOCOL_MAJOR: u16 = 1;
-pub const ANALYZER_PROTOCOL_MINOR: u16 = 15;
+pub const ANALYZER_PROTOCOL_MINOR: u16 = 16;
 /// A method identifier's rule, as the codebase answers it for its class: a PHP# class-like, spec section 24.
 const METHOD_OF_SHARP_CLASS: u8 = 1;
 /// A method identifier's rule: its class keys its methods by their declared names.

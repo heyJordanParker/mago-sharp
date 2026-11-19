@@ -92,11 +92,20 @@ const MAXIMUM_REFERENCE_QUERIES: usize = 1_000_000;
 const MAXIMUM_REFERENCES: usize = 10_000_000;
 const EXPRESSION_TYPE_PREFETCH: usize = 16;
 
+/// What one lifecycle response gave. An after-file hook's issues and references are each kept by the file whose hooks
+/// reported them, and the project-level hooks' by none.
 #[derive(Debug, Default)]
 pub(super) struct LifecycleEffects {
     pub issues: IssueCollection,
+    pub issues_by_file: HashMap<FileId, IssueCollection>,
     pub references: SymbolReferences,
     pub references_by_file: HashMap<FileId, SymbolReferences>,
+}
+
+impl LifecycleEffects {
+    pub(super) fn issue_count(&self) -> usize {
+        self.issues.len() + self.issues_by_file.values().map(IssueCollection::len).sum::<usize>()
+    }
 }
 
 pub(super) struct SymbolReferenceStore<'analysis> {
@@ -1260,7 +1269,7 @@ pub(super) fn decode_lifecycle_response(
     let mut reader = protocol::message_reader(payload, response_kind)?;
     let count = reader.read_count("lifecycle issues", MAXIMUM_ISSUES)?;
     let mut issues = IssueCollection::new();
-    issues.reserve(count);
+    let mut issues_by_file = HashMap::<FileId, IssueCollection>::default();
     for _ in 0..count {
         let plugin_index = reader.read_u16("lifecycle issue plugin index")?;
         if !active_plugins.contains(&plugin_index) {
@@ -1270,6 +1279,23 @@ pub(super) fn decode_lifecycle_response(
         let plugin = plugins
             .get(plugin_index as usize)
             .ok_or_else(|| protocol(format!("worker reported unknown plugin index {plugin_index}")))?;
+        let reporting_file = if matches!(request_kind, AFTER_FILE_ANALYSIS_REQUEST | AFTER_FILE_ANALYSIS_BATCH_REQUEST)
+        {
+            let name = reader.read_bytes("lifecycle issue reporting file")?;
+            Some(
+                session
+                    .source(name)
+                    .ok_or_else(|| {
+                        protocol(format!(
+                            "lifecycle issue names unknown reporting file `{}`",
+                            String::from_utf8_lossy(name)
+                        ))
+                    })?
+                    .0,
+            )
+        } else {
+            None
+        };
         let level = read_level(&mut reader)?;
         let local_code = reader.read_string("lifecycle issue code")?;
         if local_code.is_empty() {
@@ -1383,7 +1409,10 @@ pub(super) fn decode_lifecycle_response(
         issue.help = help;
         issue.link = link;
         issue.edits = edits;
-        issues.push(issue);
+        match reporting_file {
+            Some(file_id) => issues_by_file.entry(file_id).or_default().push(issue),
+            None => issues.push(issue),
+        }
     }
 
     let reference_count = reader.read_count("lifecycle contributed references", MAXIMUM_REFERENCES)?;
@@ -1480,7 +1509,7 @@ pub(super) fn decode_lifecycle_response(
         session.record_reads(file_id, file_reads, loads);
     }
 
-    Ok(LifecycleEffects { issues, references, references_by_file })
+    Ok(LifecycleEffects { issues, issues_by_file, references, references_by_file })
 }
 
 fn read_safety(reader: &mut PayloadReader<'_>) -> Result<Safety, ExternalAnalyzerError> {

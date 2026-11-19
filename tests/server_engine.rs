@@ -179,6 +179,124 @@ fn a_warm_pass_whose_before_analysis_references_changed_reports_what_a_fresh_pas
     assert_eq!(after, fresh);
 }
 
+/// A whole-run rule's errors stay in each warm pass that edits one file, as the watch runs one: a body edit, a signature
+/// edit, and a write that reverts both. One rule reports a route two other files declare, and one reports each class
+/// whose code reaches the module class `Settings`, the edited `PhoneFunction` and the unedited `DateFunction` among
+/// them. Each pass reports what a fresh pass of the same tree reports, under `diff`, as `mago analyze --watch` analyzes.
+#[test]
+fn a_warm_pass_that_edits_one_file_keeps_every_whole_run_rule_s_errors() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the whole-run rule test") {
+        return;
+    }
+
+    let watch = || AnalyzerSettings { diff: true, ..AnalyzerSettings::new(PHPVersion::PHP85) };
+    let unedited = [
+        ("src/orders.php", "<?php\n// route: /orders\nfunction orders(): int { return 1; }\n"),
+        ("src/refunds.php", "<?php\n// route: /orders\nfunction refunds(): int { return 2; }\n"),
+        (
+            "src/settings.php",
+            "<?php\n// module: Settings\nfinal class Settings { public static function current(): self { return new self(); } }\n",
+        ),
+        (
+            "src/date.php",
+            "<?php\nfinal class DateFunction { public function settings(): Settings { return Settings::current(); } }\n",
+        ),
+    ];
+    let phone = |name: &str, parameter: &str| {
+        format!(
+            "<?php\nfinal class PhoneFunction {{\n    public function invoke(): Settings {{ return Settings::current(); }}\n    public function expressionName({parameter}): string {{ return '{name}'; }}\n}}\n"
+        )
+    };
+    let tree = |phone: &str| {
+        let mut files: Vec<(&'static str, String)> =
+            unedited.iter().map(|(name, contents)| (*name, (*contents).to_owned())).collect();
+        files.push(("src/phone.php", phone.to_owned()));
+        files
+    };
+    let fresh = |phone: &str| {
+        let files = tree(phone);
+        let files: Vec<(&'static str, &str)> =
+            files.iter().map(|(name, contents)| (*name, contents.as_str())).collect();
+        codes(&server_with(repository, database(&files), watch()).analyze().expect("fresh analysis").issues)
+    };
+
+    let original = phone("phone", "");
+    let files = tree(&original);
+    let files: Vec<(&'static str, &str)> = files.iter().map(|(name, contents)| (*name, contents.as_str())).collect();
+    let mut warm = server_with(repository, database(&files), watch());
+    let initial = codes(&warm.analyze().expect("initial analysis").issues);
+    assert_eq!(initial.get("server-proof/duplicate-route").map(Vec::len), Some(1), "{initial:#?}");
+    assert_eq!(
+        initial.get("server-proof/reach"),
+        Some(&vec![
+            "`datefunction` reaches the module class `Settings`.".to_owned(),
+            "`datefunction::settings` reaches the module class `Settings`.".to_owned(),
+            "`phonefunction` reaches the module class `Settings`.".to_owned(),
+            "`phonefunction::invoke` reaches the module class `Settings`.".to_owned(),
+        ]),
+        "{initial:#?}"
+    );
+    assert_eq!(initial, fresh(&original));
+
+    let phone_file = FileId::new(b"src/phone.php");
+    for edited in [phone("tel", ""), phone("tel", "int $digits = 0"), original] {
+        warm.database_mut().update(phone_file, Cow::Owned(edited.clone().into_bytes()));
+        let after = codes(&warm.analyze_incremental(&[phone_file]).expect("warm analysis").issues);
+        assert_eq!(after, fresh(&edited), "after the edit to `{edited}`");
+    }
+}
+
+/// An after-file hook's error in another file stays while its hook's file stays: the hook of `src/audit.php` reports
+/// in `src/date.php`, and each warm pass analyzes one of the two files again, an edit of `src/date.php` alone, one of
+/// `src/audit.php` that keeps the mark, and `src/date.php` again, until an edit of `src/audit.php` drops the mark and
+/// its error. Each pass reports what a fresh pass of the same tree reports, under `diff`, as `mago analyze --watch`
+/// analyzes.
+#[test]
+fn an_after_file_error_in_another_file_stays_until_its_hook_s_file_drops_it() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the audit test") {
+        return;
+    }
+
+    let watch = || AnalyzerSettings { diff: true, ..AnalyzerSettings::new(PHPVersion::PHP85) };
+    let audit = |body: &str| format!("<?php\n{body}\nfunction audit(): int {{ return 1; }}\n");
+    let date = |returned: &str| format!("<?php\nfunction date_of(): int {{ return {returned}; }}\n");
+    let (audit_file, date_file) = (FileId::new(b"src/audit.php"), FileId::new(b"src/date.php"));
+    let mut tree = (audit("// audits: src/date.php"), date("1"));
+    let mut warm = server_with(repository, database(&[("src/audit.php", &tree.0), ("src/date.php", &tree.1)]), watch());
+    let initial = codes(&warm.analyze().expect("initial analysis").issues);
+    assert_eq!(
+        initial.get("server-audit/audited"),
+        Some(&vec!["`src/audit.php` audits this file.".to_owned()]),
+        "{initial:#?}"
+    );
+
+    let edits = [
+        (date_file, date("2")),
+        (audit_file, audit("// audits: src/date.php\n// edited")),
+        (date_file, date("3")),
+        (audit_file, audit("// audits nothing")),
+    ];
+    for (file, contents) in edits {
+        if file == audit_file {
+            tree.0.clone_from(&contents);
+        } else {
+            tree.1.clone_from(&contents);
+        }
+
+        warm.database_mut().update(file, Cow::Owned(contents.clone().into_bytes()));
+        let after = codes(&warm.analyze_incremental(&[file]).expect("warm analysis").issues);
+        let fresh = codes(
+            &server_with(repository, database(&[("src/audit.php", &tree.0), ("src/date.php", &tree.1)]), watch())
+                .analyze()
+                .expect("fresh analysis")
+                .issues,
+        );
+        assert_eq!(after, fresh, "after the edit {contents:?}");
+    }
+}
+
 /// The messages the reading hook reports under `code`.
 fn reads(issues: &IssueCollection, code: &str) -> Vec<String> {
     let code = format!("server-reads/{code}");

@@ -88,18 +88,22 @@ pub struct BeforeAnalysisResult {
     pub references: SymbolReferences,
 }
 
+/// The after-file hooks' issues and references, each kept by the file whose hooks reported it, wherever it points, so a
+/// file's next analysis replaces exactly what its own hooks found.
 #[derive(Debug, Default)]
 pub struct AfterFileAnalysisResult {
-    pub issues: IssueCollection,
+    pub issues_by_file: foldhash::HashMap<FileId, IssueCollection>,
     pub references_by_file: foldhash::HashMap<FileId, SymbolReferences>,
 }
 
-fn extend_references_by_file(
-    target: &mut foldhash::HashMap<FileId, SymbolReferences>,
-    source: impl IntoIterator<Item = (FileId, SymbolReferences)>,
-) {
-    for (file_id, references) in source {
-        target.entry(file_id).or_default().extend(references);
+impl AfterFileAnalysisResult {
+    fn take_in(&mut self, effects: lifecycle::LifecycleEffects) {
+        for (file_id, issues) in effects.issues_by_file {
+            self.issues_by_file.entry(file_id).or_default().extend(issues);
+        }
+        for (file_id, references) in effects.references_by_file {
+            self.references_by_file.entry(file_id).or_default().extend(references);
+        }
     }
 }
 
@@ -2044,7 +2048,7 @@ where
 
         if let Some(start) = decode_start {
             self.telemetry.lifecycle_decode_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
-            self.telemetry.lifecycle_issues.fetch_add(issues.issues.len() as u64, Ordering::Relaxed);
+            self.telemetry.lifecycle_issues.fetch_add(issues.issue_count() as u64, Ordering::Relaxed);
         }
 
         if let Some(start) = started_at {
@@ -2058,7 +2062,7 @@ where
                     plugins = plugins.len(),
                     file,
                     response_bytes = response.len(),
-                    issues = issues.issues.len(),
+                    issues = issues.issue_count(),
                     elapsed = ?elapsed,
                     "Slow external analyzer lifecycle request completed."
                 );
@@ -2214,8 +2218,7 @@ where
                 codebase,
                 lifecycle_start,
             )?;
-            result.issues.extend(effects.issues);
-            extend_references_by_file(&mut result.references_by_file, effects.references_by_file);
+            result.take_in(effects);
         }
 
         Ok(result)
@@ -2301,8 +2304,7 @@ where
                 codebase,
                 lifecycle_start,
             )?;
-            result.issues.extend(effects.issues);
-            extend_references_by_file(&mut result.references_by_file, effects.references_by_file);
+            result.take_in(effects);
         }
 
         Ok(result)

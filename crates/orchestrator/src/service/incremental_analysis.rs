@@ -2273,15 +2273,13 @@ impl IncrementalAnalysisService {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(mago_analyzer::error::AnalysisError::from)?;
             #[cfg(not(target_arch = "wasm32"))]
-            let issue_count = batches.iter().map(|batch| batch.issues.len()).sum::<usize>();
+            let issue_count =
+                batches.iter().flat_map(|batch| batch.issues_by_file.values()).map(IssueCollection::len).sum::<usize>();
+            // A hook's issue stays with the file whose hooks reported it, wherever it points, so a pass that skips that
+            // file keeps it, and the next run of its hooks replaces it.
             for batch in batches {
-                for issue in batch.issues.into_iter().filter(in_project) {
-                    let file_id = issue.annotations.first().map(|annotation| annotation.span.file_id);
-                    if let Some(issues) = file_id.and_then(|file_id| per_file_issues.get_mut(&file_id)) {
-                        issues.push(issue);
-                    } else {
-                        aggregated_result.issues.push(issue);
-                    }
+                for (file_id, issues) in batch.issues_by_file {
+                    per_file_issues.entry(file_id).or_default().extend(issues.into_iter().filter(in_project));
                 }
                 for (file_id, references) in batch.references_by_file {
                     late_symbol_references_by_file.entry(file_id).or_default().extend(references);

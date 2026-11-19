@@ -37,6 +37,7 @@ use Mago\Sdk\Worker;
 use RuntimeException;
 
 use function array_key_exists;
+use function array_keys;
 use function dirname;
 use function explode;
 use function implode;
@@ -54,8 +55,9 @@ require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
 /**
  * The hooks the analysis server tests drive: a before-analysis issue, a before-analysis reference
  * from `src/flag.php` to `Box::value` while `PROOF_REFERENCE` is declared, a node hook that reports
- * each function and fails in a file marked `node hook: fail`, a failing after-analysis hook, and a
- * cross-file rule that reports a route declared by two analyzed files.
+ * each function and fails in a file marked `node hook: fail`, a failing after-analysis hook, a
+ * cross-file rule that reports a route declared by two analyzed files, and one that reports, in a file
+ * marked `module: Class`, each symbol whose code references `Class`.
  */
 final class ServerProofPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysisHook, AfterAnalysisHook
 {
@@ -132,6 +134,37 @@ final class ServerProofPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysi
                     Level::Error,
                     'duplicate-route',
                     Issue::at("Route `{$route}` is also declared in `{$owner}`.", $location),
+                );
+            }
+
+            $marker = strpos($contents, 'module: ');
+            if ($marker === false) {
+                continue;
+            }
+
+            $start = $marker + strlen('module: ');
+            $end = $start + strcspn($contents, " \t\n\v\f\r", $start);
+            $module = substr($contents, $start, $end - $start);
+            $sources = [];
+            foreach ($context->analysis->references->getReferencesTo($module) as $reference) {
+                $source = $reference->source->symbol;
+                if ($source === null) {
+                    continue;
+                }
+
+                $sources[$source instanceof MemberIdentifier ? "{$source->class}::{$source->member}" : $source] = true;
+            }
+
+            $sources = array_keys($sources);
+            sort($sources);
+            foreach ($sources as $source) {
+                $context->report(
+                    Level::Error,
+                    'reach',
+                    Issue::at(
+                        "`{$source}` reaches the module class `{$module}`.",
+                        new SourceLocation($file->file, new Span($start, $end)),
+                    ),
                 );
             }
         }
@@ -550,6 +583,45 @@ final class ServerRelationsPlugin implements Plugin, BeforeAnalysisHook, Propert
     }
 }
 
+/**
+ * An after-file hook that reports in another file: in a file marked `audits: path` it reports an error at the start of
+ * `path`, as a rule that checks one file reports what it finds in the files it reaches.
+ */
+final class ServerAuditPlugin implements Plugin, AfterFileAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('server-audit', 'Server audit', 'An after-file hook that reports in another file.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerAfterFileAnalysisHook($this);
+    }
+
+    public function getRequirements(): array
+    {
+        return [];
+    }
+
+    public function afterFileAnalysis(AfterFileAnalysisContext $context): void
+    {
+        $contents = $context->analysis->getSourceFile()->contents;
+        $marker = strpos($contents, 'audits: ');
+        if ($marker === false) {
+            return;
+        }
+
+        $start = $marker + strlen('audits: ');
+        $audited = substr($contents, $start, strcspn($contents, " \t\n\v\f\r", $start));
+        $context->report(
+            Level::Error,
+            'audited',
+            Issue::at("`{$context->analysis->file}` audits this file.", new SourceLocation($audited, new Span(0, 5))),
+        );
+    }
+}
+
 (new Worker(new Extension(
     identifier: 'mago/server-proof',
     name: 'Mago analysis server proof',
@@ -562,5 +634,6 @@ final class ServerRelationsPlugin implements Plugin, BeforeAnalysisHook, Propert
         new ServerParentsPlugin(),
         new ServerPreparedPlugin(),
         new ServerRelationsPlugin(),
+        new ServerAuditPlugin(),
     ],
 )))->run();

@@ -148,7 +148,7 @@ final class Protocol
     private const TYPE_COMPARISON_BATCH_REQUEST = 16;
     private const MAGIC_U32 = 0x4D41_4E41;
     private const MAJOR = 1;
-    private const MINOR = 15;
+    private const MINOR = 16;
     public const VERSION_U32 = (self::MAJOR << 16) | self::MINOR;
     private const DESCRIBE_RESPONSE = 0x8001;
     private const RETURN_TYPE_RESPONSE = 0x8002;
@@ -909,7 +909,9 @@ final class Protocol
     }
 
     /**
-     * @param list<int|ReportedIssue|string|null> $reportedIssues
+     * @param list<int|ReportedIssue|string|null> $reportedIssues each issue as its plugin, the issue, and the file
+     *   whose after-file hooks reported it, which a project-level hook's issue has none of. Mago keeps an after-file
+     *   issue with that file's analysis, so it stays until the hooks of that file run again.
      * @param list<int|string|MemberIdentifier|ReferenceOrigin|ReferenceKind|null> $contributedReferences
      * @param list<array{string|null, list<array{int, int, string}>, list<array{int, int, string}>, int}> $recordedReads
      *   each file's codebase reads, or the before-analysis hooks', which name no file: the reads of plugins with no
@@ -937,10 +939,21 @@ final class Protocol
             $plugin = $reportedIssues[$index];
             /** @var ReportedIssue $reported */
             $reported = $reportedIssues[$index + 1];
-            /** @var string|null $defaultFile */
-            $defaultFile = $reportedIssues[$index + 2];
+            /** @var string|null $reportingFile */
+            $reportingFile = $reportedIssues[$index + 2];
             $issue = $reported->issue;
             $writer->writeU16($plugin);
+            if (
+                $requestKind === self::AFTER_FILE_ANALYSIS_REQUEST
+                || $requestKind === self::AFTER_FILE_ANALYSIS_BATCH_REQUEST
+            ) {
+                $writer->writeBytes(
+                    $reportingFile ?? throw new ProtocolException(
+                        'An after-file issue names no file that reported it.',
+                    ),
+                );
+            }
+
             $writer->writeU8($reported->level->value);
             $writer->writeString($reported->code);
             $writer->writeString($issue->message);
@@ -954,7 +967,7 @@ final class Protocol
             $writer->writeCount($issue->annotations);
             foreach ($issue->annotations as $annotation) {
                 $writer->writeU8($annotation->kind->value);
-                $writer->writeOptionalString($annotation->file ?? $defaultFile);
+                $writer->writeOptionalString($annotation->file ?? $reportingFile);
                 $writer->writeU32($annotation->span->start);
                 $writer->writeU32($annotation->span->end);
                 $writer->writeOptionalString($annotation->message);
@@ -962,7 +975,7 @@ final class Protocol
 
             $writer->writeCount($issue->edits);
             foreach ($issue->edits as $edit) {
-                $writer->writeOptionalString($edit->file ?? $defaultFile);
+                $writer->writeOptionalString($edit->file ?? $reportingFile);
                 $writer->writeU32($edit->span->start);
                 $writer->writeU32($edit->span->end);
                 $writer->writeU8($edit->safety->value);

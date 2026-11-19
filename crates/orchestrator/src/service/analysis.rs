@@ -215,7 +215,7 @@ impl AnalysisService {
                 &self.codebase,
                 external_session.as_ref(),
             )?;
-            analysis_result.issues.extend(reported.issues);
+            analysis_result.issues.extend(reported.issues_by_file.into_values().flatten());
             let has_late_references = !reported.references_by_file.is_empty();
             for references in reported.references_by_file.into_values() {
                 analysis_result.symbol_references.extend(references);
