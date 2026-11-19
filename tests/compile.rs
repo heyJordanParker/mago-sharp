@@ -25,12 +25,15 @@ const BROKEN_MONEY: &str =
     "namespace Acme;\n\npublic class Money\n{\n    public int cents()\n    {\n        return \"one\";\n    }\n}\n";
 const LEGACY: &str = "<?php\n\nnamespace App;\n\nfinal class Legacy {}\n";
 const MONEY_PATH: &str = "vendor/acme/money/src/Money.sharp";
+const LIBRARY: &str = "{\"type\": \"library\"}\n";
 
-/// A project with `app/Order.sharp`, `app/Legacy.php` and the package file `vendor/acme/money/src/Money.sharp`.
+/// A library with `app/Order.sharp`, `app/Legacy.php` and the package file `vendor/acme/money/src/Money.sharp`. It is
+/// a library so that spec section 5's strict rules, which run on a project, stay out of the tests about something else.
 fn project(order: &str, money: &str) -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
+    write(root, "composer.json", LIBRARY);
     write(root, "composer.lock", "{}\n");
     write(root, "app/Order.sharp", order);
     write(root, "app/Legacy.php", LEGACY);
@@ -138,7 +141,7 @@ fn compile_writes_a_preload_script_that_requires_the_autoloader_and_every_accept
     write(
         root,
         "composer.json",
-        "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}, \"autoload-dev\": {\"psr-4\": {\"Tests\\\\\": \"tests/\"}}}\n",
+        "{\"type\": \"library\", \"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}, \"autoload-dev\": {\"psr-4\": {\"Tests\\\\\": \"tests/\"}}}\n",
     );
     write(root, "tests/Shop/CheckoutTest.sharp", "namespace Tests.Shop;\n\npublic class CheckoutTest\n{\n}\n");
     write(
@@ -2379,7 +2382,7 @@ fn compile_writes_no_php_file_beside_a_source_in_an_autoload_dev_folder() {
     write(
         root,
         "composer.json",
-        "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}, \"autoload-dev\": {\"psr-4\": {\"Tests\\\\\": \"tests/\"}}}\n",
+        "{\"type\": \"library\", \"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}, \"autoload-dev\": {\"psr-4\": {\"Tests\\\\\": \"tests/\"}}}\n",
     );
     write(root, "tests/Shop/CheckoutTest.sharp", "namespace Tests.Shop;\n\npublic class CheckoutTest\n{\n}\n");
     write(
@@ -2837,11 +2840,11 @@ fn compile_writes_each_compiled_file_again_once_a_module_file_appears_at_the_roo
 fn compile_deletes_the_php_file_of_a_source_whose_folder_moved_to_autoload_dev() {
     let directory = project(ORDER, MONEY);
     let root = directory.path();
-    write(root, "composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}\n");
+    write(root, "composer.json", "{\"type\": \"library\", \"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}\n");
     compile_succeeds(root);
     assert!(root.join("app/Order.php").exists());
 
-    write(root, "composer.json", "{\"autoload-dev\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}\n");
+    write(root, "composer.json", "{\"type\": \"library\", \"autoload-dev\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}\n");
     compile_succeeds(root);
 
     assert!(!root.join("app/Order.php").exists());
@@ -3962,7 +3965,7 @@ fn compile_quotes_each_input_path_of_the_listener_table() {
     write(
         root,
         "composer.json",
-        "{\n    \"autoload\": {\n        \"psr-4\": {\n            \"App\\\\\": \"it's\\\\here/\"\n        }\n    }\n}\n",
+        "{\n    \"type\": \"library\",\n    \"autoload\": {\n        \"psr-4\": {\n            \"App\\\\\": \"it's\\\\here/\"\n        }\n    }\n}\n",
     );
 
     compile_succeeds(root);
@@ -3982,7 +3985,7 @@ fn source_lean_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// A project whose `composer.json` maps `App\` to `app/`, holding `files`.
+/// A library whose `composer.json` maps `App\` to `app/`, holding `files`.
 fn lawful_project(files: &[(&str, &str)]) -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -3990,7 +3993,7 @@ fn lawful_project(files: &[(&str, &str)]) -> tempfile::TempDir {
     write(
         root,
         "composer.json",
-        "{\n    \"autoload\": {\n        \"psr-4\": {\n            \"App\\\\\": \"app/\"\n        }\n    }\n}\n",
+        "{\n    \"type\": \"library\",\n    \"autoload\": {\n        \"psr-4\": {\n            \"App\\\\\": \"app/\"\n        }\n    }\n}\n",
     );
     write(root, "composer.lock", "{}\n");
     for (name, contents) in files {

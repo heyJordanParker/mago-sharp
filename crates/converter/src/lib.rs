@@ -245,7 +245,7 @@ impl<'input> Converter<'input, '_> {
         self.refusals.push(Refusal { span, reason: reason.into() });
     }
 
-    /// Whether the file is an application's, a project's, whose `composer.json` says `"type": "project"`.
+    /// Whether the file is an application's, a project's, whose `composer.json` does not say `"type": "library"`.
     fn in_project(&self) -> bool {
         self.input.codebase.folder(self.input.file.id).is_some_and(|folder| self.input.library.is_project(folder))
     }

@@ -130,8 +130,8 @@ impl Library {
         }
     }
 
-    /// Whether `folder`'s classes are a project's, whose `composer.json` says `"type": "project"`, so its converted
-    /// classes are an application's.
+    /// Whether `folder`'s classes are a project's, whose `composer.json` does not say `"type": "library"`, so its
+    /// converted classes are an application's.
     #[must_use]
     pub fn is_project(&self, folder: Word) -> bool {
         self.project_folders.contains(&folder)
@@ -260,8 +260,9 @@ fn folder_namespaces(codebase: &CodebaseMetadata, workspace: &Path) -> HashMap<W
         .collect()
 }
 
-/// The folders of the plain PHP classes whose Composer package is a project, whose `composer.json` says `"type":
-/// "project"`. The converted classes of such a folder are an application's, whose public members name their types.
+/// The folders of the plain PHP classes whose Composer package is a project, by the rule `mago compile` reads: their
+/// nearest `composer.json`, if any, does not say `"type": "library"`. The converted classes of such a folder are an
+/// application's, whose public members name their types.
 fn project_folders(codebase: &CodebaseMetadata, workspace: &Path) -> HashSet<Word> {
     let folders: HashSet<Word> = codebase
         .class_likes
@@ -276,7 +277,7 @@ fn project_folders(codebase: &CodebaseMetadata, workspace: &Path) -> HashSet<Wor
         .into_iter()
         .filter(|folder| {
             nearest_manifest(&workspace.join(&*folder.as_str_lossy()), &mut manifests)
-                .is_some_and(|manifest| manifest.is_project())
+                .is_none_or(|manifest| manifest.is_project())
         })
         .collect()
 }

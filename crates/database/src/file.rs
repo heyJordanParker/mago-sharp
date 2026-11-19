@@ -78,9 +78,9 @@ pub struct File {
     /// `None` when no PSR-4 folder holds it. The loader sets it, with `is_standard_library`.
     pub folder_namespace: Option<FolderNamespace>,
 
-    /// Whether a `.sharp` file's nearest `composer.json` says `"type": "project"`: an application, whose code no other
-    /// package uses, so spec section 5's too-wide warning runs on it. Composer's default type is a library's. The
-    /// loader sets it, with `is_standard_library`.
+    /// Whether a `.sharp` file is an application's, whose code no other package uses, so spec section 5's strict rules
+    /// run on it: its nearest `composer.json`, if any, does not say `"type": "library"`, it is not the standard
+    /// library's, and it is not installed in `vendor/`. The loader sets it, with `is_standard_library`.
     pub is_project: bool,
 
     /// The contents of the file, if available.

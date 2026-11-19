@@ -583,7 +583,7 @@ pub struct Manifest {
     name: Option<String>,
     /// Whether it names the standard library's package.
     is_standard_library: bool,
-    /// Whether it says `"type": "project"`.
+    /// Whether its package is a project: it does not say `"type": "library"`, and it is not the standard library.
     is_project: bool,
     /// Its PSR-4 folders, `autoload`'s and `autoload-dev`'s.
     folders: Vec<Psr4Folder>,
@@ -596,7 +596,9 @@ impl Manifest {
         self.name.as_deref()
     }
 
-    /// Whether its package is a project, an application, whose `composer.json` says `"type": "project"`.
+    /// Whether its package is a project, an application, whose `composer.json` does not say `"type": "library"`, so
+    /// leaving the type out turns none of spec section 5's strict rules off. The standard library is a library
+    /// whatever type Composer needs it to give.
     #[must_use]
     pub fn is_project(&self) -> bool {
         self.is_project
@@ -623,20 +625,24 @@ pub fn mark_sharp_file(file: &mut File, workspace: &Path) {
 }
 
 /// Marks a `.sharp` file from its nearest `composer.json`: whether it is a PHP# source of the standard library, which
-/// names the standard library's package, vendored or in the package's own repository, whether its package is a
-/// project, and what its PSR-4 folders say about its namespace, from the folder that holds it most closely.
+/// names the standard library's package, vendored or in the package's own repository, whether it is a project's, and
+/// what its PSR-4 folders say about its namespace, from the folder that holds it most closely. A file with no
+/// `composer.json` above it is a project's, and one installed in `vendor/` never is, since its project is the one that
+/// installs it.
 pub(crate) fn mark_package(file: &mut File, workspace: &Path, manifests: &mut Manifests) {
     if !file.name.ends_with(b".sharp") {
         return;
     }
 
     let path = file.path.clone().unwrap_or_else(|| workspace.join(bytes_to_path(&file.name)));
-    let Some(manifest) = path.parent().and_then(|directory| nearest_manifest(directory, manifests)) else {
+    let manifest = path.parent().and_then(|directory| nearest_manifest(directory, manifests));
+    file.is_project =
+        file.file_type != FileType::Vendored && manifest.as_ref().is_none_or(|manifest| manifest.is_project);
+    let Some(manifest) = manifest else {
         return;
     };
 
     file.is_standard_library = manifest.is_standard_library;
-    file.is_project = manifest.is_project;
     file.folder_namespace = manifest
         .folders
         .iter()
@@ -668,20 +674,23 @@ pub fn nearest_manifest(directory: &Path, manifests: &mut Manifests) -> Option<A
             Ok(package) => Some(Arc::new(read_manifest(directory, &package))),
             Err(error) => {
                 tracing::warn!(
-                    "Failed to parse `{}`: {error}. Its files are not the standard library.",
+                    "Failed to parse `{}`: {error}. Its files are a project's, not the standard library.",
                     path.display()
                 );
 
-                Some(Arc::new(Manifest::default()))
+                Some(Arc::new(read_manifest(directory, &serde_json::Value::Null)))
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             directory.parent().and_then(|parent| nearest_manifest(parent, manifests))
         }
         Err(error) => {
-            tracing::warn!("Failed to read `{}`: {error}. Its files are not the standard library.", path.display());
+            tracing::warn!(
+                "Failed to read `{}`: {error}. Its files are a project's, not the standard library.",
+                path.display()
+            );
 
-            Some(Arc::new(Manifest::default()))
+            Some(Arc::new(read_manifest(directory, &serde_json::Value::Null)))
         }
     };
 
@@ -713,11 +722,12 @@ fn read_manifest(directory: &Path, package: &serde_json::Value) -> Manifest {
     }
 
     let name = package.get("name").and_then(serde_json::Value::as_str);
+    let is_standard_library = name == Some(STANDARD_LIBRARY_PACKAGE);
 
     Manifest {
         name: name.map(str::to_owned),
-        is_standard_library: name == Some(STANDARD_LIBRARY_PACKAGE),
-        is_project: package.get("type").and_then(serde_json::Value::as_str) == Some("project"),
+        is_standard_library,
+        is_project: !is_standard_library && package.get("type").and_then(serde_json::Value::as_str) != Some("library"),
         folders,
     }
 }
@@ -1353,25 +1363,45 @@ mod tests {
         );
     }
 
-    /// Spec section 5's too-wide warning runs in a project: a `.sharp` file whose nearest `composer.json` says
-    /// `"type": "project"`. A package without a type is a library, as Composer's default type is.
+    /// Spec section 5's strict rules run in a project: a `.sharp` file unless its nearest `composer.json` says
+    /// `"type": "library"`. So a package that leaves its type out, a folder with no `composer.json` above it and one
+    /// whose `composer.json` does not parse are projects, and no line left out turns a rule off. The standard library
+    /// is a library whatever its type, `composer-plugin`, and so is a package installed in `vendor/`, whose project is
+    /// the one that installs it.
     #[test]
-    fn a_sharp_file_belongs_to_a_project_when_its_nearest_composer_json_says_so() {
+    fn a_sharp_file_belongs_to_a_project_unless_its_nearest_composer_json_says_library() {
         let temp_dir = TempDir::new().unwrap();
-        create_test_file(&temp_dir, "composer.json", r#"{"name": "acme/app", "type": "project"}"#);
-        create_test_file(&temp_dir, "src/App/Page.sharp", "");
-        create_test_file(&temp_dir, "src/App/Page.php", "<?php");
+        create_test_file(&temp_dir, "app/composer.json", r#"{"name": "acme/app"}"#);
+        create_test_file(&temp_dir, "app/src/App/Page.sharp", "");
+        create_test_file(&temp_dir, "app/src/App/Page.php", "<?php");
+        create_test_file(&temp_dir, "loose/Tool.sharp", "");
+        create_test_file(&temp_dir, "broken/composer.json", "{");
+        create_test_file(&temp_dir, "broken/Probe.sharp", "");
+        create_test_file(&temp_dir, "packages/format/composer.json", r#"{"name": "acme/format", "type": "library"}"#);
+        create_test_file(&temp_dir, "packages/format/src/Format.sharp", "");
+        create_test_file(
+            &temp_dir,
+            "vendor/heyjordanparker/php-sharp-composer/composer.json",
+            &format!(r#"{{"name": "{STANDARD_LIBRARY_PACKAGE}", "type": "composer-plugin"}}"#),
+        );
+        create_test_file(&temp_dir, "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text.sharp", "");
         create_test_file(&temp_dir, "vendor/acme/tools/composer.json", r#"{"name": "acme/tools"}"#);
         create_test_file(&temp_dir, "vendor/acme/tools/src/Tools.sharp", "");
+        create_test_file(&temp_dir, "vendor/acme/bare/Bare.sharp", "");
 
-        let mut config = create_test_config(&temp_dir, vec!["src"], vec!["vendor"]);
+        let mut config = create_test_config(
+            &temp_dir,
+            vec!["app", "loose", "broken", "packages", "vendor/heyjordanparker"],
+            vec!["vendor"],
+        );
         config.extensions = vec![Cow::Borrowed(b"php"), Cow::Borrowed(b"sharp")];
         let db = DatabaseLoader::new(config).load().unwrap();
 
-        let in_project: Vec<String> =
+        let mut in_project: Vec<String> =
             db.files().filter(|file| file.is_project).map(|file| name_str(&file.name).into_owned()).collect();
+        in_project.sort();
 
-        assert_eq!(in_project, ["src/App/Page.sharp"]);
+        assert_eq!(in_project, ["app/src/App/Page.sharp", "broken/Probe.sharp", "loose/Tool.sharp"]);
     }
 
     /// `mago convert` reads a folder's package as the loader reads a file's: from the nearest `composer.json` at or
@@ -1384,7 +1414,11 @@ mod tests {
             "composer.json",
             r#"{"type": "project", "autoload": {"psr-4": {"": "lib/", "App\\Shop\\": "src/"}}, "autoload-dev": {"psr-4": {"Tests\\": "tests/"}}}"#,
         );
-        create_test_file(&temp_dir, "vendor/acme/format/composer.json", r#"{"name": "acme/format"}"#);
+        create_test_file(
+            &temp_dir,
+            "vendor/acme/format/composer.json",
+            r#"{"name": "acme/format", "type": "library"}"#,
+        );
         let mut manifests = Manifests::default();
 
         let project = nearest_manifest(&temp_dir.path().join("src/Shop/Orders"), &mut manifests).unwrap();

@@ -36,6 +36,7 @@ fn workspace(report: &str) -> tempfile::TempDir {
     std::fs::create_dir_all(directory.path().join("src/Demo")).unwrap();
     std::fs::create_dir_all(directory.path().join("src/Lib")).unwrap();
     std::fs::write(directory.path().join("mago.toml"), include_str!("fixtures/sharp/mago.toml")).unwrap();
+    std::fs::write(directory.path().join("composer.json"), LIBRARY).unwrap();
     std::fs::write(directory.path().join("src/Lib/Calc.php"), include_str!("fixtures/sharp/Calc.php")).unwrap();
     std::fs::write(directory.path().join("src/Demo/Report.sharp"), report).unwrap();
     directory
@@ -214,8 +215,8 @@ fn issues_in(stdout: &str, file: &str) -> Vec<String> {
 /// outside its namespace and the namespaces below it uses, across every file of the project: one its own class, a class
 /// of its namespace or of one below it uses, and one nothing uses. A member used from another namespace, an interface
 /// member and its implementation, the members of an `internal` class, and plain PHP get none. The check runs only in a
-/// project, a package whose `composer.json` says `"type": "project"`, because a library's uses are in the projects that
-/// install it, so Composer's default type, a library's, gets none.
+/// project, a package whose `composer.json` does not say `"type": "library"`, because a library's uses are in the
+/// projects that install it.
 #[test]
 fn analyze_refuses_a_public_member_nothing_outside_its_namespace_uses() {
     let directory = workspace(&valid_report());
@@ -284,7 +285,7 @@ fn analyze_refuses_a_public_member_nothing_outside_its_namespace_uses() {
         assert_eq!(too_wide(file), Vec::<String>::new(), "{file}: {stdout}");
     }
 
-    write(directory.path(), "composer.json", "{\n    \"name\": \"acme/shop\"\n}\n");
+    write(directory.path(), "composer.json", "{\n    \"name\": \"acme/shop\",\n    \"type\": \"library\"\n}\n");
     let library = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
     let library = String::from_utf8_lossy(&library.stdout);
     assert!(!library.contains("too-wide-member"), "{library}");
@@ -478,6 +479,10 @@ const TYPE_CLASSES: [(&str, &str); 2] = [
 /// The `composer.json` of the standard library's package.
 const LIBRARY_PACKAGE: &str = "{\n    \"name\": \"heyjordanparker/php-sharp-composer\"\n}\n";
 
+/// The `composer.json` of a workspace whose test is about something other than spec section 5's strict rules, which run
+/// on every package that does not say it is a library.
+const LIBRARY: &str = "{\"type\": \"library\"}\n";
+
 fn write(root: &Path, name: &str, contents: &str) {
     let path = root.join(name);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -529,7 +534,7 @@ fn every_library_file_an_effect_class_imports_is_an_effect_class_too() {
     assert!(missing.is_empty(), "Add each imported file to EFFECT_CLASSES: {missing:#?}");
 }
 
-/// A project whose `vendor/` holds the standard library's package, beside the project's `src/App/Page.sharp`.
+/// A library whose `vendor/` holds the standard library's package, beside its `src/App/Page.sharp`.
 fn library_workspace(page: &str) -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     write(
@@ -537,7 +542,7 @@ fn library_workspace(page: &str) -> tempfile::TempDir {
         "mago.toml",
         "php-version = \"8.4\"\n\n[source]\npaths = [\"src\"]\nincludes = [\"vendor\"]\n",
     );
-    write(directory.path(), "composer.json", "{\n    \"name\": \"acme/app\"\n}\n");
+    write(directory.path(), "composer.json", "{\n    \"name\": \"acme/app\",\n    \"type\": \"library\"\n}\n");
     write_library(&directory.path().join("vendor/heyjordanparker/php-sharp-composer"));
     write(directory.path(), "src/App/Page.sharp", page);
     directory
@@ -604,14 +609,14 @@ fn compile_inlines_a_vendored_library_form_into_a_project_caller() {
 
 /// In the standard library's own repository, whose root `composer.json` names the package, `library/Sharp/` is the
 /// library: its `extern` method compiles, and a file of another package in the same repository inlines its
-/// one-call method. That package is still a project, so its own `extern` method under `Sharp` is refused.
+/// one-call method. That package is not the standard library, so its own `extern` method under `Sharp` is refused.
 #[test]
 fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n");
     write_library(root);
-    write(root, "example/composer.json", "{\n    \"name\": \"acme/example\"\n}\n");
+    write(root, "example/composer.json", "{\n    \"name\": \"acme/example\",\n    \"type\": \"library\"\n}\n");
     write(
         root,
         "example/App/Title.sharp",
@@ -985,6 +990,7 @@ fn compile_accepts_a_struct_that_renames_an_import_to_keep_the_short_name_free()
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"src\"]\n");
+    write(root, "composer.json", LIBRARY);
     write(root, "src/Cache/Key.php", "<?php\n\nnamespace Cache;\n\nfinal class Key\n{\n}\n");
     write(
         root,
@@ -1011,6 +1017,7 @@ fn compile_accepts_a_struct_that_renames_an_import_to_keep_the_short_name_free()
 fn analyze_reports_a_sharp_attribute_on_a_target_its_flags_leave_out() {
     let directory = tempfile::tempdir().unwrap();
     write(directory.path(), "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"src\"]\n");
+    write(directory.path(), "composer.json", LIBRARY);
     write(
         directory.path(),
         "src/App/Wraps.sharp",
@@ -1323,6 +1330,7 @@ fn suppressed_workspace(name: &str, contents: &str, analyzer: &str) -> tempfile:
         format!("php-version = \"8.4\"\n\n[source]\npaths = [\"src\"]\n\n[analyzer]\n{analyzer}\n"),
     )
     .unwrap();
+    std::fs::write(directory.path().join("composer.json"), LIBRARY).unwrap();
     std::fs::write(directory.path().join("src/Demo").join(name), contents).unwrap();
     directory
 }
@@ -1617,6 +1625,7 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\n");
+    write(root, "composer.json", LIBRARY);
     write(
         root,
         "app/Shop/Stop.sharp",
@@ -1678,6 +1687,7 @@ fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\", \"lib\"]\n");
+    write(root, "composer.json", LIBRARY);
     write(
         root,
         "lib/Pdf.php",
@@ -1730,6 +1740,7 @@ fn analyze_finds_no_issues_in_a_class_with_a_law() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\n");
+    write(root, "composer.json", LIBRARY);
     write(
         root,
         "app/Shared/Money.sharp",
@@ -1751,6 +1762,7 @@ fn compile_proves_a_law_that_reads_a_field_of_a_case() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\n");
+    write(root, "composer.json", LIBRARY);
     write(
         root,
         "app/Shared/Payment.sharp",
@@ -1805,6 +1817,7 @@ fn compile_writes_a_list_property_whose_set_empties_and_refills_it() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
+    write(root, "composer.json", LIBRARY);
     write_library(&root.join("vendor/heyjordanparker/php-sharp-composer"));
     write(
         root,
@@ -1951,7 +1964,10 @@ class Exporter
 }
 ",
     ),
-    ("composer.json", r#"{"autoload": {"psr-4": {"App\\": "src/App/", "Legacy\\": "src/Legacy/"}}}"#),
+    (
+        "composer.json",
+        r#"{"type": "library", "autoload": {"psr-4": {"App\\": "src/App/", "Legacy\\": "src/Legacy/"}}}"#,
+    ),
     ("src/App/Shop/Module.sharp", "namespace App.Shop;\n\nmodule\n{\n    transient Customer = Customer;\n}\n"),
 ];
 
@@ -2080,7 +2096,7 @@ fn two_moves_leave_each_import_line_whole_in_either_order() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         write(root, "mago.toml", include_str!("fixtures/sharp/mago.toml"));
-        write(root, "composer.json", r#"{"autoload": {"psr-4": {"App\\": "src/App/"}}}"#);
+        write(root, "composer.json", r#"{"type": "library", "autoload": {"psr-4": {"App\\": "src/App/"}}}"#);
         write(root, "src/App/Parts/X.sharp", "namespace App.Parts;\n\npublic class X\n{\n}\n");
         write(root, "src/App/Parts/Z.sharp", "namespace App.Parts;\n\npublic class Z\n{\n}\n");
         write(
