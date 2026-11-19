@@ -41,8 +41,20 @@ static ZEND_FUNCTION(ask)
 	}
 }
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_classCount, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+/* How many classes, interfaces, traits and enums the interpreter has declared, which grows with each one it declares. */
+static ZEND_FUNCTION(classCount)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	RETURN_LONG(zend_hash_num_elements(EG(class_table)));
+}
+
 static const zend_function_entry engine_functions[] = {
 	ZEND_NS_FE("Mago\\Engine", ask, arginfo_ask)
+	ZEND_NS_FE("Mago\\Engine", classCount, arginfo_classCount)
 	ZEND_FE_END
 };
 

@@ -6,10 +6,23 @@ namespace Mago\Engine;
 
 use Mago\Tests\Sdk\Unit\Mago;
 
+use function count;
+use function get_declared_classes;
+use function get_declared_interfaces;
+use function get_declared_traits;
+
 /**
- * The function mago's engine gives the PHP it runs, which these tests answer as mago does.
+ * The question mago's engine lets the PHP it runs ask, which these tests answer as mago does.
  */
 function ask(string $question, string $payload): ?string
 {
     return Mago::ask($question, $payload);
+}
+
+/**
+ * How many classes, interfaces, traits and enums PHP has declared, as mago's engine counts its class table.
+ */
+function classCount(): int
+{
+    return count(get_declared_classes()) + count(get_declared_interfaces()) + count(get_declared_traits());
 }

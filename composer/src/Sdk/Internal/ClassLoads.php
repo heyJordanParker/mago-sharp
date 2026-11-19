@@ -19,6 +19,7 @@ use function count;
 use function get_declared_classes;
 use function get_declared_interfaces;
 use function get_declared_traits;
+use function Mago\Engine\classCount;
 use function max;
 use function random_int;
 use function spl_autoload_register;
@@ -52,6 +53,9 @@ final class ClassLoads
     /** How many entries Mago has been sent. */
     private int $sent = 0;
 
+    /** How many class-likes the interpreter had declared when the log last caught up. */
+    private int $classCount = -1;
+
     public function __construct()
     {
         $this->worker = random_int(1, PHP_INT_MAX);
@@ -68,10 +72,16 @@ final class ClassLoads
      * Catches the log up with what the worker declared and failed to load, and returns how many entries it holds: the
      * end the callbacks that just finished read up to. The autoloaders are asked only for a name no class, interface
      * or trait holds, so a name asked since the last catch-up that none of them declared since is one that never
-     * loaded.
+     * loaded. With no class-like declared and no name asked since, the log already holds everything.
      */
     public function end(): int
     {
+        $classCount = classCount();
+        if ($classCount === $this->classCount && $this->asked === []) {
+            return count($this->log);
+        }
+
+        $this->classCount = $classCount;
         $declared = [get_declared_classes(), get_declared_interfaces(), get_declared_traits()];
         $new = array_merge(...array_map(
             /**

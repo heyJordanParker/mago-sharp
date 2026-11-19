@@ -233,6 +233,18 @@ fn a_value_no_value_holds_fails_the_call() {
 }
 
 #[test]
+fn the_class_count_counts_each_class_like_the_interpreter_declares() {
+    let engine = engine();
+
+    let counted = call(&engine, "class_count_around_a_declaration");
+
+    let Ok(Value::List(counts)) = counted else { panic!("class_count_around_a_declaration returned {counted:?}") };
+    let [Value::Int(before), Value::Int(after)] = counts.as_slice() else { panic!("the counts are {counts:?}") };
+    assert!(*before > 0, "the interpreter starts with PHP's own classes declared");
+    assert_eq!(*after, before + 1);
+}
+
+#[test]
 fn an_answer_that_calls_the_engine_again_is_refused() {
     let engine = engine();
     let mut nested = None;

@@ -82,3 +82,11 @@ function an_object(): object
 {
     return new \stdClass();
 }
+
+function class_count_around_a_declaration(): array
+{
+    $before = \Mago\Engine\classCount();
+    eval('namespace Mago\\Tests\\Engine; interface Declared {}');
+
+    return [$before, \Mago\Engine\classCount()];
+}
