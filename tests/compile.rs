@@ -5459,6 +5459,38 @@ fn analyze_refuses_a_law_that_reaches_a_file_with_errors_for_its_errors() {
     );
 }
 
+/// `mago analyze` refuses a law that reaches a package's PHP# file with an error for that file's errors, as `mago
+/// compile` does, and reports no issue of the package's own.
+#[test]
+fn analyze_refuses_a_law_that_reaches_a_package_file_with_errors_for_its_errors() {
+    let money = LAWFUL_MONEY
+        .replace("namespace App.Shared;", "namespace Acme;")
+        .replace("    law addKeepsCurrency", "    public int broken() => \"text\";\n\n    law addKeepsCurrency");
+    let directory = lawful_project(&[
+        (
+            "vendor/acme/money/composer.json",
+            "{\n    \"autoload\": {\n        \"psr-4\": {\n            \"Acme\\\\\": \"src/\"\n        }\n    }\n}\n",
+        ),
+        ("vendor/acme/money/src/Money.sharp", &money),
+        (
+            "app/Shared/Ledger.sharp",
+            "namespace App.Shared;\n\nimport Acme.Money;\n\npublic class Ledger\n{\n    law addKeeps(Money a, Money b) => a.add(b).currency == a.currency;\n}\n",
+        ),
+    ]);
+
+    let analyzed = analyze(directory.path());
+
+    assert_eq!(analyzed.status.code(), Some(1), "{}", printed(&analyzed));
+    assert!(
+        printed(&analyzed).contains(
+            "app/Shared/Ledger.sharp:7:5: error[law-unproven]: Law addKeeps is not proven: it reaches Money.add, whose file has errors. Fix them, then run vendor/bin/mago compile again."
+        ),
+        "{}",
+        printed(&analyzed)
+    );
+    assert!(!printed(&analyzed).contains("Money.sharp"), "{}", printed(&analyzed));
+}
+
 /// Spec section 28's `app/Tenant/Store/Module.sharp`, whose law spans `Receipts` and `Refunds`.
 const STORE_MODULE: &str = "namespace App.Tenant.Store;\n\nmodule\n{\n    law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);\n}\n";
 

@@ -1252,8 +1252,8 @@ impl IncrementalAnalysisService {
         files
     }
 
-    /// The last analysis's errors, by file: those that refuse their file, as `refusing` keeps them, and those of each
-    /// other file, which refuse nothing.
+    /// The last analysis's errors, a package's PHP# file's that it reports none of among them, by file: those that
+    /// refuse their file, as `refusing` keeps them, and those of each other file, which refuse nothing.
     fn errors(
         &self,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
@@ -1268,8 +1268,12 @@ impl IncrementalAnalysisService {
 
             by_file
         };
-        let reported: IssueCollection =
-            self.collect_all_issues().into_iter().filter(|issue| issue.level == Level::Error).collect();
+        let reported: IssueCollection = self
+            .collect_all_issues()
+            .into_iter()
+            .chain(self.file_states.values().flat_map(|state| state.package_errors.iter().cloned()))
+            .filter(|issue| issue.level == Level::Error)
+            .collect();
         let errors = by_file(refusing(reported.clone()));
         let mut unrefused = by_file(reported);
         unrefused.retain(|file_id, _| !errors.contains_key(file_id));

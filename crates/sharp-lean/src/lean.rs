@@ -117,7 +117,7 @@ impl<'laws> Laws<'laws> {
         let successors: Vec<Vec<usize>> = all
             .iter()
             .map(|(_, law)| {
-                law.proof.laws.iter().filter_map(|(called, _)| index.get(called.as_str()).copied()).collect()
+                law.proof.laws.iter().filter_map(|(called, ..)| index.get(called.as_str()).copied()).collect()
             })
             .collect();
 
@@ -146,7 +146,7 @@ impl<'laws> Laws<'laws> {
             if !reached.insert(position) {
                 continue;
             }
-            pending.extend(self.ordered[position].1.proof.laws.iter().map(|(called, _)| called.as_str()));
+            pending.extend(self.ordered[position].1.proof.laws.iter().map(|(called, ..)| called.as_str()));
         }
         let mut reached: Vec<usize> = reached.into_iter().collect();
         reached.sort_unstable();
@@ -764,26 +764,28 @@ pub fn refusals(translations: &[Translation], errored: &HashSet<FileId>) -> Hash
 }
 
 /// The issues that refuse `law` before any proof: each construct it reaches that the translation does not model, each
-/// declaration it reaches that no translation holds, for the errors of its file when its file is in `errored` or
-/// unknown, each law it calls that a file with errors states, and each call it makes in a cycle of laws. A law with
-/// none is proved.
+/// declaration it reaches and each law it calls that no translation holds, for the errors of its file when its file is
+/// in `errored` or unknown, and each call it makes in a cycle of laws. A law with none is proved.
 fn refused(law: &Law, program: &Program<'_>, laws: &Laws<'_>, errored: &HashSet<FileId>) -> Vec<Issue> {
+    let untranslated = |place: &str, file: Option<FileId>| {
+        if file.is_none_or(|file| errored.contains(&file)) {
+            issues::refused_reach(law, place)
+        } else {
+            issues::untranslated(law, place)
+        }
+    };
     let problems = program.problems(&law.statement);
     let mut issues: Vec<Issue> = problems.unmodeled.iter().map(|construct| issues::unmodeled(law, construct)).collect();
-    for missing in &problems.missing {
-        issues.push(if missing.file.is_none_or(|file| errored.contains(&file)) {
-            issues::refused_reach(law, &missing.place)
-        } else {
-            issues::untranslated(law, &missing.place)
-        });
-    }
-    // Every file a law reaches is translated unless it has errors, so a law a body calls that no translation states is
-    // in a file with errors.
-    for (called, _) in law.proof.laws.iter().filter(|(called, _)| !laws.position.contains_key(called.as_str())) {
-        issues.push(issues::refused_reach(law, &place_of(called)));
-    }
+    issues.extend(problems.missing.iter().map(|missing| untranslated(&missing.place, missing.file)));
+    issues.extend(
+        law.proof
+            .laws
+            .iter()
+            .filter(|(called, ..)| !laws.position.contains_key(called.as_str()))
+            .map(|(called, _, file)| untranslated(&place_of(called), *file)),
+    );
     if laws.cyclic.contains(law.statement.as_str()) {
-        for (called, span) in law.proof.laws.iter().filter(|(called, _)| laws.cyclic.contains(called.as_str())) {
+        for (called, span, _) in law.proof.laws.iter().filter(|(called, ..)| laws.cyclic.contains(called.as_str())) {
             issues.push(issues::law_cycle(*span, called));
         }
     }
@@ -821,6 +823,38 @@ mod tests {
             span: Span::dummy(0, 0),
             proof: crate::translate::proof::Proof::default(),
         }
+    }
+
+    /// A law a body calls that no translation states refuses the law for the errors of its file when the analysis
+    /// reported errors in that file or doesn't know the file, and as the checker's bug when the file has none.
+    #[test]
+    fn a_called_law_no_translation_states_is_refused_for_its_file_s_errors_only_when_its_file_has_errors() {
+        let broken = FileId::new(b"app/Shared/Broken.sharp");
+        let mut calling = law();
+        calling.proof.laws = vec![
+            ("App.Shared.Broken.holds".to_owned(), Span::dummy(0, 0), Some(broken)),
+            ("App.Shared.Clean.holds".to_owned(), Span::dummy(0, 0), Some(FileId::new(b"app/Shared/Clean.sharp"))),
+            ("App.Shared.Unknown.holds".to_owned(), Span::dummy(0, 0), None),
+        ];
+        let translation = Translation {
+            file: FileId::new(b"app/Shared/Money.sharp"),
+            name: b"app/Shared/Money.sharp".to_vec(),
+            class: None,
+            laws: vec![calling],
+            declarations: Vec::new(),
+            receivers: Vec::new(),
+        };
+
+        let refused = refusals(&[translation], &HashSet::from_iter([broken]));
+
+        assert_eq!(
+            refused.values().flat_map(|issues| issues.iter()).map(|issue| issue.message.as_str()).collect::<Vec<_>>(),
+            [
+                "Law addKeepsCurrency is not proven: it reaches Broken.holds, whose file has errors. Fix them, then run vendor/bin/mago compile again.",
+                "Law addKeepsCurrency is not proven: the checker left out Clean.holds, which the law reaches. This is a bug in the PHP# checker; report it to its maintainers.",
+                "Law addKeepsCurrency is not proven: it reaches Unknown.holds, whose file has errors. Fix them, then run vendor/bin/mago compile again.",
+            ]
+        );
     }
 
     /// A proof or a module the checker wrote wrong is the checker's bug, which the message says in PHP#, naming no Lean
