@@ -576,6 +576,9 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
 }
 
 fn report(issues: &mut HashMap<FileId, IssueCollection>, translation: &Translation, issue: Issue) {
+    issues.entry(translation.file).or_default().push(issue);
+}
+
 /// The issues that refuse the laws of `translations` before any proof, as [`Lean::check`] reports them.
 ///
 /// Each issue is in the file that states its law, and no Lean process starts. `translations` hold each file whose laws
@@ -622,9 +625,6 @@ fn refused(law: &Law, program: &Program<'_>, laws: &Laws<'_>, translated: &HashS
     }
 
     issues
-}
-
-    issues.entry(translation.file).or_default().push(issue);
 }
 
 /// Whether one of the generated modules `from` is `module`, or imports it, transitively, through the imports `modules`

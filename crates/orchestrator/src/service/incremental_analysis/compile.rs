@@ -62,8 +62,8 @@ use mago_sharp_bridge::unit::encode;
 use mago_sharp_bridge::unit::key;
 use mago_sharp_bridge::unit::source_hash;
 use mago_sharp_lean::Reach;
-use mago_sharp_lean::refusals;
 use mago_sharp_lean::Translation;
+use mago_sharp_lean::refusals;
 use mago_sharp_lean::translate;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file_with_settings;
@@ -1194,19 +1194,6 @@ impl IncrementalAnalysisService {
         Ok(lowered.into_iter().filter_map(Result::ok).flat_map(|(lowered, _)| lowered.forms).collect())
     }
 
-    /// The PHP# files [`Self::compile`] lowers, the workspace's own, in file name order.
-    fn sharp_files(&self) -> Vec<Arc<File>> {
-        let mut files: Vec<Arc<File>> = self
-            .database
-            .files()
-            .filter(|file| file.file_type == FileType::Host && Dialect::of(file).is_sharp())
-            .collect();
-        files.sort_unstable_by(|a, b| a.name.cmp(&b.name));
-
-        files
-    }
-
-    /// The last analysis's errors, by file: those that refuse their file, as `refusing` keeps them, and those of each
     /// The issues that refuse the laws of the last analysis before any proof, as [`Self::compile`]'s `check` reports them.
     ///
     /// They are the [`refusals`] of the translation of each file a law reaches, each in the file that states its law, and
@@ -1239,6 +1226,19 @@ impl IncrementalAnalysisService {
         Ok(refusals(&translations.into_iter().filter_map(Result::ok).collect::<Vec<_>>()))
     }
 
+    /// The PHP# files [`Self::compile`] lowers, the workspace's own, in file name order.
+    fn sharp_files(&self) -> Vec<Arc<File>> {
+        let mut files: Vec<Arc<File>> = self
+            .database
+            .files()
+            .filter(|file| file.file_type == FileType::Host && Dialect::of(file).is_sharp())
+            .collect();
+        files.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+
+        files
+    }
+
+    /// The last analysis's errors, by file: those that refuse their file, as `refusing` keeps them, and those of each
     /// other file, which refuse nothing.
     fn errors(
         &self,
