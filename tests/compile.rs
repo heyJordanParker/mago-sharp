@@ -3908,6 +3908,46 @@ fn a_call_of_a_method_that_gives_string_int_float_or_bool_keeps_the_four_types()
     );
 }
 
+/// Spec section 29: an `extern` line of a plain PHP trait's member declares the effects of that one body, so a call of
+/// it through a PHP# class that takes it from the trait has them. A class that writes the member itself runs its own
+/// body, which the line does not cover.
+#[test]
+fn an_extern_line_of_a_trait_member_covers_each_class_that_takes_the_member_from_the_trait() {
+    let dispatchable = "<?php\n\nnamespace Bus;\n\ntrait Dispatchable\n{\n    public static function dispatch(...$arguments): void\n    {\n    }\n}\n";
+    let stubs = "namespace App.Stubs;\n\nimport Bus.Dispatchable;\n\nextern Dispatchable.dispatch uses Database;\n";
+    let receive =
+        "namespace App.Events;\n\nimport Bus.Dispatchable;\n\npublic class ReceiveEvent : Dispatchable\n{\n}\n";
+    let send = "namespace App.Events;\n\nimport Bus.Dispatchable;\n\npublic class SendEvent : Dispatchable\n{\n    public static override void dispatch(Any? ...arguments)\n    {\n    }\n}\n";
+    let mail =
+        "namespace App.Events;\n\npublic interface Mail\n{\n    void receive() uses Database;\n\n    void send();\n}\n";
+    let inbox = "namespace App.Events;\n\npublic class Inbox : Mail\n{\n    public void receive()\n    {\n        ReceiveEvent.dispatch(\"payload\");\n    }\n\n    public void send()\n    {\n        SendEvent.dispatch(\"payload\");\n    }\n}\n";
+    let directory = library_project(&[
+        ("vendor/acme/bus/Dispatchable.php", dispatchable),
+        ("app/Stubs/Bus.sharp", stubs),
+        ("app/Events/ReceiveEvent.sharp", receive),
+        ("app/Events/SendEvent.sharp", send),
+        ("app/Events/Mail.sharp", mail),
+        ("app/Events/Inbox.sharp", inbox),
+    ]);
+    let root = directory.path();
+
+    compile_succeeds(root);
+
+    let outbox = "namespace App.Events;\n\npublic class Outbox : Mail\n{\n    public void receive()\n    {\n    }\n\n    public void send()\n    {\n        ReceiveEvent.dispatch(\"payload\");\n    }\n}\n";
+    write(root, "app/Events/Outbox.sharp", outbox);
+
+    let output = compile_lines(root);
+
+    assert_eq!(
+        issue_lines(&output),
+        [
+            "app/Events/Outbox.sharp:11:9:error - incompatible-effects: `Outbox.send` calls `ReceiveEvent.dispatch`, which has the effect `Database`, so the pure `App.Events.Mail.send` cannot accept it."
+        ],
+        "{}",
+        printed(&output)
+    );
+}
+
 /// A path the listener table quotes keeps a `'` and a `\` in its name. The PSR-4 folder that maps `App` carries both,
 /// since a folder below it names a namespace, which can take neither.
 #[test]
