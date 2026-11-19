@@ -1744,10 +1744,10 @@ fn analyze_finds_no_issues_in_a_class_with_a_law() {
     assert!(stderr.contains("No issues found."), "{stdout}{stderr}");
 }
 
-/// Spec section 20: Lean models a case that carries data as a constructor of its fields, which it reads only by
-/// matching, so a law that reads a field is refused by name.
+/// Spec section 20: Lean models a case that carries data as a constructor of its fields, and a law reads a field of a
+/// value of the case as the constructor's field.
 #[test]
-fn compile_refuses_a_law_that_reads_a_field_of_a_case() {
+fn compile_proves_a_law_that_reads_a_field_of_a_case() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\n");
@@ -1760,8 +1760,7 @@ fn compile_refuses_a_law_that_reads_a_field_of_a_case() {
     let output = run(root, "compile", &[]);
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
-    assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("the field Payment.Paid.cents of a case"), "{printed}");
+    assert_eq!(output.status.code(), Some(0), "{printed}");
 }
 
 #[test]
