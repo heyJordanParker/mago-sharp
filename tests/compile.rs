@@ -3949,14 +3949,14 @@ fn unwritable_cache() -> PathBuf {
     cache
 }
 
-/// `mago compile` with no `lake`, nor any other program, on the `PATH`, and a cache folder Mago cannot install Lean
-/// into.
+/// `mago compile` with no elan folder, no other program on the `PATH`, and a cache folder Mago cannot install Lean into.
 fn compile_without_lean(root: &Path) -> Output {
     let empty = tempfile::tempdir().unwrap();
     process::output(
         command(root, "never")
             .env("MAGO_REPORTING_FORMAT", "emacs")
             .env("PATH", empty.path())
+            .env("ELAN_HOME", empty.path())
             .env("XDG_CACHE_HOME", unwritable_cache()),
     )
     .unwrap()
@@ -4349,149 +4349,52 @@ fn compile_proves_the_laws_of_two_stale_files_with_one_runner() {
     assert!(compiled(root, "app/Shared/Wallet.sharp").exists());
 }
 
-/// A `lake` on the `PATH` builds the Lean code, so CI's and a user's own elan keep working, and Mago installs no Lean.
+/// A law runs on one Lean, found one way, and a `lake` on the `PATH` is never it: neither a compile that builds the law
+/// checker nor one that finds it built calls the `lake` first on the `PATH`, which fails every call.
 #[cfg(unix)]
 #[test]
-fn compile_runs_the_lake_on_the_path_and_installs_no_lean() {
+fn a_law_never_runs_on_the_lake_on_the_path() {
     use std::os::unix::fs::PermissionsExt;
 
-    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
     let lake = tempfile::tempdir().unwrap();
-    write(lake.path(), "lake", "#!/bin/sh\necho \"the lake on the PATH ran $*\"\n[ \"$1\" = --version ]\n");
-    std::fs::set_permissions(lake.path().join("lake"), std::fs::Permissions::from_mode(0o755)).unwrap();
-    let cache = tempfile::tempdir().unwrap();
-
-    // The debug log holds what the failed build printed.
-    let output = process::output(
-        command(directory.path(), "never")
-            .env("PATH", lake.path())
-            .env("XDG_CACHE_HOME", cache.path())
-            .env("MAGO_LOG", "debug"),
-    )
-    .unwrap();
-
-    assert!(printed(&output).contains("the lake on the PATH ran build"), "{}", printed(&output));
-    assert!(!printed(&output).contains("Downloading the law checker"), "{}", printed(&output));
-}
-
-/// A compile whose law checker is built in the cache proves its laws with the runner alone: the build is named by the
-/// Lean version the library pins, and it records the Lean that built it, so no `lake` starts.
-#[cfg(unix)]
-#[test]
-fn a_compile_whose_law_checker_is_built_starts_no_lake() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let cache = tempfile::tempdir().unwrap();
-    let first = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
-    let output = process::output(command(first.path(), "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
-    assert!(output.status.success(), "{}", printed(&output));
-    let lake = tempfile::tempdir().unwrap();
-    let path = std::env::var_os("PATH").unwrap();
-    let real =
-        std::env::split_paths(&path).map(|directory| directory.join("lake")).find(|lake| lake.is_file()).unwrap();
     let started = lake.path().join("started");
-    write(
-        lake.path(),
-        "bin/lake",
-        &format!("#!/bin/sh\necho \"$*\" >> '{}'\nexec '{}' \"$@\"\n", started.display(), real.display()),
-    );
-    std::fs::set_permissions(lake.path().join("bin/lake"), std::fs::Permissions::from_mode(0o755)).unwrap();
-    let path = std::env::join_paths(std::iter::once(lake.path().join("bin")).chain(std::env::split_paths(&path)));
-    let second = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    write(lake.path(), "lake", &format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 1\n", started.display()));
+    std::fs::set_permissions(lake.path().join("lake"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::var_os("PATH").unwrap();
+    let path =
+        std::env::join_paths(std::iter::once(lake.path().to_path_buf()).chain(std::env::split_paths(&path))).unwrap();
+    let cache = tempfile::tempdir().unwrap();
 
-    let output =
-        process::output(command(second.path(), "never").env("XDG_CACHE_HOME", cache.path()).env("PATH", path.unwrap()))
-            .unwrap();
+    for run in ["builds the law checker", "finds it built"] {
+        let project = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+        let output =
+            process::output(command(project.path(), "never").env("XDG_CACHE_HOME", cache.path()).env("PATH", &path))
+                .unwrap();
 
-    assert!(output.status.success(), "{}", printed(&output));
-    assert!(compiled(second.path(), "app/Shared/Money.sharp").exists());
-    assert_eq!(std::fs::read_to_string(&started).unwrap_or_default(), "", "the lake calls of the second compile");
+        assert!(output.status.success(), "{run}: {}", printed(&output));
+        assert!(compiled(project.path(), "app/Shared/Money.sharp").exists(), "{run}");
+    }
+    assert_eq!(std::fs::read_to_string(&started).unwrap_or_default(), "", "the calls to the lake on the PATH");
 }
 
 /// A cache folder the law checker can't create, as one a root container left, is named with what failed.
 #[cfg(unix)]
 #[test]
 fn compile_names_the_cache_folder_the_law_checker_cannot_create() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
-    let lake = tempfile::tempdir().unwrap();
-    write(lake.path(), "lake", "#!/bin/sh\n[ \"$1\" = --version ]\n");
-    std::fs::set_permissions(lake.path().join("lake"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let cache = unwritable_cache();
 
-    let output =
-        process::output(command(directory.path(), "never").env("PATH", lake.path()).env("XDG_CACHE_HOME", &cache))
-            .unwrap();
+    let output = process::output(command(directory.path(), "never").env("XDG_CACHE_HOME", &cache)).unwrap();
 
     assert!(!output.status.success(), "{}", printed(&output));
     assert!(
         printed(&output).contains(&format!(
-            "The laws could not be checked: can't create the folder `{}`: File exists (os error 17).",
-            cache.join("mago").display()
+            "The laws could not be checked: can't create the folder `{}`: Not a directory (os error 20).",
+            cache.join("mago/lean").display()
         )),
         "{}",
         printed(&output)
     );
-}
-
-/// Puts a `lake` first on the `PATH` that runs the real one, except that its first `--version`, the call on which elan
-/// installs a missing Lean, installs into the empty folder `toolchain` in `folder`, as elan does, with no lock of its
-/// own: an install takes a second, and an install that starts while another runs leaves `overlap` in `folder`.
-#[cfg(unix)]
-fn installing_lake(folder: &Path) -> std::ffi::OsString {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = std::env::var_os("PATH").unwrap();
-    let real =
-        std::env::split_paths(&path).map(|directory| directory.join("lake")).find(|lake| lake.is_file()).unwrap();
-    let toolchain = folder.join("toolchain");
-    std::fs::create_dir_all(&toolchain).unwrap();
-    let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ] && [ ! -e '{toolchain}/installed' ]; then\n  if mkdir '{toolchain}/installing' 2>/dev/null; then\n    sleep 1\n    echo lean >> '{toolchain}/installed'\n    rmdir '{toolchain}/installing'\n  else\n    touch '{overlap}'\n  fi\nfi\nexec '{real}' \"$@\"\n",
-        toolchain = toolchain.display(),
-        overlap = folder.join("overlap").display(),
-        real = real.display(),
-    );
-    let lake = folder.join("bin/lake");
-    write(folder, "bin/lake", &script);
-    std::fs::set_permissions(&lake, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    std::env::join_paths(std::iter::once(folder.join("bin")).chain(std::env::split_paths(&path))).unwrap()
-}
-
-/// elan's `lake` installs a missing Lean on its first call, with no lock of its own, so compiles that start together on
-/// a machine without that Lean would break it. Mago makes that call under the lock its own installs take, so the
-/// compiles take turns and Lean is installed once. Mago calls `lake` only to build the law checker, so the compiles
-/// start on an empty cache.
-#[cfg(unix)]
-#[test]
-fn compiles_that_start_together_install_the_missing_lean_of_the_lake_on_the_path_once() {
-    let lake = tempfile::tempdir().unwrap();
-    let path = installing_lake(lake.path());
-    let cache = tempfile::tempdir().unwrap();
-    let projects: Vec<_> = (0..2).map(|_| lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)])).collect();
-
-    let outputs: Vec<Output> = std::thread::scope(|scope| {
-        let compiles: Vec<_> = projects
-            .iter()
-            .map(|project| {
-                scope.spawn(|| {
-                    process::output(
-                        command(project.path(), "never").env("PATH", &path).env("XDG_CACHE_HOME", cache.path()),
-                    )
-                    .unwrap()
-                })
-            })
-            .collect();
-        compiles.into_iter().map(|compile| compile.join().unwrap()).collect()
-    });
-
-    for output in &outputs {
-        assert!(output.status.success(), "{}", printed(output));
-    }
-    assert!(!lake.path().join("overlap").exists(), "two compiles installed Lean at once");
-    assert_eq!(read(lake.path(), "toolchain/installed"), "lean\n");
 }
 
 #[test]
@@ -4515,9 +4418,9 @@ fn compile_refuses_an_unproven_law_every_time_and_never_leaves_a_current_compile
     }
 }
 
-/// A file whose law needs proving needs the law checker; with no `lake` and no Lean Mago can install, each such file is
-/// refused with `law-checker-unavailable`, a fixed sentence that names no tool and no folder of one, and every other
-/// file compiles. The debug log holds what failed.
+/// A file whose law needs proving needs the law checker; with no Lean installed and none Mago can install, each such
+/// file is refused with `law-checker-unavailable`, a fixed sentence that names no tool and no folder of one, and every
+/// other file compiles. The debug log holds what failed.
 #[test]
 fn compile_reports_an_unavailable_law_checker_on_each_file_that_needs_it_and_whose_compiled_file_is_not_current() {
     let unavailable = if cfg!(target_env = "musl") {

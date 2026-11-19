@@ -226,7 +226,7 @@ pub(crate) fn uninstalled_checker(span: Span) -> Issue {
     .with_annotation(Annotation::primary(span))
 }
 
-/// No `lake` is on the `PATH`, and the Mago build pins no Lean archive for its target, so it cannot install Lean. The
+/// No Lean is installed, and the Mago build pins no Lean archive for its target, so it cannot install Lean. The
 /// message describes the build, never the host, and gives only advice true on every host it runs on: a musl build also
 /// runs on glibc Linux, where Lean runs, and on Alpine, where neither Mago's glibc build nor Lean starts.
 pub(crate) fn uninstallable_lean(span: Span) -> Issue {

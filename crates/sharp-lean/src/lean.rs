@@ -28,11 +28,11 @@ use crate::goal::Names;
 use crate::issues;
 use crate::library;
 use crate::library::Stop;
+use crate::library::Toolchain;
 use crate::package;
 use crate::package::Package;
 use crate::package::Program;
 use crate::package::Refusal;
-use crate::package::Toolchain;
 use crate::package::place_of;
 use crate::package::write_if_changed;
 use crate::reach::Reach;
@@ -204,7 +204,7 @@ impl Lean {
     /// Returns an error when a file cannot be read or written, when the runtime library does not build, or when a
     /// runner fails.
     pub fn check(&self, translations: Vec<Translation>, reach: &Reach) -> io::Result<HashMap<FileId, IssueCollection>> {
-        let mut package = Package::new(&self.root);
+        let package = Package::new(&self.root);
         let record_path = package.directory.with_file_name(PROOFS);
         let mut issues: HashMap<FileId, IssueCollection> = HashMap::default();
 
@@ -278,9 +278,9 @@ impl Lean {
         package.write_toolchain()?;
         let library = match library::built() {
             Some(library) => library,
-            None => {
-                let toolchain = package.toolchain()?;
-                if !matches!(toolchain, Toolchain::Ready) {
+            None => match library::toolchain() {
+                Toolchain::Ready(lake) => library::build(&lake)?,
+                toolchain => {
                     if let Toolchain::Failed(failure) = &toolchain {
                         tracing::debug!("The law checker could not be installed: {failure}");
                     }
@@ -297,9 +297,7 @@ impl Lean {
 
                     return Ok(issues);
                 }
-
-                library::build(&package.lake)?
-            }
+            },
         };
         package.remove_stale()?;
         let proved: HashSet<FileId> = work.iter().map(|(translation, _)| translation.file).collect();

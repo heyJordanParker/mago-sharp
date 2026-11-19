@@ -362,15 +362,19 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::library::Lake;
+    use crate::library::Toolchain;
 
     /// The variable that names the library a test built to `stopping`, which that test runs.
     const LIBRARY: &str = "SHARP_LEAN_TEST_LIBRARY";
 
     /// The runtime library, built for these tests in a folder of the system's temporary folder, once per library source
-    /// and Lean version as Mago builds it, with the `lake` on the `PATH`.
+    /// and Lean version as Mago builds it, with the Lean a law runs on.
     fn library() -> io::Result<PathBuf> {
-        library::build_in(&std::env::temp_dir().join("mago-sharp-lean-tests"), &Lake::on_path())
+        let Toolchain::Ready(lake) = library::toolchain() else {
+            return Err(io::Error::other("no Lean is installed for the law checker, and Mago could not install one"));
+        };
+
+        library::build_in(&std::env::temp_dir().join("mago-sharp-lean-tests"), &lake)
     }
 
     /// The threads and the heartbeats of each theorem, in thousands, the tests' runners use.

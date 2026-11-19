@@ -1,6 +1,6 @@
 //! The Lean runtime library and the `sharp-lean` runner, built in Mago's cache folder once per library source and Lean
-//! version, and the `lake` that builds them: the one on the `PATH`, else the one of the Lean Mago installs in its cache
-//! folder.
+//! version, and the Lean a law runs on, found one way: the Lean Mago installed in its cache folder, else elan's
+//! toolchain of the pinned version, else the Lean Mago downloads into its cache folder.
 
 use std::fmt::Write;
 use std::fs;
@@ -92,22 +92,23 @@ const ARCHIVE: Option<Archive> = if cfg!(all(target_os = "macos", target_arch = 
     None
 };
 
-/// The `lake` Mago runs.
+/// The `lake` of the Lean a law runs on.
 #[derive(Debug)]
 pub(crate) struct Lake {
-    program: PathBuf,
+    /// The Lean's folder, which holds `bin/lake` and Lean's own modules in `lib/lean`.
+    lean: PathBuf,
 }
 
 impl Lake {
-    /// The `lake` on the `PATH`.
-    pub(crate) fn on_path() -> Self {
-        Self { program: PathBuf::from("lake") }
+    /// The `lake` program in `bin` in the Lean's folder.
+    fn program(&self) -> PathBuf {
+        self.lean.join("bin").join(format!("lake{}", std::env::consts::EXE_SUFFIX))
     }
 
     /// A command that runs this `lake`. On Unix it may use `processor_seconds()`, as may each Lean process it starts,
     /// which inherits the limit.
     pub(crate) fn command(&self) -> Command {
-        let mut command = Command::new(&self.program);
+        let mut command = Command::new(self.program());
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -340,19 +341,11 @@ pub(crate) fn runner_command(library: &Path) -> io::Result<Command> {
     Ok(command)
 }
 
-/// Records in `staging` the folder of the Lean that built it, as `lake` names it there.
+/// Records in `staging` the folder of the Lean whose `lake` built it.
 fn record_sysroot(staging: &Path, lake: &Lake) -> io::Result<()> {
     let recorded = staging.join(SYSROOT);
-    let output = process::output(lake.command().args(["env", "lean", "--print-prefix"]).current_dir(staging))?;
-    if !output.status.success() {
-        return Err(unbuilt(format!(
-            "lake env lean --print-prefix in {} printed:\n{}",
-            staging.display(),
-            printed(&output)
-        )));
-    }
 
-    fs::write(&recorded, &output.stdout)
+    fs::write(&recorded, lake.lean.as_os_str().as_encoded_bytes())
         .map_err(|error| DatabaseError::io(IOAction::WriteFile, &recorded, error).into())
 }
 
@@ -457,9 +450,49 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
     Ok(library)
 }
 
+/// What finding the Lean a law runs on came to.
+pub(crate) enum Toolchain {
+    /// The `lake` of the Lean found or installed.
+    Ready(Lake),
+    /// Neither Lean is installed, and the Mago build pins no Lean archive for its target.
+    Unsupported,
+    /// Mago could not install Lean, with what failed.
+    Failed(String),
+}
+
+/// The Lean a law runs on: [`installed`] in Mago's cache folder and elan's folder, else the Lean Mago downloads now. A
+/// Lean of another version, as a `lake` on the `PATH` may run, is never the one.
+pub(crate) fn toolchain() -> Toolchain {
+    let installed = cache_root().ok().and_then(|cache| installed(&cache, elan_home().as_deref()));
+    match installed.map_or_else(install, |lake| Ok(Some(lake))) {
+        Ok(Some(lake)) => Toolchain::Ready(lake),
+        Ok(None) => Toolchain::Unsupported,
+        Err(error) => Toolchain::Failed(error.to_string()),
+    }
+}
+
+/// The `lake` of the installed Lean a law runs on: the one Mago installed in `lean/` in `cache`, else elan's toolchain
+/// of the pinned version in `elan`, the folder elan installs into, as elan names the toolchain. Mago's own Lean moves
+/// into place whole, so one found here is never half installed.
+fn installed(cache: &Path, elan: Option<&Path>) -> Option<Lake> {
+    let own = ARCHIVE.as_ref().map(|archive| cache.join("lean").join(archive.name));
+    let toolchain = TOOLCHAIN.trim().replace('/', "--").replace(':', "---");
+    let elan = elan.map(|elan| elan.join("toolchains").join(toolchain));
+
+    own.into_iter().chain(elan).map(|lean| Lake { lean }).find(|lake| lake.program().is_file())
+}
+
+/// The folder elan installs toolchains into: `$ELAN_HOME`, else `.elan` in the home folder.
+fn elan_home() -> Option<PathBuf> {
+    std::env::var_os("ELAN_HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join(".elan")))
+}
+
 /// Installs the pinned Lean into `lean/` in Mago's cache folder and returns its `lake`. `None` where Mago pins no Lean
 /// archive for the platform it is built for. An error names the step that failed.
-pub(crate) fn install() -> io::Result<Option<Lake>> {
+fn install() -> io::Result<Option<Lake>> {
     let Some(archive) = &ARCHIVE else {
         return Ok(None);
     };
@@ -486,8 +519,8 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
     let _lock = install_lock(cache)?;
     let builds = cache.join("lean");
     let lean = builds.join(archive.name);
-    let lake = Lake { program: lean.join("bin/lake") };
-    if lake.program.is_file() {
+    let lake = Lake { lean: lean.clone() };
+    if lake.program().is_file() {
         return Ok(lake);
     }
 
@@ -628,19 +661,6 @@ fn joined<T>(thread: thread::JoinHandle<io::Result<T>>) -> io::Result<T> {
     thread.join().map_err(|_| io::Error::other("a thread of the install panicked"))?
 }
 
-/// Runs `command`, the first call to a `lake`, under the lock Mago's own installs take. elan's `lake` installs the
-/// pinned Lean on its first call, with no lock of its own, so compiles that start together on a machine without that
-/// Lean take turns to install it once instead of breaking it. With no such program on the `PATH`, the call installs
-/// nothing and takes no lock, so it fails as not found even where Mago's cache folder can hold no lock.
-pub(crate) fn first_call(command: &mut Command) -> io::Result<Output> {
-    let program = Path::new(command.get_program()).with_extension(std::env::consts::EXE_EXTENSION);
-    let found = std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|folder| folder.join(&program).is_file()));
-    let _lock = if found { Some(install_lock(&cache_root()?)?) } else { None };
-
-    process::output(command)
-}
-
 /// The exclusive lock on `install.lock` in `cache`, held across threads and processes alike until it is dropped.
 fn install_lock(cache: &Path) -> io::Result<fs::File> {
     Ok(lock::exclusive(&cache.join("install.lock"))?)
@@ -707,9 +727,10 @@ mod tests {
     /// which the Lean processes it starts inherit.
     #[test]
     fn each_process_a_lake_starts_runs_under_the_processor_time_limit() -> io::Result<()> {
-        let lake = Lake { program: PathBuf::from("/bin/sh") };
+        let lean = tempfile::tempdir()?;
+        let lake = lake_in(lean.path(), "#!/bin/sh\nulimit -t; ulimit -c\n")?;
 
-        let output = process::output(lake.command().args(["-c", "ulimit -t; ulimit -c"]))?;
+        let output = process::output(&mut lake.command())?;
 
         assert_eq!(String::from_utf8_lossy(&output.stdout), "120\n0\n");
 
@@ -775,6 +796,18 @@ mod tests {
 
     /// The `lake` of the archive `lean_archive` makes, which prints `lake`.
     const LAKE: &str = "#!/bin/sh\necho lake\n";
+
+    /// The `lake` of a Lean in `lean` whose `bin/lake` runs `script`.
+    fn lake_in(lean: &Path, script: &str) -> io::Result<Lake> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let lake = Lake { lean: lean.to_path_buf() };
+        fs::create_dir_all(lean.join("bin"))?;
+        fs::write(lake.program(), script)?;
+        fs::set_permissions(lake.program(), fs::Permissions::from_mode(0o755))?;
+
+        Ok(lake)
+    }
 
     /// A Lean archive as Lean's releases make one, a zstd stream of a tarball whose one folder, `lean-test`, holds
     /// `bin/lake` and `bin/lean`, a link to it.
@@ -868,7 +901,7 @@ mod tests {
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         assert_eq!(lean_in(cache.path())?, "lake\n");
         for lake in lakes {
-            assert_eq!(lake.program, cache.path().join("lean/lean-test/bin/lake"));
+            assert_eq!(lake.lean, cache.path().join("lean/lean-test"));
         }
         assert!(!cache.path().join("lean/lean-test.staging").exists());
 
@@ -938,26 +971,43 @@ mod tests {
         Ok(())
     }
 
+    /// A law runs on one Lean, found one way: the Lean Mago installed in its cache folder, else elan's toolchain of the
+    /// pinned version. elan's toolchain of another version is never one of them.
+    #[test]
+    fn a_law_runs_on_mago_s_own_lean_else_on_elan_s_toolchain_of_the_pinned_version() -> io::Result<()> {
+        let cache = tempfile::tempdir()?;
+        let elan = tempfile::tempdir()?;
+        let pinned = elan.path().join("toolchains/leanprover--lean4---v4.34.1");
+        lake_in(&elan.path().join("toolchains/leanprover--lean4---v4.35.0"), LAKE)?;
+
+        assert!(installed(cache.path(), Some(elan.path())).is_none());
+
+        lake_in(&pinned, LAKE)?;
+        assert_eq!(installed(cache.path(), Some(elan.path())).map(|lake| lake.lean), Some(pinned));
+
+        if let Some(archive) = &ARCHIVE {
+            let own = cache.path().join("lean").join(archive.name);
+            lake_in(&own, LAKE)?;
+            assert_eq!(installed(cache.path(), Some(elan.path())).map(|lake| lake.lean), Some(own.clone()));
+            assert_eq!(installed(cache.path(), None).map(|lake| lake.lean), Some(own));
+        }
+
+        Ok(())
+    }
+
     /// A finished build deletes the older builds beside it, and keeps the Lean Mago installed there.
     #[test]
     fn a_build_deletes_the_older_builds_and_keeps_the_lean_mago_installed() -> io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-
         let Some(archive) = &ARCHIVE else {
             return Ok(());
         };
         let builds = tempfile::tempdir()?;
-        let lake = tempfile::tempdir()?;
-        let program = lake.path().join("lake");
-        fs::write(
-            &program,
-            "#!/bin/sh\ncase \"$1\" in\n    build) mkdir -p .lake/build/bin && touch .lake/build/bin/sharp-lean ;;\n    env) pwd ;;\nesac\n",
-        )?;
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755))?;
+        let lean = tempfile::tempdir()?;
+        let lake = lake_in(lean.path(), "#!/bin/sh\nmkdir -p .lake/build/bin && touch .lake/build/bin/sharp-lean\n")?;
         fs::create_dir_all(builds.path().join(archive.name).join("bin"))?;
         fs::create_dir_all(builds.path().join("0123456789abcdef0123456789abcdef"))?;
 
-        let library = build_in(builds.path(), &Lake { program })?;
+        let library = build_in(builds.path(), &lake)?;
 
         assert!(runner(&library).is_file());
         assert!(builds.path().join(archive.name).join("bin").is_dir());
@@ -970,21 +1020,11 @@ mod tests {
     /// as an uninstalled toolchain leaves it, is built again by the Lean there is, which it then records.
     #[test]
     fn a_build_whose_lean_is_gone_is_built_again_by_the_lean_there_is() -> io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-
         let builds = tempfile::tempdir()?;
         let lean = tempfile::tempdir()?;
         fs::create_dir_all(lean.path().join("lib/lean"))?;
-        let lake = tempfile::tempdir()?;
-        let program = lake.path().join("lake");
-        fs::write(
-            &program,
-            format!(
-                "#!/bin/sh\ncase \"$1\" in\n    build) mkdir -p .lake/build/bin && echo rebuilt > .lake/build/bin/sharp-lean ;;\n    env) echo '{}' ;;\nesac\n",
-                lean.path().display()
-            ),
-        )?;
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755))?;
+        let lake =
+            lake_in(lean.path(), "#!/bin/sh\nmkdir -p .lake/build/bin && echo rebuilt > .lake/build/bin/sharp-lean\n")?;
         let library = builds.path().join(key(&PACKAGE));
         for (path, source) in PACKAGE {
             fs::create_dir_all(library.join(path).parent().unwrap_or(&library))?;
@@ -995,7 +1035,7 @@ mod tests {
         fs::write(library.join(SYSROOT), builds.path().join("gone").display().to_string())?;
 
         assert_eq!(built_in(builds.path()), None);
-        let built = build_in(builds.path(), &Lake { program })?;
+        let built = build_in(builds.path(), &lake)?;
 
         assert_eq!(built, library);
         assert_eq!(fs::read_to_string(runner(&library))?, "rebuilt\n");
