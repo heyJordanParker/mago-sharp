@@ -62,7 +62,6 @@ pub(crate) const CONSTANT_VALUE: &str = "Write the constant's value without call
 pub(crate) const MEMBER_NAME: &str = "Name the member in the code.";
 pub(crate) const BODYLESS: &str = "A law reads a method's body, and this method has none it can read.";
 pub(crate) const ARGUMENT: &str = "Pass each argument by its position.";
-pub(crate) const DEFAULT_ARGUMENT: &str = "Pass every argument, the ones with a default value included.";
 pub(crate) const MEMBER: &str = "Read a property the class declares, or call one of its methods.";
 pub(crate) const RECEIVER: &str = "Call it on a value of a PHP# class, enum or interface.";
 pub(crate) const LAW_MATCH: &str =

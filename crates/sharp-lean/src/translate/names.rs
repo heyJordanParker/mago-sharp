@@ -85,6 +85,12 @@ pub(crate) fn member(class: &str, member: &[u8]) -> String {
     format!("{class}.{}", identifier(member))
 }
 
+/// The default of the parameter at `position` of the method whose Lean name is `method`, which a call that leaves its
+/// argument out passes: `App.Shop.Order.ship.«$default1»`.
+pub(crate) fn default(method: &str, position: usize) -> String {
+    format!("{method}.«$default{position}»")
+}
+
 /// The last segment of a fully qualified PHP name: `Money` of `App\Shared\Money`.
 pub(crate) fn short_name(name: &[u8]) -> String {
     String::from_utf8_lossy(name.rsplit(|byte| *byte == b'\\').next().unwrap_or(name)).into_owned()

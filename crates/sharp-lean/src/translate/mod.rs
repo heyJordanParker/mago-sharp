@@ -15,6 +15,8 @@ use std::borrow::Cow;
 use mago_analyzer::smaller::Bound;
 use mago_analyzer::smaller::Smaller;
 use mago_analyzer::smaller::Step;
+use mago_codex::scanner::get_union_from_hint;
+use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_database::file::FileId;
 use mago_names::binding::php_method_name;
 use mago_names::binding::php_operator_name;
@@ -23,12 +25,14 @@ use mago_sharp_bridge::DeclarationKind;
 use mago_span::HasSpan;
 use mago_span::Span;
 
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Extension;
 use mago_syntax::cst::FunctionLikeParameter;
+use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
@@ -45,6 +49,7 @@ use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
+use mago_syntax::dialect::Dialect;
 use mago_word::word;
 
 use crate::issues;
@@ -207,9 +212,9 @@ impl Translator<'_, '_> {
                     self.statement(statement);
                 }
             }
-            Statement::Class(class) => self.class(&class.name, class.inheritance.as_ref(), &class.members),
+            Statement::Class(class) => self.class(&class.name, class.inheritance.as_ref(), &class.members, false),
             Statement::Struct(r#struct) => {
-                self.class(&r#struct.name, r#struct.inheritance.as_ref(), &r#struct.members);
+                self.class(&r#struct.name, r#struct.inheritance.as_ref(), &r#struct.members, true);
             }
             Statement::Enum(r#enum) => self.r#enum(r#enum),
             Statement::Interface(interface) => self.interface(interface),
@@ -244,12 +249,13 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// A class, or a struct, which is the `final` class it lowers to, spec section 10.
+    /// A class, or a struct, which is the `final` class it lowers to, spec section 10, with the `==` it gets.
     fn class(
         &mut self,
         name: &LocalIdentifier,
         inheritance: Option<&Inheritance>,
         members: &Sequence<'_, ClassLikeMember<'_>>,
+        r#struct: bool,
     ) {
         let full = self.checked.names().get(name);
         self.name_module(full, name.span);
@@ -343,6 +349,60 @@ impl Translator<'_, '_> {
 
         self.constructor(full, &lean, &short, name.span, constructor, &fields, &types);
         self.members(full, &lean, &short, members);
+        if r#struct {
+            self.value_equality(full, &lean, &short, name.span, members, &fields);
+        }
+    }
+
+    /// The `==` a struct that declares none gets, spec section 19, as its `op_Equality`: each field compared with that
+    /// field's own `==`. A struct that declares `operator ==` runs its own, as [`Translator::operator`] gives it.
+    fn value_equality(
+        &mut self,
+        full: &[u8],
+        lean: &str,
+        short: &str,
+        span: Span,
+        members: &Sequence<'_, ClassLikeMember<'_>>,
+        fields: &[Field],
+    ) {
+        let Some(name) = php_operator_name(&BinaryOperator::Equal(span), 2) else {
+            unreachable!("`==` runs as a static method of its class");
+        };
+        let declared = members.iter().any(|member| {
+            matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
+        });
+        if declared || !self.reach.reaches(full, name) {
+            return;
+        }
+
+        let mut body = Body::new(self.checked, self.reach, full, format!("{short}.operator =="));
+        let r#type = body.class_type(span, full);
+        let mut equal = Vec::new();
+        for field in fields {
+            let Some(hint) = field.hint else {
+                equal.push(body.unmodeled(span, "a declaration without a type".to_owned(), issues::MISSING_TYPE));
+                continue;
+            };
+            let field_type = get_union_from_hint(
+                hint,
+                Some(word(full)),
+                self.checked.names(),
+                &TypeResolutionContext::new(),
+                Dialect::Sharp,
+            );
+            equal.push(body.fields_equal(span, full, field.name, &field_type));
+        }
+        let (mut lines, uses, unmodeled) = body.finish();
+        lines.push(format!("return {}", if equal.is_empty() { "true".to_owned() } else { equal.join(" && ") }));
+
+        self.define(
+            names::member(lean, name),
+            span,
+            &[format!("(a b : {type})")],
+            "Bool",
+            (lines, uses, unmodeled),
+            None,
+        );
     }
 
     /// `Class.__construct`, a `@[simp]` definition that builds the structure: from each promoted parameter, and from each
@@ -362,6 +422,7 @@ impl Translator<'_, '_> {
         let mut body = Body::new(self.checked, self.reach, full, format!("new {short}"));
         let mut parameters = Vec::new();
         if let Some(constructor) = constructor {
+            self.defaults(full, &key, &format!("new {short}"), &constructor.parameter_list);
             for parameter in constructor.parameter_list.parameters.iter() {
                 let r#type = body.declared_type(parameter.hint.as_ref(), parameter.span());
                 let name = parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name);
@@ -649,6 +710,7 @@ impl Translator<'_, '_> {
         receiver: Option<&FunctionLikeParameter>,
     ) {
         let place = format!("{short}.{}", String::from_utf8_lossy(method.name.value));
+        self.defaults(full, &names::member(lean, method.name.value), &place, &method.parameter_list);
         let mut body = Body::new(self.checked, self.reach, full, place.clone());
         if names::RESERVED.contains(&String::from_utf8_lossy(method.name.value).as_ref()) {
             body.unmodeled(method.name.span, format!("the method {place}"), issues::RESERVED_NAME);
@@ -694,6 +756,23 @@ impl Translator<'_, '_> {
             translated,
             measure,
         );
+    }
+
+    /// Each parameter default of the method `key`, spec section 7, as the constant [`names::default`] names, which a
+    /// call that leaves its argument out passes. A default a law can't read refuses only a law that leaves it out.
+    fn defaults(&mut self, full: &[u8], key: &str, place: &str, parameters: &FunctionLikeParameterList) {
+        for (position, parameter) in parameters.parameters.iter().enumerate() {
+            let Some(default) = &parameter.default_value else {
+                continue;
+            };
+            let name =
+                String::from_utf8_lossy(parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name));
+            let mut body = Body::new(self.checked, self.reach, full, format!("the default of `{name}` in {place}"));
+            let r#type = body.declared_type(parameter.hint.as_ref(), parameter.span());
+            let value = body.pure_value(default.value);
+            let key = names::default(key, position);
+            self.declare(body, key.clone(), parameter.span(), format!("def {key} : {type} := {value}"), true);
+        }
     }
 
     /// An operator a class declares, spec section 19, as the static method `name` it runs as, which takes its operands.

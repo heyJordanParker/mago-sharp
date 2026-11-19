@@ -5,15 +5,19 @@
 //! condition is a nested `do` block, so its effects run only there.
 
 use std::borrow::Cow;
+use std::ops::Range;
 
 use foldhash::HashSet;
 use mago_analyzer::smaller::Path;
 use mago_analyzer::smaller::Smaller;
 use mago_analyzer::smaller::Step;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
@@ -620,27 +624,12 @@ impl<'body, 'program> Body<'body, 'program> {
             BinaryOperator::Identical(_) | BinaryOperator::NotIdentical(_) => {
                 self.unmodeled(binary.span(), format!("the identity test `{operator}`"), issues::IDENTITY)
             }
-            // Lean's `==` on the values a law sees is PHP's `===` on values that hold no object, the one comparison of
-            // the bridge's that runs no code a law cannot see.
-            BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) => {
-                let (what, reason) =
-                    match types.equality(types.expression_type(binary.lhs), types.expression_type(binary.rhs)) {
-                        Equality::Identical if binary.operator.is_negated_equality() => {
-                            return format!("({lhs} != {rhs})");
-                        }
-                        Equality::Identical => return format!("({lhs} == {rhs})"),
-                        Equality::Declared(..) | Equality::Elements => {
-                            (format!("the class operator `{operator}`"), issues::CLASS_OPERATOR)
-                        }
-                        Equality::Numbers => ("a float".to_owned(), issues::FLOAT),
-                        Equality::Tables => ("a collection".to_owned(), issues::COLLECTION),
-                        Equality::Running => {
-                            (format!("`{operator}` on values only the running code tells apart"), issues::TYPE_TEST)
-                        }
-                    };
-
-                self.unmodeled(binary.span(), what, reason)
-            }
+            BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) => self.equal(
+                binary.span(),
+                (types.expression_type(binary.lhs), types.expression_type(binary.rhs)),
+                (&lhs, &rhs),
+                binary.operator.is_negated_equality(),
+            ),
             BinaryOperator::LessThan(_) if ordered => format!("(decide ({lhs} < {rhs}))"),
             BinaryOperator::LessThanOrEqual(_) if ordered => format!("(decide ({lhs} <= {rhs}))"),
             // `>` and `>=` stay Lean's `>` and `≥`, so a goal prints them as the code writes them.
@@ -673,15 +662,98 @@ impl<'body, 'program> Body<'body, 'program> {
             return None;
         }
 
-        let class_name = self.reached_name(class);
-        let key = names::member(&names::full_name(&class_name), comparison);
-        self.uses(class, &key, format!("{}.operator <=>", names::short_name(&class_name)));
-        let compared = self.bind(format!("{key} {lhs} {rhs}"));
+        let compared = self.operator(class, comparison, "<=>", (lhs, rhs));
 
         Some(match test {
             Some(test) => format!("(decide ({compared} {test} (0 : int)))"),
             None => compared,
         })
+    }
+
+    /// `==`, or `!=` when `negated`, of the values `lhs` and `rhs` of the types `types`, as spec section 19 compares
+    /// them, the way the bridge's [`Equality`] tells: Lean's `==` on values that hold no object, and the `==` a class
+    /// declares, or a struct gets with no code, as its `op_Equality` gives it. `span` is where a refusal stands.
+    pub(crate) fn equal(
+        &mut self,
+        span: Span,
+        types: (&TUnion, &TUnion),
+        (lhs, rhs): (&str, &str),
+        negated: bool,
+    ) -> String {
+        let (what, reason) = match self.checked.types().equality(types.0, types.1) {
+            Equality::Identical if negated => return format!("({lhs} != {rhs})"),
+            Equality::Identical => return format!("({lhs} == {rhs})"),
+            Equality::Declared(owner, name) if !types.0.is_nullable() && !types.1.is_nullable() => {
+                if !self.is_translated_class(span, owner.as_bytes()) {
+                    return "default".to_owned();
+                }
+                let equal = self.operator(owner.as_bytes(), name, "==", (lhs, rhs));
+                return if negated { format!("(!{equal})") } else { equal };
+            }
+            Equality::Declared(..) | Equality::Elements => {
+                (format!("the class operator `{}`", if negated { "!=" } else { "==" }), issues::CLASS_OPERATOR)
+            }
+            Equality::Numbers => ("a float".to_owned(), issues::FLOAT),
+            Equality::Tables => ("a collection".to_owned(), issues::COLLECTION),
+            Equality::Running => {
+                let operator = if negated { "!=" } else { "==" };
+                (format!("`{operator}` on values only the running code tells apart"), issues::TYPE_TEST)
+            }
+        };
+
+        self.unmodeled(span, what, reason)
+    }
+
+    /// Whether the field `field`, of the declared type `r#type`, holds equal values in `a` and `b`, two values of the
+    /// struct `class`, by the field's own `==`, spec section 19. An implementer of a sealed interface reads it through
+    /// the interface's accessor. A class the type names is the enum or the object it names, as the codex populates a
+    /// declared type, and a type that names one inside another, as `List<Instant>`, keeps the class operator refusal.
+    pub(crate) fn fields_equal(&mut self, span: Span, class: &[u8], field: &[u8], r#type: &TUnion) -> String {
+        let mut populated = Vec::new();
+        for atomic in r#type.types.iter() {
+            populated.push(match atomic {
+                TAtomic::Reference(TReference::Symbol { name, parameters: None, intersection_types: None, .. }) => {
+                    match self.checked.types().class_declaration(*name).kind {
+                        DeclarationKind::Enum { .. } => TAtomic::Object(TObject::new_enum(*name)),
+                        _ => TAtomic::Object(TObject::Named(TNamedObject::new(*name))),
+                    }
+                }
+                atomic
+                    if !atomic
+                        .get_all_child_nodes()
+                        .iter()
+                        .any(|node| matches!(node, TypeRef::Atomic(TAtomic::Reference(_)))) =>
+                {
+                    atomic.clone()
+                }
+                _ => return self.unmodeled(span, "the class operator `==`".to_owned(), issues::CLASS_OPERATOR),
+            });
+        }
+        let r#type = TUnion::from_vec(populated);
+
+        let mut values = Vec::new();
+        for side in ["a", "b"] {
+            values.push(match self.sealed(class) {
+                Some((_, constructor)) => {
+                    let key = names::member(&constructor, field);
+                    self.uses(class, &key, format!("{}.{}", names::short_name(class), String::from_utf8_lossy(field)));
+                    format!("({key} {side})")
+                }
+                None => format!("{side}.{}", names::identifier(field)),
+            });
+        }
+
+        self.equal(span, (&r#type, &r#type), (&values[0], &values[1]), false)
+    }
+
+    /// The call of the operator `class` declares, or gets with no code, as the static method `name` it runs as, spec
+    /// section 19, on `lhs` and `rhs`, bound to a temporary. `symbol` is the operator as the code writes it.
+    fn operator(&mut self, class: &[u8], name: &[u8], symbol: &str, (lhs, rhs): (&str, &str)) -> String {
+        let class_name = self.reached_name(class);
+        let key = names::member(&names::full_name(&class_name), name);
+        self.uses(class, &key, format!("{}.operator {symbol}", names::short_name(&class_name)));
+
+        self.bind(format!("{key} {lhs} {rhs}"))
     }
 
     /// `+`, `-` or `*` of two non-nullable ints as the exact `Int` it computes.
@@ -1073,8 +1145,7 @@ impl<'body, 'program> Body<'body, 'program> {
             {
                 let class_name = self.reached_name(class);
                 let lean = names::full_name(&class_name);
-                let Some(arguments) = self.arguments(&call.argument_list, call.argument_list.arguments.len(), None)
-                else {
+                let Some(arguments) = self.arguments(&call.argument_list, None) else {
                     return "default".to_owned();
                 };
                 self.uses(class, &lean, names::short_name(&class_name));
@@ -1354,13 +1425,13 @@ impl<'body, 'program> Body<'body, 'program> {
         let smaller =
             arguments.filter(|_| self.reach.same_class(class, self.class)).and_then(|list| self.smaller(list));
         let stepped = smaller.as_ref().and_then(|(smaller, term)| Some((smaller.argument, term.clone()?)));
-        let Some(arguments) =
-            arguments.map_or_else(|| Some(Vec::new()), |list| self.arguments(list, facts.parameters, stepped))
-        else {
+        let Some(arguments) = arguments.map_or_else(|| Some(Vec::new()), |list| self.arguments(list, stepped)) else {
             return "default".to_owned();
         };
-        parts.extend(arguments);
         let place = format!("{}.{}", names::short_name(&class_name), facts.name);
+        let defaults = self.defaults(class, &key, &place, arguments.len()..facts.parameters);
+        parts.extend(arguments);
+        parts.extend(defaults);
         self.use_of(class, &key, place, smaller.map(|(smaller, _)| smaller));
 
         self.bind(parts.join(" "))
@@ -1406,27 +1477,25 @@ impl<'body, 'program> Body<'body, 'program> {
         let class_name = self.reached_name(class);
         let key = names::member(&names::full_name(&class_name), b"__construct");
         let parameters = self.reach.method(class, b"__construct").map_or(0, |method| method.parameters);
+        let Some(arguments) =
+            instantiation.argument_list.as_ref().map_or_else(|| Some(Vec::new()), |list| self.arguments(list, None))
+        else {
+            return "default".to_owned();
+        };
+        let place = format!("new {}", names::short_name(&class_name));
+        let defaults = self.defaults(class, &key, &place, arguments.len()..parameters);
         let mut parts = vec![key.clone()];
-        if let Some(arguments) = &instantiation.argument_list {
-            let Some(arguments) = self.arguments(arguments, parameters, None) else {
-                return "default".to_owned();
-            };
-            parts.extend(arguments);
-        }
-        self.uses(class, &key, format!("new {}", names::short_name(&class_name)));
+        parts.extend(arguments);
+        parts.extend(defaults);
+        self.uses(class, &key, place);
         let made = self.bind(parts.join(" "));
 
         self.held(class, made)
     }
 
-    /// The terms of a call's arguments, or `None` when one cannot be translated. Each argument is passed by position,
-    /// and the call passes every parameter. `stepped` is an argument's position and the term that stands for it.
-    fn arguments(
-        &mut self,
-        list: &ArgumentList,
-        parameters: usize,
-        stepped: Option<(usize, String)>,
-    ) -> Option<Vec<String>> {
+    /// The terms of a call's arguments, or `None` when one cannot be translated. Each argument is passed by position.
+    /// `stepped` is an argument's position and the term that stands for it.
+    fn arguments(&mut self, list: &ArgumentList, stepped: Option<(usize, String)>) -> Option<Vec<String>> {
         let mut arguments = Vec::new();
         for (position, argument) in list.arguments.iter().enumerate() {
             if let Some((_, term)) = stepped.as_ref().filter(|(at, _)| *at == position) {
@@ -1443,12 +1512,20 @@ impl<'body, 'program> Body<'body, 'program> {
                 }
             }
         }
-        if arguments.len() < parameters {
-            self.unmodeled(list.span(), "a default argument".to_owned(), issues::DEFAULT_ARGUMENT);
-            return None;
-        }
-
         Some(arguments)
+    }
+
+    /// The default of each parameter at `positions` of the method `key` of `class`, spec section 7, which a call that
+    /// leaves those arguments out passes, as the declarations [`names::default`] names.
+    fn defaults(&mut self, class: &[u8], key: &str, place: &str, positions: Range<usize>) -> Vec<String> {
+        positions
+            .map(|position| {
+                let default = names::default(key, position);
+                self.uses(class, &default, place.to_owned());
+
+                default
+            })
+            .collect()
     }
 
     /// `object.y`, `Class.CASE` and `Class.CONSTANT`.
