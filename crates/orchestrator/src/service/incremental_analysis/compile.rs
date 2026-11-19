@@ -1198,10 +1198,10 @@ impl IncrementalAnalysisService {
 
     /// The issues that refuse the laws of the last analysis before any proof, as [`Self::compile`]'s `check` reports them.
     ///
-    /// They are the [`refusals`] of the translation of each file a law reaches, each in the file that states its law, and
-    /// no Lean process starts. Each file with an error the analysis reported is left untranslated, as `compile` leaves a
-    /// file its errors refuse, so a law that reaches one is refused for it. A scan analyzes no method body, so it refuses
-    /// no law.
+    /// They are the [`refusals`] of the laws of the workspace's own files, each in the file that states its law, and no
+    /// Lean process starts. Each PHP# file those laws reach is translated, a package's too, as `compile` translates it,
+    /// but a file with an error the analysis reported, as `compile` leaves a file its errors refuse, so a law that
+    /// reaches one is refused for it. A scan analyzes no method body, so it refuses no law.
     ///
     /// # Errors
     ///
@@ -1215,9 +1215,14 @@ impl IncrementalAnalysisService {
         }
 
         let reach = Reach::new(&self.codebase, &self.native_symbol_references);
-        let reached: HashSet<FileId> = reach.law_files().flat_map(|law_file| reach.files(law_file)).copied().collect();
-        let files = self.sharp_files();
-        let reached_files: Vec<&Arc<File>> = files.iter().filter(|file| reached.contains(&file.id)).collect();
+        let law_files: HashSet<FileId> = reach
+            .law_files()
+            .filter(|law_file| self.database.get_ref(law_file).is_ok_and(|file| file.file_type == FileType::Host))
+            .collect();
+        let reached: HashSet<FileId> = law_files.iter().flat_map(|law_file| reach.files(*law_file)).copied().collect();
+        let files: Vec<Arc<File>> =
+            self.database.files().filter(|file| reached.contains(&file.id) && Dialect::of(file).is_sharp()).collect();
+        let reached_files: Vec<&Arc<File>> = files.iter().collect();
         let (errors, unrefused) = self.errors(|issues| issues);
         let session = self.plugin_registry.create_external_analysis_session(self.database.files());
         let translations = self.checked_all(
@@ -1228,8 +1233,11 @@ impl IncrementalAnalysisService {
             session.as_ref(),
             |checked, _, _| translate(checked, &reach),
         )?;
+        let errored: HashSet<FileId> = errors.keys().copied().collect();
+        let mut refused = refusals(&translations.into_iter().filter_map(Result::ok).collect::<Vec<_>>(), &errored);
+        refused.retain(|file_id, _| law_files.contains(file_id));
 
-        Ok(refusals(&translations.into_iter().filter_map(Result::ok).collect::<Vec<_>>()))
+        Ok(refused)
     }
 
     /// The PHP# files [`Self::compile`] lowers, the workspace's own, in file name order.

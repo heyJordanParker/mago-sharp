@@ -5288,6 +5288,58 @@ fn analyze_scan_only_refuses_no_law() {
     }
 }
 
+/// `mago analyze` of `root`, with every issue on one line.
+fn analyze(root: &Path) -> Output {
+    process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "analyze"])
+            .env("MAGO_REPORTING_FORMAT", "medium")
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root),
+    )
+    .unwrap()
+}
+
+/// `mago analyze` translates each PHP# file a law reaches, a package's in `includes` too, as `mago compile` does, so a
+/// law that reaches the standard library is refused for nothing, where it once was refused for errors no file had.
+#[test]
+fn analyze_proves_a_law_that_reaches_the_standard_library() {
+    let directory = library_project(&[(
+        "app/Stamp.sharp",
+        "namespace App;\n\nimport Sharp.Time.Instant;\n\npublic struct Stamp\n{\n    public Stamp(public Instant at { get; }) { }\n\n    law keepsTheInstant(Instant at) => new Stamp(at).at.epochSeconds == at.epochSeconds && new Stamp(at).at.nanosecond == at.nanosecond;\n}\n",
+    )]);
+
+    let analyzed = analyze(directory.path());
+
+    assert_eq!(analyzed.status.code(), Some(0), "{}", printed(&analyzed));
+    assert!(printed(&analyzed).contains("No issues found."), "{}", printed(&analyzed));
+}
+
+/// `mago analyze` refuses a law that reaches a file of the project whose analysis reported an error, for those errors.
+#[test]
+fn analyze_refuses_a_law_that_reaches_a_file_with_errors_for_its_errors() {
+    let money = LAWFUL_MONEY
+        .replace("    law addKeepsCurrency", "    public int broken() => \"text\";\n\n    law addKeepsCurrency");
+    let directory = library_project(&[
+        ("app/Shared/Money.sharp", &money),
+        (
+            "app/Shared/Ledger.sharp",
+            "namespace App.Shared;\n\npublic class Ledger\n{\n    law addKeeps(Money a, Money b) => a.add(b).currency == a.currency;\n}\n",
+        ),
+    ]);
+
+    let analyzed = analyze(directory.path());
+
+    assert_eq!(analyzed.status.code(), Some(1), "{}", printed(&analyzed));
+    assert!(
+        printed(&analyzed).contains(
+            "app/Shared/Ledger.sharp:5:5: error[law-unproven]: Law addKeeps is not proven: it reaches Money.add, whose file has errors. Fix them, then run vendor/bin/mago compile again."
+        ),
+        "{}",
+        printed(&analyzed)
+    );
+}
+
 /// Spec section 28's `app/Tenant/Store/Module.sharp`, whose law spans `Receipts` and `Refunds`.
 const STORE_MODULE: &str = "namespace App.Tenant.Store;\n\nmodule\n{\n    law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);\n}\n";
 
