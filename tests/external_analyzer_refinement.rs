@@ -3,9 +3,9 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
@@ -15,6 +15,9 @@ use mago_database::Database;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_extension::WorkerCommand;
+use mago_extension::WorkerPool;
+use mago_extension::WorkerPoolOptions;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
@@ -150,18 +153,20 @@ fn factory_database(returned: &str) -> (Database<'static>, FileId) {
     (database, factory_id)
 }
 
-fn registry(repository: &Path) -> Arc<PluginRegistry> {
-    registry_of(repository, &[])
+fn worker(repository: &Path) -> WorkerCommand {
+    WorkerCommand::new("php")
+        .with_argument(repository.join("composer/tests/Sdk/Fixtures/analyzer-refinement-worker.php"))
+        .with_current_directory(repository)
 }
 
-/// The plugin registry of the refinement fixture worker, which reads `environment`.
-fn registry_of(repository: &Path, environment: &[(&str, &str)]) -> Arc<PluginRegistry> {
-    let host = common::host(
-        &repository.join("composer/tests/Sdk/Fixtures/analyzer-refinement-worker.php"),
-        Duration::from_secs(30),
-        environment,
-    );
-    let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)
+fn registry(repository: &Path) -> Arc<PluginRegistry> {
+    registry_of(worker(repository))
+}
+
+fn registry_of(command: WorkerCommand) -> Arc<PluginRegistry> {
+    let pool = WorkerPool::spawn(command, NonZeroUsize::new(2).expect("two workers"), WorkerPoolOptions::default())
+        .expect("refinement worker pool should start");
+    let analyzer = ExternalAnalyzer::initialize([Arc::new(pool)], PHPVersion::PHP85, &[], false)
         .expect("refinement analyzer should initialize");
     let mut registry = PluginRegistry::with_library_providers();
     registry.set_external_analyzer(Arc::new(ExternalAnalyzerHandle::ready(analyzer)));
@@ -332,7 +337,7 @@ fn a_body_edit_of_a_return_taken_from_the_body_rechecks_its_callers_along_the_ch
 
     let temporary = tempfile::tempdir().expect("a temporary folder");
     let log = temporary.path().join("analyzed.log");
-    let logging = registry_of(repository, &[("MAGO_ANALYZED_FILES_LOG", log.to_str().expect("a UTF-8 path"))]);
+    let logging = registry_of(worker(repository).with_environment("MAGO_ANALYZED_FILES_LOG", &log));
     let (special, factory_id) = chain_database("special");
     let mut incremental = service(&special, logging);
     incremental.analyze().expect("body return analysis should succeed");

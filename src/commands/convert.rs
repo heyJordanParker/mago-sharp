@@ -785,6 +785,7 @@ fn load(
     if let Some(external_analyzer) = start_external_analyzer(
         &configuration.extension_hosts,
         configuration.php_version,
+        configuration.threads,
         &configuration.analyzer.plugins,
         configuration.analyzer.disable_default_plugins,
     ) {
@@ -1598,10 +1599,10 @@ mod tests {
         assert_eq!(outcome.proofs, 2);
     }
 
-    /// An extension host whose one plugin appends to the log `HOST_LOG` names: `start` and the worker's process id as
-    /// an interpreter starts the worker, `exit` and the id as it ends, and `proof` and how many workers the log names
-    /// alive as each analysis starts. Its after-analysis hooks never finish, and log `hang`, in the proof `HANGS_IN`
-    /// names: `the second proof of one sink`, logging `one sink` and the sink of each analysis that converts one,
+    /// An extension host whose one plugin appends to the log its second argument names: `start` and the worker's
+    /// process id as the worker starts, `exit` and the id as it exits, and `proof` and how many workers the log names
+    /// alive as each analysis starts. Its after-analysis hooks never finish, and log `hang`, in the proof its third
+    /// argument names: `the second proof of one sink`, logging `one sink` and the sink of each analysis that converts one,
     /// or `the proof of the written files`, the first whose converted files are on disk.
     const HOST_COUNTING_ITS_WORKERS: &str = r#"<?php
 
@@ -1617,8 +1618,10 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-$log = getenv('HOST_LOG');
-$worker = random_int(1, 0xFFFFFFFF);
+require $argv[1];
+
+$log = $argv[2];
+$worker = getmypid();
 file_put_contents($log, "start {$worker}\n", FILE_APPEND | LOCK_EX);
 register_shutdown_function(static fn() => file_put_contents($log, "exit {$worker}\n", FILE_APPEND | LOCK_EX));
 
@@ -1696,33 +1699,40 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
 }
 
 (new Worker(new Extension('counts-workers', 'Counts workers', '0.0.0', analyzerPlugins: [
-    new CountsWorkers($log, getenv('HANGS_IN') ?: null),
+    new CountsWorkers($log, $argv[3] ?? null),
 ])))->run();
 "#;
 
-    /// Whether the PHP SDK's Composer dependencies are installed, which `MAGO_REQUIRE_PHP_SDK_TESTS` requires.
-    fn php_sdk() -> bool {
-        let available = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/autoload.php").is_file();
+    /// The PHP SDK's autoloader, or `None` when PHP or the SDK's Composer dependencies are missing and
+    /// `MAGO_REQUIRE_PHP_SDK_TESTS` doesn't require them.
+    fn php_sdk() -> Option<PathBuf> {
+        let autoload = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/autoload.php");
+        let available = autoload.is_file()
+            && mago_database::process::output(std::process::Command::new("php").arg("--version"))
+                .is_ok_and(|output| output.status.success());
         assert!(
             available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
-            "vendor dependencies are required for the extension host tests"
+            "PHP and vendor dependencies are required for the extension host tests"
         );
-        available
+        available.then_some(autoload)
     }
 
     /// The configuration of a project at `root` of `files`, as [`project`] builds it, with an extension host `counter` of
-    /// [`HOST_COUNTING_ITS_WORKERS`] with a deadline of 15 s, which logs to `host.log`, and never finishes the
-    /// after-analysis hooks of the proof `hangs_in` names. Each proof's hooks finish in under 1 s, so a loaded machine
-    /// that stops one for seconds still lets it finish.
-    fn hosted(root: &Path, files: &[(String, String)], hangs_in: Option<&str>) -> Configuration {
+    /// one worker that runs [`HOST_COUNTING_ITS_WORKERS`] with a deadline of 15 s, logs to `host.log`, and never
+    /// finishes the after-analysis hooks of the proof `hangs_in` names. A worker starts in about 0.1 s and answers
+    /// each proof in under 1 s, and the deadline counts from its start, so with 3 s a worker stopped for 4 s after its
+    /// start, as a loaded machine can stop it, failed its own proof too. Its workers have 30 s to exit once stopped, so
+    /// one that exits slowly on a loaded machine still logs its exit rather than being killed and counted alive.
+    fn hosted(root: &Path, autoload: &Path, files: &[(String, String)], hangs_in: Option<&str>) -> Configuration {
         project(root, files);
         std::fs::create_dir_all(root.join("tools")).unwrap();
         std::fs::write(root.join("tools/host.php"), HOST_COUNTING_ITS_WORKERS).unwrap();
         let mut toml = std::fs::read_to_string(root.join("mago.toml")).unwrap();
         toml.push_str(&format!(
-            "\n[extension-hosts.counter]\nfile = \"tools/host.php\"\nrequest-timeout-ms = 15000\nenvironment = {{ HOST_LOG = {:?}{} }}\n",
+            "\n[extension-hosts.counter]\nworkers = 1\nrequest-timeout-ms = 15000\nshutdown-timeout-ms = 30000\ncommand = [\"php\", \"tools/host.php\", {:?}, {:?}{}]\n",
+            autoload.display().to_string(),
             root.join("host.log").display().to_string(),
-            hangs_in.map(|proof| format!(", HANGS_IN = {proof:?}")).unwrap_or_default(),
+            hangs_in.map(|proof| format!(", {proof:?}")).unwrap_or_default(),
         ));
         std::fs::write(root.join("mago.toml"), toml).unwrap();
 
@@ -1760,14 +1770,14 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     /// proofs of three sinks, each split kept with its hosts while it proved its parts, had 1, 2, 3, 4, 3 and 2.
     #[test]
     fn each_proof_stops_its_hosts_before_the_next_proof_starts_its_own() {
-        if !php_sdk() {
+        let Some(autoload) = php_sdk() else {
             return;
-        }
+        };
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let mut files: Vec<(String, String)> = (0..5).map(clean).collect();
         files.extend((0..3).flat_map(sink));
-        let configuration = hosted(&root, &files, None);
+        let configuration = hosted(&root, &autoload, &files, None);
 
         let (_, outcome) = ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true }
             .run(configuration, ColorChoice::Never)
@@ -1784,14 +1794,14 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     /// on top of the five clean interfaces accepted, and the host's after-analysis hooks make no progress there.
     #[test]
     fn a_proof_that_cannot_finish_keeps_its_files_plain_php_and_the_run_reports_the_rest() {
-        if !php_sdk() {
+        let Some(autoload) = php_sdk() else {
             return;
-        }
+        };
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let mut files: Vec<(String, String)> = (0..5).map(clean).collect();
         files.extend((0..3).flat_map(sink));
-        let configuration = hosted(&root, &files, Some("the second proof of one sink"));
+        let configuration = hosted(&root, &autoload, &files, Some("the second proof of one sink"));
 
         let ((exit_code, outcome), logged) = logged(|| {
             ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true }
@@ -1821,19 +1831,19 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     }
 
     /// The error the host of [`hosted`] gives when its after-analysis hooks make no progress.
-    const TIMEOUT: &str = "Orchestrator error: Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `counter` made no progress for 15000 ms on the after-analysis hooks of plugin `counts-workers`: raise its `request-timeout-ms` for hooks that run that long";
+    const TIMEOUT: &str = "Orchestrator error: Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `counter` made no progress for 15000 ms on the after-analysis hooks of plugin `counts-workers` (worker 0): raise its `request-timeout-ms` for hooks that run that long";
 
     /// Once a run writes its files, fresh hosts that load them prove the project again. When that proof can't finish,
     /// the files are written and git holds their plain PHP, so the run still names them, logs the error, and fails as
     /// when those hosts find an issue.
     #[test]
     fn a_proof_of_the_written_files_that_cannot_finish_still_reports_them_and_fails() {
-        if !php_sdk() {
+        let Some(autoload) = php_sdk() else {
             return;
-        }
+        };
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
-        let configuration = hosted(&root, &[clean(0), clean(1)], Some("the proof of the written files"));
+        let configuration = hosted(&root, &autoload, &[clean(0), clean(1)], Some("the proof of the written files"));
 
         let ((exit_code, outcome), logged) = logged(|| {
             ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: false }
@@ -1861,12 +1871,12 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     /// the run still names them, logs the error, and fails as when those hosts find an issue.
     #[test]
     fn a_compile_of_the_written_files_for_the_hosts_that_fails_still_reports_them_and_fails() {
-        if !php_sdk() {
+        let Some(autoload) = php_sdk() else {
             return;
-        }
+        };
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
-        let configuration = hosted(&root, &[clean(0), clean(1)], None);
+        let configuration = hosted(&root, &autoload, &[clean(0), clean(1)], None);
         let project: String =
             unit::source_hash(root.as_os_str().as_encoded_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
         let folder = mago_sharp_lean::cache_root().unwrap().join("hosts").join(project);
@@ -2059,17 +2069,11 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             ("Contracts/helpers.php".to_owned(), "<?php\n\nfunction helper(): int\n{\n    return 1;\n}\n".to_owned());
         project(&root, &[script]);
         let started = root.join("host-started");
-        std::fs::create_dir_all(root.join("tools")).unwrap();
-        std::fs::write(
-            root.join("tools/host.php"),
-            "<?php\n\nfile_put_contents(getenv('STARTED'), \"started\\n\", FILE_APPEND);\n",
-        )
-        .unwrap();
         std::fs::write(
             root.join("mago.toml"),
             format!(
-                "php-version = \"8.5\"\n\n[source]\npaths = [\"src\"]\n\n[extension-hosts.proof]\nfile = \"tools/host.php\"\nenvironment = {{ STARTED = {:?} }}\n",
-                started.display().to_string()
+                "php-version = \"8.5\"\n\n[source]\npaths = [\"src\"]\n\n[extension-hosts.proof]\ncommand = [\"sh\", \"-c\", \"echo started >> '{}'\"]\nworkers = 1\n",
+                started.display()
             ),
         )
         .unwrap();

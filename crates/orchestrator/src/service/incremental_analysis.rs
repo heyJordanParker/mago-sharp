@@ -399,7 +399,7 @@ impl IncrementalAnalysisService {
     }
 
     /// Takes in that the compiled files of `classes`, each a lowercase class name, changed: starts again each extension
-    /// interpreter that loaded one or failed to, since PHP declares a class once, and gives up what the last analysis found
+    /// worker that loaded one or failed to, since PHP declares a class once, and gives up what the last analysis found
     /// in each file whose extension callbacks read one, so the next
     /// [`analyze_incremental()`](Self::analyze_incremental) given the returned files analyzes them again. A callback
     /// reads every class its worker loaded before it ran. Returns `None` when the before-analysis hooks read one, which
@@ -407,16 +407,22 @@ impl IncrementalAnalysisService {
     ///
     /// # Errors
     ///
-    /// Returns an error when the external analyzer failed to start.
+    /// Returns an error when a worker cannot answer whether it loaded one, or cannot start again.
     pub fn reload_classes(&mut self, classes: &HashSet<Word>) -> Result<Option<Vec<FileId>>, OrchestratorError> {
         if classes.is_empty() {
             return Ok(Some(Vec::new()));
         }
 
         let names: Vec<&[u8]> = classes.iter().map(Word::as_bytes).collect();
-        self.plugin_registry
+        let reloaded = self
+            .plugin_registry
             .reload_external_workers_holding(&names)
             .map_err(mago_analyzer::error::AnalysisError::from)?;
+        tracing::debug!(
+            reloaded,
+            classes = classes.len(),
+            "Extension workers that loaded a changed class started again."
+        );
         if self.class_logs.read_any(&self.before_analysis_reads, classes) {
             return Ok(None);
         }

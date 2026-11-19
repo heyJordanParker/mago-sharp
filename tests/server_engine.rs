@@ -2,9 +2,9 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
@@ -15,6 +15,9 @@ use mago_database::DatabaseReader;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_extension::WorkerCommand;
+use mago_extension::WorkerPool;
+use mago_extension::WorkerPoolOptions;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
 use mago_php_version::PHPVersion;
@@ -52,12 +55,12 @@ fn server(repository: &Path, database: Database<'static>) -> Server {
 }
 
 fn server_with(repository: &Path, database: Database<'static>, analyzer_settings: AnalyzerSettings) -> Server {
-    let host = common::host(
-        &repository.join("composer/tests/Sdk/Fixtures/analyzer-server-worker.php"),
-        Duration::from_secs(30),
-        &[],
-    );
-    let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)
+    let command = WorkerCommand::new("php")
+        .with_argument(repository.join("composer/tests/Sdk/Fixtures/analyzer-server-worker.php"))
+        .with_current_directory(repository);
+    let pool = WorkerPool::spawn(command, NonZeroUsize::MIN, WorkerPoolOptions::default())
+        .expect("server proof worker pool should start");
+    let analyzer = ExternalAnalyzer::initialize([Arc::new(pool)], PHPVersion::PHP85, &[], false)
         .expect("server proof analyzer should initialize");
     let mut registry = PluginRegistry::with_library_providers();
     registry.set_external_analyzer(Arc::new(ExternalAnalyzerHandle::ready(analyzer)));
@@ -435,6 +438,57 @@ fn owners(issues: &IssueCollection) -> Vec<String> {
 /// The messages the parents hook reports.
 fn parents(issues: &IssueCollection) -> Vec<String> {
     reported(issues, "server-parents/parents")
+}
+
+/// `Shipment`, extending `parent`, with `total` returning `returned`.
+fn shipment(parent: &str, returned: &str) -> String {
+    format!(
+        "<?php\nclass Base {{}}\nclass Other {{}}\nfinal class Shipment extends {parent}\n{{\n    public function total(): int {{ return {returned}; }}\n}}\n"
+    )
+}
+
+/// The prepared hook reads `Shipment`'s parents before the analysis and answers both marked files from them, reading
+/// nothing for either. Each file is analyzed again when `Shipment`'s parent changes, and neither after an edit of its
+/// body.
+#[test]
+fn every_file_a_before_analysis_read_answered_runs_again_when_the_class_changes_parent_and_none_after_a_body_edit() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the before-analysis reads test") {
+        return;
+    }
+
+    let mut server = server(
+        repository,
+        database(&[
+            ("src/shipment.php", &shipment("Base", "1")),
+            ("src/billing.php", "<?php\n// prepared: Base\nfinal class Billing {}\n"),
+            ("src/shipping.php", "<?php\n// prepared: Base\nfinal class Shipping {}\n"),
+        ]),
+    );
+    let prepared = |issues: &IssueCollection| reported(issues, "server-prepared/prepared");
+    let first = server.analyze().expect("initial analysis").issues;
+    assert_eq!(
+        prepared(&first),
+        [
+            "Run 1 of `src/billing.php`: `Shipment` extends `Base`.",
+            "Run 1 of `src/shipping.php`: `Shipment` extends `Base`."
+        ]
+    );
+
+    let shipment_file = FileId::new(b"src/shipment.php");
+    server.database_mut().update(shipment_file, Cow::Owned(shipment("Base", "2").into_bytes()));
+    let edited = server.analyze_incremental(&[shipment_file]).expect("analysis after a body edit").issues;
+    assert_eq!(prepared(&edited), prepared(&first), "a body edit runs neither again");
+
+    server.database_mut().update(shipment_file, Cow::Owned(shipment("Other", "2").into_bytes()));
+    let moved = server.analyze_incremental(&[shipment_file]).expect("analysis after a parent change").issues;
+    assert_eq!(
+        prepared(&moved),
+        [
+            "Run 2 of `src/billing.php`: `Shipment` does not extend `Base`.",
+            "Run 2 of `src/shipping.php`: `Shipment` does not extend `Base`."
+        ]
+    );
 }
 
 /// The attribute the owners hook lists the methods of.
@@ -880,11 +934,12 @@ fn lines(relations: &[&str]) -> String {
 /// A PHP# file whose `int` return holds only while the relations plugin's provider answers `Order::$items` with `int`.
 const ORDERS: &str = "namespace App;\n\nimport App.Models.Order;\n\nextern Order uses none;\n\npublic class Orders\n{\n    public int count(Order order)\n    {\n        return order.items;\n    }\n}\n";
 
-/// The relations provider answers `Order::$items` when it is asked, from `Line` and a search of the methods with a
-/// `#[Relation]`. What it read can change the PHP# file's code, so the file declaring `Line` is among its inputs, and a
-/// relation that joins the search gives the file a new key.
+/// The relations plugin searches the methods before the analysis, and its provider answers `Order::$items` from what
+/// the search found, reading nothing itself. The search can change the PHP# file's code, so the file declaring a
+/// relation is among its inputs, and a relation that joins gives the file a new key.
 #[test]
-fn a_sharp_file_whose_type_a_provider_answered_from_a_method_search_lists_the_class_it_read_among_its_inputs() {
+fn a_sharp_file_whose_type_a_provider_answered_from_its_plugins_before_analysis_read_lists_what_it_read_among_its_inputs()
+ {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     if !common::php_sdk_is_available(repository, "the provider plugin reads compile test") {
         return;

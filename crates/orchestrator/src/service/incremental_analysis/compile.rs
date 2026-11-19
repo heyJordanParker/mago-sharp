@@ -3075,9 +3075,9 @@ mod tests {
     }
 
     /// The lowering reads the configuration, which no key holds, so the record of another configuration's compile
-    /// keeps no compiled file, and neither does the record another checker build wrote.
+    /// keeps no compiled file.
     #[test]
-    fn the_record_of_the_compiled_files_keeps_none_under_another_configuration_or_build() {
+    fn the_record_of_the_compiled_files_keeps_none_under_another_configuration() {
         let (_, last, _) = compile_keeping(
             &mut analyzed(&shop_project(&shop(MONEY, RATE))),
             &CompiledFiles::default(),

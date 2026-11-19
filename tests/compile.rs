@@ -575,6 +575,8 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
+require $argv[1];
+
 final class ReadsTheCompiledFile implements Plugin, BeforeAnalysisHook
 {
     public function getDefinition(): PluginDefinition
@@ -622,7 +624,10 @@ fn a_host_sees_each_php_sharp_file_compiled_from_its_current_source() {
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
 
     compile_succeeds(root);
@@ -657,7 +662,10 @@ fn analyses_that_start_together_after_an_edit_each_give_their_hosts_the_current_
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
     let cache = tempfile::tempdir().unwrap();
     let analyze = || {
@@ -715,6 +723,8 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
+require $argv[1];
+
 final class ReadsTheCompiledFileTwice implements Plugin, BeforeAnalysisHook
 {
     public function getDefinition(): PluginDefinition
@@ -769,7 +779,10 @@ fn a_later_run_rewrites_the_hosts_folder_only_once_the_hosts_reading_it_are_done
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
     write(root, "hold", "");
     let cache = tempfile::tempdir().unwrap();
@@ -825,7 +838,10 @@ fn a_compile_with_a_host_enabled_runs_every_time() {
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
     compile_succeeds(root);
     compile_succeeds(root);
@@ -846,6 +862,8 @@ use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
+
+require $argv[1];
 
 final class DeletesASource implements Plugin, BeforeAnalysisHook
 {
@@ -881,7 +899,10 @@ fn a_source_deleted_while_the_compile_runs_fails_nothing_and_the_next_compile_le
         write(
             root,
             "mago.toml",
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.deleter]\nfile = \"tools/host.php\"\n",
+            &format!(
+                "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.deleter]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+                repository.join("vendor/autoload.php").display().to_string()
+            ),
         );
     };
     let directory = project(ORDER, MONEY);
@@ -917,7 +938,10 @@ fn the_hosts_compile_keeps_its_record_whatever_its_worker_threads_log() {
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
     for file in 0..64 {
         write(root, &format!("vendor/acme/torn/src/Torn{file}.php"), "<?php\n\nfunction torn( {\n");
@@ -960,6 +984,8 @@ use Mago\Sdk\Linter\RuleDefinition;
 use Mago\Sdk\Reporting\Level;
 use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Worker;
+
+require $argv[1];
 
 final class ReadsTheCompiledFile implements Rule
 {
@@ -1004,7 +1030,10 @@ fn a_linter_host_sees_each_php_sharp_file_compiled_on_a_fresh_tree() {
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
 
     let linted = process::output(
@@ -1036,7 +1065,7 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-define('MAGO_TEST_WORKER', random_int(1, 0xFFFFFFFF));
+require $argv[1];
 
 final class LogsItsProcess implements Plugin, BeforeAnalysisHook
 {
@@ -1055,7 +1084,7 @@ final class LogsItsProcess implements Plugin, BeforeAnalysisHook
         class_exists('App\Word');
         $compiled = (string) @file_get_contents(getenv('SHARP_COMPILED') . '/app/Word.sharpc');
         $word = str_contains($compiled, 'second') ? 'second' : (str_contains($compiled, 'first') ? 'first' : 'nothing');
-        file_put_contents('host.log', MAGO_TEST_WORKER . " {$word}\n", FILE_APPEND);
+        file_put_contents('host.log', getmypid() . " {$word}\n", FILE_APPEND);
     }
 }
 
@@ -1080,7 +1109,10 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
     let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
     let wait_for_lines = |lines: usize| {
@@ -1131,7 +1163,7 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-define('MAGO_TEST_WORKER', random_int(1, 0xFFFFFFFF));
+require $argv[1];
 
 final class LogsEachFile implements Plugin, AfterFileAnalysisHook
 {
@@ -1152,7 +1184,7 @@ final class LogsEachFile implements Plugin, AfterFileAnalysisHook
 
     public function afterFileAnalysis(AfterFileAnalysisContext $context): void
     {
-        file_put_contents('host.log', MAGO_TEST_WORKER . " {$context->analysis->file}\n", FILE_APPEND);
+        file_put_contents('host.log', getmypid() . " {$context->analysis->file}\n", FILE_APPEND);
     }
 }
 
@@ -1178,7 +1210,10 @@ fn a_watch_keeps_a_worker_that_never_loaded_the_edited_class() {
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.rule]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.rule]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
     let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
     let watch_log = tempfile::NamedTempFile::new().unwrap();
@@ -1404,7 +1439,10 @@ fn a_watch_whose_changes_hold_a_deleted_file_reports_its_dependents_and_keeps_wa
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
 
     // The watch's reports and log, outside the watched project, so a failure shows what the watch saw.
@@ -1476,7 +1514,10 @@ fn a_watch_starts_the_hosts_again_when_another_run_compiled_an_edit_while_it_wai
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
     let cache = tempfile::tempdir().unwrap();
     let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
@@ -1575,7 +1616,10 @@ fn a_typing_host_loads_a_class_only_its_typing_makes_correct_on_a_fresh_tree() {
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.typing]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.typing]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
 
     compile_succeeds(root);
@@ -1599,6 +1643,8 @@ use Mago\Sdk\Reporting\Level;
 use Mago\Sdk\SourceLocation;
 use Mago\Sdk\Span;
 use Mago\Sdk\Worker;
+
+require $argv[1];
 
 final class MarkerRule implements Plugin, AfterFileAnalysisHook
 {
@@ -1656,7 +1702,8 @@ fn compile_hides_the_host_errors_an_ignore_entry_or_the_baseline_hides_from_anal
     );
     let config = |analyzer: &str| {
         format!(
-            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[analyzer]\n{analyzer}\n\n[extension-hosts.acme]\nfile = \"tools/host.php\"\n"
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[analyzer]\n{analyzer}\n\n[extension-hosts.acme]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
         )
     };
 
@@ -1686,6 +1733,8 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Worker;
+
+require $argv[1];
 
 final class SharpOnlyRule implements Plugin, NodeAnalysisHook
 {
@@ -1735,7 +1784,10 @@ fn compile_runs_the_node_hooks_only_in_the_php_sharp_files_it_lowers() {
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.acme]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.acme]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
 
     compile_succeeds(root);
@@ -1763,7 +1815,10 @@ fn compile_reports_a_hosts_issue_only_on_the_projects_own_files() {
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.acme]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.acme]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
 
     let output = compile(root);
@@ -1795,7 +1850,10 @@ fn compile_reports_a_hosts_issue_on_a_file_of_an_includes_folder_outside_vendor(
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\", \"lib\"]\n\n[extension-hosts.acme]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\", \"lib\"]\n\n[extension-hosts.acme]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
 
     let output = compile(root);
@@ -1825,6 +1883,8 @@ use Mago\Sdk\Analyzer\ReturnTypeProviderContext;
 use Mago\Sdk\Analyzer\Type;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
+
+require $argv[1];
 
 final class TypesHelpers implements FunctionReturnTypeProvider
 {
@@ -1882,6 +1942,8 @@ use Mago\Sdk\Analyzer\Type;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
+require $argv[1];
+
 final class Signing implements Plugin, MethodReturnTypeProvider, CallableSignatureProvider
 {
     public function getDefinition(): PluginDefinition
@@ -1932,7 +1994,10 @@ fn a_missing_collection_method_names_the_collection_type_when_a_host_signs_metho
     write(
         root,
         "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.signing]\nfile = \"tools/host.php\"\n",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.signing]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
     );
 
     let output = compile(root);
