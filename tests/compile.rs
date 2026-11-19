@@ -4439,6 +4439,40 @@ fn compile_runs_the_lake_on_the_path_and_installs_no_lean() {
     assert!(!printed(&output).contains("Downloading the law checker"), "{}", printed(&output));
 }
 
+/// A compile whose law checker is built in the cache proves its laws with the runner alone: the build is named by the
+/// Lean version the library pins, and it records the Lean that built it, so no `lake` starts.
+#[cfg(unix)]
+#[test]
+fn a_compile_whose_law_checker_is_built_starts_no_lake() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let cache = tempfile::tempdir().unwrap();
+    let first = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let output = process::output(command(first.path(), "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
+    assert!(output.status.success(), "{}", printed(&output));
+    let lake = tempfile::tempdir().unwrap();
+    let path = std::env::var_os("PATH").unwrap();
+    let real =
+        std::env::split_paths(&path).map(|directory| directory.join("lake")).find(|lake| lake.is_file()).unwrap();
+    let started = lake.path().join("started");
+    write(
+        lake.path(),
+        "bin/lake",
+        &format!("#!/bin/sh\necho \"$*\" >> '{}'\nexec '{}' \"$@\"\n", started.display(), real.display()),
+    );
+    std::fs::set_permissions(lake.path().join("bin/lake"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(std::iter::once(lake.path().join("bin")).chain(std::env::split_paths(&path)));
+    let second = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+
+    let output =
+        process::output(command(second.path(), "never").env("XDG_CACHE_HOME", cache.path()).env("PATH", path.unwrap()))
+            .unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(second.path(), "app/Shared/Money.sharp").exists());
+    assert_eq!(std::fs::read_to_string(&started).unwrap_or_default(), "", "the lake calls of the second compile");
+}
+
 /// A cache folder the law checker can't create, as one a root container left, is named with what failed.
 #[cfg(unix)]
 #[test]
@@ -4493,19 +4527,26 @@ fn installing_lake(folder: &Path) -> std::ffi::OsString {
 
 /// elan's `lake` installs a missing Lean on its first call, with no lock of its own, so compiles that start together on
 /// a machine without that Lean would break it. Mago makes that call under the lock its own installs take, so the
-/// compiles take turns and Lean is installed once.
+/// compiles take turns and Lean is installed once. Mago calls `lake` only to build the law checker, so the compiles
+/// start on an empty cache.
 #[cfg(unix)]
 #[test]
 fn compiles_that_start_together_install_the_missing_lean_of_the_lake_on_the_path_once() {
     let lake = tempfile::tempdir().unwrap();
     let path = installing_lake(lake.path());
+    let cache = tempfile::tempdir().unwrap();
     let projects: Vec<_> = (0..2).map(|_| lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)])).collect();
 
     let outputs: Vec<Output> = std::thread::scope(|scope| {
         let compiles: Vec<_> = projects
             .iter()
             .map(|project| {
-                scope.spawn(|| process::output(command(project.path(), "never").env("PATH", &path)).unwrap())
+                scope.spawn(|| {
+                    process::output(
+                        command(project.path(), "never").env("PATH", &path).env("XDG_CACHE_HOME", cache.path()),
+                    )
+                    .unwrap()
+                })
             })
             .collect();
         compiles.into_iter().map(|compile| compile.join().unwrap()).collect()

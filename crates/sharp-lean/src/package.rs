@@ -388,14 +388,18 @@ impl Package {
         Self { directory: plain(root).join(COMPILED_FOLDER).join(PACKAGE_FOLDER), lake: Lake::on_path() }
     }
 
-    /// Writes the package's Lean version, so an elan on the `PATH` installs it on first use, and asks `lake` for its
-    /// version there, under `library::first_call`'s lock. With no `lake` on the `PATH`, the package uses the `lake` of
-    /// the Lean Mago installs in its cache folder.
-    pub(crate) fn toolchain(&mut self) -> io::Result<Toolchain> {
+    /// Writes the package's Lean version, so an elan on the `PATH` installs it on the first call `toolchain` makes.
+    pub(crate) fn write_toolchain(&self) -> io::Result<()> {
         fs::create_dir_all(&self.directory)
             .map_err(|error| DatabaseError::io(IOAction::CreateFolder, &self.directory, error))?;
         write_if_changed(&self.directory.join("lean-toolchain"), library::TOOLCHAIN.as_bytes())?;
 
+        Ok(())
+    }
+
+    /// Asks `lake` for its version in the package, under `library::first_call`'s lock. With no `lake` on the `PATH`,
+    /// the package uses the `lake` of the Lean Mago installs in its cache folder.
+    pub(crate) fn toolchain(&mut self) -> io::Result<Toolchain> {
         let output = match library::first_call(self.lake.command().arg("--version").current_dir(&self.directory)) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 self.lake = match library::install() {

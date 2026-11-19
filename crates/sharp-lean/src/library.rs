@@ -340,18 +340,14 @@ pub(crate) fn runner_command(library: &Path) -> io::Result<Command> {
     Ok(command)
 }
 
-/// Records in `library` the folder of the Lean that built it, as `lake` names it there, unless the build already names
-/// a folder that holds Lean's modules.
-fn record_sysroot(library: &Path, lake: &Lake) -> io::Result<()> {
-    let recorded = library.join(SYSROOT);
-    if fs::read_to_string(&recorded).is_ok_and(|sysroot| Path::new(sysroot.trim()).join("lib/lean").is_dir()) {
-        return Ok(());
-    }
-    let output = process::output(lake.command().args(["env", "lean", "--print-prefix"]).current_dir(library))?;
+/// Records in `staging` the folder of the Lean that built it, as `lake` names it there.
+fn record_sysroot(staging: &Path, lake: &Lake) -> io::Result<()> {
+    let recorded = staging.join(SYSROOT);
+    let output = process::output(lake.command().args(["env", "lean", "--print-prefix"]).current_dir(staging))?;
     if !output.status.success() {
         return Err(unbuilt(format!(
             "lake env lean --print-prefix in {} printed:\n{}",
-            library.display(),
+            staging.display(),
             printed(&output)
         )));
     }
@@ -360,9 +356,12 @@ fn record_sysroot(library: &Path, lake: &Lake) -> io::Result<()> {
         .map_err(|error| DatabaseError::io(IOAction::WriteFile, &recorded, error).into())
 }
 
-/// Whether `library` holds the runner and every package file with the bytes Mago embeds.
+/// Whether `library` holds the runner and every package file with the bytes Mago embeds, and names the folder of the
+/// Lean that built it, which still holds Lean's modules.
 fn is_built(library: &Path) -> bool {
     runner(library).is_file()
+        && fs::read_to_string(library.join(SYSROOT))
+            .is_ok_and(|sysroot| Path::new(sysroot.trim()).join("lib/lean").is_dir())
         && PACKAGE
             .iter()
             .all(|(path, source)| fs::read(library.join(path)).is_ok_and(|bytes| bytes == source.as_bytes()))
@@ -378,11 +377,10 @@ fn unbuilt(failure: impl std::fmt::Display) -> io::Error {
     )
 }
 
-/// The name of the library's build by the Lean whose `lake` printed `version`: a hash of `version` and each file of
-/// `package`, the whole of what the build reads, so a build is used only by the Lean that built it from those files.
-fn key(version: &str, package: &[(&str, &str)]) -> String {
+/// The name of the library's build: a hash of each file of `package`, the whole of what the build reads. Its
+/// `lean-toolchain` pins the Lean version, so a build of another Lean or of other sources has another name.
+fn key(package: &[(&str, &str)]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(format!("{}\0{version}\0", version.len()));
     for (path, source) in package {
         hasher.update(format!("{path}\0{}\0", source.len()));
         hasher.update(source);
@@ -396,35 +394,39 @@ fn printed(output: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
 }
 
+/// The library's build in `lean/` in Mago's cache folder, as `built_in` finds it, so the compile runs it with no
+/// `lake`. `None` sends the compile to `build`, which reports what failed when Mago's cache folder can't be named.
+pub(crate) fn built() -> Option<PathBuf> {
+    built_in(&cache_root().ok()?.join("lean"))
+}
+
+/// The library's build in `builds` when it is built. A build moves into place whole, so a build found here is never
+/// half written.
+fn built_in(builds: &Path) -> Option<PathBuf> {
+    let library = builds.join(key(&PACKAGE));
+
+    is_built(&library).then_some(library)
+}
+
 /// Builds the library in `lean/` in Mago's cache folder, as `build_in` does.
 pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
     build_in(&cache_root()?.join("lean"), lake)
 }
 
 /// Writes the library's package to `<key>.staging` in `builds`, builds it with `lake` and renames it to `<key>`, once
-/// per Lean version and library source, which `key` names. The version is what `lake` prints in `builds`, which pins the
-/// library's Lean as the staging folder in it does, so it names the Lean that builds the library. Builds take turns
-/// under an exclusive lock on `build.lock` in `builds`, across threads and processes alike. A build that lost its runner
-/// or a package file, as a cache cleaner leaves it, is deleted and built again. A finished build deletes every other
-/// folder in `builds` but the Lean Mago installs there: older builds, any staging folder a dead build left, and the Lean
-/// an older Mago installed. A build records the folder of the Lean that built it, which the runner starts with, once.
+/// per library source and the Lean version it pins, which `key` names. Builds take turns under an exclusive lock on
+/// `build.lock` in `builds`, across threads and processes alike. A build that lost its runner or a package file, as a
+/// cache cleaner leaves it, or whose Lean is gone, as an uninstalled toolchain leaves it, is deleted and built again.
+/// A finished build deletes every other folder in `builds` but the Lean Mago installs there: older builds, any staging
+/// folder a dead build left, and the Lean an older Mago installed. A build records the folder of the Lean that built
+/// it, which the runner starts with.
 pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
     let _lock = lock::exclusive(&builds.join("build.lock"))?;
-    let toolchain = builds.join("lean-toolchain");
-    if !fs::read(&toolchain).is_ok_and(|bytes| bytes == TOOLCHAIN.as_bytes()) {
-        fs::write(&toolchain, TOOLCHAIN).map_err(|error| DatabaseError::io(IOAction::WriteFile, &toolchain, error))?;
-    }
-    let version = process::output(lake.command().arg("--version").current_dir(builds))?;
-    if !version.status.success() {
-        return Err(unbuilt(format!("lake --version in {} printed:\n{}", builds.display(), printed(&version))));
-    }
-    let library = builds.join(key(String::from_utf8_lossy(&version.stdout).trim(), &PACKAGE));
-    if is_built(&library) {
-        record_sysroot(&library, lake)?;
-
+    if let Some(library) = built_in(builds) {
         return Ok(library);
     }
 
+    let library = builds.join(key(&PACKAGE));
     let staging = library.with_extension("staging");
     for folder in [&library, &staging] {
         remove_folder(folder)?;
@@ -441,8 +443,8 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
         return Err(unbuilt(format!("lake build in {} printed:\n{}", staging.display(), printed(&output))));
     }
 
+    record_sysroot(&staging, lake)?;
     fs::rename(&staging, &library).map_err(unbuilt)?;
-    record_sysroot(&library, lake)?;
 
     let lean = ARCHIVE.as_ref().map(|archive| builds.join(archive.name));
     for entry in fs::read_dir(builds).map_err(|error| DatabaseError::io(IOAction::OpenFolder, builds, error))? {
@@ -740,21 +742,22 @@ mod tests {
         Ok(())
     }
 
-    /// A build is named by the Lean version and every file of the library's package, so a build of another Lean or of
-    /// other sources is never used, and nothing else, such as Mago's own Rust code, names another build.
+    /// A build is named by every file of the library's package, its `lean-toolchain` among them, so a build of another
+    /// Lean or of other sources is never used, and nothing else, such as Mago's own Rust code, names another build.
     #[test]
-    fn the_library_build_is_named_by_its_lean_version_and_each_file_of_its_package() {
-        let version = "Lake version 5.0.0-src+5045d00 (Lean version 4.34.1)";
-        let base = key(version, &PACKAGE);
-        assert_eq!(base, key(version, &PACKAGE));
+    fn the_library_build_is_named_by_each_file_of_its_package_and_so_by_its_lean_version() {
+        let base = key(&PACKAGE);
+        assert_eq!(base, key(&PACKAGE));
         assert_eq!(base.len(), 32);
-        assert_ne!(base, key("Lake version 5.0.0-src+0000000 (Lean version 4.35.0)", &PACKAGE));
+        let other_lean = PACKAGE
+            .map(|(path, source)| (path, if path == "lean-toolchain" { "leanprover/lean4:v4.35.0\n" } else { source }));
+        assert_ne!(base, key(&other_lean));
 
         for (index, &(path, source)) in PACKAGE.iter().enumerate() {
             let edited = format!("{source}\n");
             let mut package: [(&str, &str); 8] = PACKAGE;
             package[index] = (path, edited.as_str());
-            assert_ne!(base, key(version, &package), "{path}");
+            assert_ne!(base, key(&package), "{path}");
         }
     }
 
@@ -948,7 +951,7 @@ mod tests {
         let program = lake.path().join("lake");
         fs::write(
             &program,
-            "#!/bin/sh\ncase \"$1\" in\n    --version) echo 'Lake version test' ;;\n    build) mkdir -p .lake/build/bin && touch .lake/build/bin/sharp-lean ;;\n    env) pwd ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n    build) mkdir -p .lake/build/bin && touch .lake/build/bin/sharp-lean ;;\n    env) pwd ;;\nesac\n",
         )?;
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755))?;
         fs::create_dir_all(builds.path().join(archive.name).join("bin"))?;
@@ -959,6 +962,45 @@ mod tests {
         assert!(runner(&library).is_file());
         assert!(builds.path().join(archive.name).join("bin").is_dir());
         assert!(!builds.path().join("0123456789abcdef0123456789abcdef").exists());
+
+        Ok(())
+    }
+
+    /// A build's `.olean` files load only beside the modules of the Lean that wrote them, so a build whose Lean is gone,
+    /// as an uninstalled toolchain leaves it, is built again by the Lean there is, which it then records.
+    #[test]
+    fn a_build_whose_lean_is_gone_is_built_again_by_the_lean_there_is() -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let builds = tempfile::tempdir()?;
+        let lean = tempfile::tempdir()?;
+        fs::create_dir_all(lean.path().join("lib/lean"))?;
+        let lake = tempfile::tempdir()?;
+        let program = lake.path().join("lake");
+        fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n    build) mkdir -p .lake/build/bin && echo rebuilt > .lake/build/bin/sharp-lean ;;\n    env) echo '{}' ;;\nesac\n",
+                lean.path().display()
+            ),
+        )?;
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755))?;
+        let library = builds.path().join(key(&PACKAGE));
+        for (path, source) in PACKAGE {
+            fs::create_dir_all(library.join(path).parent().unwrap_or(&library))?;
+            fs::write(library.join(path), source)?;
+        }
+        fs::create_dir_all(library.join(".lake/build/bin"))?;
+        fs::write(runner(&library), "built by a Lean that is gone")?;
+        fs::write(library.join(SYSROOT), builds.path().join("gone").display().to_string())?;
+
+        assert_eq!(built_in(builds.path()), None);
+        let built = build_in(builds.path(), &Lake { program })?;
+
+        assert_eq!(built, library);
+        assert_eq!(fs::read_to_string(runner(&library))?, "rebuilt\n");
+        assert_eq!(fs::read_to_string(library.join(SYSROOT))?.trim(), lean.path().display().to_string());
+        assert_eq!(built_in(builds.path()), Some(library));
 
         Ok(())
     }

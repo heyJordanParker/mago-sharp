@@ -275,26 +275,32 @@ impl Lean {
             return Ok(issues);
         }
 
-        let toolchain = package.toolchain()?;
-        if !matches!(toolchain, Toolchain::Ready) {
-            if let Toolchain::Failed(failure) = &toolchain {
-                tracing::debug!("The law checker could not be installed: {failure}");
-            }
-            for (translation, span) in
-                work.iter().filter_map(|(translation, _)| Some((*translation, translation.laws.first()?.span)))
-            {
-                let issue = match &toolchain {
-                    Toolchain::Failed(_) => issues::uninstalled_checker(span),
-                    _ => issues::uninstallable_lean(span),
-                };
-                report(&mut issues, translation, issue);
-            }
-            record.write(&record_path)?;
+        package.write_toolchain()?;
+        let library = match library::built() {
+            Some(library) => library,
+            None => {
+                let toolchain = package.toolchain()?;
+                if !matches!(toolchain, Toolchain::Ready) {
+                    if let Toolchain::Failed(failure) = &toolchain {
+                        tracing::debug!("The law checker could not be installed: {failure}");
+                    }
+                    for (translation, span) in
+                        work.iter().filter_map(|(translation, _)| Some((*translation, translation.laws.first()?.span)))
+                    {
+                        let issue = match &toolchain {
+                            Toolchain::Failed(_) => issues::uninstalled_checker(span),
+                            _ => issues::uninstallable_lean(span),
+                        };
+                        report(&mut issues, translation, issue);
+                    }
+                    record.write(&record_path)?;
 
-            return Ok(issues);
-        }
+                    return Ok(issues);
+                }
 
-        let library = library::build(&package.lake)?;
+                library::build(&package.lake)?
+            }
+        };
         package.remove_stale()?;
         let proved: HashSet<FileId> = work.iter().map(|(translation, _)| translation.file).collect();
         let reached: HashSet<&str> = work
