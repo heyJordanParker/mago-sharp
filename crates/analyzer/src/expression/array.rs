@@ -133,7 +133,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LegacyArray<'arena> {
 /// collection its place declares, as [`get_placed_type`] gives it. `None` for any other value or place. The literal
 /// inside any parentheses gets the type too, since the lowering reads it there. A literal that holds elements keeps
 /// its own element types, and [`record_placed_type`] records the collection its place declares, at any depth. The
-/// literal runs in `function_like`, None outside a function, as a property's default runs.
+/// literal runs in `function_like`, None outside a function, as a property's default runs. A literal that `value`
+/// gives through `??`, `? :` or a `match` takes the type too, as [`get_given_literals_type`] says.
 pub(crate) fn get_set_literal_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -144,13 +145,16 @@ pub(crate) fn get_set_literal_type<A>(
 where
     A: Arena,
 {
-    let literal = unwrap_expression(value);
-    let Expression::Array(array_literal) = literal else {
-        return None;
-    };
     if !context.dialect.is_sharp() {
         return None;
     }
+    let literal = unwrap_expression(value);
+    let Expression::Array(array_literal) = literal else {
+        let given_type = get_given_literals_type(context, artifacts, literal, declared_type, function_like)?;
+        artifacts.set_expression_type(value, given_type.clone());
+
+        return Some(given_type);
+    };
 
     let declares_set = declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))));
     let declares_map = declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
@@ -179,6 +183,63 @@ where
     }
 
     literal_type
+}
+
+/// The type of `value`, a `??`, a `? :` or a `match`, once each literal it gives, either side of `??`, either branch of
+/// `? :` or an arm of the `match`, at any depth, takes the type [`get_set_literal_type`] gives it at a place declared
+/// `declared_type`, as [`check_sharp_literal_kind`] checks each one there: the join of what it gives, the left side of
+/// `??` without its `null`. The value keeps that type. `None` where no literal it gives takes a type.
+fn get_given_literals_type<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    value: &Expression<'_>,
+    declared_type: &TUnion,
+    function_like: Option<&FunctionLikeMetadata>,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    let (given, coalesces): (Vec<&Expression<'_>>, bool) = match value {
+        Expression::Binary(binary) if binary.operator.is_null_coalesce() => (vec![binary.lhs, binary.rhs], true),
+        Expression::Conditional(conditional) => {
+            (vec![conditional.then.unwrap_or(conditional.condition), conditional.r#else], false)
+        }
+        Expression::PatternMatch(pattern_match) => (
+            pattern_match
+                .arms
+                .iter()
+                .filter_map(|arm| match arm.body() {
+                    PatternMatchArmBody::Expression(arm_value) => Some(*arm_value),
+                    PatternMatchArmBody::Block(_) => None,
+                })
+                .collect(),
+            false,
+        ),
+        _ => return None,
+    };
+
+    let mut typed = false;
+    for given_value in &given {
+        typed |= get_set_literal_type(context, artifacts, given_value, declared_type, function_like).is_some();
+    }
+    if !typed {
+        return None;
+    }
+
+    let given_types: Vec<TAtomic> = given
+        .iter()
+        .enumerate()
+        .filter_map(|(index, given_value)| {
+            let given_type = artifacts.get_expression_type(*given_value)?;
+
+            Some(if coalesces && index == 0 { given_type.to_non_nullable() } else { given_type.clone() })
+        })
+        .flat_map(|given_type| given_type.types.into_owned())
+        .collect();
+    let given_type = TUnion::from_vec(combine(given_types, context.codebase, context.settings.combiner_options()));
+    artifacts.set_expression_type(value, given_type.clone());
+
+    Some(given_type)
 }
 
 /// The tuples of `declared` that a list literal of the type `own` becomes, spec section 30: each one it fits, so it

@@ -18782,29 +18782,24 @@ fn the_engines_set_class_is_not_a_class_sharp_code_calls() {
     );
 }
 
-/// A `match` gives the value of its arm, so a list literal there is a `List`, which a place declared `Set` refuses.
+/// A list literal on a side of `??`, in a branch of `? :` or in an arm of a `match` takes the type of the place the
+/// value goes into, spec section 12, as a literal written there alone does, so where a `Set` is declared it is that
+/// `Set`, which the lowering makes it.
 #[test]
-fn a_list_literal_in_a_match_arm_where_a_set_is_declared_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public Set<string> pick(bool flag)\n    {\n        Set<string> tags = match (flag) {\n            true => [\"a\"],\n            default => [\"b\"],\n        };\n        return tags;\n    }\n}\n";
+fn a_list_literal_in_a_coalesce_a_conditional_or_a_match_where_a_set_is_declared_is_a_set() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public Set<string> pick(Set<string>? maybe, bool flag)\n    {\n        Set<string> coalesced = maybe ?? [\"a\"];\n        Set<string> branched = flag ? [\"b\"] : coalesced;\n        Set<string> matched = match (flag) {\n            true => [\"c\"],\n            default => branched,\n        };\n        return matched;\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["7:28 invalid-local-assignment-value"]);
-}
+    let (issues, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tags.sharp", sharp), &[]);
+    let type_at = |literal: &str| {
+        let start = sharp.find(literal).unwrap() as u32;
+        artifacts.expression_types.get(&(start, start + literal.len() as u32)).map(|r#type| r#type.get_id().to_string())
+    };
 
-/// `??` gives either side, so a list literal on its right is a `List`, which a place declared `Set` refuses.
-#[test]
-fn a_list_literal_after_null_coalescing_where_a_set_is_declared_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public Set<string> pick(Set<string>? maybe)\n    {\n        Set<string> tags = maybe ?? [\"a\"];\n        return tags;\n    }\n}\n";
-
-    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["7:28 invalid-local-assignment-value"]);
-}
-
-/// `?:` gives either branch, so a list literal there is a `List`, which a place declared `Set` refuses, and never
-/// compiles into a list held as a `Set`.
-#[test]
-fn a_list_literal_in_a_conditional_where_a_set_is_declared_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public Set<string> pick(bool flag)\n    {\n        Set<string> tags = flag ? [\"a\"] : [\"b\"];\n        return tags;\n    }\n}\n";
-
-    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["7:28 invalid-local-assignment-value"]);
+    assert_eq!(issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(), Vec::<String>::new());
+    assert_eq!(
+        [type_at("[\"a\"]"), type_at("[\"b\"]"), type_at("[\"c\"]")].map(Option::unwrap),
+        ["set<string('a')>", "set<string('b')>", "set<string('c')>"]
+    );
 }
 
 /// A PHP# local, parameter or `field` is the collection it is declared as, so an element written into it must fit
