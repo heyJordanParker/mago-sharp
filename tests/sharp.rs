@@ -740,6 +740,36 @@ fn a_tuple_a_collection_local_holds_unpacks_into_its_element_types() {
     );
 }
 
+/// A test that returns a count compared with `0` narrows the value it counts, as the standard library's `isEmpty()` and
+/// `isNotEmpty()` and a plain PHP `return count($items) > 0;` do: where it holds, or past an early return where it
+/// fails, a `List` passes where a plain PHP parameter requires a `non-empty-list`. Without a test it is still refused.
+#[test]
+fn a_tested_list_passes_where_a_non_empty_list_is_required() {
+    let directory = library_workspace(
+        "namespace App;\n\nimport Lib.CheckedType;\nimport Lib.Lists;\n\npublic class Page\n{\n    public string tested(List<string> members)\n    {\n        if (members.isNotEmpty()) {\n            return CheckedType.union(members);\n        }\n        return \"\";\n    }\n\n    public string returned(List<string> members)\n    {\n        if (members.isEmpty()) {\n            return \"\";\n        }\n        return CheckedType.union(members);\n    }\n\n    public string counted(List<string> members)\n    {\n        if (Lists.filled(members)) {\n            return CheckedType.union(members);\n        }\n        return \"\";\n    }\n\n    public string untested(List<string> members) => CheckedType.union(members);\n}\n",
+    );
+    write(
+        directory.path(),
+        "src/Lib/CheckedType.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class CheckedType\n{\n    /**\n     * @param non-empty-list<string> $members\n     */\n    public static function union(array $members): string\n    {\n        return implode('|', $members);\n    }\n}\n",
+    );
+    write(
+        directory.path(),
+        "src/Lib/Lists.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Lists\n{\n    public static function filled(array $items): bool\n    {\n        return count($items) > 0;\n    }\n}\n",
+    );
+
+    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        stdout.lines().filter(|line| line.starts_with("src/")).collect::<Vec<_>>(),
+        [
+            "src/App/Page.sharp:32:71:error - possibly-invalid-argument: Argument #1 of method `CheckedType.union` takes a non-empty `List<string>`, and `members` may be empty."
+        ]
+    );
+}
+
 /// The semantic checks let a file under the namespace `Sharp` declare the standard library's reserved type names,
 /// and the analyzer refuses the namespace in a project file.
 #[test]

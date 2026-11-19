@@ -742,8 +742,12 @@ where
                     TAtomic::Array(TArray::List(TList::new(element_type)))
                 });
             }
-            TAtomic::Array(TArray::List(_)) => {
-                acceptable_types.push(atomic.clone());
+            TAtomic::Array(TArray::List(list)) => {
+                acceptable_types.push(TAtomic::Array(TArray::List(if is_non_empty {
+                    list.clone_non_empty()
+                } else {
+                    list.clone()
+                })));
             }
             TAtomic::Iterable(iterable) => {
                 let element_type = iterable.get_value_type();
@@ -807,19 +811,14 @@ where
         };
     }
 
+    let asserts_non_empty = matches!(assertion_type, Some(TAtomic::Array(array)) if array.is_non_empty());
     let mut acceptable_types = Vec::new();
     let mut did_remove_type = false;
 
     for atomic in existing_var_type.types.as_ref() {
         match atomic {
             TAtomic::Array(TArray::Keyed(keyed_array)) if !keyed_array.has_known_items() => {
-                let mut non_empty = keyed_array.is_non_empty();
-
-                if let Some(TAtomic::Array(assertion_array)) = assertion_type
-                    && assertion_array.is_non_empty()
-                {
-                    non_empty = true;
-                }
+                let non_empty = keyed_array.is_non_empty() || asserts_non_empty;
 
                 acceptable_types.push(TAtomic::Array(TArray::Keyed(keyed_array.as_non_empty_array(non_empty))));
             }
@@ -827,7 +826,11 @@ where
                 acceptable_types.push(TAtomic::Array(TArray::Keyed(keyed_array.clone())));
             }
             TAtomic::Array(TArray::List(list)) => {
-                acceptable_types.push(TAtomic::Array(TArray::List(list.clone())));
+                acceptable_types.push(TAtomic::Array(TArray::List(if asserts_non_empty {
+                    list.clone_non_empty()
+                } else {
+                    list.clone()
+                })));
             }
             TAtomic::Iterable(iterable) => {
                 let key_type = refine_array_key(iterable.get_key_type());

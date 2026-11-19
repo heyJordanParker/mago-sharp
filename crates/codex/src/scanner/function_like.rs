@@ -255,9 +255,9 @@ where
     );
 
     match method.body {
-        MethodBody::Concrete(block) => infer_assertions_from_block_body(block, &mut metadata, context.resolved_names),
+        MethodBody::Concrete(block) => infer_assertions_from_block_body(block, &mut metadata, context),
         MethodBody::Expression(body) if method.returns_value => {
-            infer_assertions_from_expression_body(body.expression, &mut metadata, context.resolved_names);
+            infer_assertions_from_expression_body(body.expression, &mut metadata, context);
         }
         MethodBody::Expression(_) | MethodBody::Abstract(_) => {}
     }
@@ -517,7 +517,7 @@ where
 
     scan_function_like_docblock(function.span(), functionlike_id, &mut metadata, classname, context, scope);
 
-    infer_assertions_from_block_body(&function.body, &mut metadata, context.resolved_names);
+    infer_assertions_from_block_body(&function.body, &mut metadata, context);
 
     if metadata.attributes.iter().any(|attr| attr.name.as_bytes().eq_ignore_ascii_case(b"Deprecated")) {
         metadata.flags |= MetadataFlags::DEPRECATED;
@@ -582,7 +582,7 @@ where
 
     scan_function_like_docblock(span, functionlike_id, &mut metadata, classname, context, scope);
 
-    infer_assertions_from_block_body(&closure.body, &mut metadata, context.resolved_names);
+    infer_assertions_from_block_body(&closure.body, &mut metadata, context);
 
     metadata
 }
@@ -642,7 +642,7 @@ where
 
     scan_function_like_docblock(span, functionlike_id, &mut metadata, classname, context, scope);
 
-    infer_assertions_from_expression_body(arrow_function.expression, &mut metadata, context.resolved_names);
+    infer_assertions_from_expression_body(arrow_function.expression, &mut metadata, context);
 
     metadata
 }
