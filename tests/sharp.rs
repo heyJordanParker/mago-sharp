@@ -723,6 +723,23 @@ fn analyze_types_the_parse_calls_of_the_standard_library_from_the_vendored_packa
     );
 }
 
+/// Spec section 30: a local without a written type takes its value's general type, and a tuple a `Map` or a `List`
+/// holds stays that tuple there, so `get` and `getOrNull` on the local give the tuple, and it unpacks into locals of
+/// its element types.
+#[test]
+fn a_tuple_a_collection_local_holds_unpacks_into_its_element_types() {
+    assert_eq!(
+        page_errors(
+            "namespace App;\n\npublic class Page\n{\n    public string label(string key)\n    {\n        const held = Page.held();\n        const [tag, attribute] = held.get(key) ?? throw new LogicException(\"none\");\n        [string tag, string? attribute] one = held.get(key) ?? throw new LogicException(\"none\");\n        const rows = Page.rows();\n        const [name, count] = rows.getOrNull(0) ?? throw new LogicException(\"none\");\n        int wrongTag = tag;\n        int wrongAttribute = attribute;\n        string wrongCount = count;\n        return `${tag}${attribute ?? \"\"}${one.tag}${name}${count}`;\n    }\n\n    private static Map<string, [string tag, string? attribute]> held() => [\"k\": [\"x\", null]];\n\n    private static List<[string, int]> rows() => [[\"a\", 1]];\n}\n"
+        ),
+        [
+            "src/App/Page.sharp:12:24:error - invalid-local-assignment-value: Invalid assignment to `wrongTag`: it is declared as `int`.",
+            "src/App/Page.sharp:13:30:error - invalid-local-assignment-value: Invalid assignment to `wrongAttribute`: it is declared as `int`.",
+            "src/App/Page.sharp:14:29:error - invalid-local-assignment-value: Invalid assignment to `wrongCount`: it is declared as `string`.",
+        ]
+    );
+}
+
 /// The semantic checks let a file under the namespace `Sharp` declare the standard library's reserved type names,
 /// and the analyzer refuses the namespace in a project file.
 #[test]

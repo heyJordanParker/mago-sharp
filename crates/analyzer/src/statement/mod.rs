@@ -803,7 +803,8 @@ pub(crate) fn is_event_class(codebase: &CodebaseMetadata, class_like: &ClassLike
 }
 
 /// The type a written type would give a value: every literal and narrowed scalar widened, and every list or map shape
-/// made a `List<T>` or `Map<TKey, TValue>` of any length. A `Set<T>` keeps its kind.
+/// made a `List<T>` or `Map<TKey, TValue>` of any length. A `Set<T>` keeps its kind, and a tuple stays the tuple of its
+/// elements' general types, spec section 30, wherever it is held, as a `Map`'s value or a `List`'s element.
 fn get_general_type(value: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
     let mut widened = value.clone();
     widened.widen_scalars();
@@ -812,6 +813,11 @@ fn get_general_type(value: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
         .types
         .iter()
         .map(|atomic| match atomic {
+            TAtomic::Array(TArray::List(list)) if let Some(elements) = list.tuple_elements() => {
+                TAtomic::Array(TArray::List(TList::tuple(
+                    elements.into_iter().map(|(element, name)| (get_general_type(element, codebase), name)).collect(),
+                )))
+            }
             TAtomic::Array(array) => {
                 let (key, value) = get_array_parameters(array, codebase);
                 let value = Arc::new(get_general_type(&value, codebase));
