@@ -954,7 +954,8 @@ fn combine_union_types_inner(
     } else if type_2.is_never() || type_2.is_never_template() {
         type_1.clone()
     } else if type_1.is_vanilla_mixed() && type_2.is_vanilla_mixed() {
-        get_mixed()
+        // Two mixed unions of the same atomics, as `nonnull` with a `nonnull` that may be undefined, join to them.
+        if type_1.types == type_2.types { TUnion::from_vec(type_1.types.to_vec()) } else { get_mixed() }
     } else {
         let mut all_atomic_types = type_1.types.to_vec();
         all_atomic_types.extend(type_2.types.iter().cloned());

@@ -18802,6 +18802,25 @@ fn a_list_literal_in_a_coalesce_a_conditional_or_a_match_where_a_set_is_declared
     );
 }
 
+/// An `Any` joined with an `Any` is an `Any`, though one of them is an element read that may be past the end of its
+/// `List`. So a `? :` of two `Any` values goes into a declared `Any`, and `[]` beside `[this.streams[0]]` goes into a
+/// declared `List<Any>`, spec section 12, where 0.6.35 joined each pair as `Any?` and refused the line.
+#[test]
+fn a_conditional_of_two_any_values_or_two_lists_of_any_goes_into_a_declared_any() {
+    let sharp = "namespace Demo;\n\nclass Pipe\n{\n    private List<Any> streams = [];\n\n    public List<Any> pending(int written, string request)\n    {\n        List<Any> write = written < request.byteLength() ? [this.streams[0]] : [];\n        return write;\n    }\n\n    public Any first(bool flag, Any held)\n    {\n        Any picked = flag ? this.streams[0] : held;\n        return picked;\n    }\n}\n";
+
+    assert_eq!(
+        refusals(
+            ("src/Demo/Pipe.sharp", sharp),
+            &[(
+                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharp",
+                include_str!("../../../../composer/library/Sharp/Text/StringMembers.sharp"),
+            )]
+        ),
+        Vec::<String>::new()
+    );
+}
+
 /// A PHP# local, parameter or `field` is the collection it is declared as, so an element written into it must fit
 /// that type, as one written into a property must, and the place keeps its type. PHP keeps widening an array.
 #[test]
