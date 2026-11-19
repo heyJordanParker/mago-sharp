@@ -3,13 +3,7 @@
 //!
 //! Every compiled file lives in one `.sharp` folder at the workspace root, at the real path of its source relative to
 //! the root, with `.sharp` replaced by `.sharpc`. The folder mirrors the accepted sources exactly: a refused, removed
-//! or renamed source loses its compiled file.
-//!
-//! Beside each of the project's own PHP# sources that declares a type, outside `vendor/` and `autoload-dev` folders, it
-//! also writes a PHP file of the type's name that loads the source and states the type's declaration, so PHP code that
-//! finds classes by listing `*.php` files or reading their source finds PHP# classes too, spec section 27. A removed
-//! source loses its PHP file, and a `.gitignore` the compile writes in each folder that holds such files keeps them
-//! out of git in that checkout alone.
+//! or renamed source loses its compiled file. It writes nothing outside that folder.
 //!
 //! It writes `preload.php` in the `.sharp` folder too, the script `opcache.preload` names to preload every type it
 //! accepted outside `autoload-dev` folders, spec section 27.
@@ -25,8 +19,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::collections::hash_map::Entry;
-use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -41,7 +33,6 @@ use rayon::iter::ParallelIterator;
 use serde::Deserialize;
 use serde::Serialize;
 
-use mago_allocator::LocalArena;
 use mago_analyzer::code::IssueCode;
 use mago_build_id::BUILD_ID;
 use mago_codex::metadata::CodebaseMetadata;
@@ -57,7 +48,6 @@ use mago_database::DatabaseReader;
 use mago_database::ReadDatabase;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
-use mago_database::file::COMPANION_START;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
@@ -83,16 +73,12 @@ use mago_reporting::ReportingTarget;
 use mago_reporting::color::ColorChoice as ReportingColorChoice;
 use mago_reporting::reporter::Reporter;
 use mago_reporting::reporter::ReporterConfig;
-use mago_semantics::is_php_keyword;
 use mago_server::Server;
 use mago_sharp_bridge::unit;
 use mago_sharp_lean::Lean;
 use mago_sharp_lean::PACKAGE_FOLDER;
 use mago_sharp_lean::PROOFS;
-use mago_syntax::cst::Statement;
 use mago_syntax::dialect::Dialect;
-use mago_syntax::parser::parse_file;
-use mago_syntax_core::utils::is_part_of_identifier;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 
@@ -109,7 +95,6 @@ use crate::consts::VERSION;
 use crate::error::Error;
 use crate::extensions::start_external_analyzer;
 use crate::utils::create_orchestrator;
-use crate::utils::git;
 use crate::utils::logger;
 use crate::utils::rename_into;
 use crate::utils::temp_file_in;
@@ -1005,92 +990,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
 
     let (database, included) = project_database(&orchestrator, workspace)?;
 
-    // Written before the compile stamps its inputs, which hold the PHP file a default class's name could name in
-    // a file's folder, so a compiled file is current once it is written.
     let mut errors = Vec::new();
-    let mut written_beside: HashMap<PathBuf, BTreeSet<String>> = HashMap::new();
-    let mut folders = BTreeSet::new();
-    let mut listings = HashMap::new();
-    for file in database.files().filter(|file| {
-        file.file_type == FileType::Host
-            && Dialect::of(file).is_sharp()
-            && !file.is_standard_library
-            && !file.name.starts_with(VENDOR)
-            && !included.contains(&file.id)
-    }) {
-        let source = root.join(String::from_utf8_lossy(&file.name).as_ref());
-        let folder = source.parent().unwrap_or(&root).to_path_buf();
-        folders.insert(folder.clone());
-        if file.folder_namespace == Some(FolderNamespace::Test) {
-            continue;
-        }
-        let Some(declared) = declared_type(&file) else {
-            continue;
-        };
-        let (type_file, class) = (&declared.file, &declared.name);
-        let php = format!("{}.php", type_file.strip_suffix(".sharp").unwrap_or(type_file));
-        let listing = match listings.entry(folder.clone()) {
-            Entry::Occupied(listing) => listing.into_mut(),
-            Entry::Vacant(listing) => listing.insert(file_names(&folder)?),
-        };
-        // PHP names a class whatever its case, and a disk that ignores case opens `order.php` for `Order.php`.
-        let named: Vec<&String> = listing.iter().filter(|name| name.eq_ignore_ascii_case(&php)).collect();
-        let mut someone_wrote = None;
-        for name in &named {
-            if !written_by_compile(&folder.join(name))? {
-                someone_wrote = Some(name);
-                break;
-            }
-        }
-        if let Some(name) = someone_wrote {
-            let source = String::from_utf8_lossy(&file.name);
-            let written = format!("{}{name}", &source[..source.len() - type_file.len()]);
-            errors.push(format!("{written} and {source} both name {class}. Delete {written}, or rename one of them."));
-            continue;
-        }
-        // A rename onto a file of another case keeps that file's name on a disk that ignores case.
-        for name in named.into_iter().filter(|name| **name != php) {
-            let path = folder.join(name);
-            std::fs::remove_file(&path)
-                .or_else(ignore_missing)
-                .map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))?;
-        }
-        let path = folder.join(&php);
-        let contents = beside(&declared);
-        if !listing.contains(&php) || read_listed(&path)?.as_deref() != Some(contents.as_bytes()) {
-            write_by_rename(&path, contents.as_bytes())?;
-        }
-        if let Some(record) = record.as_mut() {
-            record.output(&path, contents.as_bytes());
-        }
-        written_beside.entry(folder).or_default().insert(php);
-    }
-    // A removed source's PHP file, and the `.gitignore` that lists it, are in a folder that holds a source, held one at
-    // the last compile, or holds the compile's `.gitignore`, as the folder of a refused source does.
-    source_folders(&root, &compiled_folder, &compiled_folder, &mut folders)?;
-    gitignore_folders(&root, &orchestrator.database_configuration(workspace, false), &mut folders)?;
-    for folder in folders {
-        let written = written_beside.remove(&folder).unwrap_or_default();
-        for name in file_names(&folder)? {
-            let path = folder.join(&name);
-            if name.ends_with(".php") && !written.contains(&name) && written_by_compile(&path)? {
-                std::fs::remove_file(&path)
-                    .or_else(ignore_missing)
-                    .map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))?;
-            }
-        }
-        keep_out_of_git(&root, &folder, &written)?;
-        // The `.gitignore` of a folder of PHP files is the compile's, which it wrote, or someone else's, which it reads.
-        if let Some(record) = record.as_mut().filter(|_| !written.is_empty()) {
-            let gitignore = folder.join(".gitignore");
-            match std::fs::read(&gitignore) {
-                Ok(contents) if gitignore_written_by_compile(&contents) => record.output(&gitignore, &contents),
-                _ => record.input(&gitignore),
-            }
-        }
-    }
-    git::remove_exclude_blocks(&root, "mago compile")?;
-
     let library = match standard_library(&root, &database) {
         Ok(library) => library,
         Err(refusal) => {
@@ -1592,15 +1492,6 @@ impl Record {
         let name = source_name(&self.root, path);
         self.files.remove(&name);
         self.outputs.insert(name, output);
-    }
-
-    /// Keeps the file at `path`, which the compile read, as an input with its stamp now.
-    fn input(&mut self, path: &Path) {
-        let name = source_name(&self.root, path);
-        match unit::stamp(&self.root, name.as_bytes()) {
-            Ok(input) => self.inputs.push(recorded(name.as_bytes(), input.as_ref())),
-            Err(_) => self.lost = true,
-        }
     }
 
     /// Writes the record to `path` once the compile is done with `outcome`: hashes each source file's bytes as
@@ -2282,331 +2173,6 @@ fn quoted(table: &mut Vec<u8>, text: &[u8]) {
         table.push(*byte);
     }
     table.push(b'\'');
-}
-
-/// The PHP file beside the PHP# source `declared`, spec section 27. PHP code that lists `*.php` files and names each
-/// class by its path finds the PHP# class through it, and Composer's PSR-4 loads it before the source. It loads the
-/// source through the engine, and on plain PHP it throws before any source can reach the output. Its last statement
-/// states the type's declaration and never runs, so a tool that reads PHP source, as Composer's class map and
-/// Symfony's attribute routing do, finds the type in it, and the engine declares the type once, from the source. PHP
-/// refuses a keyword as a type's name even in a declaration that never runs, so the file of a type named after one, as
-/// `Case`, states none and parses. Once the source is gone it declares nothing, as if it were not there, until the next
-/// compile deletes it.
-///
-/// A project's formatter passes it as written: `mago fmt`, Pint's `laravel`, `per` and `psr12` presets, and
-/// PHP-CS-Fixer's `@PER-CS2x0`. Pint's `laravel` preset wants each global name a namespace uses imported. PHPCS's
-/// `PSR12` warns of the side effects a generated file has, so the file marks itself `phpcs:ignoreFile`. A type named
-/// `Error` declares the name the file would import, which PHP refuses even in a declaration that never runs, so its
-/// file names `\Error` in full. PHP warns of an import in no namespace, where every global name resolves as written, so
-/// there the file imports none.
-fn beside(declared: &DeclaredType) -> String {
-    let DeclaredType { file, name, keyword } = declared;
-    let stem = file.strip_suffix(".sharp").unwrap_or(file);
-    let (imports, error) = match name.rsplit_once('.') {
-        Some((namespace, _)) => {
-            let namespace = namespace.replace('.', "\\");
-            let functions = "use function function_exists;\nuse function is_file;\nuse function sprintf;\n\n";
-            if stem.eq_ignore_ascii_case("Error") {
-                (format!("namespace {namespace};\n\n{functions}"), "\\Error")
-            } else {
-                (format!("namespace {namespace};\n\nuse Error;\n\n{functions}"), "Error")
-            }
-        }
-        None => (String::new(), "Error"),
-    };
-    let declaration = match keyword {
-        Some(keyword) => format!(
-            "\nif (false) {{\n    {keyword} {stem}\n    {{\n        // The engine declares {stem} from {file}, and this declaration never runs.\n    }}\n}}\n"
-        ),
-        None => String::new(),
-    };
-
-    format!(
-        "{COMPANION_START}{file}, so PHP code that finds *.php files finds its type.\n// phpcs:ignoreFile\n\ndeclare(strict_types=1);\n\n{imports}if (is_file(sprintf('%s/{file}', __DIR__))) {{\n    function_exists('Sharp\\Internal\\requireNative')\n        || throw new {error}(\n            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n        );\n\n    require_once sprintf('%s/{file}', __DIR__);\n}}\n{declaration}"
-    )
-}
-
-/// Whether the file at `path` is one `mago compile` wrote beside a source, which starts with [`COMPANION_START`].
-fn written_by_compile(path: &Path) -> Result<bool, DatabaseError> {
-    let mut start = Vec::with_capacity(COMPANION_START.len());
-    let read =
-        std::fs::File::open(path).and_then(|file| file.take(COMPANION_START.len() as u64).read_to_end(&mut start));
-    match read {
-        Ok(_) => Ok(start == COMPANION_START.as_bytes()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(DatabaseError::io(IOAction::ReadFile, path, error)),
-    }
-}
-
-/// The first line of the `.gitignore` [`keep_out_of_git`] writes, which marks the file as the compile's own.
-const GITIGNORE_START: &str =
-    "# mago compile writes this file and the files it lists. It rewrites it on every compile.\n";
-
-/// Keeps `written`, the names of the PHP files the compile wrote in `folder`, out of git through the folder's
-/// `.gitignore`, which lists itself and each of them. Each checkout of a repository has its own `.gitignore`, so git
-/// ignores the files of this checkout alone, where the `info/exclude` every checkout shares hid them in all of them. A
-/// file's name is a type's name and `.php`, which holds no character a pattern reads as a wildcard.
-///
-/// The compile's own file, as [`gitignore_written_by_compile`] tells it, is rewritten when the list changes, and is
-/// deleted once the folder holds no such file. A `.gitignore` the compile didn't write, tracked or not, is left as it
-/// is, and the compile warns of each file it doesn't list, as [`lists`] reads it, since git may show that file as
-/// untracked. So it does of a `.gitignore` that is a link, which git doesn't read, and of one it can't read, which fails
-/// no compile.
-fn keep_out_of_git(root: &Path, folder: &Path, written: &BTreeSet<String>) -> Result<(), DatabaseError> {
-    let path = folder.join(".gitignore");
-    let relative = folder.strip_prefix(root).unwrap_or(folder);
-    let shown = relative.join(".gitignore");
-    let shown = shown.display();
-    // The files git may show for `names`, and the lines that list them, each joined by commas.
-    let named = |names: &[&String]| -> (String, String) {
-        let files: Vec<String> = names.iter().map(|name| relative.join(name).display().to_string()).collect();
-        let lines: Vec<String> = names.iter().map(|name| format!("/{name}")).collect();
-        (files.join(", "), lines.join(", "))
-    };
-    let all: Vec<&String> = written.iter().collect();
-    if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        if !all.is_empty() {
-            let (files, lines) = named(&all);
-            tracing::warn!(
-                "{shown} is a link, which git doesn't read, so git may show {files} as untracked: make it a file that lists {lines}."
-            );
-        }
-        return Ok(());
-    }
-    let before = match std::fs::read(&path) {
-        Ok(contents) => Some(contents),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            if !all.is_empty() {
-                let (files, _) = named(&all);
-                tracing::warn!(
-                    "{shown} can't be read: {}, so git may show {files} as untracked. Make it a file mago compile can read, and run vendor/bin/mago compile again.",
-                    error.kind()
-                );
-            }
-            return Ok(());
-        }
-    };
-    match before {
-        Some(theirs) if !gitignore_written_by_compile(&theirs) => {
-            let unlisted: Vec<&String> = written.iter().filter(|name| !lists(&theirs, name)).collect();
-            if !unlisted.is_empty() {
-                let (files, lines) = named(&unlisted);
-                tracing::warn!(
-                    "{shown} doesn't list {lines}, so git may show {files} as untracked: add {lines} to it."
-                );
-            }
-        }
-        Some(_) if written.is_empty() => {
-            std::fs::remove_file(&path)
-                .or_else(ignore_missing)
-                .map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))?;
-        }
-        None if written.is_empty() => {}
-        before => {
-            let mut after = format!("{GITIGNORE_START}/.gitignore\n");
-            for name in written {
-                after.push_str(&format!("/{name}\n"));
-            }
-            if before.as_deref() != Some(after.as_bytes()) {
-                write_by_rename(&path, after.as_bytes())?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Whether `contents` is a `.gitignore` [`keep_out_of_git`] wrote: [`GITIGNORE_START`], then lines that each name the
-/// file itself or a PHP file, as `/` and its name. Any other line makes the file someone else's, so the compile never
-/// rewrites or deletes a line someone added.
-fn gitignore_written_by_compile(contents: &[u8]) -> bool {
-    contents.strip_prefix(GITIGNORE_START.as_bytes()).is_some_and(|lines| {
-        lines.split_inclusive(|byte| *byte == b'\n').all(|line| {
-            line.strip_suffix(b"\n").and_then(|line| line.strip_prefix(b"/")).is_some_and(|name| {
-                name == b".gitignore"
-                    || name
-                        .strip_suffix(b".php")
-                        .is_some_and(|stem| !stem.is_empty() && stem.iter().all(is_part_of_identifier))
-            })
-        })
-    })
-}
-
-/// Whether git reads the `.gitignore` `contents`, which someone else wrote, as ignoring the PHP file `name` of its
-/// folder: a line names it as `/` and its name, and no `!` line after that names it again, which git reads as showing
-/// it. A byte order mark before the first line, and the spaces and the carriage return that end a line, are no part of
-/// the line.
-fn lists(contents: &[u8], name: &str) -> bool {
-    let contents = contents.strip_prefix(b"\xef\xbb\xbf").unwrap_or(contents);
-    let mut listed = false;
-    for line in contents.split(|byte| *byte == b'\n').map(<[u8]>::trim_ascii_end) {
-        match line.strip_prefix(b"!") {
-            Some(shown) => listed &= shown.strip_prefix(b"/").unwrap_or(shown) != name.as_bytes(),
-            None => listed |= line.strip_prefix(b"/") == Some(name.as_bytes()),
-        }
-    }
-
-    listed
-}
-
-/// Adds to `folders` each folder under the project's own source `paths` that holds a `.gitignore` the compile wrote, so
-/// the compile comes back to a folder whose every source is gone even when none of them was compiled, as a refused one
-/// isn't. `configuration` is the one the analysis walks the project's own files by. A path that holds a wildcard is
-/// walked from its folder before the wildcard, and no path walks the workspace. The walk skips each folder that walk
-/// skips, as [`ExcludedFolders`] tells it: the `excludes`, the `includes` and the `.sharp` folder. It skips `vendor/`
-/// too, and a path inside a skipped folder, where the compile writes no PHP file, each `.git` folder, and every link,
-/// which the compile never writes through. A folder it can't open is skipped, as the analysis's own walk skips it with
-/// a warning.
-fn gitignore_folders(
-    root: &Path,
-    configuration: &DatabaseConfiguration<'_>,
-    folders: &mut BTreeSet<PathBuf>,
-) -> Result<(), DatabaseError> {
-    let excluded = ExcludedFolders::from_configuration(configuration)?;
-    let vendor = root.join("vendor");
-    let skipped = |folder: &Path| folder.starts_with(&vendor) || excluded.contains(folder);
-    let mut pending: Vec<PathBuf> = if configuration.paths.is_empty() {
-        vec![root.to_path_buf()]
-    } else {
-        configuration
-            .paths
-            .iter()
-            .map(|path| {
-                // The folder a configured path names, before any wildcard, with its `.` parts gone.
-                let path = String::from_utf8_lossy(path);
-                let literal = match path.find(['*', '?', '[', '{']) {
-                    Some(wildcard) => &path[..path[..wildcard].rfind('/').unwrap_or(0)],
-                    None => path.as_ref(),
-                };
-                root.join(literal).components().collect::<PathBuf>()
-            })
-            .filter(|folder| !skipped(folder))
-            .collect()
-    };
-    while let Some(folder) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&folder) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            let path = entry.path();
-            if file_type.is_dir() {
-                if entry.file_name() != ".git" && !skipped(&path) {
-                    pending.push(path);
-                }
-            } else if file_type.is_file()
-                && entry.file_name() == ".gitignore"
-                && std::fs::read(&path).is_ok_and(|contents| gitignore_written_by_compile(&contents))
-            {
-                folders.insert(folder.clone());
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// The type a PHP# source declares named like its file, spec section 27.
-struct DeclaredType {
-    /// The source's file name, as `Order.sharp`.
-    file: String,
-    /// The type's PHP# name, as `App.Billing.Order`.
-    name: String,
-    /// The PHP keyword of the type the engine declares: `interface`, `enum` for an enum that runs as a PHP enum, or
-    /// `class` for a class, a struct, an event, and an enum whose cases are classes. It is none for a type PHP source
-    /// can't declare, one named after a PHP keyword.
-    keyword: Option<&'static str>,
-}
-
-/// The type the PHP# source `file` declares, when it declares one named like it, spec section 27: a class, interface,
-/// enum, struct or event. A module's file and an `extern` declaration file declare none.
-fn declared_type(file: &File) -> Option<DeclaredType> {
-    let name = String::from_utf8_lossy(&file.name);
-    let type_file = name.rsplit('/').next()?;
-    let stem = type_file.strip_suffix(".sharp")?;
-    let arena = LocalArena::new();
-    let program = parse_file(&arena, file);
-    let namespace = program.statements.iter().find_map(|statement| match statement {
-        Statement::Namespace(namespace) => Some(namespace),
-        _ => None,
-    });
-    let namespaced = namespace.map(|namespace| namespace.statements().iter());
-    let keyword =
-        program.statements.iter().chain(namespaced.into_iter().flatten()).find_map(|statement| match statement {
-            Statement::Class(class) if class.name.value == stem.as_bytes() => Some("class"),
-            Statement::Struct(r#struct) if r#struct.name.value == stem.as_bytes() => Some("class"),
-            Statement::Enum(r#enum) if r#enum.name.value == stem.as_bytes() => {
-                Some(if r#enum.runs_as_classes() { "class" } else { "enum" })
-            }
-            Statement::Interface(interface) if interface.name.value == stem.as_bytes() => Some("interface"),
-            Statement::Event(event) if event.name.value == stem.as_bytes() => Some("class"),
-            _ => None,
-        })?;
-    let name = match namespace.and_then(|namespace| namespace.name.as_ref()) {
-        Some(namespace) => format!("{}.{stem}", String::from_utf8_lossy(namespace.value()).replace('\\', ".")),
-        None => stem.to_string(),
-    };
-
-    let keyword = (!is_php_keyword(stem.as_bytes())).then_some(keyword);
-
-    Some(DeclaredType { file: type_file.to_string(), name, keyword })
-}
-
-/// The names of the files in `folder`, exactly as the folder holds them, or none when it is gone.
-fn file_names(folder: &Path) -> Result<Vec<String>, DatabaseError> {
-    let entries = match std::fs::read_dir(folder) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(DatabaseError::io(IOAction::OpenFolder, folder, error)),
-    };
-    let mut names = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, folder, error))?;
-        let file_type =
-            entry.file_type().map_err(|error| DatabaseError::io(IOAction::ReadMetadata, &entry.path(), error))?;
-        if file_type.is_file() {
-            names.push(entry.file_name().to_string_lossy().into_owned());
-        }
-    }
-
-    Ok(names)
-}
-
-/// Adds to `folders` the folder of the source of each compiled file under `folder` of the compiled folder `compiled`,
-/// outside `vendor/` and the folder the Lean step owns.
-fn source_folders(
-    root: &Path,
-    compiled: &Path,
-    folder: &Path,
-    folders: &mut BTreeSet<PathBuf>,
-) -> Result<(), DatabaseError> {
-    let entries = match std::fs::read_dir(folder) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(DatabaseError::io(IOAction::OpenFolder, folder, error)),
-    };
-    for entry in entries {
-        let entry = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, folder, error))?;
-        let path = entry.path();
-        let relative = path.strip_prefix(compiled).unwrap_or(&path);
-        if entry.file_type().map_err(|error| DatabaseError::io(IOAction::ReadMetadata, &path, error))?.is_dir() {
-            if relative != Path::new(PACKAGE_FOLDER) && relative != Path::new("vendor") {
-                source_folders(root, compiled, &path, folders)?;
-            }
-        } else if path.extension().is_some_and(|extension| extension == "sharpc") {
-            folders.insert(root.join(relative.parent().unwrap_or(Path::new(""))));
-        }
-    }
-
-    Ok(())
-}
-
-/// Treats a file that is already gone as removed.
-fn ignore_missing(error: std::io::Error) -> std::io::Result<()> {
-    if error.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(error) }
 }
 
 /// `count` PHP# files, in words.
