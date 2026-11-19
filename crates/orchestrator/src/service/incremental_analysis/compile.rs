@@ -1136,7 +1136,8 @@ impl IncrementalAnalysisService {
 
     /// The effects solve over every file's bodies, as the analysis ran it, which a PHP# function's type lists, spec
     /// section 29.
-    fn effects(&self) -> Effects {
+    #[must_use]
+    pub fn effects(&self) -> Effects {
         let mut summaries: Vec<(&FileId, &[EffectSummary])> =
             self.file_states.iter().map(|(file_id, state)| (file_id, state.effect_summaries.as_slice())).collect();
         summaries.sort_unstable_by_key(|(file_id, _)| **file_id);

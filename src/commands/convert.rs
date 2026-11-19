@@ -34,6 +34,7 @@ use clap::Parser;
 use diffy::PatchFormatter;
 
 use mago_allocator::LocalArena;
+use mago_analyzer::effects::Effects;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_composer::AutoloadPsr4value;
 use mago_composer::ComposerPackage;
@@ -352,6 +353,7 @@ impl ConvertCommand {
         let forms = session.server.standard_library_forms(|issues| prover.hidden.shown(issues, &database))?;
         drop(database);
         let library = Library::new(&forms, session.server.codebase(), &workspace);
+        let effects = session.server.effects();
 
         let mut candidates = Vec::new();
         // One line gives a folder its namespace, so each folder's is the one the first file that needs it names.
@@ -367,7 +369,7 @@ impl ConvertCommand {
                 outcome.refused.entry(name).or_default().push(reason);
                 continue;
             };
-            match session.convert(file, &library) {
+            match session.convert(file, &library, &effects) {
                 Ok(Converted { text, extern_namespaces }) => {
                     let extern_namespaces = extern_namespaces
                         .iter()
@@ -729,8 +731,9 @@ impl<'configuration> Session<'configuration> {
     }
 
     /// The PHP# text of `file` with the `extern namespace` lines it needs, or each construct that keeps it plain PHP, by
-    /// its place. A built-in's call becomes the member of `library` that runs it.
-    fn convert(&self, file: &File, library: &Library) -> Result<Converted, Vec<String>> {
+    /// its place. A built-in's call becomes the member of `library` that runs it, and an invoker lists the `effects`
+    /// of the method it calls.
+    fn convert(&self, file: &File, library: &Library, effects: &Effects) -> Result<Converted, Vec<String>> {
         let arena = LocalArena::new();
         let program = parse_file(&arena, file);
         let names = NameResolver::new(&arena).resolve(program);
@@ -743,6 +746,7 @@ impl<'configuration> Session<'configuration> {
             names: &names,
             codebase: self.server.codebase(),
             artifacts: &artifacts,
+            effects,
             references: self.server.symbol_references(),
             library,
         };

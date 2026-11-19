@@ -8,6 +8,7 @@ use foldhash::HashSet;
 
 use mago_analyzer::analysis_result::AnalysisResult;
 use mago_analyzer::artifacts::AnalysisArtifacts;
+use mago_analyzer::effects::Effects;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::reference::SymbolReferences;
 use mago_database::Database;
@@ -283,6 +284,13 @@ impl Server {
     #[must_use]
     pub fn extern_effects(&self) -> Vec<ExternEffects> {
         self.service.extern_effects()
+    }
+
+    /// The effects the last analysis solves over every file's bodies, which give a PHP# method the effects a function
+    /// type of it lists, spec section 29, as `mago convert` reads them for the invoker it writes.
+    #[must_use]
+    pub fn effects(&self) -> Effects {
+        self.service.effects()
     }
 
     /// For each of `files`, the source files other than it whose signature edit makes the last analysis's warm path

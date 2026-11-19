@@ -14,4 +14,10 @@ class Order
     {
         return null;
     }
+
+    /** @return string */
+    public static function code(int $id)
+    {
+        return 'code ' . $id;
+    }
 }

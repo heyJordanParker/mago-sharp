@@ -198,12 +198,14 @@ fn converted(folder: &Path) -> Result<Converted, String> {
     let arena = LocalArena::new();
     let program = parse_file(&arena, &file);
     let names = NameResolver::new(&arena).resolve(program);
+    let effects = server.effects();
     let input = Input {
         file: &file,
         program,
         names: &names,
         codebase: server.codebase(),
         artifacts: &artifacts,
+        effects: &effects,
         references: server.symbol_references(),
         library: &library,
     };

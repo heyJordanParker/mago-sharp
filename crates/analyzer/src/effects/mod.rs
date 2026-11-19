@@ -203,7 +203,7 @@ pub(crate) struct Impurity {
     /// The effect of the call, or `None` when the cause is a place written.
     pub(crate) effect: Option<Effect>,
     /// Whether the path ends at a member of the standard library that may have every effect, spec section 29, as
-    /// `Method.invoke`, whose plain PHP call with no `extern` the caller can't declare.
+    /// `Property.get`, whose plain PHP call with no `extern` the caller can't declare.
     pub(crate) every_effect: bool,
 }
 
@@ -676,8 +676,8 @@ impl Effects {
             path.push(self.names[callee]);
             item = callee_item;
             origin = *callee_origin;
-            // A plain PHP call with no `extern` in the standard library is the member's own, as `Method.invoke` runs
-            // any method, so for code outside the library the chain ends at the member it calls. The library's own
+            // A plain PHP call with no `extern` in the standard library is the member's own, as `Property.get` runs
+            // any `get`, so for code outside the library the chain ends at the member it calls. The library's own
             // code is told the `extern` to write.
             if !self.standard_library[position]
                 && self.standard_library[callee]

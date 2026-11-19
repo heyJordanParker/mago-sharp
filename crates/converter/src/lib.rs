@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use mago_analyzer::artifacts::AnalysisArtifacts;
+use mago_analyzer::effects::Effects;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::TemplateTypes;
@@ -59,6 +60,9 @@ pub struct Input<'input, 'arena> {
     pub names: &'input ResolvedNames<'arena>,
     pub codebase: &'input CodebaseMetadata,
     pub artifacts: &'input AnalysisArtifacts,
+    /// The effects the project's analysis solves, which the invoker of a static method of a class held at run time
+    /// lists, spec sections 25 and 29.
+    pub effects: &'input Effects,
     /// The project's references between symbols, which name every member and file that sets a property.
     pub references: &'input SymbolReferences,
     /// The standard library's members that run a PHP function, which a bare call of a built-in becomes.

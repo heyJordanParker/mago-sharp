@@ -1,0 +1,6 @@
+namespace App.Stubs;
+
+import App.Order;
+
+extern Order.find;
+extern Order.code;

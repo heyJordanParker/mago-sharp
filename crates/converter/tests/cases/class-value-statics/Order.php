@@ -23,4 +23,10 @@ class Order
     {
         return 'order ' . $id;
     }
+
+    /** @return string */
+    public static function code(int $id)
+    {
+        return 'code ' . $id;
+    }
 }

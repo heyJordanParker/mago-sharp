@@ -939,7 +939,7 @@ fn an_attribute_on_an_extern_line_is_the_declaration_s_own() {
 
 /// Spec section 5: a marked attribute on a class counts every public member of the class as used, as a framework that
 /// reads a class attribute reaches its members by reflection. An application's own marked attribute counts its member
-/// as used, as the dispatcher that reads it with `methods()` and `invoke()` reaches it unseen. The mark goes on an
+/// as used, as the dispatcher that reads it with `methods()` and `createInvoker()` reaches it unseen. The mark goes on an
 /// attribute class only, so on a member it is a compile error.
 #[test]
 fn a_marked_attribute_on_a_class_or_a_member_counts_it_as_used_and_the_mark_goes_on_no_member() {
@@ -949,7 +949,7 @@ fn a_marked_attribute_on_a_class_or_a_member_counts_it_as_used_and_the_mark_goes
     );
     let controller = "namespace App.Web;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_CLASS)]\n[DynamicallyAccessed]\npublic class Controller\n{\n}\n";
     let handles = "namespace App.Events;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_METHOD)]\n[DynamicallyAccessed]\npublic class Handles\n{\n}\n";
-    let dispatcher = "namespace App.Events;\n\ninternal class Dispatcher\n{\n    internal void dispatch<TListener : Object>(TListener listener, string order)\n    {\n        for (const method of typeof(TListener).methods())\n        {\n            if (method.attributes<Handles>().isNotEmpty())\n            {\n                method.invoke(listener, [order]);\n            }\n        }\n    }\n}\n";
+    let dispatcher = "namespace App.Events;\n\ninternal class Dispatcher\n{\n    internal void dispatch<TListener : Object>(TListener listener, string order)\n    {\n        for (const method of typeof(TListener).methods())\n        {\n            if (method.attributes<Handles>().isNotEmpty())\n            {\n                method.createInvoker<Function<Any?(Object, List<Any?>)>>()(listener, [order]);\n            }\n        }\n    }\n}\n";
     let pages = "namespace App.Shop;\n\nimport App.Web.Controller;\n\n[Controller]\npublic class Pages\n{\n    public const int LIMIT = 3;\n\n    public string title { get; } = \"shop\";\n\n    public string index() => \"index\";\n}\n";
     let receipts = "namespace App.Shop;\n\nimport App.Events.Handles;\n\npublic class Receipts\n{\n    [Handles]\n    public void paid(string order) { }\n\n    public void voided(string order) { }\n}\n";
 
@@ -31148,13 +31148,13 @@ fn the_reflection_booleans_of_0_6_10_name_no_member() {
 
 /// Spec section 25: a `Method` gives the class that declares it, `isStatic`, its `Visibility` and its result type, a
 /// `Property` its declaring class, `Visibility` and type, and a `Parameter` its type, `isOptional`, `isVariadic` and
-/// its `defaultValue()`, so each read into an `int` is refused with its own type. So are a method's `invoke` and a
-/// property's `get`, whose results are `Any?`.
+/// its `defaultValue()`, so each read into an `int` is refused with its own type. So is a property's `get`, whose
+/// result is `Any?`.
 #[test]
 fn reflection_gives_each_member_fact_its_type() {
     let report = (
         "src/Report.sharp",
-        "namespace App;\n\npublic class Report\n{\n    int code = 0;\n\n    public int read(int depth)\n    {\n        const method = typeof(Report).methods()[0];\n        const property = typeof(Report).properties()[0];\n        const parameter = method.parameters()[0];\n        int declaring = method.declaringClass;\n        int shared = method.isStatic;\n        int visibility = method.visibility;\n        int result = method.type;\n        int owner = property.declaringClass;\n        int reach = property.visibility;\n        int held = property.type;\n        int given = parameter.type;\n        int optional = parameter.isOptional;\n        int variadic = parameter.isVariadic;\n        int fallback = parameter.defaultValue();\n        int called = method.invoke(this, [depth]);\n        int value = property.get(this);\n        return declaring + shared + visibility + result + owner + reach + held + given + optional + variadic + fallback\n            + called + value + depth + this.code;\n    }\n}\n",
+        "namespace App;\n\npublic class Report\n{\n    int code = 0;\n\n    public int read(int depth)\n    {\n        const method = typeof(Report).methods()[0];\n        const property = typeof(Report).properties()[0];\n        const parameter = method.parameters()[0];\n        int declaring = method.declaringClass;\n        int shared = method.isStatic;\n        int visibility = method.visibility;\n        int result = method.type;\n        int owner = property.declaringClass;\n        int reach = property.visibility;\n        int held = property.type;\n        int given = parameter.type;\n        int optional = parameter.isOptional;\n        int variadic = parameter.isVariadic;\n        int fallback = parameter.defaultValue();\n        int value = property.get(this);\n        return declaring + shared + visibility + result + owner + reach + held + given + optional + variadic + fallback\n            + value + depth + this.code;\n    }\n}\n",
     );
 
     // Each refusal names the local and the type of the member read into it.
@@ -31182,7 +31182,6 @@ fn reflection_gives_each_member_fact_its_type() {
             "optional: bool",
             "variadic: bool",
             "fallback: Any?",
-            "called: Any?",
             "value: Any?",
         ]
     );
@@ -31210,9 +31209,9 @@ fn class_of_any_object_has_every_member_of_a_class_value() {
     );
 }
 
-/// Spec sections 25 and 29: `Method.invoke`, `Property.get` and `Property.set` run code the caller can't see, a method's
-/// body, a `get` or a `set`, so each may have every effect. A method that implements a pure interface method can't call
-/// one, and a method with no `uses` to keep may.
+/// Spec sections 25 and 29: `Property.get` and `Property.set` run code the caller can't see, a `get` or a `set`, so each
+/// may have every effect. A method that implements a pure interface method can't call one, and a method with no `uses`
+/// to keep may.
 #[test]
 fn a_reflection_call_read_or_write_may_have_every_effect() {
     let audit =
@@ -31220,10 +31219,6 @@ fn a_reflection_call_read_or_write_may_have_every_effect() {
     let till = (
         "app/Shop/Till.sharp",
         "namespace App.Shop;\n\npublic class Till\n{\n    public int total { get; set; } = 0;\n\n    public int add(int amount) => amount;\n}\n",
-    );
-    let calling = (
-        "app/Shop/Calling.sharp",
-        "namespace App.Shop;\n\npublic class Calling : Audit\n{\n    public void run(Till till) { typeof(Till).methods()[0].invoke(till, [1]); }\n}\n",
     );
     let reading = (
         "app/Shop/Reading.sharp",
@@ -31235,14 +31230,13 @@ fn a_reflection_call_read_or_write_may_have_every_effect() {
     );
     let free = (
         "app/Shop/Free.sharp",
-        "namespace App.Shop;\n\npublic class Free\n{\n    public void run(Till till) { typeof(Till).properties()[0].set(till, typeof(Till).methods()[0].invoke(till, [1])); }\n}\n",
+        "namespace App.Shop;\n\npublic class Free\n{\n    public void run(Till till) { typeof(Till).properties()[0].set(till, typeof(Till).properties()[0].get(till)); }\n}\n",
     );
     let [a, b, c, d, e, f, g] = REFLECTION;
 
     assert_eq!(
-        effect_issues(&[calling, reading, writing, free, audit, till, a, b, c, d, e, f, g]),
+        effect_issues(&[reading, writing, free, audit, till, a, b, c, d, e, f, g]),
         [
-            "app/Shop/Calling.sharp:5:34 incompatible-effects: `Calling.run` reaches `Method.invoke`, which may have every effect, so the pure `Audit.run` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
             "app/Shop/Reading.sharp:5:34 incompatible-effects: `Reading.run` reaches `Property.get`, which may have every effect, so the pure `Audit.run` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
             "app/Shop/Writing.sharp:5:34 incompatible-effects: `Writing.run` reaches `Property.set`, which may have every effect, so the pure `Audit.run` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
         ]
@@ -31252,8 +31246,7 @@ fn a_reflection_call_read_or_write_may_have_every_effect() {
 /// Spec sections 25 and 29: `Method.createDelegate<TFunction>()` gives a value of the function type `TFunction`, whose
 /// `uses` says the effects a call of it has, and whose result type types the call, and making it is pure. So a base
 /// class whose `relations` is held to `uses Database` builds each method it walks by an attribute as a
-/// `Function<Relation(Model) uses Database>` and gives what each call returns as a `Relation`, while the same walk
-/// through `Method.invoke`, which may have every effect, is refused.
+/// `Function<Relation(Model) uses Database>` and gives what each call returns as a `Relation`.
 #[test]
 fn a_delegate_has_the_effects_its_function_type_lists() {
     let related = ("app/Shop/Related.sharp", "namespace App.Shop;\n\n[Attribute]\npublic class Related\n{\n}\n");
@@ -31269,20 +31262,54 @@ fn a_delegate_has_the_effects_its_function_type_lists() {
         "app/Shop/Model.sharp",
         "namespace App.Shop;\n\npublic abstract class Model : Relations\n{\n    public List<Relation> relations()\n        => typeof(Self).methods()\n            .filter(method => method.attributes<Related>().count() > 0)\n            .map(method => method.createDelegate<Function<Relation(Model) uses Database>>()(this));\n}\n",
     );
-    let invoked = (
-        "app/Shop/Invoked.sharp",
-        "namespace App.Shop;\n\npublic abstract class Invoked : Relations\n{\n    public List<Relation> relations()\n        => typeof(Self).methods()\n            .filter(method => method.attributes<Related>().count() > 0)\n            .map(method => method.invoke(this, []) is Relation relation ? relation : new Relation(method.name));\n}\n",
-    );
     let [a, b, c, d, e, f, g] = REFLECTION;
 
     assert_eq!(issues(related, &[a, b, c, d, e, f, g]), Vec::<String>::new());
     assert_eq!(issues(relation, &[a, b, c, d, e, f, g]), Vec::<String>::new());
     assert_eq!(issues(relations, &[relation, a, b, c, d, e, f, g]), Vec::<String>::new());
     assert_eq!(issues(model, &[related, relation, relations, a, b, c, d, e, f, g]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[model, related, relation, relations, a, b, c, d, e, f, g]), Vec::<String>::new());
+}
+
+/// Spec sections 25 and 29: `Method.createInvoker<TFunction>()` gives a value of the function type `TFunction` that
+/// takes the method's arguments as one `List<Any?>`, after the receiver of an instance method, and making it is pure.
+/// So a dispatcher held to `uses Database` calls methods of their own parameters by name through one invoker each,
+/// while a call of an invoker whose type lists `Mail` is refused. `Method.invoke` does not exist.
+#[test]
+fn an_invoker_has_the_effects_its_function_type_lists() {
+    let billing = (
+        "app/Shop/Billing.sharp",
+        "namespace App.Shop;\n\npublic abstract class Billing\n{\n    public abstract string pause(Billing subscription, Billing user) uses Database;\n\n    public static string create(string name, int plan = 1) => name;\n}\n",
+    );
+    let actions = (
+        "app/Shop/Actions.sharp",
+        "namespace App.Shop;\n\npublic interface Actions\n{\n    Any? run(Billing billing, List<Any?> arguments) uses Database;\n}\n",
+    );
+    let dispatch = (
+        "app/Shop/Dispatch.sharp",
+        "namespace App.Shop;\n\npublic class Dispatch : Actions\n{\n    Method method(string name) => typeof(Billing).methods().first(method => method.name == name);\n\n    public Any? run(Billing billing, List<Any?> arguments)\n    {\n        this.method(\"pause\").createInvoker<Function<Any?(Object, List<Any?>) uses Database>>()(billing, arguments);\n        return this.method(\"create\").createInvoker<Function<Any?(List<Any?>) uses Database>>()(arguments);\n    }\n}\n",
+    );
+    let mailing = (
+        "app/Shop/Mailing.sharp",
+        "namespace App.Shop;\n\npublic class Mailing : Actions\n{\n    public Any? run(Billing billing, List<Any?> arguments)\n        => typeof(Billing).methods()[0].createInvoker<Function<Any?(Object, List<Any?>) uses Mail>>()(billing, arguments);\n}\n",
+    );
+    let invoked = (
+        "app/Shop/Invoked.sharp",
+        "namespace App.Shop;\n\npublic class Invoked\n{\n    public Any? run(Billing billing) => typeof(Billing).methods()[0].invoke(billing, []);\n}\n",
+    );
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(issues(dispatch, &[billing, actions, a, b, c, d, e, f, g]), Vec::<String>::new());
     assert_eq!(
-        effect_issues(&[model, invoked, related, relation, relations, a, b, c, d, e, f, g]),
+        effect_issues(&[dispatch, mailing, billing, actions, a, b, c, d, e, f, g]),
         [
-            "app/Shop/Invoked.sharp:8:28 incompatible-effects: `Invoked.relations` reaches `Method.invoke`, which may have every effect, so `uses Database` on `Relations.relations` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+            "app/Shop/Mailing.sharp:6:12 incompatible-effects: `Mailing.run` calls `typeof(Billing).methods()[0].createInvoker<Function<Any?(Object, List<Any?>) uses Mail>>()`, which has the effect `Mail`, so `uses Database` on `Actions.run` cannot accept it.",
+        ]
+    );
+    assert_eq!(
+        refusals(invoked, &[billing, a, b, c, d, e, f, g]),
+        [
+            "5:70 non-existent-method Method `Method.invoke` does not exist. | Ensure the method `Method.invoke` is defined."
         ]
     );
 }

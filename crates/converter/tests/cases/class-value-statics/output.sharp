@@ -1,8 +1,10 @@
 namespace App;
 
+import Sharp.Data.Database;
+
 // PHP# reaches a static through its class's name or a type parameter, so a static of a `class-string<T>` is `T`'s, as
-// `T.find(7)`, and a static call through a class held at run time is a call through reflection, whose `Any?` result
-// `as` checks into the call's type (spec sections 11 and 25).
+// `T.find(7)`, and a static call through a class held at run time is a call through reflection's invoker, which gives
+// the result the method declares and lists the effects its `extern` line does (spec sections 11, 25 and 29).
 internal final class Finder
 {
     internal int total<T : Order>(Class<T> kind)
@@ -16,6 +18,11 @@ internal final class Finder
 
     internal string label(Class<Order> kind)
     {
-        return kind.methods().first(method => method.name == nameof(Order.label)).invoke(null, [7]) as string ?? throw new TypeError("Return value must be of type string");
+        return kind.methods().first(method => method.name == nameof(Order.label)).createInvoker<Function<string(List<Any?>) uses Database>>()([7]);
+    }
+
+    internal string code(Class<Order> kind)
+    {
+        return kind.methods().first(method => method.name == nameof(Order.code)).createInvoker<Function<Any?(List<Any?>)>>()([7]) as string ?? throw new TypeError("Return value must be of type string");
     }
 }

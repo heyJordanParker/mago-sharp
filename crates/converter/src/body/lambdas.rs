@@ -359,12 +359,13 @@ impl Converter<'_, '_> {
     }
 
     /// `$kind::find(...)`, a static method of a class held at run time as a value, as the lambda that calls it through
-    /// reflection, `(int id) => kind.methods().first(method => method.name == nameof(Order.find)).invoke(null, [id]) as
-    /// Order`,
-    /// which runs the `find` of the class the value holds, as PHP's method value does (spec sections 14.3 and 25). The
-    /// lambda takes the method's parameters, and `as` gives `invoke`'s `Any?` the type the method declares, which PHP
-    /// checks where the method returns, so `?? throw` never throws. A method with an optional, a variadic or a
-    /// by-reference parameter, which a PHP# lambda never takes, and one whose return no PHP# test gives, refuse.
+    /// reflection, `(int id) => kind.methods().first(method => method.name ==
+    /// nameof(Order.find)).createInvoker<Function<Order?(List<Any?>)>>()([id])`, which runs the `find` of the class the
+    /// value holds, as PHP's method value does (spec sections 14.3 and 25). The lambda takes the method's parameters,
+    /// and the invoker gives the type the method declares where PHP checks it. Where only PHPDoc gives it, the invoker
+    /// gives `Any?`, which `as` takes into that type, and PHP checks it where the method returns, so `?? throw` never
+    /// throws. A method with an optional, a variadic or a by-reference parameter, which a PHP# lambda never takes, one
+    /// whose return no PHP# test gives, and one no invoker can call, see [`Converter::invoker`], refuse.
     fn held_method_value(
         &mut self,
         expression: &Expression<'_>,
@@ -414,9 +415,13 @@ impl Converter<'_, '_> {
             chosen.push(name);
         }
         let returned = method.return_type_metadata.as_ref().map(|declared| &declared.type_union);
+        let typed = returned.filter(|returned| {
+            natively_checked(method.return_type_declaration_metadata.as_ref(), returned, self.input.codebase)
+        });
         let tested = returned.map(|union| TUnion::from_vec(union.get_non_nullable_types()));
         let check = match (returned, tested) {
             (None, _) => String::new(),
+            _ if typed.is_some() => String::new(),
             (Some(union), _) if union.has_mixed() || union.is_void() || union.is_null() => String::new(),
             (Some(union), Some(tested)) if tested.types.len() == 1 => {
                 let Some(text) = self.type_text(&tested, span) else {
@@ -436,11 +441,14 @@ impl Converter<'_, '_> {
             (Some(union), _) => {
                 return self.refuse(
                     span,
-                    format!("`{shown}` names a static method of a class held at run time, which PHP# calls through reflection, whose `invoke` gives `Any?`, and no PHP# test gives it the `{}` the method returns (spec section 21)", union.get_id()),
+                    format!("`{shown}` names a static method of a class held at run time, which PHP# calls through reflection, whose invoker gives `Any?` where PHP doesn't check the method's result, and no PHP# test gives it the `{}` the method returns (spec section 21)", union.get_id()),
                 );
             }
         };
         let Some(declared) = self.member_name(span, held_class, &method.original_name.as_str_lossy()) else {
+            return;
+        };
+        let Some(invoker) = self.invoker(span, &shown, held_class, method, typed) else {
             return;
         };
         self.expression(class, None);
@@ -450,7 +458,7 @@ impl Converter<'_, '_> {
         self.edits.replace(
             span,
             format!(
-                "({}) => {held}.methods().first({found} => {found}.name == {declared}).invoke(null, [{}]){check}",
+                "({}) => {held}.methods().first({found} => {found}.name == {declared}).{invoker}([{}]){check}",
                 written.join(", "),
                 chosen.join(", ")
             ),

@@ -29,4 +29,12 @@ final class Reader
 
         return $find(1);
     }
+
+    /** @param class-string<Order> $kind */
+    public function code(string $kind): string
+    {
+        $code = $kind::code(...);
+
+        return $code(1);
+    }
 }

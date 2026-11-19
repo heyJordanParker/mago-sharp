@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace App;
 
 // PHP# reaches a static through its class's name or a type parameter, and a static of a class held at run time
-// through reflection, which needs the member the analysis finds to type the read or the call, and a constant's own
-// type, which a subclass's constant of no declared type may not keep (spec sections 11 and 25).
+// through reflection, which needs the member the analysis finds to type the read or the call, a constant's own type,
+// which a subclass's constant may not keep, and a method's effects, which plain PHP no `extern` declares has not.
 final class Reader
 {
     /** @param class-string<Order> $kind */

@@ -18,8 +18,15 @@ internal final class Reader
 
     internal Order? first(Class<Order> kind)
     {
-        const find = (int id) => kind.methods().first(method => method.name == nameof(Order.find)).invoke(null, [id]) as Order;
+        const find = (int id) => kind.methods().first(method => method.name == nameof(Order.find)).createInvoker<Function<Order?(List<Any?>)>>()([id]);
 
         return find(1);
+    }
+
+    internal string code(Class<Order> kind)
+    {
+        const code = (int id) => kind.methods().first(method => method.name == nameof(Order.code)).createInvoker<Function<Any?(List<Any?>)>>()([id]) as string ?? throw new TypeError("Return value must be of type string");
+
+        return code(1);
     }
 }

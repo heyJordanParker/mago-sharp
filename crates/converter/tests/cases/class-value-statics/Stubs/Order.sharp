@@ -1,0 +1,6 @@
+namespace App.Stubs;
+
+import App.Order;
+
+extern Order.label uses Database;
+extern Order.code;

@@ -769,17 +769,6 @@ function createLazy(string $type, callable $initialize): object {}
 function accessors(string $type, string $name): array {}
 
 /**
- * The result of the method `$method` that `$class` declares, called on `$receiver` with `$arguments` as a direct call
- * from the caller's code would be, or, with a null receiver, of the static method run on the class `$readOn` names, the
- * one its `Method` was read from. The standard library's `Method.invoke` returns it.
- *
- * @param list<mixed> $arguments
- *
- * @throws \InvalidArgumentException
- */
-function invoke(?object $receiver, string $class, string $method, array $arguments, string $readOn): mixed {}
-
-/**
  * A value of the function type the class value `$type` names that calls the method `$method` that `$class` declares, or
  * the accessor `$name::get` or `$name::set`, as a direct call from the caller's code would: an instance one on the
  * receiver of the class `$readOn` names it takes first, the one its `Method` was read from, and a static one on that
@@ -794,6 +783,22 @@ function invoke(?object $receiver, string $class, string $method, array $argumen
  * @throws \ValueError
  */
 function createDelegate(string $readOn, string $class, string $method, string $type): \Closure {}
+
+/**
+ * A value of the function type the class value `$type` names that calls the method `$method` that `$class` declares, or
+ * the accessor `$name::get` or `$name::set`, with a list of arguments, as a direct call from the caller's code would: an
+ * instance one on the receiver of the class `$readOn` names it takes first, the one its `Method` was read from, and a
+ * static one on that class. The standard library's `Method.createInvoker` returns it.
+ *
+ * @template T
+ *
+ * @param class-string<T> $type
+ *
+ * @return T
+ *
+ * @throws \ValueError
+ */
+function createInvoker(string $readOn, string $class, string $method, string $type): \Closure {}
 
 /**
  * The value of the property `$property` that `$class` declares, read on `$receiver`, or of the static `$property`, as a

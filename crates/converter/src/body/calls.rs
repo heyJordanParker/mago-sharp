@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::ttype::TType;
@@ -425,12 +426,14 @@ impl<'input> Converter<'input, '_> {
     }
 
     /// `$class::find(7)` of a class value held at run time as the call through reflection PHP# makes it with,
-    /// `class.methods().first(method => method.name == nameof(Order.find)).invoke(null, [7])`, which runs the `find` of
-    /// the class the value holds as PHP's call does, the class's own before one it inherits (spec section 25). `invoke` gives `Any?`,
-    /// which [`Converter::checked`] takes into the type the analysis gives the call where the code reads it, as `used`
-    /// says. It keeps the file plain PHP for a value that may hold something other than a class value, as an object or
-    /// null, where the analysis knows no `method` the call runs, which would type its arguments and its result, and for
-    /// a named argument, since `invoke` takes a `List` of them.
+    /// `class.methods().first(method => method.name == nameof(Order.find)).createInvoker<Function<Order?(List<Any?>)>>()([7])`,
+    /// which runs the `find` of the class the value holds as PHP's call does, the class's own before one it inherits
+    /// (spec section 25). The invoker gives the result the method declares where PHP checks the type the analysis gives
+    /// the call, and `Any?` otherwise, which [`Converter::checked`] takes into that type where the code reads it, as
+    /// `used` says. It keeps the file plain PHP for a value that may hold something other than a class value, as an
+    /// object or null, where the analysis knows no `method` the call runs, which would type its arguments and its
+    /// result, for a named argument, since the invoker takes a `List` of them, and for a method no invoker can call, see
+    /// [`Converter::invoker`].
     fn reflected_call(
         &mut self,
         expression: &Expression<'_>,
@@ -463,10 +466,19 @@ impl<'input> Converter<'input, '_> {
         {
             return self.refuse(
                 named.span(),
-                format!("a named argument of `{shown}` has no PHP# form: it is a static call through a class held at run time, which PHP# makes through reflection, whose `invoke` takes its arguments as a `List` (spec section 25)"),
+                format!("a named argument of `{shown}` has no PHP# form: it is a static call through a class held at run time, which PHP# makes through reflection, whose invoker takes its arguments as a `List` (spec section 25)"),
             );
         }
         let Some(declared) = self.member_name(call.span(), held_class, &method.original_name.as_str_lossy()) else {
+            return;
+        };
+        let result = self.type_of(expression).filter(|_| used);
+        let returned = method.return_type_declaration_metadata.as_ref();
+        let typed =
+            returned.filter(|_| result.is_none_or(|result| natively_checked(returned, result, self.input.codebase)));
+        let Some(invoker) =
+            self.invoker(call.span(), &shown, held_class, method, typed.map(|returned| &returned.type_union))
+        else {
             return;
         };
         self.expression(call.class, None);
@@ -487,24 +499,78 @@ impl<'input> Converter<'input, '_> {
         self.edits.replace(
             call.span(),
             format!(
-                "{class}.methods().first({found} => {found}.name == {declared}).invoke(null, [{}])",
+                "{class}.methods().first({found} => {found}.name == {declared}).{invoker}([{}])",
                 arguments.join(", ")
             ),
         );
 
-        let Some(result) = self.type_of(expression).filter(|_| used) else {
+        let Some(result) = result.filter(|_| typed.is_none()) else {
             return;
         };
         if result.has_mixed() || result.is_void() || result.is_null() || result.is_never() {
             return;
         }
-        let natively = natively_checked(method.return_type_declaration_metadata.as_ref(), result, self.input.codebase);
-        if !self.checked(expression, &get_mixed(), result, "Return value", natively) {
+        if !self.checked(expression, &get_mixed(), result, "Return value", false) {
             self.refuse(
                 call.span(),
-                format!("`{shown}` is a static call through a class held at run time, which PHP# makes through reflection, whose `invoke` gives `Any?`, and no PHP# test gives it the `{}` the call returns (spec section 21)", result.get_id()),
+                format!("`{shown}` is a static call through a class held at run time, which PHP# makes through reflection, whose invoker gives `Any?` where PHP doesn't check the method's result, and no PHP# test gives it the `{}` the call returns (spec section 21)", result.get_id()),
             );
         }
+    }
+
+    /// `createInvoker<Function<Order?(List<Any?>) uses Database>>()`, the invoker of `method`, a static method of a class
+    /// `held` names that the code holds at run time, which calls it with its arguments as one `List` (spec section 25).
+    /// It gives `result`, or `Any?` with none, and lists the effects the engine holds `method` to where the code makes
+    /// it, which it refuses a type for that doesn't list each (spec section 29): those the analysis solves for a PHP#
+    /// method, and those its `extern` line declares for a plain PHP one. `None` after refusing `span`, written `shown`,
+    /// for a method that may have every effect, which no `uses` lists: plain PHP no `extern` declares, or a PHP# method
+    /// that calls it.
+    pub(super) fn invoker(
+        &mut self,
+        span: Span,
+        shown: &str,
+        held: Word,
+        method: &FunctionLikeMetadata,
+        result: Option<&TUnion>,
+    ) -> Option<String> {
+        let codebase = self.input.codebase;
+        let declaring = codebase.get_declaring_method_class(held, method.name).unwrap_or(held);
+        let effects = if method.flags.is_sharp() {
+            self.input.effects.function_effects(codebase, &FunctionLikeIdentifier::Method(declaring, method.name))
+        } else {
+            codebase.extern_of_method(held, declaring, method.name).map(|declaration| declaration.effects.clone())
+        };
+        let Some(effects) = effects else {
+            let class = codebase.get_class_like(declaring).map_or(declaring, |class| class.original_name);
+            let named = format!("{}.{}", class.as_str_lossy().replace('\\', "."), method.original_name.as_str_lossy());
+            let reason = if method.flags.is_sharp() {
+                format!("`{named}` calls plain PHP no `extern` declares")
+            } else {
+                format!("`{named}` is plain PHP no `extern` declares, as `extern {named};` declares it pure")
+            };
+            self.refuse(
+                span,
+                format!("`{shown}` reaches a class held at run time through reflection, whose invoker lists the effects of the method it calls, and {reason}, so it may have every effect, which no `uses` lists (spec sections 25 and 29)"),
+            );
+            return None;
+        };
+        let mut named = Vec::new();
+        for effect in effects {
+            match self.imports.name_of(&effect.as_str_lossy()) {
+                Ok(name) => named.push(name),
+                Err(reason) => {
+                    self.refuse(span, reason);
+                    return None;
+                }
+            }
+        }
+        let result = match result {
+            Some(result) => self.type_text(result, span)?,
+            None => "Any?".to_owned(),
+        };
+        let uses = if named.is_empty() { String::new() } else { format!(" uses {}", named.join(", ")) };
+
+        Some(format!("createInvoker<Function<{result}(List<Any?>){uses}>>()"))
     }
 
     /// Refuses `self::m()`, or its method value `self::m(...)`, at `span` in a class a subclass can extend, where `m` may
