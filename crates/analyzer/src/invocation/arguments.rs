@@ -498,6 +498,25 @@ where
         return true;
     }
 
+    // Spec section 7: plain PHP calls a string as the function it names, and PHP# never, so a string is no function
+    // value, whether the parameter is a function type or an `extern` line's `callable`.
+    if context.dialect.is_sharp()
+        && input_type.has_string()
+        && parameter_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Callable(_) | TAtomic::Null))
+    {
+        let target_name_str = invocation_target.guess_name(context);
+        context.collector.report_with_code(
+            IssueCode::InvalidArgument,
+            Issue::error(format!(
+                "{argument_subject} of {target_kind_str} `{target_name_str}` is a string, and a string is never a function value."
+            ))
+            .with_annotation(Annotation::primary(input_expression.span()).with_message("A string."))
+            .with_help("Pass a function value, as the method value `this.saved` or a lambda is."),
+        );
+
+        return false;
+    }
+
     if let Some(fits) = check_map_literal_shape(context, artifacts, parameter_type, input_expression, invocation_target)
     {
         return fits;

@@ -14,6 +14,7 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -814,11 +815,34 @@ fn check_extern_signature<A>(
 
             break;
         };
+        if let (Some(default), Some(default_type), Some(stated_type)) =
+            (&written_parameter.default_value, &parameter.default_type, &parameter.type_metadata)
+            && !fits(&default_type.type_union, &expanded(&stated_type.type_union))
+        {
+            let name = parameter_name(parameter.name.0);
+            context.collector.report_with_code(
+                IssueCode::InvalidParameterDefaultValue,
+                Issue::error(format!("Default value for parameter `{name}` is not assignable to its declared type."))
+                    .with_annotation(Annotation::primary(default.value.span()).with_message(format!(
+                        "This default value has type `{}`",
+                        display_sharp_type(context, &default_type.type_union)
+                    )))
+                    .with_annotation(Annotation::secondary(written_parameter.span()).with_message(format!(
+                        "Parameter `{name}` is declared with type `{}`",
+                        display_sharp_type(context, &stated_type.type_union)
+                    )))
+                    .with_note("A call that leaves the parameter out passes its default to plain PHP.")
+                    .with_help("Change the default value to match the declared type."),
+            );
+        }
         let (Some(native_type), Some(stated_type)) = (&native.type_declaration_metadata, &parameter.type_metadata)
         else {
             continue;
         };
         let native_type = expanded(&native_type.type_union);
+        // Spec section 7: a function value crosses as the closure it runs as, so a stated `callable` takes a native
+        // `\Closure` too.
+        let closure = TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(TCallableSignature::mixed(true))));
         let crosses = expanded(&stated_type.type_union).types.iter().all(|atomic| {
             let backing = match atomic {
                 TAtomic::Object(TObject::Enum(object)) => Some(object.name),
@@ -828,6 +852,7 @@ fn check_extern_signature<A>(
 
             fits(&TUnion::from_atomic(atomic.clone()), &native_type)
                 || backing.is_some_and(|backing| fits(&TUnion::from_atomic(backing), &native_type))
+                || (atomic.is_callable() && fits(&closure, &native_type))
         });
         if !crosses {
             context.collector.report_with_code(

@@ -122,16 +122,36 @@ fn an_extern_event_names_a_class() {
 }
 
 /// Spec section 23: an `extern` line states the signature of a method or a function, with the class's type parameters
-/// and `keyof`, in its types alone. A class is no signature, and a default is the library's own.
+/// and `keyof`, and a literal default. A class is no signature.
 #[test]
-fn an_extern_signature_names_a_member_and_states_its_types_alone() {
+fn an_extern_signature_names_a_member() {
     let code = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Builder;\nimport Illuminate.Foundation;\nimport Illuminate.Mail.Mailer;\n\nextern string Foundation.route(string name);\nextern Builder<TModel> Builder<TModel>.where(keyof TModel column, Any? value) uses Database;\nextern void Mailer(string to);\nextern void Mailer.send(string to = \"\");\n";
 
     assert_eq!(
         issues(code),
+        ["9:13 An `extern` line states the signature of a method or a function, and `Mailer` names neither.",]
+    );
+}
+
+/// Spec sections 7 and 23: `callable` is only the type of an `extern` line's parameter, nullable there as any type is,
+/// and every other place that writes it, a return type, a union, a property, a PHP# parameter, a type argument and a
+/// local, is refused. An `extern` line's parameter takes a default as a method's does, a literal, which a call that
+/// leaves it out passes to plain PHP, so a default that runs code is refused.
+#[test]
+fn callable_is_only_an_extern_parameter_s_type_and_an_extern_default_is_a_literal() {
+    let code = "namespace App.Stubs;\n\nimport Lib.Hooks;\n\nextern bool Hooks.add_action(string hookName, callable callback, int priority = 10, int acceptedArgs = 1);\nextern void Hooks.remove_action(string hookName, callable? callback = null, int priority = -10);\nextern callable Hooks.current();\nextern void Hooks.later(string hookName, int at = Hooks.now());\nextern void Hooks.either(callable|string callback);\n\npublic class Saving\n{\n    callable held;\n\n    public callable kept() => this.saved;\n\n    public void keep(callable value) { }\n\n    public List<callable> all() => [];\n\n    public void run()\n    {\n        callable later = this.saved;\n    }\n\n    public void saved(int id) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
         [
-            "9:13 An `extern` line states the signature of a method or a function, and `Mailer` names neither.",
-            "10:35 An `extern` line states types alone, so `to` takes no default: a call passes each parameter the line states, and the library's own default fills each one after them.",
+            "7:8 `callable` is only the type of an extern line's parameter.",
+            "8:51 An `extern` line's default is a literal, which a call that leaves `at` out passes to plain PHP.",
+            "9:26 `callable` is only the type of an extern line's parameter.",
+            "13:5 `callable` is only the type of an extern line's parameter.",
+            "15:12 `callable` is only the type of an extern line's parameter.",
+            "17:22 `callable` is only the type of an extern line's parameter.",
+            "19:17 `callable` is only the type of an extern line's parameter.",
+            "23:9 `callable` is only the type of an extern line's parameter.",
         ]
     );
 }
@@ -3222,7 +3242,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             "8:45 Unexpected `&`",
             "8:54 Unexpected `__LINE__`",
             "14:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a class value, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
-            "14:18 Unexpected `callable`",
+            "14:18 `callable` is only the type of an extern line's parameter.",
             "15:9 Unexpected `echo`",
         ]
     );
@@ -3306,10 +3326,10 @@ fn a_map_key_is_refused_once() {
     assert_eq!(
         issues(code),
         [
-            "7:13 Unexpected `callable`".to_owned(),
+            "7:13 `callable` is only the type of an extern line's parameter.".to_owned(),
             "8:13 Unexpected `static`".to_owned(),
             format!("9:13 {key}"),
-            "10:13 Unexpected `callable`".to_owned(),
+            "10:13 `callable` is only the type of an extern line's parameter.".to_owned(),
             format!("11:13 {key}"),
         ]
     );
@@ -5016,7 +5036,8 @@ fn a_member_name_written_as_an_expression_is_an_error() {
 
 /// Spec section 24: the built-in types are lowercase, every other type is capitalized, and a PHP# type written in
 /// another case is an error that names its PHP# spelling, wherever a type is written. A PHP type PHP# never writes, as
-/// `mixed` or `array`, fails as a typo does.
+/// `mixed` or `array`, fails as a typo does, and `callable` is only the type of an `extern` line's parameter, spec section
+/// 7.
 #[test]
 fn a_type_written_in_another_case_names_its_spelling_and_a_php_type_fails_as_a_typo_does() {
     let rows = [
@@ -5033,12 +5054,12 @@ fn a_type_written_in_another_case_names_its_spelling_and_a_php_type_fails_as_a_t
         ("true", "Unexpected `true`"),
         ("false", "Unexpected `false`"),
         ("array", "Unexpected `array`"),
-        ("callable", "Unexpected `callable`"),
+        ("callable", "`callable` is only the type of an extern line's parameter."),
     ];
 
     for (written, message) in rows {
         // A statement that starts with a keyword is that keyword's statement, so a keyword type has no typed local.
-        let keyword = ["null", "true", "false", "array", "callable"].contains(&written);
+        let keyword = ["null", "true", "false", "array"].contains(&written);
         let local = if keyword { String::new() } else { format!("        {written} local = null;\n") };
         let code = leak(
             method(&format!("{local}        return 1;\n"))
@@ -5114,7 +5135,7 @@ fn types_outside_the_slice_are_an_error_and_an_intersection_holds_null_only_as_a
             "3:23 Unexpected `iterable`",
             "3:40 Unexpected `iterable`",
             "3:52 Unexpected `iterable`",
-            "3:64 Unexpected `callable`",
+            "3:64 `callable` is only the type of an extern line's parameter.",
             "3:88 A type that holds null is written `(Lib&Other)?`.",
             "8:12 Unexpected `self`",
         ]

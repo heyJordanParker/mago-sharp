@@ -136,6 +136,10 @@ where
         n: usize,
         at_statement: bool,
     ) -> Result<bool, ParseError<'arena>> {
+        // PHP's `callable` names a type alone and starts no construct, so `callable later = …;` is a local's type.
+        if keyword == T!["callable"] {
+            return Ok(false);
+        }
         let starts_lambda = matches!(keyword, T!["fn" | "function"]);
         let starts_body = at_statement && matches!(keyword, T!["foreach" | "switch" | "elseif"]);
 

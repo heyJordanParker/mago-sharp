@@ -9548,15 +9548,75 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
             });
         }
+        arguments.extend(self.stated_defaults(line, list, parameters));
 
         (arguments, written)
+    }
+
+    /// Spec section 23: the default an `extern` line states for each parameter of `parameters` the call `list` leaves
+    /// out, as the named argument `priority: 10`, by the name plain PHP declares. A call that spreads a list passes
+    /// none, since the list may hold a value for any parameter after it, and plain PHP's variadic parameter takes no
+    /// named argument as its own.
+    fn stated_defaults(&mut self, line: u32, list: &ArgumentList, parameters: &[PlainParameter]) -> Vec<u32> {
+        if list
+            .arguments
+            .iter()
+            .any(|argument| matches!(argument, Argument::Positional(positional) if positional.ellipsis.is_some()))
+        {
+            return Vec::new();
+        }
+        let positional =
+            list.arguments.iter().take_while(|argument| matches!(argument, Argument::Positional(_))).count();
+        let mut defaults = Vec::new();
+        for parameter in parameters.iter().skip(positional).filter(|parameter| !parameter.is_variadic()) {
+            let (Some(default), Some(name)) = (parameter.stated_default(), parameter.name()) else {
+                continue;
+            };
+            let named = list
+                .arguments
+                .iter()
+                .any(|argument| matches!(argument, Argument::Named(named) if named.name.value == name));
+            if named {
+                continue;
+            }
+            let name = self.string(0, line, name);
+            let value = self.literal_value(line, default);
+            defaults.push(self.node(SHARP_AST_NAMED_ARG, 0, line, &[name, value]));
+        }
+
+        defaults
+    }
+
+    /// The value of `r#type`, the type of a literal, on line `line`, as an `extern` line's default is one, spec section
+    /// 23.
+    fn literal_value(&mut self, line: u32, r#type: &TUnion) -> u32 {
+        if let Some(value) = r#type.get_single_literal_int_value() {
+            return self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = value);
+        }
+        if let Some(value) = r#type.get_single_literal_float_value() {
+            return self.zval(line, sharp_value::SHARP_DOUBLE, |node| node.double_value = value);
+        }
+        if let Some(value) = r#type.get_single_literal_string_value() {
+            return self.string(0, line, value);
+        }
+        let value = if r#type.is_true() {
+            sharp_value::SHARP_TRUE
+        } else if r#type.is_false() {
+            sharp_value::SHARP_FALSE
+        } else if r#type.is_null() {
+            sharp_value::SHARP_NULL
+        } else {
+            unreachable!("the checker takes only a literal whose type keeps its value as an `extern` line's default")
+        };
+
+        self.zval(line, value, |_| {})
     }
 
     /// The lowered `value->value` on line `line`, `?->` for a nullable one, when `value` is a backed case and plain PHP's
     /// `parameter` natively declares only scalars, as `string $name`, which take the case's value and never the case,
     /// spec section 23. None otherwise, for a parameter that may take the case itself.
     fn backing_value(&mut self, line: u32, value: &Expression, parameter: Option<PlainParameter>) -> Option<u32> {
-        let Some(PlainParameter::Declared(parameter)) = parameter else {
+        let Some(PlainParameter::Declared(parameter, _)) = parameter else {
             return None;
         };
         let native = &parameter.type_declaration_metadata.as_ref()?.type_union;

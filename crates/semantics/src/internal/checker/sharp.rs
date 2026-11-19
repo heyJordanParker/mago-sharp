@@ -1416,6 +1416,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
+        // Spec section 7: `callable` passed `type_written_another_way` only as an `extern` line's parameter type.
+        (Node::Hint(Hint::Callable(_)), Parameter) => None,
         // Spec section 13: `readonly` before a type a value has. The analyzer refuses it on a type whose class PHP# does
         // not check, or that never changes, an enum's or a struct's.
         (Node::Hint(Hint::Readonly(_)), FieldOrProperty | Method | Signature | Parameter | Body) => Some(place),
@@ -3405,8 +3407,8 @@ fn imports_error(item: &UseItem) -> bool {
 /// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, whose
 /// effects its `uses` lists.
 /// Spec section 23: an `extern` line states the signature of a method or a function, `Class.method` or
-/// `Namespace.function`, and its types alone: a call passes each parameter it states, and the library's own default
-/// fills each one after them. Its parameters and return type are checked as an interface method's are.
+/// `Namespace.function`. Its parameters and return type are checked as an interface method's are, and each default is
+/// a literal, which a PHP# call that leaves its parameter out passes to plain PHP.
 fn check_extern_signature(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> Option<Place> {
     if r#extern.member_name().is_none() {
         let issue = Issue::error(format!(
@@ -3420,18 +3422,46 @@ fn check_extern_signature(r#extern: &Extern, context: &mut Context<'_, '_, '_>) 
         return None;
     }
     for parameter in r#extern.parameter_list.iter().flat_map(|list| list.parameters.iter()) {
-        if let Some(default) = &parameter.default_value {
+        if let Some(default) = &parameter.default_value
+            && !is_literal(default.value)
+        {
             context.report(
                 Issue::error(format!(
-                    "An `extern` line states types alone, so `{}` takes no default: a call passes each parameter the line states, and the library's own default fills each one after them.",
+                    "An `extern` line's default is a literal, which a call that leaves `{}` out passes to plain PHP.",
                     BytesDisplay(parameter.variable.name)
                 ))
-                .with_annotation(Annotation::primary(default.span()).with_message("Written here.")),
+                .with_annotation(Annotation::primary(default.value.span()).with_message("Written here."))
+                .with_note(
+                    "A literal is a string shorter than 1000 bytes, an `int`, a `float`, `true`, `false` or `null`.",
+                )
+                .with_help("Write the value, as in `int priority = 10`."),
             );
         }
     }
 
     Some(Place::Signature)
+}
+
+/// Whether `expression` is a literal whose value its type keeps whole, so a call passes the value: a string shorter than
+/// 1000 bytes, an `int`, signed or not, a `float`, `true`, `false` or `null`.
+fn is_literal(expression: &Expression) -> bool {
+    let kept = |literal: &Literal| match literal {
+        Literal::String(string) => string.value.is_some_and(|value| value.len() < 1000),
+        Literal::Integer(integer) => integer.value.is_some_and(|value| i64::try_from(value).is_ok()),
+        Literal::Float(_) | Literal::True(_) | Literal::False(_) | Literal::Null(_) => true,
+    };
+
+    match expression.unparenthesized() {
+        Expression::Literal(literal) => kept(literal),
+        Expression::UnaryPrefix(UnaryPrefix {
+            operator: UnaryPrefixOperator::Negation(_) | UnaryPrefixOperator::Plus(_),
+            operand,
+        }) => matches!(
+            operand.unparenthesized(),
+            Expression::Literal(literal @ (Literal::Integer(_) | Literal::Float(_))) if kept(literal)
+        ),
+        _ => false,
+    }
 }
 
 fn check_extern_event(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> Option<Place> {
@@ -5063,8 +5093,9 @@ fn is_slice_type(hint: &Hint) -> bool {
 
 /// The error for a type PHP# writes another way, spec section 24: the built-in types are lowercase, every other type is
 /// capitalized, as `Any` and `Object`, a lone `null` is written with `?` after a type, and PHP's `mixed`, `object`,
-/// `array`, `callable`, `iterable`, `parent`, `true` and `false` are no PHP# syntax. `Equatable` is a type only as a
-/// bound, spec section 11, which is no place this reads. `None` for a type written as PHP# writes it.
+/// `array`, `iterable`, `parent`, `true` and `false` are no PHP# syntax. `callable` is only the type of an `extern`
+/// line's parameter, spec section 7. `Equatable` is a type only as a bound, spec section 11, which is no place this
+/// reads. `None` for a type written as PHP# writes it.
 fn type_written_another_way(hint: &Hint, context: &Context<'_, '_, '_>) -> Option<Issue> {
     let written = match hint {
         Hint::Identifier(Identifier::Local(name)) => name.value,
@@ -5092,7 +5123,10 @@ fn type_written_another_way(hint: &Hint, context: &Context<'_, '_, '_>) -> Optio
         }
         // PHP's `object` is lowercase, so another case is PHP#'s `Object`.
         b"object" if written != OBJECT && written != b"object" => "PHP# writes `Object`.".to_owned(),
-        b"object" | b"mixed" | b"true" | b"false" | b"array" | b"callable" | b"parent"
+        // Spec section 7: `callable` is the type of plain PHP's parameter an `extern` line states, and nothing else.
+        b"callable" if is_extern_parameter_type(context.program, hint.span()) => return None,
+        b"callable" => "`callable` is only the type of an extern line's parameter.".to_owned(),
+        b"object" | b"mixed" | b"true" | b"false" | b"array" | b"parent"
             if written != OBJECT || lowercase != b"object" =>
         {
             return Some(unexpected(hint.span(), context));
@@ -7484,6 +7518,22 @@ fn report_static_member_in_constant(
             "A default, a constant's value, a constant initial value and a pattern read constants and enum cases only.",
         ),
     );
+}
+
+/// Whether the type at `span` is the type of an `extern` line's parameter, or the type `?` makes nullable there, in any
+/// of the file's namespaces.
+fn is_extern_parameter_type(program: &Program, span: Span) -> bool {
+    file_statements(program)
+        .filter_map(|statement| match statement {
+            Statement::Extern(r#extern) => r#extern.parameter_list.as_ref(),
+            _ => None,
+        })
+        .flat_map(|list| list.parameters.iter())
+        .filter_map(|parameter| parameter.hint.as_ref())
+        .any(|hint| match hint {
+            Hint::Nullable(nullable) => nullable.hint.span() == span,
+            hint => hint.span() == span,
+        })
 }
 
 /// The class or enum of a PHP# file whose body holds `span`, in any of the file's namespaces, because the walk checks

@@ -27886,6 +27886,73 @@ fn statements_at(code: &str, library: &[(&str, &str)], positions: std::ops::Rang
 }
 
 /// ```php
+/// \Lib\Hooks::add_action('deleted_post', $handler, priority: 10, accepted_args: 1);
+/// \Lib\Hooks::add_action('save_post', $handler, 20, accepted_args: 1);
+/// \Lib\Hooks::add_action('init', $handler, 30, 2);
+/// ```
+///
+/// Spec section 23: a call that leaves out a parameter its `extern` line gives a default passes that default to plain
+/// PHP, by the name plain PHP declares, whatever default plain PHP declares, and a function value goes into a
+/// `callable` parameter as the closure it holds.
+#[test]
+fn a_call_passes_the_default_an_extern_line_states_for_each_parameter_it_leaves_out() {
+    let hooks = (
+        "src/Lib/Hooks.php",
+        "<?php namespace Lib; final class Hooks { public static function add_action(string $hook_name, callable $callback, int $priority, int $accepted_args = 5): bool { return true; } }",
+    );
+    let stubs = (
+        "src/Stubs/Hooks.sharp",
+        "namespace Stubs;\n\nimport Lib.Hooks;\n\nextern bool Hooks.add_action(string hookName, callable callback, int priority = 10, int acceptedArgs = 1);\n",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Hooks;\n\nclass Report\n{\n    public void run(Function<void(int)> handler)\n    {\n        Hooks.add_action(\"deleted_post\", handler);\n        Hooks.add_action(\"save_post\", handler, 20);\n        Hooks.add_action(\"init\", handler, 30, 2);\n    }\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[hooks, stubs], 0..3),
+        [
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Lib\\Hooks"
+                  ZVAL "add_action"
+                  ARG_LIST
+                    ZVAL "deleted_post"
+                    VAR
+                      ZVAL "handler"
+                    NAMED_ARG
+                      ZVAL "priority"
+                      ZVAL 10
+                    NAMED_ARG
+                      ZVAL "accepted_args"
+                      ZVAL 1
+            "#},
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Lib\\Hooks"
+                  ZVAL "add_action"
+                  ARG_LIST
+                    ZVAL "save_post"
+                    VAR
+                      ZVAL "handler"
+                    ZVAL 20
+                    NAMED_ARG
+                      ZVAL "accepted_args"
+                      ZVAL 1
+            "#},
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Lib\\Hooks"
+                  ZVAL "add_action"
+                  ARG_LIST
+                    ZVAL "init"
+                    VAR
+                      ZVAL "handler"
+                    ZVAL 30
+                    ZVAL 2
+            "#},
+        ]
+    );
+}
+
+/// ```php
 /// $url = \Lib\Routing\route($name->value);
 /// return $url . \Lib\Routing\label($maybe?->value) . \Lib\Routing\keep($name);
 /// ```

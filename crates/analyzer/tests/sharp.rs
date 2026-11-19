@@ -11119,6 +11119,29 @@ fn a_typed_extern_that_misfits_the_native_types_is_refused_at_its_line() {
     );
 }
 
+/// Spec sections 7 and 23: an `extern` line's `callable` parameter takes any function value, a method value and a
+/// value of a function type alike, over a native `callable` or `\Closure`, and a string, which names a function only to
+/// plain PHP, never. A call may leave out a parameter the line gives a default, and a default the parameter's type does
+/// not take is refused at the line.
+#[test]
+fn an_extern_callable_parameter_takes_a_function_value_and_an_extern_default_fits_its_type() {
+    let hooks = "<?php\n\nnamespace Lib;\n\nfinal class Hooks\n{\n    public static function add_action(string $hook_name, callable $callback, int $priority = 10, int $accepted_args = 1): bool\n    {\n        return true;\n    }\n\n    public static function remove_action(string $hook_name, \\Closure $callback): bool\n    {\n        return true;\n    }\n\n    public static function later(int $priority): void\n    {\n    }\n}\n";
+    let stubs = "namespace Stubs;\n\nimport Lib.Hooks;\n\nextern bool Hooks.add_action(string hookName, callable callback, int priority = 10, int acceptedArgs = 1);\nextern bool Hooks.remove_action(string hookName, callable callback);\nextern void Hooks.later(int priority = \"10\");\n";
+    let saving = "namespace Shop;\n\nimport Lib.Hooks;\n\npublic class Saving\n{\n    public void register()\n    {\n        Function<void(int)> handler = this.deleted;\n        Hooks.add_action(\"save_post\", this.saved, 10, 3);\n        Hooks.add_action(\"deleted_post\", this.deleted);\n        Hooks.add_action(\"init\", handler);\n        Hooks.remove_action(\"init\", handler);\n        Hooks.add_action(\"init\", \"my_function\");\n        Hooks.later();\n    }\n\n    public void saved(int id, string title, bool update) { }\n\n    public void deleted(int id) { }\n}\n";
+
+    assert_eq!(
+        package_errors(&[
+            ("src/Lib/Hooks.php", hooks),
+            ("src/Stubs/Library.sharp", stubs),
+            ("src/Shop/Saving.sharp", saving),
+        ]),
+        [
+            "Default value for parameter `priority` is not assignable to its declared type.",
+            "Argument #2 of method `Hooks.add_action` is a string, and a string is never a function value.",
+        ]
+    );
+}
+
 /// Spec section 23: an `extern` line states any return type a PHP# method declares: a function type over a native
 /// `\Closure`, a tuple over a native `array` and a nullable union over a native one, as a nullable type over a nullable
 /// one. A call reads each as the line states it, so the function `Factory.make()` returns is called in turn, with no

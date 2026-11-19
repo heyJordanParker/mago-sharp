@@ -1571,6 +1571,52 @@ fn analyze_reports_only_the_second_extern_of_a_class() {
     );
 }
 
+/// Spec sections 7 and 23: `callable` is only the type of an `extern` line's parameter, which takes a method value and
+/// refuses a string, and a call may leave out a parameter the line gives a default. Section 7's example, in a library
+/// as the spec's examples are, is refused at its two refused lines alone, and compiles without them.
+#[test]
+fn compile_takes_a_function_value_for_an_extern_callable_parameter_and_refuses_callable_anywhere_else() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
+    write(root, "composer.json", "{\n    \"name\": \"acme/hooks\",\n    \"type\": \"library\"\n}\n");
+    write_library(&root.join("vendor/heyjordanparker/php-sharp-composer"));
+    write(
+        root,
+        "app/Lib/Hooks/functions.php",
+        "<?php\n\nnamespace Vendor\\Hooks;\n\nfunction add_action(string $hook_name, callable $callback, int $priority = 10, int $accepted_args = 1): bool\n{\n    return true;\n}\n",
+    );
+    write(
+        root,
+        "app/Stubs/Hooks.sharp",
+        "namespace App.Stubs;\n\nimport Vendor.Hooks;\n\nextern bool Hooks.add_action(string hookName, callable callback, int priority = 10, int acceptedArgs = 1);\n",
+    );
+    let refused = "        Hooks.add_action(\"init\", \"my_function\");\n        callable later = this.saved;\n";
+    let saving = format!(
+        "namespace App.Posts;\n\nimport Vendor.Hooks;\n\npublic class Saving\n{{\n    public void register()\n    {{\n        Hooks.add_action(\"save_post\", this.saved, 10, 3);\n        Hooks.add_action(\"deleted_post\", this.deleted);\n{refused}    }}\n\n    public void saved(int id, string title, bool update) {{ }}\n\n    public void deleted(int id) {{ }}\n}}\n"
+    );
+    write(root, "app/Posts/Saving.sharp", &saving);
+
+    let output = run(root, "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        stdout.lines().filter(|line| line.contains(":error - ")).collect::<Vec<_>>(),
+        [
+            "app/Posts/Saving.sharp:12:9:error - semantics: `callable` is only the type of an extern line's parameter.",
+            "app/Posts/Saving.sharp:11:34:error - invalid-argument: Argument #2 of function `Hooks.add_action` is a string, and a string is never a function value.",
+        ],
+        "{stdout}"
+    );
+
+    write(root, "app/Posts/Saving.sharp", &saving.replace(refused, ""));
+    let output = run(root, "compile", &[]);
+    let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+
+    assert!(output.status.success(), "{printed}");
+    assert!(root.join(".sharp/app/Posts/Saving.sharpc").exists(), "{printed}");
+}
+
 /// Spec section 6: a getter never writes `this`, and `compile` refuses the file that breaks the rule, while it still
 /// compiles the others.
 #[test]

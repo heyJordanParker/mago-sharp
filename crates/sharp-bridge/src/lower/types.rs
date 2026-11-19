@@ -2226,8 +2226,8 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The parameters of the plain PHP function or method the call `call` runs, as the analysis resolved it, which a
-    /// `Map` or a `Set` crosses into as a PHP array where the parameter takes one. None for a PHP# one, which takes the
-    /// object.
+    /// `Map` or a `Set` crosses into as a PHP array where the parameter takes one, each with the default its `extern`
+    /// line states. None for a PHP# one, which takes the object.
     pub(crate) fn call_parameters(&self, call: &Expression) -> Option<Vec<PlainParameter<'analysis>>> {
         let mut callees = self.artifacts.get_callees(call);
         let (Some(CallTarget::FunctionLike { callee, .. }), None) = (callees.next(), callees.next()) else {
@@ -2238,7 +2238,7 @@ impl<'analysis> Types<'analysis> {
             FunctionLikeIdentifier::Closure(_) => return None,
         };
 
-        plain_parameters(owner, self.codebase.get_function_like(callee))
+        plain_parameters(owner, self.codebase.get_function_like(callee), self.codebase.get_extern_signature(callee))
     }
 
     /// The parameters of the closure the expression `function` gives, which the call `function(…)` runs, as the
@@ -2258,13 +2258,31 @@ impl<'analysis> Types<'analysis> {
     /// The parameters of the constructor `new` runs for the fully qualified class name `class`, as
     /// [`Self::call_parameters`] gives a call's.
     pub(crate) fn new_parameters(&self, class: Word) -> Option<Vec<PlainParameter<'analysis>>> {
-        plain_parameters(class.as_bytes(), self.codebase.get_declaring_method(class, word("__construct")))
+        plain_parameters(
+            class.as_bytes(),
+            self.codebase.get_declaring_method(class, word("__construct")),
+            self.stated_constructor(class),
+        )
     }
 
     /// The parameters of the constructor `parent::__construct` reaches from the fully qualified class name `class`, as
     /// [`Self::call_parameters`] gives a call's.
     pub(crate) fn parent_constructor_parameters(&self, class: Word) -> Option<Vec<PlainParameter<'analysis>>> {
-        plain_parameters(b"", self.codebase.get_parent_constructor(class))
+        let parent = self.codebase.get_class_like(class).and_then(|class| class.direct_parent_class);
+
+        plain_parameters(
+            b"",
+            self.codebase.get_parent_constructor(class),
+            parent.and_then(|parent| self.stated_constructor(parent)),
+        )
+    }
+
+    /// The constructor of the fully qualified class name `class` as the `extern` line of the class that declares it
+    /// states it, spec section 23.
+    fn stated_constructor(&self, class: Word) -> Option<&'analysis FunctionLikeMetadata> {
+        let declaring = self.codebase.get_declaring_method_class(class, word("__construct"))?;
+
+        self.codebase.get_extern_signature(&FunctionLikeIdentifier::Method(declaring, word("__construct")))
     }
 
     /// The declared type of the property `target` writes, `object.property`, `object?.property` or `Class.property`,
@@ -2318,7 +2336,7 @@ impl<'analysis> Types<'analysis> {
         let declared = match self.codebase.get_declaring_property(class, variable) {
             Some(_) if !self.plain_declares(class, variable) => return None,
             Some(property) => property.type_metadata.as_ref().map(|declared| &declared.type_union),
-            None => plain_parameters(class.as_bytes(), self.codebase.get_declaring_method(class, word("__set")))?
+            None => plain_parameters(class.as_bytes(), self.codebase.get_declaring_method(class, word("__set")), None)?
                 .get(1)?
                 .declared_type(),
         };
@@ -2786,17 +2804,31 @@ pub(crate) fn class_value_classes(r#type: &TUnion) -> Option<Vec<&[u8]>> {
     (!classes.is_empty()).then_some(classes)
 }
 
-/// The parameters of `function`, which the function or class `owner` names, when plain PHP declares it. PHP# declares
-/// what the `Sharp\` namespace holds, its collection stubs among them, though their files are plain PHP.
+/// The parameters of `function`, which the function or class `owner` names, when plain PHP declares it, each with the
+/// default `stated`, the signature its `extern` line states, gives it, spec section 23. PHP# declares what the
+/// `Sharp\` namespace holds, its collection stubs among them, though their files are plain PHP.
 fn plain_parameters<'function>(
     owner: &[u8],
     function: Option<&'function FunctionLikeMetadata>,
+    stated: Option<&'function FunctionLikeMetadata>,
 ) -> Option<Vec<PlainParameter<'function>>> {
     let function = function?;
     let sharp =
         function.flags.is_sharp() || owner.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"sharp\\"));
+    let default = |position: usize| {
+        let stated = stated?.parameters.get(position)?;
 
-    (!sharp).then(|| function.parameters.iter().map(PlainParameter::Declared).collect())
+        stated.flags.has_default().then_some(&stated.default_type.as_ref()?.type_union)
+    };
+
+    (!sharp).then(|| {
+        function
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(position, parameter)| PlainParameter::Declared(parameter, default(position)))
+            .collect()
+    })
 }
 
 /// The whole type of a PHP# method or lambda, which `is` tests a closure of it by.
@@ -2854,18 +2886,28 @@ fn effects_fingerprint(effects: Option<Vec<Word>>, codebase: &CodebaseMetadata) 
 }
 
 /// A parameter of plain PHP code a call runs, which a `Map` or a `Set` crosses into: a declared function's, method's or
-/// constructor's, or one of the signature of a plain PHP closure a local holds.
+/// constructor's, with the type of the default its `extern` line states, or one of the signature of a plain PHP closure
+/// a local holds.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PlainParameter<'analysis> {
-    Declared(&'analysis FunctionLikeParameterMetadata),
+    Declared(&'analysis FunctionLikeParameterMetadata, Option<&'analysis TUnion>),
     Callable(&'analysis TCallableParameter),
 }
 
 impl<'analysis> PlainParameter<'analysis> {
+    /// The type of the literal default the parameter's `extern` line states, spec section 23, which a PHP# call that
+    /// leaves the parameter out passes.
+    pub(crate) const fn stated_default(self) -> Option<&'analysis TUnion> {
+        match self {
+            Self::Declared(_, default) => default,
+            Self::Callable(_) => None,
+        }
+    }
+
     /// The name a named argument gives the parameter, without its `$`.
     pub(crate) fn name(self) -> Option<&'analysis [u8]> {
         let name = match self {
-            Self::Declared(parameter) => parameter.get_name(),
+            Self::Declared(parameter, _) => parameter.get_name(),
             Self::Callable(parameter) => parameter.get_name()?,
         };
 
@@ -2875,7 +2917,7 @@ impl<'analysis> PlainParameter<'analysis> {
     /// The type the parameter declares.
     pub(crate) fn declared_type(self) -> Option<&'analysis TUnion> {
         match self {
-            Self::Declared(parameter) => parameter.get_type_metadata().map(|declared| &declared.type_union),
+            Self::Declared(parameter, _) => parameter.get_type_metadata().map(|declared| &declared.type_union),
             Self::Callable(parameter) => parameter.get_type_signature(),
         }
     }
@@ -2888,14 +2930,14 @@ impl<'analysis> PlainParameter<'analysis> {
 
     pub(crate) fn is_variadic(self) -> bool {
         match self {
-            Self::Declared(parameter) => parameter.flags.is_variadic(),
+            Self::Declared(parameter, _) => parameter.flags.is_variadic(),
             Self::Callable(parameter) => parameter.is_variadic(),
         }
     }
 
     pub(crate) fn is_by_reference(self) -> bool {
         match self {
-            Self::Declared(parameter) => parameter.flags.is_by_reference(),
+            Self::Declared(parameter, _) => parameter.flags.is_by_reference(),
             Self::Callable(parameter) => parameter.is_by_reference(),
         }
     }
