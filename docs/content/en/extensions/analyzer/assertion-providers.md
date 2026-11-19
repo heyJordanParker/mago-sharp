@@ -132,6 +132,6 @@ The SDK represents Mago's assertion vocabulary without flattening it into string
 
 ## Context and performance
 
-`AssertionProviderContext` provides the same PHP version, codebase, invocation, type comparator, and cancellation services as a return-type provider. Argument types have already been inferred.
+`AssertionProviderContext` provides the same PHP version, codebase, invocation, and type comparator services as a return-type provider. Argument types have already been inferred.
 
 Target only the assertion helpers the plugin understands. Assertions are called in a hot analysis path; avoid codebase queries or type comparisons unless the result genuinely depends on them.

@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Analyzer;
 
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\PHPVersion;
 
 /**
@@ -25,10 +24,9 @@ final class AfterFileAnalysisContext extends LifecycleContext
         PHPVersion $phpVersion,
         Codebase $codebase,
         TypeComparator $types,
-        CancellationTokenInterface $cancellation,
         public readonly FileAnalysis $analysis,
     ) {
-        parent::__construct($phpVersion, $codebase, $types, $cancellation);
+        parent::__construct($phpVersion, $codebase, $types);
 
         $this->references = new ReferenceRegistry();
     }

@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Mago\Sdk\Analyzer;
 
 use Mago\Sdk\Analyzer\Metadata\MemberIdentifier;
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\Internal\Analyzer\Protocol;
 use Mago\Sdk\Internal\HostClient;
 
@@ -32,13 +31,10 @@ final class SymbolReferences
 
     /**
      * @internal
-     * @param positive-int $requestId
      */
     public function __construct(
         private readonly HostClient $host,
-        private readonly int $requestId,
         private readonly int $generation,
-        private readonly CancellationTokenInterface $cancellation,
         public readonly ReferenceSummary $summary,
     ) {
         $this->body = $summary->body;
@@ -67,11 +63,11 @@ final class SymbolReferences
         }
 
         if ($missing !== []) {
-            $this->cancellation->throwIfCancelled();
-            $response = $this->host->request(
-                $this->requestId,
-                Protocol::writeReferenceQuery($this->generation, Protocol::GET_REFERENCES_TO, $missing),
-            );
+            $response = $this->host->request(Protocol::writeReferenceQuery(
+                $this->generation,
+                Protocol::GET_REFERENCES_TO,
+                $missing,
+            ));
             $references = Protocol::readReferenceQueryResponse(
                 $response,
                 $this->generation,
@@ -113,11 +109,11 @@ final class SymbolReferences
         }
 
         if ($missing !== []) {
-            $this->cancellation->throwIfCancelled();
-            $response = $this->host->request(
-                $this->requestId,
-                Protocol::writeReferenceQuery($this->generation, Protocol::GET_REFERENCES_FROM, $missing),
-            );
+            $response = $this->host->request(Protocol::writeReferenceQuery(
+                $this->generation,
+                Protocol::GET_REFERENCES_FROM,
+                $missing,
+            ));
             $references = Protocol::readReferenceQueryResponse(
                 $response,
                 $this->generation,

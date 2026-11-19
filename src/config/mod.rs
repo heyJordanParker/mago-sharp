@@ -43,8 +43,6 @@
 //! Layers are merged later-wins. For each top-level key:
 //! - **Tables / objects**: deep-merged recursively.
 //! - **Arrays** (e.g. `source.excludes`): concatenated, parent first.
-//! - **Positional arrays** (`extension-hosts.<name>.command`): child replaces parent, since
-//!   appending to an argv produces a different command rather than a merged one.
 //! - **Scalars**: child overwrites parent.
 //!
 //! All layers parse into a generic `serde_json::Value` tree. The merged tree is deserialized
@@ -921,9 +919,7 @@ mod tests {
             &configuration_file,
             r#"
 [extension-hosts.php]
-command = ["./vendor/bin/mago-extension", "--verbose"]
-workers = 2
-working-directory = "project"
+file = "vendor/acme/host.php"
 request-timeout-ms = 1234
 environment = { APP_ENV = "test" }
 "#,
@@ -931,33 +927,22 @@ environment = { APP_ENV = "test" }
 
         let configuration = load_isolated(&configuration_file);
         let host = &configuration.extension_hosts["php"];
-        let command = host.worker_command().unwrap();
 
-        assert_eq!(command.program(), directory.join("./vendor/bin/mago-extension"));
-        assert_eq!(command.arguments(), ["--verbose"]);
-        assert_eq!(command.current_directory(), Some(directory.join("project").as_path()));
-        assert_eq!(host.worker_count(configuration.threads).get(), 2);
-        assert_eq!(host.worker_pool_options("php").request_timeout, std::time::Duration::from_millis(1234));
+        assert_eq!(host.directory(), directory);
+        assert_eq!(
+            host.host_file("php"),
+            mago_extension::HostFile {
+                name: "php".to_owned(),
+                file: directory.join("vendor/acme/host.php"),
+                deadline: std::time::Duration::from_millis(1234),
+                environment: [("APP_ENV".to_owned(), "test".to_owned())].into(),
+            }
+        );
     }
 
     #[test]
-    fn extension_hosts_are_adaptive_when_worker_count_is_omitted() {
-        let directory = temp_dir().join("adaptive-extension-configuration");
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
-        let configuration_file = directory.join("mago.toml");
-        write_file(&configuration_file, "[extension-hosts.php]\ncommand = [\"php\", \"worker.php\"]\n");
-
-        let configuration = load_isolated(&configuration_file);
-        let host = &configuration.extension_hosts["php"];
-
-        assert_eq!(host.workers, 0);
-        assert_eq!(host.worker_count(configuration.threads).get(), configuration.threads);
-    }
-
-    #[test]
-    fn enabled_extension_host_requires_a_command() {
-        let directory = temp_dir().join("extension-missing-command");
+    fn enabled_extension_host_requires_a_file() {
+        let directory = temp_dir().join("extension-missing-file");
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         let configuration_file = directory.join("mago.toml");
@@ -969,15 +954,19 @@ environment = { APP_ENV = "test" }
                 no_extensions,
                 ..Default::default()
             })
-            .expect_err("enabled extension without a command should fail, under --no-extensions too");
+            .expect_err("enabled extension without a file should fail, under --no-extensions too");
 
             assert!(matches!(error, Error::InvalidExtensionHostConfiguration(_)));
-            assert!(error.to_string().contains("extension host `php` must define a non-empty command"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("extension host `php` must name the PHP file that registers its worker in `file`")
+            );
         }
     }
 
     #[test]
-    fn disabled_extension_host_may_omit_its_command() {
+    fn disabled_extension_host_may_omit_its_file() {
         let directory = temp_dir().join("disabled-extension");
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
@@ -989,6 +978,22 @@ environment = { APP_ENV = "test" }
         assert!(!configuration.extension_hosts["php"].enabled);
     }
 
+    /// A configuration that starts a host with `command`, as before hosts ran inside mago, fails to load naming the
+    /// option, so its upgrade step is plain.
+    #[test]
+    fn an_extension_host_that_sets_a_command_fails_to_load_naming_it() {
+        let directory = temp_dir().join("extension-command");
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let configuration_file = directory.join("mago.toml");
+        write_file(&configuration_file, "[extension-hosts.php]\ncommand = [\"php\", \"worker.php\"]\n");
+
+        let error = Configuration::load(CliOverrides { config: Some(configuration_file), ..Default::default() })
+            .expect_err("a host with a command should fail to load");
+
+        assert!(error.to_string().contains("unknown field `command`"), "{error}");
+    }
+
     #[test]
     fn extension_hosts_can_be_overridden_by_name_through_extends() {
         let directory = temp_dir().join("extended-extension-configuration");
@@ -996,7 +1001,7 @@ environment = { APP_ENV = "test" }
         fs::create_dir_all(&directory).unwrap();
         write_file(
             &directory.join("base.toml"),
-            "[extension-hosts.php]\ncommand = [\"php\", \"worker.php\"]\nworkers = 2\n",
+            "[extension-hosts.php]\nfile = \"host.php\"\nrequest-timeout-ms = 2000\n",
         );
         write_file(&directory.join("mago.toml"), "extends = \"base.toml\"\n[extension-hosts.php]\nenabled = false\n");
 
@@ -1004,8 +1009,8 @@ environment = { APP_ENV = "test" }
         let host = &configuration.extension_hosts["php"];
 
         assert!(!host.enabled);
-        assert_eq!(host.command, ["php", "worker.php"]);
-        assert_eq!(host.workers, 2);
+        assert_eq!(host.file, Path::new("host.php"));
+        assert_eq!(host.request_timeout_ms, 2000);
     }
 
     #[test]
@@ -1281,38 +1286,39 @@ environment = { APP_ENV = "test" }
     }
 
     #[test]
-    fn test_extends_replaces_an_extension_host_command() {
-        let dir = temp_dir().join("extends-host-command");
+    fn test_extends_replaces_an_extension_host_file() {
+        let dir = temp_dir().join("extends-host-file");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        write_file(&dir.join("base.toml"), "[extension-hosts.acme]\ncommand = [\"php\", \"vendor/acme/worker.php\"]\n");
+        write_file(&dir.join("base.toml"), "[extension-hosts.acme]\nfile = \"vendor/acme/host.php\"\n");
         write_file(
             &dir.join("mago.toml"),
-            "extends = \"base.toml\"\n[extension-hosts.acme]\ncommand = [\"php\", \".mago/worker.php\"]\n",
+            "extends = \"base.toml\"\n[extension-hosts.acme]\nfile = \".mago/host.php\"\n",
         );
 
         let config = load_isolated(&dir.join("mago.toml"));
 
-        // Concatenating would give ["php", "vendor/acme/worker.php", "php", ".mago/worker.php"],
-        // which silently starts the base layer's worker and drops the project's own.
-        assert_eq!(config.extension_hosts["acme"].command, vec!["php", ".mago/worker.php"]);
+        assert_eq!(config.extension_hosts["acme"].file, Path::new(".mago/host.php"));
     }
 
     #[test]
-    fn test_extends_keeps_an_extension_host_command_it_does_not_redeclare() {
-        let dir = temp_dir().join("extends-host-command-inherited");
+    fn test_extends_keeps_an_extension_host_file_it_does_not_redeclare() {
+        let dir = temp_dir().join("extends-host-file-inherited");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        write_file(&dir.join("base.toml"), "[extension-hosts.acme]\ncommand = [\"php\", \"vendor/acme/worker.php\"]\n");
-        write_file(&dir.join("mago.toml"), "extends = \"base.toml\"\n[extension-hosts.acme]\nworkers = 3\n");
+        write_file(&dir.join("base.toml"), "[extension-hosts.acme]\nfile = \"vendor/acme/host.php\"\n");
+        write_file(
+            &dir.join("mago.toml"),
+            "extends = \"base.toml\"\n[extension-hosts.acme]\nrequest-timeout-ms = 3000\n",
+        );
 
         let config = load_isolated(&dir.join("mago.toml"));
         let host = &config.extension_hosts["acme"];
 
-        assert_eq!(host.command, vec!["php", "vendor/acme/worker.php"]);
-        assert_eq!(host.workers, 3);
+        assert_eq!(host.file, Path::new("vendor/acme/host.php"));
+        assert_eq!(host.request_timeout_ms, 3000);
     }
 
     #[test]
@@ -1638,42 +1644,19 @@ fn resolve_extends_entry(entry: &str, base_dir: &Path) -> Result<Option<(PathBuf
 }
 
 /// Recursively merge `source` into `target`. Object keys from `source` override / merge with
-/// `target`'s. Arrays are concatenated (target first, source second), except the positional ones
-/// named by [`is_positional_array`], which `source` replaces. Scalars in `source` replace scalars
-/// in `target`.
+/// `target`'s. Arrays are concatenated (target first, source second). Scalars in `source` replace
+/// scalars in `target`.
 fn merge_into(target: &mut Value, source: Value) {
-    let mut path = Vec::new();
-    merge_value_into(target, source, &mut path);
-}
-
-/// Whether the array at `path` is an argv, whose elements derive their meaning
-/// from their position, rather than an additive set like `source.excludes`.
-///
-/// Positional arrays are replaced by the later layer, like scalars.
-fn is_positional_array(path: &[String]) -> bool {
-    // `extension-hosts.<name>.command`
-    path.len() == 3 && path[0] == "extension-hosts" && path[2] == "command"
-}
-
-fn merge_value_into(target: &mut Value, source: Value, path: &mut Vec<String>) {
-    use serde_json::Value;
     match (target, source) {
         (Value::Object(t), Value::Object(s)) => {
             for (k, v) in s {
                 match t.get_mut(&k) {
-                    Some(existing) => {
-                        path.push(k);
-                        merge_value_into(existing, v, path);
-                        path.pop();
-                    }
+                    Some(existing) => merge_into(existing, v),
                     None => {
                         t.insert(k, v);
                     }
                 }
             }
-        }
-        (target @ Value::Array(_), source @ Value::Array(_)) if is_positional_array(path) => {
-            *target = source;
         }
         (Value::Array(t), Value::Array(s)) => {
             t.extend(s);

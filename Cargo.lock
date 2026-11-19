@@ -1675,16 +1675,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mago-engine"
+version = "0.6.38"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "mago-extension"
 version = "0.6.38"
 dependencies = [
  "foldhash",
  "libc",
  "mago-database",
+ "mago-engine",
  "mago-names",
  "mago-span",
  "mago-syntax",
- "rand 0.9.5",
+ "rayon",
  "strum 0.28.0",
  "tracing",
 ]

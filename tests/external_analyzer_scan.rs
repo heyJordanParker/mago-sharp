@@ -2,9 +2,10 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
@@ -14,9 +15,6 @@ use mago_database::Database;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
-use mago_extension::WorkerCommand;
-use mago_extension::WorkerPool;
-use mago_extension::WorkerPoolOptions;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_php_version::PHPVersion;
 use mago_syntax::settings::ParserSettings;
@@ -68,6 +66,11 @@ fn audit(path: &Path) -> Vec<AuditEntry> {
         .collect()
 }
 
+/// The interpreters that recorded a scan. Each one that serves a request after a scan receives it first.
+fn interpreters(entries: &[AuditEntry]) -> usize {
+    entries.iter().map(|entry| entry.0).collect::<BTreeSet<_>>().len()
+}
+
 #[test]
 fn selected_declarations_refresh_every_worker_incrementally() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -78,14 +81,13 @@ fn selected_declarations_refresh_every_worker_incrementally() {
     let temporary = tempfile::tempdir().expect("temporary scan directory should be created");
     let audit_log = temporary.path().join("audit.jsonl");
     std::fs::write(&audit_log, []).expect("scan audit should be initialized");
-    let command = WorkerCommand::new("php")
-        .with_argument(repository.join("composer/tests/Sdk/Fixtures/analyzer-scan-worker.php"))
-        .with_current_directory(repository)
-        .with_environment("MAGO_SCAN_AUDIT_LOG", &audit_log);
-    let pool = WorkerPool::spawn(command, NonZeroUsize::new(3).expect("three workers"), WorkerPoolOptions::default())
-        .expect("scan worker pool should start");
-    let analyzer = ExternalAnalyzer::initialize([Arc::new(pool)], PHPVersion::PHP85, &[], false)
-        .expect("scan analyzer should initialize");
+    let host = common::host(
+        &repository.join("composer/tests/Sdk/Fixtures/analyzer-scan-worker.php"),
+        Duration::from_secs(30),
+        &[("MAGO_SCAN_AUDIT_LOG", audit_log.to_str().expect("a UTF-8 path"))],
+    );
+    let analyzer =
+        ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false).expect("scan analyzer should initialize");
     let mut registry = PluginRegistry::with_library_providers();
     registry.set_external_analyzer(Arc::new(ExternalAnalyzerHandle::ready(analyzer)));
 
@@ -103,7 +105,8 @@ fn selected_declarations_refresh_every_worker_incrementally() {
 
     service.analyze().expect("initial analysis should scan selected files");
     let initial_audit = audit(&audit_log);
-    assert_eq!(initial_audit.len(), 3);
+    assert!(!initial_audit.is_empty(), "the selected files reach the hosts");
+    assert_eq!(initial_audit.len(), interpreters(&initial_audit), "each interpreter scans the selected files once");
     for (_, files) in &initial_audit {
         assert_eq!(files.len(), 2);
         assert_eq!(files["database/migrations/001.php"], ["one\n"]);
@@ -114,15 +117,17 @@ fn selected_declarations_refresh_every_worker_incrementally() {
     service.update_database(changed.read_only());
     service.analyze_incremental(Some(&[migration_id])).expect("a selected source change should refresh every worker");
     let changed_audit = audit(&audit_log);
-    assert_eq!(changed_audit.len(), 6);
-    for (_, files) in &changed_audit[3..] {
+    let refreshed = &changed_audit[initial_audit.len()..];
+    assert!(!refreshed.is_empty(), "the changed file reaches the hosts");
+    assert_eq!(refreshed.len(), interpreters(refreshed), "each interpreter scans the changed files once");
+    for (_, files) in refreshed {
         assert_eq!(files["database/migrations/001.php"], ["changed\t"]);
     }
 
     let (ignored, _, _) = database("changed\\t", 2);
     service.update_database(ignored.read_only());
     service.analyze_incremental(Some(&[ignored_id])).expect("an unrelated source change should remain analyzable");
-    assert_eq!(audit(&audit_log).len(), 6, "unmatched changes must not cross the worker boundary");
+    assert_eq!(audit(&audit_log).len(), changed_audit.len(), "unmatched changes must not cross the worker boundary");
 }
 
 /// An entity in plain PHP, whose attributes read classes, enums and a library's constants, and whose property's
@@ -184,14 +189,13 @@ fn attribute_scan(database: &Database<'static>, audit_log: &Path) -> Option<Incr
     }
 
     std::fs::write(audit_log, []).expect("scan audit should be initialized");
-    let command = WorkerCommand::new("php")
-        .with_argument(repository.join("composer/tests/Sdk/Fixtures/analyzer-attribute-scan-worker.php"))
-        .with_current_directory(repository)
-        .with_environment("MAGO_SCAN_AUDIT_LOG", audit_log);
-    let pool = WorkerPool::spawn(command, NonZeroUsize::MIN, WorkerPoolOptions::default())
-        .expect("scan worker pool should start");
-    let analyzer = ExternalAnalyzer::initialize([Arc::new(pool)], PHPVersion::PHP85, &[], false)
-        .expect("scan analyzer should initialize");
+    let host = common::host(
+        &repository.join("composer/tests/Sdk/Fixtures/analyzer-attribute-scan-worker.php"),
+        Duration::from_secs(30),
+        &[("MAGO_SCAN_AUDIT_LOG", audit_log.to_str().expect("a UTF-8 path"))],
+    );
+    let analyzer =
+        ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false).expect("scan analyzer should initialize");
     let mut registry = PluginRegistry::with_library_providers();
     registry.set_external_analyzer(Arc::new(ExternalAnalyzerHandle::ready(analyzer)));
 

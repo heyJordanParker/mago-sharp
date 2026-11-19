@@ -16,7 +16,6 @@ use Mago\Sdk\Analyzer\Metadata\MethodMetadataProjection;
 use Mago\Sdk\Analyzer\Metadata\PropertyMetadata;
 use Mago\Sdk\Analyzer\Type\FunctionLikeIdentifier;
 use Mago\Sdk\Analyzer\Type\FunctionLikeKind;
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\Exception\InvalidArgumentException;
 use Mago\Sdk\Exception\ProtocolException;
 use Mago\Sdk\Internal\Analyzer\CodebaseReads;
@@ -45,15 +44,21 @@ final class Codebase
      * `$reads` records every read, cached or not, when the codebase serves one file's hooks or providers.
      *
      * @internal
-     * @param positive-int $parentRequestId
      */
     public function __construct(
         protected readonly HostClient $host,
-        protected readonly int $parentRequestId,
-        protected readonly CancellationTokenInterface $cancellation,
         protected readonly MetadataCache $cache,
         protected readonly ?CodebaseReads $reads = null,
     ) {}
+
+    /**
+     * The analysis this codebase belongs to. Mago analyzes the project again under a new generation after each change,
+     * so a plugin keys a cache of its own by it, in each interpreter, and fills it again when the generation changes.
+     */
+    public function generation(): int
+    {
+        return $this->cache->generation;
+    }
 
     public function getClass(string $name): ?ClassLikeMetadata
     {
@@ -509,9 +514,8 @@ final class Codebase
             return $this->cache->methodProjections[$search];
         }
 
-        $this->cancellation->throwIfCancelled();
         $payload = Protocol::writeCodebaseFindMethodsRequest($this->cache->generation, $search);
-        $response = $this->host->request($this->parentRequestId, $payload);
+        $response = $this->host->request($payload);
         [$reader, $count] = Protocol::readCodebaseFindMethodsResponse($response, $this->cache->generation, $fields);
 
         $methods = [];
@@ -769,7 +773,6 @@ final class Codebase
         }
 
         if ($missingRequests !== []) {
-            $this->cancellation->throwIfCancelled();
             $payload = Protocol::writeCodebaseQueryRequest(
                 $this->cache->generation,
                 $operation,
@@ -777,7 +780,7 @@ final class Codebase
                 $classLikeKind,
             );
 
-            $response = $this->host->request($this->parentRequestId, $payload);
+            $response = $this->host->request($payload);
             [$reader, $count] = Protocol::readCodebaseQueryResponse(
                 $response,
                 $this->cache->generation,
@@ -816,9 +819,8 @@ final class Codebase
             return $this->cache->lists[$bucketId];
         }
 
-        $this->cancellation->throwIfCancelled();
         $payload = Protocol::writeCodebaseListRequest($this->cache->generation, $operation, $classLikeKind);
-        $response = $this->host->request($this->parentRequestId, $payload);
+        $response = $this->host->request($payload);
         $names = Protocol::readCodebaseListResponse($response, $this->cache->generation, $operation, $classLikeKind);
         $this->cache->lists[$bucketId] = $names;
 
@@ -863,9 +865,8 @@ final class Codebase
         }
 
         if ($missingNames !== []) {
-            $this->cancellation->throwIfCancelled();
             $payload = Protocol::writeCodebaseExistenceRequest($this->cache->generation, $predicate, $missingNames);
-            $response = $this->host->request($this->parentRequestId, $payload);
+            $response = $this->host->request($payload);
             $results = Protocol::readCodebaseExistenceResponse($response, $this->cache->generation, $predicate);
             if (count($results) !== count($missingKeys)) {
                 throw new ProtocolException('A codebase existence response contains the wrong result count.');
@@ -914,14 +915,13 @@ final class Codebase
         }
 
         if ($missingMembers !== []) {
-            $this->cancellation->throwIfCancelled();
             $payload = Protocol::writeCodebaseMemberExistenceRequest(
                 $this->cache->generation,
                 $predicate,
                 $missingMembers,
             );
 
-            $response = $this->host->request($this->parentRequestId, $payload);
+            $response = $this->host->request($payload);
             $results = Protocol::readCodebaseMemberExistenceResponse($response, $this->cache->generation, $predicate);
             if (count($results) !== count($missingKeys)) {
                 throw new ProtocolException('A codebase member-existence response contains the wrong result count.');
@@ -972,9 +972,8 @@ final class Codebase
         }
 
         if ($missingNames !== []) {
-            $this->cancellation->throwIfCancelled();
             $payload = Protocol::writeCodebaseRelationsRequest($this->cache->generation, $relation, $missingNames);
-            $response = $this->host->request($this->parentRequestId, $payload);
+            $response = $this->host->request($payload);
             $results = Protocol::readCodebaseRelationsResponse($response, $this->cache->generation, $relation);
             if (count($results) !== count($missingNames)) {
                 throw new ProtocolException('A codebase relation response contains the wrong result count.');

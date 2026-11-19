@@ -317,15 +317,17 @@ final class ServerModelPlugin implements Plugin, MethodReturnTypeProvider
 }
 
 /**
- * A node hook that keeps the classes with an `#[Owner]` method in a field, as an app's rule keeps a listing it read for
- * one file and answers every later file of the analysis from it. In a file marked `owners: Class` it reports at each
+ * A node hook that keeps the classes with an `#[Owner]` method in a field, keyed by the analysis's generation, as an
+ * app's rule keeps a listing it read for one file and answers every later file of the analysis from it. In a file marked `owners: Class` it reports at each
  * class declaration whether `Class` has such a method, and in the file it read the listing for that it read it there.
  * Each report counts the hook's runs in its file in this worker, so a test sees whether Mago ran it again.
  */
-final class ServerOwnersPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysisHook
+final class ServerOwnersPlugin implements Plugin, NodeAnalysisHook
 {
-    /** @var array<string, true>|null */
-    private ?array $owned = null;
+    /** @var array<string, true> */
+    private array $owned = [];
+
+    private ?int $generation = null;
 
     /** @var array<string, int> */
     private array $runs = [];
@@ -337,7 +339,6 @@ final class ServerOwnersPlugin implements Plugin, BeforeAnalysisHook, NodeAnalys
 
     public function register(PluginRegistry $registry): void
     {
-        $registry->registerBeforeAnalysisHook($this);
         $registry->registerNodeAnalysisHook($this);
     }
 
@@ -351,11 +352,6 @@ final class ServerOwnersPlugin implements Plugin, BeforeAnalysisHook, NodeAnalys
         return [];
     }
 
-    public function beforeAnalysis(BeforeAnalysisContext $context): void
-    {
-        $this->owned = null;
-    }
-
     public function analyze(NodeAnalysisContext $context): void
     {
         $contents = $context->analysis->getSourceFile()->contents;
@@ -365,7 +361,8 @@ final class ServerOwnersPlugin implements Plugin, BeforeAnalysisHook, NodeAnalys
         }
 
         $file = $context->analysis->file;
-        if ($this->owned === null) {
+        if ($this->generation !== $context->codebase->generation()) {
+            $this->generation = $context->codebase->generation();
             $this->owned = [];
             foreach ($context->codebase->findMethods(
                 withAnyAttribute: ['Owner'],
@@ -395,15 +392,17 @@ final class ServerOwnersPlugin implements Plugin, BeforeAnalysisHook, NodeAnalys
 }
 
 /**
- * A node hook that keeps each class's parents it read in a field, as an app's rule keeps a class it read for one file
- * and answers every later file of the analysis from it. In a file marked `extends: Class Parent` it reports at each
+ * A node hook that keeps each class's parents it read in a field, keyed by the analysis's generation, as an app's rule
+ * keeps a class it read for one file and answers every later file of the analysis from it. In a file marked `extends: Class Parent` it reports at each
  * class declaration whether `Class` extends `Parent`. Each report counts the hook's runs in its file in this worker, so
  * a test sees whether Mago ran it again.
  */
-final class ServerParentsPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysisHook
+final class ServerParentsPlugin implements Plugin, NodeAnalysisHook
 {
     /** @var array<string, array<string, true>> */
     private array $parents = [];
+
+    private ?int $generation = null;
 
     /** @var array<string, int> */
     private array $runs = [];
@@ -415,7 +414,6 @@ final class ServerParentsPlugin implements Plugin, BeforeAnalysisHook, NodeAnaly
 
     public function register(PluginRegistry $registry): void
     {
-        $registry->registerBeforeAnalysisHook($this);
         $registry->registerNodeAnalysisHook($this);
     }
 
@@ -429,17 +427,17 @@ final class ServerParentsPlugin implements Plugin, BeforeAnalysisHook, NodeAnaly
         return [];
     }
 
-    public function beforeAnalysis(BeforeAnalysisContext $context): void
-    {
-        $this->parents = [];
-    }
-
     public function analyze(NodeAnalysisContext $context): void
     {
         $contents = $context->analysis->getSourceFile()->contents;
         $marker = strpos($contents, 'extends: ');
         if ($marker === false) {
             return;
+        }
+
+        if ($this->generation !== $context->codebase->generation()) {
+            $this->generation = $context->codebase->generation();
+            $this->parents = [];
         }
 
         $start = $marker + strlen('extends: ');
@@ -465,95 +463,24 @@ final class ServerParentsPlugin implements Plugin, BeforeAnalysisHook, NodeAnaly
 }
 
 /**
- * A rule that reads `Shipment`'s parents before the analysis and keeps them in a field, as an app's rule fills a cache
- * before any file. In a file marked `prepared: Parent` it reports at each class declaration whether `Shipment` extends
- * `Parent`. Each report counts the hook's runs in its file in this worker, so a test sees whether Mago ran it again.
+ * A property type provider that answers `App\Models\Order::$items` from the methods with a `#[Relation]` attribute, in
+ * a project that declares `App\Models\Line`: `int` while any class has a relation. It reads `Line` and searches when it
+ * is asked, and the codebase answers the same reads again from its cache for the rest of the analysis in that
+ * interpreter.
  */
-final class ServerPreparedPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysisHook
+final class ServerRelationsPlugin implements Plugin, PropertyTypeProvider
 {
-    /** @var array<string, true> */
-    private array $parents = [];
-
-    /** @var array<string, int> */
-    private array $runs = [];
-
-    public function getDefinition(): PluginDefinition
-    {
-        return new PluginDefinition(
-            'server-prepared',
-            'Server prepared',
-            'A node hook that answers from what it read before the analysis.',
-        );
-    }
-
-    public function register(PluginRegistry $registry): void
-    {
-        $registry->registerBeforeAnalysisHook($this);
-        $registry->registerNodeAnalysisHook($this);
-    }
-
-    public function getTargets(): array
-    {
-        return [NodeKind::Class_];
-    }
-
-    public function getRequirements(): array
-    {
-        return [];
-    }
-
-    public function beforeAnalysis(BeforeAnalysisContext $context): void
-    {
-        $this->parents = [];
-        foreach ($context->codebase->getClassLike('Shipment')->parentClasses ?? [] as $parent) {
-            $this->parents[strtolower($parent)] = true;
-        }
-    }
-
-    public function analyze(NodeAnalysisContext $context): void
-    {
-        $contents = $context->analysis->getSourceFile()->contents;
-        $marker = strpos($contents, 'prepared: ');
-        if ($marker === false) {
-            return;
-        }
-
-        $start = $marker + strlen('prepared: ');
-        $parent = substr($contents, $start, strcspn($contents, " \t\n\v\f\r", $start));
-        $file = $context->analysis->file;
-        $runs = ($this->runs[$file] ?? 0) + 1;
-        $this->runs[$file] = $runs;
-        $extends = array_key_exists(strtolower($parent), $this->parents) ? 'extends' : 'does not extend';
-        $context->report(
-            Level::Warning,
-            'prepared',
-            Issue::new("Run {$runs} of `{$file}`: `Shipment` {$extends} `{$parent}`.", $context->node->span),
-        );
-    }
-}
-
-/**
- * A rule that lists the methods with a `#[Relation]` attribute before the analysis, in a project that declares
- * `App\Models\Line`, and keeps them in a field, and a property type provider of the same plugin that answers
- * `App\Models\Order::$items` from that field alone, reading nothing itself: `int` while any class has a relation.
- */
-final class ServerRelationsPlugin implements Plugin, BeforeAnalysisHook, PropertyTypeProvider
-{
-    /** @var array<string, true> */
-    private array $relations = [];
-
     public function getDefinition(): PluginDefinition
     {
         return new PluginDefinition(
             'server-relations',
             'Server relations',
-            'A property type provider that answers from what its plugin read before the analysis.',
+            'A property type provider that answers from a search of the methods.',
         );
     }
 
     public function register(PluginRegistry $registry): void
     {
-        $registry->registerBeforeAnalysisHook($this);
         $registry->registerPropertyTypeProvider($this);
     }
 
@@ -562,24 +489,15 @@ final class ServerRelationsPlugin implements Plugin, BeforeAnalysisHook, Propert
         return [PropertyTarget::exact('App\\Models\\Order', 'items')];
     }
 
-    public function beforeAnalysis(BeforeAnalysisContext $context): void
-    {
-        $this->relations = [];
-        if ($context->codebase->getClassLike('App\\Models\\Line') === null) {
-            return;
-        }
-
-        foreach ($context->codebase->findMethods(
-            withAnyAttribute: ['Relation'],
-            fields: MethodFields::NAMES,
-        ) as $found) {
-            $this->relations[strtolower("{$found->method->class}::{$found->method->member}")] = true;
-        }
-    }
-
     public function getPropertyType(PropertyTypeProviderContext $context): ?PropertyType
     {
-        return $this->relations === [] ? null : new PropertyType(readType: Type::int());
+        if ($context->codebase->getClassLike('App\\Models\\Line') === null) {
+            return null;
+        }
+
+        $relations = $context->codebase->findMethods(withAnyAttribute: ['Relation'], fields: MethodFields::NAMES);
+
+        return $relations === [] ? null : new PropertyType(readType: Type::int());
     }
 }
 
@@ -632,7 +550,6 @@ final class ServerAuditPlugin implements Plugin, AfterFileAnalysisHook
         new ServerModelPlugin(),
         new ServerOwnersPlugin(),
         new ServerParentsPlugin(),
-        new ServerPreparedPlugin(),
         new ServerRelationsPlugin(),
         new ServerAuditPlugin(),
     ],

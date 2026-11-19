@@ -69,6 +69,6 @@ Rules should not scan unrelated files, parse Composer metadata for every node, o
 
 ## Failures
 
-An exception from a linter rule fails the file request and identifies the rule code. Unlike optional analyzer providers, linter rules have no meaningful native fallback for their own diagnostic behavior. Check cancellation in expensive loops and test rules against malformed syntax.
+An exception from a linter rule fails the file request and identifies the rule code. Unlike optional analyzer providers, linter rules have no meaningful native fallback for their own diagnostic behavior. Test rules against malformed syntax.
 
 Continue with [Writing linter rules](/extensions/linter/rules/).

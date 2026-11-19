@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::missing_panics_doc)]
 
-//! Runs `mago analyze` on named paths of a project whose extension judges files against each other.
+//! Runs `mago analyze` on projects with an extension host: on named paths of a project whose extension judges files
+//! against each other, and on a project whose host's file fails or logs while it loads.
 
 use std::io::Write;
 use std::path::Path;
@@ -28,7 +29,7 @@ fn workspace(repository: &Path, source: &str) -> tempfile::TempDir {
     std::fs::write(
         directory.path().join("mago.toml"),
         format!(
-            "php-version = \"8.4\"\n\n{source}[extension-hosts.proof]\ncommand = [\"php\", {:?}]\nworkers = 1\n",
+            "php-version = \"8.4\"\n\n{source}[extension-hosts.proof]\nfile = {:?}\n",
             worker.display().to_string()
         ),
     )
@@ -313,4 +314,64 @@ fn a_draft_in_an_excluded_folder_is_checked_in_place_of_the_file_it_replaces() {
     let substitution = format!("{}={}", project.path().join("src/Box.php").display(), draft.display());
 
     assert_eq!(located(&issues(&analyze(project.path(), &["--substitute", &substitution]))), in_place);
+}
+
+/// A project of one source file and the host `acme`, whose file is `host`, the PHP after its `<?php`.
+fn host_workspace(host: &str) -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("temporary workspace");
+    std::fs::create_dir_all(directory.path().join("src")).expect("src directory");
+    std::fs::create_dir_all(directory.path().join("tools")).expect("tools directory");
+    std::fs::write(
+        directory.path().join("mago.toml"),
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"src\"]\n\n[extension-hosts.acme]\nfile = \"tools/host.php\"\n",
+    )
+    .expect("mago.toml");
+    std::fs::write(directory.path().join("src/Total.php"), "<?php\n\nfunction total(): int { return 1; }\n")
+        .expect("the source file");
+    std::fs::write(directory.path().join("tools/host.php"), format!("<?php\n\n{host}\n")).expect("the host's file");
+    directory
+}
+
+/// What `mago analyze` gives in `workspace` within `deadline`, which it fails to meet only when it hangs.
+fn analyze_within(workspace: &Path, deadline: Duration) -> Output {
+    let mut command = command(workspace, &[]);
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(process::output(&mut command));
+    });
+
+    receiver
+        .recv_timeout(deadline)
+        .unwrap_or_else(|_| panic!("mago analyze ran past {} s", deadline.as_secs()))
+        .expect("mago runs")
+}
+
+/// The host's file throws before it registers its worker, while a pool thread waits for the hosts to start, so the
+/// analysis fails at once with the host's error and stops every interpreter without waiting for that thread.
+#[test]
+fn a_host_that_throws_while_it_loads_fails_the_analysis_naming_the_host_and_its_error() {
+    let workspace = host_workspace("throw new RuntimeException('the routes are missing');");
+
+    let output = analyze_within(workspace.path(), Duration::from_secs(120));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("extension host `acme` could not load: RuntimeException: the routes are missing"),
+        "{stderr}"
+    );
+}
+
+/// The host's file logs to `STDERR`, as it did under a php process, and its log reaches mago's stderr.
+#[test]
+fn a_host_that_logs_to_stderr_while_it_loads_runs_and_its_log_reaches_mago_s_stderr() {
+    let workspace = host_workspace(
+        "fwrite(STDERR, \"acme loads its rules\\n\");\n(new Mago\\Sdk\\Worker(new Mago\\Sdk\\Extension('acme/rules', 'Rules', '1.0.0')))->run();",
+    );
+
+    let output = analyze_within(workspace.path(), Duration::from_secs(120));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("acme loads its rules"), "{stderr}");
 }

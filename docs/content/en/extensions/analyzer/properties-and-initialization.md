@@ -105,7 +105,7 @@ final class InjectedProperties implements PropertyInitializationProvider
 }
 ```
 
-The context contains the declaring class, full `PropertyMetadata`, codebase, type comparator, PHP version, and cancellation token. The metadata property name includes `$`; the provider target does not.
+The context contains the declaring class, full `PropertyMetadata`, codebase, type comparator, and PHP version. The metadata property name includes `$`; the provider target does not.
 
 Return `true` only when initialization is guaranteed for every constructed instance represented by the target. This provider changes definite-initialization analysis; it does not change the property's declared type.
 

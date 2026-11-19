@@ -16,18 +16,23 @@ use RuntimeException;
 
 use function array_column;
 use function array_merge;
+use function define;
+use function defined;
 use function dirname;
 use function file_put_contents;
 use function getenv;
-use function getmypid;
 use function is_string;
 use function json_encode;
+use function random_int;
 
 use const FILE_APPEND;
 use const JSON_THROW_ON_ERROR;
 use const LOCK_EX;
 
 require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
+
+// Each interpreter that runs this file is one worker, named by a number of its own, since all share mago's process.
+defined('MAGO_TEST_WORKER') || define('MAGO_TEST_WORKER', random_int(1, 0xFFFF_FFFF));
 
 /**
  * Records each argument of a class's or a property's attribute a host receives as its name, its type and its value's
@@ -83,7 +88,7 @@ final class AttributeScanProofPlugin implements CodebaseScanHook, Plugin
             return;
         }
 
-        $record = json_encode([getmypid(), $this->arguments], JSON_THROW_ON_ERROR);
+        $record = json_encode([MAGO_TEST_WORKER, $this->arguments], JSON_THROW_ON_ERROR);
         if (file_put_contents($this->auditLog, $record . "\n", FILE_APPEND | LOCK_EX) === false) {
             throw new RuntimeException('Unable to append to the attribute-scan audit log.');
         }

@@ -1,0 +1,17 @@
+[package]
+name = "mago-engine"
+description = "Runs PHP inside Mago on the PHP# engine linked into the binary, one interpreter per thread."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+links = "php"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+cc = { workspace = true }

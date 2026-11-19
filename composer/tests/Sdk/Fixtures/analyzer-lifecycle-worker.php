@@ -49,14 +49,16 @@ use RuntimeException;
 
 use function array_values;
 use function count;
+use function define;
+use function defined;
 use function dirname;
 use function file_put_contents;
 use function getenv;
-use function getmypid;
 use function in_array;
 use function is_string;
 use function json_encode;
 use function min;
+use function random_int;
 use function str_contains;
 use function strlen;
 use function usleep;
@@ -66,6 +68,9 @@ use const JSON_THROW_ON_ERROR;
 use const LOCK_EX;
 
 require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
+
+// Each interpreter that runs this file is one worker, named by a number of its own, since all share mago's process.
+defined('MAGO_TEST_WORKER') || define('MAGO_TEST_WORKER', random_int(1, 0xFFFF_FFFF));
 
 final class LifecycleProofPlugin implements
     Plugin,
@@ -643,7 +648,7 @@ final class LifecycleProofPlugin implements
 
     private function record(string $phase, ?string $file): void
     {
-        $record = json_encode([$this->plugin, $phase, $file, getmypid()], JSON_THROW_ON_ERROR);
+        $record = json_encode([$this->plugin, $phase, $file, MAGO_TEST_WORKER], JSON_THROW_ON_ERROR);
         if (file_put_contents($this->auditLog, $record . "\n", FILE_APPEND | LOCK_EX) === false) {
             throw new RuntimeException('Unable to append to the lifecycle audit log.');
         }
@@ -681,7 +686,7 @@ final class LifecycleMethodCallHook implements MethodCallAnalysisHook
             $this->plugin,
             'method-call',
             $context->analysis->file,
-            getmypid(),
+            MAGO_TEST_WORKER,
         ], JSON_THROW_ON_ERROR);
         if (file_put_contents($this->auditLog, $record . "\n", FILE_APPEND | LOCK_EX) === false) {
             throw new RuntimeException('Unable to append to the lifecycle audit log.');
@@ -720,7 +725,7 @@ final class LifecycleClassLikeHook implements ClassLikeAnalysisHook
             $this->plugin,
             'class-like',
             $context->analysis->file,
-            getmypid(),
+            MAGO_TEST_WORKER,
         ], JSON_THROW_ON_ERROR);
         if (file_put_contents($this->auditLog, $record . "\n", FILE_APPEND | LOCK_EX) === false) {
             throw new RuntimeException('Unable to append to the lifecycle audit log.');

@@ -1,21 +1,38 @@
 #![allow(dead_code)]
 
 use std::borrow::Cow;
+use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
+use std::time::Duration;
 
 use mago_database::DatabaseConfiguration;
 use mago_database::GlobSettings;
-use mago_database::process;
+use mago_extension::Host;
+use mago_extension::HostFile;
+use mago_extension::Hosts;
 
 pub fn php_sdk_is_available(repository: &std::path::Path, test: &str) -> bool {
-    let available = repository.join("vendor/autoload.php").is_file()
-        && process::output(Command::new("php").arg("--version")).is_ok_and(|output| output.status.success());
+    let available = repository.join("vendor/autoload.php").is_file();
     assert!(
         available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
-        "PHP and vendor dependencies are required for {test}"
+        "vendor dependencies are required for {test}"
     );
     available
+}
+
+/// The extension host `acme` whose worker `file` registers, as mago runs it from the repository: in each thread's
+/// interpreter of the engine linked into the test binary, with `deadline` and `environment`.
+pub fn host(file: &Path, deadline: Duration, environment: &[(&str, &str)]) -> Host {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let file = HostFile {
+        name: "acme".to_owned(),
+        file: file.to_path_buf(),
+        deadline,
+        environment: environment.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect(),
+    };
+    let sdk = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sdk");
+
+    Hosts::new(vec![file], repository.to_path_buf(), &sdk).expect("the extension host starts").hosts().remove(0)
 }
 
 pub fn database_configuration(

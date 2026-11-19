@@ -1,98 +1,57 @@
 +++
 title = "Configuring extension hosts"
-description = "Configure extension commands, worker pools, environments, and safety limits."
+description = "Configure extension host files, environments, and deadlines."
 nav_order = 30
 nav_section = "Extensions"
 +++
 # Configuring extension hosts
 
-Extension hosts are configured under `[extension-hosts]`. Each named entry describes one command replicated into a pool of identical worker processes.
+Extension hosts are configured under `[extension-hosts]`. Each named entry names one PHP file that registers the host's worker. Mago runs the file inside itself, on the PHP# engine linked into the `mago` binary, so no `php` needs to be installed.
 
 ```toml
 [extension-hosts.framework]
 enabled = true
-command = ["php", ".mago/framework-worker.php"]
-workers = 0
-working-directory = "."
-inherit-environment = true
+file = ".mago/framework-worker.php"
 environment = { APP_ENV = "analysis" }
-maximum-payload-size = 67108864
 request-timeout-ms = 30000
-shutdown-timeout-ms = 250
-stderr-tail-size = 65536
 ```
 
 ## Options
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `enabled` | boolean | `true` | Whether Mago starts this host. A disabled host may omit `command`. |
-| `command` | string list | `[]` | Executable followed by literal arguments. No shell parsing is performed. Required when enabled. The program reads a relative argument, such as its script, from `working-directory`, so an inherited host's script resolves from the directory of the configuration file Mago loaded, not from the file `extends` names. With `--config /tmp/x.toml` and `extends = "/app/mago.toml"`, the inherited `command = ["php", "tools/mago/worker.php"]` runs in `/tmp` and fails with `Could not open input file: tools/mago/worker.php`. |
-| `workers` | non-negative integer | `0` | `0` starts as many processes as Mago's thread count. A positive value starts exactly that many processes. |
-| `working-directory` | path | config directory | Working directory inherited by every worker process. The default, and a relative path, resolve from the directory of the configuration file Mago loaded, whether `--config` names it or Mago finds it, for an inherited host too. With no configuration file, they resolve from the workspace. With `--config /tmp/x.toml` and `extends = "/app/mago.toml"`, the hosts of `/app/mago.toml` run in `/tmp`: give `/tmp/x.toml` its own `working-directory = "/app"` for each host it inherits, or keep it beside `/app/mago.toml`. |
-| `environment` | string map | `{}` | Variables added to, or replacing values in, the worker environment. |
-| `inherit-environment` | boolean | `true` | Whether workers inherit Mago's process environment before `environment` is applied. |
-| `maximum-payload-size` | positive integer | `67108864` | Maximum payload bytes accepted in one protocol frame. The maximum representable value is `4294967295`. |
-| `request-timeout-ms` | positive integer | `30000` | Longest one unit of a request may run. It counts from when the worker starts a request, not while the request waits behind earlier ones, and starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker reducer. So a batch of many files, or the after-analysis hooks of many plugins, lives while each unit finishes in time. A provider, lint, issue-filter or single after-file request is one unit. Nested metadata or type-comparison requests don't start it again, so a hook that never finishes fails, and the error names the host, the unit that made no progress, such as the after-analysis hooks of plugin `dead-routes`, and this option. |
-| `shutdown-timeout-ms` | non-negative integer | `250` | Grace period after shutdown before Mago forcibly terminates a worker. On macOS and Linux, it terminates every process the worker started on the host with it, as [worker processes](#worker-processes) describes. |
-| `stderr-tail-size` | non-negative integer | `65536` | Trailing worker standard-error bytes retained for failure diagnostics. |
+| `enabled` | boolean | `true` | Whether Mago runs this host. A disabled host may omit `file`. |
+| `file` | path | none | The PHP file that registers the host's worker, as `(new Worker(...))->run()` does. Required when enabled. A relative path resolves from the directory of the configuration file Mago loaded, whether `--config` names it or Mago finds it, for an inherited host too. With no configuration file, it resolves from the workspace. |
+| `environment` | string map | `{}` | Variables the worker reads through `getenv()`, `$_ENV` and `$_SERVER`, over Mago's own environment. |
+| `request-timeout-ms` | positive integer | `30000` | Longest one unit of a request may run. It counts from when the worker starts a request, and starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker reducer. So a batch of many files, or the after-analysis hooks of many plugins, lives while each unit finishes in time. A provider, lint, issue-filter or single after-file request is one unit. Nested metadata or type-comparison requests don't start it again, so a hook that never finishes fails, and the error names the host, the unit that made no progress, such as the after-analysis hooks of plugin `dead-routes`, and this option. |
 
-## Command resolution
+## How a host runs
 
-`command` is passed directly to the operating system. Shell syntax, redirects, variable expansion, and pipelines are not interpreted.
+Each analysis thread runs one PHP# interpreter. An interpreter starts in the directory of the configuration file Mago loaded, loads Mago's own copy of the extension SDK, and then runs the file of every enabled host, in the order of their names. The copy of the SDK in the project's `vendor` folder never loads, so a host always speaks the protocol of the `mago` that runs it.
 
-```toml
-# `php` is resolved through PATH. The script resolves from the config directory.
-command = ["php", ".mago/worker.php", "--project=storefront"]
-```
+The interpreter ignores `php.ini` and runs without a memory limit. It has the extensions of the PHP# runtime image, so a host loads the classes of the project and its packages as the app does.
 
-A bare executable name such as `php`, `node`, or `my-extension-host` is resolved through `PATH`. A relative executable containing a directory component, such as `./tools/extension-host`, resolves from the effective configuration file's directory. Remaining arguments are passed literally; the selected program interprets relative arguments from `working-directory`.
+A file that fails, or registers no worker, fails the whole run, and the error names the host. A hook that makes no progress for `request-timeout-ms` is interrupted, and its interpreter starts again before its next request.
 
-## Pool size
+## Environment
 
-A pool starts all its processes at once, before Mago sends its first request, so every thread of the analysis has a worker from the start. The default `workers = 0` starts as many as Mago's thread count.
-
-Set `workers` when an extension has a known external constraint:
+All hosts share each interpreter, so they share its environment too. Two hosts that set one variable must set it to the same value, or Mago refuses to start them and names both hosts and the variable:
 
 ```toml
-[extension-hosts.database-aware]
-command = ["php", ".mago/database-worker.php"]
-workers = 2
+[extension-hosts.routes]
+file = ".mago/routes-worker.php"
+environment = { APP_ENV = "analysis" }
+
+[extension-hosts.models]
+file = ".mago/models-worker.php"
+environment = { APP_ENV = "analysis" }
 ```
 
-A pool does not grow or shrink. Avoid configuring more workers than Mago threads.
-
-## Worker processes
-
-On macOS and Linux, each worker runs in a process group of its own, so Mago can end it with every process it started on the host. A worker fails when it dies, breaks the protocol, or makes no progress for `request-timeout-ms`, as one that stops reading its standard input does. Mago then closes the worker's standard input, kills the worker, and once the worker's standard error ends, or after one second, ends its whole group. A shutdown that runs past `shutdown-timeout-ms`, or whose worker exited and left a process running, ends the group too.
-
-A wrapper such as `docker compose exec … php worker.php` runs the `docker compose` process on the host and the worker in the container. Mago ends the host's processes. The process in the container is Docker's to end.
-
-The group is not the terminal's, which has three effects:
-
-- Ctrl-C, and any SIGINT, SIGQUIT, SIGHUP or SIGTERM that ends Mago, ends each worker's group with SIGKILL before Mago ends, where each worker got the signal itself.
-- A SIGKILL sent to Mago's process group no longer reaches the workers, since Mago runs no code on SIGKILL. A worker that runs `Worker::run()` exits once its standard input closes, which Mago's end closes, so only a worker that stopped reading keeps running.
-- A worker that reads from the terminal, as an interactive debugger prompt does, stops on SIGTTIN. Run such a debugger over its network port instead.
-
-## Environment isolation
-
-To start from an empty environment and provide only explicit values:
-
-```toml
-[extension-hosts.isolated]
-command = ["/usr/bin/php", ".mago/isolated-worker.php"]
-inherit-environment = false
-environment = {
-  PATH = "/usr/bin:/bin",
-  APP_ENV = "analysis",
-}
-```
-
-Environment isolation is not a security sandbox. The worker retains the permissions of the Mago process.
+A host runs with the permissions of the Mago process.
 
 ## Multiple hosts and extensions
 
-Each host has its own command, limits, environment, and worker pool. One worker command may register several logical extensions:
+Each host has its own file, deadline and environment. One worker may register several logical extensions:
 
 ```php
 (new Worker(
@@ -101,7 +60,7 @@ Each host has its own command, limits, environment, and worker pool. One worker 
 ))->run();
 ```
 
-Across all enabled hosts, extension identifiers, linter issue codes, and analyzer plugin selectors must remain unique. Extension identifiers and analyzer plugin selectors are compared ASCII case-insensitively; linter rule codes are case-sensitive. External linter codes and analyzer selectors must not collide with their native counterparts. Every process in one pool must advertise identical registration metadata.
+All hosts share each interpreter, and PHP declares a class once, so two hosts that declare one class are an error that names both hosts and the class. Across all enabled hosts, extension identifiers, linter issue codes, and analyzer plugin selectors must remain unique. Extension identifiers and analyzer plugin selectors are compared ASCII case-insensitively; linter rule codes are case-sensitive. External linter codes and analyzer selectors must not collide with their native counterparts.
 
 ## Analyzer plugin selection
 
@@ -125,23 +84,23 @@ extends = "../mago.base.toml"
 enabled = false
 ```
 
-`command` is replaced rather than appended to, because it is an argv: a layer that declares its own command gets exactly that command, and a layer that does not keeps the inherited one. Every other key in the host table merges as usual.
+A layer that declares its own `file` gets exactly that file, and a layer that does not keeps the inherited one. `environment` merges by variable name.
 
 See [Configuration](/guide/configuration/) for path resolution and merge precedence.
 
 ## Build-time scans without dev dependencies
 
-An app whose own analyzer extension writes a file the app reads at boot runs `mago analyze --scan-only` in its production build. That build usually installs with `composer install --no-dev`, so a worker that loads a `require-dev` package dies at startup there. Mago doesn't skip a host whose worker dies: the whole run fails with exit code 2.
+An app whose own analyzer extension writes a file the app reads at boot runs `mago analyze --scan-only` in its production build. That build usually installs with `composer install --no-dev`, so a host file that loads a `require-dev` package fails there. Mago doesn't skip a host whose file fails: the whole run fails with exit code 2.
 
-Give each extension its own host, so the app's extension never shares a worker with a `require-dev` one:
+Give each extension its own host, so the app's extension never shares a file with a `require-dev` one:
 
 ```toml
 # mago.toml
 [extension-hosts.app]
-command = ["php", ".mago/app-worker.php"]
+file = ".mago/app-worker.php"
 
 [extension-hosts.dev]
-command = ["php", ".mago/dev-worker.php"]
+file = ".mago/dev-worker.php"
 ```
 
 Beside `mago.toml`, add a scan configuration that extends it and turns the `require-dev` host off:
@@ -161,7 +120,7 @@ composer install --no-dev
 vendor/bin/mago --config mago.scan.toml analyze --scan-only
 ```
 
-Host entries merge by name, so the scan configuration changes only `enabled`: `dev` keeps its inherited command, and `app` runs as `mago.toml` declares it. Mago never starts a disabled host. `vendor/bin/mago` and the SDK the app's worker loads both come from `heyjordanparker/mago-sharp`, so that package belongs in `require`, not `require-dev`.
+Host entries merge by name, so the scan configuration changes only `enabled`: `dev` keeps its inherited file, and `app` runs as `mago.toml` declares it. Mago never runs a disabled host. `vendor/bin/mago` comes from `heyjordanparker/mago-sharp`, so that package belongs in `require`, not `require-dev`.
 
 Don't use `--no-extensions` for this. It turns every host off, the app's own too, so the scan exits 0 and writes nothing.
 
@@ -169,8 +128,8 @@ Don't use `--no-extensions` for this. It turns every host off, the app's own too
 
 Keep `mago.scan.toml` in the same directory as `mago.toml`. Mago resolves every host from the directory of the configuration file it loaded. Under `--config` that is the scan configuration's directory, for the hosts it inherits too:
 
-- A program with a directory part, such as `./vendor/bin/extension-host`, resolves from that directory. A bare name such as `php` resolves through `PATH`.
-- A host without `working-directory` starts its workers in that directory. Mago never resolves `command` arguments, so `php` reads `.mago/app-worker.php` from there.
+- Each host's `file`, such as `.mago/app-worker.php`, resolves from that directory.
+- Each interpreter starts in that directory, so a host reads a relative path from there.
 
 `[source] paths` resolve against the workspace instead, which is the current directory unless `--workspace` or `[source] workspace` names another. Run the scan from the project root.
 

@@ -89,7 +89,6 @@ use mago_codex::visibility::Visibility;
 use mago_database::file::File;
 use mago_extension::PayloadReader;
 use mago_extension::PayloadWriter;
-use mago_extension::WorkerError;
 use mago_extension::source::write_node_kind_table;
 use mago_php_version::PHPVersion;
 use mago_reporting::AnnotationKind;
@@ -276,7 +275,6 @@ pub(super) struct InitializationStub {
 
 pub(super) struct ReturnTypeRequest<'type_info> {
     pub payload: Vec<u8>,
-    pub memoize: bool,
     pub types: Vec<Cow<'type_info, TUnion>>,
     pub receiver_type_count: usize,
     pub snapshotted_types: usize,
@@ -600,7 +598,7 @@ pub(super) fn decode_registration(payload: &[u8]) -> Result<Registration, Extern
                 index,
                 "function assertion providers",
                 "function assertion provider",
-                read_memoization,
+                no_capabilities,
                 read_function_target,
             )?);
             method_assertion_providers.extend(read_providers(
@@ -608,7 +606,7 @@ pub(super) fn decode_registration(payload: &[u8]) -> Result<Registration, Extern
                 index,
                 "method assertion providers",
                 "method assertion provider",
-                read_memoization,
+                no_capabilities,
                 read_method_target,
             )?);
             codebase_scan_hooks.extend(read_providers(
@@ -741,7 +739,7 @@ fn read_capabilities(
     description: &'static str,
 ) -> Result<u8, ExternalAnalyzerError> {
     let capabilities = reader.read_u8("provider capabilities")?;
-    if capabilities & !15 != 0 {
+    if capabilities & !7 != 0 {
         return Err(protocol(format!("{description} {index} has unknown capabilities {capabilities:#04x}")));
     }
     Ok(capabilities)
@@ -753,14 +751,6 @@ fn no_capabilities(
     _description: &'static str,
 ) -> Result<u8, ExternalAnalyzerError> {
     Ok(0)
-}
-
-fn read_memoization(
-    reader: &mut PayloadReader<'_>,
-    _index: u16,
-    _description: &'static str,
-) -> Result<u8, ExternalAnalyzerError> {
-    Ok(u8::from(reader.read_bool("provider memoization flag")?) * super::PROVIDER_MEMOIZED)
 }
 
 fn read_targets<T>(
@@ -923,7 +913,6 @@ pub(super) fn encode_provider_request<'type_info>(
     source_file: &File,
     codebase: &CodebaseMetadata,
     generation: u64,
-    memoize: bool,
     trace_enabled: bool,
     calling_function_like: Option<FunctionLikeIdentifier>,
 ) -> Result<ReturnTypeRequest<'type_info>, ExternalAnalyzerError> {
@@ -962,7 +951,6 @@ pub(super) fn encode_provider_request<'type_info>(
         source_file,
         codebase,
         generation,
-        memoize,
         trace_enabled,
         calling_function_like,
     )
@@ -1324,7 +1312,6 @@ fn encode_return_type_request<'type_info>(
     source_file: &File,
     codebase: &CodebaseMetadata,
     generation: u64,
-    memoize: bool,
     trace_enabled: bool,
     calling_function_like: Option<FunctionLikeIdentifier>,
 ) -> Result<ReturnTypeRequest<'type_info>, ExternalAnalyzerError> {
@@ -1360,8 +1347,8 @@ fn encode_return_type_request<'type_info>(
                 type_snapshot_duration = type_snapshot_duration.saturating_add(start.elapsed());
             }
 
-            writer.write_u32(if memoize { 0 } else { invocation.span.start.offset });
-            writer.write_u32(if memoize { 0 } else { invocation.span.end.offset });
+            writer.write_u32(invocation.span.start.offset);
+            writer.write_u32(invocation.span.end.offset);
             let receiver_types = receiver_type_references.into_iter().map(Cow::into_owned).collect();
             return encode_return_type_arguments(
                 writer,
@@ -1372,7 +1359,6 @@ fn encode_return_type_request<'type_info>(
                 receiver_types,
                 0,
                 type_snapshot_duration,
-                memoize,
                 trace_enabled,
                 include_argument_types,
                 calling_function_like,
@@ -1382,8 +1368,8 @@ fn encode_return_type_request<'type_info>(
     }
 
     writer.write_bytes(name)?;
-    writer.write_u32(if memoize { 0 } else { invocation.span.start.offset });
-    writer.write_u32(if memoize { 0 } else { invocation.span.end.offset });
+    writer.write_u32(invocation.span.start.offset);
+    writer.write_u32(invocation.span.end.offset);
 
     encode_return_type_arguments(
         writer,
@@ -1394,7 +1380,6 @@ fn encode_return_type_request<'type_info>(
         Vec::new(),
         0,
         type_snapshot_duration,
-        memoize,
         trace_enabled,
         include_argument_types,
         calling_function_like,
@@ -1411,7 +1396,6 @@ fn encode_return_type_arguments<'type_info>(
     receiver_types: Vec<TUnion>,
     mut typed_arguments: usize,
     mut type_snapshot_duration: Duration,
-    memoize: bool,
     trace_enabled: bool,
     include_argument_types: bool,
     calling_function_like: Option<FunctionLikeIdentifier>,
@@ -1426,8 +1410,8 @@ fn encode_return_type_arguments<'type_info>(
         writer.write_bool(argument.is_unpacked());
         writer.write_bool(argument.is_placeholder());
         let span = argument.span();
-        writer.write_u32(if memoize { 0 } else { span.start.offset });
-        writer.write_u32(if memoize { 0 } else { span.end.offset });
+        writer.write_u32(span.start.offset);
+        writer.write_u32(span.end.offset);
         let value = argument.value();
         let expression = value
             .map(HasSpan::span)
@@ -1478,7 +1462,6 @@ fn encode_return_type_arguments<'type_info>(
 
     Ok(ReturnTypeRequest {
         payload: writer.finish(),
-        memoize,
         snapshotted_types: types.len(),
         receiver_type_count,
         types,
@@ -3351,31 +3334,6 @@ pub(super) fn take_codebase_reads(
     Ok((reads, loads, [header, &response[response.len() - reader.remaining()..]].concat()))
 }
 
-/// How every SDK release before 0.6.1 starts its refusal of a request of another analyzer protocol. Those releases
-/// can't change, so a refusal that starts with it always comes from a worker on an SDK older than this mago's.
-const PRE_0_6_1_SDK_REFUSAL: &[u8] = b"Unsupported analyzer protocol version ";
-
-/// Says what to install when a worker on an SDK before 0.6.1 refuses Mago's first request, the describe request. That
-/// SDK names Mago's protocol alone and no fix. Every other refusal passes through unchanged: an SDK of 0.6.1 or later
-/// names both protocols and the fixes itself, and any other failure, such as an extension's own exception, says what
-/// failed.
-pub(super) fn refused_handshake(error: WorkerError) -> ExternalAnalyzerError {
-    match &error {
-        WorkerError::Remote { host, payload, .. } if payload.starts_with(PRE_0_6_1_SDK_REFUSAL) => {
-            let version = env!("CARGO_PKG_VERSION");
-            protocol(format!(
-                "extension host `{host}` refused the handshake of mago {version}, which speaks analyzer protocol \
-                 {ANALYZER_PROTOCOL_MAJOR}.{ANALYZER_PROTOCOL_MINOR}: {} Its SDK is from a \
-                 `heyjordanparker/mago-sharp` release before 0.6.1, so require the release of this mago with \
-                 `composer require --dev \"heyjordanparker/mago-sharp:{version}\"`, or run the mago of the release \
-                 the project requires with `vendor/bin/mago`.",
-                String::from_utf8_lossy(payload).trim_end()
-            ))
-        }
-        _ => error.into(),
-    }
-}
-
 pub(super) fn message_kind(payload: &[u8]) -> Result<u16, ExternalAnalyzerError> {
     if payload.len() < HEADER_LENGTH {
         return Err(protocol("analyzer message is shorter than its header"));
@@ -3861,7 +3819,6 @@ pub(super) mod testing {
                     analysis.file(),
                     analysis.codebase,
                     1,
-                    false,
                     false,
                     None,
                 )
@@ -4523,17 +4480,12 @@ pub(super) mod testing {
         writer.write_u16(0);
         writer.write_u32(1);
         writer.write_string("non-existent-function").unwrap();
-        // No node, method-call or class-like analysis hook, then the assertion providers, which memoize nothing.
+        // No node, method-call or class-like analysis hook, then the assertion providers.
         writer.write_u32(0);
         writer.write_u32(0);
         writer.write_u32(0);
-        write_demo_function_provider(&mut writer, |writer| writer.write_bool(false));
-        writer.write_u32(1);
-        writer.write_u16(0);
-        writer.write_bool(false);
-        writer.write_u32(1);
-        writer.write_bytes(b"Lib\\Shelf").unwrap();
-        writer.write_bytes(b"stock").unwrap();
+        write_demo_function_provider(&mut writer, |_| {});
+        write_stock_provider(&mut writer);
         // No codebase-scan hook, then the call forwarding provider.
         writer.write_u32(0);
         write_stock_provider(&mut writer);

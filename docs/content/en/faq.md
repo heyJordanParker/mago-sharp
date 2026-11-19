@@ -28,7 +28,7 @@ No. mago-sharp ships no editor-specific extensions.
 
 ## Does mago-sharp support analyzer plugins?
 
-Yes, through extensions. An extension is an external program that mago-sharp starts from `[extension-hosts]` in `mago.toml` and talks to over a binary worker protocol. It can add linter rules and analyzer plugins. The formatter and guard have no extension API. mago-sharp ships a PHP SDK for writing extensions: the `Mago\Sdk` namespace in the `heyjordanparker/mago-sharp` Composer package. [Extensions](/extensions/overview/) covers the protocol, the SDK, and a complete example.
+Yes, through extensions. An extension is a PHP file that `[extension-hosts]` in `mago.toml` names, which mago-sharp runs inside itself, on the PHP# engine linked into its binary, so no `php` needs to be installed. It can add linter rules and analyzer plugins. The formatter and guard have no extension API. mago-sharp ships a PHP SDK for writing extensions: the `Mago\Sdk` namespace in the `heyjordanparker/mago-sharp` Composer package. [Extensions](/extensions/overview/) covers the hosts, the SDK, and a complete example.
 
 ## Which tools does mago-sharp include?
 

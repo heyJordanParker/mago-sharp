@@ -2,7 +2,6 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,9 +20,6 @@ use mago_database::GlobSettings;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
-use mago_extension::WorkerCommand;
-use mago_extension::WorkerPool;
-use mago_extension::WorkerPoolOptions;
 use mago_formatter::settings::FormatSettings;
 use mago_guard::settings::Settings as GuardSettings;
 use mago_linter::settings::Settings as LinterSettings;
@@ -181,8 +177,13 @@ fn assert_issue_cardinality(issues: &IssueCollection, unused_methods: usize) {
     }
 }
 
+/// The interpreters whose worker started, each of which runs every plugin's initialization once.
+fn interpreters(entries: &[AuditEntry]) -> usize {
+    entries.iter().filter(|entry| entry.1 == "initialize").map(|entry| entry.3).collect::<HashSet<_>>().len()
+}
+
 fn assert_initial_audit(entries: &[AuditEntry]) {
-    assert_eq!(entries.iter().filter(|entry| entry.1 == "initialize").count(), PLUGINS.len() * 3);
+    assert_eq!(entries.iter().filter(|entry| entry.1 == "initialize").count(), PLUGINS.len() * interpreters(entries));
     assert_eq!(entries.iter().filter(|entry| entry.1 == "before").count(), PLUGINS.len());
     assert_eq!(entries.iter().filter(|entry| entry.1 == "after-file").count(), FILE_COUNT * PLUGINS.len());
     assert_eq!(entries.iter().filter(|entry| entry.1 == "node").count(), PLUGINS.len() * NODE_TARGET_COUNT);
@@ -205,7 +206,7 @@ fn assert_initial_audit(entries: &[AuditEntry]) {
             .filter(|entry| entry.0 == plugin && entry.1 == "initialize")
             .map(|entry| entry.3)
             .collect::<HashSet<_>>();
-        assert_eq!(initialization_workers.len(), 3, "initialization must run on every worker");
+        assert!(initialization_workers.is_superset(&workers), "initialization must run on every worker");
     }
 }
 
@@ -227,14 +228,12 @@ fn external_analyzer_lifecycle_is_exact_across_workers_and_incremental_runs() {
     let audit_log = temporary.path().join("audit.jsonl");
     std::fs::write(&audit_log, []).expect("lifecycle audit log should be initialized");
 
-    let command = WorkerCommand::new("php")
-        .with_argument(repository.join("composer/tests/Sdk/Fixtures/analyzer-lifecycle-worker.php"))
-        .with_current_directory(repository)
-        .with_environment("MAGO_LIFECYCLE_AUDIT_LOG", &audit_log);
-    let pool =
-        WorkerPool::spawn(command, NonZeroUsize::new(3).expect("three is non-zero"), WorkerPoolOptions::default())
-            .expect("PHP lifecycle worker pool should start");
-    let analyzer = ExternalAnalyzer::initialize([Arc::new(pool)], PHPVersion::PHP85, &[], false)
+    let host = common::host(
+        &repository.join("composer/tests/Sdk/Fixtures/analyzer-lifecycle-worker.php"),
+        Duration::from_secs(30),
+        &[("MAGO_LIFECYCLE_AUDIT_LOG", audit_log.to_str().expect("a UTF-8 path"))],
+    );
+    let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)
         .expect("PHP lifecycle analyzer should initialize");
     let initialization_sources = analyzer
         .initialization_files()
@@ -285,7 +284,10 @@ fn external_analyzer_lifecycle_is_exact_across_workers_and_incremental_runs() {
     );
 
     let initial_audit = read_audit(&audit_log);
-    assert_eq!(initial_audit.len(), PLUGINS.len() * (7 + NODE_TARGET_COUNT + FILE_COUNT));
+    assert_eq!(
+        initial_audit.len(),
+        PLUGINS.len() * (4 + interpreters(&initial_audit) + NODE_TARGET_COUNT + FILE_COUNT)
+    );
     assert_initial_audit(&initial_audit);
 
     let (updated_database, changed_file) = make_database(Some(5), true, true, &initialization_sources);
@@ -386,13 +388,12 @@ fn orchestrator_loads_initialization_stubs_into_the_source_database() {
     std::fs::write(temporary.path().join("host.php"), "<?php\nfinal class HostClass {}\n")
         .expect("host source should be created");
 
-    let command = WorkerCommand::new("php")
-        .with_argument(repository.join("composer/tests/Sdk/Fixtures/analyzer-lifecycle-worker.php"))
-        .with_current_directory(repository)
-        .with_environment("MAGO_LIFECYCLE_AUDIT_LOG", &audit_log);
-    let pool = WorkerPool::spawn(command, NonZeroUsize::MIN, WorkerPoolOptions::default())
-        .expect("PHP lifecycle worker pool should start");
-    let analyzer = ExternalAnalyzer::initialize([Arc::new(pool)], PHPVersion::PHP85, &[], false)
+    let host = common::host(
+        &repository.join("composer/tests/Sdk/Fixtures/analyzer-lifecycle-worker.php"),
+        Duration::from_secs(30),
+        &[("MAGO_LIFECYCLE_AUDIT_LOG", audit_log.to_str().expect("a UTF-8 path"))],
+    );
+    let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)
         .expect("PHP lifecycle analyzer should initialize");
     let orchestrator = Orchestrator::new(OrchestratorConfiguration {
         php_version: PHPVersion::PHP85,
@@ -447,8 +448,6 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-require $argv[1];
-
 final class Routes implements Plugin, AfterAnalysisHook
 {
     public function __construct(
@@ -501,8 +500,6 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-require $argv[1];
-
 final class HungFilter implements Plugin, IssueFilterHook
 {
     public function getDefinition(): PluginDefinition
@@ -543,8 +540,6 @@ use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
-
-require $argv[1];
 
 final class HungFile implements Plugin, AfterFileAnalysisHook
 {
@@ -588,8 +583,6 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-require $argv[1];
-
 final class LooksUpARoute implements Plugin, AfterFileAnalysisHook
 {
     public function getDefinition(): PluginDefinition
@@ -616,17 +609,12 @@ final class LooksUpARoute implements Plugin, AfterFileAnalysisHook
 (new Worker(new Extension('acme/routes', 'Routes', '1.0.0', analyzerPlugins: [new LooksUpARoute()])))->run();
 "#;
 
-/// The plugin registry of an extension host `acme` of one worker that runs `source`, a PHP worker script written into
+/// The plugin registry of an extension host `acme` whose worker `source` registers, a PHP file written into
 /// `directory`, with `DEADLINE` as its `request-timeout-ms`.
 fn deadline_registry(source: &str, directory: &Path) -> PluginRegistry {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let host = directory.join("host.php");
-    std::fs::write(&host, source).expect("host source should be written");
-    let command = WorkerCommand::new("php").with_argument(host).with_argument(repository.join("vendor/autoload.php"));
-    let options =
-        WorkerPoolOptions { host: "acme".to_owned(), request_timeout: DEADLINE, ..WorkerPoolOptions::default() };
-    let pool = WorkerPool::spawn(command, NonZeroUsize::MIN, options).expect("PHP host pool should start");
-    let analyzer = ExternalAnalyzer::initialize([Arc::new(pool)], PHPVersion::PHP85, &[], false)
+    let file = directory.join("host.php");
+    std::fs::write(&file, source).expect("host source should be written");
+    let analyzer = ExternalAnalyzer::initialize([common::host(&file, DEADLINE, &[])], PHPVersion::PHP85, &[], false)
         .expect("PHP host analyzer should initialize");
     let mut registry = PluginRegistry::with_library_providers();
     registry.set_external_analyzer(Arc::new(ExternalAnalyzerHandle::ready(analyzer)));
@@ -674,7 +662,7 @@ fn an_after_analysis_hook_that_never_finishes_fails_at_the_deadline_naming_its_p
     assert!(elapsed > DEADLINE * 6 / 5 && elapsed < DEADLINE * 13 / 5, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
-        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the after-analysis hooks of plugin `dead-routes` (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the after-analysis hooks of plugin `dead-routes`: raise its `request-timeout-ms` for hooks that run that long"
     );
 }
 
@@ -705,7 +693,7 @@ fn an_issue_filter_that_never_finishes_fails_at_the_deadline_naming_its_file() {
     assert!(elapsed >= DEADLINE && elapsed < DEADLINE * 2, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
-        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the issue-filter hooks of src/Route.php (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the issue-filter hooks of src/Route.php: raise its `request-timeout-ms` for hooks that run that long"
     );
 }
 
@@ -737,7 +725,7 @@ fn an_after_file_hook_that_never_finishes_fails_at_the_deadline_naming_its_file(
     assert!(elapsed >= DEADLINE && elapsed < DEADLINE * 2, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
-        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the hooks of src/Route.php (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the hooks of src/Route.php: raise its `request-timeout-ms` for hooks that run that long"
     );
 }
 

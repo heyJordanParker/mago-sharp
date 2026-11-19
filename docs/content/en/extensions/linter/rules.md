@@ -53,14 +53,13 @@ For each matching node, `lint()` receives:
 | :--- | :--- |
 | `file` | Filtered immutable `SourceFile`. |
 | `node` | Current target node. |
-| `cancellation` | Cooperative cancellation token. |
 | `report(Issue)` | Adds an issue under this rule's code and level. |
 | `getParent()` | Parent node, when available. |
 | `getChildren()` | Direct children of the target. |
 | `getText()` | Exact target source text. |
 | `getResolvedName()` | Resolved name beginning at the target, when one exists. |
 
-Do not retain a `LintContext` after `lint()` returns. Retaining immutable values for a process-local cache is possible, but account for memory use and changing in-memory file contents.
+Do not retain a `LintContext` after `lint()` returns. Retaining immutable values for an interpreter-local cache is possible, but account for memory use and changing in-memory file contents.
 
 ## Complete call rule
 
@@ -153,5 +152,4 @@ Fixes should use source spans already supplied by Mago. Never search and replace
 - Use resolved names instead of reparsing namespace imports.
 - Avoid scanning `SourceFile::$contents` for every target.
 - Cache immutable package configuration on the rule object.
-- Check cancellation in long loops.
 - Do not perform blocking network I/O from a hot rule callback.

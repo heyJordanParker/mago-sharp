@@ -53,7 +53,7 @@ final class AcmePlugin implements Plugin
 
 The identifier is the stable, globally unique configuration name. Aliases provide shorter alternative names. Identifiers and aliases are compared case-insensitively and must not overlap within the plugin.
 
-`defaultEnabled` controls analyzer activation, not whether the worker process starts. Mago still starts an enabled extension host so that it can register linter rules, other plugins, or reducers.
+`defaultEnabled` controls analyzer activation, not whether the host runs. Mago still runs an enabled extension host so that it can register linter rules, other plugins, or reducers.
 
 ## Activation
 
@@ -107,18 +107,7 @@ Function, method, and class matching is ASCII case-insensitive. Property-name ma
 
 External semantic providers are optional hints. If a worker fails, times out, disconnects, or returns an invalid provider response, Mago logs the failure and falls back to native behavior instead of invalidating the current file's analysis.
 
-Lifecycle hooks have broader side effects. Registration, initialization, scan, and lifecycle callback failures propagate as analysis-operation errors rather than being converted into ordinary analyzer issues. Extensions should use the cancellation token in expensive loops and avoid blocking work in hot provider callbacks.
-
-## Provider memoization
-
-Call `$registry->enableProviderMemoization()` only when every registered function and method return-type provider is deterministic and independent of:
-
-- source locations;
-- invocation order;
-- mutable external state;
-- process-local state that changes during the analysis generation.
-
-Memoization includes effective callable signatures supplied by those providers. Incorrectly enabling it can reuse semantically wrong answers, so it is an opt-in contract rather than an automatic optimization.
+Lifecycle hooks have broader side effects. Registration, initialization, scan, and lifecycle callback failures propagate as analysis-operation errors rather than being converted into ordinary analyzer issues. Extensions should avoid blocking work in hot provider callbacks.
 
 ## Next steps
 

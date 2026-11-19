@@ -1,9 +1,9 @@
 #![allow(clippy::expect_used, clippy::missing_panics_doc)]
 
 use std::borrow::Cow;
-use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
@@ -12,9 +12,6 @@ use mago_analyzer::settings::Settings;
 use mago_database::Database;
 use mago_database::file::File;
 use mago_database::file::FileType;
-use mago_extension::WorkerCommand;
-use mago_extension::WorkerPool;
-use mago_extension::WorkerPoolOptions;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_php_version::PHPVersion;
 use mago_syntax::settings::ParserSettings;
@@ -136,11 +133,12 @@ fn service(
         return Ok(None);
     }
 
-    let command = WorkerCommand::new("php")
-        .with_argument(repository.join("composer/tests/Sdk/Fixtures/analyzer-entry-point-worker.php"))
-        .with_current_directory(repository);
-    let pool = WorkerPool::spawn(command, NonZeroUsize::MIN, WorkerPoolOptions::default())?;
-    let external = ExternalAnalyzer::initialize([Arc::new(pool)], PHPVersion::PHP85, &[], false)?;
+    let host = common::host(
+        &repository.join("composer/tests/Sdk/Fixtures/analyzer-entry-point-worker.php"),
+        Duration::from_secs(30),
+        &[],
+    );
+    let external = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)?;
     let mut registry = PluginRegistry::with_library_providers();
     registry.set_external_analyzer(Arc::new(ExternalAnalyzerHandle::ready(external)));
 

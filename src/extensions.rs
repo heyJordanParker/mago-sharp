@@ -1,65 +1,64 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
+use std::sync::Weak;
 use std::time::Instant;
 
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerError;
 use mago_analyzer::external::ExternalAnalyzerHandle;
-use mago_extension::WorkerPool;
+use mago_extension::Host;
+use mago_extension::Hosts;
+use mago_extension::WorkerError;
 use mago_linter::external::ExternalLintError;
 use mago_linter::external::ExternalLinter;
 use mago_php_version::PHPVersion;
 
 use crate::config::extension::ExtensionHostConfiguration;
 
+/// The hosts this process runs for one configuration, while a linter or an analyzer holds them.
+type Running = Option<(BTreeMap<String, ExtensionHostConfiguration>, Weak<Hosts>)>;
+
+/// Each enabled host of `extension_hosts`, or none when no host is enabled. A linter and an analyzer of one
+/// configuration share its hosts, since each thread runs one interpreter, so the hosts start once while either holds
+/// them, and stop, running their worker reducers, once neither does.
+fn hosts(extension_hosts: &BTreeMap<String, ExtensionHostConfiguration>) -> Result<Option<Vec<Host>>, WorkerError> {
+    static RUNNING: Mutex<Running> = Mutex::new(None);
+
+    let enabled: Vec<_> = extension_hosts.iter().filter(|(_, host)| host.enabled).collect();
+    let Some((_, first)) = enabled.first() else {
+        return Ok(None);
+    };
+
+    let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((configuration, hosts)) = running.as_ref()
+        && configuration == extension_hosts
+        && let Some(hosts) = hosts.upgrade()
+    {
+        return Ok(Some(hosts.hosts()));
+    }
+
+    let cache = mago_sharp_lean::cache_root().map_err(WorkerError::Sdk)?.join("sdk");
+    let files = enabled.iter().map(|(name, host)| host.host_file(name)).collect();
+    let hosts = Hosts::new(files, first.directory().to_path_buf(), &cache)?;
+    *running = Some((extension_hosts.clone(), Arc::downgrade(&hosts)));
+
+    Ok(Some(hosts.hosts()))
+}
+
 /// Starts every enabled extension host and validates its linter registration.
 pub(crate) fn initialize_external_linter(
     extension_hosts: &BTreeMap<String, ExtensionHostConfiguration>,
     php_version: PHPVersion,
-    mago_threads: usize,
 ) -> Result<Option<ExternalLinter>, ExternalLintError> {
     let trace_start = tracing::enabled!(tracing::Level::TRACE).then(Instant::now);
-    tracing::trace!(
-        configured_hosts = extension_hosts.len(),
-        enabled_hosts = extension_hosts.values().filter(|host| host.enabled).count(),
-        mago_threads,
-        php_version = %php_version,
-        "Initializing external linter hosts."
-    );
-
-    let pools = extension_hosts
-        .iter()
-        .filter(|(_, host)| host.enabled)
-        .map(|(name, host)| {
-            let host_start = tracing::enabled!(tracing::Level::TRACE).then(Instant::now);
-            let command = host.worker_command().ok_or_else(|| {
-                ExternalLintError::Protocol(format!("enabled extension host `{name}` has no command"))
-            })?;
-
-            let size = host.worker_count(mago_threads);
-            let options = host.worker_pool_options(name);
-            tracing::trace!(
-                host = %name,
-                command = ?command,
-                workers = size.get(),
-                "Starting external linter host."
-            );
-
-            let pool = WorkerPool::spawn(command, size, options).map(Arc::new).map_err(ExternalLintError::from)?;
-            if let Some(start) = host_start {
-                tracing::trace!(host = %name, workers = pool.len(), elapsed = ?start.elapsed(), "External linter host started.");
-            }
-
-            Ok::<Arc<WorkerPool>, ExternalLintError>(pool)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    if pools.is_empty() {
+    let Some(hosts) = hosts(extension_hosts)? else {
         tracing::trace!("No external linter hosts are enabled.");
         return Ok(None);
-    }
+    };
 
-    let linter = ExternalLinter::initialize(pools, php_version)?;
+    let linter = ExternalLinter::initialize(hosts, php_version)?;
     if let Some(start) = trace_start {
         tracing::trace!(
             extensions = linter.extensions().len(),
@@ -76,54 +75,16 @@ pub(crate) fn initialize_external_linter(
 pub(crate) fn initialize_external_analyzer(
     extension_hosts: &BTreeMap<String, ExtensionHostConfiguration>,
     php_version: PHPVersion,
-    mago_threads: usize,
     enabled_plugins: &[String],
     disable_defaults: bool,
 ) -> Result<Option<ExternalAnalyzer>, ExternalAnalyzerError> {
     let trace_start = tracing::enabled!(tracing::Level::TRACE).then(Instant::now);
-    tracing::trace!(
-        configured_hosts = extension_hosts.len(),
-        enabled_hosts = extension_hosts.values().filter(|host| host.enabled).count(),
-        mago_threads,
-        php_version = %php_version,
-        explicitly_enabled_plugins = enabled_plugins.len(),
-        disable_defaults,
-        "Initializing external analyzer hosts."
-    );
-
-    let pools = extension_hosts
-        .iter()
-        .filter(|(_, host)| host.enabled)
-        .map(|(name, host)| {
-            let host_start = tracing::enabled!(tracing::Level::TRACE).then(Instant::now);
-            let command = host.worker_command().ok_or_else(|| {
-                ExternalAnalyzerError::protocol(format!("enabled extension host `{name}` has no command"))
-            })?;
-
-            let size = host.worker_count(mago_threads);
-            let options = host.worker_pool_options(name);
-            tracing::trace!(
-                host = %name,
-                command = ?command,
-                workers = size.get(),
-                "Starting external analyzer host."
-            );
-
-            let pool = WorkerPool::spawn(command, size, options).map(Arc::new).map_err(ExternalAnalyzerError::from)?;
-            if let Some(start) = host_start {
-                tracing::trace!(host = %name, workers = pool.len(), elapsed = ?start.elapsed(), "External analyzer host started.");
-            }
-
-            Ok::<Arc<WorkerPool>, ExternalAnalyzerError>(pool)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    if pools.is_empty() {
+    let Some(hosts) = hosts(extension_hosts)? else {
         tracing::trace!("No external analyzer hosts are enabled.");
         return Ok(None);
-    }
+    };
 
-    let analyzer = ExternalAnalyzer::initialize(pools, php_version, enabled_plugins, disable_defaults)?;
+    let analyzer = ExternalAnalyzer::initialize(hosts, php_version, enabled_plugins, disable_defaults)?;
     if let Some(start) = trace_start {
         tracing::trace!(
             extensions = analyzer.extensions().len(),
@@ -140,7 +101,6 @@ pub(crate) fn initialize_external_analyzer(
 pub(crate) fn start_external_analyzer(
     extension_hosts: &BTreeMap<String, ExtensionHostConfiguration>,
     php_version: PHPVersion,
-    mago_threads: usize,
     enabled_plugins: &[String],
     disable_defaults: bool,
 ) -> Option<Arc<ExternalAnalyzerHandle>> {
@@ -161,14 +121,9 @@ pub(crate) fn start_external_analyzer(
         .spawn(move || {
             let start = tracing::enabled!(tracing::Level::TRACE).then(Instant::now);
             tracing::trace!("External analyzer initialization thread started.");
-            let analyzer = initialize_external_analyzer(
-                &extension_hosts,
-                php_version,
-                mago_threads,
-                &enabled_plugins,
-                disable_defaults,
-            )?
-            .ok_or_else(|| ExternalAnalyzerError::protocol("external analyzer has no enabled hosts"));
+            let analyzer =
+                initialize_external_analyzer(&extension_hosts, php_version, &enabled_plugins, disable_defaults)?
+                    .ok_or_else(|| ExternalAnalyzerError::protocol("external analyzer has no enabled hosts"));
             if let Some(start) = start {
                 tracing::trace!(elapsed = ?start.elapsed(), success = analyzer.is_ok(), "External analyzer initialization thread finished.");
             }

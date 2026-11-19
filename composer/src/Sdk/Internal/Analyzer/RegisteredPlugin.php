@@ -87,7 +87,6 @@ final class RegisteredPlugin
         public readonly array $classLikeAnalysisHooks,
         public readonly array $classLikeAnalysisHooksByIndex,
         public readonly array $afterAnalysisHooks,
-        public readonly bool $memoizeProviders,
         public readonly array $callForwardingProviders,
     ) {}
 }

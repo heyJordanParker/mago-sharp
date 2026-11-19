@@ -14,7 +14,7 @@ An extension may contribute:
 
 - **Linter rules** that inspect selected concrete-syntax-tree nodes and report issues or suggested edits.
 - **Analyzer plugins** that provide types, callable signatures, flow assertions, framework entry points, initialization knowledge, codebase scans, and analysis hooks.
-- **Worker reduction** that merges process-local data after Mago finishes using a worker pool.
+- **Worker reduction** that merges interpreter-local data once Mago stops the hosts.
 
 The formatter and guard do not currently expose extension APIs.
 
@@ -32,13 +32,13 @@ Fix generally applicable PHP behavior in Mago itself. Use an extension for behav
 
 ## Execution and trust
 
-Extension workers are external processes, not sandboxed scripts. They run with the operating-system permissions, working directory, and environment configured for their host. Install and enable only extensions you trust.
+Extension workers run inside Mago, not in a sandbox. They run with the operating-system permissions of the Mago process, in the configuration file's directory, with the environment configured for their host. Install and enable only extensions you trust.
 
-Mago communicates with workers through a framed binary protocol. That protocol is the extension ABI: another language can provide its own SDK or worker implementation as long as it follows the same registration, capability, framing, cancellation, and lifecycle contracts.
+Mago runs every worker on the PHP# engine linked into the `mago` binary, and exchanges binary messages with it. The `mago` binary carries its own copy of the PHP SDK, which it loads before any host, so a worker always speaks the protocol of the `mago` that runs it.
 
-PHP extension authors should use the bundled SDK, which handles registration, source snapshots, analyzer metadata requests, cancellation, and responses.
+PHP extension authors should use the bundled SDK, which handles registration, source snapshots, analyzer metadata requests, and responses.
 
-One configured extension host owns a pool of identical processes. Each worker may expose one or more logical extensions. Mago uses multiple processes for CPU parallelism, and each process serves one request at a time. The PHP SDK represents these concepts with `Worker` and `Extension`.
+Each analysis thread runs one interpreter, which runs every configured extension host's file. Each worker may expose one or more logical extensions. The interpreters give Mago its parallelism, and each serves one request at a time. The PHP SDK represents these concepts with `Worker` and `Extension`.
 
 ## Where to begin
 

@@ -262,18 +262,16 @@ impl PluginRegistry {
             .map_err(PluginError::from)
     }
 
-    /// Starts again each external worker whose class loads hold one of `classes`, each a lowercase class name, so it
-    /// loads the class as it is now, and returns how many it started again.
+    /// Takes in that the compiled files of `classes`, each a lowercase class name, changed: each extension host's
+    /// interpreter that loaded one starts again before its next request, so it loads the class as it is now.
     ///
     /// # Errors
     ///
-    /// Returns an error when a worker cannot answer or cannot be started again.
-    pub fn reload_external_workers_holding(&self, classes: &[&[u8]]) -> PluginResult<usize> {
+    /// Returns an error when the external analyzer failed to start.
+    pub fn reload_external_workers_holding(&self, classes: &[&[u8]]) -> PluginResult<()> {
         self.external_analyzer
             .as_deref()
-            .map(|analyzer| analyzer.with(|analyzer| analyzer.reload_workers_holding(classes)))
-            .transpose()
-            .map(Option::unwrap_or_default)
+            .map_or(Ok(()), |analyzer| analyzer.read(|analyzer| analyzer.reload_workers_holding(classes)))
             .map_err(PluginError::from)
     }
 

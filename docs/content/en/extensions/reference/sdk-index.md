@@ -14,10 +14,9 @@ This page indexes the public extension authoring API. Public symbols live under 
 | Type | Purpose |
 | :--- | :--- |
 | `Extension` | Declares one logical extension's rules, plugins, version, and optional reducer |
-| `Worker` | Hosts one or more extensions in one command-scoped worker process |
-| `WorkerReducer` | Exports and merges process-local state at pool shutdown |
-| `WorkerReductionContext` | Ordered worker payloads and cancellation for the surviving reducer |
-| `CancellationTokenInterface` | Cooperative request cancellation |
+| `Worker` | Hosts one or more extensions in each interpreter Mago runs |
+| `WorkerReducer` | Exports and merges interpreter-local state when Mago stops the hosts |
+| `WorkerReductionContext` | Ordered interpreter payloads for the reducing interpreter |
 | `PHPVersion` | Mago's configured target language version |
 | `Span` | Half-open byte range within a source file |
 | `SourceLocation` | Logical filename plus span |
@@ -26,7 +25,7 @@ See [Extensions and workers](/extensions/sdk/extensions-and-workers/) and [Worke
 
 ## Exceptions
 
-`SdkException` is the common marker. `InvalidArgumentException` reports invalid public DTO construction, `ProtocolException` reports a worker/protocol contract failure, and `CancelledException` terminates cancelled callback work.
+`SdkException` is the common marker. `InvalidArgumentException` reports invalid public DTO construction, and `ProtocolException` reports a worker/protocol contract failure.
 
 ## Syntax
 
@@ -61,7 +60,7 @@ See [Reporting issues and suggested edits](/extensions/sdk/reporting/).
 | :--- | :--- |
 | `Linter\Rule` | Custom linter rule contract |
 | `Linter\RuleDefinition` | Code, name, description, level, activation, and syntax targets |
-| `Linter\LintContext` | Current source, target node, traversal, names, cancellation, and reporting |
+| `Linter\LintContext` | Current source, target node, traversal, names, and reporting |
 
 See [Writing linter rules](/extensions/linter/rules/).
 
@@ -71,7 +70,7 @@ See [Writing linter rules](/extensions/linter/rules/).
 | :--- | :--- |
 | `Analyzer\Plugin` | Analyzer plugin contract |
 | `Analyzer\PluginDefinition` | Identifier, aliases, description, and default activation |
-| `Analyzer\PluginRegistry` | Registers every provider, hook, entry point, filter, and memoization policy |
+| `Analyzer\PluginRegistry` | Registers every provider, hook, entry point, and filter |
 | `Analyzer\TargetedProvider` | Common non-empty target-list contract |
 | `Analyzer\TargetedAnalysisHook` | Common targets, requirements, and post-analysis node callback |
 
@@ -81,13 +80,13 @@ See [Analyzer plugins](/extensions/analyzer/overview/).
 
 | Hook | Context and data |
 | :--- | :--- |
-| `InitializationHook` | `InitializationContext`: PHP version, cancellation, in-memory stubs |
+| `InitializationHook` | `InitializationContext`: PHP version, in-memory stubs |
 | `CodebaseScanHook` | `CodebaseScanContext`: deterministic batches of `CodebaseScanFile`, the scanned declarations of selected host files |
 | `BeforeAnalysisHook` | `BeforeAnalysisContext`: frozen codebase and project-wide reference registry |
 | `AfterFileAnalysisHook` | `AfterFileAnalysisContext`: completed `FileAnalysis` and file references |
 | `AfterAnalysisHook` | `AfterAnalysisContext`: merged `ProjectAnalysis` and final reference graph |
 
-`LifecycleContext` supplies PHP version, `Codebase`, `TypeComparator`, cancellation, and analyzer issue reporting. `FileAnalysisRequirement::ExpressionTypes` configures plain after-file hooks; the remaining cases configure targeted hooks.
+`LifecycleContext` supplies PHP version, `Codebase`, `TypeComparator`, and analyzer issue reporting. `FileAnalysisRequirement::ExpressionTypes` configures plain after-file hooks; the remaining cases configure targeted hooks.
 
 See [Lifecycle hooks](/extensions/analyzer/lifecycle-hooks/).
 

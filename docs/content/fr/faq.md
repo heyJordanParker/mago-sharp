@@ -28,7 +28,7 @@ Non. mago-sharp ne fournit aucune extension propre à un éditeur.
 
 ## mago-sharp prend-il en charge des plugins d'analyseur ?
 
-Oui, par des extensions. Une extension est un programme externe que mago-sharp lance depuis `[extension-hosts]` dans `mago.toml` et avec lequel il communique par un protocole binaire de workers. Elle peut ajouter des règles au linter et des plugins à l'analyseur. Le formateur et le guard n'ont pas d'API d'extension. mago-sharp fournit un SDK PHP pour écrire des extensions : l'espace de noms `Mago\Sdk` du paquet Composer `heyjordanparker/mago-sharp`. La page [Extensions](/extensions/overview/) décrit le protocole, le SDK et un exemple complet.
+Oui, par des extensions. Une extension est un fichier PHP que `[extension-hosts]` nomme dans `mago.toml`, et que mago-sharp exécute en lui-même, sur le moteur PHP# lié à son binaire, si bien qu'aucun `php` n'a besoin d'être installé. Elle peut ajouter des règles au linter et des plugins à l'analyseur. Le formateur et le guard n'ont pas d'API d'extension. mago-sharp fournit un SDK PHP pour écrire des extensions : l'espace de noms `Mago\Sdk` du paquet Composer `heyjordanparker/mago-sharp`. La page [Extensions](/extensions/overview/) décrit les hôtes, le SDK et un exemple complet.
 
 ## Quels outils mago-sharp inclut-il ?
 

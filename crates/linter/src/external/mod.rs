@@ -1,9 +1,9 @@
 //! Worker-backed custom linter rules.
 //!
-//! A pool is queried once for immutable rule metadata. Linting then sends one
+//! A host is queried once for immutable rule metadata. Linting then sends one
 //! coarse-grained request per file and extension, containing source text, a
 //! stable flat syntax tree, comments, and resolved names. Node callbacks are
-//! dispatched inside the worker rather than crossing IPC one node at a time.
+//! dispatched inside the worker rather than crossing into PHP one node at a time.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -13,8 +13,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use mago_database::file::File;
+use mago_extension::Host;
 use mago_extension::WorkerError;
-use mago_extension::WorkerPool;
 use mago_names::ResolvedNames;
 use mago_php_version::PHPVersion;
 use mago_reporting::IssueCollection;
@@ -74,7 +74,7 @@ pub struct ExternalRule {
     pub targets: Vec<NodeKind>,
 }
 
-/// Metadata advertised by one extension worker pool.
+/// Metadata advertised by one extension host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalExtension {
     pub identifier: String,
@@ -84,18 +84,18 @@ pub struct ExternalExtension {
 }
 
 pub(crate) trait LinterTransport: std::fmt::Debug + Send + Sync {
-    fn broadcast(&self, payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError>;
+    fn broadcast(&self, payload: &[u8]) -> Result<Vec<u8>, WorkerError>;
     /// Sends one lint request, named by `running` for its deadline's error.
     fn request(&self, payload: Vec<u8>, running: &dyn std::fmt::Display) -> Result<Vec<u8>, WorkerError>;
 }
 
-impl LinterTransport for WorkerPool {
-    fn broadcast(&self, payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
+impl LinterTransport for Host {
+    fn broadcast(&self, payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
         Self::broadcast(self, payload)
     }
 
     fn request(&self, payload: Vec<u8>, running: &dyn std::fmt::Display) -> Result<Vec<u8>, WorkerError> {
-        Self::request(self, payload, Some(running))
+        Self::request(self, payload, Some(running), &mut |_: &[u8]| Err(b"a linter rule queries no codebase".to_vec()))
     }
 }
 
@@ -130,9 +130,9 @@ impl ActiveRulePlan {
     }
 }
 
-/// A set of custom linter rules backed by one or more extension worker pools.
+/// A set of custom linter rules backed by one or more extension hosts.
 #[derive(Debug)]
-pub struct ExternalLinter<T = WorkerPool> {
+pub struct ExternalLinter<T = Host> {
     backends: Box<[Backend<T>]>,
     extensions: Box<[ExternalExtension]>,
     trace_enabled: bool,
@@ -140,21 +140,18 @@ pub struct ExternalLinter<T = WorkerPool> {
     started_at: Option<Instant>,
 }
 
-impl ExternalLinter<WorkerPool> {
-    /// Discovers and validates the rules exposed by each worker pool.
-    ///
-    /// Every process in a pool must advertise equivalent metadata. Extension
-    /// identifiers and rule codes must also be unique across pools.
+impl ExternalLinter<Host> {
+    /// Discovers and validates the rules each extension host exposes. Extension identifiers and rule codes must be
+    /// unique across hosts.
     ///
     /// # Errors
     ///
-    /// Returns an error if a worker fails, sends malformed metadata, disagrees
-    /// with its peers, or conflicts with another extension.
+    /// Returns an error if a worker fails, sends malformed metadata, or conflicts with another extension.
     pub fn initialize(
-        pools: impl IntoIterator<Item = Arc<WorkerPool>>,
+        hosts: impl IntoIterator<Item = Host>,
         php_version: PHPVersion,
     ) -> Result<Self, ExternalLintError> {
-        let linter = Self::initialize_transports(pools, php_version)?;
+        let linter = Self::initialize_transports(hosts.into_iter().map(Arc::new), php_version)?;
         for backend in &linter.backends {
             if backend.registration.has_worker_reducer {
                 backend.transport.enable_worker_reduction();
@@ -350,18 +347,8 @@ impl<T> ExternalLinter<T> {
                 request_bytes = describe.len(),
                 "Describing external linter backend."
             );
-            let responses = transport.broadcast(&describe)?;
-            let response_bytes = responses.iter().map(Vec::len).sum::<usize>();
-            let mut decoded = responses.iter().map(|response| protocol::decode_registration(response));
-            let Some(first) = decoded.next() else {
-                return Err(ExternalLintError::Protocol("worker pool returned no registration responses".to_string()));
-            };
-            let registration = first?;
-            for response in decoded {
-                if response? != registration {
-                    return Err(ExternalLintError::InconsistentRegistration);
-                }
-            }
+            let response = transport.broadcast(&describe)?;
+            let registration = protocol::decode_registration(&response)?;
 
             for extension in &registration.extensions {
                 if !extension_identifiers.insert(extension.identifier.to_ascii_lowercase()) {
@@ -379,8 +366,7 @@ impl<T> ExternalLinter<T> {
             if let Some(start) = backend_start {
                 tracing::trace!(
                     backend = backend_index,
-                    workers = responses.len(),
-                    response_bytes,
+                    response_bytes = response.len(),
                     extensions = registration.extensions.len(),
                     rules = registration.rules.len(),
                     elapsed = ?start.elapsed(),
@@ -496,12 +482,11 @@ mod tests {
         registration: Vec<u8>,
         response: Vec<u8>,
         request: Mutex<Option<testing::DecodedRequest>>,
-        workers: usize,
     }
 
     impl LinterTransport for MockTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, mago_extension::WorkerError> {
-            Ok(vec![self.registration.clone(); self.workers])
+        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, mago_extension::WorkerError> {
+            Ok(self.registration.clone())
         }
 
         fn request(
@@ -521,13 +506,13 @@ mod tests {
     }
 
     impl LinterTransport for NamingTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, mago_extension::WorkerError> {
-            Ok(vec![testing::describe_response(
+        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, mago_extension::WorkerError> {
+            Ok(testing::describe_response(
                 "acme/tools",
                 "Acme Tools",
                 "1.0.0",
                 &[("acme/no-run", "No run", "Disallows this call.", Level::Warning, true, &[NodeKind::FunctionCall])],
-            )])
+            ))
         }
 
         fn request(
@@ -586,7 +571,6 @@ mod tests {
             ),
             response: testing::lint_response(&[(0, issue)]),
             request: Mutex::new(None),
-            workers: 3,
         });
         let external = ExternalLinter::initialize_transports([Arc::clone(&transport)], PHPVersion::PHP85)
             .expect("registration should succeed");
@@ -632,7 +616,6 @@ mod tests {
             ),
             response: testing::lint_response(&[]),
             request: Mutex::new(None),
-            workers: 1,
         });
         let external = ExternalLinter::initialize_transports([Arc::clone(&transport)], PHPVersion::PHP85)
             .expect("registration should succeed");
@@ -659,7 +642,6 @@ mod tests {
             ),
             response: testing::lint_response(&[]),
             request: Mutex::new(None),
-            workers: 1,
         });
         let external = ExternalLinter::initialize_transports([Arc::clone(&transport)], PHPVersion::PHP85)
             .expect("registration should succeed");
@@ -689,7 +671,6 @@ mod tests {
             ),
             response: testing::lint_response(&[]),
             request: Mutex::new(None),
-            workers: 1,
         });
         let external = ExternalLinter::initialize_transports([Arc::clone(&transport)], PHPVersion::PHP85)
             .expect("registration should succeed");
@@ -739,7 +720,6 @@ mod tests {
             ),
             response: testing::lint_response(&[(0, issue)]),
             request: Mutex::new(None),
-            workers: 1,
         });
         let external =
             ExternalLinter::initialize_transports([transport], PHPVersion::PHP85).expect("registration should succeed");
@@ -755,44 +735,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_inconsistent_pool_registrations() {
-        #[derive(Debug)]
-        struct InconsistentTransport;
-
-        impl LinterTransport for InconsistentTransport {
-            fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, mago_extension::WorkerError> {
-                Ok(vec![
-                    testing::describe_response("acme/a", "A", "1", &[]),
-                    testing::describe_response("acme/b", "B", "1", &[]),
-                ])
-            }
-
-            fn request(
-                &self,
-                _payload: Vec<u8>,
-                _running: &dyn std::fmt::Display,
-            ) -> Result<Vec<u8>, mago_extension::WorkerError> {
-                unreachable!()
-            }
-        }
-
-        let result = ExternalLinter::initialize_transports([Arc::new(InconsistentTransport)], PHPVersion::PHP85);
-        assert!(matches!(result, Err(ExternalLintError::InconsistentRegistration)));
-    }
-
-    #[test]
     fn rejects_case_insensitive_duplicate_extension_identifiers() {
         let first = Arc::new(MockTransport {
             registration: testing::describe_response("Acme/Tools", "Acme", "1", &[]),
             response: testing::lint_response(&[]),
             request: Mutex::new(None),
-            workers: 1,
         });
         let second = Arc::new(MockTransport {
             registration: testing::describe_response("acme/tools", "Acme", "2", &[]),
             response: testing::lint_response(&[]),
             request: Mutex::new(None),
-            workers: 1,
         });
 
         let result = ExternalLinter::initialize_transports([first, second], PHPVersion::PHP85);
@@ -818,7 +770,6 @@ mod tests {
             ),
             response: testing::lint_response(&[]),
             request: Mutex::new(None),
-            workers: 1,
         });
 
         let result = ExternalLinter::initialize_transports([transport], PHPVersion::PHP85);
@@ -827,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn registers_multiple_extensions_from_one_worker_pool() {
+    fn registers_multiple_extensions_from_one_host() {
         let function_targets = [NodeKind::FunctionCall];
         let interface_targets = [NodeKind::Interface];
         let iteration_rules = [(
@@ -853,7 +804,6 @@ mod tests {
             ]),
             response: testing::lint_response(&[]),
             request: Mutex::new(None),
-            workers: 2,
         });
 
         let external =

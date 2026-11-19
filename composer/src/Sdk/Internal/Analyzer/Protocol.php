@@ -43,7 +43,6 @@ use Mago\Sdk\Analyzer\Type\Variance;
 use Mago\Sdk\Analyzer\TypeComparison;
 use Mago\Sdk\Analyzer\UndeclaredReturnTypeProvider;
 use Mago\Sdk\Analyzer\VariableDefinedness;
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\Exception\ProtocolException;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Internal\ClassLoads;
@@ -181,7 +180,6 @@ final class Protocol
     private const METHOD_SEARCH_EXACT_CLASS = 1;
     private const METHOD_SEARCH_DESCENDANTS = 2;
     private const REGISTRATION_CAPABILITIES = 1;
-    private const REGISTRATION_MEMOIZATION = 2;
 
     /** @return array{int<0, 65535>, PayloadReader} */
     public static function readRequest(string $payload): array
@@ -296,18 +294,8 @@ final class Protocol
                     $writer->writeString($alias);
                 }
 
-                self::writeTargetRegistrations(
-                    $writer,
-                    $plugin->functionProviders,
-                    self::REGISTRATION_CAPABILITIES,
-                    $plugin->memoizeProviders,
-                );
-                self::writeTargetRegistrations(
-                    $writer,
-                    $plugin->methodProviders,
-                    self::REGISTRATION_CAPABILITIES,
-                    $plugin->memoizeProviders,
-                );
+                self::writeTargetRegistrations($writer, $plugin->functionProviders, self::REGISTRATION_CAPABILITIES);
+                self::writeTargetRegistrations($writer, $plugin->methodProviders, self::REGISTRATION_CAPABILITIES);
                 self::writeTargetRegistrations($writer, $plugin->propertyProviders);
                 self::writeTargetRegistrations($writer, $plugin->propertyInitializationProviders);
                 self::writeTargetRegistrations($writer, $plugin->classInitializerProviders);
@@ -336,18 +324,8 @@ final class Protocol
                 self::writeTargetRegistrations($writer, $plugin->nodeAnalysisHooks);
                 self::writeTargetRegistrations($writer, $plugin->methodCallAnalysisHooks);
                 self::writeTargetRegistrations($writer, $plugin->classLikeAnalysisHooks);
-                self::writeTargetRegistrations(
-                    $writer,
-                    $plugin->functionAssertionProviders,
-                    self::REGISTRATION_MEMOIZATION,
-                    $plugin->memoizeProviders,
-                );
-                self::writeTargetRegistrations(
-                    $writer,
-                    $plugin->methodAssertionProviders,
-                    self::REGISTRATION_MEMOIZATION,
-                    $plugin->memoizeProviders,
-                );
+                self::writeTargetRegistrations($writer, $plugin->functionAssertionProviders);
+                self::writeTargetRegistrations($writer, $plugin->methodAssertionProviders);
                 self::writeTargetRegistrations($writer, $plugin->codebaseScanHooks);
                 self::writeTargetRegistrations($writer, $plugin->callForwardingProviders);
             }
@@ -359,16 +337,12 @@ final class Protocol
     /**
      * @param list<RegisteredTargetedCallback> $registrations
      */
-    private static function writeTargetRegistrations(
-        PayloadWriter $writer,
-        array $registrations,
-        int $header = 0,
-        bool $memoize = false,
-    ): void {
+    private static function writeTargetRegistrations(PayloadWriter $writer, array $registrations, int $header = 0): void
+    {
         $writer->writeCount($registrations);
         foreach ($registrations as $registration) {
             $writer->writeU16($registration->index);
-            self::writeRegistrationHeader($writer, $registration, $header, $memoize);
+            self::writeRegistrationHeader($writer, $registration, $header);
 
             /** @var non-empty-list<FunctionTarget|MethodTarget|PropertyTarget|ClassTarget|NodeKind|ClassLikeTarget|non-empty-string> $targets */
             $targets = $registration->targets;
@@ -383,7 +357,6 @@ final class Protocol
         PayloadWriter $writer,
         RegisteredTargetedCallback $registration,
         int $header,
-        bool $memoize,
     ): void {
         if ($registration->callback instanceof TargetedAnalysisHook) {
             $writer->writeU8(self::requirements($registration->requirements));
@@ -395,15 +368,8 @@ final class Protocol
             $writer->writeU8(
                 (int) ($registration->callback instanceof CallableSignatureProvider)
                 | ((int) ($registration->callback instanceof CallableSignatureOverride) << 1)
-                | ((int) ($registration->callback instanceof UndeclaredReturnTypeProvider) << 2)
-                | ((int) $memoize << 3),
+                | ((int) ($registration->callback instanceof UndeclaredReturnTypeProvider) << 2),
             );
-
-            return;
-        }
-
-        if ($header === self::REGISTRATION_MEMOIZATION) {
-            $writer->writeBoolean($memoize);
         }
     }
 
@@ -794,15 +760,12 @@ final class Protocol
     }
 
     /**
-     * @param positive-int $requestId
      * @param list<NodeKind> $nodeKinds
      */
     public static function readLifecycleRequest(
         int $kind,
         PayloadReader $reader,
         HostClient $host,
-        int $requestId,
-        CancellationTokenInterface $cancellation,
         PHPVersion $phpVersion,
         array $nodeKinds,
     ): LifecycleRequest {
@@ -821,27 +784,21 @@ final class Protocol
             self::AFTER_FILE_ANALYSIS_REQUEST => self::readFileAnalysis(
                 $reader,
                 $host,
-                $requestId,
                 $generation,
-                $cancellation,
                 $phpVersion,
                 $nodeKinds,
             ),
             self::AFTER_FILE_ANALYSIS_BATCH_REQUEST => self::readFileAnalysisBatch(
                 $reader,
                 $host,
-                $requestId,
                 $generation,
-                $cancellation,
                 $phpVersion,
                 $nodeKinds,
             ),
             self::AFTER_ANALYSIS_REQUEST => self::readProjectAnalysis(
                 $reader,
                 $host,
-                $requestId,
                 $generation,
-                $cancellation,
                 $phpVersion,
                 $nodeKinds,
             ),
@@ -873,15 +830,12 @@ final class Protocol
     }
 
     /**
-     * @param positive-int $requestId
      * @param list<NodeKind> $nodeKinds
      */
     private static function readProjectAnalysis(
         PayloadReader $reader,
         HostClient $host,
-        int $requestId,
         int $generation,
-        CancellationTokenInterface $cancellation,
         PHPVersion $phpVersion,
         array $nodeKinds,
     ): ProjectAnalysis {
@@ -890,22 +844,10 @@ final class Protocol
         $fileCount = $reader->readCount(1_000_000);
         $files = [];
         for ($index = 0; $index < $fileCount; ++$index) {
-            $files[] = self::readFileAnalysis(
-                $reader,
-                $host,
-                $requestId,
-                $generation,
-                $cancellation,
-                $phpVersion,
-                $nodeKinds,
-            );
+            $files[] = self::readFileAnalysis($reader, $host, $generation, $phpVersion, $nodeKinds);
         }
 
-        return new ProjectAnalysis(
-            $files,
-            $issueCount,
-            new SymbolReferences($host, $requestId, $generation, $cancellation, $summary),
-        );
+        return new ProjectAnalysis($files, $issueCount, new SymbolReferences($host, $generation, $summary));
     }
 
     /**
@@ -1071,15 +1013,12 @@ final class Protocol
     }
 
     /**
-     * @param positive-int $requestId
      * @param list<NodeKind> $nodeKinds
      */
     private static function readFileAnalysis(
         PayloadReader $reader,
         HostClient $host,
-        int $requestId,
         int $generation,
-        CancellationTokenInterface $cancellation,
         PHPVersion $phpVersion,
         array $nodeKinds,
     ): FileAnalysis {
@@ -1175,9 +1114,7 @@ final class Protocol
 
         return new FileAnalysis(
             $host,
-            $requestId,
             $generation,
-            $cancellation,
             $phpVersion,
             $nodeKinds,
             $sourceFile,
@@ -1196,7 +1133,6 @@ final class Protocol
     }
 
     /**
-     * @param positive-int $requestId
      * @param list<NodeKind> $nodeKinds
      *
      * @return non-empty-list<FileAnalysis>
@@ -1204,9 +1140,7 @@ final class Protocol
     private static function readFileAnalysisBatch(
         PayloadReader $reader,
         HostClient $host,
-        int $requestId,
         int $generation,
-        CancellationTokenInterface $cancellation,
         PHPVersion $phpVersion,
         array $nodeKinds,
     ): array {
@@ -1217,15 +1151,7 @@ final class Protocol
 
         $files = [];
         for ($index = 0; $index < $count; ++$index) {
-            $files[] = self::readFileAnalysis(
-                $reader,
-                $host,
-                $requestId,
-                $generation,
-                $cancellation,
-                $phpVersion,
-                $nodeKinds,
-            );
+            $files[] = self::readFileAnalysis($reader, $host, $generation, $phpVersion, $nodeKinds);
         }
 
         return $files;

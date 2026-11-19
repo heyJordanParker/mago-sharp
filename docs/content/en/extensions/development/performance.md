@@ -86,29 +86,23 @@ $results = $types->compareMultiple($comparisons);
 
 The SDK caches supported immutable lookups and preserves batch input order. `compareMultiple()`, expression-type batches, and reference-graph batches also deduplicate repeated unresolved keys before crossing the protocol boundary.
 
-## Worker pools
+## Interpreters
 
-The default `workers = 0` starts as many processes as Mago's thread count, all at once, so the analysis waits on no worker that a busier pool would have started.
+Mago runs one interpreter per analysis thread, so the workers run in parallel as the analysis does. A worker should avoid starting threads that compete for the CPUs Mago uses.
 
-A positive worker count sets the pool size. Use it for measured constraints, not as a default tuning ritual. While Mago threads wait for responses, the operating system can schedule worker processes on the same CPUs.
+Do not turn hot semantic providers into network clients. A worker that waits on the network holds its analysis thread meanwhile, and external state also makes results slow, fragile, and difficult to memoize.
 
-Each worker serves one request at a time, so parallelism comes only from multiple processes. A worker in any language should avoid starting threads that compete for the CPUs Mago uses.
+## Interpreter-local state
 
-Do not turn hot semantic providers into network clients. A worker that waits on the network serves no other request meanwhile, and external state also makes results slow, fragile, and difficult to memoize.
+Construct expensive immutable configuration once in the worker entrypoint or plugin object, not per callback. State is local to one interpreter.
 
-## Process-local state
+Codebase scan hooks broadcast selected input to each worker, allowing each interpreter to build its own equivalent index. Keep indexes compact and keyed for the provider's common lookup path.
 
-Construct expensive immutable configuration once in the worker entrypoint or plugin object, not per callback. State is local to one worker process.
+Use a `WorkerReducer` only when interpreter-local results must be combined for an external action at shutdown. It is not a live cross-worker synchronization mechanism.
 
-Codebase scan hooks broadcast selected input to each worker, allowing each process to build its own equivalent index. Keep indexes compact and keyed for the provider's common lookup path.
+## Caching
 
-Use a `WorkerReducer` only when process-local results must be combined for an external action at shutdown. It is not a live cross-worker synchronization mechanism.
-
-## Memoization
-
-`PluginRegistry::enableProviderMemoization()` can remove repeated function and method return-type provider requests, including callable-signature requests. Enable it only when every such provider in the plugin is deterministic and independent of locations, order, and mutable state. One unsafe provider invalidates the contract for the whole registry.
-
-Cache your own pure PHP computations when keys are compact and hit rates justify retained memory. Do not duplicate the specific lookup caches already provided by `Codebase`, `TypeComparator`, `FileAnalysis`, or `SymbolReferences`; note that `FileAnalysis::getAllExpressionTypes()` intentionally performs a request on every call.
+Mago asks a provider every time an analyzed call or access matches its target, and runs it in the analysis thread's own interpreter, so a provider call costs what its PHP costs. Cache your own pure PHP computations when keys are compact and hit rates justify retained memory. Do not duplicate the specific lookup caches already provided by `Codebase`, `TypeComparator`, `FileAnalysis`, or `SymbolReferences`; note that `FileAnalysis::getAllExpressionTypes()` intentionally performs a request on every call.
 
 ## PHP hot-path guidance
 
@@ -117,7 +111,6 @@ Cache your own pure PHP computations when keys are compact and hit rates justify
 - Prefer direct DTO field access to rebuilding arrays.
 - Avoid reparsing PHP source; use Mago's syntax and semantic snapshots.
 - Reuse immutable `Type` and configuration values.
-- Check cancellation in long loops, not on every trivial operation.
 - Keep worker startup free of unnecessary framework bootstrapping.
 
 Do not depend on classes under `Mago\Sdk\Internal`. They are optimized protocol machinery and may change without compatibility guarantees.

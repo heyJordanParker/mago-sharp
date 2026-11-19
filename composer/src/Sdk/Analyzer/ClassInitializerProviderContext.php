@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Mago\Sdk\Analyzer;
 
 use Mago\Sdk\Analyzer\Metadata\ClassLikeMetadata;
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\PHPVersion;
 
 /**
@@ -19,6 +18,5 @@ final class ClassInitializerProviderContext
         public readonly PHPVersion $phpVersion,
         public readonly Codebase $codebase,
         public readonly ClassLikeMetadata $class,
-        public readonly CancellationTokenInterface $cancellation,
     ) {}
 }

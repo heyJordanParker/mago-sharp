@@ -314,7 +314,6 @@ impl AnalyzeCommand {
         let external_analyzer = start_external_analyzer(
             &extension_hosts,
             configuration.php_version,
-            configuration.threads,
             &configuration.analyzer.plugins,
             configuration.analyzer.disable_default_plugins,
         );
@@ -489,7 +488,6 @@ impl AnalyzeCommand {
         if let Some(external_analyzer) = initialize_external_analyzer(
             hosts.extension_hosts(),
             configuration.php_version,
-            configuration.threads,
             &configuration.analyzer.plugins,
             configuration.analyzer.disable_default_plugins,
         )
@@ -904,11 +902,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let file = root.join("mago.toml");
-        std::fs::write(
-            &file,
-            "php-version = \"8.4\"\n\n[extension-hosts.logger]\nworkers = 1\ncommand = [\"php\", \"host.php\"]\n",
-        )
-        .unwrap();
+        std::fs::write(&file, "php-version = \"8.4\"\n\n[extension-hosts.logger]\nfile = \"host.php\"\n").unwrap();
         let cli_overrides = CliOverrides {
             workspace: Some(root.clone()),
             config: Some(file.clone()),

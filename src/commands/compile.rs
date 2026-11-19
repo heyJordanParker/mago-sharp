@@ -997,7 +997,6 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     if let Some(external_analyzer) = start_external_analyzer(
         &configuration.extension_hosts,
         configuration.php_version,
-        configuration.threads,
         &configuration.analyzer.plugins,
         configuration.analyzer.disable_default_plugins,
     ) {

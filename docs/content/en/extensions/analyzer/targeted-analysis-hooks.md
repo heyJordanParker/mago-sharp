@@ -102,7 +102,7 @@ Without `TargetSubtree`, each selected target is retained as a standalone node w
 | `receiverType` | Requested direct receiver type, or `null` |
 | `argumentTypes` | Requested direct argument types, otherwise an empty list |
 | `getVariableDefinedness()` | Returns `Defined`, `PossiblyDefined`, or `Undefined`; `null` when unavailable |
-| lifecycle members | PHP version, codebase, type comparator, cancellation, and `report()` |
+| lifecycle members | PHP version, codebase, type comparator, and `report()` |
 
 A PHP# static call, `Calc.make()`, is a `MethodCall` node. A hook that targets `NodeKind::StaticMethodCall` receives it, as it receives `Calc::make()` in PHP. `CallExpression::fromNode($context->source, $context->node)` reports it through `isStaticMethod()`, because the snapshot binds `Calc` to a class.
 

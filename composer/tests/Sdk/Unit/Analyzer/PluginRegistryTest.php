@@ -19,17 +19,6 @@ use PHPUnit\Framework\TestCase;
 
 final class PluginRegistryTest extends TestCase
 {
-    public function testProviderMemoizationIsExplicitlyEnabled(): void
-    {
-        $registry = new PluginRegistry();
-
-        self::assertFalse($registry->shouldMemoizeProviders());
-
-        $registry->enableProviderMemoization();
-
-        self::assertTrue($registry->shouldMemoizeProviders());
-    }
-
     public function testNodeAnalysisHooksPreserveRegistrationOrder(): void
     {
         $registry = new PluginRegistry();

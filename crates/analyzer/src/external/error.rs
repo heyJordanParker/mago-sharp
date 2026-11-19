@@ -7,8 +7,6 @@ pub enum ExternalAnalyzerError {
     InitializationPanicked,
     Worker(WorkerError),
     Protocol(String),
-    InconsistentRegistration,
-    InconsistentInitialization,
     DuplicateExtension(String),
     DuplicatePluginSelector { selector: String, first: String, second: String },
 }
@@ -29,12 +27,6 @@ impl std::fmt::Display for ExternalAnalyzerError {
             Self::InitializationPanicked => formatter.write_str("external analyzer initialization thread panicked"),
             Self::Worker(error) => write!(formatter, "external analyzer worker failed: {error}"),
             Self::Protocol(message) => write!(formatter, "external analyzer protocol error: {message}"),
-            Self::InconsistentRegistration => {
-                formatter.write_str("workers in an extension pool advertised different analyzer registrations")
-            }
-            Self::InconsistentInitialization => {
-                formatter.write_str("workers in an extension pool produced different analyzer initialization stubs")
-            }
             Self::DuplicateExtension(identifier) => {
                 write!(formatter, "external extension `{identifier}` is registered by more than one host")
             }

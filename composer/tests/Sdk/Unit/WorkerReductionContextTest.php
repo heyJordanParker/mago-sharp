@@ -5,20 +5,17 @@ declare(strict_types=1);
 namespace Mago\Tests\Sdk\Unit;
 
 use Mago\Sdk\Extension;
-use Mago\Sdk\Internal\SignalCancellationToken;
 use Mago\Sdk\WorkerReducer;
 use Mago\Sdk\WorkerReductionContext;
 use PHPUnit\Framework\TestCase;
 
 final class WorkerReductionContextTest extends TestCase
 {
-    public function testPreservesOrderedPayloadsAndCancellation(): void
+    public function testPreservesOrderedPayloads(): void
     {
-        $cancellation = new SignalCancellationToken();
-        $context = new WorkerReductionContext(['first', '', 'third'], $cancellation);
+        $context = new WorkerReductionContext(['first', '', 'third']);
 
         self::assertSame(['first', '', 'third'], $context->workerPayloads);
-        self::assertSame($cancellation, $context->cancellation);
     }
 
     public function testExtensionRetainsItsWorkerReducer(): void

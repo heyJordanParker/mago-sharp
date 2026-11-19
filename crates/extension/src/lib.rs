@@ -1,29 +1,24 @@
-//! Infrastructure for running external Mago extensions.
+//! Infrastructure for running Mago's extension hosts.
 //!
 //! This crate deliberately knows nothing about linter rules or analyzer
-//! providers. It owns the process lifecycle, worker pool, multiplexed request
-//! routing, capability-neutral source snapshots, and the stable outer frame
-//! used by all extension capabilities.
+//! providers. It runs each host's worker inside mago on the PHP# engine,
+//! and owns the capability-neutral source snapshots and payload codecs every
+//! extension capability uses.
 
-pub mod command;
 pub mod error;
+pub mod hosts;
 pub mod payload;
-pub mod pool;
 pub mod process_group;
-pub mod protocol;
 pub mod source;
-pub mod worker;
 
 mod reduction;
 
-pub use command::WorkerCommand;
 pub use error::PayloadError;
-pub use error::ProtocolError;
 pub use error::WorkerError;
+pub use hosts::Host;
+pub use hosts::HostFile;
+pub use hosts::Hosts;
+pub use hosts::WorkerRequestHandler;
 pub use payload::PayloadReader;
 pub use payload::PayloadWriter;
-pub use pool::WorkerPool;
-pub use pool::WorkerPoolOptions;
 pub use process_group::ProcessGroup;
-pub use protocol::Frame;
-pub use worker::WorkerRequestHandler;

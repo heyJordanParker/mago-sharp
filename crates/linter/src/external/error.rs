@@ -8,9 +8,7 @@ pub enum ExternalLintError {
     Worker(WorkerError),
     /// A linter-domain payload was malformed or violated the protocol.
     Protocol(String),
-    /// Workers in the same pool advertised different extension definitions.
-    InconsistentRegistration,
-    /// Two worker pools advertised the same extension identifier.
+    /// Two extension hosts advertised the same extension identifier.
     DuplicateExtension(String),
     /// An external rule advertised an issue code already owned by another rule.
     DuplicateRule(String),
@@ -23,11 +21,8 @@ impl std::fmt::Display for ExternalLintError {
         match self {
             Self::Worker(error) => write!(formatter, "external linter worker failed: {error}"),
             Self::Protocol(message) => write!(formatter, "external linter protocol error: {message}"),
-            Self::InconsistentRegistration => {
-                formatter.write_str("workers in one pool advertised different linter registrations")
-            }
             Self::DuplicateExtension(identifier) => {
-                write!(formatter, "multiple worker pools advertised extension `{identifier}`")
+                write!(formatter, "multiple extension hosts advertised extension `{identifier}`")
             }
             Self::DuplicateRule(code) => write!(formatter, "linter issue code `{code}` is registered more than once"),
             Self::FileTooLarge(size) => {

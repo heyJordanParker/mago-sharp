@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Analyzer;
 
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\Exception\InvalidArgumentException;
 use Mago\Sdk\PHPVersion;
 
@@ -28,7 +27,6 @@ final class InitializationContext
 
     public function __construct(
         public readonly PHPVersion $phpVersion,
-        public readonly CancellationTokenInterface $cancellation,
     ) {}
 
     public function addStub(string $filename, string $bytes): void
@@ -41,7 +39,6 @@ final class InitializationContext
             throw new InvalidArgumentException("External stub `{$filename}` was added more than once.");
         }
 
-        $this->cancellation->throwIfCancelled();
         $this->stubNames[$filename] = true;
         $this->stubs[] = [$filename, $bytes];
     }

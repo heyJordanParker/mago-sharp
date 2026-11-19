@@ -1,17 +1,11 @@
 #![allow(clippy::expect_used, clippy::missing_panics_doc, clippy::unwrap_used)]
 
 use std::borrow::Cow;
-use std::num::NonZeroUsize;
 use std::path::Path;
-use std::process::Command;
-use std::sync::Arc;
+use std::time::Duration;
 
 use mago_allocator::LocalArena;
 use mago_database::file::File;
-use mago_database::process;
-use mago_extension::WorkerCommand;
-use mago_extension::WorkerPool;
-use mago_extension::WorkerPoolOptions;
 use mago_linter::Linter;
 use mago_linter::external::ExternalLinter;
 use mago_linter::settings::Settings;
@@ -20,24 +14,17 @@ use mago_php_version::PHPVersion;
 use mago_syntax::parser::parse_file;
 use mago_text_edit::Safety;
 
+use crate::common;
+
 #[test]
 fn external_linter_issue_preserves_suggested_edits() -> Result<(), Box<dyn std::error::Error>> {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sdk_available = repository.join("vendor/autoload.php").is_file()
-        && process::output(Command::new("php").arg("--version")).is_ok_and(|output| output.status.success());
-    assert!(
-        sdk_available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
-        "PHP and vendor dependencies are required for the external linter SDK test"
-    );
-    if !sdk_available {
+    if !common::php_sdk_is_available(repository, "the external linter SDK test") {
         return Ok(());
     }
 
-    let command = WorkerCommand::new("php")
-        .with_argument(repository.join("composer/tests/Sdk/worker.php"))
-        .with_current_directory(repository);
-    let pool = WorkerPool::spawn(command, NonZeroUsize::MIN, WorkerPoolOptions::default())?;
-    let external = ExternalLinter::initialize([Arc::new(pool)], PHPVersion::PHP85)?;
+    let host = common::host(&repository.join("composer/tests/Sdk/worker.php"), Duration::from_secs(30), &[]);
+    let external = ExternalLinter::initialize([host], PHPVersion::PHP85)?;
 
     let source = b"<?php\n\nPsl\\Iter\\any([1], static fn(int $value): bool => $value > 0);\n";
     let file = File::ephemeral(Cow::Borrowed(b"src/example.php"), Cow::Borrowed(source));

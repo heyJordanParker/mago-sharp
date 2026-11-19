@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Analyzer;
 
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\Exception\InvalidArgumentException;
 use Mago\Sdk\Internal\Analyzer\ReportedIssue;
 use Mago\Sdk\PHPVersion;
@@ -27,7 +26,6 @@ abstract class LifecycleContext
         public readonly PHPVersion $phpVersion,
         public readonly Codebase $codebase,
         public readonly TypeComparator $types,
-        public readonly CancellationTokenInterface $cancellation,
     ) {}
 
     public function report(Level $level, string $code, Issue $issue): void

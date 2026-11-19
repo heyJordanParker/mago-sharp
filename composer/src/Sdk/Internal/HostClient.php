@@ -5,107 +5,44 @@ declare(strict_types=1);
 namespace Mago\Sdk\Internal;
 
 use Mago\Sdk\Exception\ProtocolException;
-use Mago\Sdk\Internal\Io\ResourceWriter;
-use Mago\Sdk\Internal\Protocol\Frame;
-use Mago\Sdk\Internal\Protocol\FrameCodec;
-use Mago\Sdk\Internal\Protocol\FrameKind;
-use Revolt\EventLoop;
-use Revolt\EventLoop\Suspension;
-use Throwable;
+use RuntimeException;
+
+use function is_string;
+use function Mago\Engine\ask;
 
 /**
+ * Asks mago, which runs the worker in its own process, what a hook or provider needs while it runs.
+ *
  * @internal
  */
 final class HostClient
 {
-    /** @var int<0, max> */
-    private int $nextRequestId = 0;
-
     /**
-     * @var array<int<1, max>, array{int<1, max>, Suspension<string>}>
-     */
-    private array $pending = [];
-
-    public function __construct(
-        private readonly FrameCodec $codec,
-        private readonly ResourceWriter $writer,
-    ) {}
-
-    /** @param int<1, max> $parentId */
-    public function request(int $parentId, string $payload): string
-    {
-        $requestId = ++$this->nextRequestId;
-        /** @var Suspension<string> $suspension */
-        $suspension = EventLoop::getSuspension();
-        $this->pending[$requestId] = [$parentId, $suspension];
-        try {
-            $this->writer->write($this->codec->encode(Frame::request($requestId, $parentId, $payload)));
-
-            return $suspension->suspend();
-        } finally {
-            unset($this->pending[$requestId]);
-        }
-    }
-
-    /**
-     * Tells Mago that request `$parentId` starts `$running`, such as "the hooks of app/User.php", which starts its
-     * deadline again. An error for a deadline the request then misses says it made no progress on `$running`.
+     * Sends mago a codebase query and returns its answer.
      *
-     * @param int<1, max> $parentId
+     * @throws ProtocolException when mago refuses the query.
      */
-    public function progress(int $parentId, string $running): void
+    public function request(string $payload): string
     {
-        $this->writer->write($this->codec->encode(Frame::notification($parentId, $running)));
+        try {
+            $answer = ask('query', $payload);
+        } catch (RuntimeException $exception) {
+            throw new ProtocolException($exception->getMessage(), 0, $exception);
+        }
+
+        if (!is_string($answer)) {
+            throw new ProtocolException('mago answered a codebase query with no payload.');
+        }
+
+        return $answer;
     }
 
-    public function accept(Frame $frame): bool
+    /**
+     * Tells mago that the request starts `$running`, such as "the hooks of app/User.php", which starts its deadline
+     * again. An error for a deadline the request then misses says it made no progress on `$running`.
+     */
+    public function progress(string $running): void
     {
-        if ($frame->kind !== FrameKind::Response) {
-            return false;
-        }
-
-        $pending = $this->pending[$frame->id] ?? null;
-        if ($pending === null) {
-            return false;
-        }
-
-        [$parentId, $suspension] = $pending;
-        unset($this->pending[$frame->id]);
-        if ($frame->parentId !== $parentId) {
-            $suspension->throw(
-                new ProtocolException(
-                    "Mago responded to nested request {$frame->id} with the wrong parent identifier.",
-                ),
-            );
-
-            return true;
-        }
-
-        if ($frame->flags === 0) {
-            $suspension->resume($frame->payload);
-
-            return true;
-        }
-
-        if ($frame->flags === Frame::ERROR_FLAG) {
-            $suspension->throw(new ProtocolException($frame->payload));
-
-            return true;
-        }
-
-        $suspension->throw(
-            new ProtocolException("Nested response {$frame->id} has unsupported flags {$frame->flags}."),
-        );
-
-        return true;
-    }
-
-    public function fail(Throwable $throwable): void
-    {
-        $pending = $this->pending;
-        $this->pending = [];
-        foreach ($pending as [, $suspension]) {
-            $suspension->throw($throwable);
-        }
+        ask('progress', $running);
     }
 }

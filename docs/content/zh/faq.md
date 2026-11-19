@@ -28,7 +28,7 @@ nav_section = "参考"
 
 ## mago-sharp 支持分析器插件吗?
 
-支持,通过扩展实现。扩展是一个外部程序,mago-sharp 根据 `mago.toml` 中的 `[extension-hosts]` 启动它,并通过二进制 worker 协议与之通信。扩展可以添加 linter 规则和分析器插件。格式化器和 guard 没有扩展 API。mago-sharp 提供用于编写扩展的 PHP SDK,即 Composer 包 `heyjordanparker/mago-sharp` 中的 `Mago\Sdk` 命名空间。[扩展](/extensions/overview/)页面介绍了该协议、SDK 和一个完整示例。
+支持,通过扩展实现。扩展是 `mago.toml` 中的 `[extension-hosts]` 指定的一个 PHP 文件,mago-sharp 在自身内部、在链接进其二进制文件的 PHP# 引擎上运行它,因此无需安装 `php`。扩展可以添加 linter 规则和分析器插件。格式化器和 guard 没有扩展 API。mago-sharp 提供用于编写扩展的 PHP SDK,即 Composer 包 `heyjordanparker/mago-sharp` 中的 `Mago\Sdk` 命名空间。[扩展](/extensions/overview/)页面介绍了扩展主机、SDK 和一个完整示例。
 
 ## mago-sharp 包含哪些工具?
 

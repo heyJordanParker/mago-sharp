@@ -5,7 +5,6 @@ mod common;
 mod compile;
 mod convert;
 mod cst;
-mod extension_host_processes;
 mod external_analyzer_entry_points;
 mod external_analyzer_invocation;
 mod external_analyzer_lifecycle;

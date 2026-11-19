@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Analyzer;
 
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\PHPVersion;
 
 /**
@@ -29,6 +28,5 @@ final class CallForwardingProviderContext
         public readonly bool $property,
         public readonly Type $receiverType,
         public readonly TypeComparator $types,
-        public readonly CancellationTokenInterface $cancellation,
     ) {}
 }

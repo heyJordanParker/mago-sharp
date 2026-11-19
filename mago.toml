@@ -29,11 +29,8 @@ cyclomatic-complexity = { threshold = 6, exclude = [
     "composer/src/Sdk/Internal/Analyzer/Protocol.php",
     "composer/src/Sdk/Internal/Analyzer/TypeCodec.php",
     "composer/src/Sdk/Internal/HostClient.php",
-    "composer/src/Sdk/Internal/Io/InputTransport.php",
-    "composer/src/Sdk/Internal/Io/ResourceReader.php",
-    "composer/src/Sdk/Internal/Io/ResourceWriter.php",
+    "composer/src/Sdk/Internal/Hosts.php",
     "composer/src/Sdk/Internal/Linter/Protocol.php",
-    "composer/src/Sdk/Internal/Protocol/FrameCodec.php",
     "composer/src/Sdk/Internal/Protocol/PayloadReader.php",
     "composer/src/Sdk/Internal/Syntax/NodeStore.php",
     "composer/src/Sdk/Internal/Worker/Protocol.php",
@@ -102,7 +99,6 @@ halstead = { effort-threshold = 7000, exclude = [
     "composer/src/Sdk/Internal/Analyzer/MetadataCodec.php",
     "composer/src/Sdk/Internal/Analyzer/Protocol.php",
     "composer/src/Sdk/Internal/Analyzer/TypeCodec.php",
-    "composer/src/Sdk/Internal/Io/ResourceReader.php",
     "composer/src/Sdk/Worker.php",
     "composer/tests/Sdk/Fixtures/",
 ] }
@@ -133,7 +129,6 @@ no-boolean-flag-parameter = { exclude = [
 ] }
 no-error-control-operator = { exclude = ["composer/src/internal.php", "composer/tests/Internal/DownloadTest.php"] }
 no-empty-catch-clause = { exclude = ["composer/src/internal.php"] }
-no-isset = { exclude = ["composer/src/Sdk/Internal/Io/ResourceWriter.php"] }
 # Enable disabled-by-default rules
 no-redundant-use = { enabled = true }
 no-variable-variable = { enabled = true }

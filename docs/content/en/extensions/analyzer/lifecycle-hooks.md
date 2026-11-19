@@ -23,7 +23,7 @@ flowchart TB
     NativeMerge --> FileHooks["After-file and targeted hooks<br/>parallel batches"]
     FileHooks --> EffectMerge["Merge extension issues and references<br/>reconcile late unused checks"]
     EffectMerge --> After["After-analysis hook<br/>final project graph"]
-    After --> Reduce["Optional worker reduction<br/>during pool shutdown"]
+    After --> Reduce["Optional worker reduction<br/>when Mago stops the hosts"]
 ```
 
 ## Initialization
@@ -31,7 +31,6 @@ flowchart TB
 `InitializationHook::initialize()` runs before Mago parses project source. Its context contains only:
 
 - `phpVersion`;
-- `cancellation`;
 - `addStub()` and `addMultipleStubs()`.
 
 ```php
@@ -60,7 +59,7 @@ Added stubs exist only in Mago's in-memory source database. Mago parses and scan
 
 Mago namespaces the logical filename as `@mago-extension/{extension}/{plugin}/{filename}`, escaping unsafe bytes in the extension and plugin path components. Metadata locations expose that final logical name. External stub declarations override vendored and built-in declarations, while project source and configured patch declarations retain higher precedence.
 
-Initialization is broadcast to every active worker in the host pool. Every worker must return identical filenames and bytes; Mago rejects inconsistent stub sets. Replacement workers replay the accepted initialization before serving analyzer requests.
+Initialization runs in every interpreter of the engine before it serves an analyzer request, and each one that starts later runs it too. Mago keeps the stubs the first one returns.
 
 Use stubs for declarations that Mago should understand before it builds metadata. Do not use them as an issue-reporting mechanism or to copy real project files.
 
@@ -108,20 +107,20 @@ final class RouteScanner implements CodebaseScanHook
 
 `getTargets()` returns a non-empty list of path or glob patterns. Patterns containing `*`, `?`, `[`, or `{` use Mago's default glob settings. Other values are exact logical paths or directory prefixes: `src` matches both `src` and paths below `src/`. Only UTF-8 logical paths for host files are eligible; dependencies and in-memory stubs are excluded.
 
-Each batch contains one `CodebaseScanFile` per selected file and `firstBatch`/`lastBatch` markers. A `CodebaseScanFile` holds the file's `path`, its `classLikes`, their declared properties through `getProperties()`, and its `functionLikes`: every function, method, closure, and arrow function. Anonymous classes and closures are included. The metadata is the file's own scan, so inherited members and ancestors are not resolved yet; a before-analysis hook sees the populated codebase. Attribute arguments carry their evaluated `ConstantExpression`, and `AttributeMetadata::getArguments()` and `newInstance()` evaluate them as PHP's `ReflectionAttribute` does, reading constants and constructing nested `new` expressions in the worker. Files are delivered in deterministic path order and split to respect protocol payload limits. Every active worker receives the complete scan sequence, and workers started or restarted later replay it, so every process can construct equivalent local state before providers run. Even an empty match produces one batch with both markers set.
+Each batch contains one `CodebaseScanFile` per selected file and `firstBatch`/`lastBatch` markers. A `CodebaseScanFile` holds the file's `path`, its `classLikes`, their declared properties through `getProperties()`, and its `functionLikes`: every function, method, closure, and arrow function. Anonymous classes and closures are included. The metadata is the file's own scan, so inherited members and ancestors are not resolved yet; a before-analysis hook sees the populated codebase. Attribute arguments carry their evaluated `ConstantExpression`, and `AttributeMetadata::getArguments()` and `newInstance()` evaluate them as PHP's `ReflectionAttribute` does, reading constants and constructing nested `new` expressions in the worker. Files are delivered in deterministic path order, in one batch with both markers set, which an empty match sends too. Every interpreter receives the scan, and each one that starts later receives the latest one, so every worker can construct equivalent local state before providers run.
 
 Do not request every PHP file unless every file is genuinely relevant. Narrow scan targets are one of the most important extension performance controls.
 
 ## Before analysis
 
-Every before-analysis hook registered by an enabled plugin runs once before parallel file analysis. At this point the merged codebase metadata is complete and read-only.
+Every before-analysis hook registered by an enabled plugin runs once before parallel file analysis, in one interpreter. At this point the merged codebase metadata is complete and read-only.
 
 `BeforeAnalysisContext` provides:
 
-- the common lifecycle services: `phpVersion`, `codebase`, `types`, `cancellation`, and `report()`;
+- the common lifecycle services: `phpVersion`, `codebase`, `types`, and `report()`;
 - `references`, a project-wide `ReferenceRegistry` for framework-known symbol references.
 
-This stage is appropriate for validating a framework model built during codebase scanning, reporting project-level setup problems, and registering references that are not owned by one analyzed file. It cannot add or replace codebase symbols; declarations must be supplied as initialization stubs. A rule may read the codebase here and keep what it read for its file hooks or its plugin's providers: Mago counts what a before-analysis hook reads [as read by every file](/extensions/analyzer/codebase-metadata/#reads-and-incremental-analysis).
+This stage is appropriate for validating a framework model built during codebase scanning, reporting project-level setup problems, and registering references that are not owned by one analyzed file. It cannot add or replace codebase symbols; declarations must be supplied as initialization stubs. It is not where per-interpreter state goes: what it keeps on its plugin's object stays in its one interpreter, and the other analysis threads' interpreters never see it. A file hook or a provider that needs codebase facts reads them when it is asked, as through `findMethods()` inside `getPropertyType()`, and the codebase answers the same read again from its cache for the rest of the analysis in that interpreter. A cache a plugin keeps on its own object is keyed by `$context->codebase->generation()`, and filled again when the generation changes. Mago counts what a before-analysis hook reads [as read by every file](/extensions/analyzer/codebase-metadata/#reads-and-incremental-analysis).
 
 ## After each file
 
@@ -182,11 +181,10 @@ Before-, after-file, targeted-analysis, and after-analysis contexts extend `Life
 | `phpVersion` | PHP language version selected by Mago |
 | `codebase` | Lazy, read-only metadata facade for the current analysis generation |
 | `types` | Native, codebase-aware type comparison service |
-| `cancellation` | Cooperative cancellation token |
 | `report(Level, code, Issue)` | Reports an issue using a plugin-local code; Mago prefixes the plugin identifier |
 
 The codebase is frozen before scan callbacks and parallel analysis are dispatched. Immutable metadata and comparison responses may therefore be cached for that generation. SDK facades already cache supported lazy queries, including missing lookup results where applicable.
 
 ## State and worker identity
 
-Hooks run inside worker processes. PHP object state is local to one worker and is not automatically shared with other workers. Use codebase scan broadcasts to build equivalent read-only indexes in every worker. If state must be combined after all work is done for an external side effect, implement a [worker reducer](/extensions/sdk/worker-reduction/).
+Each analysis thread runs one interpreter, which runs its own copy of every worker. PHP object state is local to one interpreter and is not automatically shared with the others. Use codebase scan broadcasts to build equivalent read-only indexes in every interpreter. If state must be combined after all work is done for an external side effect, implement a [worker reducer](/extensions/sdk/worker-reduction/).

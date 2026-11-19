@@ -9,6 +9,9 @@ use Mago\Sdk\WorkerReductionContext;
 
 require_once __DIR__ . '/../../../../vendor/autoload.php';
 
+// Each interpreter that runs this file is one worker, named by a number of its own, since all share mago's process.
+defined('MAGO_TEST_WORKER') || define('MAGO_TEST_WORKER', random_int(1, 0xFFFF_FFFF));
+
 final class AuditWorkerReducer implements WorkerReducer
 {
     public function __construct(
@@ -18,16 +21,14 @@ final class AuditWorkerReducer implements WorkerReducer
 
     public function collect(): string
     {
-        return $this->identifier . ':' . (string) getmypid();
+        return $this->identifier . ':' . (string) MAGO_TEST_WORKER;
     }
 
     public function reduce(WorkerReductionContext $context): void
     {
-        $context->cancellation->throwIfCancelled();
         file_put_contents($this->directory . '/' . $this->identifier . '.txt', implode("\n", [
             $this->identifier,
-            (string) getmypid(),
-            $context->cancellation->isCancelled() ? 'cancelled' : 'active',
+            (string) MAGO_TEST_WORKER,
             ...$context->workerPayloads,
         ]));
     }

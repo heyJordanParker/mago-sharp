@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Mago\Sdk\Analyzer;
 
 use LogicException;
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\Internal\Analyzer\NodeAnalysisData;
 use Mago\Sdk\Internal\Analyzer\Protocol;
 use Mago\Sdk\Internal\Analyzer\TypeCodec;
@@ -46,16 +45,13 @@ final class FileAnalysis
 
     /**
      * @internal
-     * @param positive-int $requestId
      * @param list<NodeKind> $nodeKinds
      * @param list<NodeAnalysisData> $nodeAnalysisData
      * @param non-empty-string $file
      */
     public function __construct(
         private readonly HostClient $host,
-        private readonly int $requestId,
         private readonly int $generation,
-        private readonly CancellationTokenInterface $cancellation,
         private readonly PHPVersion $phpVersion,
         private readonly array $nodeKinds,
         private readonly ?SourceFile $nodeSourceFile,
@@ -102,16 +98,12 @@ final class FileAnalysis
         }
 
         if ($missing !== [] && !$this->hasLocalExpressionTypes) {
-            $this->cancellation->throwIfCancelled();
-            $response = $this->host->request(
-                $this->requestId,
-                Protocol::writeAnalysisTypeQuery(
-                    $this->generation,
-                    $this->file,
-                    Protocol::GET_EXPRESSION_TYPES,
-                    $missing,
-                ),
-            );
+            $response = $this->host->request(Protocol::writeAnalysisTypeQuery(
+                $this->generation,
+                $this->file,
+                Protocol::GET_EXPRESSION_TYPES,
+                $missing,
+            ));
 
             [$types, $prefetched] = Protocol::readOptionalAnalysisTypeQueryResponse(
                 $response,
@@ -154,11 +146,11 @@ final class FileAnalysis
             return $this->sourceFile;
         }
 
-        $this->cancellation->throwIfCancelled();
-        $response = $this->host->request(
-            $this->requestId,
-            Protocol::writeAnalysisTypeQuery($this->generation, $this->file, Protocol::GET_SOURCE_FILE),
-        );
+        $response = $this->host->request(Protocol::writeAnalysisTypeQuery(
+            $this->generation,
+            $this->file,
+            Protocol::GET_SOURCE_FILE,
+        ));
 
         return $this->sourceFile = Protocol::readSourceFileResponse(
             $response,
@@ -201,11 +193,11 @@ final class FileAnalysis
      */
     public function getAllExpressionTypes(): array
     {
-        $this->cancellation->throwIfCancelled();
-        $response = $this->host->request(
-            $this->requestId,
-            Protocol::writeAnalysisTypeQuery($this->generation, $this->file, Protocol::GET_ALL_EXPRESSION_TYPES),
-        );
+        $response = $this->host->request(Protocol::writeAnalysisTypeQuery(
+            $this->generation,
+            $this->file,
+            Protocol::GET_ALL_EXPRESSION_TYPES,
+        ));
 
         return Protocol::readAllExpressionTypesResponse($response, $this->generation, $this->file);
     }
@@ -240,11 +232,11 @@ final class FileAnalysis
     private function getInferredTypes(int $operation): array
     {
         if (!array_key_exists($operation, $this->inferredTypes)) {
-            $this->cancellation->throwIfCancelled();
-            $response = $this->host->request(
-                $this->requestId,
-                Protocol::writeAnalysisTypeQuery($this->generation, $this->file, $operation),
-            );
+            $response = $this->host->request(Protocol::writeAnalysisTypeQuery(
+                $this->generation,
+                $this->file,
+                $operation,
+            ));
 
             $this->inferredTypes[$operation] = Protocol::readAnalysisTypeQueryResponse(
                 $response,

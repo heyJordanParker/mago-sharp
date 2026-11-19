@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Analyzer;
 
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\Exception\InvalidArgumentException;
 use Mago\Sdk\Internal\Analyzer\CodebaseReads;
 use Mago\Sdk\Internal\Analyzer\MetadataCache;
@@ -31,13 +30,10 @@ final class TypeComparator
      * `$reads` records a class-level read of every class-like a comparison names, cached or not, when the comparator
      * serves one file's hooks or providers.
      *
-     * @param positive-int $requestId
      * @internal
      */
     public function __construct(
         private readonly HostClient $host,
-        private readonly int $requestId,
-        private readonly CancellationTokenInterface $cancellation,
         private readonly ?MetadataCache $cache = null,
         private readonly ?CodebaseReads $reads = null,
     ) {}
@@ -100,7 +96,6 @@ final class TypeComparator
             return $results;
         }
 
-        $this->cancellation->throwIfCancelled();
         $requests = array_values($pending);
         $requestCount = count($requests);
         $comparison = $requests[0];
@@ -111,8 +106,7 @@ final class TypeComparator
                 $comparison->encodeRight(),
             )
             : Protocol::writeTypeComparisonBatchRequest($requests);
-        $response = $this->host->request($this->requestId, $payload);
-        $this->cancellation->throwIfCancelled();
+        $response = $this->host->request($payload);
         $answers = $requestCount === 1
             ? [Protocol::readTypeComparisonResponse($response)]
             : Protocol::readTypeComparisonBatchResponse($response, $requestCount);

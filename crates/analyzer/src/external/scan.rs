@@ -227,18 +227,16 @@ where
         let selected =
             files.iter().filter_map(|file| file.route(backend_index).map(|hooks| (file, hooks))).collect::<Vec<_>>();
         let active_hooks = backend.registration.codebase_scan_hooks.iter().map(|hook| hook.index).collect::<Vec<_>>();
-        let maximum = backend.transport.maximum_payload_size();
-        let batches = encode_batches(&active_hooks, &selected, maximum)?;
-        let request_bytes = batches.iter().map(Vec::len).sum::<usize>();
+        let request = encode_batch(&active_hooks, &selected)?;
+        let request_bytes = request.len();
         let started_at = tracing::enabled!(tracing::Level::TRACE).then(Instant::now);
         tracing::trace!(
             backend = backend_index,
             files = selected.len(),
-            batches = batches.len(),
             request_bytes,
             "Broadcasting filtered codebase-scan snapshots."
         );
-        let responses = backend.transport.broadcast_sequence(BOOTSTRAP_GROUP, &batches)?;
+        let responses = backend.transport.broadcast_sequence(BOOTSTRAP_GROUP, &[request])?;
         let selected_files = selected
             .iter()
             .map(|(file, _)| (file.file.name.as_ref(), file.file.as_ref()))
@@ -252,24 +250,13 @@ where
                 .find(|plugin| plugin.index == hook.plugin)
                 .map(|plugin| plugin.identifier.clone())
         };
-        for batch in responses {
-            let mut workers = batch.into_iter();
-            let response =
-                workers.next().ok_or_else(|| protocol("a codebase-scan batch returned no worker response"))?;
-            // Every worker receives every batch, so each must describe the same declarations; a
-            // worker that disagrees would make analysis depend on which worker answered.
-            if workers.any(|other| other != response) {
-                return Err(protocol(format!(
-                    "codebase-scan workers of backend {backend_index} returned different declaration refinements"
-                )));
-            }
+        for response in responses {
             refinements.extend(protocol::decode_codebase_scan_response(&response, &selected_files, &plugin_of_hook)?);
         }
         if let Some(started_at) = started_at {
             tracing::trace!(
                 backend = backend_index,
                 files = selected.len(),
-                batches = batches.len(),
                 request_bytes,
                 elapsed = ?started_at.elapsed(),
                 "Filtered codebase-scan broadcast completed."
@@ -280,60 +267,29 @@ where
     Ok(refinements)
 }
 
-fn encode_batches(
-    active_hooks: &[u16],
-    files: &[(&CodebaseScanFile, &[u16])],
-    maximum: usize,
-) -> Result<Vec<Vec<u8>>, ExternalAnalyzerError> {
-    let message_overhead = MESSAGE_OVERHEAD.saturating_add(active_hooks.len().saturating_mul(2));
-    let mut ranges = Vec::new();
-    let mut start = 0;
-    let mut length = message_overhead;
-    for (index, (file, hooks)) in files.iter().enumerate() {
-        let record = file.encoded_len(hooks);
-        if message_overhead.saturating_add(record) > maximum {
-            return Err(protocol(format!(
-                "codebase-scan snapshot for `{}` requires {} bytes, exceeding the worker payload limit of {maximum}",
-                mago_bytes::BytesDisplay(&file.file.name),
-                message_overhead.saturating_add(record),
-            )));
-        }
-        if index > start && length.saturating_add(record) > maximum {
-            ranges.push(start..index);
-            start = index;
-            length = message_overhead;
-        }
-        length = length.saturating_add(record);
+/// The one codebase-scan request of `files`, which is both the first and the last batch of the scan.
+fn encode_batch(active_hooks: &[u16], files: &[(&CodebaseScanFile, &[u16])]) -> Result<Vec<u8>, ExternalAnalyzerError> {
+    let capacity = files
+        .iter()
+        .fold(MESSAGE_OVERHEAD.saturating_add(active_hooks.len().saturating_mul(2)), |size, (file, hooks)| {
+            size.saturating_add(file.encoded_len(hooks))
+        });
+    let mut writer = protocol::message_writer_with_capacity(protocol::CODEBASE_SCAN_REQUEST, capacity);
+    writer.write_bool(true);
+    writer.write_bool(true);
+    writer.write_length(active_hooks.len())?;
+    for hook in active_hooks {
+        writer.write_u16(*hook);
     }
-    ranges.push(start..files.len());
+    writer.write_length(files.len())?;
+    for (file, hooks) in files {
+        writer.write_length(hooks.len())?;
+        for hook in *hooks {
+            writer.write_u16(*hook);
+        }
+        writer.write_bytes(&file.file.name)?;
+        writer.write_raw(&file.declarations);
+    }
 
-    let range_count = ranges.len();
-    ranges
-        .into_iter()
-        .enumerate()
-        .map(|(index, range)| {
-            let mut writer = protocol::message_writer_with_capacity(
-                protocol::CODEBASE_SCAN_REQUEST,
-                files[range.clone()]
-                    .iter()
-                    .fold(message_overhead, |size, (file, hooks)| size.saturating_add(file.encoded_len(hooks))),
-            );
-            writer.write_bool(index == 0);
-            writer.write_bool(index + 1 == range_count);
-            writer.write_length(active_hooks.len())?;
-            for hook in active_hooks {
-                writer.write_u16(*hook);
-            }
-            writer.write_length(range.len())?;
-            for (file, hooks) in &files[range] {
-                writer.write_length(hooks.len())?;
-                for hook in *hooks {
-                    writer.write_u16(*hook);
-                }
-                writer.write_bytes(&file.file.name)?;
-                writer.write_raw(&file.declarations);
-            }
-            Ok(writer.finish())
-        })
-        .collect()
+    Ok(writer.finish())
 }

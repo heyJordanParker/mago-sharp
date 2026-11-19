@@ -32,10 +32,9 @@ enum ExtensionSubcommand {
 
 impl ExtensionCommand {
     pub fn execute(self, configuration: Configuration) -> Result<ExitCode, Error> {
-        let mago_threads = configuration.threads;
         let enabled_hosts = configuration.extension_hosts.iter().filter(|(_, host)| host.enabled).collect::<Vec<_>>();
         let (extension_hosts, _) = compile_for_hosts(&configuration)?;
-        let external = initialize_external_linter(&extension_hosts, configuration.php_version, configuration.threads)
+        let external = initialize_external_linter(&extension_hosts, configuration.php_version)
             .map_err(mago_orchestrator::OrchestratorError::from)?;
 
         match self.command {
@@ -45,8 +44,7 @@ impl ExtensionCommand {
                     let hosts = enabled_hosts.iter().map(|(host, host_configuration)| {
                         serde_json::json!({
                             "host": host,
-                            "adaptive": host_configuration.workers == 0,
-                            "workers": host_configuration.worker_count(mago_threads).get(),
+                            "file": host_configuration.file,
                         })
                     });
                     let extensions = extensions.iter().map(|extension| {
@@ -74,12 +72,7 @@ impl ExtensionCommand {
                 } else if let Some(external) = external {
                     println!("Extension hosts:");
                     for (host, host_configuration) in &enabled_hosts {
-                        let workers = host_configuration.worker_count(mago_threads);
-                        if host_configuration.workers == 0 {
-                            println!("  {host} (adaptive, up to {workers} workers)");
-                        } else {
-                            println!("  {host} ({workers} workers)");
-                        }
+                        println!("  {host} ({})", host_configuration.file.display());
                     }
 
                     println!("Registered extensions:");

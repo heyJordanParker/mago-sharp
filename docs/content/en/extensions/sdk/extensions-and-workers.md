@@ -1,6 +1,6 @@
 +++
 title = "Extensions and workers"
-description = "Define logical extensions and run them in command-scoped PHP workers."
+description = "Define logical extensions and run them in the PHP workers Mago runs."
 nav_order = 10
 nav_section = "Extensions"
 nav_subsection = "PHP SDK"
@@ -50,9 +50,9 @@ Keep the identifier, version, default capability set, and shared object wiring i
 | `version` | non-empty string | Extension package version reported during registration. |
 | `linterRules` | `list<Rule>` | Custom linter rules exposed by the extension. |
 | `analyzerPlugins` | `list<Plugin>` | Analyzer plugins exposed by the extension. |
-| `workerReducer` | `?WorkerReducer` | Optional terminal aggregation for process-local state. |
+| `workerReducer` | `?WorkerReducer` | Optional terminal aggregation for interpreter-local state. |
 
-Extension identifiers and analyzer plugin selectors are compared ASCII case-insensitively. Linter rule codes are case-sensitive and must be unique within an extension, across every enabled host, and against Mago's native rule codes. Analyzer plugin identifiers and aliases must not collide with another external or native plugin selector. Mago also verifies that every process in one host pool advertises the same registration.
+Extension identifiers and analyzer plugin selectors are compared ASCII case-insensitively. Linter rule codes are case-sensitive and must be unique within an extension, across every enabled host, and against Mago's native rule codes. Analyzer plugin identifiers and aliases must not collide with another external or native plugin selector.
 
 ## Running a worker
 
@@ -87,24 +87,24 @@ The constructor is variadic:
 ))->run();
 ```
 
-This shares one process pool and one PHP runtime among the extensions. It is useful when packages are always deployed together. Use separate configured hosts when extensions require different PHP binaries, environments, working directories, timeouts, or worker counts.
+This shares one worker among the extensions. It is useful when packages are always deployed together. Use separate configured hosts when extensions require different environments or timeouts.
 
-## Command-scoped process-local state
+## Interpreter-local state
 
-Rules, plugins, providers, and reducers are constructed once per PHP worker process. Their object properties persist across requests handled by that process. The processes belong to one Mago command and are shut down when that command finishes.
+Rules, plugins, providers, and reducers are constructed once per interpreter, as each one runs the host's file. Their object properties persist across requests handled by that interpreter, until the Mago command finishes.
 
 This state is:
 
-- local to one worker, not shared with sibling processes;
-- retained across files and incremental-analysis generations while the process lives;
-- lost if Mago restarts the worker after a failure;
+- local to one interpreter, not shared with the other analysis threads' interpreters;
+- retained across files and incremental-analysis generations while the interpreter lives;
+- lost when Mago starts the interpreter again, after a deadline or when a class it loaded changed;
 - not guaranteed to receive requests in file order.
 
-A worker runs one request at a time, in the order Mago sends them. A hook that waits on a codebase query keeps its turn, so no other hook in that process starts until it returns. A rule can fill a cache on its own object around a query, and every later file reads the full result. Mago gets parallelism by running several workers.
+An interpreter runs one request at a time. A hook that waits on a codebase query keeps its turn, so no other hook in that interpreter starts until it returns. A rule can fill a cache on its own object around a query, and every later file in that interpreter reads the full result. Mago gets parallelism by running one interpreter per analysis thread.
 
-Mago counts what any hook or provider reads from the codebase, such as a class from `Codebase::getClassLike()` or the methods `Codebase::findMethods()` finds across classes, as read by every file, as [reads and incremental analysis](/extensions/analyzer/codebase-metadata/#reads-and-incremental-analysis) says. So a rule may keep what it read on its own object and answer later files from it: every file is analyzed again when what was read changes, as a class's signature or a search's result, and none is when it stays the same. A provider's answer may depend on what its own plugin read in any callback, so a plugin may fill a cache in a before-analysis hook and answer its provider from it.
+Mago counts what any hook or provider reads from the codebase, such as a class from `Codebase::getClassLike()` or the methods `Codebase::findMethods()` finds across classes, as read by every file, as [reads and incremental analysis](/extensions/analyzer/codebase-metadata/#reads-and-incremental-analysis) says. So a rule may keep what it read on its own object and answer later files from it: every file is analyzed again when what was read changes, as a class's signature or a search's result, and none is when it stays the same. A before-analysis hook runs in one interpreter, so what it keeps stays there, and a provider in another interpreter never sees it. A provider that needs codebase facts reads them when it is asked, as through `findMethods()` inside `getPropertyType()`, and the codebase answers the same read again from its cache for the rest of the analysis in that interpreter.
 
-Use generation-aware SDK data for analysis caches. Use a `WorkerReducer` when process-local application metrics must be combined at shutdown.
+Key an analysis cache on a plugin's object by `Codebase::generation()`, and fill it again when the generation changes, since the object outlives the analysis that filled it. Use a `WorkerReducer` when interpreter-local application metrics must be combined at shutdown.
 
 ## PHP version
 
@@ -118,19 +118,10 @@ if ($context->phpVersion->isAtLeast(PHPVersion::fromParts(8, 4))) {
 
 The numeric identifier uses `0xMMMMmmpp`: a 16-bit major version followed by 8-bit minor and patch components. Prefer `fromParts()`, `major()`, `minor()`, `patch()`, and `isAtLeast()` over inspecting `id` directly.
 
-## Cancellation
+## Deadlines
 
-Every callback context includes a `CancellationTokenInterface`. Mago sends a cancellation frame when an outer request reaches its configured timeout. Closing the input stream or shutting down the worker also cancels every in-flight context locally.
-
-```php
-foreach ($largeCollection as $item) {
-    $context->cancellation->throwIfCancelled();
-    process($item);
-}
-```
-
-`isCancelled()` performs a non-throwing check. `subscribe()` installs a callback and returns a subscription identifier; `unsubscribe()` removes it. A zero identifier means no subscription was retained. Cancellation is cooperative: CPU-bound code must check the token itself.
+A unit of a request that runs past the host's `request-timeout-ms` is interrupted at its next PHP instruction, and the check fails with an error naming the host and the unit. The interpreter starts again before its next request. A callback needs no check of its own, so a long loop needs no code to stop at the deadline.
 
 ## Exceptions
 
-Do not catch `Mago\Sdk\Exception\CancelledException` unless it is immediately rethrown. Other callback exceptions become protocol errors with callback identity and the original message. Optional analyzer provider failures fall back to native analysis, while registration and lifecycle failures fail the operation.
+A callback exception becomes a protocol error with callback identity and the original message. Optional analyzer provider failures fall back to native analysis, while registration and lifecycle failures fail the operation.

@@ -6,7 +6,6 @@ namespace Mago\Sdk\Analyzer;
 
 use Mago\Sdk\Analyzer\Declaration\ClassLikeRefinement;
 use Mago\Sdk\Analyzer\Declaration\FunctionLikeRefinement;
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\Exception\InvalidArgumentException;
 use Mago\Sdk\PHPVersion;
 
@@ -29,7 +28,6 @@ final class CodebaseScanContext
      */
     public function __construct(
         public readonly PHPVersion $phpVersion,
-        public readonly CancellationTokenInterface $cancellation,
         public readonly array $files,
         public readonly bool $firstBatch,
         public readonly bool $lastBatch,

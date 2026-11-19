@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Analyzer;
 
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\PHPVersion;
 
 /**
@@ -17,6 +16,5 @@ final class AssertionProviderContext
         public readonly Codebase $codebase,
         public readonly Invocation $invocation,
         public readonly TypeComparator $types,
-        public readonly CancellationTokenInterface $cancellation,
     ) {}
 }

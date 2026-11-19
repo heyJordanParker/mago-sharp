@@ -1,12 +1,12 @@
 +++
 title = "Architecture and execution model"
-description = "How Mago schedules extension workers, exchanges data, and orders extension callbacks."
+description = "How Mago runs extension workers, exchanges data, and orders extension callbacks."
 nav_order = 40
 nav_section = "Extensions"
 +++
 # Architecture and execution model
 
-Mago keeps parsing, target matching, scheduling, and analysis in Rust. External workers receive compact, capability-specific views and return explicit results. This preserves Mago's parallel pipeline while allowing framework knowledge to live in extensions written in any language.
+Mago keeps parsing, target matching, scheduling, and analysis in Rust. Extension workers run in PHP inside Mago, on the PHP# engine linked into the `mago` binary, receive compact, capability-specific views and return explicit results. This preserves Mago's parallel pipeline while allowing framework knowledge to live in PHP extensions.
 
 ## Hosts, workers, and logical extensions
 
@@ -14,30 +14,21 @@ Mago keeps parsing, target matching, scheduling, and analysis in Rust. External 
 flowchart TB
     subgraph Mago["Mago process"]
         direction LR
-        CLI["CLI command"] --> Pipeline["Rust pipeline<br/>T worker threads"]
+        CLI["CLI command"] --> Pipeline["Rust pipeline<br/>T analysis threads"]
+        Pipeline --> I1["Interpreter 1"]
+        Pipeline --> IT["Interpreter T"]
+        I1 --> E1["Every host's file<br/>rules + plugins"]
+        IT --> ET["Every host's file<br/>rules + plugins"]
     end
-
-    subgraph Host["Configured extension host"]
-        direction TB
-        Pool["Worker pool"]
-        Mode["workers = 0: T workers<br/>workers = N: N workers"]
-        Pool --> Mode
-        Pool --> W1["Worker 1"]
-        Pool --> WN["Worker N"]
-        W1 --> E1["Identical extension set<br/>rules + plugins"]
-        WN --> EN["Identical extension set<br/>rules + plugins"]
-    end
-
-    Pipeline <-->|"length-delimited binary frames"| Pool
 ```
 
 The three terms have distinct meanings:
 
-- A **host** is one `[extension-hosts.NAME]` configuration entry and its command.
-- A **worker** is one command-scoped process started from that command.
-- An **extension** is one logical bundle of rules and plugins advertised by every worker in the pool. The PHP SDK represents it as `Mago\Sdk\Extension`.
+- A **host** is one `[extension-hosts.NAME]` configuration entry and its file.
+- A **worker** is what a host's file registers. Each analysis thread's interpreter runs its own copy of every host's worker.
+- An **extension** is one logical bundle of rules and plugins a worker advertises. The PHP SDK represents it as `Mago\Sdk\Extension`.
 
-One worker may host multiple extensions. Every worker in a pool must construct equivalent extensions, rules, plugins, targets, and capabilities.
+One worker may host multiple extensions. Every interpreter runs the same files, so every copy of a worker constructs equivalent extensions, rules, plugins, targets, and capabilities.
 
 ## Registration
 
@@ -49,22 +40,15 @@ Use `mago extension validate` to validate host startup and linter registration w
 
 ## Transport
 
-Requests and responses use length-delimited binary frames with request identifiers, nesting information, cancellation, and error responses. Standard output belongs exclusively to this protocol. The PHP SDK captures buffered accidental output and redirects throwable details to standard error, but extensions should never print to protocol output.
+Mago calls each worker in its analysis thread's interpreter and passes each request and response as a binary message, with error responses for what a worker throws. A worker asks Mago codebase queries during a request through the same call, which Mago answers on the same thread.
 
-On Unix-like systems, Mago uses process pipes. The bundled PHP SDK uses an authenticated loopback input transport on Windows because redirected PHP standard input cannot reliably support the required non-blocking behavior. This is handled by `Worker::run()`; another SDK may choose an equivalent compatible transport implementation.
-
-The versioned binary protocol is the language-neutral extension ABI. The bundled PHP SDK is its first-party implementation. PHP authors should use the SDK classes shipped with the installed Mago version; authors of another SDK must implement the same frame and capability contracts.
+Mago loads its own copy of the PHP SDK into each interpreter before any host's file, so the SDK classes a worker uses are always the ones the running `mago` ships, whatever version the project's `vendor` folder holds.
 
 ## Scheduling and parallelism
 
-Mago reserves the least-loaded available worker for ordinary requests. Analyzer requests may use a file-derived affinity key to break ties among equally loaded workers, improving process-local cache locality without sacrificing throughput.
+Each analysis thread sends its requests to the worker in its own interpreter, so the workers run in parallel as the analysis does, and no request waits for another thread's.
 
-A worker pool provides parallelism by running multiple processes. Each worker serves its requests one at a time, in the order Mago sends them: Mago starts a request's deadline only when the request before it on that worker ends, so a worker in any language must not interleave them.
-
-In the PHP SDK, a request that waits on a nested codebase query keeps its turn. The worker keeps reading frames, so the query's answer and any cancellation still reach it, but no other request starts until it responds, fails, or is cancelled.
-
-A pool starts all its processes at once, before its first request: as many as Mago's configured thread count with `workers = 0`, and exactly `workers` with a positive value, even when the value exceeds Mago's thread count.
-
+Each interpreter serves one request at a time. A request that waits on a nested codebase query keeps its turn: Mago answers the query on the same thread, and the request goes on.
 ## Data minimization
 
 Mago does not send every source file or its complete syntax tree by default.
@@ -89,18 +73,18 @@ An analyzer callback can query Mago while its outer request is active. The worke
 ```mermaid
 sequenceDiagram
     participant Analyzer as Mago analyzer
-    participant Pool as Worker pool
+    participant Engine as Interpreter
     participant Worker as Selected worker
     participant Metadata as Frozen metadata
 
-    Analyzer->>Pool: Outer provider request
-    Pool->>Worker: Dispatch on reserved connection
-    Worker->>Pool: Nested batched metadata query
-    Pool->>Metadata: Read current generation
-    Metadata-->>Pool: Typed metadata response
-    Pool-->>Worker: Nested response
-    Worker-->>Pool: Provider result
-    Pool-->>Analyzer: Semantic fact or null
+    Analyzer->>Engine: Outer provider request
+    Engine->>Worker: Call on the analysis thread
+    Worker->>Engine: Nested batched metadata query
+    Engine->>Metadata: Read current generation
+    Metadata-->>Engine: Typed metadata response
+    Engine-->>Worker: Nested response
+    Worker-->>Engine: Provider result
+    Engine-->>Analyzer: Semantic fact or null
 ```
 
 The SDK caches immutable metadata within an analysis generation where safe. Prefer `getMultiple*`, `checkMultiple*`, and batch-comparison methods whenever the complete set of keys is already known.
@@ -111,13 +95,12 @@ Mago distinguishes optional semantic hints from lifecycle operations:
 
 - A failed optional provider is logged and native analysis continues with its original type, signature, assertion, or initialization knowledge.
 - Registration, initialization, codebase-scan, and lifecycle callback failures fail the current operation.
-- A timed-out or disconnected worker may be restarted. Successful bootstrap state is replayed before the replacement serves requests.
-- Cancellation is cooperative inside workers. With the PHP SDK, long loops should periodically call `throwIfCancelled()`.
+- A request that makes no progress for the host's `request-timeout-ms` is interrupted, and its interpreter starts again before its next request, receiving the successful bootstrap state first.
 
-Worker exceptions are serialized as error responses and include the retained standard-error tail in Mago's diagnostics where applicable.
+Worker exceptions are returned as error responses, and Mago's diagnostics name the host.
 
 ## Shutdown and reduction
 
-If no extension registers a `WorkerReducer`, shutdown sends no reduction requests. Otherwise Mago collects from every active worker concurrently, preserves responses in worker-index order, shuts down every worker except worker 0, sends the ordered batch to worker 0's reducers, and finally shuts down worker 0. Reduction is for extension-owned terminal work, not for adding Mago diagnostics after analysis.
+If no extension registers a `WorkerReducer`, shutdown sends no reduction requests. Otherwise Mago collects from every interpreter that served the host, each on its own analysis thread, keeps the responses in thread order, and sends the ordered batch to the reducers in one interpreter. Reduction is for extension-owned terminal work, not for adding Mago diagnostics after analysis.
 
 See [Worker state and reduction](/extensions/sdk/worker-reduction/) for the API and guarantees.

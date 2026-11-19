@@ -1,13 +1,13 @@
 +++
 title = "Worker state and reduction"
-description = "Merge process-local extension data when a worker pool shuts down."
+description = "Merge interpreter-local extension data when Mago stops the hosts."
 nav_order = 40
 nav_section = "Extensions"
 nav_subsection = "PHP SDK"
 +++
 # Worker state and reduction
 
-Each PHP process has independent memory. `WorkerReducer` lets an extension collect one opaque payload per worker and perform terminal work with the complete ordered set.
+Each analysis thread's interpreter has independent memory. `WorkerReducer` lets an extension collect one opaque payload per interpreter and perform terminal work with the complete ordered set.
 
 Use reduction for extension-owned output such as metrics, indexes, or a single API upload. It is not an analyzer hook and cannot add diagnostics to a completed Mago result.
 
@@ -44,7 +44,6 @@ final class CoverageReducer implements WorkerReducer
     {
         $merged = [];
         foreach ($context->workerPayloads as $payload) {
-            $context->cancellation->throwIfCancelled();
             foreach (json_decode($payload, true, flags: JSON_THROW_ON_ERROR) as $file => $count) {
                 $merged[$file] = $count;
             }
@@ -73,58 +72,50 @@ new Extension(
 );
 ```
 
-The object is shared only within one process. Each worker constructs its own equivalent object graph.
+The object is shared only within one interpreter. Each interpreter constructs its own equivalent object graph.
 
 ## Shutdown sequence
 
-When reduction is registered, Mago:
+When reduction is registered, Mago, once it stops the hosts:
 
 ```mermaid
 sequenceDiagram
-    participant Mago as Mago coordinator
-    participant W1 as Worker 1
-    participant W2 as Worker 2
-    participant WN as Worker N
+    participant Mago as Mago
+    participant I1 as Interpreter 1
+    participant I2 as Interpreter 2
+    participant IT as Interpreter T
 
-    par Collect concurrently
-        Mago->>W1: collect()
-        W1-->>Mago: opaque payload 1
+    par Collect on each analysis thread
+        Mago->>I1: collect()
+        I1-->>Mago: opaque payload 1
     and
-        Mago->>W2: collect()
-        W2-->>Mago: opaque payload 2
+        Mago->>I2: collect()
+        I2-->>Mago: opaque payload 2
     and
-        Mago->>WN: collect()
-        WN-->>Mago: opaque payload N
+        Mago->>IT: collect()
+        IT-->>Mago: opaque payload T
     end
-    Mago-xW2: shut down
-    Mago-xWN: shut down
-    Mago->>W1: reduce([payload 1, 2, ..., N])
-    W1-->>Mago: reduction complete
-    Mago-xW1: final shutdown
+    Mago->>I1: reduce([payload 1, 2, ..., T])
+    I1-->>Mago: reduction complete
 ```
 
-1. stops accepting ordinary work for the pool;
-2. calls `collect()` on all active workers concurrently;
-3. preserves the collection responses in stable worker-index order;
-4. validates that workers advertised the same reducer registrations;
-5. keeps worker 0 alive, shuts down the followers, and sends worker 0 the complete batch;
-6. calls `reduce()` for each extension reducer on that surviving worker;
-7. shuts down worker 0.
+1. calls `collect()` in every interpreter that served the host, each on its own thread;
+2. keeps the collection responses in thread order;
+3. calls `reduce()` for each extension reducer in one interpreter, with every response.
 
-`WorkerReductionContext::$workerPayloads` is therefore a non-empty list. It includes the surviving worker's own payload. The order is stable but should not be interpreted as source-file order.
+`WorkerReductionContext::$workerPayloads` is therefore a non-empty list. It includes the reducing interpreter's own payload. The order is stable but should not be interpreted as source-file order.
 
-Reduction is enabled only for pools advertising at least one reducer, so ordinary extensions pay no collection or reduction request cost.
+Reduction is enabled only for hosts advertising at least one reducer, so ordinary extensions pay no collection or reduction request cost.
 
-## Failure and cancellation
+## Failure and deadlines
 
-Both methods may throw. A collection or reduction failure is logged as a worker-reduction warning; it does not replace the completed lint or analysis result. Mago still proceeds with process cleanup.
+Both methods may throw. A collection or reduction failure is logged as a worker-reduction warning; it does not replace the completed lint or analysis result.
 
-The reduction context contains a cancellation token. Check it before expensive decoding, network activity, or filesystem work. Both `collect()` and `reduce()` use the host's `request-timeout-ms`. The separate `shutdown-timeout-ms` is only the grace period between sending the shutdown frame and forcibly terminating a process.
+Both `collect()` and `reduce()` use the host's `request-timeout-ms`. A method that runs past it is interrupted, and the reduction fails with that warning.
 
 ## Design guidance
 
-- Keep `collect()` deterministic and fast; it runs once in every active worker.
+- Keep `collect()` deterministic and fast; it runs once in every interpreter.
 - Send the minimum state required for the final operation.
-- Bound payload sizes. The complete reduction request must fit the host's `maximum-payload-size`.
 - Make externally visible reduction effects idempotent when possible.
 - Do not depend on reduction for correctness of Mago's reported analysis.

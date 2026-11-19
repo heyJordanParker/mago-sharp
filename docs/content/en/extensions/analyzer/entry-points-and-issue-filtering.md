@@ -91,7 +91,7 @@ final class GeneratedProxyIssueFilter implements IssueFilterHook
 
 `IssueFilterContext` contains:
 
-- PHP version, codebase, type comparator, and cancellation token;
+- PHP version, codebase, and type comparator;
 - the logical file path;
 - exact in-memory file contents analyzed by Mago;
 - the immutable `ReportedIssue`, including level, code, message, notes, help, link, annotations, and edits.

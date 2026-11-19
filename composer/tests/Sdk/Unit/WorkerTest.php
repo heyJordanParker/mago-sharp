@@ -22,15 +22,10 @@ use Mago\Sdk\Analyzer\NodeAnalysisContext;
 use Mago\Sdk\Analyzer\Plugin;
 use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
-use Mago\Sdk\Exception\CancelledException;
 use Mago\Sdk\Exception\InvalidArgumentException;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Internal\Analyzer\Protocol;
-use Mago\Sdk\Internal\Io\ResourceReader;
-use Mago\Sdk\Internal\Io\ResourceWriter;
-use Mago\Sdk\Internal\Protocol\Frame;
-use Mago\Sdk\Internal\Protocol\FrameCodec;
-use Mago\Sdk\Internal\Protocol\FrameKind;
+use Mago\Sdk\Internal\Hosts;
 use Mago\Sdk\Internal\Protocol\PayloadWriter;
 use Mago\Sdk\Internal\Worker\Protocol as WorkerProtocol;
 use Mago\Sdk\PHPVersion;
@@ -38,16 +33,14 @@ use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Worker;
 use Mago\Sdk\WorkerReducer;
 use Mago\Sdk\WorkerReductionContext;
-use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
-use Revolt\EventLoop;
+use ReflectionProperty;
 use RuntimeException;
 
-use function array_diff;
-use function array_keys;
-use function fclose;
-use function Mago\Internal\get_version;
+use function count;
 use function pack;
+
+require_once __DIR__ . '/Engine.php';
 
 final class WorkerTest extends TestCase
 {
@@ -106,41 +99,6 @@ final class WorkerTest extends TestCase
         ]));
     }
 
-    public function testAWorkerStartsARequestOnlyAfterTheOneBeforeItResponds(): void
-    {
-        [$sent] = self::analyze(['a.php', 'b.php']);
-
-        self::assertSame(
-            [
-                'describe: response',
-                'a.php: start the hooks of a.php',
-                'a.php: query',
-                'a.php: response',
-                'b.php: start the hooks of b.php',
-                'b.php: response',
-            ],
-            $sent,
-        );
-    }
-
-    public function testACancelledRequestThatHasNotStartedIsDroppedAndTheOneAfterItRuns(): void
-    {
-        [$sent, $routesByFile] = self::analyze(['a.php', 'b.php', 'c.php'], cancel: 'b.php');
-
-        self::assertSame(
-            [
-                'describe: response',
-                'a.php: start the hooks of a.php',
-                'a.php: query',
-                'a.php: response',
-                'c.php: start the hooks of c.php',
-                'c.php: response',
-            ],
-            $sent,
-        );
-        self::assertSame(['a.php', 'c.php'], array_keys($routesByFile));
-    }
-
     public function testARuleThatCachesAroundACodebaseQueryGivesEveryFileTheWholeResult(): void
     {
         [, $routesByFile] = self::analyze(['a.php', 'b.php']);
@@ -148,7 +106,7 @@ final class WorkerTest extends TestCase
         self::assertSame(['a.php' => ['App\Http\Routes::index'], 'b.php' => ['App\Http\Routes::index']], $routesByFile);
     }
 
-    public function testACallbackThatThrowsCancelledWhileMagoCancelledNothingGetsAnErrorResponse(): void
+    public function testACallbackThatThrowsFailsItsRequestAndTheNextOneRuns(): void
     {
         $reducer = new class implements WorkerReducer {
             private bool $thrown = false;
@@ -158,7 +116,7 @@ final class WorkerTest extends TestCase
                 if (!$this->thrown) {
                     $this->thrown = true;
 
-                    throw new CancelledException();
+                    throw new RuntimeException('The metrics store is closed.');
                 }
 
                 return '';
@@ -173,7 +131,7 @@ final class WorkerTest extends TestCase
         self::assertSame(
             [
                 'first: start the worker reducer of extension `acme/metrics`',
-                'first: error The extension request was cancelled.',
+                'first: error Worker reducer for extension `acme/metrics` failed to collect: The metrics store is closed.',
                 'second: start the worker reducer of extension `acme/metrics`',
                 'second: response',
             ],
@@ -215,61 +173,6 @@ final class WorkerTest extends TestCase
                 'after: start the after-analysis hooks of plugin `first`',
                 'after: start the after-analysis hooks of plugin `second`',
                 'after: response',
-            ],
-            $sent,
-        );
-    }
-
-    /**
-     * @return iterable<string, array{string, string, string}>
-     */
-    public static function requestsOfAnotherProtocol(): iterable
-    {
-        $major = Protocol::VERSION_U32 >> 16;
-        $minor = Protocol::VERSION_U32 & 0xFFFF;
-        foreach (['an older' => $minor - 1, 'a newer' => $minor + 1] as $mago => $magoMinor) {
-            yield "{$mago} mago's analyzer describe request" => [
-                self::describeRequest(($major << 16) | $magoMinor),
-                "analyzer protocol {$major}.{$magoMinor}",
-                "{$major}.{$minor}",
-            ];
-        }
-
-        yield 'a linter describe request of another protocol' => [
-            pack('N3', 0x4D4C_4E54, 0x0001_0001, 1 << 16),
-            'linter protocol 1.1',
-            '1.2',
-        ];
-        yield 'a worker management request of another protocol' => [
-            pack('N3', self::WORKER_MAGIC, 0x0001_0001, WorkerProtocol::COLLECT_REQUEST << 16),
-            'worker management protocol 1.1',
-            '1.0',
-        ];
-    }
-
-    /**
-     * A mago of another protocol than this SDK's gets its request refused, with the extension, both protocols, the
-     * SDK's package and release, and the ways to make the two match. A mago before 0.6.1 prints this text as the whole
-     * error.
-     */
-    #[DataProvider('requestsOfAnotherProtocol')]
-    public function testAWorkerRefusesAMagoOfAnotherProtocolNamingThePackage(
-        string $request,
-        string $magoProtocol,
-        string $sdkProtocol,
-    ): void {
-        $worker = new Worker(new Extension('acme/routes', 'Routes', '1.0.0'));
-
-        $sent = self::serve($worker, ['request' => $request]);
-
-        self::assertSame(
-            [
-                "request: error The worker of `acme/routes` can't read mago's request: `mago` speaks {$magoProtocol}, "
-                    . 'and the extension SDK, heyjordanparker/mago-sharp '
-                    . get_version()
-                    . ", speaks {$sdkProtocol}. `mago` and heyjordanparker/mago-sharp must be the same release: run the "
-                    . '`mago` that heyjordanparker/mago-sharp installs, `vendor/bin/mago`, or require the '
-                    . 'heyjordanparker/mago-sharp release `mago --version` prints.',
             ],
             $sent,
         );
@@ -418,14 +321,14 @@ final class WorkerTest extends TestCase
 
     /**
      * Runs a worker whose rule caches the routes one codebase query finds, as an app's rule does, while Mago sends
-     * one after-file batch per file at once and cancels `$cancel`'s request when the first query arrives.
+     * one after-file batch per file.
      *
      * @param non-empty-list<non-empty-string> $files
      *
-     * @return array{list<string>, array<string, list<string>>} every frame the worker sent, in order, and the routes
+     * @return array{list<string>, array<string, list<string>>} everything the worker told Mago, in order, and the routes
      *     the rule saw for each file
      */
-    private static function analyze(array $files, ?string $cancel = null): array
+    private static function analyze(array $files): array
     {
         $rule = new class implements AfterFileAnalysisHook {
             /** @var array<string, list<string>> */
@@ -459,93 +362,37 @@ final class WorkerTest extends TestCase
             $requests[$file] = self::afterFileRequest($file);
         }
 
-        return [self::serve($worker, $requests, $cancel), $rule->routesByFile];
+        return [self::serve($worker, $requests), $rule->routesByFile];
     }
 
     /**
-     * Runs `$worker` while Mago sends it every request in `$requests` at once, in order, and cancels the `$cancel`
-     * request when the first codebase query arrives.
+     * Registers `$worker` as mago's engine runs a host's file, then calls it with every request in `$requests`, in
+     * order, answering each codebase query with one route.
      *
      * @param non-empty-array<non-empty-string, string> $requests each request's payload, by a label for it
      *
-     * @return list<string> every frame the worker sent, in order, named by its request's label
+     * @return list<string> everything the worker told mago, in order, named by its request's label
      */
-    private static function serve(Worker $worker, array $requests, ?string $cancel = null): array
+    private static function serve(Worker $worker, array $requests): array
     {
-        [$mago, $process] = StreamPair::create();
-        $reader = new ResourceReader($mago);
-        $writer = new ResourceWriter($mago);
+        /** @var list<\Closure(string): string> $handlers */
+        $handlers = (new ReflectionProperty(Hosts::class, 'handlers'))->getValue();
+        $place = count($handlers);
+        $worker->run();
         $sent = [];
-        EventLoop::queue(static function () use ($reader, $writer, $requests, $cancel, &$sent): void {
-            self::actAsMago($reader, $writer, $requests, $cancel, $sent);
-        });
-        $timeout = EventLoop::delay(2.0, static function (): never {
-            throw new RuntimeException('The worker did not answer every request within two seconds.');
-        });
+        foreach ($requests as $label => $payload) {
+            Mago::$answer = static function (string $question, string $asked) use ($label, &$sent): ?string {
+                $sent[] = $question === 'progress' ? "{$label}: start {$asked}" : "{$label}: query";
 
-        try {
-            $worker->run($process, $process);
-        } finally {
-            EventLoop::cancel($timeout);
-            $reader->close();
-            $writer->close();
-            fclose($mago);
-            fclose($process);
+                return $question === 'progress' ? null : self::routesResponse();
+            };
+            [$served, $response] = Hosts::handle($place, $payload);
+            $sent[] = "{$label}: " . ($served ? 'response' : "error {$response}");
         }
+
+        Mago::$answer = null;
 
         return $sent;
-    }
-
-    /**
-     * Sends the worker every request at once, answers every codebase query with one route, and shuts the worker down
-     * once every request that was not cancelled has responded.
-     *
-     * @param non-empty-array<non-empty-string, string> $requests
-     * @param list<string> $sent
-     */
-    private static function actAsMago(
-        ResourceReader $reader,
-        ResourceWriter $writer,
-        array $requests,
-        ?string $cancel,
-        array &$sent,
-    ): void {
-        $codec = new FrameCodec();
-        $labels = [];
-        $id = 0;
-        foreach ($requests as $label => $payload) {
-            $labels[++$id] = $label;
-            $writer->write($codec->encode(new Frame(FrameKind::Request, 0, $id, 0, $payload)));
-        }
-
-        $awaited = array_diff($labels, [$cancel]);
-        while ($awaited !== []) {
-            $frame = $codec->read($reader) ?? throw new RuntimeException('The worker closed its output.');
-            if ($frame->kind === FrameKind::Response) {
-                $sent[] = "{$labels[$frame->id]}: " . ($frame->flags === 0 ? 'response' : "error {$frame->payload}");
-                unset($awaited[$frame->id]);
-                continue;
-            }
-
-            if ($frame->kind === FrameKind::Notification) {
-                $sent[] = "{$labels[$frame->parentId]}: start {$frame->payload}";
-                continue;
-            }
-
-            $sent[] = "{$labels[$frame->parentId]}: query";
-            if ($cancel !== null) {
-                foreach (array_keys($labels, $cancel, true) as $cancelled) {
-                    $writer->write($codec->encode(new Frame(FrameKind::Cancel, 0, $cancelled, 0, '')));
-                }
-                $cancel = null;
-            }
-
-            $writer->write($codec->encode(
-                new Frame(FrameKind::Response, 0, $frame->id, $frame->parentId, self::routesResponse()),
-            ));
-        }
-
-        $writer->write($codec->encode(new Frame(FrameKind::Shutdown, 0, 0, 0, '')));
     }
 
     private static function describeRequest(int $version = Protocol::VERSION_U32): string

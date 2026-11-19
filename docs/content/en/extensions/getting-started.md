@@ -70,7 +70,6 @@ final class NoEvalRule implements Rule
 
     public function lint(LintContext $context): void
     {
-        $context->cancellation->throwIfCancelled();
         $context->report(Issue::new(
             'Avoid evaluating dynamically generated PHP code.',
             $context->node->span,
@@ -142,12 +141,12 @@ Add an extension host to `mago.toml`:
 
 ```toml
 [extension-hosts.acme]
-command = ["php", ".mago/acme-worker.php"]
+file = ".mago/acme-worker.php"
 ```
 
-The table name, `acme`, is a local host-pool name. It is separate from the globally unique identifier advertised by the extension.
+The table name, `acme`, is a local host name. It is separate from the globally unique identifier advertised by the extension.
 
-With no `workers` value, the pool starts as many workers as Mago's configured thread count. The default working directory is the configuration file's directory, so `.mago/acme-worker.php` resolves from there.
+`file` resolves from the configuration file's directory, which each interpreter also starts in. Mago runs the file inside itself, so the project needs no `php` to run the host.
 
 ## 5. Validate registration
 

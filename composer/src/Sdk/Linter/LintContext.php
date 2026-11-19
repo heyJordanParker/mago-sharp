@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Linter;
 
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\Reporting\Issue;
 use Mago\Sdk\Syntax\Node;
 use Mago\Sdk\Syntax\ResolvedName;
@@ -26,7 +25,6 @@ final class LintContext
     public function __construct(
         public readonly SourceFile $file,
         public readonly Node $node,
-        public readonly CancellationTokenInterface $cancellation,
     ) {}
 
     public function report(Issue $issue): void

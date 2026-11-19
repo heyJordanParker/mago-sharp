@@ -85,7 +85,7 @@ final class ContainerReturnTypes implements MethodReturnTypeProvider
 
 Returning `null` delegates to the next matching provider and ultimately preserves Mago's native result, including a declared return type. A non-null result replaces that native return result. A provider should return a type only when it has enough information to improve Mago's answer.
 
-`ReturnTypeProviderContext` provides the PHP version, read-only codebase, invocation, native type comparator, and cancellation token.
+`ReturnTypeProviderContext` provides the PHP version, read-only codebase, invocation, and native type comparator.
 
 ## Invocation data
 

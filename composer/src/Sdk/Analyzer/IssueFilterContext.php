@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Analyzer;
 
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\Reporting\ReportedIssue;
 
@@ -22,7 +21,6 @@ final class IssueFilterContext
         public readonly PHPVersion $phpVersion,
         public readonly Codebase $codebase,
         public readonly TypeComparator $types,
-        public readonly CancellationTokenInterface $cancellation,
         public readonly string $file,
         public readonly string $contents,
         public readonly ReportedIssue $issue,

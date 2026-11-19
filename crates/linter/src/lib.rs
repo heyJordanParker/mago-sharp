@@ -94,7 +94,7 @@ where
         program: &'ast Program<'arena>,
         resolved_names: &'ast ResolvedNames<'arena>,
     ) -> IssueCollection {
-        match self.lint_internal::<mago_extension::WorkerPool>(source_file, program, resolved_names, None) {
+        match self.lint_internal::<mago_extension::Host>(source_file, program, resolved_names, None) {
             Ok(issues) => issues,
             Err(_) => unreachable!("linting without external rules cannot fail"),
         }

@@ -24,9 +24,8 @@ use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
-use mago_extension::Frame;
+use mago_extension::Host;
 use mago_extension::WorkerError;
-use mago_extension::WorkerPool;
 use mago_extension::WorkerRequestHandler;
 use mago_names::ResolvedNames;
 use mago_php_version::PHPVersion;
@@ -73,11 +72,9 @@ pub use scan::CodebaseScanPlan;
 
 const SLOW_PROVIDER_THRESHOLD: Duration = Duration::from_millis(5);
 const SLOW_LIFECYCLE_THRESHOLD: Duration = Duration::from_millis(5);
-const MAXIMUM_PROVIDER_RESPONSE_CACHE_ENTRIES: usize = 0x0001_0000;
 const PROVIDER_CALLABLE_SIGNATURE: u8 = 1;
 const PROVIDER_OVERRIDES_DECLARED_SIGNATURE: u8 = 1 << 1;
 const PROVIDER_UNDECLARED_RETURN_TYPE_ONLY: u8 = 1 << 2;
-const PROVIDER_MEMOIZED: u8 = 1 << 3;
 static NEXT_ANALYSIS_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 type ExternalAnalyzerResult<T> = Result<T, Arc<ExternalAnalyzerError>>;
@@ -275,7 +272,6 @@ struct ExternalAnalyzerTelemetry {
     unmatched_lookups: AtomicU64,
     requests: AtomicU64,
     ipc_requests: AtomicU64,
-    provider_cache_hits: AtomicU64,
     signature_requests: AtomicU64,
     assertion_requests: AtomicU64,
     provided_types: AtomicU64,
@@ -547,15 +543,6 @@ enum CallableTarget<'target> {
     Method { class: &'target [u8], method: &'target [u8] },
 }
 
-impl<'target> CallableTarget<'target> {
-    fn affinity(self) -> &'target [u8] {
-        match self {
-            Self::Function(function) => function,
-            Self::Method { class, .. } => class,
-        }
-    }
-}
-
 impl std::fmt::Display for CallableTarget<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -795,51 +782,32 @@ impl ProviderIndices {
 
 /// Request transport used by worker-backed analyzer providers.
 pub trait AnalyzerTransport: std::fmt::Debug + Send + Sync {
-    /// Sends initialization data to every worker process.
+    /// Sends initialization data to the host's worker in every interpreter.
     ///
     /// # Errors
     ///
-    /// Returns an error if a worker cannot process the request.
-    fn broadcast(&self, payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError>;
+    /// Returns an error if the worker cannot process the request.
+    fn broadcast(&self, payload: &[u8]) -> Result<Vec<u8>, WorkerError>;
 
-    /// Returns the largest payload accepted by this transport.
-    fn maximum_payload_size(&self) -> usize {
-        usize::MAX
-    }
-
-    /// Sends an ordered, replayable state-replacement sequence to every worker.
+    /// Sends an ordered, replayable state-replacement sequence to the host's worker in every interpreter.
     ///
     /// # Errors
     ///
-    /// Returns an error if a worker cannot process the complete sequence.
-    fn broadcast_sequence(&self, _group: u64, payloads: &[Vec<u8>]) -> Result<Vec<Vec<Vec<u8>>>, WorkerError> {
+    /// Returns an error if the worker cannot process the complete sequence.
+    fn broadcast_sequence(&self, _group: u64, payloads: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, WorkerError> {
         payloads.iter().map(|payload| self.broadcast(payload)).collect()
     }
 
-    /// Starts again each worker whose class loads hold one of `classes`, each a lowercase class name, and returns how
-    /// many it started again. A transport with no worker process holds no class.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a worker cannot answer or cannot be started again.
-    fn reload_holding(&self, _classes: &[&[u8]]) -> Result<usize, WorkerError> {
-        Ok(0)
-    }
+    /// Takes in that the compiled files of `classes`, each a lowercase class name, changed: each interpreter whose
+    /// worker loaded one starts again before its next request. A transport with no interpreter holds no class.
+    fn reload_holding(&self, _classes: &[&[u8]]) {}
 
-    /// Sends one provider request to an available worker. `running` names what the request runs, for its
-    /// deadline's error when the worker names nothing it started.
+    /// Sends one request, servicing the worker's codebase queries with `handler`. `running` names what the request
+    /// runs, for its deadline's error when the worker names nothing it started.
     ///
     /// # Errors
     ///
-    /// Returns an error if no worker can process the request.
-    fn request(&self, payload: Vec<u8>, running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError>;
-
-    /// Sends one request, named by `running` as [`Self::request`] names it, while servicing nested analyzer
-    /// queries.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the worker or nested query handler fails.
+    /// Returns an error if the worker or the query handler fails.
     fn request_with_handler<H>(
         &self,
         payload: Vec<u8>,
@@ -848,48 +816,19 @@ pub trait AnalyzerTransport: std::fmt::Debug + Send + Sync {
     ) -> Result<Vec<u8>, WorkerError>
     where
         H: WorkerRequestHandler;
-
-    /// Sends a provider request with a stable process-local cache key.
-    ///
-    /// The default implementation preserves compatibility with transports
-    /// that do not expose worker affinity.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the worker or nested query handler fails.
-    fn request_with_handler_affinity<H>(
-        &self,
-        payload: Vec<u8>,
-        running: Option<&dyn Display>,
-        _affinity: &[u8],
-        handler: &mut H,
-    ) -> Result<Vec<u8>, WorkerError>
-    where
-        H: WorkerRequestHandler,
-    {
-        self.request_with_handler(payload, running, handler)
-    }
 }
 
-impl AnalyzerTransport for WorkerPool {
-    fn broadcast(&self, payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
+impl AnalyzerTransport for Host {
+    fn broadcast(&self, payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
         Self::broadcast(self, payload)
     }
 
-    fn maximum_payload_size(&self) -> usize {
-        Self::maximum_payload_size(self)
+    fn broadcast_sequence(&self, group: u64, payloads: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, WorkerError> {
+        Self::broadcast_sequence(self, Some(group), payloads)
     }
 
-    fn reload_holding(&self, classes: &[&[u8]]) -> Result<usize, WorkerError> {
-        Self::reload_holding(self, classes)
-    }
-
-    fn broadcast_sequence(&self, group: u64, payloads: &[Vec<u8>]) -> Result<Vec<Vec<Vec<u8>>>, WorkerError> {
-        Self::broadcast_sequence(self, group, payloads)
-    }
-
-    fn request(&self, payload: Vec<u8>, running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
-        Self::request(self, payload, running)
+    fn reload_holding(&self, classes: &[&[u8]]) {
+        Self::reload_holding(self, classes);
     }
 
     fn request_with_handler<H>(
@@ -901,20 +840,7 @@ impl AnalyzerTransport for WorkerPool {
     where
         H: WorkerRequestHandler,
     {
-        Self::request_with_handler(self, payload, running, handler)
-    }
-
-    fn request_with_handler_affinity<H>(
-        &self,
-        payload: Vec<u8>,
-        running: Option<&dyn Display>,
-        affinity: &[u8],
-        handler: &mut H,
-    ) -> Result<Vec<u8>, WorkerError>
-    where
-        H: WorkerRequestHandler,
-    {
-        Self::request_with_handler_affinity(self, payload, running, affinity, handler)
+        self.request(payload, running, handler)
     }
 }
 
@@ -922,11 +848,8 @@ impl AnalyzerTransport for WorkerPool {
 struct Backend<T> {
     transport: Arc<T>,
     registration: Registration,
-    provider_response_cache: Mutex<ProviderResponseCache>,
     function_capabilities: Box<[u8]>,
     method_capabilities: Box<[u8]>,
-    function_assertion_capabilities: Box<[u8]>,
-    method_assertion_capabilities: Box<[u8]>,
     function_exact: WordMap<Vec<u16>>,
     function_wildcard: Vec<(u16, Vec<FunctionTarget>)>,
     function_signature_exact: WordMap<Vec<u16>>,
@@ -949,33 +872,6 @@ struct Backend<T> {
     call_forwarding_wildcard: Vec<(u16, Vec<MethodTarget>)>,
     issue_filter_indices: Box<[u16]>,
     issue_filter_codes: foldhash::HashSet<String>,
-}
-
-#[derive(Debug, Default)]
-struct ProviderResponseCache {
-    generation: u64,
-    responses: foldhash::HashMap<Vec<u8>, Vec<u8>>,
-}
-
-impl ProviderResponseCache {
-    fn get(&mut self, generation: u64, request: &[u8]) -> Option<Vec<u8>> {
-        self.select_generation(generation);
-        self.responses.get(request).cloned()
-    }
-
-    fn insert(&mut self, generation: u64, request: Vec<u8>, response: Vec<u8>) {
-        self.select_generation(generation);
-        if self.responses.len() < MAXIMUM_PROVIDER_RESPONSE_CACHE_ENTRIES {
-            self.responses.insert(request, response);
-        }
-    }
-
-    fn select_generation(&mut self, generation: u64) {
-        if self.generation != generation {
-            self.generation = generation;
-            self.responses.clear();
-        }
-    }
 }
 
 fn provider_capabilities<T>(providers: &[ProviderRegistration<T>]) -> Box<[u8]> {
@@ -1053,17 +949,12 @@ impl<T> Backend<T> {
             registration.issue_filter_hooks.iter().flat_map(|hook| hook.targets.iter().cloned()).collect();
         let function_capabilities = provider_capabilities(&registration.function_providers);
         let method_capabilities = provider_capabilities(&registration.method_providers);
-        let function_assertion_capabilities = provider_capabilities(&registration.function_assertion_providers);
-        let method_assertion_capabilities = provider_capabilities(&registration.method_assertion_providers);
 
         Self {
             transport,
             registration,
-            provider_response_cache: Mutex::new(ProviderResponseCache::default()),
             function_capabilities,
             method_capabilities,
-            function_assertion_capabilities,
-            method_assertion_capabilities,
             function_exact,
             function_wildcard,
             function_signature_exact,
@@ -1115,14 +1006,6 @@ impl<T> Backend<T> {
             false,
         );
         (indices, candidates)
-    }
-
-    fn memoizes_function_providers(&self, indices: &[u16]) -> bool {
-        providers_have_capability(&self.function_capabilities, indices, PROVIDER_MEMOIZED)
-    }
-
-    fn memoizes_method_providers(&self, indices: &[u16]) -> bool {
-        providers_have_capability(&self.method_capabilities, indices, PROVIDER_MEMOIZED)
     }
 
     fn matching_method_providers(
@@ -1205,14 +1088,6 @@ impl<T> Backend<T> {
             class,
             method,
         )
-    }
-
-    fn memoizes_function_assertion_providers(&self, indices: &[u16]) -> bool {
-        providers_have_capability(&self.function_assertion_capabilities, indices, PROVIDER_MEMOIZED)
-    }
-
-    fn memoizes_method_assertion_providers(&self, indices: &[u16]) -> bool {
-        providers_have_capability(&self.method_assertion_capabilities, indices, PROVIDER_MEMOIZED)
     }
 
     fn matching_property_providers(
@@ -1483,10 +1358,6 @@ fn filter_declared_provider_indices(
     })
 }
 
-fn providers_have_capability(capabilities: &[u8], indices: &[u16], capability: u8) -> bool {
-    indices.iter().all(|index| capabilities.get(usize::from(*index)).is_some_and(|flags| flags & capability != 0))
-}
-
 fn index_property_providers(
     providers: &[PropertyProvider],
 ) -> (ProviderTargetIndex<PropertyTarget>, ProviderWildcardIndex<PropertyTarget>) {
@@ -1581,7 +1452,7 @@ fn class_hierarchy(codebase: &CodebaseMetadata, class: Word) -> impl Iterator<It
 }
 
 #[derive(Debug)]
-pub struct ExternalAnalyzer<T = WorkerPool> {
+pub struct ExternalAnalyzer<T = Host> {
     backends: Box<[Backend<T>]>,
     extensions: Box<[ExternalExtension]>,
     initialization_stubs: Box<[ExternalStub]>,
@@ -1728,20 +1599,24 @@ impl Drop for ExternalAnalyzerHandle {
     }
 }
 
-impl ExternalAnalyzer<WorkerPool> {
-    /// Discovers and validates the analyzer plugins exposed by worker pools.
+impl ExternalAnalyzer<Host> {
+    /// Discovers and validates the analyzer plugins the extension hosts expose.
     ///
     /// # Errors
     ///
-    /// Returns an error when a worker fails, sends malformed metadata, disagrees
-    /// with another process in its pool, or advertises duplicate identifiers.
+    /// Returns an error when a worker fails, sends malformed metadata, or advertises duplicate identifiers.
     pub fn initialize(
-        pools: impl IntoIterator<Item = Arc<WorkerPool>>,
+        hosts: impl IntoIterator<Item = Host>,
         php_version: PHPVersion,
         enabled_plugins: &[String],
         disable_defaults: bool,
     ) -> Result<Self, ExternalAnalyzerError> {
-        let analyzer = Self::initialize_transports(pools, php_version, enabled_plugins, disable_defaults)?;
+        let analyzer = Self::initialize_transports(
+            hosts.into_iter().map(Arc::new),
+            php_version,
+            enabled_plugins,
+            disable_defaults,
+        )?;
         for backend in &analyzer.backends {
             if backend.registration.has_worker_reducer {
                 backend.transport.enable_worker_reduction();
@@ -1867,8 +1742,10 @@ where
         scan::dispatch(&self.backends, files)
     }
 
-    pub(crate) fn reload_workers_holding(&self, classes: &[&[u8]]) -> Result<usize, ExternalAnalyzerError> {
-        self.backends.iter().try_fold(0, |reloaded, backend| Ok(reloaded + backend.transport.reload_holding(classes)?))
+    pub(crate) fn reload_workers_holding(&self, classes: &[&[u8]]) {
+        for backend in &self.backends {
+            backend.transport.reload_holding(classes);
+        }
     }
 
     pub(crate) fn filter_issues(
@@ -1911,11 +1788,11 @@ where
 
             let nested_telemetry = &self.telemetry;
             let trace_enabled = self.trace_enabled;
-            let mut handler = |frame: &Frame| {
+            let mut handler = |query: &[u8]| {
                 let nested_start = trace_enabled.then(Instant::now);
-                let result = protocol::handle_nested_request(&frame.payload, codebase, session, |_| None);
+                let result = protocol::handle_nested_request(query, codebase, session, |_| None);
                 if let Some(start) = nested_start {
-                    nested_telemetry.record_nested_request(frame.payload.len(), start.elapsed(), &result);
+                    nested_telemetry.record_nested_request(query.len(), start.elapsed(), &result);
                 }
 
                 result.map(|(_, response)| response).map_err(|error| error.to_string().into_bytes())
@@ -2109,11 +1986,11 @@ where
 
             let nested_telemetry = &self.telemetry;
             let trace_enabled = self.trace_enabled;
-            let mut handler = |frame: &Frame| {
+            let mut handler = |query: &[u8]| {
                 let nested_start = trace_enabled.then(Instant::now);
-                let result = protocol::handle_nested_request(&frame.payload, codebase, session, |_| None);
+                let result = protocol::handle_nested_request(query, codebase, session, |_| None);
                 if let Some(start) = nested_start {
-                    nested_telemetry.record_nested_request(frame.payload.len(), start.elapsed(), &result);
+                    nested_telemetry.record_nested_request(query.len(), start.elapsed(), &result);
                 }
 
                 result.map(|(_, response)| response).map_err(|error| error.to_string().into_bytes())
@@ -2190,17 +2067,16 @@ where
 
             let nested_telemetry = &self.telemetry;
             let trace_enabled = self.trace_enabled;
-            let mut handler = |frame: &Frame| {
+            let mut handler = |query: &[u8]| {
                 let nested_start = trace_enabled.then(Instant::now);
-                let result =
-                    if protocol::message_kind(&frame.payload).map_err(|error| error.to_string().into_bytes())? == 8 {
-                        lifecycle::handle_analysis_query(&frame.payload, session, &store)
-                            .map(|response| (protocol::NestedRequestKind::AnalysisQuery, response))
-                    } else {
-                        protocol::handle_nested_request(&frame.payload, codebase, session, |_| None)
-                    };
+                let result = if protocol::message_kind(query).map_err(|error| error.to_string().into_bytes())? == 8 {
+                    lifecycle::handle_analysis_query(query, session, &store)
+                        .map(|response| (protocol::NestedRequestKind::AnalysisQuery, response))
+                } else {
+                    protocol::handle_nested_request(query, codebase, session, |_| None)
+                };
                 if let Some(start) = nested_start {
-                    nested_telemetry.record_nested_request(frame.payload.len(), start.elapsed(), &result);
+                    nested_telemetry.record_nested_request(query.len(), start.elapsed(), &result);
                 }
 
                 result.map(|(_, response)| response).map_err(|error| error.to_string().into_bytes())
@@ -2276,17 +2152,16 @@ where
 
             let nested_telemetry = &self.telemetry;
             let trace_enabled = self.trace_enabled;
-            let mut handler = |frame: &Frame| {
+            let mut handler = |query: &[u8]| {
                 let nested_start = trace_enabled.then(Instant::now);
-                let result =
-                    if protocol::message_kind(&frame.payload).map_err(|error| error.to_string().into_bytes())? == 8 {
-                        lifecycle::handle_analysis_query(&frame.payload, session, &store)
-                            .map(|response| (protocol::NestedRequestKind::AnalysisQuery, response))
-                    } else {
-                        protocol::handle_nested_request(&frame.payload, codebase, session, |_| None)
-                    };
+                let result = if protocol::message_kind(query).map_err(|error| error.to_string().into_bytes())? == 8 {
+                    lifecycle::handle_analysis_query(query, session, &store)
+                        .map(|response| (protocol::NestedRequestKind::AnalysisQuery, response))
+                } else {
+                    protocol::handle_nested_request(query, codebase, session, |_| None)
+                };
                 if let Some(start) = nested_start {
-                    nested_telemetry.record_nested_request(frame.payload.len(), start.elapsed(), &result);
+                    nested_telemetry.record_nested_request(query.len(), start.elapsed(), &result);
                 }
 
                 result.map(|(_, response)| response).map_err(|error| error.to_string().into_bytes())
@@ -2337,22 +2212,20 @@ where
 
             let nested_telemetry = &self.telemetry;
             let trace_enabled = self.trace_enabled;
-            let mut handler = |frame: &Frame| {
+            let mut handler = |query: &[u8]| {
                 let nested_start = trace_enabled.then(Instant::now);
-                let kind = protocol::message_kind(&frame.payload).map_err(|error| error.to_string().into_bytes())?;
+                let kind = protocol::message_kind(query).map_err(|error| error.to_string().into_bytes())?;
                 let result = if kind == 8 {
-                    lifecycle::handle_analysis_query(&frame.payload, session, &store)
+                    lifecycle::handle_analysis_query(query, session, &store)
                         .map(|response| (protocol::NestedRequestKind::AnalysisQuery, response))
-                } else if lifecycle::is_symbol_reference_query(&frame.payload)
-                    .map_err(|error| error.to_string().into_bytes())?
-                {
-                    lifecycle::handle_symbol_reference_query(&frame.payload, session, codebase, &reference_store)
+                } else if lifecycle::is_symbol_reference_query(query).map_err(|error| error.to_string().into_bytes())? {
+                    lifecycle::handle_symbol_reference_query(query, session, codebase, &reference_store)
                         .map(|response| (protocol::NestedRequestKind::SymbolReferenceQuery, response))
                 } else {
-                    protocol::handle_nested_request(&frame.payload, codebase, session, |_| None)
+                    protocol::handle_nested_request(query, codebase, session, |_| None)
                 };
                 if let Some(start) = nested_start {
-                    nested_telemetry.record_nested_request(frame.payload.len(), start.elapsed(), &result);
+                    nested_telemetry.record_nested_request(query.len(), start.elapsed(), &result);
                 }
 
                 result.map(|(_, response)| response).map_err(|error| error.to_string().into_bytes())
@@ -2376,16 +2249,13 @@ where
         Ok(issues)
     }
 
-    /// Sends `request`, made while Mago analyzed `file_id` and named by `running`, or answers it from the memoized
-    /// responses.
-    #[allow(clippy::too_many_arguments)]
+    /// Sends `request`, made while Mago analyzed `file_id` and named by `running`.
     fn exchange_provider_request(
         &self,
         backend: &Backend<T>,
         request: &mut protocol::ReturnTypeRequest<'_>,
         running: &dyn Display,
         file_id: FileId,
-        affinity: &[u8],
         codebase: &CodebaseMetadata,
         session: &ExternalAnalysisSession,
     ) -> Result<Vec<u8>, ExternalAnalyzerError> {
@@ -2400,35 +2270,10 @@ where
             self.telemetry.request_bytes.fetch_add(request.payload.len() as u64, Ordering::Relaxed);
         }
 
-        let generation = session.generation();
-        let cache_key = request.memoize.then(|| request.payload.clone());
-        let cached = cache_key.as_deref().and_then(|cache_key| {
-            backend
-                .provider_response_cache
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(generation, cache_key)
-        });
-        let response = if let Some(response) = cached {
-            if self.trace_enabled {
-                self.telemetry.provider_cache_hits.fetch_add(1, Ordering::Relaxed);
-            }
-            response
-        } else {
-            let payload = std::mem::take(&mut request.payload);
-            let response =
-                self.exchange_provider_payload(backend, payload, running, affinity, codebase, session, |handle| {
-                    protocol::resolve_type_handle(&request.types, handle)
-                })?;
-            if let Some(cache_key) = cache_key {
-                backend.provider_response_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(
-                    generation,
-                    cache_key,
-                    response.clone(),
-                );
-            }
-            response
-        };
+        let payload = std::mem::take(&mut request.payload);
+        let response = self.exchange_provider_payload(backend, payload, running, codebase, session, |handle| {
+            protocol::resolve_type_handle(&request.types, handle)
+        })?;
 
         session.record_response_reads(file_id, &response)
     }
@@ -2445,24 +2290,22 @@ where
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn exchange_provider_payload<'type_info>(
         &self,
         backend: &Backend<T>,
         request: Vec<u8>,
         running: &dyn Display,
-        affinity: &[u8],
         codebase: &CodebaseMetadata,
         session: &ExternalAnalysisSession,
         resolve_type: impl Fn(usize) -> Option<&'type_info TUnion>,
     ) -> Result<Vec<u8>, ExternalAnalyzerError> {
         let nested_telemetry = &self.telemetry;
         let trace_enabled = self.trace_enabled;
-        let mut handler = |frame: &Frame| {
+        let mut handler = |query: &[u8]| {
             let nested_start = trace_enabled.then(Instant::now);
-            let result = protocol::handle_nested_request(&frame.payload, codebase, session, &resolve_type);
+            let result = protocol::handle_nested_request(query, codebase, session, &resolve_type);
             if let Some(start) = nested_start {
-                nested_telemetry.record_nested_request(frame.payload.len(), start.elapsed(), &result);
+                nested_telemetry.record_nested_request(query.len(), start.elapsed(), &result);
             }
 
             result.map(|(_, response)| response).map_err(|error| error.to_string().into_bytes())
@@ -2474,7 +2317,7 @@ where
         }
         let response = backend
             .transport
-            .request_with_handler_affinity(request, Some(running), affinity, &mut handler)
+            .request_with_handler(request, Some(running), &mut handler)
             .inspect_err(|_| self.record_error())?;
         if let Some(start) = ipc_start {
             self.telemetry.ipc_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
@@ -2484,22 +2327,19 @@ where
         Ok(response)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn dispatch_assertion_request(
         &self,
         backend: &Backend<T>,
         mut request: protocol::ReturnTypeRequest<'_>,
         running: &dyn Display,
         file_id: FileId,
-        affinity: &[u8],
         codebase: &CodebaseMetadata,
         session: &ExternalAnalysisSession,
     ) -> Result<Option<InvocationAssertions>, ExternalAnalyzerError> {
         if self.trace_enabled {
             self.telemetry.assertion_requests.fetch_add(1, Ordering::Relaxed);
         }
-        let response =
-            self.exchange_provider_request(backend, &mut request, running, file_id, affinity, codebase, session)?;
+        let response = self.exchange_provider_request(backend, &mut request, running, file_id, codebase, session)?;
         let result = self.decode_provider_response(|| {
             protocol::decode_assertion_response(&response, |handle| {
                 protocol::resolve_type_handle(&request.types, handle)
@@ -2596,10 +2436,6 @@ where
             let Some(indices) = indices else {
                 continue;
             };
-            let memoize = match target {
-                CallableTarget::Function(_) => backend.memoizes_function_assertion_providers(indices.as_slice()),
-                CallableTarget::Method { .. } => backend.memoizes_method_assertion_providers(indices.as_slice()),
-            };
             if self.trace_enabled {
                 self.telemetry.matched_providers.fetch_add(indices.as_slice().len() as u64, Ordering::Relaxed);
             }
@@ -2624,7 +2460,6 @@ where
                 source_file,
                 codebase,
                 session.generation(),
-                memoize,
                 self.trace_enabled,
                 calling_function_like,
             )?;
@@ -2645,7 +2480,6 @@ where
                 request,
                 &backend.provider_names("assertion", plugin_of, indices.as_slice()),
                 source_file.id,
-                target.affinity(),
                 codebase,
                 session,
             )?;
@@ -2668,22 +2502,19 @@ where
         Ok(None)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn dispatch_callable_signature_request(
         &self,
         backend: &Backend<T>,
         mut request: protocol::ReturnTypeRequest<'_>,
         running: &dyn Display,
         file_id: FileId,
-        affinity: &[u8],
         codebase: &CodebaseMetadata,
         session: &ExternalAnalysisSession,
     ) -> Result<Option<EffectiveCallableSignature>, ExternalAnalyzerError> {
         if self.trace_enabled {
             self.telemetry.signature_requests.fetch_add(1, Ordering::Relaxed);
         }
-        let response =
-            self.exchange_provider_request(backend, &mut request, running, file_id, affinity, codebase, session)?;
+        let response = self.exchange_provider_request(backend, &mut request, running, file_id, codebase, session)?;
         let result = self.decode_provider_response(|| {
             protocol::decode_callable_signature_response(&response, |handle| {
                 protocol::resolve_type_handle(&request.types, handle)
@@ -2779,10 +2610,6 @@ where
             let Some(indices) = indices else {
                 continue;
             };
-            let memoize = match target {
-                CallableTarget::Function(_) => backend.memoizes_function_providers(indices.as_slice()),
-                CallableTarget::Method { .. } => backend.memoizes_method_providers(indices.as_slice()),
-            };
 
             if self.trace_enabled {
                 self.telemetry.matched_providers.fetch_add(indices.as_slice().len() as u64, Ordering::Relaxed);
@@ -2808,7 +2635,6 @@ where
                 source_file,
                 codebase,
                 session.generation(),
-                memoize,
                 self.trace_enabled,
                 // A signature is settled before the call is analyzed in any
                 // block, so no calling function-like is known here.
@@ -2829,7 +2655,6 @@ where
                 request,
                 &backend.provider_names("callable signature", plugin_of, indices.as_slice()),
                 source_file.id,
-                target.affinity(),
                 codebase,
                 session,
             )?;
@@ -2945,10 +2770,6 @@ where
             let Some(indices) = indices else {
                 continue;
             };
-            let memoize = match target {
-                CallableTarget::Function(_) => backend.memoizes_function_providers(indices.as_slice()),
-                CallableTarget::Method { .. } => backend.memoizes_method_providers(indices.as_slice()),
-            };
             dispatched = true;
             let provider_start = self.trace_enabled.then(Instant::now);
             if self.trace_enabled {
@@ -2974,7 +2795,6 @@ where
                 source_file,
                 codebase,
                 session.generation(),
-                memoize,
                 self.trace_enabled,
                 calling_function_like,
             )
@@ -2992,7 +2812,6 @@ where
                 &mut request,
                 &backend.provider_names("return-type", plugin_of, indices.as_slice()),
                 source_file.id,
-                target.affinity(),
                 codebase,
                 session,
             )?;
@@ -3104,15 +2923,10 @@ where
                 |index| provider_plugin(&backend.registration.property_providers, index),
                 indices.as_slice(),
             );
-            let response = self.exchange_provider_payload(
-                backend,
-                request.payload,
-                &running,
-                class.as_bytes(),
-                codebase,
-                session,
-                |handle| protocol::resolve_type_handle(&request.types, handle),
-            )?;
+            let response =
+                self.exchange_provider_payload(backend, request.payload, &running, codebase, session, |handle| {
+                    protocol::resolve_type_handle(&request.types, handle)
+                })?;
             let response = session.record_response_reads(span.file_id, &response)?;
 
             let decode_start = self.trace_enabled.then(Instant::now);
@@ -3194,15 +3008,10 @@ where
                 |index| provider_plugin(&backend.registration.call_forwarding_providers, index),
                 indices.as_slice(),
             );
-            let response = self.exchange_provider_payload(
-                backend,
-                request.payload,
-                &running,
-                class.as_bytes(),
-                codebase,
-                session,
-                |handle| protocol::resolve_type_handle(&request.types, handle),
-            )?;
+            let response =
+                self.exchange_provider_payload(backend, request.payload, &running, codebase, session, |handle| {
+                    protocol::resolve_type_handle(&request.types, handle)
+                })?;
             let response = session.record_response_reads(source_file.id, &response)?;
 
             let result = protocol::decode_call_forwarding_response(&response, |handle| {
@@ -3281,15 +3090,7 @@ where
             );
             let response = session.record_response_reads(
                 source_file.id,
-                &self.exchange_provider_payload(
-                    backend,
-                    request,
-                    &running,
-                    declaring_class.as_bytes(),
-                    codebase,
-                    session,
-                    |_| None,
-                )?,
+                &self.exchange_provider_payload(backend, request, &running, codebase, session, |_| None)?,
             )?;
 
             let decode_start = self.trace_enabled.then(Instant::now);
@@ -3391,15 +3192,7 @@ where
             );
             let response = session.record_response_reads(
                 source_file.id,
-                &self.exchange_provider_payload(
-                    backend,
-                    request,
-                    &running,
-                    class.name.as_bytes(),
-                    codebase,
-                    session,
-                    |_| None,
-                )?,
+                &self.exchange_provider_payload(backend, request, &running, codebase, session, |_| None)?,
             )?;
 
             let decode_start = self.trace_enabled.then(Instant::now);
@@ -3480,19 +3273,8 @@ where
                 "Describing external analyzer backend."
             );
 
-            let responses = transport.broadcast(&describe).map_err(protocol::refused_handshake)?;
-            let response_bytes = responses.iter().map(Vec::len).sum::<usize>();
-            let mut decoded = responses.iter().map(|response| protocol::decode_registration(response));
-            let Some(first) = decoded.next() else {
-                return Err(error::protocol("worker pool returned no analyzer registration responses"));
-            };
-
-            let mut registration = first?;
-            for response in decoded {
-                if response? != registration {
-                    return Err(ExternalAnalyzerError::InconsistentRegistration);
-                }
-            }
+            let response = transport.broadcast(&describe)?;
+            let mut registration = protocol::decode_registration(&response)?;
 
             for extension in &registration.extensions {
                 if !extension_identifiers.insert(extension.identifier.to_ascii_lowercase()) {
@@ -3570,22 +3352,9 @@ where
 
             if !registration.initialization_plugins.is_empty() {
                 let initialize = protocol::encode_initialization_request(&registration.initialization_plugins)?;
-                let responses = transport.broadcast(&initialize)?;
-                let mut decoded = responses.iter().map(|response| {
-                    protocol::decode_initialization_response(response, &registration.initialization_plugins)
-                });
-
-                let Some(first) = decoded.next() else {
-                    return Err(error::protocol("worker pool returned no analyzer initialization responses"));
-                };
-
-                let initialized = first?;
-                for response in decoded {
-                    if response? != initialized {
-                        return Err(ExternalAnalyzerError::InconsistentInitialization);
-                    }
-                }
-
+                let response = transport.broadcast(&initialize)?;
+                let initialized =
+                    protocol::decode_initialization_response(&response, &registration.initialization_plugins)?;
                 for stub in initialized {
                     let plugin = registration.plugins.get(usize::from(stub.plugin)).ok_or_else(|| {
                         error::protocol(format!("initialization references unknown plugin index {}", stub.plugin))
@@ -3604,8 +3373,7 @@ where
             if let Some(start) = backend_start {
                 tracing::trace!(
                     backend = backend_index,
-                    workers = responses.len(),
-                    response_bytes,
+                    response_bytes = response.len(),
                     extensions = registration.extensions.len(),
                     plugins = registration.plugins.len(),
                     initialization_plugins = registration.initialization_plugins.len(),
@@ -3750,7 +3518,6 @@ impl<T> Drop for ExternalAnalyzer<T> {
         tracing::trace!(
             requests,
             ipc_requests,
-            provider_cache_hits = self.telemetry.provider_cache_hits.load(Ordering::Relaxed),
             signature_requests = self.telemetry.signature_requests.load(Ordering::Relaxed),
             assertion_requests = self.telemetry.assertion_requests.load(Ordering::Relaxed),
             provided_types = self.telemetry.provided_types.load(Ordering::Relaxed),
@@ -3962,7 +3729,7 @@ mod tests {
     #[derive(Debug)]
     struct InitializationTransport {
         broadcasts: Mutex<usize>,
-        initialization_responses: Vec<Vec<u8>>,
+        initialization_response: Option<Vec<u8>>,
     }
 
     #[derive(Debug)]
@@ -3974,19 +3741,16 @@ mod tests {
     struct DecliningTransport {
         requests: Mutex<Vec<Vec<u8>>>,
         names: Mutex<Vec<Option<String>>>,
+        reloads: Mutex<Vec<Vec<u8>>>,
     }
 
     impl AnalyzerTransport for DecliningTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
-            Ok(vec![protocol::testing::registration_response_with_property_providers()])
+        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
+            Ok(protocol::testing::registration_response_with_property_providers())
         }
 
-        fn request(&self, payload: Vec<u8>, running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
-            let response = protocol::testing::declined_response(&payload);
-            self.requests.lock().unwrap().push(payload);
-            self.names.lock().unwrap().push(running.map(ToString::to_string));
-
-            Ok(response)
+        fn reload_holding(&self, classes: &[&[u8]]) {
+            self.reloads.lock().unwrap().extend(classes.iter().map(|class| class.to_vec()));
         }
 
         fn request_with_handler<H>(
@@ -3998,7 +3762,11 @@ mod tests {
         where
             H: WorkerRequestHandler,
         {
-            self.request(payload, running)
+            let response = protocol::testing::declined_response(&payload);
+            self.requests.lock().unwrap().push(payload);
+            self.names.lock().unwrap().push(running.map(ToString::to_string));
+
+            Ok(response)
         }
     }
 
@@ -4009,13 +3777,8 @@ mod tests {
     struct HangingTransport;
 
     impl AnalyzerTransport for HangingTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
-            Ok(vec![protocol::testing::registration_response_with_every_provider()])
-        }
-
-        #[cfg_attr(coverage_nightly, coverage(off))]
-        fn request(&self, _payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
-            unreachable!("Mago services nested queries for every request these tests send")
+        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
+            Ok(protocol::testing::registration_response_with_every_provider())
         }
 
         fn request_with_handler<H>(
@@ -4027,11 +3790,10 @@ mod tests {
         where
             H: WorkerRequestHandler,
         {
-            let _answer = handler.handle(&Frame::request(1, protocol::testing::type_comparison_of_handle_zero()));
+            let _answer = handler.handle(&protocol::testing::type_comparison_of_handle_zero());
 
             Err(WorkerError::Timeout {
                 host: "acme".to_owned(),
-                worker: 0,
                 running: running.map(ToString::to_string),
                 duration: Duration::from_secs(30),
             })
@@ -4039,47 +3801,37 @@ mod tests {
     }
 
     impl AnalyzerTransport for TestTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
-            Ok(vec![protocol::testing::registration_response()])
+        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
+            Ok(protocol::testing::registration_response())
         }
 
         // The tests of this worker read its registration only, and route no request to it.
         #[cfg_attr(coverage_nightly, coverage(off))]
-        fn request(&self, payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
-            self.requests.lock().unwrap().push(payload);
-            Ok(protocol::testing::named_object_response("Demo\\Service"))
-        }
-
-        #[cfg_attr(coverage_nightly, coverage(off))]
         fn request_with_handler<H>(
             &self,
             payload: Vec<u8>,
-            running: Option<&dyn Display>,
+            _running: Option<&dyn Display>,
             _handler: &mut H,
         ) -> Result<Vec<u8>, WorkerError>
         where
             H: WorkerRequestHandler,
         {
-            self.request(payload, running)
+            self.requests.lock().unwrap().push(payload);
+            Ok(protocol::testing::named_object_response("Demo\\Service"))
         }
     }
 
     impl AnalyzerTransport for InitializationTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
+        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
             let mut broadcasts = self.broadcasts.lock().unwrap();
-            let responses = if *broadcasts == 0 {
-                vec![protocol::testing::registration_response_with_initialization()]
+            let response = if *broadcasts == 0 {
+                protocol::testing::registration_response_with_initialization()
             } else {
-                self.initialization_responses.clone()
+                self.initialization_response.clone().unwrap_or_default()
             };
 
             *broadcasts += 1;
-            Ok(responses)
-        }
-
-        #[cfg_attr(coverage_nightly, coverage(off))]
-        fn request(&self, _payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
-            unreachable!("initialization tests do not issue routed requests")
+            Ok(response)
         }
 
         #[cfg_attr(coverage_nightly, coverage(off))]
@@ -4097,13 +3849,8 @@ mod tests {
     }
 
     impl AnalyzerTransport for RegistrationTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
-            Ok(vec![self.0.clone()])
-        }
-
-        #[cfg_attr(coverage_nightly, coverage(off))]
-        fn request(&self, _payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
-            unreachable!("registration tests do not issue routed requests")
+        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
+            Ok(self.0.clone())
         }
 
         #[cfg_attr(coverage_nightly, coverage(off))]
@@ -4117,82 +3864,6 @@ mod tests {
             H: WorkerRequestHandler,
         {
             unreachable!("registration tests do not issue routed requests")
-        }
-    }
-
-    /// A worker of host `acme` that refuses Mago's first request with the text it holds.
-    #[derive(Debug)]
-    struct RefusingTransport(Vec<u8>);
-
-    impl AnalyzerTransport for RefusingTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
-            Err(WorkerError::Remote { host: "acme".to_owned(), worker: 0, request: 1, payload: self.0.clone() })
-        }
-
-        #[cfg_attr(coverage_nightly, coverage(off))]
-        fn request(&self, _payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
-            unreachable!("a worker that refuses the handshake gets no routed request")
-        }
-
-        #[cfg_attr(coverage_nightly, coverage(off))]
-        fn request_with_handler<H>(
-            &self,
-            _payload: Vec<u8>,
-            _running: Option<&dyn Display>,
-            _handler: &mut H,
-        ) -> Result<Vec<u8>, WorkerError>
-        where
-            H: WorkerRequestHandler,
-        {
-            unreachable!("a worker that refuses the handshake gets no routed request")
-        }
-    }
-
-    /// The error initialization gives when a worker refuses Mago's first request with `refusal`.
-    fn handshake_error(refusal: &str) -> String {
-        ExternalAnalyzer::initialize_transports(
-            [Arc::new(RefusingTransport(refusal.as_bytes().to_vec()))],
-            PHPVersion::PHP85,
-            &[],
-            false,
-        )
-        .expect_err("a refused handshake should fail initialization")
-        .to_string()
-    }
-
-    /// An SDK before 0.6.1 refuses Mago's first request naming Mago's protocol alone, so Mago names the host, its own
-    /// release and protocol, where the SDK comes from, and the commands that fix it.
-    #[test]
-    fn a_worker_on_an_sdk_before_0_6_1_that_refuses_the_handshake_names_the_package_to_require() {
-        let speaks = format!("{}.{}", protocol::ANALYZER_PROTOCOL_MAJOR, protocol::ANALYZER_PROTOCOL_MINOR);
-        let version = env!("CARGO_PKG_VERSION");
-
-        assert_eq!(
-            handshake_error(&format!("Unsupported analyzer protocol version {speaks}.")),
-            format!(
-                "external analyzer protocol error: extension host `acme` refused the handshake of mago {version}, which \
-                 speaks analyzer protocol {speaks}: Unsupported analyzer protocol version {speaks}. Its SDK is from \
-                 a `heyjordanparker/mago-sharp` release before 0.6.1, so require the release of this mago with \
-                 `composer require --dev \"heyjordanparker/mago-sharp:{version}\"`, or run the mago of the release the \
-                 project requires with `vendor/bin/mago`."
-            )
-        );
-    }
-
-    /// A describe request runs the extension's own code, which may fail for its own reason, and an SDK of 0.6.1 or
-    /// later names the fixes for a protocol mismatch itself, so Mago passes either refusal through as the worker gave
-    /// it.
-    #[test]
-    fn a_handshake_refused_for_any_other_reason_passes_through_unchanged() {
-        for refusal in [
-            "config/routes.php not found",
-            "The worker of `acme/routes` can't read mago's request: `mago` speaks analyzer protocol 1.14, and the \
-             extension SDK, heyjordanparker/mago-sharp 0.6.1, speaks 1.13.",
-        ] {
-            assert_eq!(
-                handshake_error(refusal),
-                format!("external analyzer worker failed: extension worker 0 rejected request 1: {refusal}")
-            );
         }
     }
 
@@ -4436,29 +4107,23 @@ mod tests {
                 "the hooks of src/Route.php",
             ]
             .map(|running| Some(format!(
-                "external analyzer worker failed: extension host `acme` made no progress for 30000 ms on {running} \
-                 (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+                "external analyzer worker failed: extension host `acme` made no progress for 30000 ms on {running}: \
+                 raise its `request-timeout-ms` for hooks that run that long"
             )))
         );
     }
 
-    /// The handler of a request whose worker sends no nested request.
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn answers_no_nested_request(_request: &Frame) -> Result<Vec<u8>, Vec<u8>> {
-        unreachable!("the worker reads every request and sends nothing")
-    }
-
-    /// A transport with no worker process holds no class, so an analyzer over transports that run none starts nothing
-    /// again when a class changes.
+    /// A class that changed reaches every host, each of which starts again each of its interpreters that loaded it.
     #[test]
-    fn an_analyzer_whose_transports_run_no_worker_reloads_none() {
+    fn an_analyzer_tells_every_host_which_classes_changed() {
         let registration = protocol::decode_registration(&protocol::testing::registration_response())
             .expect("the registration should decode");
+        let transports = [Arc::new(DecliningTransport::default()), Arc::new(DecliningTransport::default())];
         let analyzer = ExternalAnalyzer {
-            backends: Box::new([
-                Backend::new(Arc::new(DecliningTransport::default()), registration.clone()),
-                Backend::new(Arc::new(DecliningTransport::default()), registration),
-            ]),
+            backends: transports
+                .iter()
+                .map(|transport| Backend::new(Arc::clone(transport), registration.clone()))
+                .collect(),
             extensions: Box::default(),
             initialization_stubs: Box::default(),
             trace_enabled: false,
@@ -4466,70 +4131,11 @@ mod tests {
             started_at: None,
         };
 
-        assert_eq!(analyzer.reload_workers_holding(&[b"app\\order"]).ok(), Some(0));
-    }
-
-    /// Mago's worker pool asks its workers which classes they loaded only for a class that changed, so a reload for no
-    /// class sends nothing to a worker that would never answer.
-    #[cfg(unix)]
-    #[test]
-    fn a_worker_pool_reloads_for_no_class_without_asking_its_workers() {
-        use mago_extension::WorkerCommand;
-        use mago_extension::WorkerPoolOptions;
-
-        let options = WorkerPoolOptions { request_timeout: Duration::from_millis(50), ..WorkerPoolOptions::default() };
-        let worker = WorkerCommand::new("sh").with_arguments(["-c", "cat > /dev/null"]);
-        let pool = WorkerPool::spawn(worker, std::num::NonZeroUsize::MIN, options).expect("the worker should start");
-
-        let reloaded = AnalyzerTransport::reload_holding(&pool, &[]);
-        pool.shutdown();
-
-        assert_eq!(reloaded.ok(), Some(0));
-    }
-
-    /// Mago's worker pool hands the name of a request to the worker that runs it, so a worker that never answers is
-    /// named in the deadline's error, whichever way Mago sends the request.
-    #[cfg(unix)]
-    #[test]
-    fn a_worker_pool_names_the_request_its_worker_never_answers() {
-        use mago_extension::WorkerCommand;
-        use mago_extension::WorkerPoolOptions;
-
-        let options = WorkerPoolOptions {
-            host: "acme".to_owned(),
-            request_timeout: Duration::from_millis(50),
-            ..WorkerPoolOptions::default()
-        };
-        let worker = WorkerCommand::new("sh").with_arguments(["-c", "cat > /dev/null"]);
-        let pool = WorkerPool::spawn(worker, std::num::NonZeroUsize::MIN, options).expect("the worker should start");
-        let mut handler = answers_no_nested_request;
-
-        let errors = [
-            AnalyzerTransport::request(&pool, b"lint".to_vec(), Some(&"the request")).err(),
-            AnalyzerTransport::request_with_handler(
-                &pool,
-                b"lint".to_vec(),
-                Some(&"the handled request"),
-                &mut handler,
-            )
-            .err(),
-            AnalyzerTransport::request_with_handler_affinity(
-                &pool,
-                b"lint".to_vec(),
-                Some(&"the request with affinity"),
-                b"Lib\\Shelf",
-                &mut handler,
-            )
-            .err(),
-        ];
-        pool.shutdown();
+        analyzer.reload_workers_holding(&[b"app\\order"]);
 
         assert_eq!(
-            errors.map(|error| error.map(|error| error.to_string())),
-            ["the request", "the handled request", "the request with affinity"].map(|running| Some(format!(
-                "extension host `acme` made no progress for 50 ms on {running} (worker 0): raise its \
-                 `request-timeout-ms` for hooks that run that long"
-            )))
+            transports.map(|transport| transport.reloads.lock().unwrap().clone()),
+            [vec![b"app\\order".to_vec()], vec![b"app\\order".to_vec()]]
         );
     }
 
@@ -4571,19 +4177,6 @@ mod tests {
 
         assert_eq!(indices.as_slice(), &[0, 1, 3, 4]);
         assert!(ProviderIndices::from_exact_and_wildcards(&[], []).is_none());
-    }
-
-    #[test]
-    fn provider_response_cache_is_scoped_to_one_analysis_generation() {
-        let mut cache = ProviderResponseCache::default();
-        cache.insert(1, b"request".to_vec(), b"first".to_vec());
-
-        assert_eq!(cache.get(1, b"request"), Some(b"first".to_vec()));
-        assert_eq!(cache.get(2, b"request"), None);
-
-        cache.insert(2, b"request".to_vec(), b"second".to_vec());
-        assert_eq!(cache.get(2, b"request"), Some(b"second".to_vec()));
-        assert_eq!(cache.get(1, b"request"), None);
     }
 
     #[test]
@@ -4646,10 +4239,8 @@ mod tests {
     #[test]
     fn initialization_stubs_are_scoped_and_exposed_as_external_files() {
         let response = protocol::testing::initialization_response(b"framework.php", b"<?php class FrameworkStub {}");
-        let transport = Arc::new(InitializationTransport {
-            broadcasts: Mutex::new(0),
-            initialization_responses: vec![response.clone(), response],
-        });
+        let transport =
+            Arc::new(InitializationTransport { broadcasts: Mutex::new(0), initialization_response: Some(response) });
 
         let analyzer = ExternalAnalyzer::initialize_transports([Arc::clone(&transport)], PHPVersion::PHP85, &[], false)
             .expect("initialization should succeed");
@@ -4664,24 +4255,8 @@ mod tests {
     }
 
     #[test]
-    fn initialization_requires_identical_stubs_from_every_worker() {
-        let transport = Arc::new(InitializationTransport {
-            broadcasts: Mutex::new(0),
-            initialization_responses: vec![
-                protocol::testing::initialization_response(b"framework.php", b"<?php class First {}"),
-                protocol::testing::initialization_response(b"framework.php", b"<?php class Second {}"),
-            ],
-        });
-
-        let result = ExternalAnalyzer::initialize_transports([transport], PHPVersion::PHP85, &[], false);
-
-        assert!(matches!(result, Err(ExternalAnalyzerError::InconsistentInitialization)));
-    }
-
-    #[test]
     fn disabled_plugins_are_not_initialized() {
-        let transport =
-            Arc::new(InitializationTransport { broadcasts: Mutex::new(0), initialization_responses: Vec::new() });
+        let transport = Arc::new(InitializationTransport { broadcasts: Mutex::new(0), initialization_response: None });
         let analyzer = ExternalAnalyzer::initialize_transports([Arc::clone(&transport)], PHPVersion::PHP85, &[], true)
             .expect("registration should succeed");
 

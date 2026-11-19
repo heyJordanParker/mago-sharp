@@ -1,20 +1,19 @@
 #![allow(clippy::expect_used, clippy::missing_panics_doc)]
 
 use std::collections::HashSet;
-use std::num::NonZeroUsize;
 use std::path::Path;
-use std::process::Command;
-use std::sync::Arc;
+use std::time::Duration;
 
-use mago_database::process;
-use mago_extension::WorkerCommand;
-use mago_extension::WorkerPool;
-use mago_extension::WorkerPoolOptions;
 use mago_linter::external::ExternalLinter;
 use mago_php_version::PHPVersion;
 
+use crate::common;
+
+/// Each interpreter that served the host is one worker. Once mago stops the host, its reducers collect each one's
+/// state, on the thread it runs on, and reduce all of it in one of them. The host runs in a pool of its own, so no other
+/// test's engine takes one of its threads meanwhile.
 #[test]
-fn worker_reducers_merge_every_process_on_the_last_survivor() -> Result<(), Box<dyn std::error::Error>> {
+fn worker_reducers_merge_every_interpreter_in_one() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("MAGO_TRACE_PHP_SDK_TESTS").is_some() {
         let _subscriber = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -23,39 +22,31 @@ fn worker_reducers_merge_every_process_on_the_last_survivor() -> Result<(), Box<
     }
 
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sdk_available = repository.join("vendor/autoload.php").is_file()
-        && process::output(Command::new("php").arg("--version")).is_ok_and(|output| output.status.success());
-    assert!(
-        sdk_available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
-        "PHP and vendor dependencies are required for the external worker-reduction test"
-    );
-    if !sdk_available {
+    if !common::php_sdk_is_available(repository, "the external worker-reduction test") {
         return Ok(());
     }
 
     let temporary = tempfile::tempdir()?;
-    let command = WorkerCommand::new("php")
-        .with_argument(repository.join("composer/tests/Sdk/Fixtures/worker-reducer.php"))
-        .with_current_directory(repository)
-        .with_environment("MAGO_REDUCTION_AUDIT_DIRECTORY", temporary.path());
-    let pool = Arc::new(WorkerPool::spawn(
-        command,
-        NonZeroUsize::new(3).expect("three is non-zero"),
-        WorkerPoolOptions::default(),
-    )?);
-    let linter = ExternalLinter::initialize([Arc::clone(&pool)], PHPVersion::PHP85)?;
-    drop(linter);
-    pool.shutdown();
+    let host = common::host(
+        &repository.join("composer/tests/Sdk/Fixtures/worker-reducer.php"),
+        Duration::from_secs(30),
+        &[("MAGO_REDUCTION_AUDIT_DIRECTORY", temporary.path().to_str().expect("a UTF-8 path"))],
+    );
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(3).build()?;
+    let started = pool.install(move || {
+        let started = rayon::broadcast(|_| ExternalLinter::initialize([host.clone()], PHPVersion::PHP85).is_ok());
+        drop(host);
+        started
+    });
 
     let alpha = read_audit(&temporary.path().join("alpha.txt"), "alpha")?;
     let beta = read_audit(&temporary.path().join("beta.txt"), "beta")?;
+    assert!(started.iter().all(|started| *started));
     assert_eq!(alpha.worker_ids, beta.worker_ids, "logical extensions must observe the same worker order");
-    assert_eq!(alpha.worker_ids.len(), 3);
     assert_eq!(alpha.worker_ids.iter().collect::<HashSet<_>>().len(), 3);
-    assert!(alpha.worker_ids.contains(&alpha.leader), "the survivor's own contribution must be included");
-    assert!(beta.worker_ids.contains(&beta.leader), "the survivor's own contribution must be included");
-    assert_eq!(alpha.leader, beta.leader, "all reducers must run on the same surviving process");
-    assert!(pool.is_empty());
+    assert!(alpha.worker_ids.contains(&alpha.leader), "the reducing interpreter's own contribution must be included");
+    assert!(beta.worker_ids.contains(&beta.leader), "the reducing interpreter's own contribution must be included");
+    assert_eq!(alpha.leader, beta.leader, "all reducers must run in the same interpreter");
 
     Ok(())
 }
@@ -69,8 +60,7 @@ fn read_audit(path: &Path, identifier: &str) -> Result<Audit, Box<dyn std::error
     let contents = std::fs::read_to_string(path)?;
     let lines = contents.lines().collect::<Vec<_>>();
     assert_eq!(lines.first(), Some(&identifier));
-    assert_eq!(lines.get(2), Some(&"active"));
-    let worker_ids = lines[3..]
+    let worker_ids = lines[2..]
         .iter()
         .map(|payload| {
             payload

@@ -49,7 +49,7 @@ final class NodeAnalysisContext extends LifecycleContext
         $this->receiverType = $data->receiverType;
         $this->argumentTypes = $data->argumentTypes;
         $this->variableDefinedness = $data->variableDefinedness;
-        parent::__construct($context->phpVersion, $context->codebase, $context->types, $context->cancellation);
+        parent::__construct($context->phpVersion, $context->codebase, $context->types);
     }
 
     /**

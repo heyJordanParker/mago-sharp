@@ -90,7 +90,7 @@ final class AcmeExtension
 
 When a package exposes factory arguments, keep them strictly typed, discoverable by IDEs, and available before registration. They avoid an extra protocol cycle and let projects use their existing configuration sources.
 
-The package, not the consuming project, owns the identifier, version, default rules, analyzer plugins, and shared state. Do not accept raw capability lists in the factory: doing so lets users accidentally disable part of the extension or create registrations that differ between workers.
+The package, not the consuming project, owns the identifier, version, default rules, analyzer plugins, and shared state. Do not accept raw capability lists in the factory: doing so lets users accidentally disable part of the extension.
 
 ## Let the project own the worker
 
@@ -111,11 +111,11 @@ require dirname(__DIR__) . '/vendor/autoload.php';
 ))->run();
 ```
 
-It then configures the command:
+It then names the file:
 
 ```toml
 [extension-hosts.php]
-command = ["php", ".mago/extensions.php"]
+file = ".mago/extensions.php"
 ```
 
 The project-owned entrypoint can combine several packages in one host and express application-specific options. A package-supplied executable would make composition and configuration harder.
@@ -129,7 +129,7 @@ Across one Mago run:
 - extension identifiers must be unique;
 - linter issue codes must be unique;
 - analyzer plugin identifiers and aliases must be unique across external and native plugins;
-- registrations must be identical in every process of a pool.
+- registrations must not depend on which interpreter runs the file.
 
 The extension version is package metadata shown during inspection. It is not the binary protocol version.
 

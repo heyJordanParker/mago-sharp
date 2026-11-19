@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Mago\Sdk\Analyzer;
 
 use Mago\Sdk\Analyzer\Metadata\PropertyMetadata;
-use Mago\Sdk\CancellationTokenInterface;
 use Mago\Sdk\PHPVersion;
 
 /**
@@ -24,6 +23,5 @@ final class PropertyInitializationProviderContext
         public readonly string $declaringClass,
         public readonly PropertyMetadata $property,
         public readonly TypeComparator $types,
-        public readonly CancellationTokenInterface $cancellation,
     ) {}
 }

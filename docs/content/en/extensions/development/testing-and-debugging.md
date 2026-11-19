@@ -54,7 +54,7 @@ baseline = "analysis-baseline.toml"
 baseline-variant = "strict"
 
 [extension-hosts.acme]
-command = ["php", "worker.php"]
+file = "worker.php"
 ```
 
 Split the corpus into focused files that cover:
@@ -107,7 +107,7 @@ mago extension list --json
 
 `extension validate` exercises host startup and linter registration. `extension list` reports hosts, logical extensions, and linter rules; it does not currently list analyzer plugins. Run an analyzer fixture to validate analyzer registration, plugin selection, targets, and capabilities.
 
-Every worker in one pool must register identical extension identifiers, rule definitions, plugin selectors, targets, and capabilities. Do not make registration depend on a process ID, random value, request order, or mutable remote service.
+Every interpreter runs the host's file, so its worker must register identical extension identifiers, rule definitions, plugin selectors, targets, and capabilities in each. Do not make registration depend on a random value, request order, or mutable remote service.
 
 ## Inspect failures
 
@@ -117,7 +117,7 @@ Enable trace output:
 MAGO_LOG=trace mago analyze --reporting-format count
 ```
 
-Mago continuously retains the configured tail of worker standard error. The error for a worker that dies or disconnects, including one that dies at startup, names its host and holds that tail, as ``extension host `reports` disconnected (worker 0): worker closed stdout; stderr: PHP Fatal error: ...``. Request timeouts and remote callback errors are reported without the tail. Log concise context to `STDERR`; never write application output, a byte-order mark, or debug dumps to `STDOUT`.
+A worker that fails or throws names its host in the error, with what PHP reported, as ``extension host `reports` failed: PHP Fatal error: ...``. Log concise context to `STDERR`; output a worker prints never reaches Mago's report.
 
 Useful isolation switches are:
 
@@ -125,15 +125,11 @@ Useful isolation switches are:
 - a disabled host in a configuration overlay;
 - `[analyzer].disable-default-plugins` plus an explicit plugin selector;
 - `lint --only vendor/rule` for one external rule;
-- `workers = 1` to make process-local behavior reproducible.
+- `--threads 1` to make interpreter-local behavior reproducible.
 
-## Timeouts and cancellation
+## Timeouts
 
-The host's `request-timeout-ms` is the longest one unit of a request may run. It counts from when the worker starts a request, not while the request waits behind earlier ones, and starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker reducer. It does not start again at the nested metadata or comparison requests a hook makes. When a hook runs past it, the error names the unit that made no progress, such as the after-analysis hooks of plugin `dead-routes`. A worker that stops reading its standard input, as one held at a debugger breakpoint does, fails at the same deadline. On macOS and Linux, a worker that fails ends with every process it started on the host, as [Worker processes](/extensions/configuration/#worker-processes) describes. When Mago cancels work, `CancellationTokenInterface` becomes cancelled and `throwIfCancelled()` raises `CancelledException`.
-
-Check cancellation in long scans and aggregation loops. `subscribe()` integrates cancellation with asynchronous work; always `unsubscribe()` a retained subscription after completion.
-
-Do not catch `CancelledException` merely to continue expensive work. Mago removes cancelled pending work and ignores a response that arrives after cancellation; callback wrappers may still convert a thrown exception into a protocol error before that response is discarded.
+The host's `request-timeout-ms` is the longest one unit of a request may run. It counts from when the worker starts a request, and starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker reducer. It does not start again at the nested metadata or comparison requests a hook makes. When a hook runs past it, Mago interrupts it, and the error names the unit that made no progress, such as the after-analysis hooks of plugin `dead-routes`. The interpreter starts again before its next request. Mago interrupts the hook at its next PHP instruction, so a long scan or aggregation loop needs no check of its own.
 
 ## Test failure policy
 
@@ -143,9 +139,7 @@ Also test malformed framework data. An extension should return `null` or report 
 
 ## Cross-platform checks
 
-Run integration tests on Linux, macOS, and Windows. The SDK uses redirected standard input on Unix-like systems and an authenticated loopback input transport where Windows cannot make redirected PHP standard input non-blocking. Extension entrypoints should call `Worker::run()` normally and never implement transport selection themselves.
-
-Avoid shell-only commands in `command`: Mago performs no shell parsing. Use an executable and literal argument list that works on every supported platform, or document platform-specific host configuration explicitly.
+Run integration tests on Linux and macOS. Mago runs each host's file on the engine linked into its own binary, so a host runs the same on every machine with no `php` installed. Extension entrypoints should call `Worker::run()` normally.
 
 ## Incremental and repeated analysis
 
