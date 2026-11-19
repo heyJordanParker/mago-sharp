@@ -5272,6 +5272,34 @@ fn analyze_refuses_a_law_that_reaches_an_unmodeled_construct_as_compile_does_and
     );
 }
 
+/// A law refusal is a result of analysis, and `mago analyze --scan-only` analyzes no method body, so it refuses no law,
+/// where it once refused each law that reaches a method for having no body it could read.
+#[test]
+fn analyze_scan_only_refuses_no_law() {
+    let directory = lawful_project(&[(
+        "app/Level.sharp",
+        "namespace App;\n\npublic final class Level\n{\n    public Level(public int rank { get; }) { }\n\n    public bool meets(Level other) => this.rank >= other.rank;\n\n    law meetsItself(Level a) => a.meets(a);\n}\n",
+    )]);
+    let analyze = |arguments: &[&str]| {
+        process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never", "analyze"])
+                .args(arguments)
+                .env("MAGO_REPORTING_FORMAT", "medium")
+                .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+                .current_dir(directory.path()),
+        )
+        .unwrap()
+    };
+
+    for arguments in [&["--scan-only"][..], &[]] {
+        let analyzed = analyze(arguments);
+
+        assert_eq!(analyzed.status.code(), Some(0), "{arguments:?}: {}", printed(&analyzed));
+        assert!(printed(&analyzed).contains("No issues found."), "{arguments:?}: {}", printed(&analyzed));
+    }
+}
+
 /// Spec section 28's `app/Tenant/Store/Module.sharp`, whose law spans `Receipts` and `Refunds`.
 const STORE_MODULE: &str = "namespace App.Tenant.Store;\n\nmodule\n{\n    law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);\n}\n";
 

@@ -1199,7 +1199,8 @@ impl IncrementalAnalysisService {
     ///
     /// They are the [`refusals`] of the translation of each file a law reaches, each in the file that states its law, and
     /// no Lean process starts. Each file with an error the analysis reported is left untranslated, as `compile` leaves a
-    /// file its errors refuse, so a law that reaches one is refused for it.
+    /// file its errors refuse, so a law that reaches one is refused for it. A scan analyzes no method body, so it refuses
+    /// no law.
     ///
     /// # Errors
     ///
@@ -1207,6 +1208,9 @@ impl IncrementalAnalysisService {
     pub fn law_refusals(&self) -> Result<HashMap<FileId, IssueCollection>, OrchestratorError> {
         if !self.initialized {
             return Err(OrchestratorError::General("analyze() must be called before law_refusals()".to_string()));
+        }
+        if self.scan_only {
+            return Ok(HashMap::default());
         }
 
         let reach = Reach::new(&self.codebase, &self.native_symbol_references);
