@@ -12,7 +12,7 @@
 //! since they all start with double underscore.
 //!
 //! [`too_wide_members`] refuses, once the whole project is analyzed, a PHP# `public`
-//! member that nothing outside its namespace uses, which spec section 5 calls too wide.
+//! member whose every use a narrower access level reaches, which spec section 5 calls too wide.
 
 use foldhash::HashMap;
 use foldhash::HashSet;
@@ -579,14 +579,26 @@ where
     });
 }
 
-/// Refuses each `public` member that nothing outside its namespace and the namespaces below it uses.
+/// The access levels of spec section 5 narrower than `public`, narrowest first, which [`too_wide_members`] tries in
+/// that order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// The class's own code.
+    Private,
+    /// The class's and its subclasses' code, in any namespace.
+    Protected,
+    /// The code of the class's namespace and the namespaces below it.
+    Internal,
+}
+
+/// Refuses each `public` member whose uses a narrower access level reaches, and names the narrowest one.
 ///
 /// Spec section 5 calls such a member too wide, a compile error in an application. The pass reads `references` of
 /// every file, so it runs once the whole project is analyzed, beside [`Effects::solve`](crate::effects::Effects::solve).
-/// A use from the namespace, the member's own class included, is no outside use, so a member nothing uses is refused
-/// too. A use from code outside any
-/// class or function counts as outside, because its namespace is not known here. A method must be visible to each
-/// class that overrides or implements it, so an override from a class outside the namespace is an outside use.
+/// The levels are tried as [`Access`] orders them, so a member nothing uses is `private`. A use from code outside any
+/// class or function needs `public`, because its namespace is not known here. A member must be visible to each class
+/// that overrides or implements it, so an override is a use from the class that declares it. A `virtual` or
+/// `abstract` member is never `private`, since a private member is never replaced.
 ///
 /// Only a public PHP# class of a project has such members, a file whose nearest `composer.json` says `"type":
 /// "project"`, of the files analyzed: a library's uses are in the projects that install it, which the analysis never
@@ -608,7 +620,7 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
         };
         uses_on.entry((member, class)).or_default().push(code_in);
     });
-    // A method must be visible to each class that overrides or implements it, so each override uses the method it
+    // A member must be visible to each class that overrides or implements it, so each override uses the member it
     // replaces from the class that declares the override.
     for (class_name, class) in &codebase.class_likes {
         for (method, replaced) in &class.overridden_method_ids {
@@ -616,6 +628,13 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
                 for replaced in replaced.values() {
                     let (on, member) = replaced.get_key();
                     uses_on.entry((member, on)).or_default().push(Some(*class_name));
+                }
+            }
+        }
+        for (property, replaced) in &class.overridden_property_ids {
+            if class.declaring_property_ids.get(property) == Some(class_name) {
+                for on in replaced {
+                    uses_on.entry((*property, *on)).or_default().push(Some(*class_name));
                 }
             }
         }
@@ -651,30 +670,57 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
 
         let namespace = namespace_of(class.original_name.as_bytes());
         let class_key = codebase.class_key(*class_name);
-        let is_used_outside = |member: Word| {
-            member_uses.get(&(member, class_key)).is_some_and(|uses| {
-                uses.iter().copied().flatten().any(|code_in| {
-                    code_in.is_none_or(|symbol| !is_within_namespace(namespace_of(symbol.as_bytes()), namespace))
-                })
+        // Whether `access` reaches the code a use is in, spec section 5's table.
+        let reaches = |access: Access, code_in: Option<Word>| {
+            code_in.is_some_and(|symbol| match access {
+                Access::Private => symbol == class_key,
+                Access::Protected => codebase.is_instance_of(symbol, class_key),
+                Access::Internal => is_within_namespace(namespace_of(symbol.as_bytes()), namespace),
             })
         };
 
-        for (member, label, span) in public_members(codebase, *class_name, class) {
-            if is_used_outside(member) {
+        for (member, label, span, is_open) in public_members(codebase, *class_name, class) {
+            let uses: Vec<Option<Word>> = member_uses
+                .get(&(member, class_key))
+                .into_iter()
+                .flatten()
+                .flat_map(|uses| uses.iter().copied())
+                .collect();
+            let Some(access) = [Access::Private, Access::Protected, Access::Internal]
+                .into_iter()
+                .filter(|access| *access != Access::Private || !is_open)
+                .find(|access| uses.iter().all(|code_in| reaches(*access, *code_in)))
+            else {
                 continue;
-            }
+            };
 
             let class_label = sharp_class_like_name(codebase, &WordMap::default(), *class_name);
-            let namespace = String::from_utf8_lossy(namespace).replace('\\', ".");
+            let (keyword, reach, note) = match access {
+                Access::Private => (
+                    "private",
+                    format!("`{class_label}`"),
+                    "A member is as wide as its uses, so one that only its class uses is `private`.",
+                ),
+                Access::Protected => (
+                    "protected",
+                    format!("`{class_label}` and its subclasses"),
+                    "A member is as wide as its uses, so one that only its class and its subclasses use is `protected`, and a `virtual` or `abstract` one is never `private`.",
+                ),
+                Access::Internal => (
+                    "internal",
+                    format!("`{}`", String::from_utf8_lossy(namespace).replace('\\', ".")),
+                    "A member is as wide as its uses, so one that only its namespace uses is `internal`.",
+                ),
+            };
             issues.push(
                 Issue::error(format!(
-                    "`{}` is public, and nothing outside `{namespace}` uses it.",
-                    display_sharp_member(class_label, label)
+                    "`{}` is public, and nothing outside {reach} uses it.",
+                    display_sharp_member(&class_label, label)
                 ))
                 .with_code(IssueCode::TooWideMember)
                 .with_annotation(Annotation::primary(span).with_message("Declared `public` here."))
-                .with_note("A member is as wide as its uses, so one that only its namespace uses is `internal`.")
-                .with_help("Declare it `internal`."),
+                .with_note(note)
+                .with_help(format!("Declare it `{keyword}`.")),
             );
         }
     }
@@ -758,8 +804,13 @@ fn is_reached_by_its_members(codebase: &CodebaseMetadata, class_name: Word, clas
 }
 
 /// The `public` members `class` declares that [`too_wide_members`] checks, each as its key in `references`, its name
-/// as PHP# writes it, and the span the error points at.
-fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLikeMetadata) -> Vec<(Word, Word, Span)> {
+/// as PHP# writes it, the span the error points at, and whether it is open, `virtual` or `abstract`. The codex reads a
+/// closed PHP# method or property as final, and a constructor's parameter declares no open property.
+fn public_members(
+    codebase: &CodebaseMetadata,
+    class_name: Word,
+    class: &ClassLikeMetadata,
+) -> Vec<(Word, Word, Span, bool)> {
     let mut members = Vec::new();
 
     for (name, property) in &class.properties {
@@ -771,7 +822,8 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
             && !class.overridden_property_ids.contains_key(name)
             && let Some(span) = property.name_span.or(property.span)
         {
-            members.push((*name, word(mago_bytes::trim_start_byte(name.as_bytes(), b'$')), span));
+            let is_open = !property.flags.is_final() && !property.flags.is_promoted_property();
+            members.push((*name, word(mago_bytes::trim_start_byte(name.as_bytes(), b'$')), span, is_open));
         }
     }
 
@@ -784,14 +836,15 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
         // never sees.
         if method.span != class.span
             && class.declaring_method_ids.get(name).is_none_or(|declaring| declaring.get_class_name() == class_name)
-            && method.method_metadata.as_ref().is_some_and(|metadata| metadata.visibility.is_public())
+            && let Some(metadata) = method.method_metadata.as_ref()
+            && metadata.visibility.is_public()
             && !is_dynamically_accessed(codebase, &method.attributes)
             && !method.has_attribute(codebase, word(EXPORT))
             && !method.flags.is_internal_reach()
             && !name.as_bytes().starts_with(b"__")
             && !class.overridden_method_ids.contains_key(name)
         {
-            members.push((*name, method.original_name, method.name_span.unwrap_or(method.span)));
+            members.push((*name, method.original_name, method.name_span.unwrap_or(method.span), !metadata.is_final));
         }
     }
 
@@ -804,7 +857,7 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
             && !is_dynamically_accessed(codebase, &constant.attributes)
             && !constant.flags.is_internal_reach()
         {
-            members.push((*name, *name, constant.span));
+            members.push((*name, *name, constant.span, false));
         }
     }
 

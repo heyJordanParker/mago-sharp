@@ -270,7 +270,7 @@ fn analyze_refuses_a_public_member_nothing_outside_its_namespace_uses() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("src/App/Shop/Cart.sharp:13:16:error - too-wide-member: `Cart.count` is public, and nothing outside `App.Shop` uses it."),
+        stdout.contains("src/App/Shop/Cart.sharp:13:16:error - too-wide-member: `Cart.count` is public, and nothing outside `Cart` uses it."),
         "{stdout}"
     );
     for file in [

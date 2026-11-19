@@ -303,6 +303,6 @@ mod tests {
             .map(|issue| (issue.primary_span().map(|span| span.file_id), issue.message.as_str()))
             .collect();
 
-        assert_eq!(too_wide, [(Some(file_id), "`Cart.total` is public, and nothing outside `App.Shop` uses it.")]);
+        assert_eq!(too_wide, [(Some(file_id), "`Cart.total` is public, and nothing outside `Cart` uses it.")]);
     }
 }

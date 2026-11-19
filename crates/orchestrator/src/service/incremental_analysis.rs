@@ -4128,7 +4128,7 @@ mod tests {
 
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
-        assert_eq!(too_wide(&service), ["`Cart.total` is public, and nothing outside `App.Shop` uses it."]);
+        assert_eq!(too_wide(&service), ["`Cart.total` is public, and nothing outside `Cart` uses it."]);
 
         db.update(page_id, Cow::Owned(page("cart.total()").into_bytes()));
         service.update_database(db.read_only());
@@ -4149,7 +4149,7 @@ mod tests {
         db.update(page_id, Cow::Owned(page("0").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[page_id])).expect("Incremental analysis failed.");
-        assert_eq!(too_wide(&service), ["`Cart.total` is public, and nothing outside `App.Shop` uses it."]);
+        assert_eq!(too_wide(&service), ["`Cart.total` is public, and nothing outside `Cart` uses it."]);
         assert_eq!(service.analyzed_files, HashSet::from_iter([page_id]));
         assert_matches_full(&service, &db, "Page no longer calls Cart.total");
     }
@@ -4420,7 +4420,7 @@ mod tests {
                 .map(|issue| issue.message.clone())
                 .collect::<Vec<_>>()
         };
-        let unused = ["`Cart.total` is public, and nothing outside `App.Shop` uses it."];
+        let unused = ["`Cart.total` is public, and nothing outside `Cart` uses it."];
 
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
