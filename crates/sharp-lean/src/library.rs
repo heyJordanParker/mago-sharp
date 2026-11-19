@@ -1,5 +1,5 @@
 //! The Lean runtime library and the `sharp-lean` runner, built in Mago's cache folder once per library source and Lean
-//! version, and the `lake` that builds them: the one on the `PATH`, else the one of the elan Mago installs in its cache
+//! version, and the `lake` that builds them: the one on the `PATH`, else the one of the Lean Mago installs in its cache
 //! folder.
 
 use std::fmt::Write;
@@ -40,11 +40,10 @@ const PACKAGE: [(&str, &str); 8] = [
     ("Sharp/Lean/Runner.lean", include_str!("../lean/Sharp/Lean/Runner.lean")),
 ];
 
-/// The elan release Mago installs when no `lake` is on the `PATH`.
-const ELAN_VERSION: &str = "4.2.4";
-
-/// The largest elan archive Mago downloads. The pinned ones are about 5 MB.
-const ELAN_LIMIT: u64 = 64 * 1024 * 1024;
+/// How far the download and the unzip of Lean's archive each read ahead of the step after them: `AHEAD` chunks of
+/// `CHUNK` bytes.
+const AHEAD: usize = 32;
+const CHUNK: u64 = 1024 * 1024;
 
 /// The processor seconds each `lake` process Mago starts may use: far above any real build, so that ordinary load never
 /// reaches it, and a build that never ends stops instead of holding the compile. The runner has none: each theorem it
@@ -55,43 +54,39 @@ const PROCESSOR_SECONDS: u64 = 120;
 /// modules from.
 const SYSROOT: &str = "sysroot";
 
-/// elan's release archive for one platform, and the size of the Lean archive elan then downloads there.
+/// Lean's release archive for one platform: its name, which is also the name of the one folder it holds, its SHA-256 and
+/// its size in bytes.
 struct Archive {
-    target: &'static str,
+    name: &'static str,
     sha256: &'static str,
-    size: &'static str,
-    lean_size: &'static str,
+    bytes: u64,
 }
 
-/// elan's archive for the platform Mago is built for, as `gh release view v4.2.4 --repo leanprover/elan` lists it, or
-/// `None` where elan ships no build.
+/// Lean's archive for the platform Mago is built for, as `gh release view v4.34.1 --repo leanprover/lean4 --json assets`
+/// lists it, or `None` where Mago installs no Lean.
 const ARCHIVE: Option<Archive> = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
     Some(Archive {
-        target: "aarch64-apple-darwin",
-        sha256: "7ad829861392c718dfebde3a83b5c8508df47be02af68894b094b0b3952616e5",
-        size: "2.2 MB",
-        lean_size: "562 MB",
+        name: "lean-4.34.1-darwin_aarch64",
+        sha256: "65f22a4f047738ec742667b3247e836a86ebf06eabc12655c3dee00637e37866",
+        bytes: 562_038_070,
     })
 } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
     Some(Archive {
-        target: "x86_64-apple-darwin",
-        sha256: "8a340b309d8ed2e96f930761fa223b3af57a38f5d253b53ac90293c9516f8cd4",
-        size: "2.3 MB",
-        lean_size: "564 MB",
+        name: "lean-4.34.1-darwin",
+        sha256: "c2fee70250444e46c1106a27bddfef948d1e563eef431eaac05bb946b2f73d3a",
+        bytes: 564_348_102,
     })
 } else if cfg!(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64")) {
     Some(Archive {
-        target: "x86_64-unknown-linux-gnu",
-        sha256: "42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63",
-        size: "5.0 MB",
-        lean_size: "580 MB",
+        name: "lean-4.34.1-linux",
+        sha256: "47bf4bbd78f70c2e9670598ab7124d92b6efb7330ff33e5fbb4030f6fd72e4e4",
+        bytes: 580_432_872,
     })
 } else if cfg!(all(target_os = "linux", target_env = "gnu", target_arch = "aarch64")) {
     Some(Archive {
-        target: "aarch64-unknown-linux-gnu",
-        sha256: "05febd124d84ebf994b2e7479922a5650b1e950c17ae3bd1ddd776b65bb72bf9",
-        size: "5.1 MB",
-        lean_size: "582 MB",
+        name: "lean-4.34.1-linux_aarch64",
+        sha256: "fdb974c2cdb4627e090d5d4007b913e09d13c4868720fb5594e22808b3de9e37",
+        bytes: 581_946_052,
     })
 } else {
     None
@@ -101,23 +96,18 @@ const ARCHIVE: Option<Archive> = if cfg!(all(target_os = "macos", target_arch = 
 #[derive(Debug)]
 pub(crate) struct Lake {
     program: PathBuf,
-    /// The `ELAN_HOME` of the elan Mago installed, or `None` for the `lake` on the `PATH`, which keeps its own.
-    home: Option<PathBuf>,
 }
 
 impl Lake {
     /// The `lake` on the `PATH`.
     pub(crate) fn on_path() -> Self {
-        Self { program: PathBuf::from("lake"), home: None }
+        Self { program: PathBuf::from("lake") }
     }
 
     /// A command that runs this `lake`. On Unix it may use `processor_seconds()`, as may each Lean process it starts,
     /// which inherits the limit.
     pub(crate) fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
-        if let Some(home) = &self.home {
-            command.env("ELAN_HOME", home);
-        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -416,8 +406,8 @@ pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
 /// library's Lean as the staging folder in it does, so it names the Lean that builds the library. Builds take turns
 /// under an exclusive lock on `build.lock` in `builds`, across threads and processes alike. A build that lost its runner
 /// or a package file, as a cache cleaner leaves it, is deleted and built again. A finished build deletes every other
-/// folder in `builds`: older builds and any staging folder a dead build left. A build records the folder of the Lean that
-/// built it, which the runner starts with, once.
+/// folder in `builds` but the Lean Mago installs there: older builds, any staging folder a dead build left, and the Lean
+/// an older Mago installed. A build records the folder of the Lean that built it, which the runner starts with, once.
 pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
     let _lock = lock::exclusive(&builds.join("build.lock"))?;
     let toolchain = builds.join("lean-toolchain");
@@ -454,9 +444,10 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
     fs::rename(&staging, &library).map_err(unbuilt)?;
     record_sysroot(&library, lake)?;
 
+    let lean = ARCHIVE.as_ref().map(|archive| builds.join(archive.name));
     for entry in fs::read_dir(builds).map_err(|error| DatabaseError::io(IOAction::OpenFolder, builds, error))? {
         let old = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, builds, error))?.path();
-        if old.is_dir() && old != library {
+        if old.is_dir() && old != library && Some(&old) != lean.as_ref() {
             fs::remove_dir_all(&old).map_err(|error| DatabaseError::io(IOAction::DeleteFolder, &old, error))?;
         }
     }
@@ -464,53 +455,175 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
     Ok(library)
 }
 
-/// Installs the pinned elan into `elan/` in Mago's cache folder, with the library's Lean version, and returns its
-/// `lake`. `None` where elan ships no build for the platform Mago is built for. An error names the step that failed.
+/// Installs the pinned Lean into `lean/` in Mago's cache folder and returns its `lake`. `None` where Mago pins no Lean
+/// archive for the platform it is built for. An error names the step that failed.
 pub(crate) fn install() -> io::Result<Option<Lake>> {
     let Some(archive) = &ARCHIVE else {
         return Ok(None);
     };
-    let url =
-        format!("https://github.com/leanprover/elan/releases/download/v{ELAN_VERSION}/elan-{}.tar.gz", archive.target);
     let cache = cache_root()?;
 
-    install_from(&url, archive, &cache)
+    install_from(&url(archive), archive, &cache)
         .map(Some)
-        .map_err(|error| io::Error::other(format!("{}: {error}", cache.join("elan").display())))
+        .map_err(|error| io::Error::other(format!("{}: {error}", cache.join("lean").join(archive.name).display())))
 }
 
-/// Installs elan from the archive at `url` into `elan/` in `cache`, then the library's Lean version with it, each once.
-/// Installs take turns under an exclusive lock on `elan.lock`, across threads and processes alike, and the first one
-/// prints what it downloads. Each Lean install first deletes elan's `tmp/`, since elan names each download anew and so
-/// never reuses or deletes the download a killed install left there.
-fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> {
-    let home = cache.join("elan");
-    let _lock = install_lock(cache)?;
+/// The address of `archive` in the release of the library's Lean version on GitHub.
+fn url(archive: &Archive) -> String {
+    let release = TOOLCHAIN.trim().rsplit_once(':').map_or(TOOLCHAIN.trim(), |(_, release)| release);
 
-    let lake = Lake { program: home.join("bin/lake"), home: Some(home.clone()) };
-    let has_elan = Path::new(elan(&home).get_program()).is_file();
-    if has_elan && has_toolchain(&home)? {
+    format!("https://github.com/leanprover/lean4/releases/download/{release}/{}.tar.zst", archive.name)
+}
+
+/// Installs Lean from the archive at `url` into the folder of its name in `lean/` in `cache`, once, and returns its
+/// `lake`. Installs take turns under `install_lock`, across threads and processes alike, and the first one prints what
+/// it downloads. The archive unpacks into a staging folder while it downloads, and the staging folder moves into place
+/// only when the archive has its pinned size and SHA-256, so a dead or failed install leaves no Lean behind. An install
+/// first deletes the staging folder a dead install left.
+fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> {
+    let _lock = install_lock(cache)?;
+    let builds = cache.join("lean");
+    let lean = builds.join(archive.name);
+    let lake = Lake { program: lean.join("bin/lake") };
+    if lake.program.is_file() {
         return Ok(lake);
     }
 
-    let size =
-        if has_elan { archive.lean_size.to_owned() } else { format!("{} and {}", archive.size, archive.lean_size) };
-    tracing::info!("Downloading the law checker ({size}) into Mago's cache folder, once.");
-    tracing::debug!("The law checker installs into {}.", home.display());
-    if !has_elan {
-        install_elan(url, archive, &home)?;
-    }
+    tracing::info!(
+        "Downloading the law checker ({} MB) into Mago's cache folder, once.",
+        archive.bytes.div_ceil(1_000_000)
+    );
+    tracing::debug!("The law checker installs into {}.", lean.display());
+    let staging = builds.join(format!("{}.staging", archive.name));
+    remove_folder(&staging)?;
+    let unpacked = unpack(url, archive, &staging)
+        .and_then(|()| fs::rename(staging.join(archive.name), &lean))
+        .and_then(|()| remove_folder(&staging));
+    if let Err(error) = unpacked {
+        remove_folder(&staging)?;
 
-    remove_folder(&home.join("tmp"))?;
-    let output = process::output(elan(&home).args(["toolchain", "install", TOOLCHAIN.trim()]))?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "its download failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+        return Err(error);
     }
 
     Ok(lake)
+}
+
+/// Downloads the archive at `url` and unpacks it into `staging`, each step on a thread of its own: the download, which
+/// hashes what it reads, the unzip, and the unpack. An archive of another size or SHA-256 than `archive` pins fails. An error names the first step that failed: a step that stops reading stops the steps before
+/// it, whose error then names no cause of its own.
+fn unpack(url: &str, archive: &Archive, staging: &Path) -> io::Result<()> {
+    let failed = |error: &dyn std::fmt::Display| io::Error::other(format!("downloading {url} failed: {error}"));
+    let body = ureq::get(url)
+        .header("User-Agent", concat!("mago/", env!("CARGO_PKG_VERSION")))
+        .call()
+        .map_err(|error| failed(&error))?
+        .into_body()
+        .into_with_config()
+        // ureq refuses any read once its limit is reached, the read that finds the end too.
+        .limit(archive.bytes + 1)
+        .reader();
+    let (downloaded, download) = read_ahead(Hashed { read: body, sha256: Sha256::new() });
+    let (unzipped, unzip) = read_ahead(zstd::Decoder::new(downloaded)?);
+    let mut tarball = tar::Archive::new(unzipped);
+    // The tarball ends in padding, read to its end so the unzip and the download end too.
+    let unpacked =
+        tarball.unpack(staging).and_then(|()| io::copy(&mut tarball.into_inner(), &mut io::sink()).map(drop));
+    let unpacked = match joined(unzip) {
+        Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(error),
+        _ => unpacked,
+    }
+    .map_err(|error| io::Error::other(format!("{url} can't be unpacked: {}", with_causes(&error))));
+    let hashed = match joined(download) {
+        Ok(hashed) => hashed,
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return unpacked,
+        Err(error) => return Err(failed(&error)),
+    };
+    let digest = hex(&hashed.sha256.finalize());
+    if digest != archive.sha256 {
+        return Err(io::Error::other(format!("{url} has the SHA-256 {digest}, not the pinned {}", archive.sha256)));
+    }
+
+    unpacked
+}
+
+/// A reader that hashes what it reads.
+struct Hashed<R> {
+    read: R,
+    sha256: Sha256,
+}
+
+impl<R: Read> Read for Hashed<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.read.read(buffer)?;
+        self.sha256.update(&buffer[..read]);
+
+        Ok(read)
+    }
+}
+
+/// Reads `source` to its end on a thread of its own, up to `AHEAD` chunks ahead of the reader it returns. The thread
+/// gives `source` back once it read all of it, else the error that stopped it, or a `BrokenPipe` error once the reader
+/// was dropped before the end.
+fn read_ahead<R>(mut source: R) -> (Ahead, thread::JoinHandle<io::Result<R>>)
+where
+    R: Read + Send + 'static,
+{
+    let (chunks, received) = mpsc::sync_channel(AHEAD);
+    let thread = thread::spawn(move || {
+        loop {
+            let mut chunk = Vec::new();
+            (&mut source).take(CHUNK).read_to_end(&mut chunk)?;
+            if chunk.is_empty() {
+                return Ok(source);
+            }
+            chunks
+                .send(chunk)
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the step after it stopped reading"))?;
+        }
+    });
+
+    (Ahead { received, chunk: Vec::new(), read: 0 }, thread)
+}
+
+/// The reader of the chunks a `read_ahead` thread sends, which ends where the thread stops sending.
+struct Ahead {
+    received: mpsc::Receiver<Vec<u8>>,
+    chunk: Vec<u8>,
+    read: usize,
+}
+
+impl Read for Ahead {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        while self.read == self.chunk.len() {
+            let Ok(chunk) = self.received.recv() else {
+                return Ok(0);
+            };
+            (self.chunk, self.read) = (chunk, 0);
+        }
+        let read = buffer.len().min(self.chunk.len() - self.read);
+        buffer[..read].copy_from_slice(&self.chunk[self.read..self.read + read]);
+        self.read += read;
+
+        Ok(read)
+    }
+}
+
+/// `error` followed by each error that caused it, since tar's errors name the step that failed and leave the cause, such
+/// as a full disk, to their source.
+fn with_causes(error: &io::Error) -> String {
+    let mut printed = error.to_string();
+    let mut cause = std::error::Error::source(error);
+    while let Some(error) = cause {
+        let _ = write!(printed, ": {error}");
+        cause = error.source();
+    }
+
+    printed
+}
+
+/// What `thread` gave back once it ended.
+fn joined<T>(thread: thread::JoinHandle<io::Result<T>>) -> io::Result<T> {
+    thread.join().map_err(|_| io::Error::other("a thread of the install panicked"))?
 }
 
 /// Runs `command`, the first call to a `lake`, under the lock Mago's own installs take. elan's `lake` installs the
@@ -526,92 +639,22 @@ pub(crate) fn first_call(command: &mut Command) -> io::Result<Output> {
     process::output(command)
 }
 
-/// The exclusive lock on `elan.lock` in `cache`, held across threads and processes alike until it is dropped.
+/// The exclusive lock on `install.lock` in `cache`, held across threads and processes alike until it is dropped.
 fn install_lock(cache: &Path) -> io::Result<fs::File> {
-    Ok(lock::exclusive(&cache.join("elan.lock"))?)
+    Ok(lock::exclusive(&cache.join("install.lock"))?)
 }
 
-/// The SHA-256 of `bytes` in lowercase hex, as an archive's pinned `sha256` is written.
+/// The SHA-256 of `bytes` in lowercase hex.
 fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().fold(String::new(), |mut digest, byte| {
-        let _ = write!(digest, "{byte:02x}");
-        digest
+    hex(&Sha256::digest(bytes))
+}
+
+/// `bytes` in lowercase hex, as an archive's pinned `sha256` is written.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
     })
-}
-
-/// Downloads elan's archive from `url`, checks its SHA-256, and runs its `elan-init` with `elan.staging/` as elan's
-/// home, then renames that folder to `home`, so a dead install leaves no `home` behind.
-fn install_elan(url: &str, archive: &Archive, home: &Path) -> io::Result<()> {
-    let bytes = ureq::get(url)
-        .header("User-Agent", concat!("mago/", env!("CARGO_PKG_VERSION")))
-        .call()
-        .and_then(|response| response.into_body().with_config().limit(ELAN_LIMIT).read_to_vec())
-        .map_err(|error| io::Error::other(format!("downloading {url} failed: {error}")))?;
-    let digest = sha256_hex(&bytes);
-    if digest != archive.sha256 {
-        return Err(io::Error::other(format!("{url} has the SHA-256 {digest}, not the pinned {}", archive.sha256)));
-    }
-
-    let unpacked = tempfile::tempdir_in(home.parent().unwrap_or(home))?;
-    let mut tarball = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
-    let mut entry = tarball
-        .entries()?
-        .filter_map(Result::ok)
-        .find(|entry| entry.path().is_ok_and(|path| path == Path::new("elan-init")))
-        .ok_or_else(|| io::Error::other(format!("{url} holds no installer")))?;
-    entry.unpack_in(unpacked.path())?;
-
-    let staging = home.with_extension("staging");
-    for folder in [home, &staging] {
-        remove_folder(folder)?;
-    }
-    let output = run_unpacked(
-        Command::new(unpacked.path().join("elan-init"))
-            .args(["-y", "--no-modify-path", "--default-toolchain", "none"])
-            .env("ELAN_HOME", &staging),
-    )?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "the installer failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-
-    fs::rename(&staging, home)
-}
-
-/// Runs `command`, whose program was just written, and runs it again while Linux refuses it as "Text file busy", for up
-/// to a second. A process another thread forks while the program is still open for writing holds that handle until it
-/// starts its own program, and Linux refuses to start a file open for writing.
-fn run_unpacked(command: &mut Command) -> io::Result<Output> {
-    for _ in 0..50 {
-        match process::output(command) {
-            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy => {
-                std::thread::sleep(Duration::from_millis(20))
-            }
-            output => return output,
-        }
-    }
-
-    process::output(command)
-}
-
-/// Whether the elan in `home` has the library's Lean version installed.
-fn has_toolchain(home: &Path) -> io::Result<bool> {
-    let output = process::output(elan(home).args(["toolchain", "list"]))?;
-
-    Ok(output.status.success()
-        && String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .any(|line| line.split_whitespace().next() == Some(TOOLCHAIN.trim())))
-}
-
-/// A command that runs the elan in `home`.
-fn elan(home: &Path) -> Command {
-    let mut command = Command::new(home.join("bin/elan"));
-    command.env("ELAN_HOME", home);
-
-    command
 }
 
 /// Deletes `folder` and everything in it, if it exists.
@@ -662,7 +705,7 @@ mod tests {
     /// which the Lean processes it starts inherit.
     #[test]
     fn each_process_a_lake_starts_runs_under_the_processor_time_limit() -> io::Result<()> {
-        let lake = Lake { program: PathBuf::from("/bin/sh"), home: None };
+        let lake = Lake { program: PathBuf::from("/bin/sh") };
 
         let output = process::output(lake.command().args(["-c", "ulimit -t; ulimit -c"]))?;
 
@@ -727,37 +770,31 @@ mod tests {
         assert_eq!(processor_seconds_within(&limit(libc::RLIM_INFINITY, libc::RLIM_INFINITY)), 120);
     }
 
-    /// An `elan-init` that installs an `elan` whose `toolchain install` appends the toolchain to `$ELAN_HOME/installed`
-    /// and whose `toolchain list` prints that file. When the cache holds `broken-init`, it fails after it installed.
-    const ELAN_INIT: &str = r#"#!/bin/sh
-mkdir -p "$ELAN_HOME/bin"
-cat > "$ELAN_HOME/bin/elan" <<'ELAN'
-#!/bin/sh
-case "$2" in
-    list) cat "$ELAN_HOME/installed" 2>/dev/null ;;
-    install) echo "$3" >> "$ELAN_HOME/installed" ;;
-esac
-ELAN
-chmod +x "$ELAN_HOME/bin/elan"
-if [ -e "$ELAN_HOME/../broken-init" ]; then
-    echo "elan-init broke" >&2
-    exit 1
-fi
-"#;
+    /// The `lake` of the archive `lean_archive` makes, which prints `lake`.
+    const LAKE: &str = "#!/bin/sh\necho lake\n";
 
-    /// An elan archive that holds `ELAN_INIT`, served over HTTP on a local port, and how many requests it answered.
-    fn serve_elan() -> io::Result<(String, Vec<u8>, Arc<AtomicUsize>)> {
-        let mut tarball = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default()));
-        let mut header = tar::Header::new_gnu();
-        header.set_size(ELAN_INIT.len() as u64);
-        header.set_mode(0o755);
-        tarball.append_data(&mut header, "elan-init", ELAN_INIT.as_bytes())?;
-        let bytes = tarball.into_inner()?.finish()?;
+    /// A Lean archive as Lean's releases make one, a zstd stream of a tarball whose one folder, `lean-test`, holds
+    /// `bin/lake` and `bin/lean`, a link to it.
+    fn lean_archive() -> io::Result<Vec<u8>> {
+        let mut tarball = tar::Builder::new(Vec::new());
+        let mut lake = tar::Header::new_gnu();
+        lake.set_size(LAKE.len() as u64);
+        lake.set_mode(0o755);
+        tarball.append_data(&mut lake, "lean-test/bin/lake", LAKE.as_bytes())?;
+        let mut lean = tar::Header::new_gnu();
+        lean.set_entry_type(tar::EntryType::Symlink);
+        lean.set_size(0);
+        tarball.append_link(&mut lean, "lean-test/bin/lean", "lake")?;
 
+        zstd::encode_all(tarball.into_inner()?.as_slice(), 0)
+    }
+
+    /// `served` over HTTP on a local port, and how many requests it answered.
+    fn serve(served: Vec<u8>) -> io::Result<(String, Arc<AtomicUsize>)> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
-        let url = format!("http://{}/elan.tar.gz", listener.local_addr()?);
+        let url = format!("http://{}/lean-test.tar.zst", listener.local_addr()?);
         let requests = Arc::new(AtomicUsize::new(0));
-        let (served, answered) = (bytes.clone(), Arc::clone(&requests));
+        let answered = Arc::clone(&requests);
         // A request the server fails to answer fails the install that sent it.
         std::thread::spawn(move || -> io::Result<()> {
             for stream in listener.incoming() {
@@ -775,25 +812,43 @@ fi
             Ok(())
         });
 
-        Ok((url, bytes, requests))
+        Ok((url, requests))
     }
 
-    fn archive(sha256: &'static str) -> Archive {
-        Archive { target: "test", sha256, size: "1 KB", lean_size: "1 MB" }
+    /// The archive `lean-test` pinned to the SHA-256 and the size of `bytes`.
+    fn archive(bytes: &[u8]) -> Archive {
+        Archive { name: "lean-test", sha256: sha256(bytes), bytes: bytes.len() as u64 }
     }
 
     fn sha256(bytes: &[u8]) -> &'static str {
         Box::leak(sha256_hex(bytes).into_boxed_str())
     }
 
-    fn installed(cache: &Path) -> io::Result<String> {
-        fs::read_to_string(cache.join("elan/installed"))
+    /// What the `bin/lean` installed in `cache`, a link to `bin/lake`, prints.
+    fn lean_in(cache: &Path) -> io::Result<String> {
+        let output = process::output(&mut Command::new(cache.join("lean/lean-test/bin/lean")))?;
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Each Lean archive Mago pins is of the Lean version the library's package pins, at its release on GitHub, so a
+    /// new Lean version fails here until its archives are pinned.
+    #[test]
+    fn the_pinned_lean_archive_is_the_release_of_the_library_s_lean_version() {
+        if let Some(archive) = &ARCHIVE {
+            assert!(archive.name.starts_with("lean-4.34.1-"), "{}", archive.name);
+            assert_eq!(
+                url(archive),
+                format!("https://github.com/leanprover/lean4/releases/download/v4.34.1/{}.tar.zst", archive.name)
+            );
+        }
     }
 
     #[test]
-    fn installs_that_start_together_download_elan_and_install_lean_once() -> io::Result<()> {
-        let (url, bytes, requests) = serve_elan()?;
-        let archive = archive(sha256(&bytes));
+    fn installs_that_start_together_download_lean_once() -> io::Result<()> {
+        let bytes = lean_archive()?;
+        let archive = archive(&bytes);
+        let (url, requests) = serve(bytes)?;
         let cache = tempfile::tempdir()?;
 
         // Every install starts before any is joined, so the four run together.
@@ -808,86 +863,102 @@ fi
         })?;
 
         assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert_eq!(installed(cache.path())?, format!("{}\n", TOOLCHAIN.trim()));
+        assert_eq!(lean_in(cache.path())?, "lake\n");
         for lake in lakes {
-            assert_eq!(lake.program, cache.path().join("elan/bin/lake"));
-            assert_eq!(lake.home.as_deref(), Some(cache.path().join("elan").as_path()));
+            assert_eq!(lake.program, cache.path().join("lean/lean-test/bin/lake"));
         }
-        assert!(!cache.path().join("elan.staging").exists());
+        assert!(!cache.path().join("lean/lean-test.staging").exists());
 
         Ok(())
     }
 
     #[test]
-    fn an_install_whose_lean_is_missing_installs_only_lean() -> io::Result<()> {
-        let (url, bytes, requests) = serve_elan()?;
-        let archive = archive(sha256(&bytes));
+    fn an_install_deletes_the_staging_folder_a_killed_install_left() -> io::Result<()> {
+        let bytes = lean_archive()?;
+        let archive = archive(&bytes);
+        let (url, _) = serve(bytes)?;
         let cache = tempfile::tempdir()?;
-        install_from(&url, &archive, cache.path())?;
-        fs::remove_file(cache.path().join("elan/installed"))?;
+        fs::create_dir_all(cache.path().join("lean/lean-test.staging/lean-test/bin"))?;
+        fs::write(cache.path().join("lean/lean-test.staging/lean-test/bin/half"), "half of Lean")?;
 
         install_from(&url, &archive, cache.path())?;
 
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert_eq!(installed(cache.path())?, format!("{}\n", TOOLCHAIN.trim()));
+        assert!(!cache.path().join("lean/lean-test.staging").exists());
+        assert!(!cache.path().join("lean/lean-test/bin/half").exists());
+        assert_eq!(lean_in(cache.path())?, "lake\n");
 
         Ok(())
     }
 
     #[test]
-    fn an_install_of_lean_deletes_the_download_a_killed_install_left() -> io::Result<()> {
-        let (url, bytes, _) = serve_elan()?;
-        let archive = archive(sha256(&bytes));
-        let cache = tempfile::tempdir()?;
-        install_from(&url, &archive, cache.path())?;
-        fs::remove_file(cache.path().join("elan/installed"))?;
-        fs::create_dir_all(cache.path().join("elan/tmp"))?;
-        fs::write(cache.path().join("elan/tmp/jpvym4et00p_dz4p_file"), "half of Lean")?;
-
-        install_from(&url, &archive, cache.path())?;
-
-        assert!(!cache.path().join("elan/tmp").exists());
-        assert_eq!(installed(cache.path())?, format!("{}\n", TOOLCHAIN.trim()));
-
-        Ok(())
-    }
-
-    #[test]
-    fn a_failed_install_leaves_no_elan_and_the_next_install_downloads_it_again() -> io::Result<()> {
-        let (url, bytes, requests) = serve_elan()?;
+    fn a_failed_install_leaves_no_lean_and_the_next_install_downloads_it_again() -> io::Result<()> {
+        let bytes = lean_archive()?;
         let digest = sha256(&bytes);
         let other = "0000000000000000000000000000000000000000000000000000000000000000";
-        for (failure, pinned, broken_init, error) in [
+        let size = bytes.len() as u64;
+        let not_zstd = b"half of a tarball".to_vec();
+        for (failure, served, pinned, error) in [
             (
                 "an archive whose SHA-256 is not the pinned one",
-                other,
-                false,
-                format!("{url} has the SHA-256 {digest}, not the pinned {other}"),
+                bytes.clone(),
+                Archive { name: "lean-test", sha256: other, bytes: size },
+                format!("has the SHA-256 {digest}, not the pinned {other}"),
             ),
             (
-                "an elan-init that fails after it installed",
-                digest,
-                true,
-                "the installer failed: elan-init broke".to_owned(),
+                "an archive longer than its pinned size",
+                bytes.clone(),
+                Archive { name: "lean-test", sha256: digest, bytes: size - 1 },
+                format!("failed: the response body is larger than request limit: {size}"),
+            ),
+            (
+                "an archive that is no zstd stream",
+                not_zstd.clone(),
+                archive(&not_zstd),
+                "can't be unpacked: Unknown frame descriptor".to_owned(),
             ),
         ] {
+            let (url, _) = serve(served)?;
             let cache = tempfile::tempdir()?;
-            if broken_init {
-                fs::write(cache.path().join("broken-init"), "")?;
-            }
-            let before = requests.load(Ordering::SeqCst);
 
-            let failed = install_from(&url, &archive(pinned), cache.path()).err().map(|failed| failed.to_string());
-            assert_eq!(failed, Some(error), "{failure}");
-            assert!(!cache.path().join("elan").exists(), "{failure}");
+            let failed = install_from(&url, &pinned, cache.path()).err().map(|failed| failed.to_string());
 
-            if broken_init {
-                fs::remove_file(cache.path().join("broken-init"))?;
-            }
-            install_from(&url, &archive(digest), cache.path())?;
-            assert_eq!(requests.load(Ordering::SeqCst) - before, 2, "{failure}");
-            assert_eq!(installed(cache.path())?, format!("{}\n", TOOLCHAIN.trim()), "{failure}");
+            assert!(failed.as_deref().is_some_and(|failed| failed.contains(&error)), "{failure}: {failed:?}");
+            assert!(!cache.path().join("lean/lean-test").exists(), "{failure}");
+            assert!(!cache.path().join("lean/lean-test.staging").exists(), "{failure}");
+
+            let (url, requests) = serve(bytes.clone())?;
+            install_from(&url, &archive(&bytes), cache.path())?;
+            assert_eq!(requests.load(Ordering::SeqCst), 1, "{failure}");
+            assert_eq!(lean_in(cache.path())?, "lake\n", "{failure}");
         }
+
+        Ok(())
+    }
+
+    /// A finished build deletes the older builds beside it, and keeps the Lean Mago installed there.
+    #[test]
+    fn a_build_deletes_the_older_builds_and_keeps_the_lean_mago_installed() -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(archive) = &ARCHIVE else {
+            return Ok(());
+        };
+        let builds = tempfile::tempdir()?;
+        let lake = tempfile::tempdir()?;
+        let program = lake.path().join("lake");
+        fs::write(
+            &program,
+            "#!/bin/sh\ncase \"$1\" in\n    --version) echo 'Lake version test' ;;\n    build) mkdir -p .lake/build/bin && touch .lake/build/bin/sharp-lean ;;\n    env) pwd ;;\nesac\n",
+        )?;
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755))?;
+        fs::create_dir_all(builds.path().join(archive.name).join("bin"))?;
+        fs::create_dir_all(builds.path().join("0123456789abcdef0123456789abcdef"))?;
+
+        let library = build_in(builds.path(), &Lake { program })?;
+
+        assert!(runner(&library).is_file());
+        assert!(builds.path().join(archive.name).join("bin").is_dir());
+        assert!(!builds.path().join("0123456789abcdef0123456789abcdef").exists());
 
         Ok(())
     }

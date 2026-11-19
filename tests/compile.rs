@@ -4413,7 +4413,7 @@ fn compile_runs_the_lake_on_the_path_and_installs_no_lean() {
     .unwrap();
 
     assert!(printed(&output).contains("the lake on the PATH ran build"), "{}", printed(&output));
-    assert!(!cache.path().join("mago/elan").exists(), "{}", printed(&output));
+    assert!(!printed(&output).contains("Downloading the law checker"), "{}", printed(&output));
 }
 
 /// A cache folder the law checker can't create, as one a root container left, is named with what failed.

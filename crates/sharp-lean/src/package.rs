@@ -367,7 +367,7 @@ pub(crate) enum Refusal {
 /// What `lake` answered when asked its version.
 pub(crate) enum Toolchain {
     Ready,
-    /// No `lake` is on the `PATH`, and the Mago build pins no elan for its target.
+    /// No `lake` is on the `PATH`, and the Mago build pins no Lean archive for its target.
     Unsupported,
     /// Mago could not install Lean where no `lake` is on the `PATH`, or `lake` could not install the pinned Lean
     /// version, with what failed.
@@ -388,9 +388,9 @@ impl Package {
         Self { directory: plain(root).join(COMPILED_FOLDER).join(PACKAGE_FOLDER), lake: Lake::on_path() }
     }
 
-    /// Writes the package's Lean version, so elan installs it on first use, and asks `lake` for its version there, under
-    /// `library::first_call`'s lock. With no `lake` on the `PATH`, the package uses the `lake` of the elan Mago installs in
-    /// its cache folder.
+    /// Writes the package's Lean version, so an elan on the `PATH` installs it on first use, and asks `lake` for its
+    /// version there, under `library::first_call`'s lock. With no `lake` on the `PATH`, the package uses the `lake` of
+    /// the Lean Mago installs in its cache folder.
     pub(crate) fn toolchain(&mut self) -> io::Result<Toolchain> {
         fs::create_dir_all(&self.directory)
             .map_err(|error| DatabaseError::io(IOAction::CreateFolder, &self.directory, error))?;
