@@ -3,7 +3,7 @@ namespace App;
 // An `if` that tests the value it assigns is the assignment on its own line and the test of the local, since a PHP#
 // assignment is a statement. An `else if` that assigns refuses, since its assignment runs only when the first test
 // fails, and `refuse-assigned-condition` keeps that.
-public final class Orders
+internal final class Orders
 {
     private Map<string, Order> orders = [:];
 

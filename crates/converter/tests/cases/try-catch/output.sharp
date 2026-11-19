@@ -1,7 +1,7 @@
 namespace App;
 
 // `try`, `catch` and `finally` stay, and the caught value is named without `$` (spec section 24).
-public final class Guarded
+internal final class Guarded
 {
     internal string run(Task task)
     {

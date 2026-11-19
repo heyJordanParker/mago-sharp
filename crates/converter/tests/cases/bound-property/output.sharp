@@ -3,7 +3,7 @@ namespace App;
 // A property never narrows, since each read may give another value (spec section 21). A condition that tests a
 // property its body reads again binds it, by the property's own name, or `label2` where the method has a `$label`,
 // and the body reads the name, which holds the value the test read.
-public final class Shelf
+internal final class Shelf
 {
     private string? label = null;
 

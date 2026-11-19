@@ -2,7 +2,7 @@ namespace App;
 
 // `match (true)` runs the arm of the first condition that is `true`, which PHP compares by `===`, so for `bool`
 // conditions it is a chain of ternaries, or `if … else if … else` as a statement (spec section 21).
-public final class Shipping
+internal final class Shipping
 {
     private string note = '';
 

@@ -1,7 +1,7 @@
 namespace App;
 
 // A body PHP writes between `:` and an end keyword is a body in braces, as PHP# writes every body (spec section 17).
-public final class Tally
+internal final class Tally
 {
     internal int sum(List<int> numbers)
     {

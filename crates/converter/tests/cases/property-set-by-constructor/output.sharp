@@ -1,7 +1,7 @@
 namespace App;
 
 // A typed property with no initial value converts when the constructor sets it on every path.
-public final class Ticket
+internal final class Ticket
 {
     private string code;
 

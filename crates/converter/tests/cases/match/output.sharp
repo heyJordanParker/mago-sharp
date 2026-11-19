@@ -2,7 +2,7 @@ namespace App;
 
 // `match` keeps its form: an arm's constants become patterns joined by `or`, and a `match` that stands as a statement
 // takes block arms (spec section 21).
-public final class Router
+internal final class Router
 {
     private int hits = 0;
 

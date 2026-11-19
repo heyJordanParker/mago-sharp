@@ -3,7 +3,7 @@ namespace App;
 // PHP's `iterable<V>` keys by any `array-key`, which says no more than a PHP# `Iterable<V>`. A PHP# `Iterable<V>`
 // parameter takes a new sequence of the values it is given, numbered from 0, so a loop over its values alone reads
 // what PHP's reads (spec section 12).
-public final class Joiner
+internal final class Joiner
 {
     internal string joined(Iterable<string> items)
     {

@@ -1,6 +1,7 @@
-//! A class, an interface or an enum: its header, `public`, its type parameters, and its parents as `: A, B` (spec
-//! sections 5, 11, 20 and 22), then each of its members.
+//! A class, an interface or an enum: its header, `public` or `internal`, its type parameters, and its parents as
+//! `: A, B` (spec sections 5, 11, 20 and 22), then each of its members.
 
+use mago_analyzer::types_only_their_namespace_uses;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_span::HasSpan;
 use mago_syntax::cst::AttributeList;
@@ -114,10 +115,17 @@ impl<'input> Converter<'input, '_> {
         metadata
     }
 
-    /// `public` at `start`, where a declaration's header starts, since PHP reaches every class, and the type
-    /// parameters after `name`.
+    /// The type's access level at `start`, where a declaration's header starts, and the type parameters after `name`.
+    /// In a project, whose public types the checker refuses as too wide, a type nothing outside its namespace uses is
+    /// `internal`, as [`types_only_their_namespace_uses`] says for the checker too (spec section 5). Any other type is
+    /// `public`, since PHP reaches every class, and so is each type of a library, whose uses are in the projects that
+    /// install it.
     fn header(&mut self, start: u32, metadata: &ClassLikeMetadata, name: &LocalIdentifier<'_>) {
-        self.edits.insert(start, "public ");
+        let codebase = self.input.codebase;
+        let is_internal = self.in_project()
+            && types_only_their_namespace_uses(codebase, self.input.references)
+                .contains(&codebase.class_key(metadata.name));
+        self.edits.insert(start, if is_internal { "internal " } else { "public " });
         if let Some(parameters) = self.type_parameters(&metadata.template_types, &metadata.template_variance, name.span)
             && !parameters.is_empty()
         {

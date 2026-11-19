@@ -2,7 +2,7 @@ namespace App;
 
 // An open method is `virtual`, one that replaces a parent class's is `override`, and a `final` or private one is
 // neither (spec section 22).
-public class SalesReport : Report, Titled, Countable
+internal class SalesReport : Report, Titled, Countable
 {
     public override string title()
     {

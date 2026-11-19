@@ -1,7 +1,7 @@
 namespace App;
 
 // In a `final` class no subclass can be the class PHP called, so `self::label()` is `Badge.label()`.
-public final class Badge
+internal final class Badge
 {
     private const string LABEL = 'badge';
 

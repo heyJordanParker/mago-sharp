@@ -2,7 +2,7 @@ namespace App;
 
 // A returned value the analysis types wider than the method's return is checked as that type, which PHP checks where
 // the method returns and throws a `TypeError` for any other value (spec section 21).
-public final class Lookup
+internal final class Lookup
 {
     internal string name(Any? value)
     {

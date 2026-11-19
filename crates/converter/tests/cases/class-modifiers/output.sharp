@@ -2,7 +2,7 @@ namespace App;
 
 // An abstract class keeps `abstract`, and a `readonly` class is each of its properties `{ get; }` (spec sections 13
 // and 22).
-public abstract class Shape
+internal abstract class Shape
 {
     public Shape(internal int sides { get; })
     {

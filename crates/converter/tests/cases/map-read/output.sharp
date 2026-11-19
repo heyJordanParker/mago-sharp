@@ -1,7 +1,7 @@
 namespace App;
 
 // A key a `Map` may lack is read behind `??`, as in PHP (spec section 12).
-public final class Sizes
+internal final class Sizes
 {
     private Map<string, int> sizes = ['small': 1];
 

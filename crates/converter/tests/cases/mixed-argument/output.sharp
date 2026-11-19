@@ -2,7 +2,7 @@ namespace App;
 
 // An argument of no known type is checked as its parameter's type, which PHP checks where the argument lands and
 // throws a `TypeError` for any other value (spec section 21).
-public final class Greeter
+internal final class Greeter
 {
     internal string greet(Any? name)
     {

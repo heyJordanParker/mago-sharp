@@ -4,7 +4,7 @@ namespace App;
 // section 5, decision 95). Plain PHP marks it as `#[\Sharp\DynamicallyAccessed]`.
 [Attribute(Attribute.TARGET_METHOD)]
 [DynamicallyAccessed]
-public final class Action
+internal final class Action
 {
     public Action(internal string name { get; private set; })
     {

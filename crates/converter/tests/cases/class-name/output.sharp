@@ -6,7 +6,7 @@ import Lib.Chat.Message as ChatMessage;
 
 // A class prints by the name the file reaches it by: its import, its short name in the file's namespace, bare as a
 // root class of `Builtins.sharp`, or a new import, renamed when its short name is taken (spec section 23).
-public final class Mailer
+internal final class Mailer
 {
     internal Doc document()
     {

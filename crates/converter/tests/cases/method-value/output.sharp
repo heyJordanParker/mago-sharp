@@ -2,7 +2,7 @@ namespace App;
 
 // A method named as a value, `name(...)`, `[$this, 'name']` or `'Class::name'` where a function is declared, is
 // PHP#'s method value `this.name` (spec section 14.3).
-public final class Pricing
+internal final class Pricing
 {
     private int apply(Function<int(int)> rule, int amount)
     {

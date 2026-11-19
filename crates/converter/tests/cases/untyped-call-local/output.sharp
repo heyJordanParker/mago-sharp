@@ -2,7 +2,7 @@ namespace App;
 
 // A method with no PHP return type returns `Any?` in PHP#, so a local assigned its call is an `Any?`, read after its
 // block or appended to a `[]` (decision 2).
-public final class Sizes
+internal final class Sizes
 {
     internal int guessed(bool wide)
     {

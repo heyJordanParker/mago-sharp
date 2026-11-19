@@ -3,7 +3,7 @@ namespace App;
 // A `switch` with a `case` on a value that is no constant, which no pattern takes, is a chain of PHP's loose `==`
 // tests. Cases with no statements of their own join the next with `||`, and `default` runs where no case holds: last,
 // it is the `else`, and before other cases, the branch where none of them holds (spec sections 19 and 21).
-public final class Limits
+internal final class Limits
 {
     internal string label(int code, int limit)
     {

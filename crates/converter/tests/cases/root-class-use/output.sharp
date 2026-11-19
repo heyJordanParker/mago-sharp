@@ -2,7 +2,7 @@ namespace App;
 
 // A `use` line of a class of PHP's root namespace goes, since the file names each such class by its own name: a
 // `Closure` as the function type it is, and a root class of `Builtins.sharp` bare (spec sections 14.1 and 23).
-public final class Pipeline
+internal final class Pipeline
 {
     internal int run(Function<int(int)> next, int value)
     {

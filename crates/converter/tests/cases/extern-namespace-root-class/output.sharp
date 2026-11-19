@@ -4,7 +4,7 @@ import Acme.Legacy.Legacy_Order;
 
 // A library's class in PHP's root namespace is imported through the namespace its Composer package's name gives, which
 // the line the conversion adds gives its folder (spec section 23).
-public final class Orders
+internal final class Orders
 {
     internal string reference(Legacy_Order order)
     {

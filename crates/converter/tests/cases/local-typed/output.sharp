@@ -1,7 +1,7 @@
 namespace App;
 
 // A local whose first value says nothing of what it holds takes the type its `@var` tag declares.
-public final class Tally
+internal final class Tally
 {
     internal List<string> names()
     {

@@ -3,7 +3,7 @@ namespace App;
 // A property's hooks are its accessors: `$this->name` in them is the storage `field`, `$value` is `value`, and a
 // short `set` stores its value. A property with storage gains the accessor it declares no hook for, and its initial
 // value follows the accessors (spec section 6).
-public final class Badge
+internal final class Badge
 {
     private string label {
         get => field + '!';

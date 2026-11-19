@@ -3,7 +3,7 @@ namespace App;
 // PHP's `array-key` is `int|string`, so a plain `array`, as a request's input, is a `Map` keyed by `int|string`, whose
 // keys a PHP array gives as PHP holds them (spec section 12). A key the body reads or writes by is an `int`, or a
 // string PHP keeps a string.
-public final class Input
+internal final class Input
 {
     internal int count(Map<int|string, string> fields)
     {

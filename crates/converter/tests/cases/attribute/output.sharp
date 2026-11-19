@@ -3,7 +3,7 @@ namespace App;
 import Lib.Route;
 
 [Attribute(Attribute.TARGET_CLASS)]
-public final class Endpoint
+internal final class Endpoint
 {
     [Route('/orders', name: 'orders')]
     internal int orders([Route('/one')] int one)

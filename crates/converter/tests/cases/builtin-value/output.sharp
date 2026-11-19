@@ -2,7 +2,7 @@ namespace App;
 
 // A built-in as a value is the lambda that calls the standard library member that runs it, with as many parameters as
 // the function type it lands in passes, since PHP calls the built-in with each of them (spec section 14.2).
-public final class Rules
+internal final class Rules
 {
     private string apply(Function<string(string)> rule, string text)
     {

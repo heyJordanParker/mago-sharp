@@ -1,7 +1,7 @@
 namespace App;
 
 // PHP's own constant, read through the standard library constant whose value it is (spec section 23).
-public final class Limits
+internal final class Limits
 {
     internal int highest()
     {

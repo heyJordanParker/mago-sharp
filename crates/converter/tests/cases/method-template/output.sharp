@@ -3,7 +3,7 @@ namespace App;
 /**
  * A method's own type parameters are in PHPDoc, which PHP# writes after the method's name (spec section 11).
  */
-public class Repository
+internal class Repository
 {
     /**
      * Saves an entity, and gives it back as its own type.

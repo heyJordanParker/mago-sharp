@@ -2,7 +2,7 @@ namespace App;
 
 // A list literal an attribute passes where a plain `array`, a `Map`, is declared, in the attribute and in a `new` it
 // holds, on a property and on a parameter.
-public final class Order
+internal final class Order
 {
     [Rule(anyOf: ['paid', 'shipped'])]
     [Rule(of: new Rule(anyOf: [0: 'paid', 1: 'shipped']))]

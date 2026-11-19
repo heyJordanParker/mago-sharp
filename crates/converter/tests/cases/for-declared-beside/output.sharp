@@ -2,7 +2,7 @@ namespace App;
 
 // A PHP# `let` declares one local and ends at a comma, so a `for` whose initialization declares a local beside others
 // runs each initialization as a statement of its own before the loop, in its order (spec section 17).
-public final class Pairs
+internal final class Pairs
 {
     internal int sum(int count)
     {

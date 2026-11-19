@@ -615,42 +615,13 @@ enum Access {
 /// reaches the member through reflection, which no use records, so none of them is refused.
 #[must_use]
 pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferences) -> IssueCollection {
-    // The class or function the code of each use of a member is in, `None` for code outside both, by the member and
-    // the class the code names it on.
-    let mut uses_on = HashMap::<(Word, Word), Vec<Option<Word>>>::default();
-    references.for_each_reference(|origin, (class, member), _| {
-        let code_in = match origin {
-            ReferenceOrigin::Symbol((symbol, _)) => Some(symbol),
-            ReferenceOrigin::File(_) => None,
-        };
-        uses_on.entry((member, class)).or_default().push(code_in);
-    });
-    // A member must be visible to each class that overrides or implements it, so each override uses the member it
-    // replaces from the class that declares the override.
-    for (class_name, class) in &codebase.class_likes {
-        for (method, replaced) in &class.overridden_method_ids {
-            if class.methods.contains(method) {
-                for replaced in replaced.values() {
-                    let (on, member) = replaced.get_key();
-                    uses_on.entry((member, on)).or_default().push(Some(*class_name));
-                }
-            }
-        }
-        for (property, replaced) in &class.overridden_property_ids {
-            if class.declaring_property_ids.get(property) == Some(class_name) {
-                for on in replaced {
-                    uses_on.entry((*property, *on)).or_default().push(Some(*class_name));
-                }
-            }
-        }
-    }
+    let uses_on = uses_on(codebase, references);
+    let namespace_types = namespace_types(codebase, &uses_on);
     // The same uses by the member and each class-like the class the code names it on is an instance of, as
-    // `CodebaseMetadata::is_instance_of` decides, and the uses of each type, a use of the type or of a member of it.
+    // `CodebaseMetadata::is_instance_of` decides.
     let mut member_uses = HashMap::<(Word, Word), Vec<&[Option<Word>]>>::default();
-    let mut type_uses = HashMap::<Word, Vec<&[Option<Word>]>>::default();
     for ((member, on), code_in) in &uses_on {
         let on = codebase.class_key(*on);
-        type_uses.entry(on).or_default().push(code_in);
         let metadata = codebase.get_class_like(on);
         let instance_of = metadata.into_iter().flat_map(|metadata| {
             std::iter::once(metadata.name).chain(metadata.instance_of().into_iter().flatten().copied())
@@ -684,19 +655,7 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
             })
         };
 
-        let is_used_outside = || {
-            type_uses
-                .get(&class_key)
-                .into_iter()
-                .flatten()
-                .flat_map(|uses| uses.iter())
-                .any(|code_in| !reaches(Access::Internal, *code_in))
-        };
-        if !class.flags.is_module()
-            && !class.flags.is_enum_case_class()
-            && !is_reached_by_its_members(codebase, *class_name, class)
-            && !is_used_outside()
-        {
+        if namespace_types.contains(&class_key) {
             issues.push(
                 Issue::error(format!("`{class_label}` is public, and nothing outside `{dotted_namespace}` uses it."))
                     .with_code(IssueCode::TooWideMember)
@@ -759,6 +718,83 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
     }
 
     issues
+}
+
+/// Each type nothing outside its namespace uses, by its class key, which spec section 5 makes `internal`.
+///
+/// They are the types [`too_wide_members`] refuses as public, and the types `mago convert` writes `internal` in a
+/// project, so the two never disagree. Each user-defined class-like counts, a plain PHP one included, as it is before
+/// its conversion. A use of a type is a use of it or of a member of it, an `extends`, an `implements` and an override of one of its
+/// members included, from the code of its namespace or one below it. Code outside any class or function is outside it,
+/// since its namespace is not known here. A module and an enum's case are no types anyone names, and plain PHP calling
+/// an `[Export]` method or a framework reading a marked attribute of the type or of one of its members reaches it from
+/// outside any namespace, so none of them is in the set.
+#[must_use]
+pub fn types_only_their_namespace_uses(codebase: &CodebaseMetadata, references: &SymbolReferences) -> HashSet<Word> {
+    namespace_types(codebase, &uses_on(codebase, references))
+}
+
+/// The code each use of a member is in, the class or function, `None` for code outside both, by the member and the
+/// class the code names it on, an empty member for a use of the class itself. A member must be visible to each class
+/// that overrides or implements it, so each override uses the member it replaces from the class that declares the
+/// override.
+fn uses_on(codebase: &CodebaseMetadata, references: &SymbolReferences) -> HashMap<(Word, Word), Vec<Option<Word>>> {
+    let mut uses_on = HashMap::<(Word, Word), Vec<Option<Word>>>::default();
+    references.for_each_reference(|origin, (class, member), _| {
+        let code_in = match origin {
+            ReferenceOrigin::Symbol((symbol, _)) => Some(symbol),
+            ReferenceOrigin::File(_) => None,
+        };
+        uses_on.entry((member, class)).or_default().push(code_in);
+    });
+    for (class_name, class) in &codebase.class_likes {
+        for (method, replaced) in &class.overridden_method_ids {
+            if class.methods.contains(method) {
+                for replaced in replaced.values() {
+                    let (on, member) = replaced.get_key();
+                    uses_on.entry((member, on)).or_default().push(Some(*class_name));
+                }
+            }
+        }
+        for (property, replaced) in &class.overridden_property_ids {
+            if class.declaring_property_ids.get(property) == Some(class_name) {
+                for on in replaced {
+                    uses_on.entry((*property, *on)).or_default().push(Some(*class_name));
+                }
+            }
+        }
+    }
+
+    uses_on
+}
+
+/// [`types_only_their_namespace_uses`], of the uses [`uses_on`] gives.
+fn namespace_types(codebase: &CodebaseMetadata, uses_on: &HashMap<(Word, Word), Vec<Option<Word>>>) -> HashSet<Word> {
+    let mut type_uses = HashMap::<Word, Vec<Option<Word>>>::default();
+    for ((_, on), code_in) in uses_on {
+        type_uses.entry(codebase.class_key(*on)).or_default().extend(code_in.iter().copied());
+    }
+
+    codebase
+        .class_likes
+        .iter()
+        .filter(|(class_name, class)| {
+            class.flags.is_user_defined()
+                && !class.flags.is_module()
+                && !class.flags.is_enum_case_class()
+                && !is_dynamically_accessed(codebase, &class.attributes)
+                && !is_reached_by_its_members(codebase, **class_name, class)
+        })
+        .filter_map(|(class_name, class)| {
+            let class_key = codebase.class_key(*class_name);
+            let namespace = namespace_of(class.original_name.as_bytes());
+            let is_used_outside = type_uses.get(&class_key).into_iter().flatten().any(|code_in| {
+                code_in.is_none_or(|symbol| !is_within_namespace(namespace_of(symbol.as_bytes()), namespace))
+            });
+
+            (!is_used_outside).then_some(class_key)
+        })
+        .collect()
 }
 
 /// Refuses each class of an application that no code uses, spec section 5, so it never runs.

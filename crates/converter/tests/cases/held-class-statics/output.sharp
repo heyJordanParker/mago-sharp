@@ -4,7 +4,7 @@ namespace App;
 // the member's `nameof`: a read and a write through `kind.properties()`, and a lambda over `kind.methods()` (spec
 // sections 6.3, 14.3 and 25). A constant has no `nameof`, so an application reads none through reflection, as
 // library-fixed-strings shows.
-public final class Reader
+internal final class Reader
 {
     internal int count(Class<Order> kind)
     {

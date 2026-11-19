@@ -1,7 +1,7 @@
 namespace App;
 
 // A method with `yield` returns an `Iterable` of what it yields, and `yield from` is `yield ...` (spec section 12).
-public final class Lines
+internal final class Lines
 {
     internal Iterable<string> lines()
     {

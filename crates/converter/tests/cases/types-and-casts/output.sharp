@@ -2,7 +2,7 @@ namespace App;
 
 // `mixed` is `Any?`, `?T` is `T?` and `object` is `Object`. `(int)`, `(float)` and `(string)` stay, and PHP's aliases
 // become them (spec section 24).
-public final class Convert
+internal final class Convert
 {
     internal Any? any(Any? value)
     {

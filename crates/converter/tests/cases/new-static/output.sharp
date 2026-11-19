@@ -2,7 +2,7 @@ namespace App;
 
 // `new static(…)` is `new Self(…)`, which makes an object of the class PHP called. A class that isn't `final` marks its
 // constructor `required`, which `new Self(…)` calls on it and on every subclass.
-public class Money
+internal class Money
 {
     public required Money(private int cents { get; })
     {

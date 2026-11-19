@@ -3,7 +3,7 @@ namespace App;
 // A local that starts as `[]` or `null` takes its type from the declared types of the values written to it later:
 // `List<V>` when the body only appends to it, `Map<K, V>` when it only writes it by key, and `T?` after `null`. PHP#
 // declares it first in the body (spec sections 2, 3 and 12, decision 2).
-public final class Basket
+internal final class Basket
 {
     internal int upper(List<string> names)
     {

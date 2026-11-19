@@ -1,0 +1,9 @@
+{
+    "description": "An application, whose public types the checker refuses as too wide.",
+    "type": "project",
+    "autoload": {
+        "psr-4": {
+            "App\\": ""
+        }
+    }
+}

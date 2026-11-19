@@ -2,7 +2,7 @@ namespace App;
 
 // A heredoc and a nowdoc are templates, without the closing label's indentation and the line break before it (spec
 // section 18).
-public final class Page
+internal final class Page
 {
     internal string render(string title)
     {

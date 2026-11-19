@@ -1,9 +1,9 @@
 //! Classes and their members: the header, properties and fields, methods and constructors, and their parameters. This
 //! module holds what every declaration shares, its attributes, docblock and visibility, and each family has a module.
 //!
-//! PHP# defaults a class to `internal` and a member to `private` (spec section 5), so the converter writes every class
-//! `public`, and each member PHP makes public `public` in a library and as wide as its uses need in a project, whose
-//! too wide members the checker refuses. PHP's methods are open unless `final`, and PHP#'s are closed unless
+//! PHP# defaults a class to `internal` and a member to `private` (spec section 5), so the converter writes each class
+//! and each member PHP makes public `public` in a library, and as wide as its uses need in a project, whose too wide
+//! types and members the checker refuses. PHP's methods are open unless `final`, and PHP#'s are closed unless
 //! `virtual` (spec section 22), so an open PHP method is `virtual`, and one that replaces its parent's is `override`.
 
 mod class;

@@ -3,7 +3,7 @@ namespace App;
 // PHP reads an object as true, and `null`, `false`, `0`, `0.0`, `""`, `"0"` and an empty array as false, so a condition
 // of an object that is never null is `true`, and one of a value of no known type or of a union of scalars is one read
 // through a `match` on the values PHP reads as false (spec section 21).
-public final class Truthy
+internal final class Truthy
 {
     internal bool never(Truthy other)
     {

@@ -2,7 +2,7 @@ namespace App;
 
 // A local assigned in a block and read after it is declared first in its method's body, as `T? name = null;`, and
 // each assignment of it writes it (spec section 3).
-public final class Pricing
+internal final class Pricing
 {
     private int price(bool member)
     {

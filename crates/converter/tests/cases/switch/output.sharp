@@ -2,7 +2,7 @@ namespace App;
 
 // A `switch` whose cases never fall through is a `match` statement with block arms. Cases with no statements of their
 // own join the next with `or`, and a `switch` without `default` gains an empty one (spec section 21).
-public final class Router
+internal final class Router
 {
     internal string label(int code)
     {

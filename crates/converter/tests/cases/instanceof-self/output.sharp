@@ -1,7 +1,7 @@
 namespace App;
 
 // `instanceof self` tests the class that declares the method, by its name (spec sections 21 and 25).
-public class Money
+internal class Money
 {
     internal virtual bool sameKind(Object other)
     {

@@ -2,7 +2,7 @@ namespace App;
 
 // A `(bool)` of a declared `bool`, a condition of a call read once, a local typed by an operator of declared values,
 // and a `return` whose value first assigns a local (spec sections 2, 3, 21 and 24).
-public final class Forms
+internal final class Forms
 {
     private int? count = null;
 

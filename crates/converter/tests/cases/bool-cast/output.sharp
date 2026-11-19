@@ -1,7 +1,7 @@
 namespace App;
 
 // PHP# has no `(bool)`, and the comparison a condition of the value's type gives replaces it (spec sections 21 and 24).
-public final class Basket
+internal final class Basket
 {
     internal List<bool> flags(int count, float? rate, List<string> items)
     {

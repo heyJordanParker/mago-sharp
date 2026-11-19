@@ -3,7 +3,7 @@ namespace App;
 /**
  * Every type is in PHPDoc, which PHP# writes in the declarations (spec sections 11 and 12).
  */
-public class Shelf<T : Spec, out TLabel>
+internal class Shelf<T : Spec, out TLabel>
 {
     private List<T> items = [];
 

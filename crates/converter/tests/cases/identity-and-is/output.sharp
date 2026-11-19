@@ -2,7 +2,7 @@ namespace App;
 
 // `===` is `==` where both sides hold scalar types they share or a side is null, and stays where a side may hold an
 // object (spec section 19). `instanceof` and the type tests are `is` and `is not` (spec section 21).
-public final class Check
+internal final class Check
 {
     internal bool same(string a, string b)
     {

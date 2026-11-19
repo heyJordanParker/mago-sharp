@@ -5,7 +5,7 @@ import Acme.Pdf;
 
 // A library's function and constant are reached through their namespace, and one in PHP's root namespace through
 // the namespace its `extern namespace` line gives it, so `use function` and `use const` leave no line (spec section 23).
-public final class Printer
+internal final class Printer
 {
     internal string loud(string text)
     {

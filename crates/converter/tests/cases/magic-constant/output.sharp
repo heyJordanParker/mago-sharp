@@ -3,7 +3,7 @@ namespace App;
 // `__DIR__` and `__FILE__` are what `Position.current()` gives (spec section 27), and `__CLASS__` is `self::class`, the
 // class value (spec section 25). `__METHOD__`, `__FUNCTION__`, `__NAMESPACE__` and `__TRAIT__` are the text PHP
 // compiles in their place, which the class's own declarations fix, in a lambda too for the namespace.
-public final class Paths
+internal final class Paths
 {
     internal string stubs()
     {

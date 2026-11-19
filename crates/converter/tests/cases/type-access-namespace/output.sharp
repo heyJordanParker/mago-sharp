@@ -1,0 +1,11 @@
+namespace App;
+
+// In a project, a type that nothing outside its namespace uses is `internal`, as the checker's `too-wide-member` reads
+// its uses (spec section 5). Only `Checkout`, of `App`, uses `Basket`.
+internal final class Basket
+{
+    internal int total()
+    {
+        return 10;
+    }
+}

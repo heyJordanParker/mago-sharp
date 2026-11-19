@@ -3,7 +3,7 @@ namespace App;
 // PHP's truthiness of a value that may be null is a test of several parts, and so is `?:`, which tests a value and
 // gives it. Each reads a variable again. A property never narrows, since each read may give another value, so an `if`
 // binds a property it tests that its body reads, and `?:` reads one once, through `match` (spec section 21).
-public final class Customer
+internal final class Customer
 {
     private int? visits = null;
 

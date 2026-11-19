@@ -2,7 +2,7 @@ namespace App;
 
 // A loop over the values of an object whose class implements `Traversable`, as a framework's collection or a
 // generator, is PHP's own `foreach` over it in PHP# too (spec section 17).
-public final class Order
+internal final class Order
 {
     internal int total(Lines lines)
     {

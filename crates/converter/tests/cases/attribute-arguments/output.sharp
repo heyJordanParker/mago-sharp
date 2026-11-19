@@ -2,7 +2,7 @@ namespace App;
 
 // A parameter's attributes keep their arguments, a list holding a `new` included, before a type in parentheses
 // (spec section 1).
-public final class Entry
+internal final class Entry
 {
     public Entry(
         [Tag(list: 'key')]

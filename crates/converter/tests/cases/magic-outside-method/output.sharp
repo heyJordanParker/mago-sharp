@@ -2,7 +2,7 @@ namespace App;
 
 // `__FUNCTION__` and `__METHOD__` outside a function, as in a property's default, give nothing, and in a property's
 // accessor the accessor's name, as `$label::get` (spec section 6).
-public final class Named
+internal final class Named
 {
     internal string where { get; private set; } = "" + "";
 

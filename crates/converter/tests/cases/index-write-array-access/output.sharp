@@ -2,7 +2,7 @@ namespace App;
 
 // `=` at an index of an `ArrayAccess` object, as a framework's collection or a model, calls its `offsetSet` both ways,
 // and `unset` at one calls its `offsetUnset`.
-public final class Checkout
+internal final class Checkout
 {
     internal void add(Order order, string sku, int quantity)
     {

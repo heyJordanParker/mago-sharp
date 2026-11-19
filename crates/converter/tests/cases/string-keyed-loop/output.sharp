@@ -3,7 +3,7 @@ namespace App;
 // A keyed loop over a `string`-keyed `Map` converts where the body reads the key only as text or as a key. PHP turns
 // the key `'42'` into the `int` 42 and a PHP# `Map` keeps the string `"42"`, and both show as `42` and find the same
 // entry (spec section 12).
-public final class Prices
+internal final class Prices
 {
     internal string shown(Map<string, int> prices)
     {

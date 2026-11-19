@@ -2,7 +2,7 @@ namespace App;
 
 // A `for` keeps the commas of several initializations, conditions and increments, where its initializations assign
 // locals declared before it (spec section 17).
-public final class Pairs
+internal final class Pairs
 {
     internal int sum(int count)
     {

@@ -2,7 +2,7 @@ namespace App;
 
 // A promoted parameter's hooks are its property's accessors, as a property's in the class body are, and its default
 // follows them. PHP runs the `set` hook on the argument, as PHP# runs `set` on it (spec sections 6 and 9).
-public final class Badge
+internal final class Badge
 {
     public Badge(
         internal string label {

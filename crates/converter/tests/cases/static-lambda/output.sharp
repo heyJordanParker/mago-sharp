@@ -2,7 +2,7 @@ namespace App;
 
 // `static fn` and `static function` are lambdas too. A static closure's body names no `$this`, so each call of the
 // lambda gives the result PHP's gives (spec section 14.2).
-public final class Pricing
+internal final class Pricing
 {
     internal Function<int(int)> taxed(int rate)
     {

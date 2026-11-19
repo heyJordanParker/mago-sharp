@@ -2,7 +2,7 @@ namespace App;
 
 // A subclass's constructor runs its parent's first, as `: super(…)` with the arguments of the `parent::__construct(…)`
 // its body starts with, which leaves the body (spec section 9).
-public final class Savings : Account
+internal final class Savings : Account
 {
     private int rate;
 

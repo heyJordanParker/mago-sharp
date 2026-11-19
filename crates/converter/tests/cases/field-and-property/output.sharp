@@ -1,7 +1,7 @@
 namespace App;
 
 // A private or protected property is a field, and a public one a property with accessors (spec section 6).
-public final class Account
+internal final class Account
 {
     private int count = 0;
 

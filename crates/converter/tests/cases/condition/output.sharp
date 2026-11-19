@@ -2,7 +2,7 @@ namespace App;
 
 // A condition that is no `bool` reads PHP's truthiness, which PHP# writes as the comparison its type gives (spec
 // section 21).
-public final class Truthy
+internal final class Truthy
 {
     private List<string> lines = [];
 

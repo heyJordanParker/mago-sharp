@@ -3,7 +3,7 @@ namespace App;
 // PHP# reaches a static through its class's name or a type parameter, so a static of a `class-string<T>` is `T`'s, as
 // `T.find(7)`, and a static call through a class held at run time is a call through reflection, whose `Any?` result
 // `as` checks into the call's type (spec sections 11 and 25).
-public final class Finder
+internal final class Finder
 {
     internal int total<T : Order>(Class<T> kind)
     {

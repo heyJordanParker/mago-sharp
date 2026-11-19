@@ -2,7 +2,7 @@ namespace App;
 
 // A `match` arm on a value that is no constant is a test with `==`, which is PHP's `===` for two `int` values, in a
 // chain of ternaries that ends in `default`, or in PHP's `UnhandledMatchError` for an `int` with none (spec section 21).
-public final class Limits
+internal final class Limits
 {
     internal string at(int code, int limit)
     {

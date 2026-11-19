@@ -2,7 +2,7 @@ namespace App;
 
 // PHP reads an integer literal past `PHP_INT_MAX` as the `float` nearest its value: a decimal one as a float literal of
 // its digits, and a hex one digit by digit (spec section 24).
-public final class Big
+internal final class Big
 {
     internal float huge()
     {

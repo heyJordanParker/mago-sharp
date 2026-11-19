@@ -5,6 +5,6 @@
 
 namespace App.Shop;
 
-public final class Plain
+internal final class Plain
 {
 }

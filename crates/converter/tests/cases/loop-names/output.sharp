@@ -2,7 +2,7 @@ namespace App;
 
 // PHP's count of loops to leave, as `break 2`, is the name of the loop it leaves in PHP#, which the loop takes, and a
 // count of 1 is the innermost loop, which a plain `break` leaves (spec section 17).
-public final class Grid
+internal final class Grid
 {
     internal int first(List<List<int>> rows)
     {

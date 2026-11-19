@@ -2,7 +2,7 @@ namespace App;
 
 // PHP numbers the elements of `['a', 'b']` from 0, so where a `Map` is declared they are its keys, since `[a, b]` is a
 // `List` literal. Each element of a literal lands in the value type its place declares, at any depth (spec section 12).
-public final class Menu
+internal final class Menu
 {
     internal Map<int, string> names()
     {

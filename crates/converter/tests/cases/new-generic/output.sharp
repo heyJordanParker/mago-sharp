@@ -5,7 +5,7 @@ import Proof.Spec;
 import Proof.Special;
 
 // Each `new Box` takes the type arguments of the declared type its value goes into, or Box's bound.
-public final class Crate
+internal final class Crate
 {
     private Box<Spec> box;
 

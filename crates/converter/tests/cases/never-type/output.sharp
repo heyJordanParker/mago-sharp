@@ -2,7 +2,7 @@ namespace App;
 
 // `never` is a whole type, which no value has: a method's return, and a type argument, as a list that holds no
 // element (spec section 7).
-public final class Failure
+internal final class Failure
 {
     internal never fail(string reason)
     {

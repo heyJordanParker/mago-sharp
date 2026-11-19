@@ -2,7 +2,7 @@ namespace App;
 
 // `?:` of a call reads the call's value once, as PHP does, so the call runs once: through `match`, whose `when` is
 // PHP's truthiness of the value, and through `??` for an object, which is truthy where it is not null (spec section 21).
-public final class Header
+internal final class Header
 {
     internal float rate()
     {

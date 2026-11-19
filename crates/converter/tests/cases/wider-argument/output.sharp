@@ -2,7 +2,7 @@ namespace App;
 
 // An argument the analysis types wider than its parameter is checked as the parameter's type, which PHP checks where
 // the argument lands and throws a `TypeError` for any other value (spec section 21).
-public final class Drawing
+internal final class Drawing
 {
     internal string draw(Shape shape)
     {

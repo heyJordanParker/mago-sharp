@@ -2,7 +2,7 @@ namespace App;
 
 // `str_replace` of a literal text other than `""` is `replace`, which runs it for such a text, while `replace` puts the
 // new text before each character for an empty one, where PHP leaves the text as it is.
-public final class Slug
+internal final class Slug
 {
     internal string make(string title)
     {

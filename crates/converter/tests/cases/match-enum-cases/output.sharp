@@ -2,7 +2,7 @@ namespace App;
 
 // A PHP# `match` over a project's enum lists its cases, so a `default` on one is the cases it stands for, and a
 // `switch` without `default` gains an empty arm for the cases no `case` names, `null` included (spec section 21).
-public final class Board
+internal final class Board
 {
     internal string label(Status status)
     {

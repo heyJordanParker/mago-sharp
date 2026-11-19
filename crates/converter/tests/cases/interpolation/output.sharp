@@ -2,7 +2,7 @@ namespace App;
 
 // An interpolated string is a template, which shows an `int`, a `float` and a `string` as PHP does (spec section 18).
 // PHP shows `null` as nothing, which `?? ""` gives.
-public final class Greeter
+internal final class Greeter
 {
     internal string greet(string name, int count, float share)
     {

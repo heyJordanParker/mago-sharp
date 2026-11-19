@@ -4,7 +4,7 @@ namespace App;
  * A value the analysis types wider than a type parameter whose bound excludes null is checked as that type
  * parameter, which `as` tests while the code runs and gives null for a value that is no `T` (spec section 21).
  */
-public final class Holder<T : Item>
+internal final class Holder<T : Item>
 {
     private List<T> kept = [];
 

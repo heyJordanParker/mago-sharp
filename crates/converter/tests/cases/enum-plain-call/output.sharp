@@ -4,7 +4,7 @@ import Acme.Slug;
 
 // A plain PHP function no `extern` declares has no effect the checker names, so an enum that calls it converts, as a
 // struct does (spec section 29).
-public enum Topic: string
+internal enum Topic: string
 {
     case Billing = 'Billing';
 

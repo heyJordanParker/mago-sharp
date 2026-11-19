@@ -1,7 +1,7 @@
 namespace App;
 
 // A local's first assignment declares it: `const` when nothing writes it again, `let` when something does.
-public final class Ledger
+internal final class Ledger
 {
     internal int total(int base)
     {

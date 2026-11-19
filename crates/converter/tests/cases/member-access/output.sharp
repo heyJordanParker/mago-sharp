@@ -1,7 +1,7 @@
 namespace App;
 
 // `->` and `::` are `.`, and `?->` is `?.` (spec section 4).
-public final class Route
+internal final class Route
 {
     private Route? next = null;
 

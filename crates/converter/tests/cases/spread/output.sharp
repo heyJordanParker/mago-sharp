@@ -1,7 +1,7 @@
 namespace App;
 
 // A `List` spreads into a `...` parameter and into a literal (spec sections 7 and 12).
-public final class Prices
+internal final class Prices
 {
     private int sum(int ...amounts)
     {

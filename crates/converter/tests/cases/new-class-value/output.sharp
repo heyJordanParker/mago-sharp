@@ -1,7 +1,7 @@
 namespace App;
 
 // `new $type(…)` of a class value is `new (type)(…)` (spec section 25).
-public final class Maker
+internal final class Maker
 {
     internal Widget make(Class<Widget> type, string name)
     {

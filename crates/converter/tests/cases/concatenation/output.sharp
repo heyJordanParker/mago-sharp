@@ -1,7 +1,7 @@
 namespace App;
 
 // `.` between strings is `+`, and with a number it is a template, which shows the number as PHP does (spec section 18).
-public final class Label
+internal final class Label
 {
     private string text = 'a';
 

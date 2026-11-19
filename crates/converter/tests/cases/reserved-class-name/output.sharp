@@ -5,7 +5,7 @@ import Lib.Routing.Any as RoutingAny;
 
 // PHP# reserves `Any` for a type and `Error` for its interface of every failure, so a library's class of either name
 // is imported under its namespace's last part before it (spec sections 11 and 31).
-public final class Controller
+internal final class Controller
 {
     [RoutingAny('/ping')]
     internal string ping()

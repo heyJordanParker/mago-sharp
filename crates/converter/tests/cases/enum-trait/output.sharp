@@ -1,7 +1,7 @@
 namespace App;
 
 // A plain PHP trait an enum uses joins its header, after its backing type and interfaces (spec section 22).
-public enum Tier: string, Sized, Labels
+internal enum Tier: string, Sized, Labels
 {
     case Basic = 'basic';
 }

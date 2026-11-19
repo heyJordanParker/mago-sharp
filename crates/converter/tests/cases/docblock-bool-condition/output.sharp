@@ -3,7 +3,7 @@ namespace App;
 // A `bool` condition compiles to a test of the value itself, which reads PHP's truthiness of whatever the value holds
 // at runtime, so a value only PHPDoc types `bool`, which may hold `1`, converts in `if`, `!`, `&&`, `||` and `?:`
 // (spec section 21).
-public final class Status
+internal final class Status
 {
     internal string shown(Row row)
     {

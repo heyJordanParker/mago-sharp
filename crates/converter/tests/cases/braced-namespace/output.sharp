@@ -3,7 +3,7 @@ namespace App;
 
 import App.Shop.Item;
 
-public final class Braced
+internal final class Braced
 {
     internal string name(Item item)
     {

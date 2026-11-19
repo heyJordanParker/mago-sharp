@@ -5,7 +5,7 @@ import Acme.StringHelpers;
 // A function in PHP's root namespace of a library with no class is reached through the namespace its Composer
 // package's name gives, `acme/string-helpers` giving `Acme\StringHelpers`, which the line the conversion adds gives
 // its folder (spec section 23).
-public final class Greeter
+internal final class Greeter
 {
     internal string greet(string name)
     {

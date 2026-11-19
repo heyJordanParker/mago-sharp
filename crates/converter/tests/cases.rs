@@ -32,6 +32,7 @@ use libtest_mimic::Trial;
 use mago_allocator::LocalArena;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings as AnalyzerSettings;
+use mago_analyzer::too_wide_members;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::reference::SymbolReferences;
 use mago_converter::Converted;
@@ -162,12 +163,15 @@ fn analyzed(folder: &Path, converted: Option<&Converted>) -> Server {
 }
 
 /// Each issue the analysis finds in `converted`, the conversion of the case at `folder`, that keeps the file plain PHP,
-/// as `mago convert` reports it: an error or a warning, but the warnings decision 9 expects, each once.
+/// as `mago convert` reports it: an error or a warning, but the warnings decision 9 expects, each once. The project's
+/// `too-wide-member` pass, which runs once the whole project is analyzed, counts its issues in the file too.
 fn checked(folder: &Path, converted: &Converted) -> String {
     let server = analyzed(folder, Some(converted));
     let input = FileId::new(format!("{}.sharp", declared(folder)).as_bytes());
     let file = server.database().get(&input).unwrap();
-    let (issues, _) = server.analyze_file_with_artifacts(input).expect("the analysis holds the converted file");
+    let (mut issues, _) = server.analyze_file_with_artifacts(input).expect("the analysis holds the converted file");
+    let too_wide = too_wide_members(server.codebase(), server.symbol_references());
+    issues.extend(too_wide.into_iter().filter(|issue| issue.primary_span().is_some_and(|span| span.file_id == input)));
     let mut lines: Vec<String> = Vec::new();
     for issue in issues.iter().filter(|issue| issue.level >= Level::Warning) {
         let code = issue.code.as_deref().unwrap_or_default();

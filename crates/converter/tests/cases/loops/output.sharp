@@ -3,7 +3,7 @@ namespace App;
 // `foreach` is `for … of`, over a `Map`'s entries or values and a `List`'s entries, and `for`, `while` and
 // `do … while` keep their form. Each body is in braces, and a `Map` key is unset with `remove` (spec sections 12 and
 // 17).
-public final class Tally
+internal final class Tally
 {
     private List<int> counts = [];
 

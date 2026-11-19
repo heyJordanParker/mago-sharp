@@ -2,7 +2,7 @@ namespace App;
 
 // A `static` local keeps its value from one call of its method to the next, as a private static field does in PHP#,
 // whose type joins the values written to it (spec section 6).
-public final class Ticker
+internal final class Ticker
 {
     private static int count = 0;
 

@@ -2,7 +2,7 @@ namespace App;
 
 // A `match` on an `int` with no `default` arm gains the one that throws PHP's `UnhandledMatchError`, whose message holds
 // the `int` (spec section 21).
-public final class Codes
+internal final class Codes
 {
     internal string name(int code)
     {
