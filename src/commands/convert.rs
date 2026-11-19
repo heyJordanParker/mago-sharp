@@ -1247,13 +1247,38 @@ impl Externs {
         for line in namespaces {
             added |= put_line(&mut lines, Line::ExternNamespace, line.to_owned());
         }
-        // A class that converts with the candidates is PHP#, which takes no line.
+        // A class that converts with the candidates is PHP#, which takes no line, so a line an earlier run wrote for it
+        // goes, with its import.
         let converts = |class: &str| {
             candidates
                 .iter()
                 .flat_map(|candidate| &candidate.declares)
                 .any(|declared| declared.eq_ignore_ascii_case(class))
         };
+        let gone: Vec<(String, String)> = lines
+            .iter()
+            .filter_map(|line| {
+                let import = line.trim().strip_prefix("import ")?.strip_suffix(';')?;
+                let (path, alias) = import.split_once(" as ").unwrap_or((import, import.rsplit('.').next()?));
+                converts(&path.replace('.', "\\")).then(|| (line.trim().to_owned(), alias.to_owned()))
+            })
+            .collect();
+        if !gone.is_empty() {
+            let names = |line: &str, alias: &str| {
+                line.strip_prefix("extern ")
+                    .and_then(|target| target.strip_prefix(alias))
+                    .is_some_and(|rest| rest.starts_with([' ', '.', ';']))
+            };
+            lines.retain(|line| {
+                let held = line.trim();
+                !gone.iter().any(|(import, alias)| held == import || names(held, alias))
+            });
+            lines.dedup_by(|next, blank| next.trim().is_empty() && blank.trim().is_empty());
+            while lines.last().is_some_and(|line| line.trim().is_empty()) {
+                lines.pop();
+            }
+            added = true;
+        }
         let undeclared: BTreeSet<&Undeclared> = candidates
             .iter()
             .flat_map(|candidate| &candidate.undeclared)
@@ -2254,6 +2279,43 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             std::fs::read_to_string(root.join("src/Stubs/Externs.sharp")).unwrap(),
             "namespace Generated.Stubs;\n\nimport Acme.Chat.Message;\nimport Acme.Mail.Mailchimp;\nimport Acme.Mail.Message as MailMessage;\n\nextern MailMessage uses any;\nextern Mailchimp uses any;\nextern Message uses any;\n"
         );
+    }
+
+    /// A class that converts is PHP#, which takes no `extern` line, so a later run that converts it takes away the line
+    /// and the import an earlier run wrote for it, and the file compiles, as a class hierarchy converts in either order.
+    #[test]
+    fn a_run_that_converts_a_class_takes_away_the_line_an_earlier_run_wrote_for_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let files = [
+            (
+                "Lib/Mail/Mailchimp.php".to_owned(),
+                "<?php\n\nnamespace Generated\\Lib\\Mail;\n\nfinal class Mailchimp\n{\n    public function name(): string\n    {\n        return 'lists';\n    }\n}\n".to_owned(),
+            ),
+            (
+                "Contracts/Sync.php".to_owned(),
+                "<?php\n\nnamespace Generated\\Contracts;\n\nfinal class Sync\n{\n    public function run(): string\n    {\n        return (new \\Generated\\Lib\\Mail\\Mailchimp())->name();\n    }\n}\n".to_owned(),
+            ),
+        ];
+        let configuration = project(&root, &files);
+        let externs = root.join("src/Stubs/Externs.sharp");
+        let convert = |path: &str| {
+            ConvertCommand { paths: vec![root.join(path)], dry_run: false }
+                .run(configuration.clone(), ColorChoice::Never)
+                .unwrap()
+        };
+
+        let (_, sync) = convert("src/Contracts/Sync.php");
+        assert_eq!(sync.converted.len(), 1, "{:#?}", sync.refused);
+        assert_eq!(
+            std::fs::read_to_string(&externs).unwrap(),
+            "namespace Generated.Stubs;\n\nimport Generated.Lib.Mail.Mailchimp;\n\nextern Mailchimp uses any;\n"
+        );
+
+        let (exit_code, mailchimp) = convert("src/Lib/Mail/Mailchimp.php");
+        assert_eq!(exit_code, ExitCode::SUCCESS);
+        assert_eq!(mailchimp.converted.len(), 1, "{:#?}", mailchimp.refused);
+        assert_eq!(std::fs::read_to_string(&externs).unwrap(), "namespace Generated.Stubs;\n");
     }
 
     /// The declarations file goes in the `Stubs` folder of the first PSR-4 folder `composer.json` lists, in its
