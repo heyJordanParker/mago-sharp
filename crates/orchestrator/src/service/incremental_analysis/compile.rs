@@ -21,6 +21,7 @@ use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::FileReads;
 use mago_analyzer::external::Listing;
 use mago_build_id::BUILD_ID;
+use mago_codex::graph::strongly_connected_parts;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
@@ -655,10 +656,9 @@ impl IncrementalAnalysisService {
                     }
                 }
             }
-            let mut reached: HashSet<FileId> = body_files.clone();
-            for source in std::iter::once(file.id).chain(body_files) {
-                reached.extend(dependencies.reached_by(source));
-            }
+            let mut reached: HashSet<FileId> =
+                dependencies.reaching(body_files.iter().copied().chain([file.id])).collect();
+            reached.extend(body_files);
             let mut sources: HashSet<FileId> = read_by_every_file.clone();
             sources.extend(reach.files(file.id));
             sources.insert(file.id);
@@ -1438,6 +1438,10 @@ fn folders(name: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// signature reference from every class to each parent, interface and trait it has, so a parent's change reaches the
 /// class through that reference. The warm cascade follows `Inherits` edges for the warm graph, which can lose the
 /// reference while a parent is deleted and re-added.
+///
+/// The walk from each declaration is worked out once, for every file it serves: the declarations that reach each other
+/// form one strongly connected part, and each part's source files are its own declarations' and those of every part it
+/// reaches, which come before it.
 struct Dependencies<'service> {
     service: &'service IncrementalAnalysisService,
     /// The declarations each declaration's signature references.
@@ -1453,22 +1457,37 @@ struct Dependencies<'service> {
     referencing_members: HashMap<Word, Vec<SymbolIdentifier>>,
     /// The source files that declare each declaration.
     declared_in: HashMap<SymbolIdentifier, Vec<FileId>>,
-    /// What the plugins that register a provider read, in any callback, as `code_reads` gives it. A read of a plugin
-    /// with no provider decides only which issues are reported, never the lowered code, so it names no input.
-    code_reads: FileReads,
+    /// Each source file that declares a declaration, whose place here is its bit in a set of source files.
+    sources: Vec<FileId>,
+    /// The place of each file of `sources`.
+    places: HashMap<FileId, usize>,
+    /// The sets of source files the walk from a declaration reaches, one bit per place in `sources`. The first is the
+    /// empty set.
+    reached: Vec<Vec<u64>>,
+    /// The set in `reached` of each declaration the walk leaves through a signature reference or a class's members.
+    /// The walk from any other declaration reaches only the files that declare it.
+    reaches: HashMap<SymbolIdentifier, usize>,
+    /// The source files the walk from each declaration a plugin that registers a provider read reaches, in any
+    /// callback, as `code_reads` gives it. A read of a plugin with no provider decides only which issues are reported,
+    /// never the lowered code, so it names no input.
+    read: Vec<u64>,
 }
 
 impl<'service> Dependencies<'service> {
     fn new(service: &'service IncrementalAnalysisService) -> Self {
         let mut dependencies = Self {
             service,
-            code_reads: super::code_reads(&service.file_states, &service.before_analysis_reads),
             signature: HashMap::default(),
             references: HashMap::default(),
             files: HashMap::default(),
             signature_members: HashMap::default(),
             referencing_members: HashMap::default(),
             declared_in: HashMap::default(),
+            sources: Vec::new(),
+            places: HashMap::default(),
+            reached: vec![Vec::new()],
+            reaches: HashMap::default(),
+            read: Vec::new(),
         };
 
         for edge in service.native_symbol_references.cascade_edges(&service.codebase) {
@@ -1520,7 +1539,92 @@ impl<'service> Dependencies<'service> {
             }
         }
 
+        dependencies.walk(&super::code_reads(&service.file_states, &service.before_analysis_reads));
+
         dependencies
+    }
+
+    /// Works out the source files the walk from each declaration reaches, as [`Self::signature_changes`] reads them,
+    /// and those the walk from each declaration in `code_reads` reaches.
+    fn walk(&mut self, code_reads: &FileReads) {
+        for file_id in self.declared_in.values().flatten() {
+            self.places.entry(*file_id).or_insert_with(|| {
+                self.sources.push(*file_id);
+                self.sources.len() - 1
+            });
+        }
+        let words = self.sources.len().div_ceil(64);
+
+        let mut nodes: Vec<SymbolIdentifier> = Vec::new();
+        let mut index: HashMap<SymbolIdentifier, usize> = HashMap::default();
+        let signatures = self.signature.iter().flat_map(|(from, to)| std::iter::once(*from).chain(to.iter().copied()));
+        let classes = self
+            .signature_members
+            .iter()
+            .flat_map(|(class, members)| std::iter::once((*class, empty_word())).chain(members.iter().copied()));
+        for declaration in signatures.chain(classes) {
+            index.entry(declaration).or_insert_with(|| {
+                nodes.push(declaration);
+                nodes.len() - 1
+            });
+        }
+        let successors: Vec<Vec<usize>> = nodes
+            .iter()
+            .map(|node| {
+                let members = if node.1.is_empty() { self.signature_members.get(&node.0) } else { None };
+
+                self.signature.get(node).into_iter().chain(members).flatten().map(|next| index[next]).collect()
+            })
+            .collect();
+
+        let parts = strongly_connected_parts(&successors);
+        let mut part_of = vec![0; nodes.len()];
+        for (part, members) in parts.iter().enumerate() {
+            for node in members {
+                part_of[*node] = part;
+            }
+        }
+        // A part comes after every part it reaches, so their sets are there when it takes them. A part that declares
+        // nothing and reaches one set shares that set.
+        let mut set_of_part: Vec<usize> = Vec::with_capacity(parts.len());
+        for (part, members) in parts.iter().enumerate() {
+            let mut reached: Vec<usize> = members
+                .iter()
+                .flat_map(|node| &successors[*node])
+                .map(|next| part_of[*next])
+                .filter(|next| *next != part)
+                .map(|next| set_of_part[next])
+                .filter(|set| *set != 0)
+                .collect();
+            reached.sort_unstable();
+            reached.dedup();
+            let mut sources = vec![0; words];
+            let mut declares = false;
+            for file_id in members.iter().filter_map(|node| self.declared_in.get(&nodes[*node])).flatten() {
+                add_source(&mut sources, self.places[file_id]);
+                declares = true;
+            }
+            let set = match (declares, reached.as_slice()) {
+                (false, []) => 0,
+                (false, [set]) => *set,
+                _ => {
+                    for set in &reached {
+                        add_sources(&mut sources, &self.reached[*set]);
+                    }
+                    self.reached.push(sources);
+                    self.reached.len() - 1
+                }
+            };
+            set_of_part.push(set);
+        }
+        self.reaches = nodes.into_iter().zip(part_of).map(|(node, part)| (node, set_of_part[part])).collect();
+
+        // A read names a class-like as the extension wrote it, which the codebase keys, spec section 24.
+        let mut read = vec![0; words];
+        for &(class, member) in &code_reads.symbols {
+            self.signature_changes((self.service.codebase.class_key(class), member), &mut read);
+        }
+        self.read = read;
     }
 
     fn add_reference(&mut self, from: SymbolIdentifier, to: SymbolIdentifier) {
@@ -1534,75 +1638,87 @@ impl<'service> Dependencies<'service> {
     /// declare what its code and its declarations reach. A set of names its analysis or a plugin listed is no file's:
     /// its key holds the hash of the answer, so only an edit that changes the answer changes the file.
     fn reached_by(&self, file_id: FileId) -> HashSet<FileId> {
-        let mut changes = HashSet::default();
-        let mut visited = HashSet::default();
-        if let Ok(file) = self.service.database.get(&file_id) {
-            for referenced in self.files.get(&mago_word::word(file.name.as_ref())).into_iter().flatten() {
-                self.signature_changes(*referenced, &mut changes, &mut visited);
-            }
-        }
-        let signature = self.service.codebase.get_file_signature(&file_id);
-        for node in signature.iter().flat_map(|signature| &signature.ast_nodes).filter(|node| !node.name.is_empty()) {
-            self.changes((node.name, empty_word()), &mut changes, &mut visited);
-            for member in self.referencing_members.get(&node.name).into_iter().flatten() {
-                self.changes(*member, &mut changes, &mut visited);
-            }
-            for member in self.signature_members.get(&node.name).into_iter().flatten() {
-                self.changes(*member, &mut changes, &mut visited);
-            }
-        }
-        // A read names a class-like as the extension wrote it, which the codebase keys, spec section 24.
-        for &(class, member) in &self.code_reads.symbols {
-            self.signature_changes((self.service.codebase.class_key(class), member), &mut changes, &mut visited);
-        }
-
-        changes
-            .iter()
-            .filter_map(|change| self.declared_in.get(change))
-            .flatten()
-            .copied()
-            .filter(|source| *source != file_id)
-            .collect()
+        self.reaching([file_id]).filter(|source| *source != file_id).collect()
     }
 
-    /// Adds to `changes` each declaration whose change invalidates `declaration`'s signature or body.
-    fn changes(
-        &self,
-        declaration: SymbolIdentifier,
-        changes: &mut HashSet<SymbolIdentifier>,
-        visited: &mut HashSet<SymbolIdentifier>,
-    ) {
-        self.signature_changes(declaration, changes, visited);
+    /// The source files whose signature edit can change the analyzed code of any of `files`, as [`Self::reached_by`]
+    /// gives them for each, which may hold a file of `files` itself.
+    fn reaching(&self, files: impl IntoIterator<Item = FileId>) -> impl Iterator<Item = FileId> {
+        let mut sources = self.read.clone();
+        for file_id in files {
+            if let Ok(file) = self.service.database.get(&file_id) {
+                for referenced in self.files.get(&mago_word::word(file.name.as_ref())).into_iter().flatten() {
+                    self.signature_changes(*referenced, &mut sources);
+                }
+            }
+            let signature = self.service.codebase.get_file_signature(&file_id);
+            for node in signature.iter().flat_map(|signature| &signature.ast_nodes).filter(|node| !node.name.is_empty())
+            {
+                self.changes((node.name, empty_word()), &mut sources);
+                for member in self.referencing_members.get(&node.name).into_iter().flatten() {
+                    self.changes(*member, &mut sources);
+                }
+                for member in self.signature_members.get(&node.name).into_iter().flatten() {
+                    self.changes(*member, &mut sources);
+                }
+            }
+        }
+
+        sources
+            .into_iter()
+            .enumerate()
+            .flat_map(|(word, mut bits)| {
+                std::iter::from_fn(move || {
+                    (bits != 0).then(|| {
+                        let bit = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        word * 64 + bit
+                    })
+                })
+            })
+            .map(|place| self.sources[place])
+    }
+
+    /// Adds to `sources` each source file that declares a declaration whose change invalidates `declaration`'s
+    /// signature or body.
+    fn changes(&self, declaration: SymbolIdentifier, sources: &mut [u64]) {
+        self.signature_changes(declaration, sources);
         for referenced in self.references.get(&declaration).into_iter().flatten() {
-            self.signature_changes(*referenced, changes, visited);
+            self.signature_changes(*referenced, sources);
         }
     }
 
-    /// Adds to `changes` each declaration whose change invalidates `declaration`'s signature: a declaration whose
-    /// signature change reaches it through signature references and from members to their class, and the class of a
-    /// member whose signature references anything, which marks that member invalid when the class changes.
-    fn signature_changes(
-        &self,
-        declaration: SymbolIdentifier,
-        changes: &mut HashSet<SymbolIdentifier>,
-        visited: &mut HashSet<SymbolIdentifier>,
-    ) {
+    /// Adds to `sources` each source file that declares a declaration whose change invalidates `declaration`'s
+    /// signature: a declaration whose signature change reaches it through signature references and from members to
+    /// their class, and the class of a member whose signature references anything, which marks that member invalid
+    /// when the class changes.
+    fn signature_changes(&self, declaration: SymbolIdentifier, sources: &mut [u64]) {
         if self.signature.contains_key(&declaration) {
-            changes.insert((declaration.0, empty_word()));
+            self.declarers((declaration.0, empty_word()), sources);
         }
-
-        let mut pending = vec![declaration];
-        while let Some(next) = pending.pop() {
-            if !visited.insert(next) {
-                continue;
-            }
-
-            changes.insert(next);
-            pending.extend(self.signature.get(&next).into_iter().flatten().copied());
-            if next.1.is_empty() {
-                pending.extend(self.signature_members.get(&next.0).into_iter().flatten().copied());
-            }
+        match self.reaches.get(&declaration) {
+            Some(set) => add_sources(sources, &self.reached[*set]),
+            None => self.declarers(declaration, sources),
         }
+    }
+
+    /// Adds to `sources` each source file that declares `declaration`.
+    fn declarers(&self, declaration: SymbolIdentifier, sources: &mut [u64]) {
+        for file_id in self.declared_in.get(&declaration).into_iter().flatten() {
+            add_source(sources, self.places[file_id]);
+        }
+    }
+}
+
+/// Adds the source file at `place` to `sources`, a set of source files one bit per place.
+fn add_source(sources: &mut [u64], place: usize) {
+    sources[place / 64] |= 1 << (place % 64);
+}
+
+/// Adds every source file of `other` to `sources`, each a set of source files one bit per place.
+fn add_sources(sources: &mut [u64], other: &[u64]) {
+    for (bits, other) in sources.iter_mut().zip(other) {
+        *bits |= other;
     }
 }
 
