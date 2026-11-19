@@ -7029,7 +7029,7 @@ fn a_law_reading_what_a_plain_php_parent_declares_is_refused_where_it_reads_it()
         ),
         (
             "app/Shared/Shape.sharp",
-            "namespace App.Shared;\n\nimport Acme.Orm.Base;\n\nextern Base uses none;\n\npublic class Shape : Base\n{\n    public Shape(public int sides { get; }) : super() { }\n\n    law readsBase(Shape shape) => shape.x == shape.x;\n    law callsBase(Shape shape) => shape.size() == shape.size();\n    law builds(int sides) => new Shape(sides).sides == sides;\n}\n",
+            "namespace App.Shared;\n\nimport Acme.Orm.Base;\n\nextern Base;\n\npublic class Shape : Base\n{\n    public Shape(public int sides { get; }) : super() { }\n\n    law readsBase(Shape shape) => shape.x == shape.x;\n    law callsBase(Shape shape) => shape.size() == shape.size();\n    law builds(int sides) => new Shape(sides).sides == sides;\n}\n",
         ),
     ]);
     let root = directory.path();
