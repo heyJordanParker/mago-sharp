@@ -612,7 +612,10 @@ impl IncrementalAnalysisService {
             self.database.files().filter(|file| file.file_type.is_patch()).map(|file| file.id).collect();
 
         let inputs_start = std::time::Instant::now();
-        let dependencies = Dependencies::new(self);
+        let mut dependencies = Dependencies::new(self);
+        // A method whose return comes from its body can return another such method's return, and a body has the
+        // effects of each body it calls, so a file's inputs close over the files whose bodies it reads.
+        dependencies.follow_bodies(&files.iter().map(|file| file.id).collect::<Vec<FileId>>(), &reads);
         let listening: HashSet<FileId> = self
             .codebase
             .function_likes
@@ -645,20 +648,6 @@ impl IncrementalAnalysisService {
 
             Some((file, &lowered.namespace_classes, lowered.reaches_extension))
         }) {
-            // A method whose return comes from its body can return another such method's return, and a body has the
-            // effects of each body it calls, so the body files close over the body files of each file they hold.
-            let mut body_files: HashSet<FileId> = HashSet::default();
-            let mut pending = vec![file.id];
-            while let Some(next) = pending.pop() {
-                for body_file in reads.get(&next).into_iter().flat_map(|(_, body_files)| body_files) {
-                    if body_files.insert(*body_file) {
-                        pending.push(*body_file);
-                    }
-                }
-            }
-            let mut reached: HashSet<FileId> =
-                dependencies.reaching(body_files.iter().copied().chain([file.id])).collect();
-            reached.extend(body_files);
             let mut sources: HashSet<FileId> = read_by_every_file.clone();
             sources.extend(reach.files(file.id));
             sources.insert(file.id);
@@ -666,7 +655,7 @@ impl IncrementalAnalysisService {
             // stamp, so an edit to its bodies leaves this file current: the key holds the returns and effects it read
             // from them. Every other source keeps its stamp alone.
             let mut imports: Vec<InputPath> = Vec::new();
-            for reached in reached {
+            for reached in dependencies.reached_through_bodies(file.id) {
                 if sources.contains(&reached) {
                     continue;
                 }
@@ -1471,6 +1460,11 @@ struct Dependencies<'service> {
     /// callback, as `code_reads` gives it. A read of a plugin with no provider decides only which issues are reported,
     /// never the lowered code, so it names no input.
     read: Vec<u64>,
+    /// The sets of files [`Self::follow_bodies`] works out, one per strongly connected part of the files whose bodies
+    /// each file reads.
+    bodies: Vec<Vec<u64>>,
+    /// The set in `bodies` of each file [`Self::follow_bodies`] took.
+    body_sets: HashMap<FileId, usize>,
 }
 
 impl<'service> Dependencies<'service> {
@@ -1488,6 +1482,8 @@ impl<'service> Dependencies<'service> {
             reached: vec![Vec::new()],
             reaches: HashMap::default(),
             read: Vec::new(),
+            bodies: Vec::new(),
+            body_sets: HashMap::default(),
         };
 
         for edge in service.native_symbol_references.cascade_edges(&service.codebase) {
@@ -1638,32 +1634,105 @@ impl<'service> Dependencies<'service> {
     /// declare what its code and its declarations reach. A set of names its analysis or a plugin listed is no file's:
     /// its key holds the hash of the answer, so only an edit that changes the answer changes the file.
     fn reached_by(&self, file_id: FileId) -> HashSet<FileId> {
-        self.reaching([file_id]).filter(|source| *source != file_id).collect()
+        let mut sources = self.read.clone();
+        self.file_changes(file_id, &mut sources);
+
+        self.files_of(sources).filter(|source| *source != file_id).collect()
     }
 
-    /// The source files whose signature edit can change the analyzed code of any of `files`, as [`Self::reached_by`]
-    /// gives them for each, which may hold a file of `files` itself.
-    fn reaching(&self, files: impl IntoIterator<Item = FileId>) -> impl Iterator<Item = FileId> {
-        let mut sources = self.read.clone();
-        for file_id in files {
-            if let Ok(file) = self.service.database.get(&file_id) {
-                for referenced in self.files.get(&mago_word::word(file.name.as_ref())).into_iter().flatten() {
-                    self.signature_changes(*referenced, &mut sources);
-                }
-            }
-            let signature = self.service.codebase.get_file_signature(&file_id);
-            for node in signature.iter().flat_map(|signature| &signature.ast_nodes).filter(|node| !node.name.is_empty())
-            {
-                self.changes((node.name, empty_word()), &mut sources);
-                for member in self.referencing_members.get(&node.name).into_iter().flatten() {
-                    self.changes(*member, &mut sources);
-                }
-                for member in self.signature_members.get(&node.name).into_iter().flatten() {
-                    self.changes(*member, &mut sources);
-                }
+    /// Works out, once for each of `files` and each file whose bodies they read, as `body_files` lists them by the
+    /// file that reads them, the files [`Self::reached_through_bodies`] gives: the files whose bodies it reads along
+    /// every chain of such reads, the file itself, and the source files [`Self::reached_by`] gives for each of them. The
+    /// files that read each other's bodies form one strongly connected part, and each part's set is its own files'
+    /// and that of every part it reads, which comes before it.
+    fn follow_bodies(&mut self, files: &[FileId], body_files: &HashMap<FileId, (Reads, HashSet<FileId>)>) {
+        let mut nodes: Vec<FileId> = Vec::new();
+        let mut index: HashMap<FileId, usize> = HashMap::default();
+        let reading = body_files.iter().flat_map(|(file_id, (_, bodies))| std::iter::once(file_id).chain(bodies));
+        for file_id in files.iter().chain(reading) {
+            index.entry(*file_id).or_insert_with(|| {
+                nodes.push(*file_id);
+                nodes.len() - 1
+            });
+        }
+        // A file whose bodies are read may declare nothing the walk reaches, so each file takes a place of its own.
+        for file_id in &nodes {
+            self.places.entry(*file_id).or_insert_with(|| {
+                self.sources.push(*file_id);
+                self.sources.len() - 1
+            });
+        }
+        let words = self.sources.len().div_ceil(64);
+        let successors: Vec<Vec<usize>> = nodes
+            .iter()
+            .map(|file_id| {
+                body_files.get(file_id).into_iter().flat_map(|(_, bodies)| bodies).map(|body| index[body]).collect()
+            })
+            .collect();
+
+        let parts = strongly_connected_parts(&successors);
+        let mut part_of = vec![0; nodes.len()];
+        for (part, members) in parts.iter().enumerate() {
+            for node in members {
+                part_of[*node] = part;
             }
         }
+        let mut bodies: Vec<Vec<u64>> = Vec::with_capacity(parts.len());
+        for (part, members) in parts.iter().enumerate() {
+            let mut sources = vec![0; words];
+            add_sources(&mut sources, &self.read);
+            for node in members {
+                add_source(&mut sources, self.places[&nodes[*node]]);
+                self.file_changes(nodes[*node], &mut sources);
+            }
+            let mut read: Vec<usize> = members
+                .iter()
+                .flat_map(|node| &successors[*node])
+                .map(|next| part_of[*next])
+                .filter(|next| *next != part)
+                .collect();
+            read.sort_unstable();
+            read.dedup();
+            for next in read {
+                add_sources(&mut sources, &bodies[next]);
+            }
+            bodies.push(sources);
+        }
+        self.body_sets = nodes.into_iter().zip(part_of).collect();
+        self.bodies = bodies;
+    }
 
+    /// The files whose edit can change `file_id`'s code, of the files [`Self::follow_bodies`] took: the files whose
+    /// bodies it reads along every chain of such reads, the source files whose signature edit can change the analyzed
+    /// code of any of them or of `file_id`, and `file_id` itself.
+    fn reached_through_bodies(&self, file_id: FileId) -> impl Iterator<Item = FileId> {
+        let set = self.body_sets.get(&file_id).map_or(&[][..], |set| self.bodies[*set].as_slice());
+
+        self.files_of(set.iter().copied())
+    }
+
+    /// Adds to `sources` each source file whose signature edit can change `file_id`'s analyzed code, as
+    /// [`Self::reached_by`] gives them, except those of a plugin's reads.
+    fn file_changes(&self, file_id: FileId, sources: &mut [u64]) {
+        if let Ok(file) = self.service.database.get(&file_id) {
+            for referenced in self.files.get(&mago_word::word(file.name.as_ref())).into_iter().flatten() {
+                self.signature_changes(*referenced, sources);
+            }
+        }
+        let signature = self.service.codebase.get_file_signature(&file_id);
+        for node in signature.iter().flat_map(|signature| &signature.ast_nodes).filter(|node| !node.name.is_empty()) {
+            self.changes((node.name, empty_word()), sources);
+            for member in self.referencing_members.get(&node.name).into_iter().flatten() {
+                self.changes(*member, sources);
+            }
+            for member in self.signature_members.get(&node.name).into_iter().flatten() {
+                self.changes(*member, sources);
+            }
+        }
+    }
+
+    /// The files of `sources`, a set of files one bit per place in `sources`.
+    fn files_of(&self, sources: impl IntoIterator<Item = u64>) -> impl Iterator<Item = FileId> {
         sources
             .into_iter()
             .enumerate()
