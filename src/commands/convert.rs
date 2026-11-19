@@ -1327,11 +1327,16 @@ mod tests {
         }
     }
 
-    /// The configuration of a project at `root` of `files`, each a path under `src/` and its code, with `src/` the
-    /// PSR-4 folder of `Generated\`, all committed to git.
+    /// The configuration of a library at `root` of `files`, each a path under `src/` and its code, with `src/` the
+    /// PSR-4 folder of `Generated\`, all committed to git. It is a library so that spec section 5's strict rules, which
+    /// run on a project, stay out of the tests about something else.
     fn project(root: &Path, files: &[(String, String)]) -> Configuration {
         std::fs::write(root.join("mago.toml"), "php-version = \"8.5\"\n\n[source]\npaths = [\"src\"]\n").unwrap();
-        std::fs::write(root.join("composer.json"), r#"{"autoload": {"psr-4": {"Generated\\": "src/"}}}"#).unwrap();
+        std::fs::write(
+            root.join("composer.json"),
+            r#"{"type": "library", "autoload": {"psr-4": {"Generated\\": "src/"}}}"#,
+        )
+        .unwrap();
         for (path, code) in files {
             let path = root.join("src").join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2048,7 +2053,7 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
                 "Lib/Foundation/helpers.php".to_owned(),
                 "<?php\n\nconst ACME_VERSION = '1.0';\n\nfunction abort(int $code): never\n{\n    throw new \\RuntimeException('Aborted.', $code);\n}\n".to_owned(),
             ),
-            ("Lib/Strings/composer.json".to_owned(), r#"{"name": "acme/string-helpers"}"#.to_owned()),
+            ("Lib/Strings/composer.json".to_owned(), r#"{"name": "acme/string-helpers", "type": "library"}"#.to_owned()),
             (
                 "Lib/Strings/functions.php".to_owned(),
                 "<?php\n\nfunction str_shout(string $text): string\n{\n    return $text . '!';\n}\n".to_owned(),
@@ -2308,7 +2313,11 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             "php-version = \"8.5\"\n\n[source]\npaths = [\"src\"]\nincludes = [\"vendor\"]\nextensions = [\"php\", \"sharp\"]\n",
         )
         .unwrap();
-        std::fs::write(root.join("composer.json"), r#"{"autoload": {"psr-4": {"Generated\\": "src/"}}}"#).unwrap();
+        std::fs::write(
+            root.join("composer.json"),
+            r#"{"type": "library", "autoload": {"psr-4": {"Generated\\": "src/"}}}"#,
+        )
+        .unwrap();
         let library = Path::new(env!("CARGO_MANIFEST_DIR")).join("../composer");
         let package = root.join("vendor/heyjordanparker/php-sharp-composer");
         copy_tree(&library.join("library"), &package.join("library"));
