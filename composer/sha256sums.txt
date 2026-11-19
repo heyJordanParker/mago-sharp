@@ -1,0 +1,5 @@
+9222cffcc053e250e64eeea27dc00f71de65aba3dbbd14eb2e1c8e5b97bc0cac  mago-0.6.38-aarch64-apple-darwin.tar.gz
+60572daaa1ebd403ea13349e9ebd12d7319f88f1d04a7730a6e954de3a7ee869  mago-0.6.38-aarch64-unknown-linux-gnu.tar.gz
+3fb80affe82222d7d230af99c9994cbf04ae3bdf1b72216f2b93c66f77e1f13c  mago-0.6.38-source.tar.gz
+968425b738c70b66c09b809983c42bb359ed303b9b4707aed8f9dee37067c612  mago-0.6.38-source.zip
+8d46c9c0d03b53923ab1431e3b13d57cc295db218a234d215670e1d4c7a7d067  mago-0.6.38-x86_64-unknown-linux-gnu.tar.gz
