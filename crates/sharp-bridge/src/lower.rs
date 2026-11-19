@@ -513,6 +513,9 @@ struct Lowering<'lowering, 'arena> {
     held_receivers: Vec<(Span, Vec<u8>)>,
     /// The plain PHP properties a write being lowered renumbered first, so the write reaches each as its place.
     renumbered_places: Vec<Span>,
+    /// The sides of `??`, the branches of `? :` and the `match` arms being lowered that give the value of a place that
+    /// declares a type, by span, with that type, which each is read as, as [`Self::bind_sides`] says.
+    bound_sides: Vec<(Span, TUnion)>,
     /// The null-safe links whose chain's conditional already tests the receiver, so each is its plain form.
     tested_links: Vec<Span>,
     /// The expression of the expression statement being lowered, whose value nothing reads.
@@ -584,6 +587,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             temporaries: 0,
             held_receivers: Vec::new(),
             renumbered_places: Vec::new(),
+            bound_sides: Vec::new(),
             tested_links: Vec::new(),
             discarded: None,
             picked_steps: HashSet::default(),
@@ -5571,10 +5575,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return self.null_safe_chain(expression, link, receiver);
         }
 
+        // A side that gives the value of a place that declares a type is read as that type, as the value is.
+        let bound =
+            self.bound_sides.iter().find(|(span, _)| *span == expression.span()).map(|(_, r#type)| r#type.clone());
+        let arrival = match (arrival, &bound) {
+            (Arrival::Read, Some(r#type)) => self.declared_arrival(r#type),
+            (arrival, _) => arrival,
+        };
         // Plain PHP takes the value of its own call as the call gave it.
         let read = match arrival {
             Arrival::Map(map) => Some(map),
-            Arrival::Read | Arrival::Plain => None,
+            Arrival::Read => bound.as_ref(),
+            Arrival::Plain => None,
         };
         if !(matches!(arrival, Arrival::Plain) && self.plain_value(expression))
             && let Some(returned) = self.returned_call(line, expression, read)
@@ -9680,12 +9692,51 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if let Some(returned) = self.returned_call(line, value, Some(r#type)) {
             return returned;
         }
-        let arrival = match self.crossing_array(r#type) {
+        let arrival = self.declared_arrival(r#type);
+        let bound = self.bound_sides.len();
+        self.bind_sides(value, r#type);
+        let crossed = self.crossed_from(value.span(), r#type, |this| this.arriving(value, arrival));
+        self.bound_sides.truncate(bound);
+
+        crossed
+    }
+
+    /// How a value enters a place that declares `r#type`, a `Map` or a `Set` it may hold as a PHP array: as that `Map`
+    /// where the type is one, and as PHP# reads it otherwise.
+    fn declared_arrival<'place>(&self, r#type: &'place TUnion) -> Arrival<'place> {
+        match self.crossing_array(r#type) {
             Some(TArray::Keyed(_)) => Arrival::Map(r#type),
             _ => Arrival::Read,
-        };
+        }
+    }
 
-        self.crossed_from(value.span(), r#type, |this| this.arriving(value, arrival))
+    /// Marks each side of `??`, branch of `? :` and `match` arm that gives `value`, at any depth, that may be a PHP
+    /// array, as [`Self::may_be_php_array`] says, as bound for `r#type`, the type of the place `value` enters. Each is
+    /// then read as [`Self::crossed_value`] reads a value written there alone, so a call of plain PHP in
+    /// `Map<int, string> named = given ?? Calc.names();` keeps its keys, as in `Map<int, string> named = Calc.names();`.
+    fn bind_sides(&mut self, value: &Expression, r#type: &TUnion) {
+        ensure_sufficient_stack(|| {
+            let sides: Vec<&Expression> = match value.unparenthesized() {
+                Expression::Binary(binary) if binary.operator.is_null_coalesce() => vec![binary.lhs, binary.rhs],
+                Expression::Conditional(conditional) => {
+                    vec![conditional.then.unwrap_or(conditional.condition), conditional.r#else]
+                }
+                Expression::PatternMatch(pattern_match) => pattern_match
+                    .arms
+                    .iter()
+                    .filter_map(|arm| match arm.body() {
+                        PatternMatchArmBody::Expression(arm_value) => Some(*arm_value),
+                        PatternMatchArmBody::Block(_) => None,
+                    })
+                    .collect(),
+                _ => return,
+            };
+            let sides: Vec<&Expression> = sides.into_iter().filter(|side| self.may_be_php_array(side)).collect();
+            for side in sides {
+                self.bound_sides.push((side.unparenthesized().span(), r#type.clone()));
+                self.bind_sides(side, r#type);
+            }
+        });
     }
 
     /// The value `lower` lowers, of `r#type`, which may be a PHP array, with each `Map` and `Set` the type holds made the

@@ -7000,7 +7000,7 @@ fn a_list_literal_beside_a_map_or_beside_both_a_list_and_a_set_is_refused_before
 
 /// ```php
 /// $owning = $maybe ?? $fallback;
-/// $named = \is_array($crossing#1 = $given ?? \Lib\Calc::names()) ? new \Sharp\Map<int, string>(…) : $crossing#1;
+/// $named = \is_array($crossing#1 = $given ?? \Sharp\Internal\returned(\Lib\Calc::names(), …)) ? … : $crossing#1;
 /// ```
 ///
 /// A `??` or a `match` bound for a `Set` or a `Map` crosses its value only where one of its sides may be a PHP array,
@@ -7080,6 +7080,92 @@ fn a_coalesce_or_a_match_bound_for_a_collection_crosses_only_where_a_side_may_be
     let emptied = body_in(sets, "        Set<string> owning = maybe ?? [];\n        return owning;\n", &[]);
     assert!(!emptied.contains("crossing#"), "{emptied}");
     assert_eq!(emptied.matches("ZVAL \"Sharp\\\\Set\"\n").count(), 3, "{emptied}");
+}
+
+/// ```php
+/// $named = \is_array($crossing#1 = $given ?? \Sharp\Internal\returned(\Lib\Calc::names(), null, '',
+///     'Map<int, string>', 'Lib\Calc::names()')) ? \Sharp\Map::from($crossing#1, 'int, string') : $crossing#1;
+/// ```
+///
+/// A plain PHP call on a side of `??`, in a branch of `? :` or in a `match` arm, bound for a `Map`, is read as the
+/// `Map` the place declares, spec section 12, as the call bound there alone is, so it keeps the keys plain PHP gave it.
+/// It is never renumbered as a `List` with `\array_values`.
+#[test]
+fn a_plain_php_call_beside_a_map_in_a_coalesce_a_conditional_or_a_match_is_read_as_the_map() {
+    let signature = "Map<int, string> run(Map<int, string>? given, bool empty, int extra)";
+    let bodies = [
+        "        Map<int, string> named = given ?? Calc.names();\n        return named;\n",
+        "        Map<int, string> named = empty ? [:] : Calc.names();\n        return named;\n",
+        "        Map<int, string> named = match (extra) {\n            0 => [:],\n            default => Calc.names(),\n        };\n        return named;\n",
+    ];
+
+    for statements in bodies {
+        let lowered = body_in(signature, statements, &[ARRAYS]);
+
+        assert!(!lowered.contains("array_values"), "{lowered}");
+        assert_eq!(lowered.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"\n").count(), 1, "{lowered}");
+        assert_eq!(lowered.matches("ZVAL \"Map<int, string>\"\n").count(), 1, "{lowered}");
+    }
+    assert_eq!(
+        body_in(signature, bodies[0], &[ARRAYS]),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "given"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "given"
+                  STATIC_CALL
+                    ZVAL "Sharp\\Map"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "given"
+                      ZVAL "int, string"
+                  VAR
+                    ZVAL "given"
+              ASSIGN
+                VAR
+                  ZVAL "named"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "crossing#1"
+                        COALESCE
+                          VAR
+                            ZVAL "given"
+                          CALL
+                            ZVAL "Sharp\\Internal\\returned"
+                            ARG_LIST
+                              STATIC_CALL
+                                ZVAL "Lib\\Calc"
+                                ZVAL "names"
+                                ARG_LIST
+                              ZVAL null
+                              ZVAL ""
+                              ZVAL "Map<int, string>"
+                              ZVAL "Lib\\Calc::names()"
+                  STATIC_CALL
+                    ZVAL "Sharp\\Map"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "crossing#1"
+                      ZVAL "int, string"
+                  VAR
+                    ZVAL "crossing#1"
+              RETURN
+                VAR
+                  ZVAL "named"
+        "#}
+    );
 }
 
 /// ```php
