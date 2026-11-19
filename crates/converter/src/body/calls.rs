@@ -311,10 +311,12 @@ impl<'input> Converter<'input, '_> {
 
     /// The effect a call of `callee`, a function or a method it reaches through `class`, has as the checker reads it
     /// (spec section 29): the effect of a `foreign` class `class` is or extends, or the first effect the `extern`
-    /// declaration the call falls under lists, as [`CodebaseMetadata::extern_of`] finds it. A call no `extern` covers
-    /// has no effect the checker names, and neither does PHP's own function, the converted file's own code or another
-    /// PHP# body, whose effects the proof's analysis reads.
+    /// declaration the call falls under lists, as [`CodebaseMetadata::extern_of_method`] finds it for a method and
+    /// [`CodebaseMetadata::extern_of`] for a function. A call no `extern` covers has no effect the checker names, and
+    /// neither does PHP's own function, the converted file's own code or another PHP# body, whose effects the proof's
+    /// analysis reads.
     ///
+    /// [`CodebaseMetadata::extern_of_method`]: mago_codex::metadata::CodebaseMetadata::extern_of_method
     /// [`CodebaseMetadata::extern_of`]: mago_codex::metadata::CodebaseMetadata::extern_of
     fn declared_effect(&self, callee: &FunctionLikeMetadata, class: Option<Word>) -> Option<Word> {
         let codebase = self.input.codebase;
@@ -328,10 +330,15 @@ impl<'input> Converter<'input, '_> {
         if callee.flags.is_sharp() || callee.flags.is_built_in() || callee.span.file_id == self.input.file.id {
             return None;
         }
-        let declaration = codebase.extern_of(
-            class.map_or_else(empty_word, |class| class.name),
-            ascii_lowercase_word(callee.name.as_bytes()),
-        )?;
+        let declaration = match class {
+            Some(class) => {
+                let declaring_class =
+                    codebase.get_declaring_method_class(class.name, callee.name).unwrap_or(class.name);
+
+                codebase.extern_of_method(class.name, declaring_class, callee.name)
+            }
+            None => codebase.extern_of(empty_word(), ascii_lowercase_word(callee.name.as_bytes())),
+        }?;
 
         declaration.effects.first().copied()
     }

@@ -1039,6 +1039,20 @@ impl CodebaseMetadata {
         None
     }
 
+    /// The `extern` declaration a call of `method` through `class` falls under, spec section 29. A call runs the body of
+    /// `declaring_class`, so where `class` takes the method from a plain PHP trait, the trait's line for the member, or
+    /// for the whole trait, declares that body's effects. Without one the lookup starts at `class`, as
+    /// [`Self::extern_of`] walks it.
+    #[must_use]
+    pub fn extern_of_method(&self, class: Word, declaring_class: Word, method: Word) -> Option<&ExternMetadata> {
+        let method = ascii_lowercase_word(method.as_bytes());
+
+        self.get_class_like(declaring_class)
+            .filter(|declaring| declaring.kind.is_trait())
+            .and_then(|declaring| self.extern_of(declaring.name, method))
+            .or_else(|| self.extern_of(class, method))
+    }
+
     /// What the `extern` line `declaration` declares, keyed as `class_likes` keys a class and `function_likes` a method
     /// or a function, spec section 29: `(class, "")`, `(class, method)` for a method the class itself declares, or
     /// `("", function)`. `extern Pdf.render` after `import Vendor.Pdf;` declares the function `Vendor\Pdf\render`, and

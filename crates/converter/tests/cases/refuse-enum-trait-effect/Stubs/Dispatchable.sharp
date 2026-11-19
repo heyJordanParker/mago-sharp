@@ -1,0 +1,5 @@
+namespace App.Stubs;
+
+import App.Bus.Dispatchable;
+
+extern Dispatchable.dispatch uses Http;

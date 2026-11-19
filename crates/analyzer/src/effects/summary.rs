@@ -234,7 +234,7 @@ pub(crate) fn record_parse<A>(
             reach(&mut parsing, class.name, Body::Method(constructor.name, word(b"__construct")), b"__construct");
         } else {
             let callee = (constructor.original_name, empty_word());
-            let declaration = method_extern(codebase, class.name, constructor.name, word(b"__construct"));
+            let declaration = codebase.extern_of_method(class.name, constructor.name, word(b"__construct"));
             parsing
                 .effects
                 .extend(plain_php_effects(declaration, callee).into_iter().map(|effect| (effect, span, callee)));
@@ -390,7 +390,7 @@ fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: Word) -> 
     } else {
         Runs::Foreign {
             callee,
-            effects: plain_php_effects(method_extern(codebase, class, declaring_class, method), callee),
+            effects: plain_php_effects(codebase.extern_of_method(class, declaring_class, method), callee),
         }
     })
 }
@@ -1221,7 +1221,7 @@ where
         if is_prelude_stub(declaring_class) {
             self.prelude_stub_call(metadata, span, receiver);
         } else {
-            let declaration = method_extern(codebase, class, declaring_class, method_name);
+            let declaration = codebase.extern_of_method(class, declaring_class, method_name);
             self.plain_php(declaration, span, cause);
             self.callbacks(arguments);
         }
@@ -1385,7 +1385,7 @@ where
             let callee = Body::Method(declaring.name, constructor);
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: roots });
         } else if !is_prelude_stub(class.name) {
-            let declaration = method_extern(codebase, class.name, declaring.name, constructor);
+            let declaration = codebase.extern_of_method(class.name, declaring.name, constructor);
             // Only plain PHP takes an `extern`, so a PHP# class's error names its nearest plain PHP parent.
             let named = std::iter::successors(Some(class), |class| {
                 class.direct_parent_class.and_then(|parent| codebase.get_class_like(parent))
@@ -1675,25 +1675,6 @@ fn function_extern(codebase: &CodebaseMetadata, function: Word) -> ((Word, Word)
     };
 
     ((empty_word(), cause), codebase.extern_of(empty_word(), ascii_lowercase_word(function.as_bytes())))
-}
-
-/// The `extern` declaration a call of `method` through `class` falls under, spec section 29. A call runs the body of
-/// `declaring_class`, so where `class` takes the method from a plain PHP trait, the trait's line for the member, or for
-/// the whole trait, declares that body's effects. Without one the lookup starts at `class`, as
-/// [`CodebaseMetadata::extern_of`] walks it.
-fn method_extern(
-    codebase: &CodebaseMetadata,
-    class: Word,
-    declaring_class: Word,
-    method: Word,
-) -> Option<&ExternMetadata> {
-    let method = ascii_lowercase_word(method.as_bytes());
-
-    codebase
-        .get_class_like(declaring_class)
-        .filter(|declaring| declaring.kind.is_trait())
-        .and_then(|declaring| codebase.extern_of(declaring.name, method))
-        .or_else(|| codebase.extern_of(class, method))
 }
 
 /// The effects of a call into plain PHP of the callee `cause`: the effects its declaration lists, or `Unknown` without

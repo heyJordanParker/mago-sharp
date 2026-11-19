@@ -1,0 +1,1 @@
+17:9: `ReceiveEvent::dispatch` has the effect `Sharp\Net\Http`, and a PHP# enum has no effects (spec section 29)
