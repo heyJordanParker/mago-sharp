@@ -140,7 +140,8 @@ final class ServerProofPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysi
 
 /**
  * An after-file hook that reads the codebase: in a file marked `reads: Class::method` it reports
- * the method's visibility, in a file marked `lists: classes` every class name, and in a file
+ * the method's visibility, each parameter that takes on effects and whether the compiler generated
+ * the method, in a file marked `lists: classes` every class name, and in a file
  * marked `compares: Class` whether the class is a `Base`. Each report counts the hook's runs in
  * this worker, so a test sees whether Mago ran it again.
  */
@@ -180,19 +181,22 @@ final class ServerReadsPlugin implements Plugin, AfterFileAnalysisHook
             [$class, $method] = explode('::', substr($contents, $start, $end - $start));
             $metadata = $context->codebase->getMethod($class, $method);
             $visibility = $metadata->visibility->name ?? 'missing';
-            $effects = '';
+            $notes = '';
             foreach ($metadata->parameters ?? [] as $parameter) {
                 if (!$parameter->flags->contains(1 << 63)) {
                     continue;
                 }
 
-                $effects .= " `{$parameter->name}` takes on effects.";
+                $notes .= " `{$parameter->name}` takes on effects.";
+            }
+            if ($metadata?->isGenerated) {
+                $notes .= ' It is generated.';
             }
             $context->report(
                 Level::Warning,
                 'read',
                 Issue::at(
-                    "Run {$this->runs}: `{$class}::{$method}` is {$visibility}.{$effects}",
+                    "Run {$this->runs}: `{$class}::{$method}` is {$visibility}.{$notes}",
                     new SourceLocation($context->analysis->file, new Span($start, $end)),
                 ),
             );

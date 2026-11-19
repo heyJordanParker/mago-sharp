@@ -4984,6 +4984,80 @@ fn compile_proves_a_law_over_a_sealed_interface_no_class_implements() {
     assert!(compiled(root, "app/Shop/Uses.sharp").exists());
 }
 
+/// Spec section 28: a law reaches a standard library type from its PHP# source, as it reaches a project type, so a law
+/// over one state of a sealed family proves though another state holds an `Instant`.
+#[test]
+fn compile_proves_a_law_over_a_state_beside_one_that_holds_an_instant() {
+    let directory = library_project(&[
+        (
+            "app/Delivery/DeliveryStatus.sharp",
+            "namespace App.Delivery;\n\npublic sealed interface DeliveryStatus\n{\n}\n",
+        ),
+        (
+            "app/Delivery/Pending.sharp",
+            "namespace App.Delivery;\n\npublic final class Pending : DeliveryStatus\n{\n    public Pending(public string? error { get; }) { }\n\n    public Pending postpone(string error) => new Pending(error);\n\n    law postponeHoldsTheError(string? held, string error) => new Pending(held).postpone(error).error == error;\n}\n",
+        ),
+        (
+            "app/Delivery/Done.sharp",
+            "namespace App.Delivery;\n\nimport Sharp.Time.Instant;\n\npublic final class Done : DeliveryStatus\n{\n    internal Done(public Instant doneAt { get; }) { }\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Delivery/Pending.sharp").exists());
+}
+
+/// Spec section 28: `<` on two values of a class runs the class's own `<=>`, so a law that compares two `Instant`s
+/// proves through `Instant`'s, which compares their seconds, then their nanoseconds. A false order is not proven.
+#[test]
+fn compile_proves_a_law_that_orders_two_instants_through_their_own_comparison() {
+    let schedule = |laws: &str| {
+        format!(
+            "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic final class Schedule\n{{\n    {laws}\n}}\n"
+        )
+    };
+    let directory = library_project(&[(
+        "app/Shared/Schedule.sharp",
+        &schedule(
+            "law earlierSecondIsEarlier(Instant a, Instant b) when a.epochSeconds < b.epochSeconds => a < b;\n    law sameSecondByNanosecond(Instant a, Instant b) when a.epochSeconds == b.epochSeconds && a.nanosecond < b.nanosecond => a < b;",
+        ),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Schedule.sharp").exists());
+
+    let directory = library_project(&[(
+        "app/Shared/Schedule.sharp",
+        &schedule("law laterNanosecondIsEarlier(Instant a, Instant b) when a.nanosecond > b.nanosecond => a < b;"),
+    )]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law laterNanosecondIsEarlier is not proven\n"),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// Spec section 28: a standard library member a law can't reach is refused where the law reaches it, with the reason
+/// project code gives, as `Instant.tryParse`, which calls plain PHP.
+#[test]
+fn a_law_reaching_a_standard_library_member_that_calls_plain_php_is_refused_naming_the_call() {
+    assert_unmodeled_beside(
+        "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic class Shape\n{\n    law parses(string text) => Instant.tryParse(text) != null;\n}\n",
+        &[],
+        "Law parses reaches the plain PHP function `global.preg_match` in Instant.tryParse. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
+    );
+}
+
 /// Spec section 28: a law reads the fields of an enum's data case, in the branch a pattern or a type test names the
 /// case in, as the constructor's fields. A false claim over a field is not proven.
 #[test]
@@ -6522,8 +6596,8 @@ fn each_refusal_a_law_reaches_says_what_to_write_instead() {
     assert_eq!(output.status.code(), Some(1), "{printed}");
     for message in [
         "Law l1 reaches the type `int|string` in Shape.union. Give it a type a law reasons about: int, bool, string, a List, or a PHP# class, enum or interface, with or without `?`.",
-        "Law l2 reaches the operator `**` here in Shape.power. Write it with the operators a law reaches: `+ - * / %` on ints, `+` on strings, `< <= > >=` on ints and strings, `== !=`, `! && ||` and `??`.",
-        "Law l3 reaches the operator `~` in Shape.complement. Write it with the operators a law reaches: `+ - * / %` on ints, `+` on strings, `< <= > >=` on ints and strings, `== !=`, `! && ||` and `??`.",
+        "Law l2 reaches the operator `**` here in Shape.power. Write it with the operators a law reaches: `+ - * / %` on ints, `+` on strings, `< <= > >=` on ints, on strings and on two values of a class that declares `<=>`, `<=>` on ints and on those values, `== !=`, `! && ||` and `??`.",
+        "Law l3 reaches the operator `~` in Shape.complement. Write it with the operators a law reaches: `+ - * / %` on ints, `+` on strings, `< <= > >=` on ints, on strings and on two values of a class that declares `<=>`, `<=>` on ints and on those values, `== !=`, `! && ||` and `??`.",
         "Law l4 reaches the class operator `==` in Shape.same. Compare the values the objects hold, such as their properties.",
         "Law l5 reaches a string template in Shape.template. Join the strings with `+`.",
         "Law l6 reaches a guard that can throw in Shape.guard. Write the guard without calls or arithmetic, which can throw, and compute such a value in the arm.",
@@ -6556,7 +6630,7 @@ fn each_refusal_of_code_a_law_cannot_read_says_what_to_write_instead() {
     );
     let shape = (
         "app/Shared/Shape.sharp",
-        "namespace App.Shared;\n\nimport Lib;\nimport Lib.Clock;\n\npublic class Shape\n{\n    public Shape(public int raw { get; }) { }\n    public int doubled => this.raw * 2;\n\n    public static int parsed(string s) => Int.tryParse(s) ?? 0;\n    public static int hour(int a) => Clock.hour();\n    public static int length(string s) => Lib.measure(s);\n    public static int kept<T>(T item) => 1;\n\n    law l1(string s) => Shape.parsed(s) == Shape.parsed(s);\n    law l2(int a) => Shape.hour(a) == Shape.hour(a);\n    law l3(string s) => Shape.length(s) == Shape.length(s);\n    law l4(int a) => Shape.kept(a) == 1;\n    law l5(Shape s) => s.doubled == s.doubled;\n}\n",
+        "namespace App.Shared;\n\nimport Lib;\nimport Lib.Clock;\n\npublic class Shape\n{\n    public Shape(public int raw { get; }) { }\n    public int doubled => this.raw * 2;\n\n    public static int hour(int a) => Clock.hour();\n    public static int length(string s) => Lib.measure(s);\n    public static int kept<T>(T item) => 1;\n\n    law l1(int a) => Shape.hour(a) == Shape.hour(a);\n    law l2(string s) => Shape.length(s) == Shape.length(s);\n    law l3(int a) => Shape.kept(a) == 1;\n    law l4(Shape s) => s.doubled == s.doubled;\n}\n",
     );
     let directory = library_project(&[shape, clock, helpers, stub]);
     let root = directory.path();
@@ -6566,11 +6640,10 @@ fn each_refusal_of_code_a_law_cannot_read_says_what_to_write_instead() {
     let printed = printed(&output);
     assert_eq!(output.status.code(), Some(1), "{printed}");
     for message in [
-        "Law l1 reaches the standard library class Int in Shape.parsed. Write the code in a PHP# class of the project: of the standard library, a law reaches a List's `count()`, `map` and `filter`, and `Math.max` and `Math.min` on ints.",
-        "Law l2 reaches the plain PHP class Clock in Shape.hour. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
-        "Law l3 reaches the plain PHP function `Lib.measure` in Shape.length. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
-        "Law l4 reaches the type parameter T in Shape.kept. Give it a type a law reasons about: int, bool, string, a List, or a PHP# class, enum or interface, with or without `?`.",
-        "Law l5 reaches the accessor of Shape.doubled in Shape.l5. Compute the value in a method, and give the property no accessor body.",
+        "Law l1 reaches the plain PHP class Clock in Shape.hour. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
+        "Law l2 reaches the plain PHP function `Lib.measure` in Shape.length. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
+        "Law l3 reaches the type parameter T in Shape.kept. Give it a type a law reasons about: int, bool, string, a List, or a PHP# class, enum or interface, with or without `?`.",
+        "Law l4 reaches the accessor of Shape.doubled in Shape.l4. Compute the value in a method, and give the property no accessor body.",
     ] {
         assert!(printed.contains(&format!("error - unmodeled-construct: {message}")), "{message}\n{printed}");
     }

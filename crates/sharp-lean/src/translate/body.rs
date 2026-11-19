@@ -17,6 +17,7 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
+use mago_names::binding::php_operator_name;
 use mago_sharp_bridge::CheckedProgram;
 use mago_sharp_bridge::DeclarationKind;
 use mago_sharp_bridge::Equality;
@@ -602,7 +603,13 @@ impl<'body, 'program> Body<'body, 'program> {
         let operator = self.source(binary.operator.span());
         let ints = kinds == (Kind::Int, Kind::Int);
         let ordered = ints || kinds == (Kind::String, Kind::String);
+        if let Some(compared) = self.compared(binary, &lhs, &rhs) {
+            return compared;
+        }
         match binary.operator {
+            BinaryOperator::Spaceship(_) if ints => {
+                format!("(if {lhs} < {rhs} then (-1 : int) else if {lhs} > {rhs} then (1 : int) else (0 : int))")
+            }
             BinaryOperator::Addition(_) if ints => self.bind(format!("int.add {lhs} {rhs}")),
             BinaryOperator::Addition(_) if kinds == (Kind::String, Kind::String) => format!("({lhs} ++ {rhs})"),
             BinaryOperator::Subtraction(_) if ints => self.bind(format!("int.sub {lhs} {rhs}")),
@@ -641,6 +648,40 @@ impl<'body, 'program> Body<'body, 'program> {
             BinaryOperator::GreaterThanOrEqual(_) if ordered => format!("(decide ({lhs} >= {rhs}))"),
             _ => self.unmodeled(binary.span(), format!("the operator `{operator}` here"), issues::OPERATOR),
         }
+    }
+
+    /// `<=>`, `<`, `<=`, `>` or `>=` of `lhs` and `rhs`, two values of one class that declares `<=>`, as that `<=>`
+    /// orders them, spec section 19. None for any other operator or operands.
+    fn compared(&mut self, binary: &Binary, lhs: &str, rhs: &str) -> Option<String> {
+        let test = match binary.operator {
+            BinaryOperator::Spaceship(_) => None,
+            BinaryOperator::LessThan(_) => Some("<"),
+            BinaryOperator::LessThanOrEqual(_) => Some("<="),
+            BinaryOperator::GreaterThan(_) => Some(">"),
+            BinaryOperator::GreaterThanOrEqual(_) => Some(">="),
+            _ => return None,
+        };
+        let types = self.checked.types();
+        let ([TAtomic::Object(TObject::Named(left))], [TAtomic::Object(TObject::Named(right))]) =
+            (types.expression_type(binary.lhs).types.as_ref(), types.expression_type(binary.rhs).types.as_ref())
+        else {
+            return None;
+        };
+        let class = left.name.as_bytes();
+        let comparison = php_operator_name(&BinaryOperator::Spaceship(binary.operator.span()), 2)?;
+        if !self.reach.same_class(class, right.name.as_bytes()) || self.reach.method(class, comparison).is_none() {
+            return None;
+        }
+
+        let class_name = self.reached_name(class);
+        let key = names::member(&names::full_name(&class_name), comparison);
+        self.uses(class, &key, format!("{}.operator <=>", names::short_name(&class_name)));
+        let compared = self.bind(format!("{key} {lhs} {rhs}"));
+
+        Some(match test {
+            Some(test) => format!("(decide ({compared} {test} (0 : int)))"),
+            None => compared,
+        })
     }
 
     /// `+`, `-` or `*` of two non-nullable ints as the exact `Int` it computes.
@@ -1582,14 +1623,6 @@ impl<'body, 'program> Body<'body, 'program> {
                     self.unmodeled(object.span(), "a class value".to_owned(), issues::TYPE_TEST);
                     return None;
                 }
-                TAtomic::Scalar(_) => {
-                    self.unmodeled(
-                        object.span(),
-                        "a standard library method of a built-in type".to_owned(),
-                        issues::LIBRARY,
-                    );
-                    return None;
-                }
                 _ => {
                     self.unmodeled(
                         object.span(),
@@ -1613,10 +1646,6 @@ impl<'body, 'program> Body<'body, 'program> {
     fn is_translated_class(&mut self, span: Span, class: &[u8]) -> bool {
         if is_collection(class) {
             self.unmodeled(span, "a collection".to_owned(), issues::COLLECTION);
-            return false;
-        }
-        if is_library(class) {
-            self.unmodeled(span, format!("the standard library class {}", names::short_name(class)), issues::LIBRARY);
             return false;
         }
         if !self.reach.class(class).is_some_and(|reached| reached.sharp) {
@@ -1888,13 +1917,6 @@ fn names_values(pattern: &Pattern) -> bool {
 /// `lines`, each `by` spaces further in.
 pub(crate) fn indented(lines: &[String], by: usize) -> impl Iterator<Item = String> + '_ {
     lines.iter().map(move |line| format!("{}{line}", " ".repeat(by)))
-}
-
-/// Whether the fully qualified `class` belongs to the standard library, which owns the namespace `Sharp`.
-fn is_library(class: &[u8]) -> bool {
-    let class = class.strip_prefix(b"\\").unwrap_or(class);
-
-    class.len() > 6 && class[..6].eq_ignore_ascii_case(b"sharp\\")
 }
 
 /// Whether `class` names a PHP# collection.

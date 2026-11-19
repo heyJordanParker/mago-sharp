@@ -22,6 +22,8 @@ final class MetadataFlags
     public const ENUM_INTERFACE = 1 << 5;
     public const POPULATED = 1 << 6;
     public const INTERNAL = 1 << 7;
+    /** A member no source declares, which the compiler adds, as a PHP# type's `parse` and `tryParse`. */
+    public const GENERATED = 1 << 8;
     public const CONSISTENT_CONSTRUCTOR = 1 << 11;
     public const CONSISTENT_TEMPLATES = 1 << 12;
     public const UNCHECKED = 1 << 13;

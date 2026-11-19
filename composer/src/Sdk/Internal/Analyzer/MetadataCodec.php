@@ -179,6 +179,7 @@ final class MetadataCodec
             $static,
             $constructor,
             $whereConstraints,
+            $flags->contains(MetadataFlags::GENERATED),
         );
     }
 
@@ -392,20 +393,33 @@ final class MetadataCodec
 
     public static function readProperty(PayloadReader $reader): PropertyMetadata
     {
+        $name = $reader->readBytes();
+        $location = self::readOptionalLocation($reader);
+        $nameLocation = self::readOptionalLocation($reader);
+        $readVisibility = self::readVisibility($reader);
+        $writeVisibility = self::readVisibility($reader);
+        $declaredType = self::readOptionalTypeMetadata($reader);
+        $type = self::readOptionalTypeMetadata($reader);
+        $writeType = self::readOptionalTypeMetadata($reader);
+        $defaultType = self::readOptionalTypeMetadata($reader);
+        $attributes = self::readAttributes($reader);
+        $flags = self::readFlags($reader);
+
         return new PropertyMetadata(
-            $reader->readBytes(),
-            self::readOptionalLocation($reader),
-            self::readOptionalLocation($reader),
-            self::readVisibility($reader),
-            self::readVisibility($reader),
-            self::readOptionalTypeMetadata($reader),
-            self::readOptionalTypeMetadata($reader),
-            self::readOptionalTypeMetadata($reader),
-            self::readOptionalTypeMetadata($reader),
-            self::readAttributes($reader),
-            self::readFlags($reader),
+            $name,
+            $location,
+            $nameLocation,
+            $readVisibility,
+            $writeVisibility,
+            $declaredType,
+            $type,
+            $writeType,
+            $defaultType,
+            $attributes,
+            $flags,
             self::readPropertyHooks($reader),
             self::readVersionRanges($reader),
+            $flags->contains(MetadataFlags::GENERATED),
         );
     }
 

@@ -1785,7 +1785,7 @@ where
         }
 
         let name = word("$name");
-        let flags = MetadataFlags::READONLY | MetadataFlags::HAS_DEFAULT;
+        let flags = MetadataFlags::READONLY | MetadataFlags::HAS_DEFAULT | MetadataFlags::GENERATED;
         let mut property_metadata = PropertyMetadata::new(VariableIdentifier(name), flags);
         property_metadata.type_declaration_metadata = Some(TypeMetadata::new(get_string(), enum_name_span));
         property_metadata.type_metadata = Some(TypeMetadata::new(name_union, enum_name_span));
@@ -1795,7 +1795,7 @@ where
         if let Some(enum_backing_type) = backing_type {
             let value = word("$value");
 
-            let flags = MetadataFlags::READONLY | MetadataFlags::HAS_DEFAULT;
+            let flags = MetadataFlags::READONLY | MetadataFlags::HAS_DEFAULT | MetadataFlags::GENERATED;
             let mut property_metadata = PropertyMetadata::new(VariableIdentifier(value), flags);
 
             property_metadata.set_type_declaration_metadata(Some(TypeMetadata::new(
@@ -2064,6 +2064,7 @@ fn add_method(
 ) {
     let name = class_like_metadata.method_key(word(name));
     function_like_metadata.name = name;
+    function_like_metadata.flags |= MetadataFlags::GENERATED;
     let method_id = (class_like_metadata.name, name);
 
     let method_identifier = MethodIdentifier::new(class_like_metadata.name, name);

@@ -1477,7 +1477,7 @@ where
         class_like_metadata.add_declaring_method_id(constructor_name, constructor_method_id);
         class_like_metadata.inheritable_method_ids.insert(constructor_name, constructor_method_id);
 
-        let mut flags = MetadataFlags::PURE;
+        let mut flags = MetadataFlags::PURE | MetadataFlags::GENERATED;
         flags |= MetadataFlags::origin_flags(context.file.file_type);
 
         scanner.codebase.function_likes.insert(

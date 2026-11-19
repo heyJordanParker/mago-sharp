@@ -234,6 +234,42 @@ fn a_hook_reads_a_method_that_takes_a_function_with_every_flag() {
     assert_eq!(reads(&issues, "read"), ["Run 1: `App\\Calls::apply` is Public. `$f` takes on effects."]);
 }
 
+/// A hook tells a method the compiler generates from one the source writes: a `[Tag]` variant's `parse` and
+/// `tryParse` are generated, and a static method the enum writes is not.
+#[test]
+fn a_hook_reads_whether_the_compiler_generated_a_method() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the generated method reads test") {
+        return;
+    }
+
+    let outcome = "namespace App;\n\nimport Sharp.Tag;\n\n[Tag(\"status\")]\npublic enum Outcome\n{\n    case Paid(string transaction);\n\n    public static Outcome settled(string transaction) => Outcome.Paid(transaction);\n}\n";
+    let mut server = server(
+        repository,
+        database(&[
+            ("src/parse.php", "<?php\n// reads: App\\Outcome\\Paid::parse\n"),
+            ("src/try.php", "<?php\n// reads: App\\Outcome\\Paid::tryParse\n"),
+            ("src/settled.php", "<?php\n// reads: App\\Outcome::settled\n"),
+            ("src/Outcome.sharp", outcome),
+        ]),
+    );
+    let issues = server.analyze().expect("the analysis reads the methods").issues;
+    // The worker reads the three files in any order, so each read is compared without its run.
+    let mut read: Vec<String> = reads(&issues, "read")
+        .iter()
+        .map(|message| message.split_once(": ").map_or_else(|| message.clone(), |(_, read)| read.to_owned()))
+        .collect();
+    read.sort();
+    assert_eq!(
+        read,
+        [
+            "`App\\Outcome::settled` is Public.",
+            "`App\\Outcome\\Paid::parse` is Public. It is generated.",
+            "`App\\Outcome\\Paid::tryParse` is Public. It is generated.",
+        ]
+    );
+}
+
 #[test]
 fn a_hook_that_listed_classes_sees_a_new_class_on_the_next_run_and_does_not_run_after_a_body_edit() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));

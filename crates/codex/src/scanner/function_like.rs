@@ -436,7 +436,7 @@ where
         name,
         name,
         class.span(),
-        MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP,
+        MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP | MetadataFlags::GENERATED,
     );
     metadata.name_span = Some(class.name.span);
     metadata.method_metadata =

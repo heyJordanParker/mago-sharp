@@ -17,6 +17,7 @@ use mago_analyzer::smaller::Smaller;
 use mago_analyzer::smaller::Step;
 use mago_database::file::FileId;
 use mago_names::binding::php_method_name;
+use mago_names::binding::php_operator_name;
 use mago_sharp_bridge::CheckedProgram;
 use mago_sharp_bridge::DeclarationKind;
 use mago_span::HasSpan;
@@ -39,6 +40,7 @@ use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::NamespaceBody;
+use mago_syntax::cst::Operator;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::Sequence;
@@ -605,6 +607,13 @@ impl Translator<'_, '_> {
                 {
                     self.method(full, lean, short, method, None);
                 }
+                ClassLikeMember::Operator(operator) => {
+                    if let Some(name) = php_operator_name(&operator.symbol, operator.parameter_list.parameters.len())
+                        && self.reach.reaches(full, name)
+                    {
+                        self.operator(full, lean, short, operator, name);
+                    }
+                }
                 ClassLikeMember::Extension(extension) => self.extension(full, lean, short, extension),
                 ClassLikeMember::Constant(constant) => {
                     for item in constant.items.iter().filter(|item| self.reach.reaches(full, item.name.value)) {
@@ -685,6 +694,25 @@ impl Translator<'_, '_> {
             translated,
             measure,
         );
+    }
+
+    /// An operator a class declares, spec section 19, as the static method `name` it runs as, which takes its operands.
+    fn operator(&mut self, full: &[u8], lean: &str, short: &str, operator: &Operator, name: &[u8]) {
+        let place = format!("{short}.operator {}", String::from_utf8_lossy(operator.symbol.as_bytes()));
+        let mut body = Body::new(self.checked, self.reach, full, place.clone());
+        body.takes(operator.parameter_list.parameters.iter());
+        let parameters: Vec<String> =
+            operator.parameter_list.parameters.iter().map(|parameter| binder(&mut body, parameter)).collect();
+        let returns = body.r#type(&operator.return_type_hint.hint);
+        let translated = match &operator.body {
+            MethodBody::Concrete(block) => body.block_body(block, false),
+            MethodBody::Expression(expression) => body.expression_body(expression.expression),
+            MethodBody::Abstract(abstract_body) => {
+                body.unmodeled(abstract_body.span(), format!("the abstract operator {place}"), issues::OVERRIDABLE);
+                body.finish()
+            }
+        };
+        self.define(names::member(lean, name), operator.operator.span, &parameters, &returns, translated, None);
     }
 
     /// The reached members of an extension, spec section 26, each the static method it runs as.

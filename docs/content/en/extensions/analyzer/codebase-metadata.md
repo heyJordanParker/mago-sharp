@@ -80,6 +80,8 @@ Methods use `MemberIdentifier` for batched operations. `getMethod()` resolves th
 
 `FunctionLikeMetadata` includes parameters, native and effective return types, templates, attributes, thrown types, assertions, accessed globals, docblock state, flags, version ranges, method details, and where constraints.
 
+`FunctionLikeMetadata::$isGenerated` and `PropertyMetadata::$isGenerated` are true for a member the compiler adds and no source declares, such as a `[Tag]` variant's `parse` and `tryParse`. `MetadataFlags::GENERATED` marks the same members in `$flags`, method search projections included.
+
 ## Projected method search
 
 `findMethods()` efficiently searches visible methods without returning fields the extension will not read:
@@ -137,7 +139,7 @@ Metadata is represented by immutable DTOs under `Mago\Sdk\Analyzer\Metadata`:
 | `TypeMetadata` | A semantic `Type` plus source provenance |
 | `VersionRange` | PHP versions in which the declaration is available |
 
-`MetadataFlags::contains()` tests the public constants `ABSTRACT`, `FINAL`, `READONLY`, `DEPRECATED`, `INTERNAL`, `USER_DEFINED`, `BUILTIN`, `MUST_USE`, `PURE`, `BY_REFERENCE`, `VARIADIC`, `PROMOTED_PROPERTY`, `HAS_DEFAULT`, `VIRTUAL_PROPERTY`, `ASYMMETRIC_PROPERTY`, `STATIC`, `WRITEONLY`, `MAGIC_METHOD`, `API`, `MUTATION_FREE`, `EXTERNAL_MUTATION_FREE`, `SUSPENDS_FIBER`, `EXPERIMENTAL`, `POLYFILL`, and `PATCH`.
+`MetadataFlags::contains()` tests the public constants `ABSTRACT`, `FINAL`, `READONLY`, `DEPRECATED`, `INTERNAL`, `GENERATED`, `USER_DEFINED`, `BUILTIN`, `MUST_USE`, `PURE`, `BY_REFERENCE`, `VARIADIC`, `PROMOTED_PROPERTY`, `HAS_DEFAULT`, `VIRTUAL_PROPERTY`, `ASYMMETRIC_PROPERTY`, `STATIC`, `WRITEONLY`, `MAGIC_METHOD`, `API`, `MUTATION_FREE`, `EXTERNAL_MUTATION_FREE`, `SUSPENDS_FIBER`, `EXPERIMENTAL`, `POLYFILL`, and `PATCH`.
 
 ## Caching and generations
 

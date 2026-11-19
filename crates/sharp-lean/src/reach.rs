@@ -63,7 +63,7 @@ impl Reach {
     /// references under the law's own symbol, its class and its name as the class keys a method. A law reaches only
     /// what the members it reaches run, so the walk skips each [`CascadeEdge::Attribute`]: an attribute's constructor
     /// never runs as part of them. A sealed interface reaches each of its implementers, the closed set a law tells its
-    /// values apart by, spec section 20.1.
+    /// values apart by, spec section 20.1. A class reaches each operator it declares, which a law runs on its values.
     #[must_use]
     pub fn new(codebase: &CodebaseMetadata, references: &SymbolReferences) -> Reach {
         let mut edges: HashMap<SymbolIdentifier, Vec<SymbolIdentifier>> = HashMap::default();
@@ -89,6 +89,15 @@ impl Reach {
                     pending.push((next.0, empty_word()));
                 } else if let Some(metadata) = codebase.get_class_like(next.0) {
                     pending.extend(metadata.properties.keys().map(|property| (next.0, *property)));
+                    pending.extend(
+                        metadata
+                            .methods
+                            .iter()
+                            .filter(|method| {
+                                codebase.get_method(next.0, **method).is_some_and(|method| method.flags.is_operator())
+                            })
+                            .map(|method| (next.0, *method)),
+                    );
                     if metadata.flags.is_sealed()
                         && let Some(inheritors) = &metadata.permitted_inheritors
                     {

@@ -27,6 +27,8 @@ final class FunctionLikeMetadata
      * @param list<string> $globalsAccessed
      * @param array<string, TypeMetadata> $whereConstraints
      * @param list<VersionRange> $availableVersions
+     * @param bool $isGenerated whether the compiler added the method, which no source declares, as `$flags` holds
+     *   `MetadataFlags::GENERATED`
      */
     public function __construct(
         public readonly FunctionLikeIdentifier $identifier,
@@ -55,5 +57,6 @@ final class FunctionLikeMetadata
         public readonly bool $static,
         public readonly bool $constructor,
         public readonly array $whereConstraints,
+        public readonly bool $isGenerated,
     ) {}
 }

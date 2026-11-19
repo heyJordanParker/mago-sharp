@@ -30,7 +30,6 @@ pub(crate) const PLAIN_PHP: &str =
     "Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.";
 pub(crate) const COLLECTION: &str =
     "Hold the values in a List, and read it with `count()`, an index, `map`, `filter`, a list pattern or a spread.";
-pub(crate) const LIBRARY: &str = "Write the code in a PHP# class of the project: of the standard library, a law reaches a List's `count()`, `map` and `filter`, and `Math.max` and `Math.min` on ints.";
 pub(crate) const LOOP: &str = "Write the method as recursion that calls itself on a smaller value.";
 pub(crate) const RECURSION: &str = "Write the method as recursion that calls itself on a smaller value: a list's rest from a list pattern, or an int one step towards a bound a condition tested.";
 pub(crate) const NAMED_PATTERN: &str =
@@ -47,7 +46,7 @@ pub(crate) const TUPLE: &str = "Hold the values in a class with one property for
 pub(crate) const STATEMENT: &str = "Write the method with the statements a law reaches: `let` and `const`, assignments to locals, `if`, `match`, `return`, and loops that only count or sum.";
 pub(crate) const LOCAL_ASSIGNMENT: &str = "Assign the value to a local declared with `let`.";
 pub(crate) const UPDATE: &str = "Update an int with `+=`, `-=`, `*=`, `/=` or `%=`, or a string with `+=`.";
-pub(crate) const OPERATOR: &str = "Write it with the operators a law reaches: `+ - * / %` on ints, `+` on strings, `< <= > >=` on ints and strings, `== !=`, `! && ||` and `??`.";
+pub(crate) const OPERATOR: &str = "Write it with the operators a law reaches: `+ - * / %` on ints, `+` on strings, `< <= > >=` on ints, on strings and on two values of a class that declares `<=>`, `<=>` on ints and on those values, `== !=`, `! && ||` and `??`.";
 pub(crate) const CLASS_OPERATOR: &str = "Compare the values the objects hold, such as their properties.";
 pub(crate) const TEMPLATE: &str = "Join the strings with `+`.";
 pub(crate) const NESTED_ASSIGNMENT: &str =
