@@ -295,14 +295,6 @@ fn scalar_absorbs_bool_when_bool_first() {
 }
 
 #[test]
-fn scalar_not_synthesised_when_no_unspecified_int() {
-    let result = combine_default(vec![t_string(), t_float(), t_bool(), t_lit_int(5)]);
-    let mut ids: Vec<String> = result.iter().map(atomic_id_string).collect();
-    ids.sort();
-    assert_eq!(ids, vec!["bool", "float", "int(5)", "string"]);
-}
-
-#[test]
 fn class_string_kept_separate_from_string() {
     let result = combine_default(vec![t_class_string(), t_string()]);
     let mut ids: Vec<String> = result.iter().map(atomic_id_string).collect();

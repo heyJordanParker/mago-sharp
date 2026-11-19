@@ -31072,20 +31072,20 @@ fn a_method_whose_body_is_one_call_reading_each_slot_once_gives_an_inline_form()
 }
 
 /// ```php
-/// return \implode(', ', \Sharp\Internal\map($numbers, fn ($n) => $n * 2));
-/// return \implode(', ', \Sharp\ListMembers::map($numbers, transform: fn ($n) => $n * 2));
+/// return \array_sum(\Sharp\Internal\map($numbers, fn ($n) => $n * 2));
+/// return \array_sum(\Sharp\ListMembers::map($numbers, transform: fn ($n) => $n * 2));
 /// ```
 ///
-/// A `List`'s member whose type argument only a PHP docblock writes, as `implode`'s parameter gives `map`'s result,
-/// runs its form, which takes none, and its static method without them, as a plain PHP caller calls it.
+/// A `List`'s member whose type argument only a PHP docblock writes, as `array_sum`'s `array<numeric>` parameter gives
+/// `map`'s result, runs its form, which takes none, and its static method without them, as a plain PHP caller calls it.
 #[test]
 fn a_list_member_with_a_type_argument_php_sharp_cannot_write_passes_none() {
     let lowered = |call: &str| {
         let code = format!(
-            "namespace Sharp;\n\npublic static class Joined\n{{\n    public static string run(List<int> numbers) => global.implode(\", \", {call});\n}}\n"
+            "namespace Sharp;\n\npublic static class Summed\n{{\n    public static int|float run(List<int> numbers) => global.array_sum({call});\n}}\n"
         );
 
-        Lowered::named("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Joined.sharp", &code).body_of("run")
+        Lowered::named("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Summed.sharp", &code).body_of("run")
     };
 
     let inlined = lowered("numbers.map(n => n * 2)");
