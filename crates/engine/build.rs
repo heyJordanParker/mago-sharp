@@ -5,12 +5,13 @@ use std::path::PathBuf;
 
 /// Compiles the C shim against the installed engine's headers and links it with the engine's archives. A build that
 /// never links, as `cargo check` and `cargo clippy` are, compiles with no engine installed: the link directives name the
-/// archives either way, so only a link of mago needs them, and it fails naming the archive it can't find.
+/// archives either way, so only a link of mago needs them, and it fails naming the archive it can't find. The Rust
+/// functions the engine's ext/sharp calls come from the `sharp` crate, which mago links as a Rust library.
 fn main() {
     let engine = engine_folder();
     let include = engine.join("include/php");
     let library = engine.join("lib");
-    let archives = ["libphp.a", "libsharp.a", "system-libs"];
+    let archives = ["libphp.a", "system-libs"];
     let missing: Vec<&str> = archives.into_iter().filter(|archive| !library.join(archive).is_file()).collect();
 
     println!("cargo:rerun-if-env-changed=MAGO_ENGINE");
@@ -36,7 +37,6 @@ fn main() {
     }
 
     println!("cargo:rustc-link-lib=static=php");
-    println!("cargo:rustc-link-lib=static=sharp");
     // libphp.a holds every library the engine's extensions need, and system-libs names those the system provides.
     if let Ok(system) = std::fs::read_to_string(library.join("system-libs")) {
         for name in system.lines().filter(|line| !line.is_empty()) {

@@ -22,6 +22,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+// The engine's ext/sharp calls the native functions this Rust library defines, so mago links it.
+use sharp as _;
+
 mod value;
 
 pub use value::Value;

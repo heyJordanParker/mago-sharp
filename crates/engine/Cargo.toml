@@ -13,5 +13,8 @@ links = "php"
 [lints]
 workspace = true
 
+[dependencies]
+sharp = { workspace = true }
+
 [build-dependencies]
 cc = { workspace = true }

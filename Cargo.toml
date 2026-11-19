@@ -195,6 +195,7 @@ mago-converter = { path = "crates/converter", version = "0.6.39" }
 mago-sharp-lean = { path = "crates/sharp-lean", version = "0.6.39" }
 mago-build-id = { path = "crates/build-id", version = "0.6.39" }
 mago-engine = { path = "crates/engine", version = "0.6.39" }
+sharp = { path = "../../ext/sharp" }
 tracing = { version = "0.1.40" }
 foldhash = "0.2"
 serde_json = { version = "1.0.138" }
