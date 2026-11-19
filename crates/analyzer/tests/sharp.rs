@@ -31264,21 +31264,21 @@ fn a_write_before_a_lazy_object_loads_goes_through_its_field() {
     assert_eq!(messages(preset, &[row, a, b, c, d, e, f, g]), ["Method `Property.setBeforeLoad` does not exist."]);
 }
 
-/// Spec sections 25 and 29: `defaultValue()` runs the default it reads, so it has the effects of every default the
-/// program declares that is not constant, and no other. A constant default runs no code, so with only constant ones a
-/// method held to `uses Database, Environment` reads a parameter's, a property's and a field's default. A default that
-/// creates a `Stamp`, whose constructor has the effect `Clock`, gives each read of its kind `Clock`. A plain PHP
-/// parameter's default that creates an object runs code no `uses` names, so while the program declares one a parameter's
-/// read may have every effect, and a property's and a field's reads keep none.
+/// Spec sections 25 and 29: `Parameter.defaultValue()` reads only a default that runs no code, and the engine refuses
+/// any other, so it and `hasConstantDefault` are pure whatever defaults the program declares, a `new Stamp()` whose
+/// constructor has the effect `Clock` and a plain PHP `new` included. `Property.defaultValue()` and
+/// `Field.defaultValue()` run the initial value they read, so they have the effects of every initial value the program
+/// declares that is not constant: with only constant ones a method held to `uses none` reads one, and
+/// an initial value that creates a `Stamp` gives each read `Clock`.
 #[test]
-fn a_default_value_read_has_the_effects_of_the_defaults_it_can_run() {
+fn a_parameter_default_read_is_pure_and_an_initial_value_read_has_the_effects_it_can_run() {
     let ledger = (
         "app/Shop/Ledger.sharp",
-        "namespace App.Shop;\n\npublic interface Ledger\n{\n    bool check() uses Database, Environment;\n}\n",
+        "namespace App.Shop;\n\npublic interface Ledger\n{\n    bool check() uses none;\n}\n",
     );
     let parameter = (
         "app/Shop/ParameterRead.sharp",
-        "namespace App.Shop;\n\npublic class ParameterRead : Ledger\n{\n    public bool check() => typeof(ParameterRead).methods()[1].parameters()[0].defaultValue() is int;\n\n    public int scaled(int by = 2, Status? reason = null, List<int> steps = [], Status status = Status.Open) => by;\n}\n",
+        "namespace App.Shop;\n\npublic class ParameterRead : Ledger\n{\n    public bool check() => typeof(ParameterRead).methods()[1].parameters()[0].hasConstantDefault\n        && typeof(ParameterRead).methods()[1].parameters()[0].defaultValue() is int;\n\n    public int scaled(int by = 2, Status? reason = null, List<int> steps = [], Status status = Status.Open) => by;\n}\n",
     );
     let property = (
         "app/Shop/PropertyRead.sharp",
@@ -31319,25 +31319,15 @@ fn a_default_value_read_has_the_effects_of_the_defaults_it_can_run() {
         assert_eq!(issues(reader, &[ledger, status, a, b, c, d, e, f, g]), Vec::<String>::new());
     }
     assert_eq!(effect_issues(&with(&[])), Vec::<String>::new());
-    assert_eq!(
-        effect_issues(&with(&[stamp, stamped_call, NOW, CLOCK_STUB])),
-        [
-            "app/Shop/ParameterRead.sharp:5:28 incompatible-effects: `ParameterRead.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database, Environment` on `Ledger.check` cannot accept it."
-        ]
-    );
+    assert_eq!(effect_issues(&with(&[stamp, stamped_call, NOW, CLOCK_STUB])), Vec::<String>::new());
     assert_eq!(
         effect_issues(&with(&[stamp, stamped_value, NOW, CLOCK_STUB])),
         [
-            "app/Shop/PropertyRead.sharp:7:28 incompatible-effects: `PropertyRead.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database, Environment` on `Ledger.check` cannot accept it.",
-            "app/Shop/FieldRead.sharp:7:47 incompatible-effects: `FieldRead.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses Database, Environment` on `Ledger.check` cannot accept it.",
+            "app/Shop/PropertyRead.sharp:7:28 incompatible-effects: `PropertyRead.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses none` on `Ledger.check` cannot accept it.",
+            "app/Shop/FieldRead.sharp:7:47 incompatible-effects: `FieldRead.check` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so `uses none` on `Ledger.check` cannot accept it.",
         ]
     );
-    assert_eq!(
-        effect_issues(&with(&[plain_default])),
-        [
-            "app/Shop/ParameterRead.sharp:5:28 incompatible-effects: `ParameterRead.check` reaches `Parameter.defaultValue`, which may have every effect, so `uses Database, Environment` on `Ledger.check` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects."
-        ]
-    );
+    assert_eq!(effect_issues(&with(&[plain_default])), Vec::<String>::new());
 }
 
 /// Spec sections 7 and 29: a default runs each time a call leaves its argument out, so the call has the default's

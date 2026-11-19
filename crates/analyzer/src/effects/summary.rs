@@ -17,7 +17,6 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_names::CREATES_ATTRIBUTES;
-use mago_names::RUNS_DEFAULTS;
 use mago_names::RUNS_INITIAL_VALUES;
 use mago_names::binding::Binding;
 use mago_names::binding::Local;
@@ -1015,7 +1014,7 @@ where
                 } => {
                     if type_arguments
                         .is_some_and(|written| self.creates_attributes(declaring_class, method_name, written))
-                        || self.runs_defaults(declaring_class, method_name, span)
+                        || self.runs_initial_values(declaring_class, method_name, span)
                     {
                         continue;
                     }
@@ -1069,37 +1068,25 @@ where
     }
 
     /// Records the call at `span` of `method` of `class` as calls of the code it runs, when the standard library marks
-    /// it as running a parameter's default, `RunsDefaults`, as `Parameter.defaultValue()`, or a property's initial
-    /// value, `RunsInitialValues`, as `Property.defaultValue()` and `Field.defaultValue()`: it reaches every one the
-    /// program declares that is not constant, spec section 29, and a constant one runs no code. A plain PHP default
-    /// that is not constant runs code no summary records, so then the call stays the method's own, which may have
-    /// every effect. Gives whether it recorded the call.
-    fn runs_defaults(&mut self, class: Word, method: Word, span: Span) -> bool {
+    /// it as running a property's initial value, `RunsInitialValues`, as `Property.defaultValue()` and
+    /// `Field.defaultValue()`: it reaches every one the program declares that is not constant, spec section 29, and a
+    /// constant one runs no code. Every initial value that runs code is in a `.sharp` file, since PHP takes only a
+    /// constant expression for a property. Gives whether it recorded the call.
+    fn runs_initial_values(&mut self, class: Word, method: Word, span: Span) -> bool {
         let codebase = self.codebase();
-        let marked = |mark: &str| {
-            codebase.get_method(class, method).is_some_and(|marked| marked.has_attribute(codebase, word(mark)))
-        };
-        let mut callees = Vec::new();
-        if marked(RUNS_DEFAULTS) {
-            let methods = codebase.function_likes.iter().filter(|(_, metadata)| metadata.kind.is_method());
-            for (&(class, method), metadata) in methods {
-                for parameter in metadata.parameters.iter().filter(|parameter| parameter.flags.default_runs_code()) {
-                    if !metadata.flags.is_sharp() {
-                        return false;
-                    }
-                    callees.push(Body::Default(class, method, parameter.get_name().0));
-                }
-            }
-        } else if marked(RUNS_INITIAL_VALUES) {
-            for class_like in codebase.class_likes.values().filter(|class_like| class_like.flags.is_sharp()) {
-                for (property, metadata) in &class_like.properties {
-                    if metadata.flags.has_default() {
-                        callees.push(Body::InitialValue(class_like.name, *property));
-                    }
-                }
-            }
-        } else {
+        if !codebase
+            .get_method(class, method)
+            .is_some_and(|marked| marked.has_attribute(codebase, word(RUNS_INITIAL_VALUES)))
+        {
             return false;
+        }
+        let mut callees = Vec::new();
+        for class_like in codebase.class_likes.values().filter(|class_like| class_like.flags.is_sharp()) {
+            for (property, metadata) in &class_like.properties {
+                if metadata.flags.has_default() {
+                    callees.push(Body::InitialValue(class_like.name, *property));
+                }
+            }
         }
 
         callees.sort_unstable();

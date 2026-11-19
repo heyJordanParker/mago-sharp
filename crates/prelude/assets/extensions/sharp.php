@@ -460,13 +460,6 @@ final class StartsListener {}
 final class CreatesAttributes {}
 
 /**
- * Marks a standard library method that runs the default of a parameter, as `Parameter.defaultValue()` does, so a call
- * has the effects of every parameter default the program declares that is not constant, and none for a constant one.
- */
-#[\Attribute(\Attribute::TARGET_METHOD)]
-final class RunsDefaults {}
-
-/**
  * Marks a standard library method that runs the initial value of a property, as `Property.defaultValue()` and
  * `Field.defaultValue()` do, so a call has the effects of every initial value the program declares that is not
  * constant, and none for a constant one.
@@ -836,6 +829,17 @@ function readField(?object $receiver, string $class, string $field): mixed {}
  * @throws \InvalidArgumentException
  */
 function writeField(?object $receiver, string $class, string $field, mixed $value): void {}
+
+/**
+ * The default of the parameter at `$position` of the method `$method` that `$class` declares, or of the accessor
+ * `$name::get` or `$name::set`, as `ReflectionParameter::getDefaultValue` evaluates it. A default that runs code, a
+ * `new`, a call or a closure, throws `ValueError` and runs none of it, and a parameter with no default throws
+ * `OutOfRangeException`. The standard library's `Parameter.defaultValue()` returns it.
+ *
+ * @throws \ValueError
+ * @throws \OutOfRangeException
+ */
+function defaultValue(string $class, string $method, int $position): mixed {}
 
 /**
  * The listeners of `$event`, one function per listener that takes the event, as `emit` gives them to the dispatcher.
