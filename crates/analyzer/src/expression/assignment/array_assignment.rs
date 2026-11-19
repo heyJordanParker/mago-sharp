@@ -241,11 +241,13 @@ where
     };
 
     // A PHP# local, parameter, `field` or property is the collections it is declared as, so an element written into it
-    // must fit the elements of each of them, and the place keeps its type. An `int` written where the elements are
-    // `float` is reported at the value, when every refusal is for that `int`, as `are_parts_contained_by` decides for
-    // a union's parts. A property's other mismatches are `property_assignment`'s to report. The index check reports a
-    // key whose PHP# type does not fit, and the place keeps its type there. It keeps it too where PHP stores a fitting
-    // key as another type, as `"5"` as `5`, because the lowering reads every key back as the declared key type.
+    // must fit the elements of each of them. A write that fits leaves the place its declared type, never a union with
+    // what it wrote. An `int` written where the elements are `float` is reported at the value, when every refusal is
+    // for that `int`, as `are_parts_contained_by` decides for a union's parts, and the place keeps its type. A
+    // property's other mismatches are `property_assignment`'s to report, from the type the write gives it. The index
+    // check reports a key whose PHP# type does not fit, and the place keeps its type there. It keeps it too where PHP
+    // stores a fitting key as another type, as `"5"` as `5`, because the lowering reads every key back as the declared
+    // key type.
     if context.dialect.is_sharp()
         && let Some(declared) = get_declared_collection(context, block_context, artifacts, root_array_expression)
     {
@@ -334,7 +336,7 @@ where
                 (None, None) => {}
             }
         }
-        if keeps_type {
+        if fits || keeps_type {
             root_array_type = declared;
         }
     }

@@ -174,11 +174,7 @@ fn resource_triples() {
 
 #[test]
 fn four_atoms() {
-    check(
-        "int,string,float,bool",
-        vec![t_int(), t_string(), t_float(), t_bool()],
-        &["scalar"], // generalisation triggered
-    );
+    check("int,string,float,bool", vec![t_int(), t_string(), t_float(), t_bool()], &["bool", "float", "int", "string"]);
     check("int,string,bool,null", vec![t_int(), t_string(), t_bool(), null()], &["bool", "int", "null", "string"]);
     check(
         "Foo,Bar,Baz,Qux",

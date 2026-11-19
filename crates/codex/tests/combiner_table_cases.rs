@@ -133,12 +133,12 @@ fn cross_family_cases() {
         (
             "int ∨ string ∨ float ∨ bool",
             vec![t_int(), t_string(), t_float(), t_bool()],
-            vec!["scalar"], // synthesised
+            vec!["bool", "float", "int", "string"],
         ),
         (
             "int ∨ string ∨ float ∨ bool ∨ null",
             vec![t_int(), t_string(), t_float(), t_bool(), null()],
-            vec!["null", "scalar"],
+            vec!["bool", "float", "int", "null", "string"],
         ),
         ("array-key ∨ int", vec![t_array_key(), t_int()], vec!["array-key"]),
         ("array-key ∨ string", vec![t_array_key(), t_string()], vec!["array-key"]),

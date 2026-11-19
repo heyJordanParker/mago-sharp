@@ -295,13 +295,6 @@ fn scalar_absorbs_bool_when_bool_first() {
 }
 
 #[test]
-fn scalar_synthesised_from_string_float_bool_int() {
-    let result = combine_default(vec![t_string(), t_float(), t_bool(), t_int()]);
-    assert_eq!(result.len(), 1);
-    assert_eq!(atomic_id_string(&result[0]), "scalar");
-}
-
-#[test]
 fn scalar_not_synthesised_when_no_unspecified_int() {
     let result = combine_default(vec![t_string(), t_float(), t_bool(), t_lit_int(5)]);
     let mut ids: Vec<String> = result.iter().map(atomic_id_string).collect();

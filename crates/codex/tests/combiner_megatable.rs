@@ -237,30 +237,3 @@ fn cross_family_megatable() {
     expect("array{}∨object", vec![t_empty_array(), t_object_any()], &["array{}", "object"]);
     expect("list∨object", vec![t_list(u(t_int()), false), t_object_any()], &["list<int>", "object"]);
 }
-
-#[test]
-fn scalar_synthesis_megatable() {
-    expect("int∨string∨float∨bool", vec![t_int(), t_string(), t_float(), t_bool()], &["scalar"]);
-    expect(
-        "int∨string∨float∨true (no bool synthesis without false)",
-        vec![t_int(), t_string(), t_float(), t_true()],
-        &["float", "int", "string", "true"],
-    );
-    expect(
-        "int∨string∨float∨false",
-        vec![t_int(), t_string(), t_float(), t_false()],
-        &["false", "float", "int", "string"],
-    );
-    expect(
-        "int∨string∨float∨true∨false (bool synthesised → scalar)",
-        vec![t_int(), t_string(), t_float(), t_true(), t_false()],
-        &["scalar"],
-    );
-    expect("int∨string∨float∨bool∨null", vec![t_int(), t_string(), t_float(), t_bool(), null()], &["null", "scalar"]);
-    expect("int∨string∨bool", vec![t_int(), t_string(), t_bool()], &["bool", "int", "string"]);
-    expect(
-        "lit_int∨string∨float∨bool",
-        vec![t_lit_int(5), t_string(), t_float(), t_bool()],
-        &["bool", "float", "int(5)", "string"],
-    );
-}

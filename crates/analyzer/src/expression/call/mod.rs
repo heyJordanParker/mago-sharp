@@ -373,7 +373,6 @@ where
 
     let mut resulting_type = None;
     for target in invocation_targets {
-        let target = with_extern_signature(context, target);
         if let InvocationTarget::FunctionLike { metadata, .. } = &target {
             let name = metadata.name;
             match true {
@@ -1080,35 +1079,6 @@ pub(crate) fn report_missing_function<A>(
             .with_note(format!("This often means the {kind_str} is misspelled, or not defined or autoloaded."))
             .with_help(format!("Check the spelling of `{name_str}`{place}.")),
     );
-}
-
-/// Spec section 23: a PHP# call of a plain PHP method or function whose `extern` line states its signature takes the
-/// line's parameters and gives its return type. Plain PHP's own calls keep the declaration's.
-fn with_extern_signature<'ctx, A>(
-    context: &Context<'ctx, '_, A>,
-    target: InvocationTarget<'ctx>,
-) -> InvocationTarget<'ctx>
-where
-    A: Arena,
-{
-    match target {
-        InvocationTarget::FunctionLike {
-            identifier,
-            metadata,
-            inferred_return_type,
-            effective_signature,
-            method_context,
-            span,
-        } if context.dialect.is_sharp() && !metadata.flags.is_sharp() => InvocationTarget::FunctionLike {
-            identifier,
-            metadata: context.codebase.get_extern_signature(&identifier).unwrap_or(metadata),
-            inferred_return_type,
-            effective_signature,
-            method_context,
-            span,
-        },
-        target => target,
-    }
 }
 
 fn get_function_like_target_inner<'ctx, A>(

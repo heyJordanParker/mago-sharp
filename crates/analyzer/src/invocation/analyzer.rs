@@ -333,6 +333,17 @@ pub fn analyze_invocation<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    // Spec section 23: a PHP# call of a plain PHP function, method or constructor whose `extern` line states its
+    // signature takes the line's parameters, each function type with the effects its `uses` lists, and gives the line's
+    // return type. Plain PHP's own calls keep the declaration's.
+    if context.dialect.is_sharp()
+        && let InvocationTarget::FunctionLike { identifier, metadata, .. } = &mut invocation.target
+        && !metadata.flags.is_sharp()
+        && let Some(stated) = context.codebase.get_extern_signature(identifier)
+    {
+        *metadata = stated;
+    }
+
     if context.external_analysis_session.is_some()
         && !invocation.target.has_effective_signature()
         && let Some(identifier) = invocation.target.get_function_like_identifier().copied()

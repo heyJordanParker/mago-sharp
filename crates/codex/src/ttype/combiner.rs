@@ -344,19 +344,6 @@ pub fn combine(types: Vec<TAtomic>, codebase: &CodebaseMetadata, options: Combin
 
     new_types.extend(combination.literal_strings.into_iter().map(|s| TAtomic::Scalar(TScalar::literal_string(s))));
 
-    if combination.value_types.contains_key(&*ATOM_STRING)
-        && combination.value_types.contains_key(&*ATOM_FLOAT)
-        && combination.value_types.contains_key(&*ATOM_BOOL)
-        && combination.integers.iter().any(super::atomic::scalar::int::TInteger::is_unspecified)
-    {
-        combination.integers.clear();
-        combination.value_types.remove(&*ATOM_STRING);
-        combination.value_types.remove(&*ATOM_FLOAT);
-        combination.value_types.remove(&*ATOM_BOOL);
-
-        new_types.push(TAtomic::Scalar(TScalar::Generic));
-    }
-
     new_types.extend(TInteger::combine(combination.integers));
     new_types.extend(combination.literal_floats.into_iter().map(|f| TAtomic::Scalar(TScalar::literal_float(f.into()))));
 
@@ -1689,22 +1676,6 @@ mod tests {
     use crate::ttype::atomic::callable::TCallableSignature;
     use crate::ttype::atomic::callable::parameter::TCallableParameter;
     use crate::ttype::atomic::scalar::TScalar;
-
-    #[test]
-    fn test_combine_scalars() {
-        let types = vec![
-            TAtomic::Scalar(TScalar::string()),
-            TAtomic::Scalar(TScalar::int()),
-            TAtomic::Scalar(TScalar::float()),
-            TAtomic::Scalar(TScalar::bool()),
-        ];
-
-        let combined =
-            combine(types, &CodebaseMetadata::default(), CombinerOptions::default().with_overwrite_empty_array());
-
-        assert_eq!(combined.len(), 1);
-        assert!(matches!(combined[0], TAtomic::Scalar(TScalar::Generic)));
-    }
 
     #[test]
     fn test_combine_boolean_lists() {
