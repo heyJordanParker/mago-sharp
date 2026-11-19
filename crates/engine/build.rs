@@ -10,12 +10,12 @@ fn main() {
     let engine = engine_folder();
     let include = engine.join("include/php");
     let library = engine.join("lib");
-    let missing: Vec<&str> =
-        ["libphp.a", "libsharp.a", "system-libs"].into_iter().filter(|archive| !library.join(archive).is_file()).collect();
+    let archives = ["libphp.a", "libsharp.a", "system-libs"];
+    let missing: Vec<&str> = archives.into_iter().filter(|archive| !library.join(archive).is_file()).collect();
 
     println!("cargo:rerun-if-env-changed=MAGO_ENGINE");
     println!("cargo:rerun-if-changed=src/engine.c");
-    for archive in ["libphp.a", "libsharp.a", "system-libs"] {
+    for archive in archives {
         println!("cargo:rerun-if-changed={}", library.join(archive).display());
     }
     println!("cargo:rustc-link-search=native={}", library.display());
