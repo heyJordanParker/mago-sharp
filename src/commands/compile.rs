@@ -1101,9 +1101,14 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
             return finish(record, &record_path, outcome, &database, Vec::new(), configuration, color_choice);
         }
     };
+    let package_files: Vec<FileId> = database
+        .files()
+        .filter(|file| included.contains(&file.id) && package_of(&file.name).is_some())
+        .map(|file| file.id)
+        .collect();
     let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator))
         .keeping_lowering_inputs()
-        .with_package_files(included)
+        .with_package_files(package_files)
         .scoped_to(is_lowered);
     server.analyze()?;
     // The compile hides what `mago analyze` hides: a host rule's error an `ignore` entry or the baseline targets.

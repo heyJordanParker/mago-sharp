@@ -201,8 +201,8 @@ pub struct IncrementalAnalysisService {
     /// the file from without analyzing it again.
     keeps_lowering_inputs: bool,
     node_analysis_files: Option<HashSet<FileId>>,
-    /// The packages' `.sharp` files a compile checks as files of the project, whose extension host issues each analysis
-    /// leaves out, as it leaves out those of every other file outside the configuration's `paths`.
+    /// The Composer packages' `.sharp` files a compile checks as files of the project, whose extension host issues each
+    /// analysis leaves out.
     package_files: HashSet<FileId>,
     /// Composer's autoload maps, which serve each analysis from scratch the plain PHP vendor files its files reach.
     autoloader: Option<Arc<Autoloader>>,
@@ -351,9 +351,8 @@ impl IncrementalAnalysisService {
         self
     }
 
-    /// Leaves the extension host issues of `package_files` out of each analysis: the packages' `.sharp` files a compile
-    /// checks as files of the project, which a host reports on no more than on any other file outside the
-    /// configuration's `paths`.
+    /// Leaves the extension host issues of `package_files` out of each analysis: the Composer packages' `.sharp` files a
+    /// compile checks as files of the project, which only the checker's own errors refuse.
     #[must_use]
     pub fn with_package_files(mut self, package_files: impl IntoIterator<Item = FileId>) -> Self {
         self.package_files = package_files.into_iter().collect();
@@ -2024,8 +2023,8 @@ impl IncrementalAnalysisService {
         let before = plugin_registry
             .run_external_before_analysis_hooks(codebase, external_session.as_deref())
             .map_err(mago_analyzer::error::AnalysisError::from)?;
-        // A host reports only on the project's own files, those under the configuration's `paths`: never on a file of
-        // `includes`, nor on a package's `.sharp` file a compile checks as a file of the project, which only the
+        // A host reports only on the project's own files: those under the configuration's `paths`, and each other
+        // `.sharp` file a compile checks as a file of the project, but never a Composer package's, which only the
         // checker's own errors refuse.
         let in_project = |issue: &Issue| {
             issue.primary_span().is_none_or(|span| {
