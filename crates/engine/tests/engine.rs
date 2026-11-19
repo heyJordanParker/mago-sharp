@@ -290,3 +290,26 @@ fn an_interpreter_reads_the_engine_variables_through_getenv_env_and_server() {
 
     assert_eq!(read, Ok(Value::List(vec![stage.clone(), stage.clone(), stage])));
 }
+
+#[test]
+fn a_shutdown_function_reads_the_engine_variables_as_its_thread_ends() {
+    let engine = Engine::new(vec![fixture("functions.php")], vec![(c"MAGO_ENGINE_STAGE".into(), c"shutdown".into())])
+        .expect("the engine starts");
+    let file = std::env::temp_dir().join(format!("mago-engine-shutdown-{}", std::process::id()));
+    let arguments =
+        [Value::String(b"MAGO_ENGINE_STAGE".to_vec()), Value::String(file.as_os_str().as_encoded_bytes().to_vec())];
+
+    let registered = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                engine.call("Mago\\Tests\\Engine\\write_variable_at_shutdown", &arguments, DEADLINE, &mut no_questions)
+            })
+            .join()
+            .unwrap()
+    });
+
+    assert_eq!(registered, Ok(Value::Null));
+    let written = std::fs::read_to_string(&file).expect("the shutdown function wrote its file as the thread ended");
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(written, "shutdown");
+}

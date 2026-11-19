@@ -83,6 +83,13 @@ function an_object(): object
     return new \stdClass();
 }
 
+function write_variable_at_shutdown(string $name, string $file): void
+{
+    register_shutdown_function(static function () use ($name, $file): void {
+        file_put_contents($file, (string) getenv($name));
+    });
+}
+
 function class_count_around_a_declaration(): array
 {
     $before = \Mago\Engine\classCount();

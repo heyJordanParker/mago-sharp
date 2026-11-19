@@ -106,19 +106,31 @@ unsafe extern "C" {
     fn engine_clear_interrupt(globals: *mut c_void);
 }
 
-/// One thread's interpreter: the engine whose scripts it ran, its id, and the engine globals a deadline interrupts.
+/// One thread's interpreter: the engine whose scripts it ran, its id, the engine globals a deadline interrupts, and the
+/// variables it reads, which it holds until it has stopped, so its shutdown functions read them as it stops.
 struct Interpreter {
     engine: u64,
     id: u64,
     globals: *mut c_void,
+    #[allow(
+        dead_code,
+        reason = "holding it keeps the variables `VARIABLES` points to until the interpreter has stopped"
+    )]
+    variables: Arc<[(CString, CString)]>,
 }
 
 impl Drop for Interpreter {
     fn drop(&mut self) {
         // SAFETY: an interpreter is dropped on the thread that started it, which no call runs on meanwhile.
         unsafe { engine_interpreter_stop() };
+        VARIABLES.set(NO_VARIABLES);
     }
 }
+
+/// The variables the calling thread's interpreter reads, which point into its own [`Interpreter::variables`].
+type Variables = *const [(CString, CString)];
+
+const NO_VARIABLES: Variables = &[];
 
 /// The calling thread's place in the engine: its interpreter while one runs, and whether the engine knows the thread.
 #[derive(Default)]
@@ -143,7 +155,8 @@ thread_local! {
     static THREAD: RefCell<Thread> = RefCell::default();
     static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static ANSWERING: Cell<Option<Answering>> = const { Cell::new(None) };
-    static VARIABLES: RefCell<Arc<[(CString, CString)]>> = RefCell::default();
+    /// A pointer with no destructor, so the engine reads it while the thread ends too, as its interpreter stops then.
+    static VARIABLES: Cell<Variables> = const { Cell::new(NO_VARIABLES) };
     static WATCHING: Cell<Option<(u64, Duration)>> = const { Cell::new(None) };
 }
 
@@ -239,7 +252,6 @@ impl Engine {
                 drop(thread.interpreter.take());
             }
 
-            VARIABLES.with_borrow_mut(|variables| *variables = Arc::clone(&self.variables));
             let watch = Watch::start(deadline);
             WATCHING.set(Some((watch.token, deadline)));
             let result = self.run(thread, function, arguments, answer, &watch);
@@ -332,7 +344,10 @@ impl Engine {
     fn start(&self, watch: &Watch) -> Result<Interpreter, EngineError> {
         // SAFETY: the thread runs no interpreter, so it starts one, and it stops it when the start fails.
         unsafe {
+            let variables = Arc::clone(&self.variables);
+            VARIABLES.set(Arc::as_ptr(&variables));
             if engine_interpreter_start() != 0 {
+                VARIABLES.set(NO_VARIABLES);
                 return Err(EngineError::Interpreter);
             }
 
@@ -340,6 +355,7 @@ impl Engine {
                 engine: self.id,
                 id: NEXT_INTERPRETER.fetch_add(1, Ordering::Relaxed),
                 globals: engine_executor_globals(),
+                variables,
             };
             watch.arm(interpreter.globals);
             for script in &self.scripts {
@@ -424,9 +440,9 @@ unsafe extern "C" fn mago_engine_output(bytes: *const c_char, length: usize) {
 unsafe extern "C" fn mago_engine_variable(name: *const c_char, length: usize) -> *const c_char {
     // SAFETY: the engine gives `length` readable bytes.
     let name = unsafe { std::slice::from_raw_parts(name.cast::<u8>(), length) };
-    VARIABLES.with_borrow(|variables| {
-        variables.iter().find(|(set, _)| set.as_bytes() == name).map_or(std::ptr::null(), |(_, value)| value.as_ptr())
-    })
+    // SAFETY: the engine asks while the calling thread's interpreter runs, which holds the variables until it stops.
+    let variables = unsafe { &*VARIABLES.get() };
+    variables.iter().find(|(set, _)| set.as_bytes() == name).map_or(std::ptr::null(), |(_, value)| value.as_ptr())
 }
 
 /// Gives the name and value of the environment variable at `index` that the calling thread's engine sets, and returns
@@ -441,17 +457,17 @@ unsafe extern "C" fn mago_engine_variable_at(
     name: *mut *const c_char,
     value: *mut *const c_char,
 ) -> bool {
-    VARIABLES.with_borrow(|variables| {
-        let Some((set, held)) = variables.get(index) else {
-            return false;
-        };
-        // SAFETY: the engine gives a writable pointer for the name.
-        unsafe { *name = CStr::as_ptr(set) };
-        // SAFETY: the engine gives a writable pointer for the value.
-        unsafe { *value = CStr::as_ptr(held) };
+    // SAFETY: the engine asks while the calling thread's interpreter runs, which holds the variables until it stops.
+    let variables = unsafe { &*VARIABLES.get() };
+    let Some((set, held)) = variables.get(index) else {
+        return false;
+    };
+    // SAFETY: the engine gives a writable pointer for the name.
+    unsafe { *name = CStr::as_ptr(set) };
+    // SAFETY: the engine gives a writable pointer for the value.
+    unsafe { *value = CStr::as_ptr(held) };
 
-        true
-    })
+    true
 }
 
 /// One call's deadline, which the deadlines thread enforces by setting the interpreter's timeout flag and VM
