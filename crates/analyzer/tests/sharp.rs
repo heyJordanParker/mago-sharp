@@ -977,6 +977,34 @@ fn a_marked_attribute_on_a_class_or_a_member_counts_it_as_used_and_the_mark_goes
     );
 }
 
+/// Spec section 5: `[DynamicallyAccessed]` marks an attribute class, so that the members and classes carrying the
+/// attribute count as used. On a class that is no attribute class, as the struct `DomainRecord`, it would mark nothing,
+/// so it is a compile error that names the fix. On an attribute class it compiles, and a struct that carries that
+/// attribute has no too-wide member.
+#[test]
+fn the_dynamically_accessed_mark_goes_on_an_attribute_class_only() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let domain_record = "namespace App.Shop;\n\n[DynamicallyAccessed]\npublic struct DomainRecord\n{\n    public DomainRecord(public string value { get; }) { }\n}\n";
+    assert_eq!(
+        refusals(("src/App/Shop/DomainRecord.sharp", domain_record), &[marker]),
+        [
+            "3:2 invalid-attribute-target `[DynamicallyAccessed]` marks an attribute class, and `DomainRecord` is not one. Mark the attribute that `DomainRecord` carries. | "
+        ]
+    );
+
+    let record =
+        "namespace App.Shop;\n\nimport Attribute;\n\n[DynamicallyAccessed, Attribute]\npublic class Record\n{\n}\n";
+    let carried = "namespace App.Web;\n\nimport App.Shop.Record;\n\n[Record]\npublic struct Carried\n{\n    public Carried(public string value { get; }) { }\n}\n";
+    assert_eq!(refusals(("src/App/Shop/Record.sharp", record), &[marker]), Vec::<String>::new());
+    assert_eq!(
+        too_wide(&[marker, ("src/App/Shop/Record.sharp", record), ("src/App/Web/Carried.sharp", carried)]),
+        Vec::<String>::new()
+    );
+}
+
 /// Spec sections 5 and 23: plain PHP calls an `[Export]` method through the global function it declares, which the
 /// checker never sees, so the method never warns. The other marks say nothing about who reaches their member, so an
 /// `[Import]` method and a `[Key]` property warn as members without them do. An `override` and an `internal` member
