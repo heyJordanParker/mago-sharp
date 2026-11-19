@@ -4877,6 +4877,159 @@ fn a_law_that_calls_an_interface_method_is_refused() {
     }
 }
 
+/// `app/Shop/OrderStatus.sharp`, a sealed family of the states `Pending` and `Paid`, whose `Pending` states `laws`.
+fn order_states(laws: &str) -> tempfile::TempDir {
+    lawful_project(&[
+        ("app/Shop/OrderStatus.sharp", "namespace App.Shop;\n\npublic sealed interface OrderStatus\n{\n}\n"),
+        (
+            "app/Shop/Paid.sharp",
+            "namespace App.Shop;\n\npublic class Paid : OrderStatus\n{\n    public Paid(public int paidAt { get; }) { }\n}\n",
+        ),
+        (
+            "app/Shop/Pending.sharp",
+            &format!(
+                "namespace App.Shop;\n\npublic class Pending : OrderStatus\n{{\n    public static Pending initial() => new Pending();\n    public static OrderStatus start() => new Pending();\n    public Paid pay(int at) => new Paid(at);\n    public OrderStatus settle(int at) => new Paid(at);\n\n    {laws}\n}}\n"
+            ),
+        ),
+    ])
+}
+
+/// Spec section 28: a law reads a sealed family as the closed set of its implementers, so a type test over it, as an
+/// `is` or a `match`, is a test of which implementer a value is, and an implementer's get-only property reads in the
+/// branch the test names it in. A false claim of which state a move enters is not proven, and a test of a class against
+/// another class is the checker's own error before any law runs.
+#[test]
+fn compile_proves_a_law_over_a_sealed_family_s_type_tests_and_its_states_data() {
+    let directory = order_states(
+        "law startsPending(int unused) => Pending.initial() is Pending && Pending.start() is Pending;\n    law payKeepsTime(Pending p, int at) => p.pay(at).paidAt == at;\n    law settleKeepsTime(Pending p, int at) => p.settle(at) is Paid paid ? paid.paidAt == at : false;\n    law settleIsNoLongerPending(Pending p, int at) => match (p.settle(at)) {\n        Pending pending => false,\n        Paid paid => paid.paidAt == at,\n    };",
+    );
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shop/Pending.sharp").exists());
+    assert_eq!(source_lean_files(root), Vec::<PathBuf>::new());
+
+    let directory = order_states("law startIsPaid(int unused) => Pending.start() is Paid;");
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: law startIsPaid is not proven\n = still to show: Pending.start() is Paid\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+
+    let directory = order_states("law startsPaid(int unused) => Pending.initial() is Paid;");
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "app/Shop/Pending.sharp:10:56: error[impossible-type-comparison]: This pattern never matches the value it tests.\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// Spec section 28: a move whose `?:`, `match` or `??` gives one state in a branch and another in the next gives a value
+/// of the sealed interface, an enum's case among them, and a law tells its states apart. A state's property reads where
+/// a test narrowed the value to it, and in its own methods.
+#[test]
+fn compile_proves_a_law_over_moves_whose_branches_give_different_states() {
+    let directory = lawful_project(&[
+        ("app/Shop/Status.sharp", "namespace App.Shop;\n\npublic sealed interface Status\n{\n}\n"),
+        (
+            "app/Shop/Open.sharp",
+            "namespace App.Shop;\n\npublic enum Open : Status\n{\n    case Fresh;\n    case Reopened(int times);\n}\n",
+        ),
+        (
+            "app/Shop/Closed.sharp",
+            "namespace App.Shop;\n\npublic class Closed : Status\n{\n    public Closed(public int at { get; }) { }\n\n    public static Status close(Status status, int at) => status is Open ? new Closed(at) : status;\n    public static Status reopen(Status status) => match (status) {\n        Closed closed => Open.Reopened(closed.at),\n        Open open => open,\n    };\n    public static Status settled(Closed? closed) => closed ?? Open.Fresh;\n    public static int closedAt(Status status) => status is Closed ? status.at : 0;\n    public Closed same() => new Closed(this.at);\n\n    law closeCloses(Status status, int at) => Closed.close(status, at) is Closed;\n    law reopenCounts(int at) => Closed.reopen(new Closed(at)) is Open.Reopened(int times) ? times == at : false;\n    law freshStaysFresh(int at) => Closed.reopen(Open.Fresh) is Open;\n    law unsettledIsFresh(int unused) => Closed.settled(null) is Open;\n    law closeKeepsTime(int at) => Closed.closedAt(Closed.close(Open.Fresh, at)) == at;\n    law sameKeepsTime(Closed closed) => closed.same().at == closed.at;\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shop/Closed.sharp").exists());
+}
+
+/// Spec section 28: a law over a sealed interface that no class implements proves, as one over any other interface's
+/// value does, though the interface has no implementer to tell apart.
+#[test]
+fn compile_proves_a_law_over_a_sealed_interface_no_class_implements() {
+    let directory = lawful_project(&[
+        ("app/Shop/Nothing.sharp", "namespace App.Shop;\n\npublic sealed interface Nothing\n{\n}\n"),
+        (
+            "app/Shop/Uses.sharp",
+            "namespace App.Shop;\n\npublic static class Uses\n{\n    public static bool keep(Nothing value) => true;\n\n    law keeps(Nothing value) => Uses.keep(value);\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shop/Uses.sharp").exists());
+}
+
+/// Spec section 28: a law reads the fields of an enum's data case, in the branch a pattern or a type test names the
+/// case in, as the constructor's fields. A false claim over a field is not proven.
+#[test]
+fn compile_proves_a_law_over_the_fields_of_an_enum_s_data_case() {
+    let result = |laws: &str| {
+        format!(
+            "namespace App.Shop;\n\npublic enum PaymentResult\n{{\n    case Paid(int amount);\n    case Declined(string reason);\n\n    public static PaymentResult charge(int amount) => amount > 0 ? PaymentResult.Paid(amount) : PaymentResult.Declined(\"empty\");\n\n    {laws}\n}}\n"
+        )
+    };
+    let directory = lawful_project(&[(
+        "app/Shop/PaymentResult.sharp",
+        &result(
+            "law chargeKeepsAmount(int amount) => PaymentResult.charge(amount) is PaymentResult.Paid paid ? paid.amount == amount : amount <= 0;\n    law declinedGivesReason(int amount) => match (PaymentResult.charge(amount)) {\n        PaymentResult.Paid(int paid) => paid > 0,\n        PaymentResult.Declined declined => declined.reason == \"empty\",\n    };",
+        ),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shop/PaymentResult.sharp").exists());
+
+    let directory = lawful_project(&[(
+        "app/Shop/PaymentResult.sharp",
+        &result(
+            "law chargeDoubles(int amount) => PaymentResult.charge(amount) is PaymentResult.Paid paid ? paid.amount == amount * 2 : true;",
+        ),
+    )]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law chargeDoubles is not proven\n"),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// A type test over an interface that is not sealed is refused: its implementers are open, so a law cannot tell them apart.
+#[test]
+fn a_law_reaching_a_type_test_over_an_open_interface_is_refused() {
+    assert_unmodeled_beside(
+        "namespace App.Shared;\n\npublic class Shape : Figure\n{\n    public static bool isShape(Figure figure) => figure is Shape;\n\n    law shapeIsShape(Shape s) => Shape.isShape(s);\n}\n",
+        &[("app/Shared/Figure.sharp", "namespace App.Shared;\n\npublic interface Figure\n{\n}\n")],
+        "Law shapeIsShape reaches a type test of the interface Figure in Shape.isShape. A law tells apart only the implementers of a sealed interface. Declare `Figure` sealed.",
+    );
+}
+
 /// Spec section 28's `app/Tenant/Store/Module.sharp`, whose law spans `Receipts` and `Refunds`.
 const STORE_MODULE: &str = "namespace App.Tenant.Store;\n\nmodule\n{\n    law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);\n}\n";
 

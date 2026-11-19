@@ -267,7 +267,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
                 span: r#match.expression.span(),
                 what: format!("a match on `{}`", self.source(r#match.expression.span())),
                 place: self.place.clone(),
-                reason: issues::LAW_MATCH,
+                reason: issues::LAW_MATCH.into(),
             });
             return;
         }

@@ -54,13 +54,16 @@ pub struct Reach {
     nullable_fields: HashSet<(Word, Word)>,
     /// The files each file's laws reach, its own included.
     files: HashMap<FileId, Vec<FileId>>,
+    /// The implementers of each reached sealed interface, by the interface's key, each by its full name, in name order.
+    implementers: HashMap<Word, Vec<Word>>,
 }
 
 impl Reach {
     /// Walks from each law of `codebase` along the signature and body edges of `references`. A law's body records its
     /// references under the law's own symbol, its class and its name as the class keys a method. A law reaches only
     /// what the members it reaches run, so the walk skips each [`CascadeEdge::Attribute`]: an attribute's constructor
-    /// never runs as part of them.
+    /// never runs as part of them. A sealed interface reaches each of its implementers, the closed set a law tells its
+    /// values apart by, spec section 20.1.
     #[must_use]
     pub fn new(codebase: &CodebaseMetadata, references: &SymbolReferences) -> Reach {
         let mut edges: HashMap<SymbolIdentifier, Vec<SymbolIdentifier>> = HashMap::default();
@@ -86,6 +89,19 @@ impl Reach {
                     pending.push((next.0, empty_word()));
                 } else if let Some(metadata) = codebase.get_class_like(next.0) {
                     pending.extend(metadata.properties.keys().map(|property| (next.0, *property)));
+                    if metadata.flags.is_sealed()
+                        && let Some(inheritors) = &metadata.permitted_inheritors
+                    {
+                        pending
+                            .extend(inheritors.iter().map(|inheritor| (codebase.class_key(*inheritor), empty_word())));
+                        let mut implementers: Vec<Word> = inheritors
+                            .iter()
+                            .filter_map(|inheritor| codebase.get_class_like(*inheritor))
+                            .map(|implementer| implementer.original_name)
+                            .collect();
+                        implementers.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+                        reach.implementers.insert(next.0, implementers);
+                    }
                 }
             }
 
@@ -172,6 +188,24 @@ impl Reach {
     /// What the analysis knows about the reached class `class`.
     pub(crate) fn class(&self, class: &[u8]) -> Option<ReachedClass> {
         self.classes.get(&self.class_key(class)).copied()
+    }
+
+    /// The implementers of the reached sealed interface `interface`, each by its full name, in name order. None for an
+    /// interface that is not sealed.
+    pub(crate) fn implementers(&self, interface: &[u8]) -> Option<&[Word]> {
+        self.implementers.get(&self.class_key(interface)).map(Vec::as_slice)
+    }
+
+    /// The full name of the reached sealed interface `class` implements, spec section 20.1, the first by name when it
+    /// implements several.
+    pub(crate) fn interface_of(&self, class: &[u8]) -> Option<Word> {
+        self.implementers
+            .iter()
+            .filter(|(_, implementers)| {
+                implementers.iter().any(|implementer| self.same_class(implementer.as_bytes(), class))
+            })
+            .filter_map(|(interface, _)| self.classes.get(interface).map(|reached| reached.name))
+            .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()))
     }
 
     /// Whether the names `left` and `right` name one class, by [`Reach::class_key`].

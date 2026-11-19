@@ -4,6 +4,8 @@
 //! effects run in the order PHP# runs them and every other term is pure. A branch that runs only on one side of a
 //! condition is a nested `do` block, so its effects run only there.
 
+use std::borrow::Cow;
+
 use foldhash::HashSet;
 use mago_analyzer::smaller::Path;
 use mago_analyzer::smaller::Smaller;
@@ -858,8 +860,9 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
-    /// The Lean constructor of the case of an enum `hint` names, when `atomic` is that enum.
-    pub(super) fn case(&self, hint: &Hint, atomic: &TAtomic) -> Option<String> {
+    /// The Lean constructor of the case of an enum `hint` names, when `atomic` is that enum or the sealed interface it
+    /// implements, and with it the interface's constructor that holds the enum's value, when it implements one.
+    pub(super) fn case(&mut self, hint: &Hint, atomic: &TAtomic) -> Option<(Option<String>, String)> {
         let Hint::Identifier(identifier) = hint else {
             return None;
         };
@@ -871,13 +874,43 @@ impl<'body, 'program> Body<'body, 'program> {
             TAtomic::Object(TObject::Enum(r#enum)) => r#enum.name.as_bytes(),
             _ => return None,
         };
-        if !self.reach.same_class(named, r#enum)
-            || self.checked.types().enum_case_class(word(r#enum), word(case)).is_none()
-        {
+        if !self.reach.same_class(named, r#enum) && !self.implements(r#enum, named) {
+            return None;
+        }
+        self.checked.types().enum_case_class(word(r#enum), word(case))?;
+        let held = self.sealed(r#enum).map(|(_, constructor)| constructor);
+
+        Some((held, names::member(&names::full_name(&self.reached_name(r#enum)), case)))
+    }
+
+    /// The Lean constructor of the sealed interface `atomic` is that holds a value of the implementer `hint` names,
+    /// spec section 20.1.
+    pub(super) fn implementer(&mut self, hint: &Hint, atomic: &TAtomic) -> Option<String> {
+        let (Hint::Identifier(identifier), TAtomic::Object(TObject::Named(interface))) = (hint, atomic) else {
+            return None;
+        };
+        let class = self.checked.names().get(identifier);
+        if !self.implements(class, interface.name.as_bytes()) {
             return None;
         }
 
-        Some(names::member(&names::full_name(&self.reached_name(r#enum)), case))
+        self.sealed(class).map(|(_, constructor)| constructor)
+    }
+
+    /// Whether `class` implements the sealed interface `interface`, as the Lean type it has.
+    fn implements(&self, class: &[u8], interface: &[u8]) -> bool {
+        self.reach.interface_of(class).is_some_and(|sealed| self.reach.same_class(sealed.as_bytes(), interface))
+    }
+
+    /// The name of the interface `atomic` is, when it is not sealed, so its implementers are open.
+    pub(super) fn open_interface(&self, atomic: &TAtomic) -> Option<String> {
+        let TAtomic::Object(TObject::Named(interface)) = atomic else {
+            return None;
+        };
+
+        (self.checked.types().class_declaration(interface.name).kind == DeclarationKind::Interface
+            && self.reach.implementers(interface.name.as_bytes()).is_none())
+        .then(|| names::short_name(interface.name.as_bytes()))
     }
 
     /// `translate` on `path`, a path into a branch of the code being translated.
@@ -1008,7 +1041,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 let mut constructor = vec![names::member(&lean, case)];
                 constructor.extend(arguments);
 
-                return format!("({})", constructor.join(" "));
+                return self.held(class, format!("({})", constructor.join(" ")));
             }
             let target = self.checked.types().call_target(expression);
             if target.kind != DeclarationKind::StaticMethod {
@@ -1340,8 +1373,9 @@ impl<'body, 'program> Body<'body, 'program> {
             parts.extend(arguments);
         }
         self.uses(class, &key, format!("new {}", names::short_name(&class_name)));
+        let made = self.bind(parts.join(" "));
 
-        self.bind(parts.join(" "))
+        self.held(class, made)
     }
 
     /// The terms of a call's arguments, or `None` when one cannot be translated. Each argument is passed by position,
@@ -1398,7 +1432,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 // Spec section 20: a plain case of an enum whose cases carry data is the constructor without fields.
                 DeclarationKind::EnumCase | DeclarationKind::CaseObject => {
                     self.uses(class, &lean, short);
-                    names::member(&lean, member.value)
+                    self.held(class, names::member(&lean, member.value))
                 }
                 DeclarationKind::Constant => {
                     let key = names::member(&lean, member.value);
@@ -1441,19 +1475,23 @@ impl<'body, 'program> Body<'body, 'program> {
     /// The read of `class`'s property `property` from `object`: a field of the object's structure, or a backed enum's
     /// `value`.
     fn field(&mut self, object: String, class: Word, property: Word, expression: &Expression) -> String {
-        // Spec section 20: a case that carries data is a constructor, whose fields Lean reads only by matching on it.
+        // Spec section 20: a case that carries data is a constructor, and a value of the case reads its field as the
+        // constructor's.
         if let Some(separator) = class.as_bytes().iter().rposition(|&byte| byte == b'\\')
             && let (r#enum, case) = (&class.as_bytes()[..separator], &class.as_bytes()[separator + 1..])
             && self.checked.types().enum_case_class(word(r#enum), word(case)).is_some()
         {
+            let enum_name = self.reached_name(r#enum);
             let place = format!(
                 "{}.{}.{}",
-                names::short_name(r#enum),
+                names::short_name(&enum_name),
                 String::from_utf8_lossy(case),
                 String::from_utf8_lossy(property.as_bytes())
             );
+            let key = names::member(&names::member(&names::full_name(&enum_name), case), property.as_bytes());
+            self.uses(r#enum, &key, place);
 
-            return self.unmodeled(expression.span(), format!("the field {place} of a case"), issues::CASE_FIELD);
+            return format!("({key} {object})");
         }
         let class_name = self.reached_name(class.as_bytes());
         let short = names::short_name(&class_name);
@@ -1476,8 +1514,19 @@ impl<'body, 'program> Body<'body, 'program> {
             return self.unmodeled(expression.span(), format!("the accessor of {place}"), issues::ACCESSOR);
         }
 
-        self.uses(class.as_bytes(), &names::full_name(&class_name), short);
-        let read = format!("{object}.{}", names::identifier(property.as_bytes()));
+        // Spec section 20.1: an implementer of a sealed interface is a value of the interface, and reads its property
+        // through the interface's accessor, as a data case reads its field.
+        let read = match self.sealed(class.as_bytes()) {
+            Some((_, constructor)) => {
+                let key = names::member(&constructor, property.as_bytes());
+                self.uses(class.as_bytes(), &key, place);
+                format!("({key} {object})")
+            }
+            None => {
+                self.uses(class.as_bytes(), &names::full_name(&class_name), short);
+                format!("{object}.{}", names::identifier(property.as_bytes()))
+            }
+        };
         if self.reach.is_nullable_field(class.as_bytes(), property.as_bytes())
             && !self.checked.types().expression_type(expression).is_nullable()
         {
@@ -1593,8 +1642,18 @@ impl<'body, 'program> Body<'body, 'program> {
         self.unmodeled(expression.span(), format!("a call to the overridable method {place}"), issues::OVERRIDABLE)
     }
 
-    /// The Lean type of the class `class` a hint names.
+    /// The Lean type of the class `class` a hint names: the sealed interface it implements, spec section 20.1, as a
+    /// data case's is its enum, and else its own.
     pub(crate) fn class_type(&mut self, span: Span, class: &[u8]) -> String {
+        match self.sealed(class) {
+            Some((interface, _)) => interface,
+            None => self.own_type(span, class),
+        }
+    }
+
+    /// The Lean type the class-like `class` declares itself, which the constructor of a sealed interface it implements
+    /// holds.
+    pub(crate) fn own_type(&mut self, span: Span, class: &[u8]) -> String {
         if !self.is_translated_class(span, class) {
             return "default".to_owned();
         }
@@ -1604,6 +1663,26 @@ impl<'body, 'program> Body<'body, 'program> {
         self.uses(class, &lean, names::short_name(&class_name));
 
         lean
+    }
+
+    /// The Lean type of the sealed interface `class` implements, spec section 20.1, and the constructor that holds a
+    /// value of `class`.
+    pub(crate) fn sealed(&mut self, class: &[u8]) -> Option<(String, String)> {
+        let interface = self.reach.interface_of(class)?;
+        let lean = names::full_name(interface.as_bytes());
+        self.uses(interface.as_bytes(), &lean, names::short_name(interface.as_bytes()));
+        let constructor = names::member(&lean, names::short_name(&self.reached_name(class)).as_bytes());
+
+        Some((lean, constructor))
+    }
+
+    /// `value`, a value of the class-like `class`'s own type, as a value of its Lean type: held by the constructor of
+    /// the sealed interface `class` implements.
+    pub(super) fn held(&mut self, class: &[u8], value: String) -> String {
+        match self.sealed(class) {
+            Some((_, constructor)) => format!("({constructor} {value})"),
+            None => value,
+        }
     }
 
     /// `class` as its declaration spells it.
@@ -1632,8 +1711,8 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// Records a construct the translation does not model, and returns a term that stands in for it. A declaration
     /// that holds one is never written to Lean, so the term is never read.
-    pub(crate) fn unmodeled(&mut self, span: Span, what: String, reason: &'static str) -> String {
-        self.unmodeled.push(Unmodeled { span, what, place: self.place.clone(), reason });
+    pub(crate) fn unmodeled(&mut self, span: Span, what: String, reason: impl Into<Cow<'static, str>>) -> String {
+        self.unmodeled.push(Unmodeled { span, what, place: self.place.clone(), reason: reason.into() });
 
         "default".to_owned()
     }

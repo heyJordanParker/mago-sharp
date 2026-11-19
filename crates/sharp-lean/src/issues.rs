@@ -64,14 +64,18 @@ pub(crate) const MEMBER_NAME: &str = "Name the member in the code.";
 pub(crate) const BODYLESS: &str = "A law reads a method's body, and this method has none it can read.";
 pub(crate) const ARGUMENT: &str = "Pass each argument by its position.";
 pub(crate) const DEFAULT_ARGUMENT: &str = "Pass every argument, the ones with a default value included.";
-pub(crate) const CASE_FIELD: &str =
-    "A law tells the cases of an enum apart, and reads none of the data a case carries.";
 pub(crate) const MEMBER: &str = "Read a property the class declares, or call one of its methods.";
 pub(crate) const RECEIVER: &str = "Call it on a value of a PHP# class, enum or interface.";
 pub(crate) const LAW_MATCH: &str =
     "Match a parameter of the law, a value a pattern of its body names, or a property of one.";
 pub(crate) const SELF_HOLDING: &str =
     "A law reasons only about a class whose properties never hold a value of the class itself.";
+
+/// Why a law cannot test which class a value of the interface `interface`, which is not sealed, is: its implementers
+/// are open.
+pub(crate) fn open_interface(interface: &str) -> String {
+    format!("A law tells apart only the implementers of a sealed interface. Declare `{interface}` sealed.")
+}
 
 /// A construct the translation does not model, which `law` reaches: on the construct when the law's file holds it, and
 /// else on the law, pointing to the construct.

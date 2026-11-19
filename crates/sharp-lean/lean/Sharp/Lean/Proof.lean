@@ -168,8 +168,9 @@ private def unfoldOnce (definition : Name) : TacticM Unit := do
   try evalTactic (← `(tactic| unfold $(mkIdent definition):ident)) catch _ => pure ()
 
 /-- The automatic steps that close a goal: `simp_all` with `definitions` and every fact in scope, then `omega` or `grind`
-on what is left, or `decide`. A case hypothesis keeps its `¬ x ≤ y` and its `¬ x < y`, so it still decides the `if`
-the definition tests. -/
+on what is left, or `decide`, or the same steps on each case of each `if` and `match` left in the goal, as a `match` on
+the case of a value an `if` chose. A case hypothesis keeps its `¬ x ≤ y` and its `¬ x < y`, so it still decides the
+`if` the definition tests. -/
 private def auto (definitions : Array Name) : TacticM Unit := do
   let kept : Array SimpItem := #[⟨(← `(Lean.Parser.Tactic.simpErase| -Int64.not_le)).raw⟩,
     ⟨(← `(Lean.Parser.Tactic.simpErase| -Int.not_le)).raw⟩,
@@ -179,7 +180,9 @@ private def auto (definitions : Array Name) : TacticM Unit := do
   evalTactic (← `(tactic| first
     | ((try simp_all [$items,*])
        first | done | omega | grind)
-    | decide))
+    | decide
+    | ((try simp_all [$items,*])
+       (repeat' split) <;> (try simp_all [$items,*]) <;> first | done | omega | grind)))
 
 /-- Runs `steps`, the steps of one case, within half of its theorem's time budget, counted from where the case starts, so
 a case whose steps run out of it leaves the cases after it the rest of the theorem's. -/
@@ -260,13 +263,21 @@ private def report (index : TSyntax `num) (conditions : Array Ident) (outcome : 
   logError m!"{kind} {index.getNat} {goal.compress}"
   admitGoal (← getMainGoal)
 
-/-- The name of each value of the main goal whose type is an enum, as a PHP# enum or `bool` translates. -/
+/-- The name of each value of the main goal whose type is an enum, as a PHP# enum or `bool` translates, or an inductive
+type of the project's code that is no structure and holds no value of itself, as a sealed interface or an enum whose
+cases carry data translates. -/
 private def enumsInScope : TacticM (Array Name) := do
   (← getMainGoal).withContext do
+    let env ← getEnv
     let mut found := #[]
     for declaration in ← getLCtx do
       let .const type _ := declaration.type.getAppFn | continue
-      if !declaration.isImplementationDetail && (← isEnumType type) then found := found.push declaration.userName
+      let closed := isCode env type && !isStructure env type &&
+        match env.find? type with
+        | some (.inductInfo info) => !info.isRec
+        | _ => false
+      if !declaration.isImplementationDetail && ((← isEnumType type) || closed) then
+        found := found.push declaration.userName
     return found
 
 /-- The goal of each case of the enum values `enums` of the main goal, one for each way their cases combine, with the
@@ -287,8 +298,8 @@ private def enumCases (enums : Array Name) : TacticM (Array (MVarId × Array (Na
 /-- Proves a law without a body, whose case `index` is its whole claim: unfolds a recursive definition the claim reaches
 once, and every other one as `simp` rewrites, then runs the automatic steps. A claim over values the law writes out,
 as `Money.total([new Money(1, "EUR")])`, needs each recursion unfolded until it ends, so the steps then run with the
-recursive definitions as `simp` rewrites too. A claim over an enum the law takes, as `retry.backoff()[index]` over
-a `Retry`, reads what each case computes, so the steps then run on each case of each enum, as a body's `match` on each
+recursive definitions as `simp` rewrites too. A claim over an enum or a sealed interface the law takes, as
+`retry.backoff()[index]` over a `Retry`, reads what each case computes, so the steps then run on each case of each enum, as a body's `match` on each
 case would, and each case they leave open is reported on its own, with the case it is. -/
 syntax "sharp_prove " num " [" ident,* "]" : tactic
 

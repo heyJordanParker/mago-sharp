@@ -10,6 +10,8 @@ pub(crate) mod names;
 mod pattern;
 pub(crate) mod proof;
 
+use std::borrow::Cow;
+
 use mago_analyzer::smaller::Bound;
 use mago_analyzer::smaller::Smaller;
 use mago_analyzer::smaller::Step;
@@ -158,7 +160,7 @@ pub(crate) struct Unmodeled {
     pub(crate) what: String,
     /// The declaration that holds it, as messages name it: `Price.ratio`.
     pub(crate) place: String,
-    pub(crate) reason: &'static str,
+    pub(crate) reason: Cow<'static, str>,
 }
 
 /// Translates the laws of `checked` and every declaration in it that a law of the project reaches.
@@ -318,6 +320,25 @@ impl Translator<'_, '_> {
         lines.extend(self.coercions(&mut body, &lean, inheritance));
         self.declare(body, lean.clone(), name.span, lines.join("\n"), false);
 
+        // Spec section 20.1: an implementer of a sealed interface is a value of the interface, which reads each of its
+        // properties through the interface's accessor. Any other implementer gives the property's default, which no
+        // read sees, since the checker allows the read only where the value is the implementer.
+        for (field, r#type) in fields.iter().zip(&types) {
+            let mut body =
+                Body::new(self.checked, self.reach, full, format!("{short}.{}", String::from_utf8_lossy(field.name)));
+            let Some((interface, constructor)) = body.sealed(full) else {
+                break;
+            };
+            let key = names::member(&constructor, field.name);
+            let lines = [
+                format!("def {key} : {interface} → {type}"),
+                format!("  | {constructor} held => held.{}", names::identifier(field.name)),
+                "  | _ => default".to_owned(),
+            ];
+            self.translation.receivers.push((key.clone(), true));
+            self.declare(body, key, name.span, lines.join("\n"), true);
+        }
+
         self.constructor(full, &lean, &short, name.span, constructor, &fields, &types);
         self.members(full, &lean, &short, members);
     }
@@ -397,6 +418,7 @@ impl Translator<'_, '_> {
         let mut lines = vec![format!("inductive {lean} where")];
         let mut values = Vec::new();
         let mut cases = Vec::new();
+        let mut fields = Vec::new();
         for member in &r#enum.members {
             let ClassLikeMember::EnumCase(case) = member else {
                 continue;
@@ -414,9 +436,11 @@ impl Translator<'_, '_> {
                 // Spec section 20: a case that carries data is a constructor of its fields.
                 EnumCaseItem::Data(item) => {
                     let mut constructor = vec![format!("  | {}", names::identifier(name.value))];
-                    for field in &item.parameter_list.parameters {
+                    let count = item.parameter_list.parameters.len();
+                    for (place, field) in item.parameter_list.parameters.iter().enumerate() {
                         let r#type = field.hint.as_ref().map_or_else(|| "Unit".to_owned(), |hint| body.r#type(hint));
                         constructor.push(format!("({} : {type})", names::identifier(field.variable.name)));
+                        fields.push((name.value, field.variable.name, place, count, r#type));
                     }
                     lines.push(constructor.join(" "));
                 }
@@ -431,12 +455,36 @@ impl Translator<'_, '_> {
         lines.extend(self.coercions(&mut body, &lean, r#enum.inheritance.as_ref()));
         self.declare(body, lean.clone(), r#enum.name.span, lines.join("\n"), false);
 
+        // Spec section 20: a field of a case that carries data reads as the constructor's field, where a test named the
+        // case. Any other case gives the field's default, which no such read sees. The value of an enum that implements
+        // a sealed interface is the interface's, spec section 20.1.
+        for (case, field, place, count, r#type) in fields {
+            let key = names::member(&names::member(&lean, case), field);
+            let mut binders = vec!["_"; count];
+            binders[place] = "held";
+            let mut body =
+                Body::new(self.checked, self.reach, full, format!("{short}.{}", String::from_utf8_lossy(case)));
+            let domain = body.class_type(r#enum.name.span, full);
+            let pattern = body.held(full, format!("(.{} {})", names::identifier(case), binders.join(" ")));
+            let lines = [
+                format!("def {key} : {domain} → {type}"),
+                format!("  | {pattern} => held"),
+                "  | _ => default".to_owned(),
+            ];
+            self.translation.receivers.push((key.clone(), true));
+            self.declare(body, key, r#enum.name.span, lines.join("\n"), true);
+        }
+
         if let Some(backing) = &r#enum.backing_type_hint {
             let mut body = Body::new(self.checked, self.reach, full, format!("{short}.value"));
             let r#type = body.r#type(&backing.hint);
-            let mut lines = vec![format!("def {} : {lean} → {type}", names::member(&lean, b"value"))];
+            let domain = body.class_type(r#enum.name.span, full);
+            let mut lines = vec![format!("def {} : {domain} → {type}", names::member(&lean, b"value"))];
             for (case, value) in &values {
-                lines.push(format!("  | .{case} => {value}"));
+                lines.push(format!("  | {} => {value}", body.held(full, format!(".{case}"))));
+            }
+            if domain != lean {
+                lines.push("  | _ => default".to_owned());
             }
             self.translation.receivers.push((names::member(&lean, b"value"), true));
             self.declare(body, names::member(&lean, b"value"), r#enum.name.span, lines.join("\n"), true);
@@ -452,10 +500,11 @@ impl Translator<'_, '_> {
                 let class = body.class_type(r#enum.name.span, full);
                 let returns = if nullable { format!("(Option {class})") } else { class };
                 let parameter = format!("(value : {})", body.r#type(&backing.hint));
+                let cases: Vec<String> =
+                    values.iter().map(|(case, _)| body.held(full, format!("{lean}.{case}"))).collect();
                 let (mut lines, uses, unmodeled) = body.finish();
                 let mut chosen = if nullable { "pure none" } else { "throw Throwable.ValueError" }.to_owned();
-                for (case, value) in values.iter().rev() {
-                    let case = format!("{lean}.{case}");
+                for (case, (_, value)) in cases.into_iter().zip(&values).rev() {
                     let found = if nullable { format!("(some {case})") } else { case };
                     chosen = format!("if value == {value} then pure {found} else {chosen}");
                 }
@@ -474,6 +523,7 @@ impl Translator<'_, '_> {
         if self.reach.reaches(full, b"cases") {
             let mut body = Body::new(self.checked, self.reach, full, format!("{short}.cases"));
             let returns = format!("(List {})", body.class_type(r#enum.name.span, full));
+            let cases: Vec<String> = cases.into_iter().map(|case| body.held(full, case)).collect();
             let (mut lines, uses, unmodeled) = body.finish();
             lines.push(format!("return [{}]", cases.join(", ")));
             self.define(
@@ -491,6 +541,9 @@ impl Translator<'_, '_> {
 
     /// An interface as a type Lean knows nothing about, `Interface "App.Shop.Payment"`, so a proof holds for every class
     /// that implements it. A call of its methods is not translated, since the implementation that runs is chosen at run time.
+    /// A sealed interface is the closed set of its implementers, spec section 20.1: an inductive type with a constructor
+    /// for each, which holds the implementer's own value, and every value of an implementer is the interface's. One that
+    /// no class implements has no implementer to tell apart, and is as opaque as any other.
     fn interface(&mut self, interface: &Interface) {
         let full = self.checked.names().get(&interface.name);
         self.name_module(full, interface.name.span);
@@ -501,7 +554,19 @@ impl Translator<'_, '_> {
         let lean = names::full_name(full);
         let short = names::short_name(full);
         let mut body = Body::new(self.checked, self.reach, full, short.clone());
-        let mut lines = vec![format!("abbrev {lean} : Type := Interface \"{lean}\"")];
+        let mut lines = match self.reach.implementers(full) {
+            None | Some([]) => vec![format!("abbrev {lean} : Type := Interface \"{lean}\"")],
+            Some(implementers) => {
+                let mut constructors = vec![format!("inductive {lean} where")];
+                for implementer in implementers {
+                    let held = body.own_type(interface.name.span, implementer.as_bytes());
+                    let constructor = names::identifier(names::short_name(implementer.as_bytes()).as_bytes());
+                    constructors.push(format!("  | {constructor} (value : {held})"));
+                }
+                constructors.push("  deriving Repr, DecidableEq, Inhabited".to_owned());
+                constructors
+            }
+        };
         lines.extend(self.coercions(&mut body, &lean, interface.inheritance.as_ref()));
         self.declare(body, lean.clone(), interface.name.span, lines.join("\n"), false);
         self.members(full, &lean, &short, &interface.members);
@@ -510,7 +575,7 @@ impl Translator<'_, '_> {
     /// A `Coe` from the class-like `lean` to each interface its header names that a law reaches, so a value of it
     /// passes where the interface is expected. The interface's value is `upcast`'s, of which Lean knows nothing, as of
     /// every interface value. They follow the class-like's own declaration, so every declaration that uses it can use
-    /// them.
+    /// them. A sealed interface needs none, since an implementer's value is the interface's.
     fn coercions(&self, body: &mut Body<'_, '_>, lean: &str, inheritance: Option<&Inheritance>) -> Vec<String> {
         let mut coercions = Vec::new();
         for (index, name) in inheritance.iter().flat_map(|inheritance| inheritance.names()).enumerate() {
@@ -519,6 +584,7 @@ impl Translator<'_, '_> {
             if self.checked.types().class_declaration(word(parent)).kind != DeclarationKind::Interface
                 || !translated
                 || !self.reach.reaches(parent, b"")
+                || self.reach.implementers(parent).is_some()
             {
                 continue;
             }
@@ -584,7 +650,7 @@ impl Translator<'_, '_> {
 
         let mut parameters = Vec::new();
         if receiver.is_none() && !method.is_static() {
-            parameters.push(format!("(this : {lean})"));
+            parameters.push(format!("(this : {})", body.class_type(method.name.span, full)));
         }
         if receiver.is_some() || !method.is_static() {
             self.translation.receivers.push((names::member(lean, method.name.value), false));
