@@ -2,7 +2,9 @@
 
 use foldhash::HashMap;
 use foldhash::HashSet;
+use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::SymbolReferences;
@@ -26,6 +28,11 @@ pub(crate) struct ReachedClass {
     /// Whether it finds its methods only by their exact names, spec section 24, as a PHP# class and every class below
     /// one do.
     exact_names: bool,
+    /// The full name of the class it extends.
+    pub(crate) parent: Option<Word>,
+    /// The full name of the first plain PHP class above it, when that class declares or inherits a constructor, which
+    /// its `new` runs.
+    pub(crate) plain_constructor: Option<Word>,
 }
 
 /// What the analysis knows about a method a law reaches, from outside its class's file.
@@ -66,7 +73,9 @@ impl Reach {
     /// references under the law's own symbol, its class and its name as the class keys a method. A law reaches only
     /// what the members it reaches run, so the walk skips each [`CascadeEdge::Attribute`]: an attribute's constructor
     /// never runs as part of them. A sealed interface reaches each of its implementers, the closed set a law tells its
-    /// values apart by, spec section 20.1. A struct's generated `==` reaches the `==` of each class its fields hold.
+    /// values apart by, spec section 20.1. A struct's generated `==` reaches the `==` of each class its fields hold. A
+    /// class reaches the PHP# class it extends, whose fields it holds, and a member a class inherits reaches the
+    /// member of the PHP# class that declares it.
     #[must_use]
     pub fn new(codebase: &CodebaseMetadata, references: &SymbolReferences) -> Reach {
         let mut edges: HashMap<SymbolIdentifier, Vec<SymbolIdentifier>> = HashMap::default();
@@ -91,8 +100,17 @@ impl Reach {
                 if !next.1.is_empty() {
                     pending.push((next.0, empty_word()));
                     pending.extend(field_equalities(codebase, next));
+                    pending.extend(sharp_declaration(codebase, next));
                 } else if let Some(metadata) = codebase.get_class_like(next.0) {
                     pending.extend(metadata.properties.keys().map(|property| (next.0, *property)));
+                    pending.extend(
+                        metadata
+                            .direct_parent_class
+                            .filter(|parent| {
+                                codebase.get_class_like(*parent).is_some_and(|parent| parent.flags.is_sharp())
+                            })
+                            .map(|parent| (parent, empty_word())),
+                    );
                     if metadata.flags.is_sealed()
                         && let Some(inheritors) = &metadata.permitted_inheritors
                     {
@@ -121,6 +139,11 @@ impl Reach {
                     file,
                     sharp: metadata.flags.is_sharp(),
                     exact_names: metadata.exact_names,
+                    parent: metadata
+                        .direct_parent_class
+                        .and_then(|parent| codebase.get_class_like(parent))
+                        .map(|parent| parent.original_name),
+                    plain_constructor: plain_constructor(codebase, metadata),
                 });
                 if member.is_empty() {
                     reach.record_member(codebase, class, metadata.method_key(word("__construct")));
@@ -277,6 +300,29 @@ fn field_equalities(codebase: &CodebaseMetadata, equality: SymbolIdentifier) -> 
         })
         .filter(|(class, method)| codebase.get_method(*class, *method).is_some())
         .collect()
+}
+
+/// `class`'s member `member`, keyed under the PHP# class that declares it, when a parent of `class` declares it.
+fn sharp_declaration(codebase: &CodebaseMetadata, (class, member): SymbolIdentifier) -> Option<SymbolIdentifier> {
+    let declaring = if member.as_bytes().starts_with(b"$") {
+        *codebase.get_class_like(class)?.declaring_property_ids.get(&member)?
+    } else {
+        codebase.get_declaring_method_identifier(&MethodIdentifier::new(class, member)).get_class_name()
+    };
+    let sharp = codebase.get_class_like(declaring).is_some_and(|declaring| declaring.flags.is_sharp());
+
+    (sharp && codebase.class_key(declaring) != class).then(|| keyed(codebase, (declaring, member)))
+}
+
+/// The full name of the first plain PHP class above `class` when it declares or inherits a constructor, which `new`
+/// of `class` runs.
+fn plain_constructor(codebase: &CodebaseMetadata, class: &ClassLikeMetadata) -> Option<Word> {
+    let mut parent = codebase.get_class_like(class.direct_parent_class?)?;
+    while parent.flags.is_sharp() {
+        parent = codebase.get_class_like(parent.direct_parent_class?)?;
+    }
+
+    codebase.get_declaring_method(parent.name, word("__construct")).map(|_| parent.original_name)
 }
 
 /// The symbol with its class and a method as the codebase keys them, spec section 24: by their exact names on a PHP#

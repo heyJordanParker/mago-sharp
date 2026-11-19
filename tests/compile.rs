@@ -6932,13 +6932,119 @@ fn a_law_reaching_a_lambda_is_refused() {
     );
 }
 
+/// Spec section 28: a value whose class extends PHP# classes holds their fields, up to the first plain PHP class above
+/// it, whose state a law carries and never reads. A law carries such a value, and reads what its PHP# classes declare.
 #[test]
-fn a_law_reaching_an_inherited_class_is_refused() {
-    assert_unmodeled_beside(
-        "namespace App.Shared;\n\npublic class Shape : Base\n{\n    law any(Shape s) => true;\n}\n",
-        &[("app/Shared/Base.sharp", "namespace App.Shared;\n\npublic class Base\n{\n}\n")],
-        "Law any reaches the class Shape, which extends Base in Shape. Declare the members the law reaches in the class itself, in place of inheriting them.",
+fn compile_proves_a_law_over_a_value_whose_class_extends_php_sharp_and_plain_php() {
+    let holder = |laws: &str| {
+        format!(
+            "namespace App.Shared;\n\npublic struct Holder\n{{\n    public Holder(public Entry entry {{ get; }}, public int at {{ get; }}) {{ }}\n\n    {laws}\n}}\n"
+        )
+    };
+    let family = |laws: &str| {
+        lawful_project(&[
+            (
+                "vendor/acme/orm/src/Base.php",
+                "<?php\n\nnamespace Acme\\Orm;\n\nclass Base\n{\n    public int $x = 0;\n}\n",
+            ),
+            (
+                "app/Shared/Stamped.sharp",
+                "namespace App.Shared;\n\nimport Acme.Orm.Base;\n\npublic class Stamped : Base\n{\n    public Stamped(public int created { get; }) : super() { }\n}\n",
+            ),
+            (
+                "app/Shared/Entry.sharp",
+                "namespace App.Shared;\n\npublic class Entry : Stamped\n{\n    public Entry(public int id { get; }, int created) : super(created) { }\n}\n",
+            ),
+            ("app/Shared/Holder.sharp", &holder(laws)),
+        ])
+    };
+    let directory = family(
+        "law carries(Entry entry, int at) => new Holder(entry, at).at == at;\n    law readsOwn(Entry entry, int at) => new Holder(entry, at).entry.id == entry.id;\n    law readsPhpSharpParent(Entry entry, int at) => new Holder(entry, at).entry.created == entry.created;",
     );
+    let root = directory.path();
+
+    compile_succeeds(root);
+    assert!(compiled(root, "app/Shared/Holder.sharp").exists());
+
+    let directory = family("law parentIsOwn(Entry entry) => entry.created == entry.id;");
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("error[law-unproven]: law parentIsOwn is not proven\n"), "{}", printed(&output));
+}
+
+/// Spec section 28: a class's structure holds the fields of every PHP# class above it, so a law reads a field, calls a
+/// method and runs a constructor that a class two levels up declares, through a value of the class at the bottom, a
+/// sealed interface's implementer included.
+#[test]
+fn compile_proves_a_law_through_a_chain_of_php_sharp_classes() {
+    let line = |laws: &str| {
+        format!(
+            "namespace App.Shared;\n\npublic class Line : Item\n{{\n    public Line(public int id {{ get; }}, int cents) : super(cents) {{ }}\n\n    {laws}\n}}\n"
+        )
+    };
+    let chain = |laws: &str| {
+        lawful_project(&[
+            (
+                "app/Shared/Priced.sharp",
+                "namespace App.Shared;\n\npublic class Priced\n{\n    public Priced(public int cents { get; }) { }\n\n    public int doubled() => this.cents * 2;\n}\n",
+            ),
+            (
+                "app/Shared/Item.sharp",
+                "namespace App.Shared;\n\npublic class Item : Priced\n{\n    public Item(int cents) : super(cents) { }\n}\n",
+            ),
+            ("app/Shared/Charge.sharp", "namespace App.Shared;\n\npublic sealed interface Charge\n{\n}\n"),
+            (
+                "app/Shared/Fee.sharp",
+                "namespace App.Shared;\n\npublic final class Fee : Item, Charge\n{\n    public Fee(int cents) : super(cents) { }\n}\n",
+            ),
+            ("app/Shared/Line.sharp", &line(laws)),
+        ])
+    };
+    let directory = chain(
+        "law readsTop(Line line) => line.cents == line.cents;\n    law builds(int id, int cents) => new Line(id, cents).cents == cents;\n    law calls(Line line) => line.doubled() == line.cents * 2;\n    law feeReadsTop(int cents) => new Fee(cents).cents == cents;\n    law feeCalls(int cents) => new Fee(cents).doubled() == cents * 2;",
+    );
+    let root = directory.path();
+
+    compile_succeeds(root);
+    assert!(compiled(root, "app/Shared/Line.sharp").exists());
+
+    let directory = chain("law swapped(int id, int cents) => new Line(id, cents).cents == id;");
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("error[law-unproven]: law swapped is not proven\n"), "{}", printed(&output));
+}
+
+/// Spec section 28: a member a plain PHP class above a value's class declares is plain PHP, so a law that reads it is
+/// refused at the read, and a `new` that runs a plain PHP constructor is refused at the `new`.
+#[test]
+fn a_law_reading_what_a_plain_php_parent_declares_is_refused_where_it_reads_it() {
+    let directory = lawful_project(&[
+        (
+            "vendor/acme/orm/src/Base.php",
+            "<?php\n\nnamespace Acme\\Orm;\n\nclass Base\n{\n    public int $x = 0;\n\n    public function __construct()\n    {\n    }\n\n    final public function size(): int\n    {\n        return 1;\n    }\n}\n",
+        ),
+        (
+            "app/Shared/Shape.sharp",
+            "namespace App.Shared;\n\nimport Acme.Orm.Base;\n\nextern Base uses none;\n\npublic class Shape : Base\n{\n    public Shape(public int sides { get; }) : super() { }\n\n    law readsBase(Shape shape) => shape.x == shape.x;\n    law callsBase(Shape shape) => shape.size() == shape.size();\n    law builds(int sides) => new Shape(sides).sides == sides;\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile_without_lean(root);
+
+    let printed = printed(&output);
+    assert_eq!(output.status.code(), Some(1), "{printed}");
+    for message in [
+        "Law readsBase reaches the plain PHP property Base.x in Shape.readsBase. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
+        "Law callsBase reaches the plain PHP method Base.size in Shape.callsBase. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
+        "Law builds reaches the constructor of the plain PHP class Base in Shape.builds. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
+    ] {
+        assert!(printed.contains(&format!("error - unmodeled-construct: {message}")), "{message}\n{printed}");
+    }
 }
 
 #[test]
