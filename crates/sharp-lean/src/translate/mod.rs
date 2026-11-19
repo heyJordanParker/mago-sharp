@@ -194,6 +194,10 @@ pub fn translate(checked: &CheckedProgram<'_>, reach: &Reach) -> Translation {
     translator.translation
 }
 
+/// The instances each translated class, enum and sealed interface derives for the translated code and the library's
+/// lemmas. No `Repr`, which only prints a value, and no proof prints one.
+const DERIVED: &str = "  deriving DecidableEq, Inhabited";
+
 struct Translator<'translator, 'program> {
     checked: &'translator CheckedProgram<'program>,
     reach: &'translator Reach,
@@ -324,7 +328,7 @@ impl Translator<'_, '_> {
             lines.push(format!("  {} : {type}", names::identifier(field.name)));
             types.push(r#type);
         }
-        lines.push("  deriving Repr, DecidableEq, Inhabited".to_owned());
+        lines.push(DERIVED.to_owned());
         lines.extend(self.coercions(&mut body, &lean, inheritance));
         self.declare(body, lean.clone(), name.span, lines.join("\n"), false);
 
@@ -526,7 +530,7 @@ impl Translator<'_, '_> {
                 EnumCaseItem::Unit(_) => lines.push(format!("  | {}", names::identifier(name.value))),
             }
         }
-        lines.push("  deriving Repr, DecidableEq, Inhabited".to_owned());
+        lines.push(DERIVED.to_owned());
         lines.extend(self.coercions(&mut body, &lean, r#enum.inheritance.as_ref()));
         self.declare(body, lean.clone(), r#enum.name.span, lines.join("\n"), false);
 
@@ -638,7 +642,7 @@ impl Translator<'_, '_> {
                     let constructor = names::identifier(names::short_name(implementer.as_bytes()).as_bytes());
                     constructors.push(format!("  | {constructor} (value : {held})"));
                 }
-                constructors.push("  deriving Repr, DecidableEq, Inhabited".to_owned());
+                constructors.push(DERIVED.to_owned());
                 constructors
             }
         };

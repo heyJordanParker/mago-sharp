@@ -24,7 +24,7 @@ inductive Throwable where
   | OutOfRangeException
   /-- A backed enum's `from` of a value no case has. -/
   | ValueError
-  deriving Repr, DecidableEq
+  deriving DecidableEq
 
 /-- The monad translated code runs in. -/
 abbrev M := ExceptT Throwable Option

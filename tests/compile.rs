@@ -4738,6 +4738,24 @@ fn compile_proves_a_law_whose_calls_go_from_one_file_to_another_and_back_with_no
     assert!(!alpha.contains("import Code."), "{alpha}");
 }
 
+/// A translated class derives the instances its proofs use and no `Repr`, which only prints a value, so the runner
+/// spends nothing deriving one.
+#[cfg(unix)]
+#[test]
+fn a_generated_module_derives_no_repr_since_no_proof_prints_a_value() {
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
+
+    let output = process::output(command(root, "never").env("XDG_CACHE_HOME", counting_cache(lake.path()))).unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let money = generated_module(lake.path(), "Code.App.Shared.Money");
+    assert!(money.contains("structure App.Shared.Money where"), "{money}");
+    assert!(money.contains("  deriving DecidableEq, Inhabited\n"), "{money}");
+    assert!(!money.contains("Repr"), "{money}");
+}
+
 /// A call through the class, as `ShapeMath.doubled(s)`, is that static call already, as in C#, so it compiles and its
 /// law is proved the same way.
 #[cfg(unix)]

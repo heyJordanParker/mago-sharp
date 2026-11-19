@@ -13,7 +13,6 @@ structure Values where
   type : Type
   [inhabited : Inhabited type]
   [decidableEq : DecidableEq type]
-  [repr : Repr type]
 
 instance : Inhabited Values := ⟨⟨Unit⟩⟩
 
@@ -26,7 +25,6 @@ abbrev Interface (name : String) : Type := (values name).type
 
 instance : Inhabited (Interface name) := (values name).inhabited
 instance : DecidableEq (Interface name) := (values name).decidableEq
-instance : Repr (Interface name) := (values name).repr
 
 /-- A class's value as a value of an interface it implements, which each translated class declares as a `Coe`. Lean
 knows nothing about the interface value it gives, as about every interface value. -/
