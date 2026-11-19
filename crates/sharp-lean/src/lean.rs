@@ -226,7 +226,7 @@ impl Lean {
 
     /// Proves the laws of `translations` and returns the issues that refuse each file whose law is not proven.
     /// `translations` hold each file whose laws a compile checks, and each file those laws reach, as `reach` gives
-    /// them.
+    /// them, but the files whose errors refuse them.
     ///
     /// A law's proof ends once per key, [`proof_key`]: [`PROOFS`] keeps how it ended, passed or failed, and a law whose
     /// key it holds gets that outcome again without Lean. The rest are proved on the compile's threads: each law
@@ -264,6 +264,12 @@ impl Lean {
         let program = Program::new(&translations);
         let laws = Laws::new(&translations);
         let translated: HashSet<FileId> = translations.iter().map(|translation| translation.file).collect();
+        let errored: HashSet<FileId> = law_files
+            .iter()
+            .flat_map(|law_file| reach.files(*law_file))
+            .filter(|file| !translated.contains(*file))
+            .copied()
+            .collect();
         let receivers: HashMap<String, bool> =
             translations.iter().flat_map(|translation| translation.receivers.iter().cloned()).collect();
         let declared: HashSet<String> = translations
@@ -276,7 +282,7 @@ impl Lean {
         for translation in translations.iter().filter(|translation| !translation.laws.is_empty()) {
             let mut proving = Vec::new();
             for law in &translation.laws {
-                let refusals = refused(law, &program, &laws, &translated);
+                let refusals = refused(law, &program, &laws, &errored);
                 if !refusals.is_empty() {
                     for issue in refusals {
                         report(&mut issues, translation, issue);
@@ -739,16 +745,16 @@ fn report(issues: &mut HashMap<FileId, IssueCollection>, translation: &Translati
 /// The issues that refuse the laws of `translations` before any proof, as [`Lean::check`] reports them.
 ///
 /// Each issue is in the file that states its law, and no Lean process starts. `translations` hold each file whose laws
-/// are checked and each file those laws reach.
+/// are checked and each file those laws reach but the files of `errored`, those whose analysis reported an error.
 #[must_use]
-pub fn refusals(translations: &[Translation]) -> HashMap<FileId, IssueCollection> {
+#[allow(clippy::implicit_hasher)]
+pub fn refusals(translations: &[Translation], errored: &HashSet<FileId>) -> HashMap<FileId, IssueCollection> {
     let program = Program::new(translations);
     let laws = Laws::new(translations);
-    let translated: HashSet<FileId> = translations.iter().map(|translation| translation.file).collect();
     let mut issues: HashMap<FileId, IssueCollection> = HashMap::default();
     for translation in translations {
         for law in &translation.laws {
-            for issue in refused(law, &program, &laws, &translated) {
+            for issue in refused(law, &program, &laws, errored) {
                 report(&mut issues, translation, issue);
             }
         }
@@ -758,16 +764,17 @@ pub fn refusals(translations: &[Translation]) -> HashMap<FileId, IssueCollection
 }
 
 /// The issues that refuse `law` before any proof: each construct it reaches that the translation does not model, each
-/// declaration it reaches that no translation holds, each law it calls that a file with errors states, and each call it
-/// makes in a cycle of laws. A law with none is proved.
-fn refused(law: &Law, program: &Program<'_>, laws: &Laws<'_>, translated: &HashSet<FileId>) -> Vec<Issue> {
+/// declaration it reaches that no translation holds, for the errors of its file when its file is in `errored` or
+/// unknown, each law it calls that a file with errors states, and each call it makes in a cycle of laws. A law with
+/// none is proved.
+fn refused(law: &Law, program: &Program<'_>, laws: &Laws<'_>, errored: &HashSet<FileId>) -> Vec<Issue> {
     let problems = program.problems(&law.statement);
     let mut issues: Vec<Issue> = problems.unmodeled.iter().map(|construct| issues::unmodeled(law, construct)).collect();
     for missing in &problems.missing {
-        issues.push(if missing.file.is_some_and(|file| translated.contains(&file)) {
-            issues::untranslated(law, &missing.place)
-        } else {
+        issues.push(if missing.file.is_none_or(|file| errored.contains(&file)) {
             issues::refused_reach(law, &missing.place)
+        } else {
+            issues::untranslated(law, &missing.place)
         });
     }
     // Every file a law reaches is translated unless it has errors, so a law a body calls that no translation states is
