@@ -3,9 +3,12 @@
 use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::symbol::SymbolIdentifier;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_database::file::FileId;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
@@ -63,7 +66,7 @@ impl Reach {
     /// references under the law's own symbol, its class and its name as the class keys a method. A law reaches only
     /// what the members it reaches run, so the walk skips each [`CascadeEdge::Attribute`]: an attribute's constructor
     /// never runs as part of them. A sealed interface reaches each of its implementers, the closed set a law tells its
-    /// values apart by, spec section 20.1. A class reaches each operator it declares, which a law runs on its values.
+    /// values apart by, spec section 20.1. A struct's generated `==` reaches the `==` of each class its fields hold.
     #[must_use]
     pub fn new(codebase: &CodebaseMetadata, references: &SymbolReferences) -> Reach {
         let mut edges: HashMap<SymbolIdentifier, Vec<SymbolIdentifier>> = HashMap::default();
@@ -87,17 +90,9 @@ impl Reach {
                 pending.extend(edges.get(&next).into_iter().flatten().copied());
                 if !next.1.is_empty() {
                     pending.push((next.0, empty_word()));
+                    pending.extend(field_equalities(codebase, next));
                 } else if let Some(metadata) = codebase.get_class_like(next.0) {
                     pending.extend(metadata.properties.keys().map(|property| (next.0, *property)));
-                    pending.extend(
-                        metadata
-                            .methods
-                            .iter()
-                            .filter(|method| {
-                                codebase.get_method(next.0, **method).is_some_and(|method| method.flags.is_operator())
-                            })
-                            .map(|method| (next.0, *method)),
-                    );
                     if metadata.flags.is_sealed()
                         && let Some(inheritors) = &metadata.permitted_inheritors
                     {
@@ -257,6 +252,31 @@ impl Reach {
     pub(crate) fn is_nullable_field(&self, class: &[u8], property: &[u8]) -> bool {
         self.nullable_fields.contains(&(self.class_key(class), word(property)))
     }
+}
+
+/// The `==` of each class a field of a struct holds when `equality` is the `==` the struct gets for declaring none,
+/// spec section 19, which compares each field with that field's own `==`. It has no source, so no reference records
+/// the `==` it runs.
+fn field_equalities(codebase: &CodebaseMetadata, equality: SymbolIdentifier) -> Vec<SymbolIdentifier> {
+    let generated = codebase
+        .get_method(equality.0, equality.1)
+        .is_some_and(|method| method.flags.is_operator() && method.flags.contains(MetadataFlags::GENERATED));
+    let Some(r#struct) = codebase.get_class_like(equality.0).filter(|class| generated && class.flags.is_struct())
+    else {
+        return Vec::new();
+    };
+
+    r#struct
+        .properties
+        .keys()
+        .filter_map(|property| codebase.get_declaring_property(equality.0, *property)?.type_metadata.as_ref())
+        .flat_map(|r#type| r#type.type_union.types.iter())
+        .filter_map(|atomic| match atomic {
+            TAtomic::Object(TObject::Named(named)) => Some(keyed(codebase, (named.name, word("op_Equality")))),
+            _ => None,
+        })
+        .filter(|(class, method)| codebase.get_method(*class, *method).is_some())
+        .collect()
 }
 
 /// The symbol with its class and a method as the codebase keys them, spec section 24: by their exact names on a PHP#

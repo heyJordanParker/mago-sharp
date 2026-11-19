@@ -416,7 +416,7 @@ impl<'body, 'program> Body<'body, 'program> {
             // `nameof(X.y)` is the string `'y'`, which the checker proved names a property of `X`.
             Expression::NameOf(name_of) => names::string(name_of.named()),
             Expression::ConstantAccess(name) => self.name(expression, name),
-            Expression::Binary(binary) => self.binary(binary),
+            Expression::Binary(binary) => self.binary(expression, binary),
             Expression::UnaryPrefix(unary) => self.prefix(unary),
             Expression::Conditional(conditional) => match conditional.then {
                 Some(then) => {
@@ -580,7 +580,7 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
-    fn binary(&mut self, binary: &Binary) -> String {
+    fn binary(&mut self, expression: &Expression, binary: &Binary) -> String {
         match binary.operator {
             BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => return self.short_circuit(binary, true),
             BinaryOperator::Or(_) => return self.short_circuit(binary, false),
@@ -607,7 +607,7 @@ impl<'body, 'program> Body<'body, 'program> {
         let operator = self.source(binary.operator.span());
         let ints = kinds == (Kind::Int, Kind::Int);
         let ordered = ints || kinds == (Kind::String, Kind::String);
-        if let Some(compared) = self.compared(binary, &lhs, &rhs) {
+        if let Some(compared) = self.compared(expression, binary, &lhs, &rhs) {
             return compared;
         }
         match binary.operator {
@@ -639,9 +639,10 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
-    /// `<=>`, `<`, `<=`, `>` or `>=` of `lhs` and `rhs`, two values of one class that declares `<=>`, as that `<=>`
-    /// orders them, spec section 19. None for any other operator or operands.
-    fn compared(&mut self, binary: &Binary, lhs: &str, rhs: &str) -> Option<String> {
+    /// `<=>`, `<`, `<=`, `>` or `>=` of `lhs` and `rhs`, two values of one class, as the `<=>` the analysis chose for
+    /// `expression` orders them, spec section 19: the class's own, or the one of the sealed interface it implements,
+    /// whose values have the interface's type. None for any other operator or operands.
+    fn compared(&mut self, expression: &Expression, binary: &Binary, lhs: &str, rhs: &str) -> Option<String> {
         let test = match binary.operator {
             BinaryOperator::Spaceship(_) => None,
             BinaryOperator::LessThan(_) => Some("<"),
@@ -658,11 +659,21 @@ impl<'body, 'program> Body<'body, 'program> {
         };
         let class = left.name.as_bytes();
         let comparison = php_operator_name(&BinaryOperator::Spaceship(binary.operator.span()), 2)?;
-        if !self.reach.same_class(class, right.name.as_bytes()) || self.reach.method(class, comparison).is_none() {
+        if !self.reach.same_class(class, right.name.as_bytes()) {
+            return None;
+        }
+        let owner = types.call_target(expression).class;
+        let owner = owner.as_bytes();
+        let held = self.reach.same_class(owner, class)
+            || self
+                .reach
+                .interface_of(class)
+                .is_some_and(|interface| self.reach.same_class(interface.as_bytes(), owner));
+        if !held || self.reach.method(owner, comparison).is_none() {
             return None;
         }
 
-        let compared = self.operator(class, comparison, "<=>", (lhs, rhs));
+        let compared = self.operator(owner, comparison, "<=>", (lhs, rhs));
 
         Some(match test {
             Some(test) => format!("(decide ({compared} {test} (0 : int)))"),

@@ -4235,6 +4235,29 @@ fn compile_refuses_a_law_a_changed_method_breaks_on_the_law_line_and_writes_no_c
     assert_eq!(source_lean_files(root), Vec::<PathBuf>::new());
 }
 
+/// Spec section 28: a law reaches the body of an operator it applies as it reaches a called method's, so an edit of
+/// the operator's body proves again a law in a file that only applies it, and refuses the law the edit breaks.
+#[test]
+fn compile_refuses_a_law_an_edit_of_an_operator_it_applies_breaks() {
+    let money = "namespace App.Shared;\n\npublic final class Money\n{\n    public Money(public int amount { get; }) { }\n\n    public static int operator <=>(Money a, Money b) => a.amount <=> b.amount;\n}\n";
+    let till = "namespace App.Shared;\n\npublic final class Till\n{\n    law ordersByAmount(int low, int high) when low < high => new Money(low) < new Money(high);\n}\n";
+    let directory = lawful_project(&[("app/Shared/Money.sharp", money), ("app/Shared/Till.sharp", till)]);
+    let root = directory.path();
+    compile_succeeds(root);
+    assert!(compiled(root, "app/Shared/Till.sharp").exists());
+
+    write(root, "app/Shared/Money.sharp", &money.replace("a.amount <=> b.amount", "b.amount <=> a.amount"));
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("app/Shared/Till.sharp:5:5: error[law-unproven]: law ordersByAmount is not proven\n"),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Shared/Till.sharp").exists());
+}
+
 /// Spec section 10: a struct states a law as a class does. Mago proves it, and refuses it once a changed method breaks
 /// it.
 #[test]
@@ -5047,6 +5070,37 @@ fn compile_proves_a_law_that_orders_two_instants_through_their_own_comparison() 
     );
 }
 
+/// Spec section 19: `<` on two values of a class that declares no `<=>` runs the one the sealed interface it implements
+/// declares, as the checker chose it. A false order is not proven.
+#[test]
+fn compile_proves_a_law_that_orders_two_values_through_their_interface_s_comparison() {
+    let priced = (
+        "app/Shop/Priced.sharp",
+        "namespace App.Shop;\n\npublic sealed interface Priced\n{\n    static int operator <=>(Priced a, Priced b) => match (a) {\n        Book first => match (b) {\n            Book second => first.cents <=> second.cents,\n        },\n    };\n}\n",
+    );
+    let book = |laws: &str| {
+        format!(
+            "namespace App.Shop;\n\npublic final class Book : Priced\n{{\n    public Book(public int cents {{ get; }}) {{ }}\n\n    {laws}\n}}\n"
+        )
+    };
+    let books = book("law cheaperFirst(int low, int high) when low < high => new Book(low) < new Book(high);");
+    let directory = lawful_project(&[priced, ("app/Shop/Book.sharp", &books)]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shop/Book.sharp").exists());
+
+    let books = book("law dearerFirst(int low, int high) when low < high => new Book(high) < new Book(low);");
+    let directory = lawful_project(&[priced, ("app/Shop/Book.sharp", &books)]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("error[law-unproven]: law dearerFirst is not proven\n"), "{}", printed(&output));
+}
+
 /// Spec section 28: a standard library member a law can't reach is refused where the law reaches it, with the reason
 /// project code gives, as `Instant.tryParse`, which calls plain PHP.
 #[test]
@@ -5115,6 +5169,43 @@ fn a_law_comparing_structs_whose_field_has_no_equality_a_law_reads_is_refused() 
         "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic struct Shape\n{\n    public Shape(public Instant? closedAt { get; }) { }\n\n    law same(Shape shape) => shape == shape;\n}\n",
         "Law same reaches the class operator `==` in Shape.operator ==. Compare the values the objects hold, such as their properties.",
     );
+}
+
+/// Spec section 19: a struct's `==` compares each field with the field's own `==`, which no source applies: the `==` of
+/// a struct that declares none, and the one a class declares. A claim either breaks is not proven.
+#[test]
+fn compile_proves_a_law_over_a_struct_whose_fields_compare_with_their_own_equality() {
+    let point = (
+        "app/Shared/Point.sharp",
+        "namespace App.Shared;\n\npublic struct Point\n{\n    public Point(public int x { get; }, public int y { get; }) { }\n}\n",
+    );
+    let label = (
+        "app/Shared/Label.sharp",
+        "namespace App.Shared;\n\npublic final class Label\n{\n    public Label(public int id { get; }, public string text { get; }) { }\n\n    public static bool operator ==(Label a, Label b) => a.id == b.id;\n    public int hash() => this.id;\n}\n",
+    );
+    let pair = |law: &str| {
+        format!(
+            "namespace App.Shared;\n\npublic struct Pair\n{{\n    public Pair(public Point at {{ get; }}, public Label label {{ get; }}) {{ }}\n\n    {law}\n}}\n"
+        )
+    };
+    let same = pair(
+        "law sameById(int x, int id) => new Pair(new Point(x, 0), new Label(id, \"a\")) == new Pair(new Point(x, 0), new Label(id, \"b\"));",
+    );
+    let directory = lawful_project(&[point, label, ("app/Shared/Pair.sharp", &same)]);
+    let root = directory.path();
+
+    compile_succeeds(root);
+    assert!(compiled(root, "app/Shared/Pair.sharp").exists());
+
+    let differs = pair(
+        "law samePoint(int x, int id) => new Pair(new Point(x, 0), new Label(id, \"a\")) == new Pair(new Point(x, 1), new Label(id, \"a\"));",
+    );
+    let directory = lawful_project(&[point, label, ("app/Shared/Pair.sharp", &differs)]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("error[law-unproven]: law samePoint is not proven\n"), "{}", printed(&output));
 }
 
 /// Spec section 19: `==` on two values of a struct that holds another struct compares that field by its own `==`, and

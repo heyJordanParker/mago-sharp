@@ -1,5 +1,6 @@
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
+use mago_codex::context::ScopeContext;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
@@ -238,6 +239,7 @@ pub(crate) fn takes_operands(
 pub(crate) fn analyze_instance_operator<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
+    scope: &ScopeContext<'_>,
     symbol: &BinaryOperator<'_>,
     operands: &[(&Expression<'arena>, &TUnion)],
     span: Span,
@@ -252,7 +254,7 @@ where
 
     Some(match get_operator_method(codebase, word(name), &operand_types) {
         Some(DeclaredOperator::Chosen(method)) if can_take_operands(codebase, method, &operand_types) => {
-            analyze_operator_call(context, artifacts, method, operands, span)
+            analyze_operator_call(context, artifacts, scope, method, operands, span)
         }
         Some(DeclaredOperator::Tied(tied)) => {
             report_tied_operator(context, symbol, &operand_types, &tied, span);
@@ -341,10 +343,11 @@ fn expand_in_class(codebase: &CodebaseMetadata, method: &MethodIdentifier, union
 
 /// Checks the operands of a PHP# operator as the arguments of the static call `method` it runs as, at `span`, and
 /// returns what the call returns. The call is recorded at `span`, so the effects of a body that applies the operator
-/// include the operator's.
+/// include the operator's, and `scope` references `method`, as a call of it does.
 pub(crate) fn analyze_operator_call<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
+    scope: &ScopeContext<'_>,
     (method, metadata): (MethodIdentifier, &FunctionLikeMetadata),
     operands: &[(&Expression<'arena>, &TUnion)],
     span: Span,
@@ -357,6 +360,7 @@ where
 
     let identifier = FunctionLikeIdentifier::Method(method.get_class_name(), method.get_method_name());
     artifacts.record_call_target(span, CallTarget::FunctionLike { callee: identifier, class: None });
+    artifacts.symbol_references.add_reference_for_method_call(codebase, scope, &method);
 
     let target = InvocationTarget::FunctionLike {
         identifier,

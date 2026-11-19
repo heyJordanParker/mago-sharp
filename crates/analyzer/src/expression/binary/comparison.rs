@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
+use mago_codex::context::ScopeContext;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::atomic::TAtomic;
@@ -129,7 +130,7 @@ where
     // A PHP# comparison of instances runs the operator their class declares, which returns the `bool` it decides.
     if !refused
         && context.dialect.is_sharp()
-        && analyze_declared_comparison(context, artifacts, binary, lhs_type, rhs_type).is_some()
+        && analyze_declared_comparison(context, artifacts, &block_context.scope, binary, lhs_type, rhs_type).is_some()
     {
         artifacts.expression_types.insert(get_expression_range(binary), Rc::new(get_bool()));
 
@@ -1281,6 +1282,7 @@ pub(crate) fn get_comparison_method<'ctx>(
 pub(crate) fn analyze_declared_comparison<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
+    scope: &ScopeContext<'_>,
     binary: &Binary<'arena>,
     lhs_type: &TUnion,
     rhs_type: &TUnion,
@@ -1297,7 +1299,7 @@ where
 
     let operands = [(binary.lhs, &lhs_type), (binary.rhs, &rhs_type)];
 
-    Some(analyze_operator_call(context, artifacts, method, &operands, binary.span()))
+    Some(analyze_operator_call(context, artifacts, scope, method, &operands, binary.span()))
 }
 
 /// Spec section 24: `==`, `!=` or a value pattern that compares a string with a string fixed at compile time, as

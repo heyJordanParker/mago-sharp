@@ -60,7 +60,7 @@ where
 
                 Some(get_signum_result())
             }
-            None => analyze_declared_comparison(context, artifacts, binary, lhs_type, rhs_type),
+            None => analyze_declared_comparison(context, artifacts, &block_context.scope, binary, lhs_type, rhs_type),
         };
 
         if let Some(result_type) = result_type {
