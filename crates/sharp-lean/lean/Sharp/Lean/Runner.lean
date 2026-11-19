@@ -5,14 +5,14 @@ Mago writes one `Check` request to standard input and reads the answer from stan
 source of each generated module its checks reach, and checks, each the generated modules some laws of one `.sharp`
 file reach and the theorems of those laws, after the theorems of each law they call. The runner reads no file of the
 project. It imports the runtime library once, then answers the checks on as many threads as the request asks: for each
-check it elaborates the generated modules the check reaches, elaborates each theorem with the steps of
-`Sharp.Lean.Proof`, and answers for each law: proven, each case and condition its proof left open with the goal, the law
+check it elaborates the generated modules the check reaches, elaborates each theorem with the steps its text names,
+Lean's own or those of `Sharp.Lean.Proof`, and answers for each law: proven, each case and condition its proof left open with the goal, the law
 not proven it holds through, Lean's error, or that its theorem ran out of the time budget the request gives each one. A
 generated module Lean rejects refuses its check, with the line of its first error. This elaboration is the only one a
 generated module gets: nothing builds the package.
 
-One runner answers the checks of a compile because each runner imports all of Lean, so every check shares the one
-environment the runner imports. Each generated module is elaborated once per runner, whichever check reaches it first,
+One runner answers every check of a request, so each check shares the one environment the runner imports: the modules
+of the runtime library its modules and checks name, which is all of Lean only when a check names `Sharp.Lean.Proof`. Each generated module is elaborated once per runner, whichever check reaches it first,
 and a check that reaches it later waits for it. Generated modules are elaborated rather than imported. Each is
 elaborated on the runtime library with exactly the generated modules it imports, transitively, as Lean compiles a module
 from its imports alone, so whether Lean accepts it does not depend on the other modules of its check or of the request.
@@ -202,7 +202,7 @@ def holdsAll (env : Environment) (names : NameSet) : Bool := Id.run do
     unless env.contains name do return false
   return true
 
-/-- Elaborates `item` in `env` with the steps of `Sharp.Lean.Proof`, within `heartbeats` thousand heartbeats, and gives
+/-- Elaborates `item` in `env`, within `heartbeats` thousand heartbeats, and gives
 the environment with its theorem and what elaborating it gave. The steps `Sharp/Lean/Proof.lean` runs share that budget,
 so a theorem that runs out of it fails alone, and the other checks of the runner go on. -/
 def elaborate (env : Environment) (item : Theorem) (heartbeats : Nat) : IO (Environment × Elaborated) := do

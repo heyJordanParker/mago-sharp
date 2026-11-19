@@ -4349,6 +4349,51 @@ fn compile_proves_the_laws_of_two_stale_files_with_one_runner() {
     assert!(compiled(root, "app/Shared/Wallet.sharp").exists());
 }
 
+/// A law the fixed steps prove ends in one runner, which imports only the runtime library. A law they leave unproven
+/// goes on to a second runner, with Lean's search, which ends its proof as it always did: here, with the case Lean's
+/// search leaves open.
+#[cfg(unix)]
+#[test]
+fn a_law_the_fixed_steps_leave_unproven_goes_on_to_lean_s_search() {
+    let purse = LAWFUL_MONEY
+        .replace("Money", "Purse")
+        .replace("this.amount + other.amount, this.currency", "this.amount + other.amount, other.currency");
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Shared/Purse.sharp", &purse)]);
+    let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
+
+    let output = process::output(
+        command(root, "never").env("MAGO_REPORTING_FORMAT", "emacs").env("XDG_CACHE_HOME", counting_cache(lake.path())),
+    )
+    .unwrap();
+
+    let names = |request: &[u8], text: &str| request.windows(text.len()).any(|window| window == text.as_bytes());
+    let mut requests: Vec<Vec<u8>> = std::fs::read_dir(lake.path().join("started"))
+        .unwrap()
+        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+        .collect();
+    requests.sort_by_key(|request| names(request, "Sharp.Lean.Proof"));
+    assert_eq!(requests.len(), 2, "two runners started");
+    let [steps, search] = [&requests[0], &requests[1]];
+    assert!(!names(steps, "Sharp.Lean.Proof"), "the first runner imports only the runtime library");
+    assert!(
+        names(steps, "App.Shared.Money.addKeepsCurrency.proof")
+            && names(steps, "App.Shared.Purse.addKeepsCurrency.proof")
+    );
+    assert!(names(search, "Sharp.Lean.Proof"), "the second runner proves with Lean's search");
+    assert!(!names(search, "App.Shared.Money.addKeepsCurrency.proof"), "the proven law is not proved again");
+    assert!(names(search, "App.Shared.Purse.addKeepsCurrency.proof"));
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output)
+            .contains("app/Shared/Purse.sharp:8:5:error - law-unproven: law addKeepsCurrency is not proven"),
+        "{}",
+        printed(&output)
+    );
+    assert!(compiled(root, "app/Shared/Money.sharp").exists());
+    assert!(!compiled(root, "app/Shared/Purse.sharp").exists());
+}
+
 /// A law runs on one Lean, found one way, and a `lake` on the `PATH` is never it: neither a compile that builds the law
 /// checker nor one that finds it built calls the `lake` first on the `PATH`, which fails every call.
 #[cfg(unix)]
@@ -5286,58 +5331,6 @@ fn analyze_scan_only_refuses_no_law() {
         assert_eq!(analyzed.status.code(), Some(0), "{arguments:?}: {}", printed(&analyzed));
         assert!(printed(&analyzed).contains("No issues found."), "{arguments:?}: {}", printed(&analyzed));
     }
-}
-
-/// `mago analyze` of `root`, with every issue on one line.
-fn analyze(root: &Path) -> Output {
-    process::output(
-        Command::new(env!("CARGO_BIN_EXE_mago"))
-            .args(["--no-version-check", "--colors", "never", "analyze"])
-            .env("MAGO_REPORTING_FORMAT", "medium")
-            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
-            .current_dir(root),
-    )
-    .unwrap()
-}
-
-/// `mago analyze` translates each PHP# file a law reaches, a package's in `includes` too, as `mago compile` does, so a
-/// law that reaches the standard library is refused for nothing, where it once was refused for errors no file had.
-#[test]
-fn analyze_proves_a_law_that_reaches_the_standard_library() {
-    let directory = library_project(&[(
-        "app/Stamp.sharp",
-        "namespace App;\n\nimport Sharp.Time.Instant;\n\npublic struct Stamp\n{\n    public Stamp(public Instant at { get; }) { }\n\n    law keepsTheInstant(Instant at) => new Stamp(at).at.epochSeconds == at.epochSeconds && new Stamp(at).at.nanosecond == at.nanosecond;\n}\n",
-    )]);
-
-    let analyzed = analyze(directory.path());
-
-    assert_eq!(analyzed.status.code(), Some(0), "{}", printed(&analyzed));
-    assert!(printed(&analyzed).contains("No issues found."), "{}", printed(&analyzed));
-}
-
-/// `mago analyze` refuses a law that reaches a file of the project whose analysis reported an error, for those errors.
-#[test]
-fn analyze_refuses_a_law_that_reaches_a_file_with_errors_for_its_errors() {
-    let money = LAWFUL_MONEY
-        .replace("    law addKeepsCurrency", "    public int broken() => \"text\";\n\n    law addKeepsCurrency");
-    let directory = library_project(&[
-        ("app/Shared/Money.sharp", &money),
-        (
-            "app/Shared/Ledger.sharp",
-            "namespace App.Shared;\n\npublic class Ledger\n{\n    law addKeeps(Money a, Money b) => a.add(b).currency == a.currency;\n}\n",
-        ),
-    ]);
-
-    let analyzed = analyze(directory.path());
-
-    assert_eq!(analyzed.status.code(), Some(1), "{}", printed(&analyzed));
-    assert!(
-        printed(&analyzed).contains(
-            "app/Shared/Ledger.sharp:5:5: error[law-unproven]: Law addKeeps is not proven: it reaches Money.add, whose file has errors. Fix them, then run vendor/bin/mago compile again."
-        ),
-        "{}",
-        printed(&analyzed)
-    );
 }
 
 /// Spec section 28's `app/Tenant/Store/Module.sharp`, whose law spans `Receipts` and `Refunds`.

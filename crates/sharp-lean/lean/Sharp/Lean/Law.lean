@@ -25,6 +25,15 @@ def holds (x : M Bool) : Prop :=
 instance (x : M Bool) : Decidable (holds x) := by
   unfold holds; split <;> infer_instance
 
+@[simp] theorem pure_inj {α : Type} (a b : α) : (pure a : M α) = pure b ↔ a = b := by
+  constructor
+  · intro h
+    have := congrArg ExceptT.run h
+    simp [ExceptT.run_pure] at this
+    exact this
+  · intro h
+    rw [h]
+
 @[simp] theorem holds_pure (b : Bool) : holds (pure b) ↔ b = true := Iff.rfl
 
 @[simp] theorem holds_throw (e : Throwable) : holds (throw e : M Bool) := trivial

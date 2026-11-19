@@ -96,11 +96,20 @@ pub(crate) struct Declaration {
     pub(crate) text: String,
     pub(crate) uses: Vec<Use>,
     pub(crate) unmodeled: Vec<Unmodeled>,
-    /// Whether it is a definition that computes, a method or a law, rather than a type: a cycle of definitions is a
-    /// recursion, and a cycle of types a type that holds itself.
-    pub(crate) unfolds: bool,
+    pub(crate) role: Role,
     /// What a method makes smaller on each call it makes of itself or of a method that calls it back.
     pub(crate) measure: Option<Measure>,
+}
+
+/// What a declaration is in Lean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Role {
+    /// A structure or an inductive: a cycle of them is a type that holds itself.
+    Type,
+    /// A class's `__construct`, which builds its structure: a cycle of them builds a type that holds itself.
+    Constructor,
+    /// A method, a law's statement or a parameter's default, which computes: a cycle of them is a recursion.
+    Definition,
 }
 
 /// A declaration another one uses.
@@ -330,7 +339,7 @@ impl Translator<'_, '_> {
         }
         lines.push(DERIVED.to_owned());
         lines.extend(self.coercions(&mut body, &lean, inheritance));
-        self.declare(body, lean.clone(), name.span, lines.join("\n"), false);
+        self.declare(body, lean.clone(), name.span, lines.join("\n"), Role::Type);
 
         // Spec section 20.1: an implementer of a sealed interface is a value of the interface, which reads each of its
         // properties through the interface's accessor, and each property a PHP# parent declares through the accessor of
@@ -350,7 +359,7 @@ impl Translator<'_, '_> {
                 "  | _ => default".to_owned(),
             ];
             self.translation.receivers.push((key.clone(), true));
-            self.declare(body, key, name.span, lines.join("\n"), true);
+            self.declare(body, key, name.span, lines.join("\n"), Role::Definition);
         }
 
         self.constructor(full, &lean, &short, (name.span, parent), constructor, &fields, &types);
@@ -479,7 +488,7 @@ impl Translator<'_, '_> {
             text,
             uses,
             unmodeled,
-            unfolds: false,
+            role: Role::Constructor,
             measure: None,
         });
     }
@@ -532,7 +541,7 @@ impl Translator<'_, '_> {
         }
         lines.push(DERIVED.to_owned());
         lines.extend(self.coercions(&mut body, &lean, r#enum.inheritance.as_ref()));
-        self.declare(body, lean.clone(), r#enum.name.span, lines.join("\n"), false);
+        self.declare(body, lean.clone(), r#enum.name.span, lines.join("\n"), Role::Type);
 
         // Spec section 20: a field of a case that carries data reads as the constructor's field, where a test named the
         // case. Any other case gives the field's default, which no such read sees. The value of an enum that implements
@@ -551,7 +560,7 @@ impl Translator<'_, '_> {
                 "  | _ => default".to_owned(),
             ];
             self.translation.receivers.push((key.clone(), true));
-            self.declare(body, key, r#enum.name.span, lines.join("\n"), true);
+            self.declare(body, key, r#enum.name.span, lines.join("\n"), Role::Definition);
         }
 
         if let Some(backing) = &r#enum.backing_type_hint {
@@ -566,7 +575,7 @@ impl Translator<'_, '_> {
                 lines.push("  | _ => default".to_owned());
             }
             self.translation.receivers.push((names::member(&lean, b"value"), true));
-            self.declare(body, names::member(&lean, b"value"), r#enum.name.span, lines.join("\n"), true);
+            self.declare(body, names::member(&lean, b"value"), r#enum.name.span, lines.join("\n"), Role::Definition);
 
             // `from` and `tryFrom` give the case whose value matches. For any other value `from` throws `ValueError`, as
             // the engine does, and `tryFrom` gives null.
@@ -647,7 +656,7 @@ impl Translator<'_, '_> {
             }
         };
         lines.extend(self.coercions(&mut body, &lean, interface.inheritance.as_ref()));
-        self.declare(body, lean.clone(), interface.name.span, lines.join("\n"), false);
+        self.declare(body, lean.clone(), interface.name.span, lines.join("\n"), Role::Type);
         self.members(full, &lean, &short, &interface.members);
     }
 
@@ -707,7 +716,7 @@ impl Translator<'_, '_> {
                             Some(r#type) => format!("def {key} : {type} := {value}"),
                             None => format!("def {key} := {value}"),
                         };
-                        self.declare(body, key, item.name.span, text, true);
+                        self.declare(body, key, item.name.span, text, Role::Definition);
                     }
                 }
                 ClassLikeMember::Law(law) => self.law(full, lean, short, law),
@@ -787,7 +796,13 @@ impl Translator<'_, '_> {
             let r#type = body.declared_type(parameter.hint.as_ref(), parameter.span());
             let value = body.pure_value(default.value);
             let key = names::default(key, position);
-            self.declare(body, key.clone(), parameter.span(), format!("def {key} : {type} := {value}"), true);
+            self.declare(
+                body,
+                key.clone(),
+                parameter.span(),
+                format!("def {key} : {type} := {value}"),
+                Role::Definition,
+            );
         }
     }
 
@@ -871,7 +886,15 @@ impl Translator<'_, '_> {
             parameters.join(" "),
             indented(&lines, 2).collect::<Vec<_>>().join("\n")
         );
-        self.translation.declarations.push(Declaration { key, span, text, uses, unmodeled, unfolds: true, measure });
+        self.translation.declarations.push(Declaration {
+            key,
+            span,
+            text,
+            uses,
+            unmodeled,
+            role: Role::Definition,
+            measure,
+        });
     }
 
     /// `@[law] def Class.law (a : A) : Prop := [condition = pure true →] holds do …`: the law holds for every value of
@@ -922,7 +945,7 @@ impl Translator<'_, '_> {
             text,
             uses,
             unmodeled,
-            unfolds: true,
+            role: Role::Definition,
             measure: None,
         });
     }
@@ -931,9 +954,9 @@ impl Translator<'_, '_> {
         members.iter().any(|member| matches!(member, ClassLikeMember::Law(_)))
     }
 
-    fn declare(&mut self, body: Body<'_, '_>, key: String, span: Span, text: String, unfolds: bool) {
+    fn declare(&mut self, body: Body<'_, '_>, key: String, span: Span, text: String, role: Role) {
         let (_, uses, unmodeled) = body.finish();
-        self.translation.declarations.push(Declaration { key, span, text, uses, unmodeled, unfolds, measure: None });
+        self.translation.declarations.push(Declaration { key, span, text, uses, unmodeled, role, measure: None });
     }
 }
 

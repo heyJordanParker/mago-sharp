@@ -45,6 +45,9 @@ use crate::translate::pattern::choice;
 pub(crate) struct Proof {
     /// The Lean theorem, `<statement>.proof`.
     pub(crate) text: String,
+    /// For a law without a body, its theorem up to the step that closes it, `sharp_prove`, which the law checker's fixed
+    /// steps can close it with in that step's place.
+    pub(crate) opening: Option<String>,
     /// The law's claim as PHP# writes it, which a case's goal prints as when it holds a part PHP# writes no other way.
     pub(crate) claim: String,
     /// Each case the proof closes, in the order of its index, from 1.
@@ -163,13 +166,15 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
 
         self.proof.claim = self.source(self.law.claim.span());
         let applied = std::iter::once(self.statement.clone()).chain(parameters.iter().cloned()).collect::<Vec<_>>();
-        self.proof.text = format!(
-            "theorem {}.proof {} : {} := by\n{}",
-            self.statement,
-            binders.join(" "),
-            applied.join(" "),
-            lines.iter().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n")
-        );
+        let theorem = |lines: &[String]| {
+            let header =
+                format!("theorem {}.proof {} : {} := by", self.statement, binders.join(" "), applied.join(" "));
+            std::iter::once(header).chain(lines.iter().map(|line| format!("  {line}"))).collect::<Vec<_>>().join("\n")
+        };
+        self.proof.text = theorem(&lines);
+        if let (LawProof::Checker(_), Some((_, opening))) = (&self.law.proof, lines.split_last()) {
+            self.proof.opening = Some(format!("{}\n  ", theorem(opening)));
+        }
         if let Some((place, step)) = self.step {
             self.proof.text.push('\n');
             self.proof.text.push_str(&Measure::new(place, step, parameters).termination);

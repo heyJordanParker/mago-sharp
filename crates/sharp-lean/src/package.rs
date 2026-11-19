@@ -19,6 +19,7 @@ use crate::issues;
 use crate::library;
 use crate::library::Stop;
 use crate::translate::Declaration;
+use crate::translate::Role;
 use crate::translate::Translation;
 use crate::translate::Unmodeled;
 use crate::translate::Use;
@@ -96,7 +97,7 @@ impl<'program> Program<'program> {
                 terminating.extend(part);
                 continue;
             }
-            let methods = part.iter().all(|key| declarations[key].1.unfolds);
+            let methods = part.iter().all(|key| declarations[key].1.role == Role::Definition);
             for key in part {
                 recursive.insert(
                     key,
@@ -162,6 +163,16 @@ impl<'program> Program<'program> {
         }
 
         reached
+    }
+
+    /// The definitions and constructors `key` uses, transitively, `key`'s own included: those that recurse on no value,
+    /// then the methods that recurse on a value that gets smaller, which the fixed steps of a proof unfold differently.
+    pub(crate) fn definitions(&self, key: &str) -> (Vec<&'program str>, Vec<&'program str>) {
+        self.closure(key)
+            .0
+            .into_iter()
+            .filter(|reached| self.declarations[reached].1.role != Role::Type)
+            .partition(|reached| !self.terminating.contains(reached))
     }
 
     /// Why the declaration `key`, or one it uses, cannot be written to Lean.
