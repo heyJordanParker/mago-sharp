@@ -6819,6 +6819,218 @@ fn a_list_literal_that_coalescing_assigns_to_a_nullable_set_is_a_set() {
 }
 
 /// ```php
+/// $owning = $maybe ?? new \Sharp\Set<string>([]);
+/// ```
+///
+/// A list literal beside a `Set` in `??`, `? :` or a `match` is that `Set`, with no declared type, as it is beside a
+/// `Set` in `==`.
+#[test]
+fn a_list_literal_beside_a_set_in_a_coalesce_a_conditional_or_a_match_is_a_set() {
+    assert_eq!(
+        body_in(
+            "Set<string> run(Set<string>? maybe)",
+            "        const owning = maybe ?? [];\n        return owning;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "maybe"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "maybe"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "maybe"
+                    ZVAL "string"
+                  VAR
+                    ZVAL "maybe"
+              ASSIGN
+                VAR
+                  ZVAL "owning"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "crossing#1"
+                        COALESCE
+                          VAR
+                            ZVAL "maybe"
+                          SHARP_TYPE_ARGS
+                            NEW
+                              ZVAL "Sharp\\Set"
+                              ARG_LIST
+                                ARRAY [3]
+                            ZVAL "string"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "crossing#1"
+                    ZVAL "string"
+                  VAR
+                    ZVAL "crossing#1"
+              RETURN
+                VAR
+                  ZVAL "owning"
+        "#}
+    );
+    assert_eq!(
+        body_in(
+            "Set<string> run(Set<string> tags, bool flag)",
+            "        const owning = flag ? tags : [];\n        return owning;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "tags"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    ZVAL "string"
+                  VAR
+                    ZVAL "tags"
+              ASSIGN
+                VAR
+                  ZVAL "owning"
+                CONDITIONAL
+                  VAR
+                    ZVAL "flag"
+                  VAR
+                    ZVAL "tags"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        ARRAY [3]
+                    ZVAL "string"
+              RETURN
+                VAR
+                  ZVAL "owning"
+        "#}
+    );
+    assert_eq!(
+        body_in(
+            "Set<string> run(Set<string> tags, int extra)",
+            "        const owning = match (extra) {\n            0 => [],\n            default => tags,\n        };\n        return owning;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "tags"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    ZVAL "string"
+                  VAR
+                    ZVAL "tags"
+              ASSIGN
+                VAR
+                  ZVAL "owning"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "crossing#1"
+                        MATCH
+                          ZVAL true
+                          MATCH_ARM_LIST
+                            MATCH_ARM
+                              EXPR_LIST
+                                BINARY_OP [16]
+                                  VAR
+                                    ZVAL "extra"
+                                  ZVAL 0
+                              SHARP_TYPE_ARGS
+                                NEW
+                                  ZVAL "Sharp\\Set"
+                                  ARG_LIST
+                                    ARRAY [3]
+                                ZVAL "string"
+                            MATCH_ARM
+                              null
+                              VAR
+                                ZVAL "tags"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "crossing#1"
+                    ZVAL "string"
+                  VAR
+                    ZVAL "crossing#1"
+              RETURN
+                VAR
+                  ZVAL "owning"
+        "#}
+    );
+}
+
+/// A list literal beside a `Map` is refused, as it is beside a `Map` in `==`. One beside both a `List` and a `Set`
+/// could be either, so it is refused, and the error names the type to write.
+#[test]
+fn a_list_literal_beside_a_map_or_beside_both_a_list_and_a_set_is_refused_before_lowering() {
+    let beside_map = Lowered::with(
+        &method_with(
+            "Any run(Map<string, int>? given)",
+            "        const counts = given ?? [];\n        return counts;\n",
+        ),
+        &[],
+    );
+    let beside_both = Lowered::with(
+        &method_with(
+            "Any run(Set<string> tags, List<string> names, int extra)",
+            "        const picked = match (extra) {\n            0 => tags,\n            1 => names,\n            default => [],\n        };\n        return picked;\n",
+        ),
+        &[],
+    );
+
+    assert_eq!(beside_map.diagnostics(), ["9:33 compile error: `[]` is an empty List. An empty Map is written `[:]`."]);
+    assert_eq!(beside_map.nodes().len(), 0);
+    assert_eq!(
+        beside_both.diagnostics(),
+        ["12:24 compile error: `[]` could be a `List<string>` or a `Set<string>` here. Declare the one it is, as in \
+             `Set<string> values = [];`."]
+    );
+    assert_eq!(beside_both.nodes().len(), 0);
+}
+
+/// ```php
 /// #[\Sharp\Crossing(['set', null])]
 /// private \Sharp\Set $tags = (static function () { return new \Sharp\Set<string>(["a"]); })();
 /// ```

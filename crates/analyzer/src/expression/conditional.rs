@@ -29,6 +29,7 @@ use crate::context::block::BlockContext;
 use crate::context::scope::if_scope::IfScope;
 use crate::context::utils::inherit_branch_context_properties;
 use crate::error::AnalysisError;
+use crate::expression::array::type_collection_literal;
 use crate::formula::get_formula;
 use crate::formula::negate_or_synthesize;
 use crate::reconciler::assertion_reconciler;
@@ -380,6 +381,13 @@ where
     block_context
         .conditionally_referenced_variable_ids
         .extend(else_block_context.conditionally_referenced_variable_ids);
+
+    // A declared type the value goes into, or the place `??=` writes, checks and types a literal branch itself.
+    if expected.is_none() && !block_context.flags.inside_assignment_operation() {
+        let then_value = then.unwrap_or(condition);
+        type_collection_literal(context, block_context, artifacts, then_value, &[r#else]);
+        type_collection_literal(context, block_context, artifacts, r#else, &[then_value]);
+    }
 
     let mut then_type = None;
     let condition_type = artifacts.get_rc_expression_type(&condition).cloned();

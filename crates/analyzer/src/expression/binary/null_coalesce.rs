@@ -27,6 +27,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::scope::if_scope::IfScope;
 use crate::error::AnalysisError;
+use crate::expression::array::type_collection_literal;
 use crate::expression::array_access::check_sharp_list_coalesce;
 use crate::expression::is_refused_type;
 use crate::formula::get_formula;
@@ -61,6 +62,8 @@ where
     // Spec section 11: either side's value is the value of `??`, so either side goes into its declared type, the left
     // one nullable, as Swift's `??` takes a `T?` and a `T`.
     let expected = artifacts.get_expected_type(binary).cloned();
+    // A declared type the value goes into, or the place `??=` writes, checks and types a literal side itself.
+    let is_placed = expected.is_some() || block_context.flags.inside_assignment_operation();
     let was_inside_isset = block_context.flags.inside_isset();
     block_context.flags.set_inside_isset(
         is_variable(binary.lhs, context.resolved_names)
@@ -139,19 +142,25 @@ where
             );
         });
 
-        result_type = (**lhs_type).clone();
-
         // Analyze the unreachable right-hand side in a separate disposable context
         // Prevents its terminating control flow and recorded thrown exceptions from affecting the remainder of the block
         let mut dead_rhs_context = block_context.clone();
         dead_rhs_context.flags.set_has_returned(true);
         binary.rhs.analyze(context, &mut dead_rhs_context, artifacts)?;
+        if !is_placed {
+            type_collection_literal(context, block_context, artifacts, binary.lhs, &[binary.rhs]);
+        }
+
+        result_type = artifacts.get_expression_type(binary.lhs).cloned().unwrap_or_else(get_mixed);
     } else {
         let non_null_lhs_type = lhs_type.to_non_nullable();
         let has_returned = block_context.flags.has_returned();
         block_context.flags.set_has_returned(false);
         binary.rhs.analyze(context, block_context, artifacts)?;
         block_context.flags.set_has_returned(block_context.flags.has_returned() && has_returned);
+        if !is_placed {
+            type_collection_literal(context, block_context, artifacts, binary.rhs, &[binary.lhs]);
+        }
 
         let rhs_type =
             artifacts.get_expression_type(&binary.rhs).map_or_else(|| Cow::Owned(get_mixed()), Cow::Borrowed);

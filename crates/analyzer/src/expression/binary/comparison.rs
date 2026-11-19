@@ -47,9 +47,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::ancestor_type_arguments;
-use crate::expression::array::check_sharp_literal_kind;
-use crate::expression::array::get_empty_literal_type;
-use crate::expression::array::get_set_literal_type;
+use crate::expression::array::type_collection_literal;
 use crate::expression::binary::utils::DeclaredOperator;
 use crate::expression::binary::utils::analyze_operator_call;
 use crate::expression::binary::utils::are_definitely_loosely_equal;
@@ -105,9 +103,9 @@ where
     binary.lhs.analyze(context, block_context, artifacts)?;
     binary.rhs.analyze(context, block_context, artifacts)?;
     block_context.flags.set_inside_general_use(was_inside_general_use);
-    if context.dialect.is_sharp() && matches!(binary.operator, BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_)) {
-        type_collection_literal(context, block_context, artifacts, binary.lhs, binary.rhs);
-        type_collection_literal(context, block_context, artifacts, binary.rhs, binary.lhs);
+    if matches!(binary.operator, BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_)) {
+        type_collection_literal(context, block_context, artifacts, binary.lhs, &[binary.rhs]);
+        type_collection_literal(context, block_context, artifacts, binary.rhs, &[binary.lhs]);
     }
 
     let fallback_type = Rc::new(get_mixed());
@@ -500,45 +498,6 @@ where
     artifacts.expression_types.insert(get_expression_range(binary), Rc::new(result_type));
 
     Ok(())
-}
-
-/// Gives `literal`, a side of a PHP# `==` or `!=` written as a collection literal, the collection type of `other`, the
-/// other side, as a place gives its literal one, spec section 12: a list literal compared with a `Set` is a `Set`, at
-/// any depth, `[]` is the other side's `List` or `Set`, and `[:]` its `Map`. A literal of a kind the other side is not,
-/// as `[]` compared with a `Map`, is refused as [`check_sharp_literal_kind`] refuses it at a place, and takes the other
-/// side's type, so the comparison adds no second issue. A literal compared with a literal or with no collection keeps
-/// its own type.
-fn type_collection_literal<'arena, A>(
-    context: &mut Context<'_, 'arena, A>,
-    block_context: &BlockContext<'_>,
-    artifacts: &mut AnalysisArtifacts,
-    literal: &Expression<'arena>,
-    other: &Expression<'_>,
-) where
-    A: Arena,
-{
-    let Expression::Array(array) = literal.unparenthesized() else {
-        return;
-    };
-    let Some(other_type) = artifacts
-        .get_expression_type(other)
-        .filter(|other_type| other_type.has_array() && !matches!(other.unparenthesized(), Expression::Array(_)))
-        .cloned()
-    else {
-        return;
-    };
-
-    let literal_type = if check_sharp_literal_kind(context, Some(block_context), artifacts, literal, &other_type) {
-        Some(other_type)
-    } else if array.elements.is_empty() {
-        get_empty_literal_type(Some(literal), &other_type)
-    } else {
-        get_set_literal_type(context, artifacts, literal, &other_type, block_context.scope.get_function_like())
-    };
-    if let Some(literal_type) = literal_type {
-        artifacts.set_expression_type(array, literal_type.clone());
-        artifacts.set_expression_type(literal, literal_type);
-    }
 }
 
 /// Whether `==` never holds for a value of `lhs_type` and one of `rhs_type`. PHP# `==` is `===` on every pair but an

@@ -45,6 +45,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::utils::inherit_branch_context_properties;
 use crate::error::AnalysisError;
+use crate::expression::array::type_collection_literal;
 use crate::formula::add_nullsafe_base_clauses;
 use crate::formula::get_formula;
 use crate::formula::negate_or_synthesize;
@@ -308,7 +309,7 @@ where
 
         let (is_synthetic, subject_id, subject_for_conditions) = self.get_subject_info(&subject_type);
 
-        let mut arm_body_types: Vec<Rc<TUnion>> = Vec::new();
+        let mut arm_values: Vec<&'arena Expression<'arena>> = Vec::new();
         let mut arm_exit_contexts: Vec<BlockContext<'ctx>> = Vec::new();
         let mut running_else_context = self.block_context.clone();
         let last_expression_arm_index = expression_arms.len().saturating_sub(1);
@@ -332,7 +333,7 @@ where
                 &subject_for_conditions,
                 expression_arm,
                 &mut running_else_context,
-                &mut arm_body_types,
+                &mut arm_values,
                 &mut arm_exit_contexts,
                 is_last_arm,
                 is_exhaustive,
@@ -399,7 +400,7 @@ where
             self.analyze_default_arm(
                 default_arm,
                 &running_else_context,
-                &mut arm_body_types,
+                &mut arm_values,
                 &mut arm_exit_contexts,
                 previous_arms_executed,
                 is_exhaustive,
@@ -417,7 +418,6 @@ where
                 self.set_unhandled_match_error(Some(&mut running_else_context), self.stmt.span(), false);
             }
 
-            arm_body_types.push(Rc::new(get_never()));
             if !finite_array_coverage.as_ref().is_some_and(FiniteArrayMatchCoverage::is_exhaustive) {
                 arm_exit_contexts.push(running_else_context);
             }
@@ -429,14 +429,31 @@ where
             self.block_context.locals.remove(&subject_id);
         }
 
-        let final_type = arm_body_types.into_iter().reduce(|acc, item| {
-            Rc::new(combine_union_types(
-                acc.as_ref(),
-                item.as_ref(),
-                self.context.codebase,
-                self.context.settings.combiner_options(),
-            ))
-        });
+        // A declared type the value goes into, or the place `??=` writes, checks and types a literal arm itself.
+        if self.expected.is_none() && !self.block_context.flags.inside_assignment_operation() {
+            for (index, value) in arm_values.iter().enumerate() {
+                let others: Vec<&Expression<'_>> = arm_values
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| *other != index)
+                    .map(|(_, other)| *other)
+                    .collect();
+                type_collection_literal(self.context, self.block_context, self.artifacts, value, &others);
+            }
+        }
+
+        let final_type = arm_values
+            .iter()
+            .map(|value| self.artifacts.get_rc_expression_type(*value).cloned().unwrap_or_else(|| Rc::new(get_mixed())))
+            .chain(first_default_arm.is_none().then(|| Rc::new(get_never())))
+            .reduce(|acc, item| {
+                Rc::new(combine_union_types(
+                    acc.as_ref(),
+                    item.as_ref(),
+                    self.context.codebase,
+                    self.context.settings.combiner_options(),
+                ))
+            });
 
         self.artifacts.set_rc_expression_type(self.stmt, final_type.unwrap_or_else(|| Rc::new(get_mixed())));
 
@@ -478,7 +495,7 @@ where
         subject_expr: &Expression<'arena>,
         expression_arm: &MatchExpressionArm<'arena>,
         running_else_context: &mut BlockContext<'ctx>,
-        arm_body_types: &mut Vec<Rc<TUnion>>,
+        arm_values: &mut Vec<&'arena Expression<'arena>>,
         arm_exit_contexts: &mut Vec<BlockContext<'ctx>>,
         is_last: bool,
         is_exhaustive: bool,
@@ -633,12 +650,7 @@ where
 
         self.expect_arm(expression_arm.expression);
         expression_arm.expression.analyze(self.context, &mut arm_body_context, self.artifacts)?;
-        arm_body_types.push(
-            self.artifacts
-                .get_rc_expression_type(&expression_arm.expression)
-                .cloned()
-                .unwrap_or_else(|| Rc::new(get_mixed())),
-        );
+        arm_values.push(expression_arm.expression);
 
         arm_exit_contexts.push(arm_body_context);
         let mut negated_arm_clauses = negate_or_synthesize(
@@ -677,7 +689,7 @@ where
         &mut self,
         default_arm: &'ast MatchDefaultArm<'arena>,
         running_else_context: &BlockContext<'ctx>,
-        arm_body_types: &mut Vec<Rc<TUnion>>,
+        arm_values: &mut Vec<&'arena Expression<'arena>>,
         arm_exit_contexts: &mut Vec<BlockContext<'ctx>>,
         previous_arms_executed: ArmExecutionStatus,
         is_exhaustive: bool,
@@ -696,12 +708,7 @@ where
         self.expect_arm(default_arm.expression);
         default_arm.expression.analyze(self.context, &mut default_context, self.artifacts)?;
 
-        arm_body_types.push(
-            self.artifacts
-                .get_rc_expression_type(&default_arm.expression)
-                .cloned()
-                .unwrap_or_else(|| Rc::new(get_mixed())),
-        );
+        arm_values.push(default_arm.expression);
         arm_exit_contexts.push(default_context);
 
         Ok(())

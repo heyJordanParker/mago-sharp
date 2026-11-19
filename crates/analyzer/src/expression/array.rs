@@ -77,6 +77,7 @@ use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::quoted_source;
 
 /// Analyzes array literals and their elements.
 ///
@@ -392,6 +393,85 @@ pub(crate) fn get_empty_literal_type(value: Option<&Expression<'_>>, declared: &
     }
 
     (!types.is_empty()).then(|| TUnion::from_vec(types))
+}
+
+/// Gives `literal`, a PHP# value written as a collection literal, the collection type of `others`, the values written
+/// beside it, as a place gives its literal one, spec section 12: the other side of `==`, `!=` or `??`, the other branch
+/// of `? :`, or the other arms of a `match`. A list literal beside a `Set` is a `Set`, at any depth, `[]` is the `List`
+/// or `Set` beside it, and `[:]` its `Map`. A literal of a kind no value beside it is, as `[]` beside a `Map`, is refused
+/// as [`check_sharp_literal_kind`] refuses it at a place, and a list literal beside both a `List` and a `Set` is refused,
+/// since nothing says which it is. A refused literal takes the type beside it, so nothing that reads it reports again.
+/// A literal beside only literals, or beside no collection, keeps its own type.
+pub(crate) fn type_collection_literal<'arena, A>(
+    context: &mut Context<'_, 'arena, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    literal: &Expression<'arena>,
+    others: &[&Expression<'_>],
+) where
+    A: Arena,
+{
+    let Expression::Array(array) = literal.unparenthesized() else {
+        return;
+    };
+    if !context.dialect.is_sharp() {
+        return;
+    }
+    let collections: Vec<TAtomic> = others
+        .iter()
+        .filter(|other| !matches!(other.unparenthesized(), Expression::Array(_)))
+        .filter_map(|other| artifacts.get_expression_type(*other))
+        .flat_map(|other_type| other_type.types.iter().filter(|atomic| matches!(atomic, TAtomic::Array(_))).cloned())
+        .collect();
+    if collections.is_empty() {
+        return;
+    }
+    let other_type = TUnion::from_vec(combine(collections, context.codebase, context.settings.combiner_options()));
+
+    let literal_type = if check_sharp_literal_kind(context, Some(block_context), artifacts, literal, &other_type)
+        || report_list_or_set_literal(context, array, &other_type)
+    {
+        Some(other_type)
+    } else if array.elements.is_empty() {
+        get_empty_literal_type(Some(literal), &other_type)
+    } else {
+        get_set_literal_type(context, artifacts, literal, &other_type, block_context.scope.get_function_like())
+    };
+    if let Some(literal_type) = literal_type {
+        artifacts.set_expression_type(array, literal_type.clone());
+        artifacts.set_expression_type(literal, literal_type);
+    }
+}
+
+/// Reports `literal`, a list literal written beside `beside`, the values that give it its type, when they hold both a
+/// `List` and a `Set`, so the literal could be either. Returns whether it reported.
+fn report_list_or_set_literal<A>(context: &mut Context<'_, '_, A>, literal: &Array<'_>, beside: &TUnion) -> bool
+where
+    A: Arena,
+{
+    let collection = |is_set: bool| {
+        beside.types.iter().find(|atomic| match atomic {
+            TAtomic::Array(TArray::Set(_)) => is_set,
+            TAtomic::Array(TArray::List(_)) => !is_set,
+            _ => false,
+        })
+    };
+    let (Some(false), Some(list), Some(set)) = (is_map_literal(literal), collection(false), collection(true)) else {
+        return false;
+    };
+
+    let (list, set) = (display_atomic(context, list), display_atomic(context, set));
+    let written = quoted_source(context, literal.span());
+    let beside = display_type(context, beside);
+    context.collector.report_with_code(
+        IssueCode::InvalidArrayElement,
+        Issue::error(format!(
+            "`{written}` could be a `{list}` or a `{set}` here. Declare the one it is, as in `{set} values = {written};`."
+        ))
+        .with_annotation(Annotation::primary(literal.span()).with_message(format!("Written beside `{beside}`."))),
+    );
+
+    true
 }
 
 #[derive(Debug)]
