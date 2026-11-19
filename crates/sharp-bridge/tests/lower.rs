@@ -6855,31 +6855,15 @@ fn a_list_literal_beside_a_set_in_a_coalesce_a_conditional_or_a_match_is_a_set()
               ASSIGN
                 VAR
                   ZVAL "owning"
-                CONDITIONAL
-                  CALL
-                    ZVAL "is_array"
-                    ARG_LIST
-                      ASSIGN
-                        VAR
-                          ZVAL "crossing#1"
-                        COALESCE
-                          VAR
-                            ZVAL "maybe"
-                          SHARP_TYPE_ARGS
-                            NEW
-                              ZVAL "Sharp\\Set"
-                              ARG_LIST
-                                ARRAY [3]
-                            ZVAL "string"
+                COALESCE
+                  VAR
+                    ZVAL "maybe"
                   SHARP_TYPE_ARGS
                     NEW
                       ZVAL "Sharp\\Set"
                       ARG_LIST
-                        VAR
-                          ZVAL "crossing#1"
+                        ARRAY [3]
                     ZVAL "string"
-                  VAR
-                    ZVAL "crossing#1"
               RETURN
                 VAR
                   ZVAL "owning"
@@ -6959,41 +6943,25 @@ fn a_list_literal_beside_a_set_in_a_coalesce_a_conditional_or_a_match_is_a_set()
               ASSIGN
                 VAR
                   ZVAL "owning"
-                CONDITIONAL
-                  CALL
-                    ZVAL "is_array"
-                    ARG_LIST
-                      ASSIGN
-                        VAR
-                          ZVAL "crossing#1"
-                        MATCH
-                          ZVAL true
-                          MATCH_ARM_LIST
-                            MATCH_ARM
-                              EXPR_LIST
-                                BINARY_OP [16]
-                                  VAR
-                                    ZVAL "extra"
-                                  ZVAL 0
-                              SHARP_TYPE_ARGS
-                                NEW
-                                  ZVAL "Sharp\\Set"
-                                  ARG_LIST
-                                    ARRAY [3]
-                                ZVAL "string"
-                            MATCH_ARM
-                              null
-                              VAR
-                                ZVAL "tags"
-                  SHARP_TYPE_ARGS
-                    NEW
-                      ZVAL "Sharp\\Set"
-                      ARG_LIST
-                        VAR
-                          ZVAL "crossing#1"
-                    ZVAL "string"
-                  VAR
-                    ZVAL "crossing#1"
+                MATCH
+                  ZVAL true
+                  MATCH_ARM_LIST
+                    MATCH_ARM
+                      EXPR_LIST
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "extra"
+                          ZVAL 0
+                      SHARP_TYPE_ARGS
+                        NEW
+                          ZVAL "Sharp\\Set"
+                          ARG_LIST
+                            ARRAY [3]
+                        ZVAL "string"
+                    MATCH_ARM
+                      null
+                      VAR
+                        ZVAL "tags"
               RETURN
                 VAR
                   ZVAL "owning"
@@ -7028,6 +6996,90 @@ fn a_list_literal_beside_a_map_or_beside_both_a_list_and_a_set_is_refused_before
              `Set<string> values = [];`."]
     );
     assert_eq!(beside_both.nodes().len(), 0);
+}
+
+/// ```php
+/// $owning = $maybe ?? $fallback;
+/// $named = \is_array($crossing#1 = $given ?? \Lib\Calc::names()) ? new \Sharp\Map<int, string>(…) : $crossing#1;
+/// ```
+///
+/// A `??` or a `match` bound for a `Set` or a `Map` crosses its value only where one of its sides may be a PHP array,
+/// spec section 12, as a `? :` does, so a value whose every side holds the object runs with no `is_array` test. A side
+/// plain PHP gives still crosses into the object.
+#[test]
+fn a_coalesce_or_a_match_bound_for_a_collection_crosses_only_where_a_side_may_be_a_php_array() {
+    let sets = "Set<string> run(Set<string>? maybe, Set<string> fallback, int extra)";
+    let matched = body_in(
+        sets,
+        "        Set<string> owning = match (extra) {\n            0 => fallback,\n            default => maybe ?? fallback,\n        };\n        return owning;\n",
+        &[],
+    );
+    let plain = body_in(
+        "Map<int, string> run(Map<int, string>? given)",
+        "        Map<int, string> named = given ?? Calc.names();\n        return named;\n",
+        &[ARRAYS],
+    );
+
+    assert_eq!(
+        body_in(sets, "        Set<string> owning = maybe ?? fallback;\n        return owning;\n", &[]),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "maybe"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "maybe"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "maybe"
+                    ZVAL "string"
+                  VAR
+                    ZVAL "maybe"
+              ASSIGN
+                VAR
+                  ZVAL "fallback"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "fallback"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "fallback"
+                    ZVAL "string"
+                  VAR
+                    ZVAL "fallback"
+              ASSIGN
+                VAR
+                  ZVAL "owning"
+                COALESCE
+                  VAR
+                    ZVAL "maybe"
+                  VAR
+                    ZVAL "fallback"
+              RETURN
+                VAR
+                  ZVAL "owning"
+        "#}
+    );
+    assert_eq!(matched.matches("ZVAL \"is_array\"\n").count(), 2, "{matched}");
+    assert!(!matched.contains("crossing#"), "{matched}");
+    assert!(plain.contains("ZVAL \"crossing#1\"\n"), "{plain}");
+
+    let emptied = body_in(sets, "        Set<string> owning = maybe ?? [];\n        return owning;\n", &[]);
+    assert!(!emptied.contains("crossing#"), "{emptied}");
+    assert_eq!(emptied.matches("ZVAL \"Sharp\\\\Set\"\n").count(), 3, "{emptied}");
 }
 
 /// ```php
