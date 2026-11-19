@@ -176,7 +176,8 @@ static void engine_describe_exception(zval *result)
 
 int engine_run_script(const char *path, zval *result)
 {
-	int status = ENGINE_DONE;
+	/* zend_catch returns here through longjmp, so status lives in memory, where the assignments before it stay. */
+	volatile int status = ENGINE_DONE;
 	ZVAL_NULL(result);
 	zend_try {
 		zend_file_handle handle;
@@ -208,7 +209,8 @@ int engine_run_script(const char *path, zval *result)
 
 int engine_call(const char *function, size_t length, zval *arguments, uint32_t count, zval *result)
 {
-	int status = ENGINE_DONE;
+	/* zend_catch returns here through longjmp, so status lives in memory, where the assignments before it stay. */
+	volatile int status = ENGINE_DONE;
 	ZVAL_NULL(result);
 	zend_execute_data caller = {0};
 	caller.func = (zend_function *) &engine_caller;
