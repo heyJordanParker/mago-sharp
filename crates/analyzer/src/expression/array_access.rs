@@ -259,8 +259,8 @@ pub(crate) fn check_sharp_map_read<'arena, A>(
     if !kinds.map {
         return;
     }
-    let fixed_key = artifacts.get_expression_type(access.index).is_some_and(is_compile_time_string)
-        && report_fixed_map_key(context, access.index);
+    let fixed_key =
+        is_compile_time_string(context, artifacts, access.index) && report_fixed_map_key(context, access.index);
 
     if block_context.flags.inside_isset() {
         if let Some(read) = artifacts.get_expression_type(access).cloned() {

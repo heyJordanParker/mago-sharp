@@ -123,7 +123,7 @@ where
     }
     let refused = refusal.is_some();
     if !refused {
-        report_compile_time_selection(context, binary, lhs_type, rhs_type);
+        report_compile_time_selection(context, artifacts, binary, lhs_type, rhs_type);
     }
 
     // A PHP# comparison of instances runs the operator their class declares, which returns the `bool` it decides.
@@ -1300,11 +1300,11 @@ where
     Some(analyze_operator_call(context, artifacts, method, &operands, binary.span()))
 }
 
-/// Spec section 24: `==`, `!=` or a value pattern that compares a string with a string fixed at compile time, a
-/// literal, a constant, a backed case's `.value` or a join of them, selects one of a closed set of values, as
-/// [`report_selection`] reports it.
+/// Spec section 24: `==`, `!=` or a value pattern that compares a string with a string fixed at compile time, as
+/// [`is_compile_time_string`] reads it, selects one of a closed set of values, as [`report_selection`] reports it.
 fn report_compile_time_selection<A>(
     context: &mut Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
     binary: &Binary<'_>,
     lhs_type: &TUnion,
     rhs_type: &TUnion,
@@ -1316,7 +1316,10 @@ fn report_compile_time_selection<A>(
     {
         return;
     }
-    let (compared, fixed, fixed_type) = match (is_compile_time_string(lhs_type), is_compile_time_string(rhs_type)) {
+    let (compared, fixed, fixed_type) = match (
+        is_compile_time_string(context, artifacts, binary.lhs),
+        is_compile_time_string(context, artifacts, binary.rhs),
+    ) {
         (_, true) if lhs_type.has_string() => (binary.lhs, binary.rhs, rhs_type),
         (true, false) if rhs_type.has_string() => (binary.rhs, binary.lhs, lhs_type),
         _ => return,

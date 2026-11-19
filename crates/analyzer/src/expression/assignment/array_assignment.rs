@@ -203,7 +203,7 @@ where
     if let ArrayTarget::Access(access) = array_target
         && let Some(written) = artifacts.get_expression_type(access.array)
         && matches!(indexed_collection(written), Some((CollectionKind::Map, _)))
-        && artifacts.get_expression_type(access.index).is_some_and(is_compile_time_string)
+        && is_compile_time_string(context, artifacts, access.index)
     {
         report_fixed_map_key(context, access.index);
     }

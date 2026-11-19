@@ -807,6 +807,47 @@ fn a_mixin_method_that_returns_this_gives_the_receivers_type() {
     );
 }
 
+/// Spec section 24: the check of a string fixed at compile time reads declared types, so a member read through a value
+/// from data, as an enum's `limit.value`, is a `string`, and `==`, `equals`, `contains` and a `Map` key compare it as
+/// data. A literal, a constant and a member of a case named in the code, as `Feature.Reports.value`, are still fixed.
+#[test]
+fn a_member_read_through_data_is_no_string_fixed_at_compile_time() {
+    let directory = library_workspace(
+        "namespace App;\n\npublic class Page\n{\n    public bool shared(Limit limit, Feature feature) => limit.value == feature.value;\n\n    public bool equal(Limit limit, Feature feature) => limit.value.equals(feature.value);\n\n    public bool listed(List<string> names, Feature feature) => names.contains(feature.value);\n\n    public int keyed(Map<string, int> counts, Feature feature) => counts[feature.value] ?? 0;\n\n    public bool status(Order order) => order.status == \"paid\";\n\n    public bool written(Feature feature) => feature.value == \"reports\";\n\n    public bool cased(string status) => status == Feature.Reports.value;\n}\n",
+    );
+    write(
+        directory.path(),
+        "src/App/Feature.sharp",
+        "namespace App;\n\npublic enum Feature : string\n{\n    case Reports = \"reports\";\n    case Exports = \"exports\";\n}\n",
+    );
+    write(
+        directory.path(),
+        "src/App/Limit.sharp",
+        "namespace App;\n\npublic enum Limit : string\n{\n    case Seats = \"seats\";\n}\n",
+    );
+    write(directory.path(), "composer.json", "{\n    \"name\": \"acme/app\",\n    \"type\": \"project\"\n}\n");
+    write(
+        directory.path(),
+        "src/App/Order.sharp",
+        "namespace App;\n\npublic class Order\n{\n    public Order(public string status { get; }) { }\n}\n",
+    );
+
+    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.contains(" - invalid-operand: ") || line.contains(" - invalid-array-index: "))
+            .collect::<Vec<_>>(),
+        [
+            "src/App/Page.sharp:13:40:error - invalid-operand: `==` compares `order.status` with `\"paid\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "src/App/Page.sharp:15:45:error - invalid-operand: `==` compares `feature.value` with `\"reports\"`, a string fixed at compile time, so it selects one of a closed set of values.",
+            "src/App/Page.sharp:17:41:error - invalid-operand: `==` compares `status` with `Feature.Reports.value`, a string fixed at compile time, so it selects one of a closed set of values.",
+        ]
+    );
+}
+
 /// The semantic checks let a file under the namespace `Sharp` declare the standard library's reserved type names,
 /// and the analyzer refuses the namespace in a project file.
 #[test]

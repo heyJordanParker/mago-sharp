@@ -8,15 +8,19 @@ use mago_codex::ttype::atomic::callable::DroppedReadonly;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::union::TUnion;
+use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::AnnotationKind;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LiteralInteger;
+use mago_syntax::cst::NullSafePropertyAccess;
+use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 
@@ -298,14 +302,64 @@ where
     }
 }
 
-/// Whether `value` is a string fixed at compile time, spec section 24's `literal-string`: a literal, a constant, a
-/// backed case's `.value`, `""`, or a join of them.
-pub(crate) fn is_compile_time_string(value: &TUnion) -> bool {
-    !value.types.is_empty()
-        && value
-            .types
-            .iter()
-            .all(|atomic| matches!(atomic, TAtomic::Scalar(scalar) if scalar.is_literal_origin_string()))
+/// Whether `expression` is a string fixed at compile time, spec section 24's `literal-string`: a literal, `""`, a
+/// constant, a member of a value fixed at compile time, as a backed case's `.value`, or a join of them. The check reads
+/// declared types, so a member read through a value from data, as `limit.value`, is its member's declared `string`,
+/// whatever strings its type lists.
+pub(crate) fn is_compile_time_string<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    expression: &Expression<'_>,
+) -> bool
+where
+    A: Arena,
+{
+    artifacts.get_expression_type(expression).is_some_and(|value| {
+        !value.types.is_empty()
+            && value
+                .types
+                .iter()
+                .all(|atomic| matches!(atomic, TAtomic::Scalar(scalar) if scalar.is_literal_origin_string()))
+    }) && reads_no_member_of_data(context, expression)
+}
+
+/// Whether each member `expression` reads, itself or as a part of a join, a `??` or a conditional, is read from a value
+/// fixed at compile time.
+fn reads_no_member_of_data<A>(context: &Context<'_, '_, A>, expression: &Expression<'_>) -> bool
+where
+    A: Arena,
+{
+    match expression.unparenthesized() {
+        Expression::Access(
+            Access::Property(PropertyAccess { object, .. })
+            | Access::NullSafeProperty(NullSafePropertyAccess { object, .. }),
+        ) => is_fixed_at_compile_time(context, object),
+        Expression::Binary(binary) => {
+            reads_no_member_of_data(context, binary.lhs) && reads_no_member_of_data(context, binary.rhs)
+        }
+        Expression::Conditional(conditional) => {
+            reads_no_member_of_data(context, conditional.then.unwrap_or(conditional.condition))
+                && reads_no_member_of_data(context, conditional.r#else)
+        }
+        _ => true,
+    }
+}
+
+/// Whether `object` is a value fixed at compile time: a class or a constant named in the code, or a member of one, as
+/// the case `Feature.Reports`.
+fn is_fixed_at_compile_time<A>(context: &Context<'_, '_, A>, object: &Expression<'_>) -> bool
+where
+    A: Arena,
+{
+    match object.unparenthesized() {
+        Expression::ConstantAccess(access) => {
+            matches!(context.resolved_names.binding(&access.name), Some(Binding::Class | Binding::Constant))
+        }
+        Expression::Access(Access::Property(PropertyAccess { object, .. })) => {
+            is_fixed_at_compile_time(context, object)
+        }
+        _ => false,
+    }
 }
 
 /// The source text at `span`, as one line: every run of whitespace that holds a newline becomes one space, so a value

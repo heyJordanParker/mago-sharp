@@ -680,7 +680,7 @@ where
         // string fixed at compile time is refused there too, spec section 12.
         if parameter.get_name().0.as_bytes() == b"$key"
             && collection_member_kind(class, metadata) == Some(CollectionKind::Map)
-            && artifacts.get_expression_type(value).is_some_and(is_compile_time_string)
+            && is_compile_time_string(context, artifacts, value)
         {
             report_fixed_map_key(context, value);
         }
@@ -758,16 +758,14 @@ fn report_collection_selection<A>(
 ) where
     A: Arena,
 {
-    let value_type = artifacts.get_expression_type(value);
     let selection = format!("`{method}`");
-    if value_type.is_some_and(is_compile_time_string) {
+    if is_compile_time_string(context, artifacts, value) {
         report_selection(context, &selection, receiver, value, None, span);
-    } else if value_type.is_some_and(TUnion::has_string)
+    } else if artifacts.get_expression_type(value).is_some_and(TUnion::has_string)
         && let Expression::Array(literal) = receiver.unparenthesized()
         && !literal.elements.is_empty()
         && literal.elements.iter().all(|element| {
-            matches!(element, ArrayElement::Value(element)
-                if artifacts.get_expression_type(element.value).is_some_and(is_compile_time_string))
+            matches!(element, ArrayElement::Value(element) if is_compile_time_string(context, artifacts, element.value))
         })
     {
         report_selection(context, &selection, value, receiver, None, span);
@@ -786,12 +784,13 @@ fn report_text_selection<A>(
 ) where
     A: Arena,
 {
-    let is_fixed = |side: &Expression<'_>| artifacts.get_expression_type(side).is_some_and(is_compile_time_string);
-    let (compared, fixed) = match (is_fixed(receiver), is_fixed(other)) {
-        (_, true) => (receiver, other),
-        (true, false) => (other, receiver),
-        (false, false) => return,
-    };
+    let (compared, fixed) =
+        match (is_compile_time_string(context, artifacts, receiver), is_compile_time_string(context, artifacts, other))
+        {
+            (_, true) => (receiver, other),
+            (true, false) => (other, receiver),
+            (false, false) => return,
+        };
     let empty_test = artifacts.get_expression_type(fixed).is_some_and(is_empty_text).then_some("isEmpty");
 
     report_selection(context, &format!("`{method}`"), compared, fixed, empty_test, span);
