@@ -284,11 +284,15 @@ where
         static_class_type = method_context.class_type.clone();
         allow_mixin_static_rebind = method_context.declaring_object_type.is_some();
         self_class = Some(method_context.class_like_metadata.name);
-        function_is_final = invocation
-            .target
-            .get_function_like_metadata()
-            .and_then(|metadata| metadata.method_metadata.as_ref())
-            .is_some_and(|metadata| metadata.is_final);
+        let sharp_mixin_call_on_value = allow_mixin_static_rebind
+            && context.dialect.is_sharp()
+            && matches!(&method_context.class_type, StaticClassType::Object(TObject::Named(receiver)) if !receiver.is_static);
+        function_is_final = sharp_mixin_call_on_value
+            || invocation
+                .target
+                .get_function_like_metadata()
+                .and_then(|metadata| metadata.method_metadata.as_ref())
+                .is_some_and(|metadata| metadata.is_final);
         let declaring_class = get_declaring_class(context, method_context);
         if declaring_class.name != method_context.class_like_metadata.name {
             rename_trait_objects(

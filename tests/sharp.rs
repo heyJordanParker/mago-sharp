@@ -770,6 +770,43 @@ fn a_tested_list_passes_where_a_non_empty_list_is_required() {
     );
 }
 
+/// Spec section 25: a plain PHP method a class reaches through a `@mixin` that returns `$this` gives a PHP# call the
+/// receiver's type, type arguments included, as a method the class declares with `$this` does, after a `where` and
+/// through a chain of two such calls. Returned where another type argument is declared, it is still refused.
+#[test]
+fn a_mixin_method_that_returns_this_gives_the_receivers_type() {
+    let directory = library_workspace(
+        "namespace App;\n\npublic class Page\n{\n    public RowQuery<Page> ordered() => RowQuery.of(typeof(Page)).where(\"status\").orderBy(\"id\");\n\n    public RowQuery<Page> twice() => RowQuery.of(typeof(Page)).orderBy(\"id\").orderBy(\"name\");\n\n    public int shown() => RowQuery.of(typeof(Page)).orderBy(\"id\");\n\n    public RowQuery<Item> other() => RowQuery.of(typeof(Page)).where(\"status\").orderBy(\"id\");\n}\n",
+    );
+    write(directory.path(), "src/App/Item.sharp", "namespace App;\n\npublic class Item\n{\n}\n");
+    write(
+        directory.path(),
+        "src/App/RowQuery.sharp",
+        "namespace App;\n\nimport Acme.Query.Builder;\n\npublic class RowQuery<TRow> : Builder<TRow>\n{\n    public static RowQuery<TRow> of(Class<TRow> rows) => new RowQuery<TRow>();\n}\n",
+    );
+    write(
+        directory.path(),
+        "vendor/acme/query/src/Builder.php",
+        "<?php\n\nnamespace Acme\\Query;\n\n/**\n * @template TModel\n * @mixin QueryBuilder\n */\nclass Builder\n{\n    /**\n     * @return $this\n     */\n    public function where(string $column)\n    {\n        return $this;\n    }\n\n    public function __call(string $method, array $parameters): mixed\n    {\n        return $this;\n    }\n}\n",
+    );
+    write(
+        directory.path(),
+        "vendor/acme/query/src/QueryBuilder.php",
+        "<?php\n\nnamespace Acme\\Query;\n\nclass QueryBuilder\n{\n    /**\n     * @return $this\n     */\n    public function orderBy(string $column)\n    {\n        return $this;\n    }\n}\n",
+    );
+
+    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        stdout.lines().filter(|line| line.starts_with("src/")).collect::<Vec<_>>(),
+        [
+            "src/App/Page.sharp:9:27:error - invalid-return-statement: Invalid return type for method `Page.shown`: expected `int`, but found `RowQuery<Page>`.",
+            "src/App/Page.sharp:11:38:error - invalid-return-statement: RowQuery<Page> cannot be used as RowQuery<Item>.",
+        ]
+    );
+}
+
 /// The semantic checks let a file under the namespace `Sharp` declare the standard library's reserved type names,
 /// and the analyzer refuses the namespace in a project file.
 #[test]
