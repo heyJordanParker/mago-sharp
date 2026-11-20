@@ -2003,7 +2003,8 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The cases and moves of the PHP# machine `class`, spec section 20.2. None for any other class.
-    pub(crate) fn machine(&self, class: Word) -> Option<&'analysis MachineMetadata> {
+    #[must_use]
+    pub fn machine(&self, class: Word) -> Option<&'analysis MachineMetadata> {
         self.codebase.get_class_like(class)?.machine.as_ref()
     }
 

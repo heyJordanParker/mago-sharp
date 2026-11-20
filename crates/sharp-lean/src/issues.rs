@@ -131,6 +131,12 @@ pub(crate) fn unproven_case(law: &Law, case: &Case, split: &[String], goal: Opti
     }
 }
 
+/// The invariant `law` of a machine, spec section 20.2, which breaks `after` the moves written there: the trace the search
+/// found, "`open() → Draft`, `pay(cents: 0) → Paid(cents: 0)`", or the entry point or move whose proof stays open.
+pub(crate) fn broken_invariant(law: &Law, after: &str) -> Issue {
+    unproven(law, format!("`{}` breaks after {after}", law.name))
+}
+
 /// A call in `law`'s body of a law whose `when` condition the case of the call does not show, with the part of the
 /// condition still to show in PHP#.
 pub(crate) fn unshown_condition(law: &Law, call: &LawCall, goal: Option<&str>) -> Issue {

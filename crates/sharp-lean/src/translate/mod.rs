@@ -6,6 +6,7 @@
 
 mod body;
 mod loops;
+mod machine;
 pub(crate) mod names;
 mod pattern;
 pub(crate) mod proof;
@@ -56,6 +57,7 @@ use crate::issues;
 use crate::reach::Reach;
 use crate::translate::body::Body;
 use crate::translate::body::indented;
+use crate::translate::machine::case_class;
 use crate::translate::proof::Proof;
 use crate::translate::proof::Prover;
 
@@ -363,7 +365,7 @@ impl Translator<'_, '_> {
         }
 
         self.constructor(full, &lean, &short, (name.span, parent), constructor, &fields, &types);
-        self.members(full, &lean, &short, members);
+        self.members(full, &lean, &short, members.as_slice());
         if r#struct {
             self.value_equality(full, &lean, &short, name.span, members, &fields);
         }
@@ -624,7 +626,19 @@ impl Translator<'_, '_> {
             );
         }
 
-        self.members(full, &lean, &short, &r#enum.members);
+        self.members(full, &lean, &short, r#enum.members.as_slice());
+        // Spec section 20.2: the class of a machine's case holds the members of its block, each a definition on the
+        // machine's inductive type, as `Shop.OrderStatus.Draft.pay`.
+        for member in &r#enum.members {
+            if let ClassLikeMember::EnumCase(case) = member {
+                let class = case_class(full, case.item.name().value);
+                let place = format!("{short}.{}", String::from_utf8_lossy(case.item.name().value));
+                self.members(&class, &names::full_name(&class), &place, case.members());
+            }
+        }
+        if let Some(machine) = self.checked.types().machine(word(full)) {
+            self.invariants(r#enum, machine, full, &lean, &short);
+        }
     }
 
     /// An interface as a type Lean knows nothing about, `Interface "App.Shop.Payment"`, so a proof holds for every class
@@ -657,7 +671,7 @@ impl Translator<'_, '_> {
         };
         lines.extend(self.coercions(&mut body, &lean, interface.inheritance.as_ref()));
         self.declare(body, lean.clone(), interface.name.span, lines.join("\n"), Role::Type);
-        self.members(full, &lean, &short, &interface.members);
+        self.members(full, &lean, &short, interface.members.as_slice());
     }
 
     /// A `Coe` from the class-like `lean` to each interface its header names that a law reaches, so a value of it
@@ -684,8 +698,9 @@ impl Translator<'_, '_> {
         coercions
     }
 
-    /// The reached methods, extension members and constants, and every law, of a class-like.
-    fn members(&mut self, full: &[u8], lean: &str, short: &str, members: &Sequence<'_, ClassLikeMember<'_>>) {
+    /// The reached methods, extension members and constants, and every law, of a class-like. A machine's invariant is
+    /// proved as [`Translator::invariants`] says, so it is no law here.
+    fn members(&mut self, full: &[u8], lean: &str, short: &str, members: &[ClassLikeMember<'_>]) {
         for member in members {
             match member {
                 ClassLikeMember::Method(method)
@@ -719,7 +734,9 @@ impl Translator<'_, '_> {
                         self.declare(body, key, item.name.span, text, Role::Definition);
                     }
                 }
-                ClassLikeMember::Law(law) => self.law(full, lean, short, law),
+                ClassLikeMember::Law(law) if self.invariant_case(full, law).is_none() => {
+                    self.law(full, lean, short, law);
+                }
                 _ => {}
             }
         }

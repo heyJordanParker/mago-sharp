@@ -3991,6 +3991,63 @@ fn compile_proves_spec_section_28_s_state_machine_law_with_a_class_as_its_event(
     assert_eq!(source_lean_files(root), Vec::<PathBuf>::new());
 }
 
+/// The machine of spec section 20.2's specimen, whose `pay` runs `check` before it gives `Paid`.
+fn order_status(check: &str) -> String {
+    format!(
+        "namespace App.Shop;\n\nextern ValueError uses none;\n\npublic machine OrderStatus : string\n{{\n    case Draft = \"draft\"\n    {{\n        public OrderStatus.Paid pay(int cents)\n        {{\n{check}            return OrderStatus.Paid(cents);\n        }}\n\n        public OrderStatus.Cancelled cancel() => OrderStatus.Cancelled;\n    }}\n\n    case Paid(int cents) = \"paid\"\n    {{\n        public OrderStatus.Shipped ship() => OrderStatus.Shipped;\n    }}\n\n    final case Shipped = \"shipped\";\n    final case Cancelled = \"cancelled\";\n\n    public static OrderStatus.Draft open() => OrderStatus.Draft;\n\n    law paidIsPositive(OrderStatus.Paid paid) => paid.cents > 0;\n}}\n"
+    )
+}
+
+/// Spec section 20.2: an invariant of a machine, a law whose one parameter is a case, is proved after each entry point
+/// and each move that gives the case. The specimen's `pay` throws on a payment that isn't positive, so
+/// `paidIsPositive` holds after it.
+#[test]
+fn compile_proves_a_machine_s_invariant_after_each_move_that_gives_its_case() {
+    let checked = "            if (cents <= 0) {\n                throw new ValueError(\"A payment is positive.\");\n            }\n";
+    let directory = lawful_project(&[("app/Shop/OrderStatus.sharp", &order_status(checked))]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shop/OrderStatus.sharp").exists());
+}
+
+/// Spec section 20.2: a move that breaks an invariant is refused with the moves that break it, the first the checker
+/// finds breadth-first from each entry point, on small values of each parameter.
+#[test]
+fn a_move_that_breaks_a_machine_s_invariant_is_refused_with_the_moves_that_break_it() {
+    let directory = lawful_project(&[("app/Shop/OrderStatus.sharp", &order_status(""))]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: `paidIsPositive` breaks after `open() → Draft`, `pay(cents: 0) → Paid(cents: 0)`\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// Spec section 20.2: a move that breaks an invariant only on a value no small value of its parameters is, as
+/// `pay(7)`, is refused by its name and the names of its parameters.
+#[test]
+fn a_move_that_breaks_a_machine_s_invariant_on_no_small_value_is_refused_by_name() {
+    let checked = "            if (cents <= 0) {\n                throw new ValueError(\"A payment is positive.\");\n            }\n            if (cents == 7) {\n                return OrderStatus.Paid(0);\n            }\n";
+    let directory = lawful_project(&[("app/Shop/OrderStatus.sharp", &order_status(checked))]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: `paidIsPositive` breaks after `pay(cents)`\n"),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// A law never calls an interface's method, which a law cannot reason about, even when every implementation is
 /// pure as spec section 29 holds `Card.amount` to. A call through `?.` is refused too.
 #[test]
@@ -6103,7 +6160,7 @@ fn a_law_reaching_a_value_pattern_on_a_list_is_refused() {
 /// the value is out of a law's reach.
 #[test]
 fn each_refusal_a_law_reaches_says_what_to_write_instead() {
-    let source = "namespace App.Shared;\n\nextern InvalidArgumentException uses none;\n\npublic class Shape\n{\n    public Shape(public int value { get; }) { }\n    public static bool operator ==(Shape a, Shape b) => a.value == b.value;\n    public int hash() => this.value;\n\n    public static int union(int|string x) => 1;\n    public static int power(int a) => a ** 2;\n    public static int complement(int a) => ~a;\n    public static string template(int a) => `n ${a}`;\n    public static int guard(int a) => match (a) {\n        int m when m + 1 > 2 => 1,\n        default => 0,\n    };\n    public static int defaulted(int a = 1) => a;\n    public static int named(int a) => Shape.defaulted(a: a);\n    public static int thrown(int a) => a > 0 ? a : throw new InvalidArgumentException(\"no\");\n    public static int compound(int a)\n    {\n        let x = a;\n        x **= 2;\n        return x;\n    }\n    public static int inner(int a)\n    {\n        let x = 0;\n        return (x = a) + 1;\n    }\n\n    law l1(int a) => Shape.union(a) == 1;\n    law l2(int a) => Shape.power(a) == Shape.power(a);\n    law l3(int a) => Shape.complement(a) == Shape.complement(a);\n    law l4(int a) => Shape.template(a) == Shape.template(a);\n    law l5(int a) => Shape.guard(a) == Shape.guard(a);\n    law l6(int a) => Shape.named(a) == a;\n    law l7(int a) => Shape.thrown(a) == Shape.thrown(a);\n    law l8(int a) => Shape.compound(a) == Shape.compound(a);\n    law l9(int a) => Shape.inner(a) == Shape.inner(a);\n}\n";
+    let source = "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int value { get; }) { }\n    public static bool operator ==(Shape a, Shape b) => a.value == b.value;\n    public int hash() => this.value;\n\n    public static int union(int|string x) => 1;\n    public static int power(int a) => a ** 2;\n    public static int complement(int a) => ~a;\n    public static string template(int a) => `n ${a}`;\n    public static int guard(int a) => match (a) {\n        int m when m + 1 > 2 => 1,\n        default => 0,\n    };\n    public static int defaulted(int a = 1) => a;\n    public static int named(int a) => Shape.defaulted(a: a);\n    public static int compound(int a)\n    {\n        let x = a;\n        x **= 2;\n        return x;\n    }\n    public static int inner(int a)\n    {\n        let x = 0;\n        return (x = a) + 1;\n    }\n\n    law l1(int a) => Shape.union(a) == 1;\n    law l2(int a) => Shape.power(a) == Shape.power(a);\n    law l3(int a) => Shape.complement(a) == Shape.complement(a);\n    law l4(int a) => Shape.template(a) == Shape.template(a);\n    law l5(int a) => Shape.guard(a) == Shape.guard(a);\n    law l6(int a) => Shape.named(a) == a;\n    law l7(int a) => Shape.compound(a) == Shape.compound(a);\n    law l8(int a) => Shape.inner(a) == Shape.inner(a);\n}\n";
     let directory = lawful_project(&[("app/Shared/Shape.sharp", source)]);
     let root = directory.path();
 
@@ -6118,9 +6175,8 @@ fn each_refusal_a_law_reaches_says_what_to_write_instead() {
         "Law l4 reaches a string template in Shape.template. Join the strings with `+`.",
         "Law l5 reaches a guard that can throw in Shape.guard. Write the guard without calls or arithmetic, which can throw, and compute such a value in the arm.",
         "Law l6 reaches a named or spread argument in Shape.named. Pass each argument by its position.",
-        "Law l7 reaches a throw in Shape.thrown. Return a value that tells the failure apart, such as `null` or an enum case, in place of the exception.",
-        "Law l8 reaches the operator `**=` in Shape.compound. Update an int with `+=`, `-=`, `*=`, `/=` or `%=`, or a string with `+=`.",
-        "Law l9 reaches an assignment inside an expression in Shape.inner. Assign the value in a statement of its own, before the expression that reads it.",
+        "Law l7 reaches the operator `**=` in Shape.compound. Update an int with `+=`, `-=`, `*=`, `/=` or `%=`, or a string with `+=`.",
+        "Law l8 reaches an assignment inside an expression in Shape.inner. Assign the value in a statement of its own, before the expression that reads it.",
     ] {
         assert!(printed.contains(&format!("error - unmodeled-construct: {message}")), "{message}\n{printed}");
     }

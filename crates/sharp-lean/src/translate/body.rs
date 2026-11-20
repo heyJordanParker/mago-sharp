@@ -519,7 +519,12 @@ impl<'body, 'program> Body<'body, 'program> {
                 self.unmodeled(expression.span(), "a type test".to_owned(), issues::TYPE_TEST)
             }
             Expression::Yield(_) => self.unmodeled(expression.span(), "a lazy sequence".to_owned(), issues::LAZY),
-            Expression::Throw(_) => self.unmodeled(expression.span(), "a throw".to_owned(), issues::EXCEPTION),
+            // A throw ends the code there with `Throwable.Thrown`, which proves nothing about a law, as an engine error
+            // does. Its value, which no code reads, is a stand-in.
+            Expression::Throw(_) => {
+                self.lines.push("throw Throwable.Thrown".to_owned());
+                "default".to_owned()
+            }
             Expression::CompositeString(_) => {
                 self.unmodeled(expression.span(), "a string template".to_owned(), issues::TEMPLATE)
             }
@@ -1853,6 +1858,13 @@ impl<'body, 'program> Body<'body, 'program> {
     /// The Lean type of the class `class` a hint names: the sealed interface it implements, spec section 20.1, as a
     /// data case's is its enum, and else its own.
     pub(crate) fn class_type(&mut self, span: Span, class: &[u8]) -> String {
+        // Spec section 20: the class a case that carries data runs as is a constructor of its enum, as a machine's
+        // `OrderStatus.Paid` is of `OrderStatus`.
+        if let Some(separator) = class.iter().rposition(|&byte| byte == b'\\')
+            && self.checked.types().enum_case_class(word(&class[..separator]), word(&class[separator + 1..])).is_some()
+        {
+            return self.class_type(span, &class[..separator]);
+        }
         match self.sealed(class) {
             Some((interface, _)) => interface,
             None => self.own_type(span, class),

@@ -60,6 +60,37 @@ pub(crate) struct Proof {
     pub(crate) laws: Vec<(String, Span, Option<FileId>)>,
     pub(crate) uses: Vec<Use>,
     pub(crate) unmodeled: Vec<Unmodeled>,
+    /// For an invariant of a machine, spec section 20.2, the entry point or move each case proves it after, in the
+    /// order of the case's index, as written: `pay(cents)`. The trace search reports as the case after them. Empty for
+    /// any other law.
+    pub(crate) after: Vec<String>,
+}
+
+impl Proof {
+    /// The theorem of `statement`, the invariant of a machine, spec section 20.2, which states one part for each of
+    /// `after`, the entry points and moves that give its case: the trace search `trace`, a `Sharp.Machine.search`,
+    /// runs first and reports as the case after the parts, then each part is proved with Lean's automatic steps as the
+    /// case of its index. `claim` is the invariant's claim as PHP# writes it.
+    pub(crate) fn invariant(statement: &str, trace: &str, after: Vec<String>, claim: String) -> Proof {
+        let mut lines = vec![format!("unfold {statement}"), format!("sharp_trace {} {trace}", after.len() + 1)];
+        if after.len() > 1 {
+            lines.push(format!("refine ⟨{}⟩", vec!["?_"; after.len()].join(", ")));
+        }
+        for index in 1..=after.len() {
+            let steps = vec!["intros".to_owned(), format!("sharp_prove {index} []")];
+            if after.len() > 1 {
+                lines.extend(dotted(steps));
+            } else {
+                lines.extend(steps);
+            }
+        }
+        let text = std::iter::once(format!("theorem {statement}.proof : {statement} := by"))
+            .chain(lines.iter().map(|line| format!("  {line}")))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Proof { text, claim, cases: vec![Case::default(); after.len()], after, ..Proof::default() }
+    }
 }
 
 /// One case of a law's proof: the end of the body, or a `return;`, on one path through its conditions.

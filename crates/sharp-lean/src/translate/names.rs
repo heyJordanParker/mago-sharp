@@ -49,6 +49,7 @@ const KEYWORDS: &[&str] = &[
     "sharp_close",
     "sharp_condition",
     "sharp_prove",
+    "sharp_trace",
     "show",
     "structure",
     "suffices",

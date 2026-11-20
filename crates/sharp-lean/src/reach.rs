@@ -6,6 +6,7 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::flags::MetadataFlags;
+use mago_codex::metadata::machine::MachineMetadata;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::symbol::SymbolIdentifier;
@@ -75,7 +76,7 @@ impl Reach {
     /// never runs as part of them. A sealed interface reaches each of its implementers, the closed set a law tells its
     /// values apart by, spec section 20.1. A struct's generated `==` reaches the `==` of each class its fields hold. A
     /// class reaches the PHP# class it extends, whose fields it holds, and a member a class inherits reaches the
-    /// member of the PHP# class that declares it.
+    /// member of the PHP# class that declares it. The laws of a machine reach each of its entry points and moves.
     #[must_use]
     pub fn new(codebase: &CodebaseMetadata, references: &SymbolReferences) -> Reach {
         let mut edges: HashMap<SymbolIdentifier, Vec<SymbolIdentifier>> = HashMap::default();
@@ -91,6 +92,7 @@ impl Reach {
             let mut reached: HashSet<SymbolIdentifier> = HashSet::default();
             let mut pending: Vec<SymbolIdentifier> =
                 class.laws.keys().map(|law| keyed(codebase, (class.name, *law))).collect();
+            pending.extend(class.machine.iter().flat_map(|machine| machine_steps(codebase, class, machine)));
             while let Some(next) = pending.pop() {
                 if !reached.insert(next) {
                     continue;
@@ -300,6 +302,27 @@ fn field_equalities(codebase: &CodebaseMetadata, equality: SymbolIdentifier) -> 
         })
         .filter(|(class, method)| codebase.get_method(*class, *method).is_some())
         .collect()
+}
+
+/// Each entry point and each move of the machine `machine`, which `class` is, spec section 20.2: the laws of a machine
+/// reach them, since its invariants are proved after each one. A move a case's block holds is a method of the case's
+/// class, and one of the machine's body a method of the machine.
+fn machine_steps(
+    codebase: &CodebaseMetadata,
+    class: &ClassLikeMetadata,
+    machine: &MachineMetadata,
+) -> Vec<SymbolIdentifier> {
+    let mut steps: Vec<SymbolIdentifier> =
+        machine.entry_points.iter().map(|entry| keyed(codebase, (class.name, entry.name))).collect();
+    for r#move in &machine.moves {
+        for from in &r#move.from {
+            let case = word([class.original_name.as_bytes(), b"\\", from.as_bytes()].concat());
+            let declaring = if codebase.get_method(case, r#move.name).is_some() { case } else { class.name };
+            steps.push(keyed(codebase, (declaring, r#move.name)));
+        }
+    }
+
+    steps
 }
 
 /// `class`'s member `member`, keyed under the PHP# class that declares it, when a parent of `class` declares it.

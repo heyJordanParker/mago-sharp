@@ -13,7 +13,8 @@ law's `when` condition first. A step that cannot close its goal reports the goal
 every theorem is declared and each failure is reported once. The steps of each case run within half of the time budget
 the runner gives the law's theorem, so a case whose steps run out of it is reported as `sharp-case-out-of-time` or
 `sharp-condition-out-of-time`, and the cases after it still run. A law without a body that proves case by case over an enum it takes reports each case left open with the
-case it is. The runner reads those errors, and Mago prints each goal in PHP#.
+case it is. The proof of an invariant of a machine first runs `sharp_trace`, which reports the moves that break it, as
+its case after the others. The runner reads those errors, and Mago prints each goal in PHP#.
 -/
 
 namespace Sharp
@@ -376,6 +377,16 @@ elab_rules : term
     let .forallE _ condition _ _ ← whnf (← inferType fact) | return fact
     let shown ← Term.elabTerm (← `(by sharp_condition $index)) (some condition)
     return mkApp fact shown
+
+/-- Evaluates `search`, a `Machine.search` of the moves that break an invariant, and reports the trace it finds as the
+case `index` of the invariant's proof, `["trace", step…]`. It leaves the goals as they are. -/
+syntax "sharp_trace " num term : tactic
+
+elab_rules : tactic
+  | `(tactic| sharp_trace $index $search) => do
+    let type := mkApp (.const ``Option [.zero]) (mkApp (.const ``List [.zero]) (.const ``String []))
+    if let some trace ← unsafe Term.evalTerm (Option (List String)) type search then
+      logError m!"sharp-case {index.getNat} {(node "trace" (trace.toArray.map .str)).compress}"
 
 end Proof
 

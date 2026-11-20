@@ -709,6 +709,27 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
 
             vec![issues::rejected_proof(law)]
         }
+        // Spec section 20.2: an invariant of a machine is broken by the moves its trace search found, and else by each
+        // entry point or move whose part of its proof stays open.
+        Judgment::Open(steps) if !law.proof.after.is_empty() => {
+            let found = steps.iter().find(|step| step.index > law.proof.after.len()).and_then(|step| {
+                let Ok(serde_json::Value::Array(trace)) = serde_json::from_str(&step.goal) else {
+                    return None;
+                };
+                let moves: Vec<String> =
+                    trace.iter().skip(1).filter_map(|step| Some(format!("`{}`", step.as_str()?))).collect();
+
+                Some(moves.join(", "))
+            });
+            match found {
+                Some(trace) => vec![issues::broken_invariant(law, &trace)],
+                None => steps
+                    .iter()
+                    .filter_map(|step| law.proof.after.get(step.index - 1))
+                    .map(|after| issues::broken_invariant(law, &format!("`{after}`")))
+                    .collect(),
+            }
+        }
         // A case a `match` reaches both where a guard fails and where a pattern does is one case, reported once. A case
         // of the enums a law without a body splits on is a case of its own.
         Judgment::Open(steps) => {

@@ -24,6 +24,8 @@ inductive Throwable where
   | OutOfRangeException
   /-- A backed enum's `from` of a value no case has. -/
   | ValueError
+  /-- A `throw` the code writes, whatever it throws: a law reads that the code throws, and no more. -/
+  | Thrown
   deriving DecidableEq
 
 /-- The monad translated code runs in. -/
