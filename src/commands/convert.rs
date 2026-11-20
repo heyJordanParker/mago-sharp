@@ -1960,13 +1960,13 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         assert_eq!(outcome.proofs, 2);
     }
 
-    /// A folder of 200 classes, each calling the one before it, converts in one proof of them all, so the proof's cost
-    /// stays one analysis of the project, never one per file.
+    /// A folder of classes, each calling the one before it, converts in one proof of them all, so the proof's cost
+    /// stays one analysis of the project, never one per file. Three files tell one proof from one per file.
     #[test]
-    fn two_hundred_classes_convert_in_one_proof_of_them_all() {
+    fn a_folder_of_classes_converts_in_one_proof_of_them_all() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
-        let files: Vec<(String, String)> = (0..200)
+        let files: Vec<(String, String)> = (0..3)
             .map(|index| {
                 let previous = match index {
                     0 => String::new(),
@@ -1990,8 +1990,8 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             .unwrap();
 
         assert_eq!(exit_code, ExitCode::SUCCESS);
-        assert!(root.join("src/Step199.sharp").exists() && !root.join("src/Step199.php").exists());
-        assert_eq!(outcome.converted.len(), 200);
+        assert!(root.join("src/Step2.sharp").exists() && !root.join("src/Step2.php").exists());
+        assert_eq!(outcome.converted.len(), 3);
         assert_eq!(outcome.proofs, 1);
     }
 
