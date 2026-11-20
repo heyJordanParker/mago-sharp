@@ -61,13 +61,11 @@ final class Type
 
     /**
      * @param list<null|bool|int|float|string|list<mixed>> $payload
-     * @param null|string $description the type as its atomic types describe it when null, as for each type a provider
-     *     request names but an argument's own, which mago's engine builds with no constructor run
      * @param non-empty-list<AtomicType> $atomicTypes
      */
     private function __construct(
         private readonly array $payload,
-        private ?string $description,
+        private readonly string $description,
         public readonly array $atomicTypes,
         public readonly TypeFlags $flags,
     ) {}
@@ -200,7 +198,7 @@ final class Type
         $descriptions = [];
         foreach ($parameters as $parameter) {
             $payload = [...$payload, ...$parameter->encode()];
-            $descriptions[] = (string) $parameter;
+            $descriptions[] = $parameter->description;
         }
 
         $description = $class;
@@ -220,7 +218,7 @@ final class Type
     {
         return new self(
             [self::ARRAY, ...$key->encode(), ...$value->encode()],
-            "array<{$key}, {$value}>",
+            "array<{$key->description}, {$value->description}>",
             [new KeyedArrayType(null, $key, $value, false)],
             new TypeFlags(),
         );
@@ -230,7 +228,7 @@ final class Type
     {
         return new self(
             [self::LIST, ...$element->encode()],
-            "list<{$element}>",
+            "list<{$element->description}>",
             [new ListType($element, null, null, false)],
             new TypeFlags(),
         );
@@ -244,7 +242,7 @@ final class Type
         $atomicTypes = [];
         foreach ($members as $member) {
             $payload = [...$payload, ...$member->encode()];
-            $descriptions[] = (string) $member;
+            $descriptions[] = $member->description;
             foreach ($member->atomicTypes as $atomicType) {
                 $atomicTypes[] = $atomicType;
             }
@@ -271,7 +269,17 @@ final class Type
             return $this;
         }
 
-        return new self([], (string) $this, $this->atomicTypes, $flags);
+        return new self([], $this->description, $this->atomicTypes, $flags);
+    }
+
+    /**
+     * @param int<0, 4294967295> $handle
+     * @param non-empty-list<AtomicType> $atomicTypes
+     * @internal
+     */
+    public static function reference(int $handle, string $description, array $atomicTypes, TypeFlags $flags): self
+    {
+        return new self([self::REFERENCE, $handle], $description, $atomicTypes, $flags);
     }
 
     public function getLiteralInt(): ?int
@@ -358,7 +366,7 @@ final class Type
 
     public function __toString(): string
     {
-        return $this->description ??= self::describeAtomics($this->atomicTypes);
+        return $this->description;
     }
 
     private static function simple(int $kind, string $description, AtomicType $atomicType): self

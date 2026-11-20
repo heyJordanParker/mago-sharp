@@ -13,33 +13,6 @@ final class Calls
     public static int $count = 0;
 }
 
-enum Carrier
-{
-    case Post;
-    case Courier;
-}
-
-final class Parcel
-{
-    public function __construct(
-        public readonly int $grams,
-        private readonly ?string $label,
-        public readonly Carrier $carrier,
-    ) {
-        throw new RuntimeException('a parcel Mago builds runs no constructor');
-    }
-
-    public function label(): ?string
-    {
-        return $this->label;
-    }
-}
-
-function open_parcel(Parcel $parcel): array
-{
-    return [$parcel->grams, $parcel->label(), $parcel->carrier->name];
-}
-
 function count_call(): int
 {
     return ++Calls::$count;

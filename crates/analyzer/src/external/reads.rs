@@ -313,14 +313,6 @@ fn hash_values(hasher: &mut DefaultHasher, values: &[Value]) {
                     hash_values(hasher, std::slice::from_ref(value));
                 }
             }
-            Value::Object { class, properties } => {
-                (7u8, class, properties.len()).hash(hasher);
-                for (name, value) in properties {
-                    name.hash(hasher);
-                    hash_values(hasher, std::slice::from_ref(value));
-                }
-            }
-            Value::Case { enumeration, case } => (8u8, enumeration, case).hash(hasher),
         }
     }
 }

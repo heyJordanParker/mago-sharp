@@ -645,6 +645,12 @@ function isNullable(string $type): bool {}
 function nonNullable(string $type): string {}
 
 /**
+ * `$bytes` read as UTF-8, each byte sequence that is not UTF-8 replaced by U+FFFD, as the engine makes a string that
+ * crosses into PHP# text. The standard library's `Bytes.toText()` returns it.
+ */
+function text(string $bytes): string {}
+
+/**
  * The class values the type the class value `$type` holds without its `?` is made of: a union's members, a tuple's
  * element types, a function type's result type then its parameter types, a type parameter's bound, and none for a
  * class. The standard library's `Class<T>` members of each kind read them.

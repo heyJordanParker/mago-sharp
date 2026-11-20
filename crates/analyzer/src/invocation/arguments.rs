@@ -30,6 +30,7 @@ use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_php_array_form;
 use mago_codex::ttype::get_php_array_key_type;
 use mago_codex::ttype::takes_array;
+use mago_codex::ttype::takes_bytes;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
@@ -640,6 +641,17 @@ where
     );
 
     if type_match_found {
+        return true;
+    }
+
+    // Spec section 18: plain PHP takes `Bytes` as the PHP string it holds, which the bridge passes, so a plain PHP
+    // parameter that takes a `string` takes `Bytes`.
+    if context.dialect.is_sharp()
+        && parameter_type.has_string()
+        && invocation_target.get_function_like_metadata().is_some_and(|function| !function.flags.is_sharp())
+        && input_type.types.iter().all(|atomic| atomic.is_null() || takes_bytes(&TUnion::from_atomic(atomic.clone())))
+        && takes_bytes(input_type)
+    {
         return true;
     }
 

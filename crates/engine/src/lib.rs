@@ -68,8 +68,6 @@ pub enum EngineError {
     Deadline(Duration),
     /// The call returned a value of this engine type, which no [`Value`] holds.
     Value(u8),
-    /// An argument or an answer holds a [`Value::Object`] or a [`Value::Case`] the interpreter can't build, and why.
-    Build(String),
     /// The call was made from inside another call's `answer`, on the same thread.
     Nested,
 }
@@ -90,7 +88,6 @@ impl fmt::Display for EngineError {
                 write!(formatter, "the call returned a value of engine type {kind}, which Mago can't read")
             }
             Self::Nested => write!(formatter, "a call into the engine ran while the same thread answered another"),
-            Self::Build(reason) => write!(formatter, "a value Mago gave the engine can't be built: {reason}"),
         }
     }
 }
@@ -312,13 +309,8 @@ impl Engine {
         // SAFETY: the thread runs an interpreter, each slot is empty when written, `answer` outlives the call it is
         // reachable from, and every value the engine wrote is released before the slots go.
         unsafe {
-            let written = arguments.iter().zip(&mut slots).try_for_each(|(argument, slot)| argument.write(slot));
-            if let Err(error) = written {
-                for slot in &mut slots {
-                    engine_value_release(slot);
-                }
-
-                return Err(error);
+            for (argument, slot) in arguments.iter().zip(&mut slots) {
+                argument.write(slot);
             }
 
             let answering: *mut (dyn FnMut(Vec<Value>) -> Answer + '_) = answer;
@@ -430,16 +422,13 @@ unsafe extern "C" fn mago_engine_answer(arguments: *mut Zval, count: u32, result
                 Some(answering) => (*answering)(arguments),
                 None => Err("\\Mago\\Engine\\ask() was called outside a call from Mago".to_owned()),
             });
-        let written = answer.and_then(|value| {
-            value.write(result).map_err(|error| {
-                engine_value_release(result);
-                error.to_string()
-            })
-        });
-        match written {
-            Ok(()) => 0,
+        match answer {
+            Ok(value) => {
+                value.write(result);
+                0
+            }
             Err(message) => {
-                let _ = Value::String(message.into_bytes()).write(result);
+                Value::String(message.into_bytes()).write(result);
                 1
             }
         }

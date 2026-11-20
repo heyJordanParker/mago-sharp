@@ -151,7 +151,7 @@ fn a_thrown_exception_names_its_class_message_and_place() {
 
     let Err(EngineError::Threw(message)) = thrown else { panic!("the call threw, and returned {thrown:?}") };
     assert!(message.starts_with("RuntimeException: the provider refused in "), "{message}");
-    assert!(message.ends_with("functions.php:69"), "{message}");
+    assert!(message.ends_with("functions.php:42"), "{message}");
     assert_eq!(call(&engine, "count_call"), Ok(Value::Int(1)), "an exception keeps the interpreter");
 }
 
@@ -306,52 +306,6 @@ fn a_value_no_value_holds_fails_the_call() {
     let engine = engine();
 
     assert!(matches!(call(&engine, "an_object"), Err(EngineError::Value(_))));
-}
-
-fn parcel(properties: Vec<(&'static str, Value)>) -> Value {
-    Value::Object { class: "Mago\\Tests\\Engine\\Parcel", properties }
-}
-
-fn post() -> Value {
-    Value::Case { enumeration: "Mago\\Tests\\Engine\\Carrier", case: "Post" }
-}
-
-fn open_parcel(engine: &Engine, parcel: Value) -> Result<Value, EngineError> {
-    engine.call("Mago\\Tests\\Engine\\open_parcel", &[parcel], DEADLINE, &mut no_questions)
-}
-
-#[test]
-fn an_object_goes_to_php_with_its_properties_set_and_no_constructor_run() {
-    let engine = engine();
-    let parcel = parcel(vec![("grams", Value::Int(250)), ("label", Value::Null), ("carrier", post())]);
-
-    let opened = open_parcel(&engine, parcel);
-
-    assert_eq!(opened, Ok(Value::List(vec![Value::Int(250), Value::Null, Value::String(b"Post".to_vec())])));
-}
-
-#[test]
-fn an_object_the_interpreter_cant_build_fails_the_call_and_the_next_call_runs() {
-    let engine = engine();
-    let refused = [
-        Value::Object { class: "Mago\\Tests\\Engine\\Missing", properties: Vec::new() },
-        parcel(vec![("grams", Value::Int(1)), ("label", Value::Null), ("carrier", post()), ("color", Value::Null)]),
-        parcel(vec![("grams", Value::String(b"1".to_vec())), ("label", Value::Null), ("carrier", post())]),
-        parcel(vec![("grams", Value::Int(1)), ("grams", Value::Int(2)), ("label", Value::Null), ("carrier", post())]),
-        parcel(vec![("grams", Value::Int(1)), ("carrier", post())]),
-        parcel(vec![
-            ("grams", Value::Int(1)),
-            ("label", Value::Null),
-            ("carrier", Value::Case { enumeration: "Mago\\Tests\\Engine\\Carrier", case: "Drone" }),
-        ]),
-    ];
-
-    for parcel in refused {
-        let opened = open_parcel(&engine, parcel.clone());
-
-        assert!(matches!(opened, Err(EngineError::Build(_))), "{parcel:?} opened as {opened:?}");
-    }
-    assert_eq!(call(&engine, "count_call"), Ok(Value::Int(1)), "the interpreter keeps serving calls");
 }
 
 #[test]
