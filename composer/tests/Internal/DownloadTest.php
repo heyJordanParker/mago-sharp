@@ -7,9 +7,11 @@ namespace Mago\Tests\Internal;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 
+use function dirname;
 use function fclose;
 use function file_get_contents;
 use function file_put_contents;
+use function filesize;
 use function fsockopen;
 use function is_resource;
 use function Mago\Internal\download_with_curl;
@@ -27,6 +29,7 @@ use function tempnam;
 use function unlink;
 use function urlencode;
 use function usleep;
+use function var_export;
 
 use const PHP_BINARY;
 
@@ -40,6 +43,11 @@ final class DownloadTest extends TestCase
 {
     private const ROUTER = <<<'PHP'
         <?php
+        if (isset($_GET['bytes'])) {
+            header('Content-Length: ' . $_GET['bytes']);
+            echo str_repeat('m', (int) $_GET['bytes']);
+            return;
+        }
         $authorization = $_SERVER['HTTP_AUTHORIZATION'] ?? 'none';
         if (isset($_GET['to'])) {
             header('Location: ' . $_GET['to'] . '?first=' . urlencode($authorization), true, 302);
@@ -104,6 +112,39 @@ final class DownloadTest extends TestCase
             'first host: Bearer redirect-test-token, redirect host: none',
             self::download(download_with_fopen(...)),
         );
+    }
+
+    public function testCurlWritesNoProgressLineWhenStderrIsNoTerminal(): void
+    {
+        $destination = (string) tempnam(sys_get_temp_dir(), 'mago-download');
+        $stderr = "{$destination}.stderr";
+        $pipes = [];
+        $process = proc_open(
+            [
+                PHP_BINARY,
+                '-r',
+                'require '
+                    . var_export(dirname(__DIR__, 3) . '/vendor/autoload.php', true)
+                    . ';'
+                    . 'Mago\\Internal\\download_with_curl('
+                    . var_export('http://127.0.0.1:' . self::$port . '/?bytes=8388608', true)
+                    . ', '
+                    . var_export($destination, true)
+                    . ');',
+            ],
+            [2 => ['file', $stderr, 'w']],
+            $pipes,
+        );
+
+        try {
+            self::assertIsResource($process);
+            self::assertSame(0, proc_close($process));
+            self::assertSame(8_388_608, filesize($destination));
+            self::assertSame('', file_get_contents($stderr));
+        } finally {
+            unlink($destination);
+            unlink($stderr);
+        }
     }
 
     /**

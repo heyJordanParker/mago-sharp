@@ -49,6 +49,7 @@ use function str_contains;
 use function stream_context_create;
 use function stream_get_contents;
 use function stream_get_meta_data;
+use function stream_isatty;
 use function stripos;
 use function strtolower;
 use function substr;
@@ -302,7 +303,7 @@ function get_github_token(): ?string
 /**
  * Download a file from a URL using the best available method.
  *
- * Prefers the curl extension (with progress display) and falls back to
+ * Prefers the curl extension (with a progress line on a terminal) and falls back to
  * `file_get_contents` when `allow_url_fopen` is enabled.
  *
  * @throws RuntimeException If the download fails or no download method is available.
@@ -329,7 +330,8 @@ function download(string $url, string $destination): void
 }
 
 /**
- * Download a file using the curl extension with a progress bar.
+ * Download a file using the curl extension, with a progress line when STDERR is a terminal, as curl and Composer show
+ * one. A hook that captures STDERR gets no progress line, where each chunk would add one.
  *
  * @throws RuntimeException If the download fails or the server returns an error status.
  *
@@ -337,11 +339,12 @@ function download(string $url, string $destination): void
  */
 function download_with_curl(string $url, string $destination): void
 {
+    $showsProgress = stream_isatty(STDERR);
     $ch = curl_init($url);
     $fh = fopen($destination, 'w');
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     curl_setopt($ch, CURLOPT_FILE, $fh);
-    curl_setopt($ch, CURLOPT_NOPROGRESS, false);
+    curl_setopt($ch, CURLOPT_NOPROGRESS, !$showsProgress);
     curl_setopt($ch, CURLOPT_USERAGENT, 'mago-composer/' . namespace\get_version());
 
     // The release download redirects to objects.githubusercontent.com. curl 7.58.0 and later send a custom
@@ -376,7 +379,9 @@ function download_with_curl(string $url, string $destination): void
         throw new RuntimeException("Failed to download mago binary (HTTP {$statusCode}): {$error}\nURL: {$url}");
     }
 
-    fprintf(STDERR, "\n");
+    if ($showsProgress) {
+        fprintf(STDERR, "\n");
+    }
 }
 
 /**
