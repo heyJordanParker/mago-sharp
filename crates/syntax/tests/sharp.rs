@@ -5358,7 +5358,7 @@ fn a_law_without_a_semicolon_or_a_body_after_its_claim_is_a_parse_error() {
     assert_eq!(program.errors.len(), 1, "{:#?}", program.errors);
 }
 
-/// Spec section 28 gives a state machine its laws on its status enum, beside the cases and the transition method.
+/// Spec section 28: a law in an enum follows its cases and its methods, as one over a pure transition method does.
 #[test]
 fn a_law_in_an_enum_follows_its_cases_and_methods() {
     const CODE: &str = "public enum Status : string\n{\n    case Open = \"open\";\n    case Refunded = \"refunded\";\n\n    public Status after(Payment e) => this;\n    law refundedIsFinal(Payment e) => Status.Refunded.after(e) == Status.Refunded;\n}\n";

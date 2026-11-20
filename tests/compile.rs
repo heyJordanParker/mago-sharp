@@ -3852,8 +3852,10 @@ fn compile_proves_a_law_through_an_extension_member_as_the_static_call_it_runs_a
     assert!(compiled(root, "app/Shared/Shape.sharp").exists());
 }
 
+/// Spec section 28: a law covers every status and event through an enum's pure transition method, whose `match`
+/// gives the next status.
 #[test]
-fn compile_proves_spec_section_28_1_s_state_machine_law_over_an_enum_match() {
+fn compile_proves_a_transition_law_over_an_enum_match() {
     let directory = lawful_project(&[
         (
             "app/Shop/Payment.sharp",
@@ -3950,16 +3952,15 @@ fn a_law_reaches_a_backed_enum_s_from_and_try_from() {
     }
 }
 
-/// Spec section 28's `state-machine-law` example as it stands.
-const STATE_MACHINE: &str = "namespace App.Shop;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n    case Paid = \"paid\";\n    case Refunded = \"refunded\";\n\n    public Status after(Payment e) => match (this) {                               // pure: the next status for every status and event\n        Status.Open => Status.Paid,\n        Status.Paid => Status.Refunded,\n        Status.Refunded => Status.Refunded,\n    };\n    law refundedIsFinal(Payment e) => Status.Refunded.after(e) == Status.Refunded;\n}\n";
+/// An enum whose pure transition method gives the next status for every status and event, and a law over it.
+const STATUS_TRANSITION: &str = "namespace App.Shop;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n    case Paid = \"paid\";\n    case Refunded = \"refunded\";\n\n    public Status after(Payment e) => match (this) {                               // pure: the next status for every status and event\n        Status.Open => Status.Paid,\n        Status.Paid => Status.Refunded,\n        Status.Refunded => Status.Refunded,\n    };\n    law refundedIsFinal(Payment e) => Status.Refunded.after(e) == Status.Refunded;\n}\n";
 
-/// Spec section 28's `state-machine-law` example, whose `Payment` is an interface: the law holds for every class that
-/// implements it.
+/// Spec section 28: a transition law whose `Payment` is an interface holds for every class that implements it.
 #[test]
-fn compile_proves_spec_section_28_s_state_machine_law_over_an_interface() {
+fn compile_proves_a_transition_law_over_an_interface() {
     let directory = lawful_project(&[
         ("app/Shop/Payment.sharp", "namespace App.Shop;\n\npublic interface Payment\n{\n}\n"),
-        ("app/Shop/Status.sharp", STATE_MACHINE),
+        ("app/Shop/Status.sharp", STATUS_TRANSITION),
     ]);
     let root = directory.path();
 
@@ -3970,13 +3971,13 @@ fn compile_proves_spec_section_28_s_state_machine_law_over_an_interface() {
     assert!(compiled(root, "app/Shop/Status.sharp").exists());
 }
 
-/// Spec section 28's `state-machine-law` example, called with a class that implements `Payment` as its event: Lean
-/// takes the class's value as a `Payment` it knows nothing about, so the law proves for every event.
+/// Spec section 28: a transition law called with a class that implements `Payment` as its event: Lean takes the
+/// class's value as a `Payment` it knows nothing about, so the law proves for every event.
 #[test]
-fn compile_proves_spec_section_28_s_state_machine_law_with_a_class_as_its_event() {
+fn compile_proves_a_transition_law_with_a_class_as_its_event() {
     let directory = lawful_project(&[
         ("app/Shop/Payment.sharp", "namespace App.Shop;\n\npublic interface Payment\n{\n}\n"),
-        ("app/Shop/Status.sharp", STATE_MACHINE),
+        ("app/Shop/Status.sharp", STATUS_TRANSITION),
         (
             "app/Shop/Card.sharp",
             "namespace App.Shop;\n\npublic class Card : Payment\n{\n    public Card(public int cents { get; }) { }\n\n    law cardRefundIsFinal(int cents) => Status.Refunded.after(new Card(cents)) == Status.Refunded;\n}\n",
