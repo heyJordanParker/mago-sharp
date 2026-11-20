@@ -633,7 +633,7 @@ fn compiled_consumer(
                 inputs.lock().unwrap().push(String::from_utf8_lossy(path).into_owned());
                 Ok(None)
             },
-            |_, _| Ok(Default::default()),
+            |_, _, _| Ok(Default::default()),
             &Library::default(),
             |issues| issues,
         )

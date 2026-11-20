@@ -568,9 +568,10 @@ impl IncrementalAnalysisService {
     /// own folder and of each folder above it, whose `imports` line limits what it imports.
     ///
     /// The laws of a file are checked again when the file or a file its laws reach is lowered again, and the files they
-    /// reach that keep their compiled file are translated without being lowered. `check` gets those translations and
-    /// `reach`, and returns the issues of each file whose law is not proved, which refuse that file whatever ignore entry
-    /// or baseline the analysis honors.
+    /// reach that keep their compiled file are translated without being lowered. `check` gets those translations,
+    /// `reach`, and each file the analysis reported an error in, whether or not its errors refuse it, as
+    /// [`Self::law_refusals`] reads them, and returns the issues of each file whose law is not proved, which refuse that
+    /// file whatever ignore entry or baseline the analysis honors.
     ///
     /// `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or none when no
     /// file is there. It is called once per input, from several threads at once. An input no file is at is stored
@@ -598,7 +599,7 @@ impl IncrementalAnalysisService {
         folder: Folder<'folder>,
         hosts: Option<Folder<'folder>>,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
-        check: impl FnOnce(Vec<Translation>, &Reach) -> std::io::Result<HashMap<FileId, IssueCollection>>,
+        check: impl FnOnce(Vec<Translation>, &Reach, &HashSet<FileId>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<(Compiled, Option<Compiled>), OrchestratorError> {
@@ -608,6 +609,7 @@ impl IncrementalAnalysisService {
 
         let files = self.sharp_files();
         let (errors, unrefused) = self.errors(refusing);
+        let errored: HashSet<FileId> = errors.keys().chain(unrefused.keys()).copied().collect();
         // No error refuses a file in the hosts' folder: each is one that refuses nothing.
         let mut hosts = hosts.map(|hosts| {
             let mut every = unrefused.clone();
@@ -697,7 +699,7 @@ impl IncrementalAnalysisService {
             .filter_map(|lowering| lowerings[*lowering].1.take())
             .collect();
         translations.extend(translated.into_iter().filter_map(Result::ok));
-        let refused = check(translations, &reach)
+        let refused = check(translations, &reach, &errored)
             .map_err(|error| OrchestratorError::General(format!("The laws could not be checked: {error}.")))?;
 
         let read_by_every_file: HashSet<FileId> =
@@ -2229,7 +2231,11 @@ mod tests {
     }
 
     /// Proves every law, as a Lean step that refuses nothing.
-    fn proved(_: Vec<Translation>, _: &Reach) -> std::io::Result<HashMap<FileId, IssueCollection>> {
+    fn proved(
+        _: Vec<Translation>,
+        _: &Reach,
+        _: &HashSet<FileId>,
+    ) -> std::io::Result<HashMap<FileId, IssueCollection>> {
         Ok(HashMap::default())
     }
 
@@ -2242,7 +2248,7 @@ mod tests {
     fn fresh(
         service: &mut IncrementalAnalysisService,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
-        check: impl FnOnce(Vec<Translation>, &Reach) -> std::io::Result<HashMap<FileId, IssueCollection>>,
+        check: impl FnOnce(Vec<Translation>, &Reach, &HashSet<FileId>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<Vec<(FileId, Compilation)>, OrchestratorError> {
@@ -3993,7 +3999,7 @@ mod tests {
         let compiled = fresh(
             &mut service,
             empty_stamp,
-            |_, _| {
+            |_, _, _| {
                 let mut issues = IssueCollection::default();
                 issues.push(Issue::error("Law addKeepsCurrency is not proven."));
                 Ok(HashMap::from_iter([(money, issues)]))
@@ -4014,6 +4020,43 @@ mod tests {
         }
     }
 
+    /// The law check gets each file the analysis reported an error in, as `law_refusals` does, whether or not its
+    /// errors refuse it: a law that reaches it is refused for its errors, and one that reaches a file with none that
+    /// was left untranslated, as one whose lowering panicked, is the checker's bug.
+    #[test]
+    fn the_law_check_gets_each_file_the_analysis_reported_an_error_in() {
+        let database = project(&[
+            (
+                "app/Shared/Money.sharp",
+                "namespace App.Shared;\n\npublic class Money\n{\n    public static int kept(int a) => Digits.keep(a);\n\n    law keeps(int a) => Money.kept(a) == a;\n}\n",
+            ),
+            (
+                "app/Shared/Digits.sharp",
+                "namespace App.Shared;\n\npublic class Digits\n{\n    public static int keep(int a) => a;\n\n    public static int broken() => \"text\";\n}\n",
+            ),
+        ]);
+        let digits = FileId::new(b"app/Shared/Digits.sharp");
+        let refusing_none = |_: IssueCollection| IssueCollection::default();
+        for refusing in [(|issues| issues) as fn(IssueCollection) -> IssueCollection, refusing_none] {
+            let mut service = analyzed(&database);
+            let mut checked = None;
+
+            fresh(
+                &mut service,
+                empty_stamp,
+                |_, _, errored| {
+                    checked = Some(errored.clone());
+                    Ok(HashMap::default())
+                },
+                &Library::default(),
+                refusing,
+            )
+            .expect("the compile runs");
+
+            assert_eq!(checked, Some(HashSet::from_iter([digits])));
+        }
+    }
+
     #[test]
     fn a_failed_law_check_reports_itself_as_the_law_check() {
         let database = lawful_project();
@@ -4022,7 +4065,7 @@ mod tests {
         let error = fresh(
             &mut service,
             empty_stamp,
-            |_, _| Err(std::io::Error::other("the law checker failed with exit status: 1")),
+            |_, _, _| Err(std::io::Error::other("the law checker failed with exit status: 1")),
             &Library::default(),
             |issues| issues,
         )

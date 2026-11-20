@@ -717,7 +717,7 @@ fn write_hosts_folder(
 
                 Ok(input)
             },
-            |_, _| Ok(Default::default()),
+            |_, _, _| Ok(Default::default()),
             library,
             |_| IssueCollection::default(),
         )
@@ -1225,7 +1225,7 @@ fn compiled(
         Folder { last: &last, compiled: &mut compiled, intact: &mut intact },
         hosts_folder,
         recording_stamp(&root, &read_database, &stamped),
-        |translations, reach| lean.check(translations, reach),
+        |translations, reach, errored| lean.check(translations, reach, errored),
         &library,
         |mut issues| {
             issues.filter_out_ignored(&ignored, |file_id| {

@@ -197,8 +197,8 @@ impl Server {
     /// load the project's classes from, where no error and no law refuses a file, compiled from the same lowerings.
     /// `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or none when no
     /// file is there, once for each path, called from several threads at once. `check` gets the Lean translation of
-    /// each file whose laws are checked again and of each file they reach, with the reach, and returns the issues of
-    /// each file whose law is not proved. Each compiled file's header names `standard_library`, the standard library
+    /// each file whose laws are checked again and of each file they reach, with the reach and each file the analysis
+    /// reported an error in, and returns the issues of each file whose law is not proved. Each compiled file's header names `standard_library`, the standard library
     /// the workspace compiles against. `refusing` keeps the analysis's errors that refuse their file.
     ///
     /// [`CompiledFiles`]: mago_orchestrator::service::incremental_analysis::compile::CompiledFiles
@@ -213,7 +213,7 @@ impl Server {
         folder: Folder<'folder>,
         hosts: Option<Folder<'folder>>,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
-        check: impl FnOnce(Vec<Translation>, &Reach) -> std::io::Result<HashMap<FileId, IssueCollection>>,
+        check: impl FnOnce(Vec<Translation>, &Reach, &HashSet<FileId>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<(Compiled, Option<Compiled>), ServerError> {

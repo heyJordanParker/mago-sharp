@@ -688,7 +688,7 @@ impl<'configuration> Session<'configuration> {
             Folder { last: &CompiledFiles::default(), compiled: &mut |_| Ok(None), intact: &mut |_| false },
             None,
             |path| unit::stamp(&prover.root, path),
-            |_, _| Ok(Default::default()),
+            |_, _, _| Ok(Default::default()),
             &prover.standard_library,
             |issues| prover.hidden.shown(issues, &database),
         )?;

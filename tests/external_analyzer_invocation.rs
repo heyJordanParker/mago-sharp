@@ -1139,7 +1139,7 @@ fn compile_with_fixture(
         Folder { last: &CompiledFiles::default(), compiled: &mut |_| Ok(None), intact: &mut |_| false },
         None,
         |_| Ok(None),
-        |_, _| Ok(Default::default()),
+        |_, _, _| Ok(Default::default()),
         &Library::default(),
         |issues| issues,
     )?;

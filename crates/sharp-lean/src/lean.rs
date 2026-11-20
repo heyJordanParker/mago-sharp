@@ -244,7 +244,9 @@ impl Lean {
 
     /// Proves the laws of `translations` and returns the issues that refuse each file whose law is not proven.
     /// `translations` hold each file whose laws a compile checks, and each file those laws reach, as `reach` gives
-    /// them, but the files whose errors refuse them.
+    /// them, but the files whose errors refuse them. `errored` holds each file the analysis reported an error in: a law
+    /// that reaches a declaration no translation holds is refused for the errors of its file when that file is in it,
+    /// and else as the checker's bug, as a lowering that panicked leaves its file untranslated.
     ///
     /// A law's proof ends once per key, [`proof_key`]: [`PROOFS`] keeps how it ended, passed or failed, and a law whose
     /// key it holds gets that outcome again without Lean. The rest are proved by one runner on the compile's threads,
@@ -256,7 +258,12 @@ impl Lean {
     ///
     /// Returns an error when a file cannot be read or written, when the runtime library does not build, or when a
     /// runner fails.
-    pub fn check(&self, translations: Vec<Translation>, reach: &Reach) -> io::Result<HashMap<FileId, IssueCollection>> {
+    pub fn check(
+        &self,
+        translations: Vec<Translation>,
+        reach: &Reach,
+        errored: &HashSet<FileId>,
+    ) -> io::Result<HashMap<FileId, IssueCollection>> {
         let package = Package::new(&self.root);
         let record_path = package.directory.with_file_name(PROOFS);
         let mut issues: HashMap<FileId, IssueCollection> = HashMap::default();
@@ -280,13 +287,6 @@ impl Lean {
         let mut record = Record::read(&record_path);
         let program = Program::new(&translations);
         let laws = Laws::new(&translations);
-        let translated: HashSet<FileId> = translations.iter().map(|translation| translation.file).collect();
-        let errored: HashSet<FileId> = law_files
-            .iter()
-            .flat_map(|law_file| reach.files(*law_file))
-            .filter(|file| !translated.contains(*file))
-            .copied()
-            .collect();
         let receivers: HashMap<String, bool> =
             translations.iter().flat_map(|translation| translation.receivers.iter().cloned()).collect();
         let declared: HashSet<String> = translations
@@ -299,7 +299,7 @@ impl Lean {
         for translation in translations.iter().filter(|translation| !translation.laws.is_empty()) {
             let mut proving = Vec::new();
             for law in &translation.laws {
-                let refusals = refused(law, &program, &laws, &errored);
+                let refusals = refused(law, &program, &laws, errored);
                 if !refusals.is_empty() {
                     for issue in refusals {
                         report(&mut issues, translation, issue);
