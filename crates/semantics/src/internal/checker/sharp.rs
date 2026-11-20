@@ -395,7 +395,8 @@ const ANY: &[u8] = b"Any";
 ///   `check_function_call` reports `assert` with a spread as its only argument, after which PHP adds a positional
 ///   description. `?.` never follows a class. A function is the global function of that name, PHP's own or one a
 ///   library or the app declares, as spec sections 8 and 29 keep them, and the engine calls the global one. A string
-///   literal's `\u{...}` escapes are valid codepoints, as PHP requires. A `"…"` string never interpolates, and a
+///   literal's `\u{...}` escapes are valid codepoints, as PHP requires, and its escapes write UTF-8 text, since binary
+///   data is `Bytes`. A `"…"` string never interpolates, and a
 ///   template, `` `Order ${number}` ``, interpolates any expression of this list in each `${…}` and takes
 ///   JavaScript's escapes, as spec section 18 writes them.
 /// - Lambdas, as spec section 3 writes them: `x => x.id`, `(a, b) => a + b` and `() => { … }`, whose body is an
@@ -2119,6 +2120,23 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 Issue::error("Invalid UTF-8 codepoint escape sequence.")
                     .with_annotation(Annotation::primary(string.span).with_message("Escape written here."))
                     .with_note("A `\\u{...}` escape holds hex digits for a codepoint up to `10FFFF`."),
+            );
+
+            None
+        }
+        // Spec section 18: a `string` is UTF-8 text, so escapes that write other bytes are `Bytes`.
+        (Node::LiteralString(string), Body | Constant)
+            if string.value.is_some_and(|value| std::str::from_utf8(value).is_err()) =>
+        {
+            let bytes: Vec<String> =
+                string.value.unwrap_or_default().iter().map(|byte| format!("0x{byte:02X}")).collect();
+            context.report(
+                Issue::error(format!(
+                    "This literal's escapes are no UTF-8 text; bytes are `[{}].toBytes()`.",
+                    bytes.join(", ")
+                ))
+                .with_annotation(Annotation::primary(string.span).with_message("Escapes written here."))
+                .with_note("A `string` is UTF-8 text, and binary data is `Bytes`."),
             );
 
             None

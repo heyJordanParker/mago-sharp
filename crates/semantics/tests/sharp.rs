@@ -5583,6 +5583,17 @@ fn an_invalid_codepoint_escape_is_an_error_as_in_php() {
     );
 }
 
+/// Spec section 18: a `string` is UTF-8 text, so a literal whose escapes write bytes that are no UTF-8 is refused with
+/// the `Bytes` of those bytes, and escapes that write a character's UTF-8 bytes are that character.
+#[test]
+fn a_literal_whose_escapes_are_no_utf8_text_is_an_error_that_writes_its_bytes() {
+    let code = leak(method(
+        "        const bytes = \"\\xB1\\x31\";\n        const text = \"caf\\u{E9} caf\\xC3\\xA9\";\n        return 1;\n",
+    ));
+
+    assert_eq!(issues(code), ["7:23 This literal's escapes are no UTF-8 text; bytes are `[0xB1, 0x31].toBytes()`."]);
+}
+
 #[test]
 fn new_creates_a_class_written_by_its_short_name_with_its_arguments() {
     let code = leak(method("        const made = new Report(extra, total: 2);\n        return made.run(1);\n"));
