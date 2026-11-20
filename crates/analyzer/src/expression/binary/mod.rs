@@ -180,9 +180,14 @@ where
     }
 
     // Spec section 22: in PHP# a plain PHP trait is a type, which the engine tests by the traits of the class and its
-    // parents, so a value of an open class may be one, through a subclass that uses the trait.
+    // parents, so a value of an open class may be one, through a subclass that uses the trait. So may a value of a type
+    // parameter bounded by an open class.
     let is_trait = |atomic: &TAtomic| matches!(atomic, TAtomic::Object(TObject::Named(named)) if context.codebase.trait_exists(named.name));
-    let is_open_class = |atomic: &TAtomic| matches!(atomic, TAtomic::Object(TObject::Named(named)) if context.codebase.is_inheritable(named.name));
+    let is_named_open_class = |atomic: &TAtomic| matches!(atomic, TAtomic::Object(TObject::Named(named)) if context.codebase.is_inheritable(named.name));
+    let is_open_class = |atomic: &TAtomic| match atomic {
+        TAtomic::GenericParameter(parameter) => parameter.constraint.types.iter().any(is_named_open_class),
+        atomic => is_named_open_class(atomic),
+    };
     if context.dialect.is_sharp() && target_type.types.iter().all(is_trait) && lhs_type.types.iter().any(is_open_class)
     {
         return get_bool();

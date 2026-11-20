@@ -13018,6 +13018,26 @@ fn a_type_test_of_a_plain_php_trait_tests_the_class_and_its_parents() {
     );
 }
 
+/// Spec section 22: a value of a type parameter bounded by an open class may be of a subclass that uses a plain PHP
+/// trait, so `is` and `is not` of the trait may go either way and the narrowed value has the trait's members. A value
+/// of a final class that doesn't use the trait never matches.
+#[test]
+fn a_trait_test_on_a_bounded_type_parameter_may_match() {
+    let library = "<?php\n\nnamespace Lib;\n\ntrait SoftDeletes\n{\n    public function getDeletedAtColumn(): string\n    {\n        return 'deleted_at';\n    }\n}\n\nabstract class Model\n{\n}\n\nfinal class Ledger extends Model\n{\n}\n\n/** @template TModel of Model */\nclass Builder\n{\n    /** @return TModel */\n    public function getModel()\n    {\n        throw new \\LogicException();\n    }\n}\n";
+    let base = (
+        "src/Demo/BaseModel.sharp",
+        "namespace Demo;\n\nimport Lib.Model;\n\npublic abstract class BaseModel : Model\n{\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.Builder;\nimport Lib.Ledger;\nimport Lib.SoftDeletes;\n\npublic class RowQuery<TRow : BaseModel> : Builder<TRow>\n{\n    public string onlyTrashed()\n    {\n        if (this.getModel() is SoftDeletes trashable)\n        {\n            return trashable.getDeletedAtColumn();\n        }\n        return \"\";\n    }\n\n    public bool dropsTrash()\n    {\n        if (this.getModel() is not SoftDeletes)\n        {\n            return true;\n        }\n        return false;\n    }\n\n    public static bool ledger(Ledger ledger) => ledger is SoftDeletes;\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/RowQuery.sharp", sharp), &[base, ("src/Lib/Models.php", library)]),
+        [
+            "27:59 impossible-type-comparison This pattern never matches the value it tests. Remove the pattern, or test a value that can match it."
+        ]
+    );
+}
+
 /// An issue that names two types whose short names match names each by its full name, as `App.Schema.Type` and
 /// `Lib.Type`, so the message never reads "expected `List<Type>`, but found `List<Type>`". A `List` of one class
 /// passed where a `List`, an array or an `iterable` of that class is declared fits, and one passed where a
