@@ -2013,7 +2013,7 @@ impl<'analysis> Types<'analysis> {
     pub(crate) fn variant_tag(&self, class: &[u8]) -> Option<(&'analysis [u8], &'analysis [u8])> {
         let class = self.codebase.get_class_like(word(class))?;
 
-        Some((self.codebase.family_of(class)?.tag_key()?, class.variant_name()?))
+        Some((self.codebase.family_of(class)?.tag_key()?, self.codebase.variant_name(class)?))
     }
 
     /// The fields the `parse` of the struct or PHP# class `class` reads, as the codex gives them.

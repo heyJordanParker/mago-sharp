@@ -587,14 +587,6 @@ impl ClassLikeMetadata {
         self.attribute_text(b"Sharp\\Tag", b"key")
     }
 
-    /// The name `[Key("…")]` gives the class-like, a variant of the family above it, spec section 10, by which that
-    /// family's `parse` and `withTag` find it and which its encoding writes. None without one, which the analyzer
-    /// refuses on a variant.
-    #[must_use]
-    pub fn variant_name(&self) -> Option<&[u8]> {
-        self.attribute_text(b"Sharp\\Key", b"name")
-    }
-
     /// Whether the class-like is a variant a family's `parse` can build, spec section 10: a class, a struct or an enum
     /// case, and not abstract.
     #[must_use]
@@ -604,7 +596,7 @@ impl ClassLikeMetadata {
 
     /// The literal text the first argument, or the one named `argument`, of the class-like's attribute `attribute`
     /// gives. `Sharp\Tag` and `Sharp\Key` are PHP# class-likes, named exactly, spec section 24.
-    fn attribute_text(&self, attribute: &[u8], argument: &[u8]) -> Option<&[u8]> {
+    pub(crate) fn attribute_text(&self, attribute: &[u8], argument: &[u8]) -> Option<&[u8]> {
         self.attributes.iter().find(|found| found.name.as_bytes() == attribute)?.text_argument(0, argument)
     }
 

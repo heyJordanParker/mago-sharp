@@ -187,8 +187,9 @@ pub(crate) fn report_keys_read_twice<A>(
 /// Reports what breaks the family `class` is or belongs to, spec section 10, for a PHP# class-like whose name is at
 /// `name`. `[Tag]` goes on a sealed interface, an abstract class or an enum whose cases carry data, and `[Key]` on a
 /// class-like names a variant of a family. Each variant below a family that is not abstract gives its name with
-/// `[Key]`, no two variants of one family share a name, and no field of a variant reads the tag's key. An enum's cases
-/// are checked with the enum, which declares them.
+/// `[Key]`, and a backed machine's case by its value instead, spec section 20.2. No two variants of one family share a
+/// name, and no field of a variant reads the tag's key. An enum's cases are checked with the enum, which declares
+/// them.
 pub(crate) fn check_family<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, name: Span)
 where
     A: Arena,
@@ -214,6 +215,9 @@ where
         }
     }
 
+    if class.flags.is_enum_case_class() {
+        return;
+    }
     match context.codebase.family_of(class) {
         Some(family) if class.is_variant_kind() => check_variant(context, family, class, name),
         _ => report_stray_key(context, class),
@@ -221,7 +225,8 @@ where
 }
 
 /// Reports what breaks `variant`, a class-like of the family `family` whose name is at `name`, spec section 10: a
-/// missing `[Key]` name, a name another variant of the family has, and a field that reads the tag's key.
+/// missing `[Key]` name, a `[Key]` on a backed machine's case, which its value names, spec section 20.2, a name
+/// another variant of the family has, and a field that reads the tag's key.
 fn check_variant<A>(
     context: &mut Context<'_, '_, A>,
     family: &ClassLikeMetadata,
@@ -233,7 +238,20 @@ fn check_variant<A>(
     let codebase = context.codebase;
     let variant_name = display_class_like_name(context, variant.original_name);
     let family_name = display_class_like_name(context, family.original_name);
-    let Some(written) = variant.variant_name() else {
+    let key = variant.attributes.iter().find(|attribute| attribute.name.as_bytes() == b"Sharp\\Key");
+    if let (Some(value), Some(key)) = (codebase.machine_value(variant), key) {
+        context.collector.report_with_code(
+            IssueCode::InvalidStruct,
+            Issue::error(format!(
+                "`{family_name}.{variant_name}` is named `{}` by its value, so it takes no `[Key]`.",
+                BytesDisplay(value)
+            ))
+            .with_annotation(Annotation::primary(key.span).with_message("Named here."))
+            .with_note(format!("A backed machine's value names its case, so `{family_name}.parse` finds it by its value and the encoding writes it."))
+            .with_help("Remove the `[Key]`, and change the value to store the case under another name."),
+        );
+    }
+    let Some(written) = codebase.variant_name(variant) else {
         context.collector.report_with_code(
             IssueCode::InvalidStruct,
             Issue::error(format!("`{variant_name}` is a variant of `{family_name}` and gives no name for it."))
@@ -244,11 +262,7 @@ fn check_variant<A>(
 
         return;
     };
-    let named_at = variant
-        .attributes
-        .iter()
-        .find(|attribute| attribute.name.as_bytes() == b"Sharp\\Key")
-        .map_or(name, |attribute| attribute.span);
+    let named_at = key.map_or(name, |attribute| attribute.span);
     let twin = codebase
         .variants(family)
         .into_iter()

@@ -26,6 +26,9 @@ pub struct MachineCase {
     pub span: Span,
     /// Whether it is written `final`: no move leaves it.
     pub is_final: bool,
+    /// The value it is backed by, as `paid` of `case Paid(int cents) = "paid"`, which names it in its machine's
+    /// `[Tag]` family. None in a machine with no backing type.
+    pub value: Option<Word>,
 }
 
 /// An entry point or a move of a PHP# machine, spec section 20.2.
@@ -44,8 +47,8 @@ pub struct MachineMove {
 
 impl MachineCase {
     #[must_use]
-    pub fn new(name: Word, span: Span, is_final: bool) -> Self {
-        Self { name, span, is_final }
+    pub fn new(name: Word, span: Span, is_final: bool, value: Option<Word>) -> Self {
+        Self { name, span, is_final, value }
     }
 }
 

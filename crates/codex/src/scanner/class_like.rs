@@ -23,12 +23,14 @@ use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumBackingTypeHint;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Event;
+use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
+use mago_syntax::cst::Literal;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::Module;
@@ -484,9 +486,12 @@ pub fn register_machine(codebase: &mut CodebaseMetadata, r#enum: &Enum<'_>, mach
         .members
         .iter()
         .filter_map(|member| match member {
-            ClassLikeMember::EnumCase(case) => {
-                Some(MachineCase::new(word(case.item.name().value), case.item.name().span, case.is_final()))
-            }
+            ClassLikeMember::EnumCase(case) => Some(MachineCase::new(
+                word(case.item.name().value),
+                case.item.name().span,
+                case.is_final(),
+                backing_value(&case.item),
+            )),
             _ => None,
         })
         .collect();
@@ -589,6 +594,22 @@ pub fn register_machine(codebase: &mut CodebaseMetadata, r#enum: &Enum<'_>, mach
     }
     machine_metadata.machine = Some(MachineMetadata { cases, entry_points, moves });
     codebase.class_likes.insert(machine, machine_metadata);
+}
+
+/// The value the case `item` of a machine is backed by, spec section 20.2: its string's text, or its int's digits.
+/// None for a case with no value.
+fn backing_value(item: &EnumCaseItem<'_>) -> Option<Word> {
+    let value = match item {
+        EnumCaseItem::Backed(item) => item.value,
+        EnumCaseItem::Data(item) => item.backing.as_ref()?.value,
+        EnumCaseItem::Unit(_) => return None,
+    };
+
+    match value {
+        Expression::Literal(Literal::String(text)) => text.value.map(word),
+        Expression::Literal(Literal::Integer(integer)) => integer.value.map(|value| word(value.to_string())),
+        _ => None,
+    }
 }
 
 /// Registers a PHP# event, spec section 15, as the final class it runs as: its constructor takes the event's

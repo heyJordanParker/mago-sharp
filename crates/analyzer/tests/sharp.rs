@@ -32513,7 +32513,7 @@ fn a_law_over_pure_code_reports_no_issue() {
     assert_eq!(effect_issues(&[LAWFUL_MONEY]), Vec::<String>::new());
 }
 
-/// Spec section 28's state machine: a law covers every state and event through the enum's pure transition method.
+/// Spec section 28: a law covers every status and event through an enum's pure transition method.
 #[test]
 fn a_law_over_an_enum_transition_reports_no_issue() {
     let payment = (
@@ -36550,13 +36550,22 @@ fn a_match_over_a_machine_lists_every_case() {
     );
 }
 
-/// Spec sections 10 and 20.2: a machine marked `[Tag]` is a family whose `[Key]` cases are its variants, so
-/// `Json.encode` writes a case and `Json.decode` reads one as a family's variant.
+/// Spec sections 10 and 20.2: a machine marked `[Tag]` is a family whose cases are its variants, so `Json.encode`
+/// writes a case and `Json.decode` reads one as a family's variant. A backed machine's values name its cases, so a
+/// `[Key]` on its case is refused, naming the value, and a machine with no backing names each case with `[Key]`.
 #[test]
 fn a_tagged_machine_reads_and_writes_its_cases_as_a_family() {
     let status = (
         "src/Shop/OrderStatus.sharp",
-        "namespace Shop;\n\nimport Sharp.Key;\nimport Sharp.Tag;\n\n[Tag(\"status\")]\npublic machine OrderStatus\n{\n    [Key(\"draft\")] case Draft\n    {\n        public OrderStatus.Paid pay(int cents) => OrderStatus.Paid(cents);\n    }\n\n    [Key(\"paid\")] case Paid(int cents)\n    {\n        public OrderStatus.Shipped ship() => OrderStatus.Shipped;\n    }\n\n    [Key(\"shipped\")] final case Shipped;\n\n    public static OrderStatus.Draft open() => OrderStatus.Draft;\n}\n",
+        "namespace Shop;\n\nimport Sharp.Tag;\n\n[Tag(\"status\")]\npublic machine OrderStatus : string\n{\n    case Draft = \"draft\"\n    {\n        public OrderStatus.Paid pay(int cents) => OrderStatus.Paid(cents);\n    }\n\n    case Paid(int cents) = \"paid\"\n    {\n        public OrderStatus.Shipped ship() => OrderStatus.Shipped;\n    }\n\n    final case Shipped = \"shipped\";\n\n    public static OrderStatus.Draft open() => OrderStatus.Draft;\n}\n",
+    );
+    let keyed = (
+        "src/Shop/OrderStatus.sharp",
+        "namespace Shop;\n\nimport Sharp.Key;\nimport Sharp.Tag;\n\n[Tag(\"status\")]\npublic machine OrderStatus : string\n{\n    case Draft = \"draft\"\n    {\n        public OrderStatus.Paid pay(int cents) => OrderStatus.Paid(cents);\n    }\n\n    [Key(\"paid\")] case Paid(int cents) = \"paid\"\n    {\n        public OrderStatus.Shipped ship() => OrderStatus.Shipped;\n    }\n\n    final case Shipped = \"shipped\";\n\n    public static OrderStatus.Draft open() => OrderStatus.Draft;\n}\n",
+    );
+    let unbacked = (
+        "src/Shop/Ticket.sharp",
+        "namespace Shop;\n\nimport Sharp.Key;\nimport Sharp.Tag;\n\n[Tag(\"state\")]\npublic machine Ticket\n{\n    [Key(\"open\")] case Open\n    {\n        public Ticket.Closed close() => Ticket.Closed;\n    }\n\n    final case Closed;\n\n    public static Ticket.Open open() => Ticket.Open;\n}\n",
     );
     let stored = (
         "src/Shop/Stored.sharp",
@@ -36564,5 +36573,17 @@ fn a_tagged_machine_reads_and_writes_its_cases_as_a_family() {
     );
 
     assert_eq!(refusals(status, &[KEY, TAG]), Vec::<String>::new());
+    assert_eq!(
+        refusals(keyed, &[KEY, TAG]),
+        [
+            "14:6 invalid-struct `OrderStatus.Paid` is named `paid` by its value, so it takes no `[Key]`. | Remove the `[Key]`, and change the value to store the case under another name."
+        ]
+    );
+    assert_eq!(
+        refusals(unbacked, &[KEY, TAG]),
+        [
+            "14:16 invalid-struct `Closed` is a variant of `Ticket` and gives no name for it. | Name it with `[Key(\"…\")]`, the name its input holds under the tag's key."
+        ]
+    );
     assert_eq!(refusals(stored, &[KEY, TAG, JSON, JSON_VALUE, status]), Vec::<String>::new());
 }

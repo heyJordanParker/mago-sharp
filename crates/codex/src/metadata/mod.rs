@@ -1129,8 +1129,31 @@ impl CodebaseMetadata {
             .find(|parent| parent.tag_key().is_some())
     }
 
+    /// The name the variant `variant` of a family goes by, spec section 10, by which its family's `parse` and `withTag`
+    /// find it and which its encoding writes: a backed machine's case's value, spec section 20.2, and the name
+    /// `[Key("…")]` gives any other variant. None for a variant with neither, which the analyzer refuses.
+    #[must_use]
+    pub fn variant_name<'codebase>(&'codebase self, variant: &'codebase ClassLikeMetadata) -> Option<&'codebase [u8]> {
+        self.machine_value(variant).or_else(|| variant.attribute_text(b"Sharp\\Key", b"name"))
+    }
+
+    /// The value the case `case` of a backed machine is backed by, spec section 20.2. None for any other class-like.
+    #[must_use]
+    pub fn machine_value(&self, case: &ClassLikeMetadata) -> Option<&[u8]> {
+        let machine = self.get_class_like(case.direct_parent_class?)?.machine.as_ref()?;
+        let name = case.original_name.as_bytes().rsplit(|byte| *byte == b'\\').next()?;
+
+        machine
+            .cases
+            .iter()
+            .find(|machine_case| machine_case.name.as_bytes() == name)?
+            .value
+            .as_ref()
+            .map(Word::as_bytes)
+    }
+
     /// The variants of the family `family`, spec section 10, in the order of their names: each PHP# class, struct and
-    /// enum case below it that is not abstract, with the name its `[Key]` gives, or None where it gives none.
+    /// enum case below it that is not abstract, with the name [`CodebaseMetadata::variant_name`] gives, or None.
     #[must_use]
     pub fn variants(&self, family: &ClassLikeMetadata) -> Vec<(Option<&[u8]>, &ClassLikeMetadata)> {
         let mut variants: Vec<(Option<&[u8]>, &ClassLikeMetadata)> = self
@@ -1140,7 +1163,7 @@ impl CodebaseMetadata {
             .flatten()
             .filter_map(|descendant| self.get_class_like(*descendant))
             .filter(|descendant| descendant.flags.is_sharp() && descendant.is_variant_kind())
-            .map(|variant| (variant.variant_name(), variant))
+            .map(|variant| (self.variant_name(variant), variant))
             .collect();
         variants
             .sort_by(|(a, a_class), (b, b_class)| a.cmp(b).then(a_class.name.as_bytes().cmp(b_class.name.as_bytes())));
