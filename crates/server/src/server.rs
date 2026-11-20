@@ -18,12 +18,12 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_orchestrator::error::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
-use mago_orchestrator::service::incremental_analysis::compile::Compilation;
-use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
+use mago_orchestrator::service::incremental_analysis::compile::Compiled;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::ExternAttributes;
 use mago_orchestrator::service::incremental_analysis::compile::ExternEffects;
 use mago_orchestrator::service::incremental_analysis::compile::Family;
+use mago_orchestrator::service::incremental_analysis::compile::Folder;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
@@ -189,38 +189,37 @@ impl Server {
         Ok(self.service.reload_classes(&classes.into_iter().collect())?)
     }
 
-    /// Compile each `.sharp` file of the last analysis into the bytes of its `.sharpc` file, or the errors that
-    /// refuse it, and give the [`CompiledFiles`] the next compile keeps files by. A file whose key `last` holds keeps
-    /// its compiled file, which `compiled` gives, and is not lowered again. One `intact` vouches for, as the compiled
-    /// file the last compile wrote, is read only when a stamp it holds changed, and is [`Compilation::Kept`] otherwise.
+    /// Compile each `.sharp` file of the last analysis into the bytes of its `.sharpc` file in `folder`, or the errors
+    /// that refuse it there, and give the [`CompiledFiles`] the next compile into it keeps files by. A file whose key
+    /// the folder's `last` holds keeps its compiled file, which the folder's `compiled` gives, and is not lowered again.
+    /// One the folder's `intact` vouches for, as the compiled file the last compile wrote, is read only when a stamp it
+    /// holds changed, and is [`Compilation::Kept`] otherwise. `hosts`, when given, is the folder the extension hosts
+    /// load the project's classes from, where no error and no law refuses a file, compiled from the same lowerings.
     /// `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or none when no
     /// file is there, once for each path, called from several threads at once. `check` gets the Lean translation of
     /// each file whose laws are checked again and of each file they reach, with the reach, and returns the issues of
     /// each file whose law is not proved. Each compiled file's header names `standard_library`, the standard library
     /// the workspace compiles against. `refusing` keeps the analysis's errors that refuse their file.
     ///
+    /// [`CompiledFiles`]: mago_orchestrator::service::incremental_analysis::compile::CompiledFiles
+    /// [`Compilation::Kept`]: mago_orchestrator::service::incremental_analysis::compile::Compilation::Kept
+    ///
     /// # Errors
     ///
     /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a file, `compiled`, `stamp` or `check`
     /// fails.
-    #[allow(clippy::too_many_arguments)]
-    pub fn compile(
+    pub fn compile<'folder>(
         &mut self,
-        last: &CompiledFiles,
-        compiled: impl FnMut(&File) -> Result<Option<Vec<u8>>, DatabaseError>,
-        intact: impl FnMut(&File) -> bool,
+        folder: Folder<'folder>,
+        hosts: Option<Folder<'folder>>,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         check: impl FnOnce(Vec<Translation>, &Reach) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
-    ) -> Result<(Vec<(FileId, Compilation)>, CompiledFiles), ServerError> {
-        self.service
-            .compile(last, compiled, intact, stamp, check, standard_library, refusing)
-            .map_err(ServerError::from)
+    ) -> Result<(Compiled, Option<Compiled>), ServerError> {
+        self.service.compile(folder, hosts, stamp, check, standard_library, refusing).map_err(ServerError::from)
     }
 
-    /// The standard library's inline forms, which `mago convert` reads to find the library member that runs a PHP
-    /// function: those of the library files [`Self::compile`] lowers and doesn't refuse, by `refusing` as `compile`
     /// The issues that refuse the laws of the last analysis before any proof, as `mago compile` reports them, in the
     /// files the scope holds.
     ///
@@ -242,6 +241,8 @@ impl Server {
             .collect())
     }
 
+    /// The standard library's inline forms, which `mago convert` reads to find the library member that runs a PHP
+    /// function: those of the library files [`Self::compile`] lowers and doesn't refuse, by `refusing` as `compile`
     /// takes it.
     ///
     /// # Errors

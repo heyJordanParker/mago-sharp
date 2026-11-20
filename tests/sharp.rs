@@ -977,10 +977,12 @@ fn a_list_index_write_without_the_standard_library_is_refused() {
     }
 }
 
-/// `mago analyze` reports nothing in vendored files, so another package's `extern` method under `Sharp` gets no
-/// report. The engine registers no native function for it, so a call of it fails when it runs.
+/// `mago analyze` reports nothing in vendored files, so its analysis of the project's files gives another package's
+/// `extern` method under `Sharp` no report. The engine registers no native function for it, so a call of it fails when
+/// it runs, and the compile refuses the package's file: `mago analyze` of the whole project compiles it too, and
+/// reports that refusal.
 #[test]
-fn analyze_trusts_a_vendored_file_of_another_package_under_sharp() {
+fn analyze_trusts_a_vendored_file_of_another_package_under_sharp_that_its_compile_refuses() {
     let directory = library_workspace(
         "namespace App;\n\nimport Sharp.Tools.Tools;\n\npublic class Page\n{\n    public string slug() => Tools.slug(\"Hello\");\n}\n",
     );
@@ -991,12 +993,22 @@ fn analyze_trusts_a_vendored_file_of_another_package_under_sharp() {
         "namespace Sharp.Tools;\n\npublic static class Tools\n{\n    public static extern string slug(string title);\n}\n",
     );
 
-    let output = run(directory.path(), "analyze", &[]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let named = run(directory.path(), "analyze", &["src"]);
+    let whole = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let printed = |output: &Output| {
+        format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
+    };
 
-    assert!(output.status.success(), "{stdout}{stderr}");
-    assert!(stderr.contains("No issues found."), "{stdout}{stderr}");
+    assert!(named.status.success(), "{}", printed(&named));
+    assert!(printed(&named).contains("No issues found."), "{}", printed(&named));
+    assert_eq!(whole.status.code(), Some(1), "{}", printed(&whole));
+    for refusal in [
+        "vendor/acme/tools/src/Sharp/Tools/Tools.sharp:1:11:error - reserved-name-outside-library:",
+        "vendor/acme/tools/src/Sharp/Tools/Tools.sharp:5:33:error - native-body-outside-library:",
+        "vendor/acme/tools/src/Sharp/Tools/Tools.sharp comes from the Composer package acme/tools.",
+    ] {
+        assert_eq!(printed(&whole).matches(refusal).count(), 1, "{refusal}\n{}", printed(&whole));
+    }
 }
 
 /// Spec section 23's example: the renamed import leaves the bare `Key` to name the standard attribute.

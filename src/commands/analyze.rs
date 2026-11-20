@@ -64,6 +64,7 @@ use mago_database::watcher::start_watcher;
 use mago_orchestrator::Orchestrator;
 use mago_prelude::Prelude;
 use mago_reporting::CompiledIgnoreSet;
+use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_server::Server;
 use mago_server::Settings as ServerSettings;
@@ -78,6 +79,7 @@ use crate::commands::compile::HostsChange;
 use crate::commands::compile::HostsCompile;
 use crate::commands::compile::Recompiled;
 use crate::commands::compile::compile_for_hosts;
+use crate::commands::compile::compile_with_hosts;
 use crate::commands::compile::release_hosts_folders;
 use crate::commands::outcome::CommandOutcome;
 use crate::commands::stdin_input;
@@ -310,7 +312,15 @@ impl AnalyzeCommand {
         let load_inputs_start = trace_enabled.then(Instant::now);
         let mut prelude_duration = None;
         let mut load_database_duration = None;
-        let (extension_hosts, _) = compile_for_hosts(&configuration)?;
+        // A run over the whole project compiles it too, as an agent's save needs: into the `.sharp` folder and the
+        // hosts' folder, from one analysis and one lowering. A run on named files, staged files or standard input, or
+        // one that only scans, compiles only the hosts' folder.
+        let (extension_hosts, compiled) = if scope.is_some() || self.stdin_input || self.scan_only {
+            (compile_for_hosts(&configuration)?.0, None)
+        } else {
+            let (extension_hosts, outcome) = compile_with_hosts(&configuration, color_choice)?;
+            (extension_hosts, Some(outcome.into_parts()))
+        };
         let external_analyzer = start_external_analyzer(
             &extension_hosts,
             configuration.php_version,
@@ -357,6 +367,14 @@ impl AnalyzeCommand {
         }
         let mut issues = server.analyze()?.issues;
         issues.extend(server.law_refusals()?);
+        // Each issue that refused a file of the compile and that the analysis did not report, as a law left unproven.
+        let refused: Vec<Issue> = match &compiled {
+            Some((refused, _)) => {
+                refused.iter().filter(|issue| !issues.iter().any(|held| held == *issue)).cloned().collect()
+            }
+            None => Vec::new(),
+        };
+        issues.extend(refused);
         let service_run_duration = service_run_start.map(|s| s.elapsed());
         let report_start = trace_enabled.then(Instant::now);
         let ignore_set = self.compile_ignore_set(&configuration);
@@ -377,7 +395,12 @@ impl AnalyzeCommand {
             self.staged || !self.path.is_empty() || self.stdin_input,
         );
 
-        let (exit_code, changed_file_ids) = processor.process_issues(&orchestrator, database, issues)?;
+        let (mut exit_code, changed_file_ids) = processor.process_issues(&orchestrator, database, issues)?;
+        // Each other error of the compile, as a PHP file someone wrote where a source's PHP file goes, fails the run.
+        for error in compiled.iter().flat_map(|(_, errors)| errors) {
+            tracing::error!("{error}");
+            exit_code = ExitCode::FAILURE;
+        }
         let outcome = CommandOutcome::with_changes(exit_code, database, changed_file_ids.iter().copied())?;
         let report_duration = report_start.map(|s| s.elapsed());
 

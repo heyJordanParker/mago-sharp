@@ -15,6 +15,7 @@ use mago_database::file::FileType;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
+use mago_orchestrator::service::incremental_analysis::compile::Folder;
 use mago_php_version::PHPVersion;
 use mago_sharp_bridge::unit::Library;
 use mago_syntax::settings::ParserSettings;
@@ -1134,10 +1135,9 @@ fn compile_with_fixture(
         service = service.keeping_lowering_inputs();
     }
     service.analyze()?;
-    let (compiled, _) = service.compile(
-        &CompiledFiles::default(),
-        |_| Ok(None),
-        |_| false,
+    let ((compiled, _), _) = service.compile(
+        Folder { last: &CompiledFiles::default(), compiled: &mut |_| Ok(None), intact: &mut |_| false },
+        None,
         |_| Ok(None),
         |_, _| Ok(Default::default()),
         &Library::default(),

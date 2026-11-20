@@ -104,6 +104,91 @@ type Lowered = Result<(LoweredUnit, Translation), IssueCollection>;
 /// last compile kept of it.
 type KeptFile<'last> = (Option<Vec<u8>>, &'last CompiledFile);
 
+/// A folder [`IncrementalAnalysisService::compile`] compiles into.
+pub struct Folder<'folder> {
+    /// The [`CompiledFiles`] the last compile into the folder kept.
+    pub last: &'folder CompiledFiles,
+    /// The compiled file of a file in the folder, or none when no file is there.
+    pub compiled: &'folder mut CompiledReader<'folder>,
+    /// Whether a file's compiled file in the folder is the one the last compile wrote, as the caller knows from the
+    /// file's status.
+    pub intact: &'folder mut dyn FnMut(&File) -> bool,
+}
+
+/// What gives a file's compiled file in a [`Folder`], or none when no file is there.
+pub type CompiledReader<'folder> = dyn FnMut(&File) -> Result<Option<Vec<u8>>, DatabaseError> + 'folder;
+
+/// What [`IncrementalAnalysisService::compile`] made of each file of one folder, and the [`CompiledFiles`] the next
+/// compile into the folder keeps files by.
+pub type Compiled = (Vec<(FileId, Compilation)>, CompiledFiles);
+
+/// A `.sharp` file lowered, or the errors that refused it, and its Lean translation until the laws' check takes it.
+type Lowering = (Result<LoweredUnit, IssueCollection>, Option<Translation>);
+
+/// What a compile holds of one folder it compiles into while it lowers.
+struct Target<'folder> {
+    folder: Folder<'folder>,
+    /// The errors that refuse a file in the folder, by file.
+    errors: HashMap<FileId, IssueCollection>,
+    /// The errors of each file no error refuses in the folder, by file.
+    unrefused: HashMap<FileId, IssueCollection>,
+    /// Each file that keeps its compiled file in the folder.
+    kept: HashMap<FileId, KeptFile<'folder>>,
+    /// Each file lowered for the folder, by its place in the compile's lowerings.
+    lowered: HashMap<FileId, usize>,
+}
+
+impl<'folder> Target<'folder> {
+    fn new(
+        folder: Folder<'folder>,
+        errors: HashMap<FileId, IssueCollection>,
+        unrefused: HashMap<FileId, IssueCollection>,
+    ) -> Self {
+        Self { folder, errors, unrefused, kept: HashMap::default(), lowered: HashMap::default() }
+    }
+
+    /// The inline forms of the files of `library` the folder lowered, from `lowerings`, then of those it keeps.
+    fn library_forms(&self, library: &[&Arc<File>], lowerings: &[Lowering]) -> Vec<(Vec<u8>, InlineForm)> {
+        let lowered = library
+            .iter()
+            .filter_map(|file| self.lowered.get(&file.id))
+            .filter_map(|lowering| lowerings[*lowering].0.as_ref().ok())
+            .flat_map(|lowered| lowered.forms.iter().cloned());
+        let kept = library
+            .iter()
+            .filter_map(|file| self.kept.get(&file.id))
+            .flat_map(|(_, record)| record.forms.iter().cloned());
+
+        lowered.chain(kept).collect()
+    }
+}
+
+/// What a compile holds of one folder it compiles into once the laws are checked.
+struct Inputs<'folder> {
+    target: Target<'folder>,
+    /// The issues of each file whose law is not proved, which refuse it in the folder.
+    refused: HashMap<FileId, IssueCollection>,
+    /// The hash of the declarations of each file the folder accepts, where it is not all zero.
+    read_by_declarations: HashMap<FileId, [u8; 16]>,
+    /// The inputs of each file the folder keeps or lowered.
+    input_paths: HashMap<FileId, Vec<InputPath>>,
+}
+
+impl Inputs<'_> {
+    /// Whether the folder accepts `file`: no law refuses it, and it keeps its compiled file or lowered, from
+    /// `lowerings`.
+    fn accepted(&self, file: &File, lowerings: &[Lowering]) -> bool {
+        !self.refused.contains_key(&file.id)
+            && (self.target.kept.contains_key(&file.id)
+                || self.target.lowered.get(&file.id).is_some_and(|lowering| lowerings[*lowering].0.is_ok()))
+    }
+}
+
+/// The fingerprint of each of `forms`, by its name.
+fn fingerprints_of(forms: &[(Vec<u8>, InlineForm)]) -> HashMap<Vec<u8>, u64> {
+    forms.iter().map(|(name, form)| (name.clone(), form.fingerprint())).collect()
+}
+
 /// A lowered `.sharp` file, with what its inputs depend on.
 #[derive(Debug)]
 struct LoweredUnit {
@@ -441,21 +526,21 @@ impl IncrementalAnalysisService {
 
     /// Compiles each `.sharp` file of the last analysis, in file name order, then refuses each plain PHP file whose
     /// class the engine would refuse to link, as [`Self::unlinkable_plain_php_classes`] finds them. Gives each
-    /// compilation, and the [`CompiledFiles`] the next compile keeps files by.
+    /// compilation, and the [`CompiledFiles`] the next compile keeps files by, of `folder` and of `hosts`.
     ///
     /// A file is accepted when the analysis reported no error-level issue in it. The standard library's files, those
     /// `File::is_standard_library` marks, lower first, and the others inline their forms.
     ///
-    /// A file `last`, the last compile's [`CompiledFiles`], holds whose key holds keeps its compiled file, which
-    /// `compiled` gives, or none when no file is there: it is neither analyzed again, lowered nor translated, and only its
-    /// inputs' stamps and the standard library are written anew. Its key holds while its source is the one the key
-    /// hashes, and the declarations, inferred returns and sets of names it read, the library forms it inlined and the
-    /// effects of its function types have the fingerprints the key hashes, as [`unit::is_stale`] checks it. Every other
-    /// file is analyzed, lowered and translated again.
+    /// A file a folder's `last`, the last compile's [`CompiledFiles`], holds whose key holds keeps its compiled file,
+    /// which its `compiled` gives, or none when no file is there: it is neither analyzed again, lowered nor translated,
+    /// and only its inputs' stamps and the standard library are written anew. Its key holds while its source is the one
+    /// the key hashes, and the declarations, inferred returns and sets of names it read, the library forms it inlined
+    /// and the effects of its function types have the fingerprints the key hashes, as [`unit::is_stale`] checks it.
+    /// Every other file is analyzed, lowered and translated again.
     ///
-    /// `intact` vouches that a file's compiled file is the one the last compile wrote, as its caller knows from the
-    /// file's status. Such a file whose key holds is read only when a stamp its compiled file holds changed, so a compile
-    /// that changes neither leaves it [`Compilation::Kept`], unread.
+    /// A folder's `intact` vouches that a file's compiled file is the one the last compile wrote, as its caller knows
+    /// from the file's status. Such a file whose key holds is read only when a stamp its compiled file holds changed, so
+    /// a compile that changes neither leaves it [`Compilation::Kept`], unread.
     ///
     /// An accepted file's inputs are its own source, `composer.lock`, and each file outside `vendor/` whose edit makes
     /// the warm path re-analyze it and can change its code: each file whose signature edit reaches it through the
@@ -494,70 +579,76 @@ impl IncrementalAnalysisService {
     /// project's classes from. A file whose errors refuse nothing lowers as far as its code allows, as `tsc` emits
     /// despite type errors, and a file whose lowering fails on them is refused with them.
     ///
+    /// `hosts`, when given, is the folder the extension hosts load the project's classes from, which the same compile
+    /// fills: no error and no law refuses a file there, as for the compile whose `refusing` keeps none. A file both
+    /// folders lower the same, one neither refuses that inlines the same forms in both, is lowered once.
+    ///
     /// # Errors
     ///
     /// Returns [`OrchestratorError`] when no analysis ran yet, when re-analyzing a file fails, or when `compiled`,
     /// `stamp` or `check` fails.
     #[allow(clippy::too_many_arguments)]
-    pub fn compile(
+    pub fn compile<'folder>(
         &mut self,
-        last: &CompiledFiles,
-        mut compiled: impl FnMut(&File) -> Result<Option<Vec<u8>>, DatabaseError>,
-        mut intact: impl FnMut(&File) -> bool,
+        folder: Folder<'folder>,
+        hosts: Option<Folder<'folder>>,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         check: impl FnOnce(Vec<Translation>, &Reach) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
-    ) -> Result<(Vec<(FileId, Compilation)>, CompiledFiles), OrchestratorError> {
+    ) -> Result<(Compiled, Option<Compiled>), OrchestratorError> {
         if !self.initialized {
             return Err(OrchestratorError::General("analyze() must be called before compile()".to_string()));
         }
 
         let files = self.sharp_files();
         let (errors, unrefused) = self.errors(refusing);
+        // No error refuses a file in the hosts' folder: each is one that refuses nothing.
+        let mut hosts = hosts.map(|hosts| {
+            let mut every = unrefused.clone();
+            every.extend(errors.iter().map(|(file_id, issues)| (*file_id, issues.clone())));
+
+            Target::new(hosts, HashMap::default(), every)
+        });
+        let mut first = Target::new(folder, errors, unrefused);
         let session = self.plugin_registry.create_external_analysis_session(self.database.files());
         let (library, rest): (Vec<_>, Vec<_>) = files.iter().partition(|file| file.is_standard_library);
         let reach = Reach::new(&self.codebase, &self.native_symbol_references);
         let effects = self.effects();
-        let mut reads = self.reads(&effects);
+        let reads = self.reads(&effects);
+        let mut lowerings: Vec<Lowering> = Vec::new();
 
         // A library file inlines no form, so whether it keeps its compiled file needs none, and the files that keep
         // theirs give the forms the others' lowering and keys read.
-        let mut kept: HashMap<FileId, KeptFile> = HashMap::default();
-        for file in &library {
-            if let Some(found) =
-                self.kept(file, last, &mut compiled, &mut intact, &reads, &HashMap::default(), &effects, &errors)?
-            {
-                kept.insert(file.id, found);
-            }
+        let no_forms = InlineForms::default();
+        for target in std::iter::once(&mut first).chain(hosts.as_mut()) {
+            self.keep(target, &library, &reads, &HashMap::default(), &effects)?;
         }
-        let stale_library: Vec<&Arc<File>> =
-            library.iter().filter(|file| !kept.contains_key(&file.id)).copied().collect();
-        let refusals = (&errors, &unrefused);
-        let lowered_library =
-            self.lower_all(&stale_library, &InlineForms::default(), refusals, &reach, &effects, session.as_ref())?;
-        let library_forms: Vec<(Vec<u8>, InlineForm)> = lowered_library
-            .iter()
-            .filter_map(|lowered| lowered.as_ref().ok())
-            .flat_map(|(lowered, _)| lowered.forms.iter().cloned())
-            .chain(kept.values().flat_map(|(_, record)| record.forms.iter().cloned()))
-            .collect();
-        let fingerprints: HashMap<Vec<u8>, u64> =
-            library_forms.iter().map(|(name, form)| (name.clone(), form.fingerprint())).collect();
-        let forms: InlineForms = library_forms.into_iter().collect();
-        for file in &rest {
-            if let Some(found) =
-                self.kept(file, last, &mut compiled, &mut intact, &reads, &fingerprints, &effects, &errors)?
-            {
-                kept.insert(file.id, found);
-            }
+        self.lower_into(&mut first, &library, None, &no_forms, &reach, &effects, session.as_ref(), &mut lowerings)?;
+        if let Some(hosts) = hosts.as_mut() {
+            let lowered = Some(&first);
+            self.lower_into(hosts, &library, lowered, &no_forms, &reach, &effects, session.as_ref(), &mut lowerings)?;
         }
-        let stale_rest: Vec<&Arc<File>> = rest.iter().filter(|file| !kept.contains_key(&file.id)).copied().collect();
-        let lowered_rest = self.lower_all(&stale_rest, &forms, refusals, &reach, &effects, session.as_ref())?;
+        let forms = first.library_forms(&library, &lowerings);
+        let fingerprints = fingerprints_of(&forms);
+        let hosts_forms = hosts.as_ref().map(|hosts| hosts.library_forms(&library, &lowerings));
+        let hosts_fingerprints = hosts_forms.as_deref().map(fingerprints_of);
+        let forms: InlineForms = forms.into_iter().collect();
+        self.keep(&mut first, &rest, &reads, &fingerprints, &effects)?;
+        self.lower_into(&mut first, &rest, None, &forms, &reach, &effects, session.as_ref(), &mut lowerings)?;
+        if let (Some(hosts), Some(hosts_forms), Some(hosts_fingerprints)) =
+            (hosts.as_mut(), hosts_forms, hosts_fingerprints)
+        {
+            self.keep(hosts, &rest, &reads, &hosts_fingerprints, &effects)?;
+            // A file lowers the same for both folders when it inlines the same forms in both.
+            let lowered = (hosts_fingerprints == fingerprints).then_some(&first);
+            let hosts_forms: InlineForms = hosts_forms.into_iter().collect();
+            self.lower_into(hosts, &rest, lowered, &hosts_forms, &reach, &effects, session.as_ref(), &mut lowerings)?;
+        }
 
         // The laws of a file are checked again when it or a file they reach was lowered again, with each file they reach
         // that kept its compiled file translated beside them.
-        let lowered_again: HashSet<FileId> = stale_library.iter().chain(&stale_rest).map(|file| file.id).collect();
+        let lowered_again: HashSet<FileId> = first.lowered.keys().copied().collect();
         let rechecked: HashSet<FileId> = reach
             .law_files()
             .map(|law_file| reach.files(law_file))
@@ -566,14 +657,15 @@ impl IncrementalAnalysisService {
             .copied()
             .collect();
         let translated_only: Vec<&Arc<File>> =
-            files.iter().filter(|file| rechecked.contains(&file.id) && kept.contains_key(&file.id)).collect();
+            files.iter().filter(|file| rechecked.contains(&file.id) && first.kept.contains_key(&file.id)).collect();
+        let refusals = (&first.errors, &first.unrefused);
         let translated =
             self.checked_all(&translated_only, &forms, refusals, &effects, session.as_ref(), |checked, _, _| {
                 translate(checked, &reach)
             })?;
         tracing::debug!(
             "Kept the compiled file of {} PHP# files, lowered {} again, and translated {} more for the laws that reach them.",
-            kept.len(),
+            first.kept.len(),
             lowered_again.len(),
             translated_only.len(),
         );
@@ -593,21 +685,14 @@ impl IncrementalAnalysisService {
             }),
             "lowering read the codebase where the analysis it follows did not"
         );
-        let mut translations = Vec::new();
-        let mut lowered: HashMap<FileId, Result<LoweredUnit, IssueCollection>> = HashMap::default();
-        for (file, lowered_file) in
-            stale_library.iter().chain(&stale_rest).zip(lowered_library.into_iter().chain(lowered_rest))
-        {
-            lowered.insert(
-                file.id,
-                lowered_file.map(|(lowered, translation)| {
-                    translations.push(translation);
-                    lowered
-                }),
-            );
-        }
+        let mut translations: Vec<Translation> = library
+            .iter()
+            .chain(&rest)
+            .filter_map(|file| first.lowered.get(&file.id))
+            .filter_map(|lowering| lowerings[*lowering].1.take())
+            .collect();
         translations.extend(translated.into_iter().filter_map(Result::ok));
-        let mut refused = check(translations, &reach)
+        let refused = check(translations, &reach)
             .map_err(|error| OrchestratorError::General(format!("The laws could not be checked: {error}.")))?;
 
         let read_by_every_file: HashSet<FileId> =
@@ -629,24 +714,174 @@ impl IncrementalAnalysisService {
         for file in &files {
             folder_files.entry(folder_of(&file.name)).or_default().push(&file.name);
         }
-        let accepted = |file: &File| {
-            !refused.contains_key(&file.id)
-                && (kept.contains_key(&file.id) || matches!(lowered.get(&file.id), Some(Ok(_))))
+        let first = self.inputs(
+            first,
+            refused,
+            &files,
+            &lowerings,
+            &reach,
+            &dependencies,
+            &listening,
+            &folder_files,
+            &read_by_every_file,
+        );
+        let hosts = hosts.map(|hosts| {
+            self.inputs(
+                hosts,
+                HashMap::default(),
+                &files,
+                &lowerings,
+                &reach,
+                &dependencies,
+                &listening,
+                &folder_files,
+                &read_by_every_file,
+            )
+        });
+        let mut counts: Vec<usize> = first.input_paths.values().map(Vec::len).collect();
+        counts.sort_unstable();
+        tracing::debug!(
+            "Found the inputs of {} PHP# files in {:?}: a median of {} inputs, and {} at most.",
+            counts.len(),
+            inputs_start.elapsed(),
+            counts.get(counts.len() / 2).copied().unwrap_or_default(),
+            counts.last().copied().unwrap_or_default(),
+        );
+
+        // Each input of an accepted file is read once, all at once, and the first in the order the files name them that
+        // can't be read fails the compile, as reading them one after another did.
+        let named: Vec<Vec<u8>> = {
+            let mut seen: HashSet<&[u8]> = HashSet::default();
+            std::iter::once(&first)
+                .chain(hosts.as_ref())
+                .flat_map(|inputs| {
+                    files
+                        .iter()
+                        .filter(|file| inputs.accepted(file, &lowerings))
+                        .flat_map(|file| inputs.input_paths.get(&file.id).into_iter().flatten())
+                })
+                .map(|(path, _)| path)
+                .filter(|path| seen.insert(path.as_slice()))
+                .cloned()
+                .collect()
         };
+        let stamped: Vec<Result<Option<Input>, DatabaseError>> = named.par_iter().map(|path| stamp(path)).collect();
+        let mut stamps: HashMap<Vec<u8>, Input> = HashMap::default();
+        for (path, input) in named.into_iter().zip(stamped) {
+            let input = input?.unwrap_or_else(|| Input {
+                path: path.clone(),
+                size: 0,
+                mtime_ns: 0,
+                hash: [0; 16],
+                declarations_hash: [0; 16],
+            });
+            stamps.insert(path, input);
+        }
+        let compiled = self.compiled(first, &files, &lowerings, &reads, &stamps, standard_library)?;
+        let hosts = match hosts {
+            Some(hosts) => Some(self.compiled(hosts, &files, &lowerings, &reads, &stamps, standard_library)?),
+            None => None,
+        };
+
+        Ok((compiled, hosts))
+    }
+
+    /// Keeps in `target` each of `files` whose key holds in its folder, as [`Self::kept`] finds it with `reads`, `forms`
+    /// and `effects`.
+    fn keep(
+        &self,
+        target: &mut Target<'_>,
+        files: &[&Arc<File>],
+        reads: &HashMap<FileId, (Reads, HashSet<FileId>)>,
+        forms: &HashMap<Vec<u8>, u64>,
+        effects: &Effects,
+    ) -> Result<(), OrchestratorError> {
+        for file in files {
+            let Target { folder, errors, kept, .. } = &mut *target;
+            if let Some(found) =
+                self.kept(file, folder.last, &mut folder.compiled, &mut folder.intact, reads, forms, effects, errors)?
+            {
+                kept.insert(file.id, found);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Lowers for `target` each of `files` its folder keeps no compiled file of, with `forms` to inline, as
+    /// [`Self::lower_all`] lowers it, into `lowerings`. A file `lowered` lowered and neither target refuses takes that
+    /// lowering instead, since a file's lowering rests only on its errors and the forms it inlines, which `lowered`
+    /// passes only when they are `target`'s.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_into(
+        &self,
+        target: &mut Target<'_>,
+        files: &[&Arc<File>],
+        lowered: Option<&Target<'_>>,
+        forms: &InlineForms,
+        reach: &Reach,
+        effects: &Effects,
+        session: Option<&ExternalAnalysisSession>,
+        lowerings: &mut Vec<Lowering>,
+    ) -> Result<(), OrchestratorError> {
+        let mut stale = Vec::new();
+        for file in files.iter().filter(|file| !target.kept.contains_key(&file.id)) {
+            let taken = lowered
+                .filter(|lowered| !lowered.errors.contains_key(&file.id) && !target.errors.contains_key(&file.id))
+                .and_then(|lowered| lowered.lowered.get(&file.id));
+            match taken {
+                Some(lowering) => {
+                    target.lowered.insert(file.id, *lowering);
+                }
+                None => stale.push(*file),
+            }
+        }
+        let lowered = self.lower_all(&stale, forms, (&target.errors, &target.unrefused), reach, effects, session)?;
+        for (file, lowered) in stale.iter().zip(lowered) {
+            target.lowered.insert(file.id, lowerings.len());
+            lowerings.push(match lowered {
+                Ok((unit, translation)) => (Ok(unit), Some(translation)),
+                Err(issues) => (Err(issues), None),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// What `target`'s folder reads once `refused`, the issues of each file whose law is not proved, refuse their
+    /// files in it: the declarations hash of each of `files` it accepts, and the inputs of each it keeps or lowered from
+    /// `lowerings`. A file's inputs are each source `reach` and `dependencies` give it, the module files its check
+    /// resolves services through by `listening`, the files of its folder in `folder_files` when its code reaches an
+    /// extension, and the files in `read_by_every_file`.
+    #[allow(clippy::too_many_arguments)]
+    fn inputs<'folder>(
+        &self,
+        target: Target<'folder>,
+        refused: HashMap<FileId, IssueCollection>,
+        files: &[Arc<File>],
+        lowerings: &[Lowering],
+        reach: &Reach,
+        dependencies: &Dependencies<'_>,
+        listening: &HashSet<FileId>,
+        folder_files: &HashMap<&[u8], Vec<&[u8]>>,
+        read_by_every_file: &HashSet<FileId>,
+    ) -> Inputs<'folder> {
+        let mut inputs =
+            Inputs { target, refused, read_by_declarations: HashMap::default(), input_paths: HashMap::default() };
         // Spec section 27: each file this compile writes a compiled file for whose declarations hash is not all zero is
         // read through its declarations, which its compiled file's header names.
         let read_by_declarations: HashMap<FileId, [u8; 16]> = files
             .iter()
-            .filter(|file| accepted(file))
+            .filter(|file| inputs.accepted(file, lowerings))
             .map(|file| (file.id, declarations_hash(&self.codebase, file)))
             .filter(|(_, declarations_hash)| *declarations_hash != [0; 16])
             .collect();
         let mut input_paths: HashMap<FileId, Vec<InputPath>> = HashMap::default();
         for (file, namespace_classes, reaches_extension) in files.iter().filter_map(|file| {
-            if let Some((_, record)) = kept.get(&file.id) {
+            if let Some((_, record)) = inputs.target.kept.get(&file.id) {
                 return Some((file, &record.namespace_classes, record.reaches_extension));
             }
-            let lowered = lowered.get(&file.id)?.as_ref().ok()?;
+            let lowered = lowerings[*inputs.target.lowered.get(&file.id)?].0.as_ref().ok()?;
 
             Some((file, &lowered.namespace_classes, lowered.reaches_extension))
         }) {
@@ -704,7 +939,7 @@ impl IncrementalAnalysisService {
                 .chain(lists)
                 .chain(namespace_class_files)
                 .chain(namespace_files)
-                .chain(self.module_inputs(file, &dependencies, &listening))
+                .chain(self.module_inputs(file, dependencies, listening))
                 .chain(std::iter::once(COMPOSER_LOCK.to_vec()))
                 .map(|path| (path, [0; 16]))
                 .chain(imports)
@@ -714,41 +949,26 @@ impl IncrementalAnalysisService {
             paths.dedup_by(|later, first| later.0 == first.0);
             input_paths.insert(file.id, paths);
         }
-        let mut counts: Vec<usize> = input_paths.values().map(Vec::len).collect();
-        counts.sort_unstable();
-        tracing::debug!(
-            "Found the inputs of {} PHP# files in {:?}: a median of {} inputs, and {} at most.",
-            counts.len(),
-            inputs_start.elapsed(),
-            counts.get(counts.len() / 2).copied().unwrap_or_default(),
-            counts.last().copied().unwrap_or_default(),
-        );
+        inputs.read_by_declarations = read_by_declarations;
+        inputs.input_paths = input_paths;
 
-        // Each input of an accepted file is read once, all at once, and the first in the order the files name them that
-        // can't be read fails the compile, as reading them one after another did.
-        let named: Vec<Vec<u8>> = {
-            let mut seen: HashSet<&[u8]> = HashSet::default();
-            files
-                .iter()
-                .filter(|file| accepted(file))
-                .flat_map(|file| input_paths.get(&file.id).into_iter().flatten())
-                .map(|(path, _)| path)
-                .filter(|path| seen.insert(path.as_slice()))
-                .cloned()
-                .collect()
-        };
-        let stamped: Vec<Result<Option<Input>, DatabaseError>> = named.par_iter().map(|path| stamp(path)).collect();
-        let mut stamps: HashMap<Vec<u8>, Input> = HashMap::default();
-        for (path, input) in named.into_iter().zip(stamped) {
-            let input = input?.unwrap_or_else(|| Input {
-                path: path.clone(),
-                size: 0,
-                mtime_ns: 0,
-                hash: [0; 16],
-                declarations_hash: [0; 16],
-            });
-            stamps.insert(path, input);
-        }
+        inputs
+    }
+
+    /// The compilation of each of `files` in `inputs`' folder, in file name order, then of each plain PHP file the
+    /// folder refuses, as [`Self::unlinkable_plain_php_classes`] finds them, and the [`CompiledFiles`] the next compile
+    /// into the folder keeps files by. A file the folder keeps or lowered from `lowerings` compiles with what `reads`
+    /// holds it read, the stamp `stamps` holds of each of its inputs, and `standard_library`.
+    fn compiled(
+        &self,
+        inputs: Inputs<'_>,
+        files: &[Arc<File>],
+        lowerings: &[Lowering],
+        reads: &HashMap<FileId, (Reads, HashSet<FileId>)>,
+        stamps: &HashMap<Vec<u8>, Input>,
+        standard_library: &Library,
+    ) -> Result<Compiled, OrchestratorError> {
+        let Inputs { mut target, mut refused, read_by_declarations, mut input_paths } = inputs;
         let stamped = |paths: Vec<InputPath>| -> Vec<Input> {
             paths
                 .into_iter()
@@ -757,9 +977,9 @@ impl IncrementalAnalysisService {
         };
         let mut next = CompiledFiles::default();
         let mut compilations = Vec::with_capacity(files.len());
-        for file in &files {
+        for file in files {
             let issues = refused.remove(&file.id);
-            let compilation = if let Some((bytes, record)) = kept.remove(&file.id) {
+            let compilation = if let Some((bytes, record)) = target.kept.remove(&file.id) {
                 match issues {
                     Some(issues) => Compilation::Refused(issues),
                     None => {
@@ -772,7 +992,7 @@ impl IncrementalAnalysisService {
                             bytes => {
                                 let bytes = match bytes {
                                     Some(bytes) => bytes,
-                                    None => compiled(file)?
+                                    None => (target.folder.compiled)(file)?
                                         .filter(|bytes| !unit::is_stale(bytes, record.key))
                                         .ok_or_else(|| {
                                             OrchestratorError::General(format!(
@@ -792,13 +1012,14 @@ impl IncrementalAnalysisService {
                     }
                 }
             } else {
-                let Some(lowered) = lowered.remove(&file.id) else {
+                let Some(lowering) = target.lowered.get(&file.id) else {
                     continue;
                 };
-                match (lowered, issues) {
-                    (Ok(_), Some(issues)) | (Err(issues), _) => Compilation::Refused(issues),
+                match (&lowerings[*lowering].0, issues) {
+                    (Ok(_), Some(issues)) => Compilation::Refused(issues),
+                    (Err(issues), _) => Compilation::Refused(issues.clone()),
                     (Ok(LoweredUnit { unit, forms, namespace_classes, reaches_extension }), None) => {
-                        let (mut reads, _) = reads.remove(&file.id).unwrap_or_default();
+                        let mut reads = reads.get(&file.id).map(|(reads, _)| reads.clone()).unwrap_or_default();
                         reads.inlined = unit.inlined().to_vec();
                         reads.function_types = unit.function_types().to_vec();
                         let key = key(source_hash(&file.contents), &reads);
@@ -807,11 +1028,18 @@ impl IncrementalAnalysisService {
                         let stamps = stamps_hash(declarations_hash, &inputs, standard_library);
                         next.files.insert(
                             file.name.to_vec(),
-                            CompiledFile { key, reads, forms, namespace_classes, reaches_extension, stamps },
+                            CompiledFile {
+                                key,
+                                reads,
+                                forms: forms.clone(),
+                                namespace_classes: namespace_classes.clone(),
+                                reaches_extension: *reaches_extension,
+                                stamps,
+                            },
                         );
 
                         Compilation::Accepted(encode(
-                            &unit,
+                            unit,
                             &file.contents,
                             key,
                             declarations_hash,
@@ -824,7 +1052,7 @@ impl IncrementalAnalysisService {
 
             compilations.push((file.id, compilation));
         }
-        compilations.extend(self.unlinkable_plain_php_classes(&errors));
+        compilations.extend(self.unlinkable_plain_php_classes(&target.errors));
 
         Ok((compilations, next))
     }
@@ -2014,9 +2242,9 @@ mod tests {
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<Vec<(FileId, Compilation)>, OrchestratorError> {
-        service
-            .compile(&CompiledFiles::default(), uncompiled, |_| false, stamp, check, standard_library, refusing)
-            .map(|(compiled, _)| compiled)
+        let folder = Folder { last: &CompiledFiles::default(), compiled: &mut uncompiled, intact: &mut |_| false };
+
+        service.compile(folder, None, stamp, check, standard_library, refusing).map(|((compiled, _), _)| compiled)
     }
 
     /// Each compiled file of `service` by its name.
@@ -3009,27 +3237,21 @@ mod tests {
         last: &CompiledFiles,
         previous: &BTreeMap<String, Compilation>,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
-        intact: impl FnMut(&File) -> bool,
+        mut intact: impl FnMut(&File) -> bool,
     ) -> (BTreeMap<String, Compilation>, CompiledFiles, BTreeSet<String>) {
         let mut asked = BTreeSet::new();
-        let (compiled, kept) = service
-            .compile(
-                last,
-                |file| {
-                    let name = String::from_utf8_lossy(&file.name).into_owned();
-                    let bytes = match previous.get(&name) {
-                        Some(Compilation::Accepted(bytes)) => Some(bytes.clone()),
-                        _ => None,
-                    };
-                    asked.insert(name);
-                    Ok(bytes)
-                },
-                intact,
-                stamp,
-                proved,
-                &Library::default(),
-                |issues| issues,
-            )
+        let mut compiled = |file: &File| {
+            let name = String::from_utf8_lossy(&file.name).into_owned();
+            let bytes = match previous.get(&name) {
+                Some(Compilation::Accepted(bytes)) => Some(bytes.clone()),
+                _ => None,
+            };
+            asked.insert(name);
+            Ok(bytes)
+        };
+        let folder = Folder { last, compiled: &mut compiled, intact: &mut intact };
+        let ((compiled, kept), _) = service
+            .compile(folder, None, stamp, proved, &Library::default(), |issues| issues)
             .expect("the compile runs");
         let database = service.database();
         let compiled = compiled

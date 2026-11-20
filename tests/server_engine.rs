@@ -17,6 +17,7 @@ use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
+use mago_orchestrator::service::incremental_analysis::compile::Folder;
 use mago_php_version::PHPVersion;
 use mago_reporting::IssueCollection;
 use mago_server::Server;
@@ -701,11 +702,10 @@ fn a_file_whose_type_a_provider_read_from_a_class_is_analyzed_again_when_the_cla
 fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
     let database = server.database().read_only();
     let inputs = std::sync::Mutex::new(BTreeMap::new());
-    let (compiled, _) = server
+    let ((compiled, _), _) = server
         .compile(
-            &CompiledFiles::default(),
-            |_| Ok(None),
-            |_| false,
+            Folder { last: &CompiledFiles::default(), compiled: &mut |_| Ok(None), intact: &mut |_| false },
+            None,
             |path| {
                 let input = database.get(&FileId::new(path)).ok().map(|file| Input {
                     path: path.to_vec(),

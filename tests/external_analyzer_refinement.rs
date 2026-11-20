@@ -18,6 +18,7 @@ use mago_database::file::FileType;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
+use mago_orchestrator::service::incremental_analysis::compile::Folder;
 use mago_php_version::PHPVersion;
 use mago_reporting::IssueCollection;
 use mago_sharp_bridge::unit::Library;
@@ -624,11 +625,10 @@ fn compiled_consumer(
     incremental.analyze().expect("body return analysis should succeed");
 
     let inputs = std::sync::Mutex::new(Vec::new());
-    let (compiled, _) = incremental
+    let ((compiled, _), _) = incremental
         .compile(
-            &CompiledFiles::default(),
-            |_| Ok(None),
-            |_| false,
+            Folder { last: &CompiledFiles::default(), compiled: &mut |_| Ok(None), intact: &mut |_| false },
+            None,
             |path| {
                 inputs.lock().unwrap().push(String::from_utf8_lossy(path).into_owned());
                 Ok(None)

@@ -603,8 +603,8 @@ final class ReadsTheCompiledFile implements Plugin, BeforeAnalysisHook
 
 /// A Roslyn source generator sees the compilation's symbols, and a Kotlin compiler plugin sees the module's own
 /// classes, so a host sees each PHP# file compiled from its current source, on a fresh tree and after an edit. The
-/// hosts' compile lives outside the project, so `mago analyze` leaves the project's `.sharp` folder as `mago compile`
-/// wrote it.
+/// hosts' compile lives outside the project, and `mago analyze` compiles the project's `.sharp` folder from the same
+/// lowering, as `mago --no-extensions compile` writes it.
 #[test]
 fn a_host_sees_each_php_sharp_file_compiled_from_its_current_source() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -637,7 +637,63 @@ fn a_host_sees_each_php_sharp_file_compiled_from_its_current_source() {
 
     assert!(analyzed.status.success(), "{}", printed(&analyzed));
     assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\nsecond\n");
-    assert_eq!(std::fs::read(compiled(root, "app/Word.sharp")).unwrap(), compiled_by_compile);
+    let compiled_by_analyze = std::fs::read(compiled(root, "app/Word.sharp")).unwrap();
+    assert_ne!(compiled_by_analyze, compiled_by_compile, "analyze compiled the edit into the `.sharp` folder");
+    let without_hosts = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "--no-extensions", "compile"])
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root),
+    )
+    .unwrap();
+    assert!(without_hosts.status.success(), "{}", printed(&without_hosts));
+    assert_eq!(std::fs::read(compiled(root, "app/Word.sharp")).unwrap(), compiled_by_analyze);
+}
+
+/// `mago analyze` compiles the project's `.sharp` folder and the hosts' folder from one analysis without the hosts and
+/// one lowering before it analyzes with the hosts, so on a fresh tree its log holds one compile, and the host and the
+/// `.sharp` folder each get every file.
+#[test]
+fn analyze_compiles_the_sharp_folder_and_the_hosts_folder_from_one_lowering() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the one lowering test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "app/Word.sharp",
+        "namespace App;\n\npublic class Word\n{\n    public static string text() => \"first\";\n}\n",
+    );
+    write(root, "tools/host.php", HOST_READING_THE_COMPILED_FILE);
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
+    );
+    let cache = tempfile::tempdir().unwrap();
+
+    let analyzed = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "analyze"])
+            .env("MAGO_LOG", "debug")
+            .env("XDG_CACHE_HOME", cache.path())
+            .current_dir(root),
+    )
+    .unwrap();
+
+    assert!(analyzed.status.success(), "{}", printed(&analyzed));
+    assert_eq!(
+        printed(&analyzed).matches("Kept the compiled file of 0 PHP# files").count(),
+        1,
+        "{}",
+        printed(&analyzed)
+    );
+    assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\n");
+    for name in ["app/Order.sharp", MONEY_PATH, "app/Word.sharp"] {
+        assert!(compiled(root, name).exists(), "{name}");
+    }
 }
 
 /// An editor's `mago analyze` and a terminal's start together after an edit, and each compiles the project into the one
@@ -2096,7 +2152,7 @@ fn analyze_refuses_a_php_file_and_a_source_that_declare_one_class() {
     write(root, "app/Shop/StoreService.sharp", "namespace App.Shop;\n\npublic class StoreService\n{\n}\n");
     write(root, "app/Shop/StoreService.php", "<?php\n\nnamespace App\\Shop;\n\nfinal class StoreService\n{\n}\n");
 
-    let output = analyze(root);
+    let output = analyze(root, &[]);
 
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(
@@ -4461,10 +4517,9 @@ fn a_law_reaching_a_type_test_over_an_open_interface_is_refused() {
 }
 
 /// `mago analyze` refuses a law that reaches a construct the law translation does not model with the issue `mago
-/// compile` refuses it with, and proves no law: it writes no Lean package and no record of proofs, beside a law that
-/// would prove.
+/// compile` refuses it with, once, though both its analysis and its compile refuse it, and compiles no file it refuses.
 #[test]
-fn analyze_refuses_a_law_that_reaches_an_unmodeled_construct_as_compile_does_and_starts_no_lean() {
+fn analyze_refuses_a_law_that_reaches_an_unmodeled_construct_once_as_compile_does() {
     let directory = library_project(&[
         (
             "app/Shared/Shape.sharp",
@@ -4485,13 +4540,15 @@ fn analyze_refuses_a_law_that_reaches_an_unmodeled_construct_as_compile_does_and
     .unwrap();
 
     assert_eq!(analyzed.status.code(), Some(1), "{}", printed(&analyzed));
-    assert!(
-        printed(&analyzed).contains(&format!("app/Shared/Shape.sharp:5:60: error[unmodeled-construct]: {refusal}")),
+    assert_eq!(
+        printed(&analyzed)
+            .matches(&format!("app/Shared/Shape.sharp:5:60: error[unmodeled-construct]: {refusal}"))
+            .count(),
+        1,
         "{}",
         printed(&analyzed)
     );
-    assert!(!root.join(".sharp").join(PACKAGE_FOLDER).exists(), "{}", printed(&analyzed));
-    assert!(!root.join(".sharp/proofs.json").exists(), "{}", printed(&analyzed));
+    assert!(!compiled(root, "app/Shared/Shape.sharp").exists(), "{}", printed(&analyzed));
 
     let compiled = compile_without_lean(root);
 
@@ -4510,31 +4567,21 @@ fn analyze_scan_only_refuses_no_law() {
         "app/Level.sharp",
         "namespace App;\n\npublic final class Level\n{\n    public Level(public int rank { get; }) { }\n\n    public bool meets(Level other) => this.rank >= other.rank;\n\n    law meetsItself(Level a) => a.meets(a);\n}\n",
     )]);
-    let analyze = |arguments: &[&str]| {
-        process::output(
-            Command::new(env!("CARGO_BIN_EXE_mago"))
-                .args(["--no-version-check", "--colors", "never", "analyze"])
-                .args(arguments)
-                .env("MAGO_REPORTING_FORMAT", "medium")
-                .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
-                .current_dir(directory.path()),
-        )
-        .unwrap()
-    };
 
     for arguments in [&["--scan-only"][..], &[]] {
-        let analyzed = analyze(arguments);
+        let analyzed = analyze(directory.path(), arguments);
 
         assert_eq!(analyzed.status.code(), Some(0), "{arguments:?}: {}", printed(&analyzed));
         assert!(printed(&analyzed).contains("No issues found."), "{arguments:?}: {}", printed(&analyzed));
     }
 }
 
-/// `mago analyze` of `root`, with every issue on one line.
-fn analyze(root: &Path) -> Output {
+/// `mago analyze` of `paths` in `root`, of the whole project when it names none, with every issue on one line.
+fn analyze(root: &Path, paths: &[&str]) -> Output {
     process::output(
         Command::new(env!("CARGO_BIN_EXE_mago"))
             .args(["--no-version-check", "--colors", "never", "analyze"])
+            .args(paths)
             .env("MAGO_REPORTING_FORMAT", "medium")
             .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
             .current_dir(root),
@@ -4551,7 +4598,7 @@ fn analyze_proves_a_law_that_reaches_the_standard_library() {
         "namespace App;\n\nimport Sharp.Time.Instant;\n\npublic struct Stamp\n{\n    public Stamp(public Instant at { get; }) { }\n\n    law keepsTheInstant(Instant at) => new Stamp(at).at.epochSeconds == at.epochSeconds && new Stamp(at).at.nanosecond == at.nanosecond;\n}\n",
     )]);
 
-    let analyzed = analyze(directory.path());
+    let analyzed = analyze(directory.path(), &[]);
 
     assert_eq!(analyzed.status.code(), Some(0), "{}", printed(&analyzed));
     assert!(printed(&analyzed).contains("No issues found."), "{}", printed(&analyzed));
@@ -4570,7 +4617,7 @@ fn analyze_refuses_a_law_that_reaches_a_file_with_errors_for_its_errors() {
         ),
     ]);
 
-    let analyzed = analyze(directory.path());
+    let analyzed = analyze(directory.path(), &[]);
 
     assert_eq!(analyzed.status.code(), Some(1), "{}", printed(&analyzed));
     assert!(
@@ -4583,7 +4630,8 @@ fn analyze_refuses_a_law_that_reaches_a_file_with_errors_for_its_errors() {
 }
 
 /// `mago analyze` refuses a law that reaches a package's PHP# file with an error for that file's errors, as `mago
-/// compile` does, and reports no issue of the package's own.
+/// compile` does. An analyze of the project's files reports no issue of the package's own, and an analyze of the whole
+/// project, which compiles it, reports the compile's refusal of the package's file once.
 #[test]
 fn analyze_refuses_a_law_that_reaches_a_package_file_with_errors_for_its_errors() {
     let money = LAWFUL_MONEY
@@ -4601,17 +4649,21 @@ fn analyze_refuses_a_law_that_reaches_a_package_file_with_errors_for_its_errors(
         ),
     ]);
 
-    let analyzed = analyze(directory.path());
+    let named = analyze(directory.path(), &["app"]);
+    let whole = analyze(directory.path(), &[]);
+    let refused = "app/Shared/Ledger.sharp:7:5: error[law-unproven]: Law addKeeps is not proven: it reaches Money.add, whose file has errors. Fix them, then run vendor/bin/mago compile again.";
 
-    assert_eq!(analyzed.status.code(), Some(1), "{}", printed(&analyzed));
-    assert!(
-        printed(&analyzed).contains(
-            "app/Shared/Ledger.sharp:7:5: error[law-unproven]: Law addKeeps is not proven: it reaches Money.add, whose file has errors. Fix them, then run vendor/bin/mago compile again."
-        ),
-        "{}",
-        printed(&analyzed)
-    );
-    assert!(!printed(&analyzed).contains("Money.sharp"), "{}", printed(&analyzed));
+    assert_eq!(named.status.code(), Some(1), "{}", printed(&named));
+    assert!(printed(&named).contains(refused), "{}", printed(&named));
+    assert!(!printed(&named).contains("Money.sharp"), "{}", printed(&named));
+    assert_eq!(whole.status.code(), Some(1), "{}", printed(&whole));
+    for issue in [
+        refused,
+        "vendor/acme/money/src/Money.sharp:8:28: error[invalid-return-statement]",
+        "vendor/acme/money/src/Money.sharp comes from the Composer package acme/money.",
+    ] {
+        assert_eq!(printed(&whole).matches(issue).count(), 1, "{issue}\n{}", printed(&whole));
+    }
 }
 
 /// Spec section 28's `app/Tenant/Store/Module.sharp`, whose law spans `Receipts` and `Refunds`.

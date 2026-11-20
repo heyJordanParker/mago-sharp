@@ -62,6 +62,7 @@ use mago_names::resolver::NameResolver;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
+use mago_orchestrator::service::incremental_analysis::compile::Folder;
 use mago_orchestrator::service::incremental_analysis::compile::LOWERING_PANIC;
 use mago_reporting::CompiledIgnoreSet;
 use mago_reporting::IssueCollection;
@@ -687,10 +688,9 @@ impl<'configuration> Session<'configuration> {
         let analysis = self.server.analyze()?;
         let database = self.server.database().read_only();
         let issues = keys(&self.server, prover.hidden.shown(analysis.issues, &database));
-        let (compilations, _) = self.server.compile(
-            &CompiledFiles::default(),
-            |_| Ok(None),
-            |_| false,
+        let ((compilations, _), _) = self.server.compile(
+            Folder { last: &CompiledFiles::default(), compiled: &mut |_| Ok(None), intact: &mut |_| false },
+            None,
             |path| unit::stamp(&prover.root, path),
             |_, _| Ok(Default::default()),
             &prover.standard_library,
