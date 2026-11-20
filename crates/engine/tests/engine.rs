@@ -1,6 +1,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, clippy::panic_in_result_fn)]
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -176,6 +178,39 @@ fn a_call_past_its_deadline_stops_and_resets_the_interpreter() {
     assert_eq!(stopped, Err(EngineError::Deadline(deadline)));
     assert!(start.elapsed() < Duration::from_secs(5), "the call stopped {:?} after it started", start.elapsed());
     assert_eq!(call(&engine, "count_call"), Ok(Value::Int(1)), "the interpreter starts again");
+}
+
+/// A call's deadline stops it while another thread's calls, each with a later deadline, start and end around it.
+#[test]
+fn a_call_past_its_deadline_stops_while_another_threads_calls_end_in_time() {
+    let engine = engine();
+    let deadline = Duration::from_millis(300);
+    let stopped = AtomicBool::new(false);
+    let (calling, called) = std::sync::mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let other = scope.spawn(|| {
+            let mut ended = 0;
+            while !stopped.load(Ordering::SeqCst) {
+                assert!(matches!(call(&engine, "count_call"), Ok(Value::Int(_))));
+                ended += 1;
+                if ended == 1 {
+                    calling.send(()).unwrap();
+                }
+            }
+
+            ended
+        });
+        called.recv().unwrap();
+        let start = Instant::now();
+
+        let spun = engine.call("Mago\\Tests\\Engine\\spin", &[], deadline, &mut no_questions);
+        stopped.store(true, Ordering::SeqCst);
+
+        assert_eq!(spun, Err(EngineError::Deadline(deadline)));
+        assert!(start.elapsed() < Duration::from_secs(5), "the call stopped {:?} after it started", start.elapsed());
+        assert!(other.join().unwrap() > 1, "the other thread's calls kept ending in time");
+    });
 }
 
 #[test]

@@ -16,8 +16,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::sync::OnceLock;
 use std::sync::PoisonError;
+use std::sync::Weak;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -162,7 +164,7 @@ thread_local! {
     static ANSWERING: Cell<Option<Answering>> = const { Cell::new(None) };
     /// A pointer with no destructor, so the engine reads it while the thread ends too, as its interpreter stops then.
     static VARIABLES: Cell<Variables> = const { Cell::new(NO_VARIABLES) };
-    static WATCHING: Cell<Option<(u64, Duration)>> = const { Cell::new(None) };
+    static SLOT: Arc<Slot> = Deadlines::get().register();
 }
 
 impl Engine {
@@ -227,9 +229,7 @@ impl Engine {
     /// Starts the deadline of the call that runs on this thread again, as when the call started, so a call that
     /// reports its progress through its `answer` runs as long as each part keeps within the deadline.
     pub fn restart_deadline(&self) {
-        if let Some((token, after)) = WATCHING.get() {
-            Deadlines::get().restart(token, after);
-        }
+        Deadlines::get().restart();
     }
 
     /// Calls the PHP function `function`, such as `name` or `Class::method`, with `arguments` in the calling thread's
@@ -262,11 +262,10 @@ impl Engine {
                 drop(thread.interpreter.take());
             }
 
-            let watch = Watch::start(deadline);
-            WATCHING.set(Some((watch.token, deadline)));
-            let result = self.run(thread, function, arguments, answer, &watch);
-            WATCHING.set(None);
-            let fired = watch.finish(thread.interpreter.as_ref().map(|interpreter| interpreter.globals));
+            let deadlines = Deadlines::get();
+            deadlines.watch(deadline, thread.interpreter.as_ref().map(|interpreter| interpreter.globals));
+            let result = self.run(thread, function, arguments, answer);
+            let fired = deadlines.finish(thread.interpreter.as_ref().map(|interpreter| interpreter.globals));
             match result {
                 Err(EngineError::Failed(_) | EngineError::Script { .. }) if fired => {
                     drop(thread.interpreter.take());
@@ -300,11 +299,9 @@ impl Engine {
         function: &str,
         arguments: &[Value],
         answer: &mut dyn FnMut(Vec<Value>) -> Answer,
-        watch: &Watch,
     ) -> Result<Value, EngineError> {
-        match &thread.interpreter {
-            Some(interpreter) => watch.arm(interpreter.globals),
-            None => thread.interpreter = Some(self.start(watch)?),
+        if thread.interpreter.is_none() {
+            thread.interpreter = Some(self.start()?);
         }
 
         let mut slots: Vec<Zval> = arguments.iter().map(|_| Zval::new()).collect();
@@ -351,7 +348,7 @@ impl Engine {
         clippy::multiple_unsafe_ops_per_block,
         reason = "each operation is one step of the same engine API call sequence, which the block's SAFETY note covers"
     )]
-    fn start(&self, watch: &Watch) -> Result<Interpreter, EngineError> {
+    fn start(&self) -> Result<Interpreter, EngineError> {
         // SAFETY: the thread runs no interpreter, so it starts one, and it stops it when the start fails.
         unsafe {
             let variables = Arc::clone(&self.variables);
@@ -367,7 +364,7 @@ impl Engine {
                 globals: engine_executor_globals(),
                 variables,
             };
-            watch.arm(interpreter.globals);
+            Deadlines::get().arm(interpreter.globals);
             for (name, value) in &self.settings {
                 let (name, value) = (name.as_bytes(), value.as_bytes());
                 if engine_set(name.as_ptr().cast(), name.len(), value.as_ptr().cast(), value.len()) != 0 {
@@ -489,84 +486,46 @@ unsafe extern "C" fn mago_engine_variable_at(
     true
 }
 
-/// One call's deadline, which the deadlines thread enforces by setting the interpreter's timeout flag and VM
-/// interrupt, so the engine stops the PHP at its next instruction boundary.
-struct Watch {
-    token: u64,
+/// The deadline of the call the calling thread runs, if it runs one. Only the thread and the deadlines thread lock it,
+/// so a call's lock waits for nothing but the deadlines thread's look at it.
+#[derive(Default)]
+struct Slot {
+    call: Mutex<Option<Deadline>>,
 }
 
+/// One call's deadline, which the deadlines thread enforces by setting its interpreter's timeout flag and VM
+/// interrupt, so the engine stops the PHP at its next instruction boundary.
 struct Deadline {
-    token: u64,
     at: Instant,
+    after: Duration,
     globals: Option<usize>,
     fired: bool,
 }
 
-#[derive(Default)]
+/// Every thread's [`Slot`], and when the deadlines thread wakes next. A call wakes it only when the call's deadline
+/// comes before that, so a stream of calls that each end in time wakes it once per deadline, not twice per call.
 struct Deadlines {
-    pending: Mutex<Vec<Deadline>>,
+    slots: Mutex<Vec<Weak<Slot>>>,
+    /// Held by the deadlines thread except while it sleeps, so a call that wakes it can't wake it before it sleeps.
+    sleeping: Mutex<()>,
     changed: Condvar,
-}
-
-impl Watch {
-    fn start(after: Duration) -> Self {
-        static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
-        let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
-        let deadlines = Deadlines::get();
-        deadlines.pending.lock().unwrap_or_else(PoisonError::into_inner).push(Deadline {
-            token,
-            at: Instant::now() + after,
-            globals: None,
-            fired: false,
-        });
-        deadlines.changed.notify_one();
-
-        Self { token }
-    }
-
-    /// Names the interpreter this deadline interrupts, once the call has one.
-    fn arm(&self, globals: *mut c_void) {
-        let deadlines = Deadlines::get();
-        let mut pending = deadlines.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(deadline) = pending.iter_mut().find(|deadline| deadline.token == self.token) {
-            deadline.globals = Some(globals as usize);
-        }
-        drop(pending);
-        deadlines.changed.notify_one();
-    }
-
-    /// Ends the watch and returns whether the deadline passed, clearing an interrupt that came after the call ended.
-    fn finish(self, globals: Option<*mut c_void>) -> bool {
-        let mut pending = Deadlines::get().pending.lock().unwrap_or_else(PoisonError::into_inner);
-        let fired = pending
-            .iter()
-            .position(|deadline| deadline.token == self.token)
-            .is_some_and(|index| pending.swap_remove(index).fired);
-        drop(pending);
-        if let (true, Some(globals)) = (fired, globals) {
-            // SAFETY: the interpreter still runs on this thread, and no call runs on it now.
-            unsafe { engine_clear_interrupt(globals) };
-        }
-
-        fired
-    }
+    /// When the deadlines thread wakes next, in nanoseconds since `epoch`, or `u64::MAX` while it waits for no
+    /// deadline or looks at the slots.
+    wake: AtomicU64,
+    epoch: Instant,
 }
 
 impl Deadlines {
-    /// Moves the deadline `token` to `after` from now, unless it already passed.
-    fn restart(&self, token: u64, after: Duration) {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(deadline) = pending.iter_mut().find(|deadline| deadline.token == token && !deadline.fired) {
-            deadline.at = Instant::now() + after;
-        }
-        drop(pending);
-        self.changed.notify_one();
-    }
-
     fn get() -> &'static Self {
         static DEADLINES: OnceLock<&'static Deadlines> = OnceLock::new();
         DEADLINES.get_or_init(|| {
-            let deadlines: &'static Self = Box::leak(Box::default());
+            let deadlines: &'static Self = Box::leak(Box::new(Self {
+                slots: Mutex::default(),
+                sleeping: Mutex::default(),
+                changed: Condvar::new(),
+                wake: AtomicU64::new(u64::MAX),
+                epoch: Instant::now(),
+            }));
             std::thread::Builder::new()
                 .name("mago-engine-deadlines".to_owned())
                 .spawn(|| deadlines.enforce())
@@ -575,30 +534,113 @@ impl Deadlines {
         })
     }
 
-    /// Interrupts each armed interpreter whose deadline passed, and sleeps until the next deadline.
-    fn enforce(&self) -> ! {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        loop {
-            let now = Instant::now();
-            for deadline in pending.iter_mut().filter(|deadline| !deadline.fired && deadline.at <= now) {
-                if let Some(globals) = deadline.globals {
-                    // SAFETY: an armed deadline's interpreter runs until its call finishes the watch, which takes this
-                    // lock first, and setting its flags is what the engine's own timer does.
-                    unsafe { engine_interrupt(globals as *mut c_void) };
-                    deadline.fired = true;
-                }
-            }
+    /// The calling thread's slot, which the deadlines thread looks at from now on.
+    fn register(&self) -> Arc<Slot> {
+        let slot = Arc::new(Slot::default());
+        lock(&self.slots).push(Arc::downgrade(&slot));
+        slot
+    }
 
-            let next = pending.iter().filter(|deadline| !deadline.fired).map(|deadline| deadline.at).min();
-            pending = match next {
+    /// Starts the deadline of the call the calling thread starts, `after` from now, which interrupts `globals`, the
+    /// thread's interpreter, once [`Self::arm`] names it, when the call has none yet.
+    fn watch(&self, after: Duration, globals: Option<*mut c_void>) {
+        let at = Instant::now() + after;
+        SLOT.with(|slot| {
+            *lock(&slot.call) =
+                Some(Deadline { at, after, globals: globals.map(|globals| globals as usize), fired: false });
+        });
+        self.wake_by(at);
+    }
+
+    /// Names the interpreter the calling thread's call interrupts, once the call has one.
+    fn arm(&self, globals: *mut c_void) {
+        let at = SLOT.with(|slot| {
+            let mut call = lock(&slot.call);
+            call.as_mut().map(|deadline| {
+                deadline.globals = Some(globals as usize);
+                deadline.at
+            })
+        });
+        if let Some(at) = at {
+            self.wake_by(at);
+        }
+    }
+
+    /// Moves the deadline of the calling thread's call to its `after` from now, unless it already passed.
+    fn restart(&self) {
+        SLOT.with(|slot| {
+            if let Some(deadline) = lock(&slot.call).as_mut().filter(|deadline| !deadline.fired) {
+                deadline.at = Instant::now() + deadline.after;
+            }
+        });
+    }
+
+    /// Ends the deadline of the calling thread's call and returns whether it passed, clearing an interrupt of
+    /// `globals` that came after the call ended.
+    fn finish(&self, globals: Option<*mut c_void>) -> bool {
+        let fired = SLOT.with(|slot| lock(&slot.call).take().is_some_and(|deadline| deadline.fired));
+        if let (true, Some(globals)) = (fired, globals) {
+            // SAFETY: the interpreter still runs on this thread, and no call runs on it now.
+            unsafe { engine_clear_interrupt(globals) };
+        }
+
+        fired
+    }
+
+    /// Wakes the deadlines thread when a deadline `at` comes before the thread wakes on its own.
+    fn wake_by(&self, at: Instant) {
+        if self.nanos(at) < self.wake.load(Ordering::SeqCst) {
+            let _sleeping = lock(&self.sleeping);
+            self.changed.notify_one();
+        }
+    }
+
+    fn nanos(&self, at: Instant) -> u64 {
+        u64::try_from(at.saturating_duration_since(self.epoch).as_nanos()).unwrap_or(u64::MAX - 1)
+    }
+
+    /// Interrupts each armed interpreter whose deadline passed, and sleeps until the next deadline. A deadline that
+    /// passed before its call named an interpreter waits for [`Self::arm`], which wakes the thread.
+    fn enforce(&self) -> ! {
+        let mut sleeping = lock(&self.sleeping);
+        loop {
+            self.wake.store(u64::MAX, Ordering::SeqCst);
+            let now = Instant::now();
+            let mut next: Option<Instant> = None;
+            lock(&self.slots).retain(|slot| {
+                let Some(slot) = slot.upgrade() else {
+                    return false;
+                };
+                if let Some(deadline) = lock(&slot.call).as_mut().filter(|deadline| !deadline.fired) {
+                    match deadline.globals {
+                        Some(globals) if deadline.at <= now => {
+                            // SAFETY: an armed deadline's interpreter runs until its call finishes the deadline, which
+                            // takes the slot's lock first, and setting its flags is what the engine's own timer does.
+                            unsafe { engine_interrupt(globals as *mut c_void) };
+                            deadline.fired = true;
+                        }
+                        _ if deadline.at > now => next = Some(next.map_or(deadline.at, |next| next.min(deadline.at))),
+                        _ => {}
+                    }
+                }
+
+                true
+            });
+
+            sleeping = match next {
                 Some(at) => {
+                    self.wake.store(self.nanos(at), Ordering::SeqCst);
                     self.changed
-                        .wait_timeout(pending, at.saturating_duration_since(now))
+                        .wait_timeout(sleeping, at.saturating_duration_since(Instant::now()))
                         .unwrap_or_else(PoisonError::into_inner)
                         .0
                 }
-                None => self.changed.wait(pending).unwrap_or_else(PoisonError::into_inner),
+                None => self.changed.wait(sleeping).unwrap_or_else(PoisonError::into_inner),
             };
         }
     }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
