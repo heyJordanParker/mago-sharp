@@ -27,7 +27,9 @@ use mago_codex::ttype::union::TUnion;
 use mago_codex::visibility::Visibility;
 use mago_database::file::File;
 use mago_extension::PayloadReader;
-use mago_extension::PayloadWriter;
+use mago_extension::Value;
+use mago_extension::ValueReader;
+use mago_extension::ValueWriter;
 use mago_span::Span;
 use mago_syntax::dialect::Dialect;
 use mago_word::Word;
@@ -118,10 +120,10 @@ pub(super) const ALL_DESCENDANTS: u8 = 2;
 const ALL_ANCESTORS: u8 = 3;
 
 pub(super) fn handle_query(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
 ) -> Result<(), ExternalAnalyzerError> {
     let generation = reader.read_u64("codebase generation")?;
     if generation != session.generation() {
@@ -219,15 +221,15 @@ pub(super) fn handle_query(
 }
 
 fn find_methods(
-    reader: &mut PayloadReader<'_>,
-    writer: &mut PayloadWriter,
+    reader: &mut ValueReader<'_>,
+    writer: &mut ValueWriter,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
-    write_methods(&read_method_search(reader)?, writer, codebase, session)
+    write_found_methods(reader.read_bytes("method search")?, writer, codebase, session)
 }
 
-/// A method search as a worker writes it: the classes it searches, the name it matches, whether it skips inherited and
+/// A method search as a worker writes it, one string of its fields: the classes it searches, the name it matches, whether it skips inherited and
 /// trait-provided methods, the attributes a method carries one of, and the metadata fields it projects.
 struct MethodSearch {
     class_filter: ClassFilter,
@@ -270,7 +272,7 @@ pub(super) fn method_search(search: &[u8]) -> Result<Word, ExternalAnalyzerError
 /// one answer holds.
 pub(super) fn write_found_methods(
     search: &[u8],
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
@@ -339,7 +341,7 @@ fn read_method_search(reader: &mut PayloadReader<'_>) -> Result<MethodSearch, Ex
 /// appears in and its name.
 fn write_methods<'codebase>(
     search: &MethodSearch,
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     codebase: &'codebase CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
@@ -433,7 +435,7 @@ fn write_methods<'codebase>(
 }
 
 fn write_method_projection(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     class_like: &ClassLikeMetadata,
     method_name: Word,
     metadata: &FunctionLikeMetadata,
@@ -524,8 +526,8 @@ fn write_method_projection(
 }
 
 fn query_function_likes(
-    reader: &mut PayloadReader<'_>,
-    writer: &mut PayloadWriter,
+    reader: &mut ValueReader<'_>,
+    writer: &mut ValueWriter,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
@@ -547,8 +549,8 @@ fn query_function_likes(
 }
 
 fn get_class_like_relations(
-    reader: &mut PayloadReader<'_>,
-    writer: &mut PayloadWriter,
+    reader: &mut ValueReader<'_>,
+    writer: &mut ValueWriter,
     codebase: &CodebaseMetadata,
 ) -> Result<(), ExternalAnalyzerError> {
     let relation = reader.read_u8("class-like relation")?;
@@ -570,8 +572,8 @@ fn get_class_like_relations(
 }
 
 fn check_member_existence(
-    reader: &mut PayloadReader<'_>,
-    writer: &mut PayloadWriter,
+    reader: &mut ValueReader<'_>,
+    writer: &mut ValueWriter,
     codebase: &CodebaseMetadata,
 ) -> Result<(), ExternalAnalyzerError> {
     let predicate = reader.read_u8("member existence predicate")?;
@@ -595,8 +597,8 @@ fn check_member_existence(
 }
 
 fn check_existence(
-    reader: &mut PayloadReader<'_>,
-    writer: &mut PayloadWriter,
+    reader: &mut ValueReader<'_>,
+    writer: &mut ValueWriter,
     codebase: &CodebaseMetadata,
 ) -> Result<(), ExternalAnalyzerError> {
     let predicate = reader.read_u8("existence predicate")?;
@@ -625,8 +627,8 @@ fn check_existence(
 }
 
 fn list_class_likes(
-    reader: &mut PayloadReader<'_>,
-    writer: &mut PayloadWriter,
+    reader: &mut ValueReader<'_>,
+    writer: &mut ValueWriter,
     codebase: &CodebaseMetadata,
 ) -> Result<(), ExternalAnalyzerError> {
     let filter = reader.read_u8("class-like kind filter")?;
@@ -639,16 +641,16 @@ fn list_class_likes(
 }
 
 fn list_functions(
-    _reader: &mut PayloadReader<'_>,
-    writer: &mut PayloadWriter,
+    _reader: &mut ValueReader<'_>,
+    writer: &mut ValueWriter,
     codebase: &CodebaseMetadata,
 ) -> Result<(), ExternalAnalyzerError> {
     write_words(writer, function_names(codebase))
 }
 
 fn list_constants(
-    _reader: &mut PayloadReader<'_>,
-    writer: &mut PayloadWriter,
+    _reader: &mut ValueReader<'_>,
+    writer: &mut ValueWriter,
     codebase: &CodebaseMetadata,
 ) -> Result<(), ExternalAnalyzerError> {
     write_words(writer, constant_names(codebase))
@@ -688,8 +690,8 @@ pub(super) fn direct_descendants(codebase: &CodebaseMetadata, name: Word) -> imp
 }
 
 fn query_class_likes(
-    reader: &mut PayloadReader<'_>,
-    writer: &mut PayloadWriter,
+    reader: &mut ValueReader<'_>,
+    writer: &mut ValueWriter,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
@@ -714,12 +716,12 @@ fn query_class_likes(
 }
 
 fn query_names<F>(
-    reader: &mut PayloadReader<'_>,
-    writer: &mut PayloadWriter,
+    reader: &mut ValueReader<'_>,
+    writer: &mut ValueWriter,
     mut query: F,
 ) -> Result<(), ExternalAnalyzerError>
 where
-    F: FnMut(&[u8], &mut PayloadWriter) -> Result<(), ExternalAnalyzerError>,
+    F: FnMut(&[u8], &mut ValueWriter) -> Result<(), ExternalAnalyzerError>,
 {
     let count = reader.read_count("metadata query names", MAXIMUM_QUERIES)?;
     writer.write_u32(count as u32);
@@ -731,12 +733,12 @@ where
 }
 
 fn query_members<F>(
-    reader: &mut PayloadReader<'_>,
-    writer: &mut PayloadWriter,
+    reader: &mut ValueReader<'_>,
+    writer: &mut ValueWriter,
     mut query: F,
 ) -> Result<(), ExternalAnalyzerError>
 where
-    F: FnMut(&[u8], &[u8], &mut PayloadWriter) -> Result<(), ExternalAnalyzerError>,
+    F: FnMut(&[u8], &[u8], &mut ValueWriter) -> Result<(), ExternalAnalyzerError>,
 {
     let count = reader.read_count("metadata query members", MAXIMUM_QUERIES)?;
     writer.write_u32(count as u32);
@@ -749,9 +751,9 @@ where
     Ok(())
 }
 
-fn write_optional<T, F>(writer: &mut PayloadWriter, value: Option<&T>, encode: F) -> Result<(), ExternalAnalyzerError>
+fn write_optional<T, F>(writer: &mut ValueWriter, value: Option<&T>, encode: F) -> Result<(), ExternalAnalyzerError>
 where
-    F: FnOnce(&mut PayloadWriter, &T) -> Result<(), ExternalAnalyzerError>,
+    F: FnOnce(&mut ValueWriter, &T) -> Result<(), ExternalAnalyzerError>,
 {
     writer.write_bool(value.is_some());
     if let Some(value) = value {
@@ -762,7 +764,7 @@ where
 }
 
 pub(super) fn write_class_like(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     metadata: &ClassLikeMetadata,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
@@ -813,7 +815,7 @@ pub(super) fn write_class_like(
 /// `scan`, the merged scan of every file. Without one, returns whether it met a member read, which it wrote as
 /// unsupported, so the payload must be written again once the merged scan exists.
 pub(super) fn write_declarations(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     metadata: &CodebaseMetadata,
     scan: Option<&Arc<CodebaseMetadata>>,
     file: &Arc<File>,
@@ -853,7 +855,7 @@ pub(super) fn write_declarations(
 }
 
 fn write_function_like(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     identifier: FunctionLikeIdentifier,
     metadata: &FunctionLikeMetadata,
     codebase: &CodebaseMetadata,
@@ -942,7 +944,7 @@ fn method_identifier(
 }
 
 fn write_assertions(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     assertions: &BTreeMap<Word, Vec<Assertion>>,
     codebase: &CodebaseMetadata,
     dialect: Dialect,
@@ -960,7 +962,7 @@ fn write_assertions(
 
 #[allow(clippy::too_many_lines)]
 fn write_assertion(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     assertion: &Assertion,
     codebase: &CodebaseMetadata,
     dialect: Dialect,
@@ -1055,7 +1057,7 @@ fn write_assertion(
 }
 
 fn write_atomic(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     atomic: &TAtomic,
     codebase: &CodebaseMetadata,
     dialect: Dialect,
@@ -1063,7 +1065,7 @@ fn write_atomic(
     write_union(writer, &TUnion::from_atomic(atomic.clone()), codebase, dialect)
 }
 
-fn write_array_key(writer: &mut PayloadWriter, key: &ArrayKey) -> Result<(), ExternalAnalyzerError> {
+fn write_array_key(writer: &mut ValueWriter, key: &ArrayKey) -> Result<(), ExternalAnalyzerError> {
     match key {
         ArrayKey::Integer(value) => {
             writer.write_u8(1);
@@ -1083,7 +1085,7 @@ fn write_array_key(writer: &mut PayloadWriter, key: &ArrayKey) -> Result<(), Ext
 }
 
 fn write_parameter(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     metadata: &FunctionLikeParameterMetadata,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
@@ -1102,7 +1104,7 @@ fn write_parameter(
 }
 
 pub(super) fn write_property(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     metadata: &PropertyMetadata,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
@@ -1124,7 +1126,7 @@ pub(super) fn write_property(
 }
 
 fn write_property_hooks(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     hooks: &mago_word::WordMap<PropertyHookMetadata>,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
@@ -1152,7 +1154,7 @@ fn write_property_hooks(
 }
 
 fn write_class_constant(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     metadata: &ClassLikeConstantMetadata,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
@@ -1170,7 +1172,7 @@ fn write_class_constant(
 }
 
 fn write_enum_case(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     metadata: &EnumCaseMetadata,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
@@ -1186,7 +1188,7 @@ fn write_enum_case(
 }
 
 fn write_constant(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     metadata: &ConstantMetadata,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
@@ -1202,7 +1204,7 @@ fn write_constant(
 }
 
 fn write_location(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     span: Span,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
@@ -1218,7 +1220,7 @@ fn write_location(
 }
 
 fn write_optional_location(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     span: Option<Span>,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
@@ -1226,7 +1228,7 @@ fn write_optional_location(
 }
 
 fn write_type_metadata(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     metadata: &TypeMetadata,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
@@ -1239,7 +1241,7 @@ fn write_type_metadata(
 }
 
 fn write_optional_type_metadata(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     metadata: Option<&TypeMetadata>,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
@@ -1249,7 +1251,7 @@ fn write_optional_type_metadata(
 
 /// Writes `union` as the code of `dialect`, the dialect of the file it is written in, sees it.
 fn write_union(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     union: &TUnion,
     codebase: &CodebaseMetadata,
     dialect: Dialect,
@@ -1276,7 +1278,7 @@ impl MixinType for TypeMetadata {
 }
 
 fn write_mixins<T>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     mixins: &[T],
     codebase: &CodebaseMetadata,
     dialect: Dialect,
@@ -1293,7 +1295,7 @@ where
 }
 
 fn write_optional_union(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     union: Option<&TUnion>,
     codebase: &CodebaseMetadata,
     dialect: Dialect,
@@ -1302,7 +1304,7 @@ fn write_optional_union(
 }
 
 fn write_optional_atomic(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     atomic: Option<&TAtomic>,
     codebase: &CodebaseMetadata,
     dialect: Dialect,
@@ -1311,7 +1313,7 @@ fn write_optional_atomic(
 }
 
 fn write_attributes(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     attributes: &[AttributeMetadata],
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
@@ -1385,7 +1387,7 @@ fn member_read(codebase: &CodebaseMetadata, class: Word, member: Word, span: Spa
 }
 
 fn write_constant_expression(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     expression: &ConstantExpression,
     as_key: bool,
     codebase: &CodebaseMetadata,
@@ -1403,7 +1405,7 @@ fn write_constant_expression(
         }
         ConstantExpression::Float(value) => {
             writer.write_u8(4);
-            writer.write_u64(value.into_inner().to_bits());
+            writer.write_f64(value.into_inner());
         }
         ConstantExpression::String(value) => {
             writer.write_u8(5);
@@ -1457,7 +1459,7 @@ fn write_constant_expression(
 }
 
 fn write_templates(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     templates: &TemplateTypes,
     variances: Option<&[Variance]>,
     readonly: Option<&mago_word::WordSet>,
@@ -1479,7 +1481,7 @@ fn write_templates(
 }
 
 fn write_type_aliases(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     aliases: &mago_word::WordMap<TypeMetadata>,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
@@ -1495,7 +1497,7 @@ fn write_type_aliases(
     Ok(())
 }
 
-fn write_words(writer: &mut PayloadWriter, words: impl IntoIterator<Item = Word>) -> Result<(), ExternalAnalyzerError> {
+fn write_words(writer: &mut ValueWriter, words: impl IntoIterator<Item = Word>) -> Result<(), ExternalAnalyzerError> {
     let mut words: Vec<_> = words.into_iter().collect();
     words.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     writer.write_u32(words.len() as u32);
@@ -1506,7 +1508,7 @@ fn write_words(writer: &mut PayloadWriter, words: impl IntoIterator<Item = Word>
     Ok(())
 }
 
-fn write_optional_words<I>(writer: &mut PayloadWriter, words: Option<I>) -> Result<(), ExternalAnalyzerError>
+fn write_optional_words<I>(writer: &mut ValueWriter, words: Option<I>) -> Result<(), ExternalAnalyzerError>
 where
     I: IntoIterator<Item = Word>,
 {
@@ -1518,11 +1520,16 @@ where
     Ok(())
 }
 
-fn write_optional_word(writer: &mut PayloadWriter, word: Option<Word>) -> Result<(), ExternalAnalyzerError> {
-    write_optional(writer, word.as_ref(), |writer, word| Ok(writer.write_bytes(word.as_bytes())?))
+fn write_optional_word(writer: &mut ValueWriter, word: Option<Word>) -> Result<(), ExternalAnalyzerError> {
+    match word {
+        Some(word) => writer.write_bytes(word.as_bytes())?,
+        None => writer.write_value(Value::Null),
+    }
+
+    Ok(())
 }
 
-fn write_version_constraint(writer: &mut PayloadWriter, constraint: &VersionConstraint) {
+fn write_version_constraint(writer: &mut ValueWriter, constraint: &VersionConstraint) {
     writer.write_u32(constraint.ranges.len() as u32);
     for range in &constraint.ranges {
         writer.write_bool(range.min.is_some());
@@ -1537,7 +1544,7 @@ fn write_version_constraint(writer: &mut PayloadWriter, constraint: &VersionCons
     }
 }
 
-fn write_optional_bool(writer: &mut PayloadWriter, value: Option<bool>) {
+fn write_optional_bool(writer: &mut ValueWriter, value: Option<bool>) {
     writer.write_u8(match value {
         None => 0,
         Some(false) => 1,
@@ -1545,7 +1552,7 @@ fn write_optional_bool(writer: &mut PayloadWriter, value: Option<bool>) {
     });
 }
 
-fn write_visibility(writer: &mut PayloadWriter, visibility: Visibility) {
+fn write_visibility(writer: &mut ValueWriter, visibility: Visibility) {
     writer.write_u8(match visibility {
         Visibility::Public => 1,
         Visibility::Protected => 2,
@@ -1591,6 +1598,9 @@ mod tests {
     use mago_codex::ttype::get_string;
 
     use super::*;
+    use mago_extension::PayloadWriter;
+    use mago_extension::Value;
+
     use crate::external::protocol;
     use crate::external::protocol::NestedRequestKind;
     use crate::external::protocol::testing::SHELF;
@@ -1629,16 +1639,18 @@ mod tests {
                 writer.finish()
             };
             let found = |class: &[u8], pattern: &[u8]| {
+                let mut search = PayloadWriter::new();
+                search.write_u8(METHOD_SEARCH_EXACT_CLASS);
+                search.write_bytes(class).expect("the class should fit in a frame");
+                search.write_bytes(pattern).expect("the pattern should fit in a frame");
+                search.write_bool(false);
+                search.write_u32(0);
+                search.write_u32(METHOD_FIELDS_ALL);
                 let mut writer = request(FIND_METHODS);
-                writer.write_u8(METHOD_SEARCH_EXACT_CLASS);
-                writer.write_bytes(class).expect("the class should fit in a frame");
-                writer.write_bytes(pattern).expect("the pattern should fit in a frame");
-                writer.write_bool(false);
-                writer.write_u32(0);
-                writer.write_u32(METHOD_FIELDS_ALL);
+                writer.write_bytes(&search.finish()).expect("the search should fit in a frame");
                 writer.finish()
             };
-            let rows: [(Vec<u8>, &[u8], bool, bool); 10] = [
+            let rows: [(Vec<Value>, &[u8], bool, bool); 10] = [
                 (member(GET_METHODS, b"App\\Shelf", b"counts"), b"counts", true, true),
                 (member(GET_METHODS, b"Lib\\Sink", b"take"), b"take", false, false),
                 (found(b"App\\Shelf", b"counts"), b"counts", true, true),
@@ -1680,7 +1692,7 @@ mod tests {
         ];
 
         for (assertion, dialect, sends_map) in rows {
-            let mut writer = PayloadWriter::new();
+            let mut writer = ValueWriter::new();
             write_assertion(&mut writer, &assertion, &codebase, dialect).expect("the assertion should encode");
 
             assert_eq!(names(&writer.finish(), b"Sharp\\Map"), sends_map, "{assertion:?} in {dialect:?}");
@@ -1773,11 +1785,13 @@ mod tests {
         let mut writer = protocol::message_writer(CODEBASE_QUERY_REQUEST);
         writer.write_u64(23);
         writer.write_u8(FIND_METHODS);
-        writer.write_u8(METHOD_SEARCH_ANY_CLASS);
-        writer.write_bytes(b"set*").expect("pattern should fit in a frame");
-        writer.write_bool(false);
-        writer.write_u32(0);
-        writer.write_u32(METHOD_FIELDS_NAMES | METHOD_FIELDS_ATTRIBUTES);
+        let mut search = PayloadWriter::new();
+        search.write_u8(METHOD_SEARCH_ANY_CLASS);
+        search.write_bytes(b"set*").expect("pattern should fit in a frame");
+        search.write_bool(false);
+        search.write_u32(0);
+        search.write_u32(METHOD_FIELDS_NAMES | METHOD_FIELDS_ATTRIBUTES);
+        writer.write_bytes(&search.finish()).expect("the search should fit in a frame");
 
         let (kind, response) = protocol::handle_nested_request(&writer.finish(), &codebase, &session, |_| None)
             .expect("projected method query should succeed");
@@ -1802,11 +1816,13 @@ mod tests {
         let mut writer = protocol::message_writer(CODEBASE_QUERY_REQUEST);
         writer.write_u64(29);
         writer.write_u8(FIND_METHODS);
-        writer.write_u8(METHOD_SEARCH_ANY_CLASS);
-        writer.write_bytes(b"*").expect("pattern should fit in a frame");
-        writer.write_bool(false);
-        writer.write_u32(0);
-        writer.write_u32(1 << 31);
+        let mut search = PayloadWriter::new();
+        search.write_u8(METHOD_SEARCH_ANY_CLASS);
+        search.write_bytes(b"*").expect("pattern should fit in a frame");
+        search.write_bool(false);
+        search.write_u32(0);
+        search.write_u32(1 << 31);
+        writer.write_bytes(&search.finish()).expect("the search should fit in a frame");
 
         let error = protocol::handle_nested_request(&writer.finish(), &codebase, &session, |_| None)
             .expect_err("unknown method projection fields must fail");
@@ -1846,12 +1862,12 @@ mod tests {
     /// The listing a worker's read of [`owner_search`] records, answered against `files`.
     fn owner_listing_answer(files: (&'static str, &'static str)) -> u64 {
         let search = owner_search();
-        let mut read = PayloadWriter::new();
+        let mut read = ValueWriter::new();
         read.write_u32(1);
         read.write_u8(FIND_METHODS);
         read.write_u8(0);
         read.write_bytes(&search).expect("the search should fit in a frame");
-        let reads = crate::external::FileReads::decode(&mut PayloadReader::new(&read.finish()))
+        let reads = crate::external::FileReads::decode(&mut ValueReader::new(&read.finish()))
             .expect("a whole method search is a read");
         assert_eq!(reads.listings.len(), 1, "the read is one listing: {reads:?}");
         let listing = *reads.listings.iter().next().expect("the read is one listing");
@@ -1886,12 +1902,14 @@ mod tests {
             let mut writer = protocol::message_writer(CODEBASE_QUERY_REQUEST);
             writer.write_u64(session.generation());
             writer.write_u8(FIND_METHODS);
-            writer.write_u8(METHOD_SEARCH_DESCENDANTS);
-            writer.write_bytes(b"Base").expect("the class should fit in a frame");
-            writer.write_bytes(b"*").expect("the pattern should fit in a frame");
-            writer.write_bool(false);
-            writer.write_u32(0);
-            writer.write_u32(METHOD_FIELDS_NAMES);
+            let mut search = PayloadWriter::new();
+            search.write_u8(METHOD_SEARCH_DESCENDANTS);
+            search.write_bytes(b"Base").expect("the class should fit in a frame");
+            search.write_bytes(b"*").expect("the pattern should fit in a frame");
+            search.write_bool(false);
+            search.write_u32(0);
+            search.write_u32(METHOD_FIELDS_NAMES);
+            writer.write_bytes(&search.finish()).expect("the search should fit in a frame");
 
             let (_, answer) = protocol::handle_nested_request(&writer.finish(), analysis.codebase, &session, |_| None)
                 .expect("the search should succeed");
@@ -1910,13 +1928,13 @@ mod tests {
     #[test]
     fn a_read_of_a_method_search_that_is_not_one_whole_search_is_refused() {
         for search in [Vec::new(), [owner_search(), vec![0]].concat()] {
-            let mut read = PayloadWriter::new();
+            let mut read = ValueWriter::new();
             read.write_u32(1);
             read.write_u8(FIND_METHODS);
             read.write_u8(0);
             read.write_bytes(&search).expect("the search should fit in a frame");
 
-            crate::external::FileReads::decode(&mut PayloadReader::new(&read.finish()))
+            crate::external::FileReads::decode(&mut ValueReader::new(&read.finish()))
                 .expect_err("a read must name one whole method search");
         }
     }

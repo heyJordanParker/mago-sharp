@@ -24,7 +24,7 @@ use function trait_exists;
  */
 final class Hosts
 {
-    /** @var list<Closure(string|list<null|bool|int|float|string|list<mixed>>): (string|list<null|bool|int|float|string|list<mixed>>)> */
+    /** @var list<Closure(list<null|bool|int|float|string|list<mixed>>): list<null|bool|int|float|string|list<mixed>>> */
     private static array $handlers = [];
 
     private static ?ClassLoads $classLoads = null;
@@ -32,7 +32,7 @@ final class Hosts
     /**
      * Registers the request handler of the worker a host's file runs.
      *
-     * @param Closure(string|list<null|bool|int|float|string|list<mixed>>): (string|list<null|bool|int|float|string|list<mixed>>) $handler
+     * @param Closure(list<null|bool|int|float|string|list<mixed>>): list<null|bool|int|float|string|list<mixed>> $handler
      */
     public static function register(Closure $handler): void
     {
@@ -84,13 +84,13 @@ final class Hosts
 
     /**
      * Serves request `$payload` with the worker of the host at `$host`: true and the response, or false and why the
-     * request failed. A request and its response are both a list of values, or both a string of bytes.
+     * request failed. A request and its response are each a list of values.
      *
-     * @param string|list<null|bool|int|float|string|list<mixed>> $payload
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
      *
-     * @return array{true, string|list<null|bool|int|float|string|list<mixed>>}|array{false, string}
+     * @return array{true, list<null|bool|int|float|string|list<mixed>>}|array{false, string}
      */
-    public static function handle(int $host, string|array $payload): array
+    public static function handle(int $host, array $payload): array
     {
         try {
             return [true, self::$handlers[$host]($payload)];

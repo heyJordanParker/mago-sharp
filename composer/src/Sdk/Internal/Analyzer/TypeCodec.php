@@ -58,8 +58,8 @@ use Mago\Sdk\Analyzer\Type\VariableType;
 use Mago\Sdk\Analyzer\Type\Variance;
 use Mago\Sdk\Analyzer\Type\Visibility;
 use Mago\Sdk\Exception\ProtocolException;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
-use Mago\Sdk\Internal\Protocol\PayloadWriter;
+use Mago\Sdk\Internal\Protocol\ValueReader;
+use Mago\Sdk\Internal\Protocol\ValueWriter;
 
 use function array_slice;
 
@@ -76,14 +76,14 @@ final class TypeCodec
     /** A method identifier's rule: its class keys its methods by their declared names. */
     private const EXACT_NAMES = 2;
 
-    public static function read(PayloadReader $reader, ?string $description = null): Type
+    public static function read(ValueReader $reader, ?string $description = null): Type
     {
         [$handle, $flags, $atomicTypes] = self::readUnion($reader, true);
 
         return Type::reference($handle, $description ?? self::describeAtomics($atomicTypes), $atomicTypes, $flags);
     }
 
-    public static function readComplete(PayloadReader $reader): Type
+    public static function readComplete(ValueReader $reader): Type
     {
         [, $flags, $atomicTypes] = self::readUnion($reader, false);
         $first = $atomicTypes[0];
@@ -92,20 +92,21 @@ final class TypeCodec
         return $type->withFlags($flags);
     }
 
-    public static function encode(Type $_type): string
+    /** @return list<null|bool|int|float|string|list<mixed>> */
+    public static function encode(Type $_type): array
     {
-        $writer = new PayloadWriter();
+        $writer = new ValueWriter();
         self::writeUnion($writer, $_type);
 
         return $writer->finish();
     }
 
-    public static function writeComplete(PayloadWriter $writer, Type $type): void
+    public static function writeComplete(ValueWriter $writer, Type $type): void
     {
         self::writeUnion($writer, $type);
     }
 
-    private static function writeUnion(PayloadWriter $writer, Type $type): void
+    private static function writeUnion(ValueWriter $writer, Type $type): void
     {
         $flags = $type->flags;
         $bits = 0;
@@ -127,7 +128,7 @@ final class TypeCodec
         }
     }
 
-    private static function writeAtomic(PayloadWriter $writer, AtomicType $atomic): void
+    private static function writeAtomic(ValueWriter $writer, AtomicType $atomic): void
     {
         if ($atomic instanceof ScalarType) {
             $writer->writeU8(1);
@@ -228,7 +229,7 @@ final class TypeCodec
         throw new ProtocolException('Cannot encode an unknown analyzer atomic type.');
     }
 
-    private static function writeScalar(PayloadWriter $writer, ScalarType $scalar): void
+    private static function writeScalar(ValueWriter $writer, ScalarType $scalar): void
     {
         $writer->writeU8(match ($scalar->kind) {
             ScalarTypeKind::Scalar => 1,
@@ -257,7 +258,7 @@ final class TypeCodec
     }
 
     private static function writeInteger(
-        PayloadWriter $writer,
+        ValueWriter $writer,
         bool|IntegerType|FloatType|StringType|ClassLikeStringType|null $type,
     ): void {
         if (!$type instanceof IntegerType) {
@@ -281,14 +282,14 @@ final class TypeCodec
         };
     }
 
-    private static function writeIntegerRange(PayloadWriter $writer, IntegerType $type): void
+    private static function writeIntegerRange(ValueWriter $writer, IntegerType $type): void
     {
         $writer->writeI64($type->minimum ?? 0);
         $writer->writeI64($type->maximum ?? 0);
     }
 
     private static function writeFloat(
-        PayloadWriter $writer,
+        ValueWriter $writer,
         bool|IntegerType|FloatType|StringType|ClassLikeStringType|null $type,
     ): void {
         if (!$type instanceof FloatType) {
@@ -308,7 +309,7 @@ final class TypeCodec
     }
 
     private static function writeString(
-        PayloadWriter $writer,
+        ValueWriter $writer,
         bool|IntegerType|FloatType|StringType|ClassLikeStringType|null $type,
     ): void {
         if (!$type instanceof StringType) {
@@ -347,7 +348,7 @@ final class TypeCodec
     }
 
     private static function writeClassLikeString(
-        PayloadWriter $writer,
+        ValueWriter $writer,
         bool|IntegerType|FloatType|StringType|ClassLikeStringType|null $type,
     ): void {
         if (!$type instanceof ClassLikeStringType) {
@@ -387,7 +388,7 @@ final class TypeCodec
         }
     }
 
-    private static function writeCallable(PayloadWriter $writer, CallableType $callable): void
+    private static function writeCallable(ValueWriter $writer, CallableType $callable): void
     {
         if ($callable->signature === null) {
             $writer->writeU8(2);
@@ -447,7 +448,7 @@ final class TypeCodec
         }
     }
 
-    private static function writeMixed(PayloadWriter $writer, MixedType $mixed): void
+    private static function writeMixed(ValueWriter $writer, MixedType $mixed): void
     {
         $bits = 0;
         $bits |= (int) $mixed->issetFromLoop;
@@ -461,7 +462,7 @@ final class TypeCodec
         });
     }
 
-    private static function writeObject(PayloadWriter $writer, AtomicType $object): void
+    private static function writeObject(ValueWriter $writer, AtomicType $object): void
     {
         if ($object instanceof AnyObjectType) {
             $writer->writeU8(1);
@@ -517,7 +518,7 @@ final class TypeCodec
         throw new ProtocolException('Cannot encode an unknown object type.');
     }
 
-    private static function writeArray(PayloadWriter $writer, ListType|KeyedArrayType $array): void
+    private static function writeArray(ValueWriter $writer, ListType|KeyedArrayType $array): void
     {
         if ($array instanceof ListType) {
             $writer->writeU8(1);
@@ -563,7 +564,7 @@ final class TypeCodec
         $writer->writeBoolean($array->nonEmpty);
     }
 
-    private static function writeArrayKey(PayloadWriter $writer, ArrayKey $key): void
+    private static function writeArrayKey(ValueWriter $writer, ArrayKey $key): void
     {
         $writer->writeU8(match ($key->kind) {
             ArrayKeyKind::Integer => 1,
@@ -578,13 +579,13 @@ final class TypeCodec
         };
     }
 
-    private static function writeClassLikeConstantArrayKey(PayloadWriter $writer, ArrayKey $key): void
+    private static function writeClassLikeConstantArrayKey(ValueWriter $writer, ArrayKey $key): void
     {
         $writer->writeBytes((string) $key->value);
         $writer->writeBytes($key->constant ?? '');
     }
 
-    private static function writeReference(PayloadWriter $writer, ReferenceType $reference): void
+    private static function writeReference(ValueWriter $writer, ReferenceType $reference): void
     {
         $writer->writeU8(match ($reference->kind) {
             ReferenceTypeKind::Symbol => 1,
@@ -612,7 +613,7 @@ final class TypeCodec
     }
 
     private static function writeReferenceSelector(
-        PayloadWriter $writer,
+        ValueWriter $writer,
         ReferenceSelectorKind $selector,
         ?string $member,
     ): void {
@@ -628,7 +629,7 @@ final class TypeCodec
         }
     }
 
-    private static function writeDerived(PayloadWriter $writer, DerivedType $derived): void
+    private static function writeDerived(ValueWriter $writer, DerivedType $derived): void
     {
         $writer->writeU8(match ($derived->kind) {
             DerivedTypeKind::KeyOf => 1,
@@ -667,7 +668,7 @@ final class TypeCodec
         }
     }
 
-    private static function writeClassLikeStringKind(PayloadWriter $writer, ?ClassLikeStringKind $kind): void
+    private static function writeClassLikeStringKind(ValueWriter $writer, ?ClassLikeStringKind $kind): void
     {
         $writer->writeU8(match ($kind) {
             ClassLikeStringKind::Class_ => 1,
@@ -678,7 +679,7 @@ final class TypeCodec
         });
     }
 
-    private static function writeGenericParent(PayloadWriter $writer, GenericParent $parent): void
+    private static function writeGenericParent(ValueWriter $writer, GenericParent $parent): void
     {
         $writer->writeU8(match ($parent->kind) {
             GenericParentKind::ClassLike => 1,
@@ -691,7 +692,7 @@ final class TypeCodec
         }
     }
 
-    public static function writeFunctionLikeIdentifier(PayloadWriter $writer, FunctionLikeIdentifier $identifier): void
+    public static function writeFunctionLikeIdentifier(ValueWriter $writer, FunctionLikeIdentifier $identifier): void
     {
         $writer->writeU8(match ($identifier->kind) {
             FunctionLikeKind::Function_ => 1,
@@ -712,7 +713,7 @@ final class TypeCodec
     }
 
     /** @param null|list<Type> $types */
-    private static function writeOptionalTypes(PayloadWriter $writer, ?array $types): void
+    private static function writeOptionalTypes(ValueWriter $writer, ?array $types): void
     {
         $writer->writeBoolean($types !== null);
         if ($types === null) {
@@ -726,7 +727,7 @@ final class TypeCodec
     }
 
     /** @param null|list<AtomicType> $atomics */
-    private static function writeOptionalAtomics(PayloadWriter $writer, ?array $atomics): void
+    private static function writeOptionalAtomics(ValueWriter $writer, ?array $atomics): void
     {
         $writer->writeBoolean($atomics !== null);
         if ($atomics === null) {
@@ -740,7 +741,7 @@ final class TypeCodec
     }
 
     /** @param null|list<Variance> $variances */
-    private static function writeOptionalVariances(PayloadWriter $writer, ?array $variances): void
+    private static function writeOptionalVariances(ValueWriter $writer, ?array $variances): void
     {
         $writer->writeBoolean($variances !== null);
         if ($variances === null) {
@@ -759,7 +760,7 @@ final class TypeCodec
     }
 
     /** @return array{int<0, 4294967295>, TypeFlags, non-empty-list<AtomicType>} */
-    private static function readUnion(PayloadReader $reader, bool $references): array
+    private static function readUnion(ValueReader $reader, bool $references): array
     {
         $handle = $reader->readU32();
         $bits = $reader->readU16();
@@ -790,7 +791,7 @@ final class TypeCodec
         return [$handle, $flags, $atomicTypes];
     }
 
-    private static function readNestedType(PayloadReader $reader, bool $references): Type
+    private static function readNestedType(ValueReader $reader, bool $references): Type
     {
         [$handle, $flags, $atomicTypes] = self::readUnion($reader, $references);
 
@@ -802,7 +803,7 @@ final class TypeCodec
         return Type::reference($handle, self::describeAtomics($atomicTypes), $atomicTypes, $flags);
     }
 
-    private static function readAtomic(PayloadReader $reader, bool $references): AtomicType
+    private static function readAtomic(ValueReader $reader, bool $references): AtomicType
     {
         return match ($tag = $reader->readU8()) {
             1 => self::readScalar($reader, $references),
@@ -846,7 +847,7 @@ final class TypeCodec
         };
     }
 
-    private static function readScalar(PayloadReader $reader, bool $references): ScalarType
+    private static function readScalar(ValueReader $reader, bool $references): ScalarType
     {
         return match ($kind = $reader->readU8()) {
             1 => new ScalarType(ScalarTypeKind::Scalar),
@@ -866,7 +867,7 @@ final class TypeCodec
         };
     }
 
-    private static function readInteger(PayloadReader $reader): IntegerType
+    private static function readInteger(ValueReader $reader): IntegerType
     {
         return match ($kind = $reader->readU8()) {
             1 => new IntegerType(IntegerTypeKind::Literal, $value = $reader->readI64(), $value),
@@ -879,7 +880,7 @@ final class TypeCodec
         };
     }
 
-    private static function readFloat(PayloadReader $reader): FloatType
+    private static function readFloat(ValueReader $reader): FloatType
     {
         return match ($kind = $reader->readU8()) {
             1 => new FloatType(FloatTypeKind::General),
@@ -889,7 +890,7 @@ final class TypeCodec
         };
     }
 
-    private static function readString(PayloadReader $reader): StringType
+    private static function readString(ValueReader $reader): StringType
     {
         $literalKind = $reader->readU8();
         $literalValue = $literalKind === 2 ? $reader->readBytes() : null;
@@ -916,7 +917,7 @@ final class TypeCodec
         );
     }
 
-    private static function readClassLikeString(PayloadReader $reader, bool $references): ClassLikeStringType
+    private static function readClassLikeString(ValueReader $reader, bool $references): ClassLikeStringType
     {
         return match ($variant = $reader->readU8()) {
             1 => new ClassLikeStringType(ClassLikeStringVariant::Any, self::readClassLikeStringKind($reader)),
@@ -937,7 +938,7 @@ final class TypeCodec
         };
     }
 
-    private static function readCallable(PayloadReader $reader, bool $references): CallableType
+    private static function readCallable(ValueReader $reader, bool $references): CallableType
     {
         $kind = $reader->readU8();
         if ($kind === 2) {
@@ -988,7 +989,7 @@ final class TypeCodec
         );
     }
 
-    private static function readMixed(PayloadReader $reader): MixedType
+    private static function readMixed(ValueReader $reader): MixedType
     {
         $bits = $reader->readU8();
 
@@ -1002,7 +1003,7 @@ final class TypeCodec
         });
     }
 
-    private static function readObject(PayloadReader $reader, bool $references): AtomicType
+    private static function readObject(ValueReader $reader, bool $references): AtomicType
     {
         return match ($kind = $reader->readU8()) {
             1 => new AnyObjectType(),
@@ -1023,7 +1024,7 @@ final class TypeCodec
         };
     }
 
-    private static function readObjectShape(PayloadReader $reader, bool $references): ObjectShapeType
+    private static function readObjectShape(ValueReader $reader, bool $references): ObjectShapeType
     {
         $sealed = $reader->readBoolean();
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
@@ -1039,7 +1040,7 @@ final class TypeCodec
         return new ObjectShapeType($properties, $sealed);
     }
 
-    private static function readArray(PayloadReader $reader, bool $references): AtomicType
+    private static function readArray(ValueReader $reader, bool $references): AtomicType
     {
         return match ($kind = $reader->readU8()) {
             1 => self::readList($reader, $references),
@@ -1048,7 +1049,7 @@ final class TypeCodec
         };
     }
 
-    private static function readList(PayloadReader $reader, bool $references): ListType
+    private static function readList(ValueReader $reader, bool $references): ListType
     {
         $elementType = self::readNestedType($reader, $references);
         $elements = null;
@@ -1069,7 +1070,7 @@ final class TypeCodec
         return new ListType($elementType, $elements, $knownCount, $reader->readBoolean());
     }
 
-    private static function readKeyedArray(PayloadReader $reader, bool $references): KeyedArrayType
+    private static function readKeyedArray(ValueReader $reader, bool $references): KeyedArrayType
     {
         $items = null;
         if ($reader->readBoolean()) {
@@ -1094,7 +1095,7 @@ final class TypeCodec
         return new KeyedArrayType($items, $keyType, $valueType, $reader->readBoolean());
     }
 
-    private static function readArrayKey(PayloadReader $reader): ArrayKey
+    private static function readArrayKey(ValueReader $reader): ArrayKey
     {
         return match ($kind = $reader->readU8()) {
             1 => new ArrayKey(ArrayKeyKind::Integer, $reader->readI64()),
@@ -1104,7 +1105,7 @@ final class TypeCodec
         };
     }
 
-    private static function readReference(PayloadReader $reader, bool $references): ReferenceType
+    private static function readReference(ValueReader $reader, bool $references): ReferenceType
     {
         return match ($kind = $reader->readU8()) {
             1 => new ReferenceType(
@@ -1137,7 +1138,7 @@ final class TypeCodec
     }
 
     /** @return array{?string, ReferenceSelectorKind} */
-    private static function readReferenceSelector(PayloadReader $reader): array
+    private static function readReferenceSelector(ValueReader $reader): array
     {
         return match ($kind = $reader->readU8()) {
             1 => [null, ReferenceSelectorKind::Wildcard],
@@ -1148,7 +1149,7 @@ final class TypeCodec
         };
     }
 
-    private static function readDerived(PayloadReader $reader, bool $references): DerivedType
+    private static function readDerived(ValueReader $reader, bool $references): DerivedType
     {
         return match ($kind = $reader->readU8()) {
             1 => new DerivedType(DerivedTypeKind::KeyOf, [self::readNestedType($reader, $references)]),
@@ -1175,7 +1176,7 @@ final class TypeCodec
         };
     }
 
-    private static function readPropertiesOf(PayloadReader $reader, bool $references): DerivedType
+    private static function readPropertiesOf(ValueReader $reader, bool $references): DerivedType
     {
         $visibility = match ($kind = $reader->readU8()) {
             0 => null,
@@ -1192,7 +1193,7 @@ final class TypeCodec
         );
     }
 
-    private static function readClassLikeStringKind(PayloadReader $reader): ClassLikeStringKind
+    private static function readClassLikeStringKind(ValueReader $reader): ClassLikeStringKind
     {
         return match ($kind = $reader->readU8()) {
             1 => ClassLikeStringKind::Class_,
@@ -1203,7 +1204,7 @@ final class TypeCodec
         };
     }
 
-    private static function readGenericParent(PayloadReader $reader): GenericParent
+    private static function readGenericParent(ValueReader $reader): GenericParent
     {
         return match ($kind = $reader->readU8()) {
             1 => new GenericParent(GenericParentKind::ClassLike, $reader->readBytes()),
@@ -1212,7 +1213,7 @@ final class TypeCodec
         };
     }
 
-    public static function readFunctionLikeIdentifier(PayloadReader $reader): FunctionLikeIdentifier
+    public static function readFunctionLikeIdentifier(ValueReader $reader): FunctionLikeIdentifier
     {
         return match ($kind = $reader->readU8()) {
             1 => new FunctionLikeIdentifier(FunctionLikeKind::Function_, $reader->readBytes()),
@@ -1222,7 +1223,7 @@ final class TypeCodec
         };
     }
 
-    private static function readMethodIdentifier(PayloadReader $reader): FunctionLikeIdentifier
+    private static function readMethodIdentifier(ValueReader $reader): FunctionLikeIdentifier
     {
         $class = $reader->readBytes();
         $name = $reader->readBytes();
@@ -1241,13 +1242,13 @@ final class TypeCodec
     }
 
     /** @return null|list<Type> */
-    private static function readOptionalTypes(PayloadReader $reader, bool $references): ?array
+    private static function readOptionalTypes(ValueReader $reader, bool $references): ?array
     {
         return $reader->readBoolean() ? self::readTypes($reader, $references) : null;
     }
 
     /** @return list<Type> */
-    private static function readTypes(PayloadReader $reader, bool $references): array
+    private static function readTypes(ValueReader $reader, bool $references): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $types = [];
@@ -1259,13 +1260,13 @@ final class TypeCodec
     }
 
     /** @return null|list<AtomicType> */
-    private static function readOptionalAtomics(PayloadReader $reader, bool $references): ?array
+    private static function readOptionalAtomics(ValueReader $reader, bool $references): ?array
     {
         return $reader->readBoolean() ? self::readAtomics($reader, $references) : null;
     }
 
     /** @return list<AtomicType> */
-    private static function readAtomics(PayloadReader $reader, bool $references): array
+    private static function readAtomics(ValueReader $reader, bool $references): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $types = [];
@@ -1277,7 +1278,7 @@ final class TypeCodec
     }
 
     /** @return null|list<Variance> */
-    private static function readOptionalVariances(PayloadReader $reader): ?array
+    private static function readOptionalVariances(ValueReader $reader): ?array
     {
         if (!$reader->readBoolean()) {
             return null;

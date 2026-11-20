@@ -47,8 +47,9 @@ use Mago\Sdk\Exception\ProtocolException;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Internal\ClassLoads;
 use Mago\Sdk\Internal\HostClient;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
 use Mago\Sdk\Internal\Protocol\PayloadWriter;
+use Mago\Sdk\Internal\Protocol\ValueReader;
+use Mago\Sdk\Internal\Protocol\ValueWriter;
 use Mago\Sdk\Internal\Syntax\SourceFileCodec;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\Reporting\Annotation;
@@ -62,19 +63,19 @@ use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Syntax\SourceFile;
 
 use function array_key_exists;
+use function array_slice;
 use function count;
 use function intdiv;
 use function is_string;
-use function Mago\Internal\release_mismatch;
-use function pack;
-use function substr;
-use function unpack;
+use function strlen;
 
 /**
  * @internal
  */
 final class Protocol
 {
+    public const NAME = 'analyzer';
+
     public const DESCRIBE_REQUEST = 1;
     public const RETURN_TYPE_REQUEST = 2;
     public const TYPE_COMPARISON_REQUEST = 3;
@@ -145,10 +146,6 @@ final class Protocol
     public const CLASS_LIKE_TRAIT = 3;
     public const CLASS_LIKE_ENUM = 4;
     private const TYPE_COMPARISON_BATCH_REQUEST = 16;
-    private const MAGIC_U32 = 0x4D41_4E41;
-    private const MAJOR = 1;
-    private const MINOR = 16;
-    public const VERSION_U32 = (self::MAJOR << 16) | self::MINOR;
     private const DESCRIBE_RESPONSE = 0x8001;
     private const RETURN_TYPE_RESPONSE = 0x8002;
     private const TYPE_COMPARISON_RESPONSE = 0x8003;
@@ -181,37 +178,25 @@ final class Protocol
     private const METHOD_SEARCH_DESCENDANTS = 2;
     private const REGISTRATION_CAPABILITIES = 1;
 
-    /** @return array{int<0, 65535>, PayloadReader} */
-    public static function readRequest(string $payload): array
+    /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return array{int<0, 65535>, ValueReader}
+     */
+    public static function readRequest(array $payload): array
     {
-        /** @var array{1: int<0, 4294967295>, 2: int<0, 4294967295>, 3: int<0, 4294967295>} $header */
-        $header = unpack('N3', $payload);
-        if ($header[1] !== self::MAGIC_U32) {
-            throw new ProtocolException('Invalid analyzer message magic.');
+        $reader = new ValueReader($payload);
+        if ($reader->readBytes() !== self::NAME) {
+            throw new ProtocolException('The message is no analyzer message.');
         }
 
-        $version = $header[2];
-        if ($version !== self::VERSION_U32) {
-            $major = $version >> 16;
-            $minor = $version & 0xffff;
-            throw new ProtocolException(release_mismatch(
-                "speaks analyzer protocol {$major}.{$minor}",
-                'speaks ' . self::MAJOR . '.' . self::MINOR,
-            ));
-        }
-
-        $message = $header[3];
-        if (($message & 0xffff) !== 0) {
-            throw new ProtocolException('Analyzer message reserved bits are non-zero.');
-        }
-
-        return [$message >> 16, new PayloadReader($payload, 12)];
+        return [$reader->readU16(), $reader];
     }
 
     /**
      * @return array{PHPVersion, list<NodeKind>}
      */
-    public static function readDescribeRequest(PayloadReader $reader): array
+    public static function readDescribeRequest(ValueReader $reader): array
     {
         $version = new PHPVersion($reader->readU32());
         $kinds = SourceFileCodec::readNodeKinds($reader);
@@ -221,7 +206,7 @@ final class Protocol
     }
 
     /** @return list<int<0, 65535>> */
-    public static function readInitializationRequest(PayloadReader $reader): array
+    public static function readInitializationRequest(ValueReader $reader): array
     {
         $count = $reader->readCount(65_536);
         $plugins = [];
@@ -235,8 +220,10 @@ final class Protocol
 
     /**
      * @param array<int<0, 65535>, list<array{non-empty-string, string}>> $stubs
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    public static function writeInitializationResponse(array $stubs): string
+    public static function writeInitializationResponse(array $stubs): array
     {
         $writer = self::createMessage(self::INITIALIZE_RESPONSE);
         $writer->writeCount($stubs);
@@ -255,8 +242,10 @@ final class Protocol
     /**
      * @param non-empty-list<Extension> $extensions
      * @param list<RegisteredPlugin> $plugins
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    public static function writeDescribeResponse(array $extensions, array $plugins): string
+    public static function writeDescribeResponse(array $extensions, array $plugins): array
     {
         $byExtension = [];
         foreach ($plugins as $plugin) {
@@ -337,7 +326,7 @@ final class Protocol
     /**
      * @param list<RegisteredTargetedCallback> $registrations
      */
-    private static function writeTargetRegistrations(PayloadWriter $writer, array $registrations, int $header = 0): void
+    private static function writeTargetRegistrations(ValueWriter $writer, array $registrations, int $header = 0): void
     {
         $writer->writeCount($registrations);
         foreach ($registrations as $registration) {
@@ -354,7 +343,7 @@ final class Protocol
     }
 
     private static function writeRegistrationHeader(
-        PayloadWriter $writer,
+        ValueWriter $writer,
         RegisteredTargetedCallback $registration,
         int $header,
     ): void {
@@ -394,7 +383,7 @@ final class Protocol
     }
 
     private static function writeRegistrationTarget(
-        PayloadWriter $writer,
+        ValueWriter $writer,
         FunctionTarget|MethodTarget|PropertyTarget|ClassTarget|NodeKind|ClassLikeTarget|string $target,
     ): void {
         if ($target instanceof FunctionTarget) {
@@ -434,7 +423,7 @@ final class Protocol
     /**
      * @return array{bool, bool, list<int<0, 65535>>, array<int<0, 65535>, list<CodebaseScanFile>>}
      */
-    public static function readCodebaseScanRequest(PayloadReader $reader): array
+    public static function readCodebaseScanRequest(ValueReader $reader): array
     {
         $firstBatch = $reader->readBoolean();
         $lastBatch = $reader->readBoolean();
@@ -474,7 +463,7 @@ final class Protocol
         return [$firstBatch, $lastBatch, $activeHooks, $filesByHook];
     }
 
-    private static function readCodebaseScanFile(PayloadReader $reader, string $path): CodebaseScanFile
+    private static function readCodebaseScanFile(ValueReader $reader, string $path): CodebaseScanFile
     {
         $classLikes = [];
         $properties = [];
@@ -499,8 +488,10 @@ final class Protocol
 
     /**
      * @param list<array{int<0, 65535>, ClassLikeRefinement|FunctionLikeRefinement}> $refinements each paired with the hook that described it
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    public static function writeCodebaseScanResponse(array $refinements): string
+    public static function writeCodebaseScanResponse(array $refinements): array
     {
         $writer = self::createMessage(self::CODEBASE_SCAN_RESPONSE);
         $writer->writeCount($refinements);
@@ -522,7 +513,7 @@ final class Protocol
     }
 
     private static function writeDeclaration(
-        PayloadWriter $writer,
+        ValueWriter $writer,
         ClassLikeRefinement|FunctionLikeRefinement $refinement,
     ): void {
         if ($refinement instanceof FunctionLikeRefinement) {
@@ -565,7 +556,7 @@ final class Protocol
      *
      * @param int<0, max>|null $declaredAt
      */
-    private static function writeDeclarationName(PayloadWriter $writer, ?int $declaredAt, string $name): void
+    private static function writeDeclarationName(ValueWriter $writer, ?int $declaredAt, string $name): void
     {
         $writer->writeBoolean($declaredAt !== null);
         if ($declaredAt !== null) {
@@ -577,7 +568,7 @@ final class Protocol
         $writer->writeBytes($name);
     }
 
-    private static function writeSignature(PayloadWriter $writer, SignatureRefinement $signature): void
+    private static function writeSignature(ValueWriter $writer, SignatureRefinement $signature): void
     {
         self::writeTypeParameters($writer, $signature->typeParameters);
         self::writeRefinedMembers($writer, $signature->parameters);
@@ -596,7 +587,7 @@ final class Protocol
     }
 
     /** @param array<non-empty-string, RefinedType> $members */
-    private static function writeRefinedMembers(PayloadWriter $writer, array $members): void
+    private static function writeRefinedMembers(ValueWriter $writer, array $members): void
     {
         $writer->writeCount($members);
         foreach ($members as $name => $type) {
@@ -606,7 +597,7 @@ final class Protocol
     }
 
     /** @param list<TypeParameter> $typeParameters */
-    private static function writeTypeParameters(PayloadWriter $writer, array $typeParameters): void
+    private static function writeTypeParameters(ValueWriter $writer, array $typeParameters): void
     {
         $writer->writeCount($typeParameters);
         foreach ($typeParameters as $typeParameter) {
@@ -621,14 +612,14 @@ final class Protocol
         }
     }
 
-    private static function writeRefinedType(PayloadWriter $writer, RefinedType $type): void
+    private static function writeRefinedType(ValueWriter $writer, RefinedType $type): void
     {
         self::writeDeclaredType($writer, $type->type);
         $writer->writeU32($type->span->start);
         $writer->writeU32($type->span->end);
     }
 
-    private static function writeDeclaredType(PayloadWriter $writer, Type $type): void
+    private static function writeDeclaredType(ValueWriter $writer, Type $type): void
     {
         if ($type->isRequestReference()) {
             throw new ProtocolException(
@@ -636,16 +627,20 @@ final class Protocol
             );
         }
 
-        $writer->writeRaw($type->encode());
+        $writer->writeValues($type->encode());
     }
 
-    /** @param array<string, Span> $spans */
+    /**
+     * @param array<string, Span> $spans
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
     public static function writeAnalysisTypeQuery(
         int $generation,
         string $file,
         int $operation,
         array $spans = [],
-    ): string {
+    ): array {
         $writer = self::createMessage(self::ANALYSIS_QUERY_REQUEST);
         $writer->writeU64($generation);
         $writer->writeU8($operation);
@@ -662,10 +657,12 @@ final class Protocol
     }
 
     /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
      * @return array{list<Type|null>, list<int|Type>}
      */
     public static function readOptionalAnalysisTypeQueryResponse(
-        string $payload,
+        array $payload,
         int $generation,
         string $file,
         int $operation,
@@ -696,10 +693,12 @@ final class Protocol
     }
 
     /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
      * @return list<Type>
      */
     public static function readAnalysisTypeQueryResponse(
-        string $payload,
+        array $payload,
         int $generation,
         string $file,
         int $operation,
@@ -716,8 +715,12 @@ final class Protocol
         return $types;
     }
 
-    /** @return list<ExpressionType> */
-    public static function readAllExpressionTypesResponse(string $payload, int $generation, string $file): array
+    /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return list<ExpressionType>
+     */
+    public static function readAllExpressionTypesResponse(array $payload, int $generation, string $file): array
     {
         [$kind, $reader] = self::readRequest($payload);
         if (
@@ -743,17 +746,18 @@ final class Protocol
     }
 
     /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
      * @param list<NodeKind> $kinds
      */
     public static function readSourceFileResponse(
-        string $payload,
+        array $payload,
         int $generation,
         string $file,
         PHPVersion $phpVersion,
         array $kinds,
     ): SourceFile {
         $reader = self::readAnalysisTypeQueryResponsePayload($payload, $generation, $file, self::GET_SOURCE_FILE);
-        $source = SourceFileCodec::read($reader, $phpVersion, $kinds, $file, $reader->readBytes());
+        $source = SourceFileCodec::readValues($reader, $phpVersion, $kinds, $file, $reader->readBytes());
         $reader->finish();
 
         return $source;
@@ -764,7 +768,7 @@ final class Protocol
      */
     public static function readLifecycleRequest(
         int $kind,
-        PayloadReader $reader,
+        ValueReader $reader,
         HostClient $host,
         PHPVersion $phpVersion,
         array $nodeKinds,
@@ -810,12 +814,13 @@ final class Protocol
         return new LifecycleRequest($generation, $plugins, $analysis);
     }
 
+    /** @param list<null|bool|int|float|string|list<mixed>> $payload */
     private static function readAnalysisTypeQueryResponsePayload(
-        string $payload,
+        array $payload,
         int $generation,
         string $file,
         int $operation,
-    ): PayloadReader {
+    ): ValueReader {
         [$kind, $reader] = self::readRequest($payload);
         if (
             $kind !== self::ANALYSIS_QUERY_RESPONSE
@@ -833,7 +838,7 @@ final class Protocol
      * @param list<NodeKind> $nodeKinds
      */
     private static function readProjectAnalysis(
-        PayloadReader $reader,
+        ValueReader $reader,
         HostClient $host,
         int $generation,
         PHPVersion $phpVersion,
@@ -858,6 +863,8 @@ final class Protocol
      * @param list<array{string|null, list<array{int, int, string}>, list<array{int, int, string}>, int}> $recordedReads
      *   each file's codebase reads, or the before-analysis hooks', which name no file: the reads of plugins with no
      *   provider, then those of plugins with one, then the end of `$classLoads` when the hooks finished
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
     public static function writeLifecycleResponse(
         int $requestKind,
@@ -865,7 +872,7 @@ final class Protocol
         array $reportedIssues,
         array $contributedReferences = [],
         array $recordedReads = [],
-    ): string {
+    ): array {
         $responseKind = match ($requestKind) {
             self::BEFORE_ANALYSIS_REQUEST => self::BEFORE_ANALYSIS_RESPONSE,
             self::AFTER_FILE_ANALYSIS_REQUEST => self::AFTER_FILE_ANALYSIS_RESPONSE,
@@ -970,19 +977,23 @@ final class Protocol
      * Places the codebase reads a provider or issue filter made right after `$response`'s header, with the class loads
      * its worker made up to now, so Mago reads them in one place whatever kind the response is.
      *
+     * @param list<null|bool|int|float|string|list<mixed>> $response
      * @param list<array{int, int, string}> $issueReads
      * @param list<array{int, int, string}> $codeReads
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
     public static function withCodebaseReads(
-        string $response,
+        array $response,
         array $issueReads,
         array $codeReads,
         ClassLoads $classLoads,
-    ): string {
-        $writer = new PayloadWriter(substr($response, 0, 12));
+    ): array {
+        $writer = new ValueWriter(array_slice($response, 0, 2));
         self::writeCodebaseReads($writer, $issueReads, $codeReads, $classLoads, $classLoads->end());
+        $writer->writeValues(array_slice($response, 2));
 
-        return $writer->finish() . substr($response, 12);
+        return $writer->finish();
     }
 
     /**
@@ -994,7 +1005,7 @@ final class Protocol
      * @param list<array{int, int, string}> $codeReads
      */
     private static function writeCodebaseReads(
-        PayloadWriter $writer,
+        ValueWriter $writer,
         array $issueReads,
         array $codeReads,
         ClassLoads $classLoads,
@@ -1016,7 +1027,7 @@ final class Protocol
      * @param list<NodeKind> $nodeKinds
      */
     private static function readFileAnalysis(
-        PayloadReader $reader,
+        ValueReader $reader,
         HostClient $host,
         int $generation,
         PHPVersion $phpVersion,
@@ -1035,21 +1046,24 @@ final class Protocol
         $references = self::readReferenceSummary($reader);
         $hasLocalExpressionTypes = $reader->readBoolean();
         $expressionTypeRecords = '';
-        $encodedExpressionTypes = '';
+        $encodedExpressionTypes = [];
         if ($hasLocalExpressionTypes) {
             $localExpressionCount = $reader->readCount(1_000_000);
-            if ($localExpressionCount !== $expressionCount) {
+            $expressionTypeRecords = $reader->readBytes();
+            if (
+                $localExpressionCount !== $expressionCount
+                || strlen($expressionTypeRecords) !== ($expressionCount * 16)
+            ) {
                 throw new ProtocolException('An eager expression-type index does not match its file summary.');
             }
-            $expressionTypeRecords = $reader->readRaw($localExpressionCount * 16);
-            $encodedExpressionTypes = $reader->readBytes();
+            $encodedExpressionTypes = $reader->readList();
         }
         $sourceFile = null;
         $nodeAnalysisData = [];
         if ($reader->readBoolean()) {
             $backend = $reader->readU16();
             $contents = $reader->readBoolean() ? $reader->readBytes() : '';
-            $sourceFile = SourceFileCodec::read($reader, $phpVersion, $nodeKinds, $file, $contents);
+            $sourceFile = SourceFileCodec::readValues($reader, $phpVersion, $nodeKinds, $file, $contents);
             $targetCount = $reader->readCount(1_000_000);
             if ($targetCount !== count($sourceFile->getTargetNodes())) {
                 throw new ProtocolException('Node-analysis data does not match the targeted syntax snapshot.');
@@ -1138,7 +1152,7 @@ final class Protocol
      * @return non-empty-list<FileAnalysis>
      */
     private static function readFileAnalysisBatch(
-        PayloadReader $reader,
+        ValueReader $reader,
         HostClient $host,
         int $generation,
         PHPVersion $phpVersion,
@@ -1157,17 +1171,17 @@ final class Protocol
         return $files;
     }
 
-    private static function readReferenceSummary(PayloadReader $reader): ReferenceSummary
+    private static function readReferenceSummary(ValueReader $reader): ReferenceSummary
     {
         return new ReferenceSummary($reader->readU64(), $reader->readU64(), $reader->readU64());
     }
 
-    private static function readOptionalType(PayloadReader $reader): ?Type
+    private static function readOptionalType(ValueReader $reader): ?Type
     {
         return $reader->readBoolean() ? TypeCodec::readComplete($reader) : null;
     }
 
-    public static function readReturnTypeRequest(PayloadReader $reader): ReturnTypeRequest
+    public static function readReturnTypeRequest(ValueReader $reader): ReturnTypeRequest
     {
         $generation = $reader->readU64();
         $encodedKind = $reader->readU8();
@@ -1224,22 +1238,28 @@ final class Protocol
         );
     }
 
-    public static function writeReturnTypeResponse(?Type $type): string
+    /** @return list<null|bool|int|float|string|list<mixed>> */
+    public static function writeReturnTypeResponse(?Type $type): array
     {
-        if ($type === null) {
-            return pack('N3C', self::MAGIC_U32, self::VERSION_U32, self::RETURN_TYPE_RESPONSE << 16, 0);
+        $writer = self::createMessage(self::RETURN_TYPE_RESPONSE);
+        $writer->writeBoolean($type !== null);
+        if ($type !== null) {
+            $writer->writeValues($type->encode());
         }
 
-        return pack('N3C', self::MAGIC_U32, self::VERSION_U32, self::RETURN_TYPE_RESPONSE << 16, 1) . $type->encode();
+        return $writer->finish();
     }
 
-    public static function writeCallableSignatureResponse(?EffectiveCallableSignature $signature): string
+    /** @return list<null|bool|int|float|string|list<mixed>> */
+    public static function writeCallableSignatureResponse(?EffectiveCallableSignature $signature): array
     {
+        $writer = self::createMessage(self::CALLABLE_SIGNATURE_RESPONSE);
         if ($signature === null) {
-            return pack('N3C', self::MAGIC_U32, self::VERSION_U32, self::CALLABLE_SIGNATURE_RESPONSE << 16, 0);
+            $writer->writeBoolean(false);
+
+            return $writer->finish();
         }
 
-        $writer = self::createMessage(self::CALLABLE_SIGNATURE_RESPONSE);
         $writer->writeBoolean(true);
         $writer->writeOptionalString($signature->displayName);
         $writer->writeBoolean($signature->allowsNamedArguments);
@@ -1248,12 +1268,12 @@ final class Protocol
             $writer->writeOptionalString($parameter->name);
             $writer->writeBoolean($parameter->type !== null);
             if ($parameter->type !== null) {
-                $writer->writeRaw($parameter->type->encode());
+                $writer->writeValues($parameter->type->encode());
             }
 
             $writer->writeBoolean($parameter->closureThisType !== null);
             if ($parameter->closureThisType !== null) {
-                $writer->writeRaw($parameter->closureThisType->encode());
+                $writer->writeValues($parameter->closureThisType->encode());
             }
 
             $flags = 0;
@@ -1266,20 +1286,23 @@ final class Protocol
         return $writer->finish();
     }
 
-    public static function writeAssertionResponse(?InvocationAssertions $assertions): string
+    /** @return list<null|bool|int|float|string|list<mixed>> */
+    public static function writeAssertionResponse(?InvocationAssertions $assertions): array
     {
+        $writer = self::createMessage(self::ASSERTION_RESPONSE);
         if ($assertions === null || $assertions->isEmpty()) {
-            return pack('N3C', self::MAGIC_U32, self::VERSION_U32, self::ASSERTION_RESPONSE << 16, 0);
+            $writer->writeBoolean(false);
+
+            return $writer->finish();
         }
 
-        $writer = self::createMessage(self::ASSERTION_RESPONSE);
         $writer->writeBoolean(true);
         AssertionCodec::write($writer, $assertions);
 
         return $writer->finish();
     }
 
-    public static function readPropertyTypeRequest(PayloadReader $reader): PropertyTypeRequest
+    public static function readPropertyTypeRequest(ValueReader $reader): PropertyTypeRequest
     {
         $generation = $reader->readU64();
         $providerCount = $reader->readU16();
@@ -1310,28 +1333,31 @@ final class Protocol
         );
     }
 
-    public static function writePropertyTypeResponse(?PropertyType $type): string
+    /** @return list<null|bool|int|float|string|list<mixed>> */
+    public static function writePropertyTypeResponse(?PropertyType $type): array
     {
+        $writer = self::createMessage(self::PROPERTY_TYPE_RESPONSE);
         if ($type === null) {
-            return pack('N3C', self::MAGIC_U32, self::VERSION_U32, self::PROPERTY_TYPE_RESPONSE << 16, 0);
+            $writer->writeBoolean(false);
+
+            return $writer->finish();
         }
 
-        $writer = self::createMessage(self::PROPERTY_TYPE_RESPONSE);
         $writer->writeBoolean(true);
         $writer->writeBoolean($type->readType !== null);
         if ($type->readType !== null) {
-            $writer->writeRaw($type->readType->encode());
+            $writer->writeValues($type->readType->encode());
         }
 
         $writer->writeBoolean($type->writeType !== null);
         if ($type->writeType !== null) {
-            $writer->writeRaw($type->writeType->encode());
+            $writer->writeValues($type->writeType->encode());
         }
 
         return $writer->finish();
     }
 
-    public static function readCallForwardingRequest(PayloadReader $reader): CallForwardingRequest
+    public static function readCallForwardingRequest(ValueReader $reader): CallForwardingRequest
     {
         $generation = $reader->readU64();
         $providerCount = $reader->readU16();
@@ -1357,12 +1383,13 @@ final class Protocol
         return new CallForwardingRequest($generation, $providers, $class, $member, $property, $receiverType);
     }
 
-    public static function writeCallForwardingResponse(?ForwardedCall $forwarded): string
+    /** @return list<null|bool|int|float|string|list<mixed>> */
+    public static function writeCallForwardingResponse(?ForwardedCall $forwarded): array
     {
         $writer = self::createMessage(self::CALL_FORWARDING_RESPONSE);
         $writer->writeBoolean($forwarded !== null);
         if ($forwarded !== null) {
-            $writer->writeRaw($forwarded->receiver->encode());
+            $writer->writeValues($forwarded->receiver->encode());
             $writer->writeCount($forwarded->methods);
             foreach ($forwarded->methods as $method) {
                 $writer->writeBytes($method);
@@ -1372,7 +1399,7 @@ final class Protocol
         return $writer->finish();
     }
 
-    public static function readPropertyInitializationRequest(PayloadReader $reader): PropertyInitializationRequest
+    public static function readPropertyInitializationRequest(ValueReader $reader): PropertyInitializationRequest
     {
         $generation = $reader->readU64();
         $providerCount = $reader->readU16();
@@ -1396,18 +1423,16 @@ final class Protocol
         return new PropertyInitializationRequest($generation, $providers, $declaringClass, $property);
     }
 
-    public static function writePropertyInitializationResponse(bool $initialized): string
+    /** @return list<null|bool|int|float|string|list<mixed>> */
+    public static function writePropertyInitializationResponse(bool $initialized): array
     {
-        return pack(
-            'N3C',
-            self::MAGIC_U32,
-            self::VERSION_U32,
-            self::PROPERTY_INITIALIZATION_RESPONSE << 16,
-            (int) $initialized,
-        );
+        $writer = self::createMessage(self::PROPERTY_INITIALIZATION_RESPONSE);
+        $writer->writeBoolean($initialized);
+
+        return $writer->finish();
     }
 
-    public static function readClassInitializerRequest(PayloadReader $reader): ClassInitializerRequest
+    public static function readClassInitializerRequest(ValueReader $reader): ClassInitializerRequest
     {
         $generation = $reader->readU64();
         $providerCount = $reader->readU16();
@@ -1426,8 +1451,12 @@ final class Protocol
         return new ClassInitializerRequest($generation, $providers, $class);
     }
 
-    /** @param list<non-empty-string> $initializers */
-    public static function writeClassInitializerResponse(array $initializers): string
+    /**
+     * @param list<non-empty-string> $initializers
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    public static function writeClassInitializerResponse(array $initializers): array
     {
         $writer = self::createMessage(self::CLASS_INITIALIZER_RESPONSE);
         $writer->writeCount($initializers);
@@ -1438,7 +1467,7 @@ final class Protocol
         return $writer->finish();
     }
 
-    public static function readIssueFilterRequest(PayloadReader $reader): IssueFilterRequest
+    public static function readIssueFilterRequest(ValueReader $reader): IssueFilterRequest
     {
         $generation = $reader->readU64();
         $hookCount = $reader->readU16();
@@ -1473,8 +1502,10 @@ final class Protocol
 
     /**
      * @param list<int<0, max>> $removedIndices
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    public static function writeIssueFilterResponse(int $issueCount, array $removedIndices): string
+    public static function writeIssueFilterResponse(int $issueCount, array $removedIndices): array
     {
         $writer = self::createMessage(self::ISSUE_FILTER_RESPONSE);
         $writer->writeU32($issueCount);
@@ -1486,7 +1517,7 @@ final class Protocol
         return $writer->finish();
     }
 
-    private static function readReportedIssue(PayloadReader $reader): ReportingReportedIssue
+    private static function readReportedIssue(ValueReader $reader): ReportingReportedIssue
     {
         $level = match ($value = $reader->readU8()) {
             1 => Level::Note,
@@ -1551,20 +1582,28 @@ final class Protocol
         return new ReportingReportedIssue($level, $code, $message, $notes, $help, $link, $annotations, $edits);
     }
 
-    public static function writeTypeComparisonRequest(int $operation, string $left, string $right): string
+    /**
+     * @param non-empty-list<null|bool|int|float|string|list<mixed>> $left
+     * @param non-empty-list<null|bool|int|float|string|list<mixed>> $right
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    public static function writeTypeComparisonRequest(int $operation, array $left, array $right): array
     {
         $writer = self::createMessage(self::TYPE_COMPARISON_REQUEST);
         $writer->writeU8($operation);
-        $writer->writeRaw($left);
-        $writer->writeRaw($right);
+        $writer->writeValues($left);
+        $writer->writeValues($right);
 
         return $writer->finish();
     }
 
     /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
      * @return array{bool, list<string>} whether the comparison holds, and every class-like either compared type names
      */
-    public static function readTypeComparisonResponse(string $payload): array
+    public static function readTypeComparisonResponse(array $payload): array
     {
         [$kind, $reader] = self::readRequest($payload);
         if ($kind !== self::TYPE_COMPARISON_RESPONSE) {
@@ -1579,22 +1618,28 @@ final class Protocol
 
     /**
      * @param non-empty-list<TypeComparison> $comparisons
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    public static function writeTypeComparisonBatchRequest(array $comparisons): string
+    public static function writeTypeComparisonBatchRequest(array $comparisons): array
     {
         $writer = self::createMessage(self::TYPE_COMPARISON_BATCH_REQUEST);
         $writer->writeCount($comparisons);
         foreach ($comparisons as $comparison) {
             $writer->writeU8($comparison->kind->value);
-            $writer->writeRaw($comparison->encodeLeft());
-            $writer->writeRaw($comparison->encodeRight());
+            $writer->writeValues($comparison->encodeLeft());
+            $writer->writeValues($comparison->encodeRight());
         }
 
         return $writer->finish();
     }
 
-    /** @return list<array{bool, list<string>}> */
-    public static function readTypeComparisonBatchResponse(string $payload, int $expectedCount): array
+    /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return list<array{bool, list<string>}>
+     */
+    public static function readTypeComparisonBatchResponse(array $payload, int $expectedCount): array
     {
         [$kind, $reader] = self::readRequest($payload);
         if ($kind !== self::TYPE_COMPARISON_BATCH_RESPONSE) {
@@ -1618,7 +1663,7 @@ final class Protocol
     }
 
     /** @return array{bool, list<string>} */
-    private static function readTypeComparisonAnswer(PayloadReader $reader): array
+    private static function readTypeComparisonAnswer(ValueReader $reader): array
     {
         $result = $reader->readBoolean();
         $classLikes = [];
@@ -1631,13 +1676,15 @@ final class Protocol
 
     /**
      * @param list<string>|list<MemberIdentifier>|list<FunctionLikeIdentifier> $keys
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
     public static function writeCodebaseQueryRequest(
         int $generation,
         int $operation,
         array $keys,
         ?int $classLikeKind = null,
-    ): string {
+    ): array {
         $writer = self::createMessage(self::CODEBASE_QUERY_REQUEST);
         $writer->writeU64($generation);
         $writer->writeU8($operation);
@@ -1663,9 +1710,13 @@ final class Protocol
         return $writer->finish();
     }
 
-    /** @return array{PayloadReader, int<0, 4294967295>} */
+    /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return array{ValueReader, int<0, 4294967295>}
+     */
     public static function readCodebaseQueryResponse(
-        string $payload,
+        array $payload,
         int $generation,
         int $operation,
         ?int $classLikeKind = null,
@@ -1723,18 +1774,23 @@ final class Protocol
         return $writer->finish();
     }
 
-    public static function writeCodebaseFindMethodsRequest(int $generation, string $search): string
+    /** @return list<null|bool|int|float|string|list<mixed>> */
+    public static function writeCodebaseFindMethodsRequest(int $generation, string $search): array
     {
         $writer = self::createMessage(self::CODEBASE_QUERY_REQUEST);
         $writer->writeU64($generation);
         $writer->writeU8(self::FIND_METHODS);
-        $writer->writeRaw($search);
+        $writer->writeBytes($search);
 
         return $writer->finish();
     }
 
-    /** @return array{PayloadReader, int<0, 4294967295>} */
-    public static function readCodebaseFindMethodsResponse(string $payload, int $generation, int $fields): array
+    /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return array{ValueReader, int<0, 4294967295>}
+     */
+    public static function readCodebaseFindMethodsResponse(array $payload, int $generation, int $fields): array
     {
         [$kind, $reader] = self::readRequest($payload);
         if ($kind !== self::CODEBASE_QUERY_RESPONSE) {
@@ -1751,7 +1807,8 @@ final class Protocol
         return [$reader, $reader->readCount(1_000_000)];
     }
 
-    public static function writeCodebaseListRequest(int $generation, int $operation, ?int $classLikeKind = null): string
+    /** @return list<null|bool|int|float|string|list<mixed>> */
+    public static function writeCodebaseListRequest(int $generation, int $operation, ?int $classLikeKind = null): array
     {
         $writer = self::createMessage(self::CODEBASE_QUERY_REQUEST);
         $writer->writeU64($generation);
@@ -1763,9 +1820,13 @@ final class Protocol
         return $writer->finish();
     }
 
-    /** @return list<string> */
+    /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return list<string>
+     */
     public static function readCodebaseListResponse(
-        string $payload,
+        array $payload,
         int $generation,
         int $operation,
         ?int $classLikeKind = null,
@@ -1791,8 +1852,12 @@ final class Protocol
         return $names;
     }
 
-    /** @param list<string> $names */
-    public static function writeCodebaseExistenceRequest(int $generation, int $predicate, array $names): string
+    /**
+     * @param list<string> $names
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    public static function writeCodebaseExistenceRequest(int $generation, int $predicate, array $names): array
     {
         $writer = self::createMessage(self::CODEBASE_QUERY_REQUEST);
         $writer->writeU64($generation);
@@ -1806,8 +1871,12 @@ final class Protocol
         return $writer->finish();
     }
 
-    /** @return list<bool> */
-    public static function readCodebaseExistenceResponse(string $payload, int $generation, int $predicate): array
+    /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return list<bool>
+     */
+    public static function readCodebaseExistenceResponse(array $payload, int $generation, int $predicate): array
     {
         [$kind, $reader] = self::readRequest($payload);
         if ($kind !== self::CODEBASE_QUERY_RESPONSE) {
@@ -1831,8 +1900,12 @@ final class Protocol
         return $results;
     }
 
-    /** @param list<MemberIdentifier> $members */
-    public static function writeCodebaseMemberExistenceRequest(int $generation, int $predicate, array $members): string
+    /**
+     * @param list<MemberIdentifier> $members
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    public static function writeCodebaseMemberExistenceRequest(int $generation, int $predicate, array $members): array
     {
         $writer = self::createMessage(self::CODEBASE_QUERY_REQUEST);
         $writer->writeU64($generation);
@@ -1847,8 +1920,12 @@ final class Protocol
         return $writer->finish();
     }
 
-    /** @return list<bool> */
-    public static function readCodebaseMemberExistenceResponse(string $payload, int $generation, int $predicate): array
+    /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return list<bool>
+     */
+    public static function readCodebaseMemberExistenceResponse(array $payload, int $generation, int $predicate): array
     {
         [$kind, $reader] = self::readRequest($payload);
         if ($kind !== self::CODEBASE_QUERY_RESPONSE) {
@@ -1872,8 +1949,12 @@ final class Protocol
         return $results;
     }
 
-    /** @param list<string> $names */
-    public static function writeCodebaseRelationsRequest(int $generation, int $relation, array $names): string
+    /**
+     * @param list<string> $names
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    public static function writeCodebaseRelationsRequest(int $generation, int $relation, array $names): array
     {
         $writer = self::createMessage(self::CODEBASE_QUERY_REQUEST);
         $writer->writeU64($generation);
@@ -1887,8 +1968,12 @@ final class Protocol
         return $writer->finish();
     }
 
-    /** @return list<list<string>> */
-    public static function readCodebaseRelationsResponse(string $payload, int $generation, int $relation): array
+    /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return list<list<string>>
+     */
+    public static function readCodebaseRelationsResponse(array $payload, int $generation, int $relation): array
     {
         [$kind, $reader] = self::readRequest($payload);
         if ($kind !== self::CODEBASE_QUERY_RESPONSE) {
@@ -1919,8 +2004,10 @@ final class Protocol
 
     /**
      * @param array<string, string|MemberIdentifier|ReferenceOrigin> $queries
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    public static function writeReferenceQuery(int $generation, int $operation, array $queries): string
+    public static function writeReferenceQuery(int $generation, int $operation, array $queries): array
     {
         $writer = self::createMessage(self::SYMBOL_REFERENCE_QUERY_REQUEST);
         $writer->writeU64($generation);
@@ -1940,9 +2027,13 @@ final class Protocol
         return $writer->finish();
     }
 
-    /** @return list<list<SymbolReference>> */
+    /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return list<list<SymbolReference>>
+     */
     public static function readReferenceQueryResponse(
-        string $payload,
+        array $payload,
         int $generation,
         int $operation,
         int $expectedCount,
@@ -1981,7 +2072,7 @@ final class Protocol
         return $results;
     }
 
-    private static function writeReferenceOrigin(PayloadWriter $writer, ReferenceOrigin $origin): void
+    private static function writeReferenceOrigin(ValueWriter $writer, ReferenceOrigin $origin): void
     {
         if ($origin->file !== null) {
             $writer->writeU8(3);
@@ -1992,7 +2083,7 @@ final class Protocol
         self::writeSymbolIdentifier($writer, $origin->symbol ?? '');
     }
 
-    private static function writeSymbolIdentifier(PayloadWriter $writer, string|MemberIdentifier $symbol): void
+    private static function writeSymbolIdentifier(ValueWriter $writer, string|MemberIdentifier $symbol): void
     {
         if ($symbol instanceof MemberIdentifier) {
             $writer->writeU8(2);
@@ -2005,7 +2096,7 @@ final class Protocol
         $writer->writeBytes($symbol);
     }
 
-    private static function readReferenceOrigin(PayloadReader $reader): ReferenceOrigin
+    private static function readReferenceOrigin(ValueReader $reader): ReferenceOrigin
     {
         $kind = $reader->readU8();
         if ($kind === 3) {
@@ -2015,7 +2106,7 @@ final class Protocol
         return ReferenceOrigin::symbol(self::readSymbolIdentifier($reader, $kind));
     }
 
-    private static function readSymbolIdentifier(PayloadReader $reader, ?int $kind = null): string|MemberIdentifier
+    private static function readSymbolIdentifier(ValueReader $reader, ?int $kind = null): string|MemberIdentifier
     {
         return match ($kind ?? $reader->readU8()) {
             1 => $reader->readBytes(),
@@ -2025,8 +2116,8 @@ final class Protocol
     }
 
     /** @param int<0, 65535> $kind */
-    private static function createMessage(int $kind): PayloadWriter
+    private static function createMessage(int $kind): ValueWriter
     {
-        return new PayloadWriter(pack('N3', self::MAGIC_U32, self::VERSION_U32, $kind << 16));
+        return new ValueWriter([self::NAME, $kind]);
     }
 }

@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace Mago\Tests\Sdk\Unit;
 
 use Mago\Sdk\Internal\ClassLoads;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
-use Mago\Sdk\Internal\Protocol\PayloadWriter;
+use Mago\Sdk\Internal\Protocol\ValueReader;
+use Mago\Sdk\Internal\Protocol\ValueWriter;
 use PHPUnit\Framework\TestCase;
 
 use function class_exists;
@@ -28,16 +28,16 @@ final class ClassLoadsTest extends TestCase
         self::assertTrue($loads->holdsAny(['app\missing\order']));
         self::assertFalse($loads->holdsAny(['app\missing\other']));
 
-        $first = new PayloadWriter();
+        $first = new ValueWriter();
         $loads->write($first, $end);
-        $reader = new PayloadReader($first->finish());
+        $reader = new ValueReader($first->finish());
         $reader->readU64();
         self::assertSame(0, $reader->readU32());
         self::assertSame($end, $reader->readCount(1_000));
 
-        $again = new PayloadWriter();
+        $again = new ValueWriter();
         $loads->write($again, $end);
-        $reader = new PayloadReader($again->finish());
+        $reader = new ValueReader($again->finish());
         $reader->readU64();
         self::assertSame($end, $reader->readU32(), 'a later response starts where the last one ended');
         self::assertSame(0, $reader->readCount(1_000));

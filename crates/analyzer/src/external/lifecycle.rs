@@ -15,8 +15,10 @@ use mago_codex::symbol::SymbolIdentifier;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
 use mago_database::file::FileId;
-use mago_extension::PayloadReader;
 use mago_extension::PayloadWriter;
+use mago_extension::Value;
+use mago_extension::ValueReader;
+use mago_extension::ValueWriter;
 use mago_extension::source::SourceSnapshot;
 use mago_names::ResolvedNames;
 use mago_reporting::Annotation;
@@ -157,10 +159,10 @@ pub struct FileAnalysisSnapshot {
     file_id: mago_database::file::FileId,
     name: Arc<[u8]>,
     size: u32,
-    encoded_source: Box<[u8]>,
-    encoded_target_source: Box<[u8]>,
-    encoded_target_analysis: Box<[u8]>,
-    encoded_types: Box<[u8]>,
+    encoded_source: Box<[Value]>,
+    encoded_target_source: Box<[Value]>,
+    encoded_target_analysis: Box<[Value]>,
+    encoded_types: Box<[Value]>,
     expression_types: HashMap<(u32, u32), Range<usize>>,
     inferred_return_types: Vec<Range<usize>>,
     inferred_yield_key_types: Vec<Range<usize>>,
@@ -485,8 +487,8 @@ impl FileAnalysisSnapshot {
         source.rename(&analyzed);
         let matched_target_count = source.target_count();
 
-        let mut source_writer = PayloadWriter::with_capacity(source.encoded_len());
-        source.write_to(&mut source_writer).map_err(|error| {
+        let mut source_writer = ValueWriter::new();
+        source.write_values_to(&mut source_writer).map_err(|error| {
             protocol(format!("failed to encode retained syntax for `{}`: {error}", String::from_utf8_lossy(&file.name)))
         })?;
 
@@ -513,14 +515,14 @@ impl FileAnalysisSnapshot {
                         "complete syntax contains {matched_target_count} targets, but targeted syntax contains {target_count}"
                     )));
                 }
-                let mut target_source_writer = PayloadWriter::with_capacity(target_source.encoded_len());
-                target_source.write_to(&mut target_source_writer).map_err(|error| {
+                let mut target_source_writer = ValueWriter::new();
+                target_source.write_values_to(&mut target_source_writer).map_err(|error| {
                     protocol(format!(
                         "failed to encode targeted syntax for `{}`: {error}",
                         String::from_utf8_lossy(&file.name)
                     ))
                 })?;
-                let mut target_analysis_writer = PayloadWriter::new();
+                let mut target_analysis_writer = ValueWriter::new();
                 write_target_analysis(&mut target_analysis_writer, artifacts, codebase, dialect, plan, target_count)?;
                 (
                     target_source_writer.finish().into_boxed_slice(),
@@ -534,7 +536,7 @@ impl FileAnalysisSnapshot {
             (Box::default(), Box::default(), 0)
         };
 
-        let mut writer = PayloadWriter::new();
+        let mut writer = ValueWriter::new();
         let mut type_handles = Vec::new();
         let mut expression_types =
             HashMap::with_capacity_and_hasher(artifacts.expression_types.len(), foldhash::fast::RandomState::default());
@@ -613,7 +615,7 @@ impl From<&SymbolReferences> for ReferenceSummary {
 }
 
 impl ReferenceSummary {
-    fn write_to(self, writer: &mut PayloadWriter) {
+    fn write_to(self, writer: &mut ValueWriter) {
         writer.write_u64(self.body);
         writer.write_u64(self.signature);
         writer.write_u64(self.maps);
@@ -621,7 +623,7 @@ impl ReferenceSummary {
 }
 
 fn encode_snapshot_types<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     types: impl IntoIterator<Item = &'type_info TUnion>,
     handles: &mut Vec<Cow<'type_info, TUnion>>,
     codebase: &CodebaseMetadata,
@@ -631,7 +633,7 @@ fn encode_snapshot_types<'type_info>(
 }
 
 fn encode_snapshot_type<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     ty: &'type_info TUnion,
     handles: &mut Vec<Cow<'type_info, TUnion>>,
     codebase: &CodebaseMetadata,
@@ -644,7 +646,7 @@ fn encode_snapshot_type<'type_info>(
 }
 
 fn write_target_analysis(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     artifacts: &AnalysisArtifacts,
     codebase: &CodebaseMetadata,
     dialect: Dialect,
@@ -690,7 +692,7 @@ fn write_target_analysis(
 }
 
 fn write_variable_definedness(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     artifacts: &AnalysisArtifacts,
     span: Span,
 ) -> Result<(), ExternalAnalyzerError> {
@@ -712,7 +714,7 @@ fn write_variable_definedness(
 }
 
 fn write_optional_expression_type(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     artifacts: &AnalysisArtifacts,
     codebase: &CodebaseMetadata,
     dialect: Dialect,
@@ -736,7 +738,7 @@ fn receiver_span(node: Node<'_, '_>) -> Option<Span> {
 }
 
 fn write_argument_types(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     artifacts: &AnalysisArtifacts,
     codebase: &CodebaseMetadata,
     dialect: Dialect,
@@ -803,15 +805,15 @@ enum FileView<'analysis> {
 
 enum TypeView<'analysis> {
     Union(&'analysis TUnion, &'analysis CodebaseMetadata, Dialect),
-    Encoded(&'analysis [u8]),
+    Encoded(&'analysis [Value]),
 }
 
 impl TypeView<'_> {
-    fn write_to(self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
+    fn write_to(self, writer: &mut ValueWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
             Self::Union(ty, codebase, dialect) => write_type(writer, ty, codebase, dialect),
-            Self::Encoded(bytes) => {
-                writer.write_raw(bytes);
+            Self::Encoded(values) => {
+                writer.write_values(values);
                 Ok(())
             }
         }
@@ -884,7 +886,7 @@ impl FileView<'_> {
         }
     }
 
-    fn write_expression_types(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
+    fn write_expression_types(&self, writer: &mut ValueWriter) -> Result<(), ExternalAnalyzerError> {
         let mut spans = match self {
             Self::Artifacts(_, _, _, artifacts, ..) => artifacts.expression_types.keys().copied().collect::<Vec<_>>(),
             Self::Snapshot(file) => file.expression_types.keys().copied().collect::<Vec<_>>(),
@@ -911,12 +913,12 @@ impl FileView<'_> {
         Ok(())
     }
 
-    fn write_expression_type_snapshot(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
+    fn write_expression_type_snapshot(&self, writer: &mut ValueWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
             Self::Artifacts(_, program, _, artifacts, codebase, _) => {
                 let mut spans = artifacts.expression_types.keys().copied().collect::<Vec<_>>();
                 spans.sort_unstable();
-                let mut encoded = PayloadWriter::new();
+                let mut encoded = ValueWriter::new();
                 let mut handles = Vec::new();
                 let mut records = Vec::with_capacity(spans.len());
                 for span in spans {
@@ -943,7 +945,7 @@ impl FileView<'_> {
         }
     }
 
-    fn write_inferred_return_types(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
+    fn write_inferred_return_types(&self, writer: &mut ValueWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
             Self::Artifacts(_, program, _, artifacts, codebase, _) => {
                 writer.write_u32(
@@ -975,7 +977,7 @@ impl FileView<'_> {
         }
     }
 
-    fn write_inferred_yield_key_types(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
+    fn write_inferred_yield_key_types(&self, writer: &mut ValueWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
             Self::Artifacts(_, program, _, artifacts, codebase, _) => {
                 write_types(writer, &artifacts.inferred_yield_key_types, codebase, program.dialect)
@@ -984,7 +986,7 @@ impl FileView<'_> {
         }
     }
 
-    fn write_inferred_yield_value_types(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
+    fn write_inferred_yield_value_types(&self, writer: &mut ValueWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
             Self::Artifacts(_, program, _, artifacts, codebase, _) => {
                 write_types(writer, &artifacts.inferred_yield_value_types, codebase, program.dialect)
@@ -993,7 +995,7 @@ impl FileView<'_> {
         }
     }
 
-    fn write_reference_summary(&self, writer: &mut PayloadWriter) {
+    fn write_reference_summary(&self, writer: &mut ValueWriter) {
         match self {
             Self::Artifacts(_, _, _, artifacts, ..) => write_reference_summary(writer, &artifacts.symbol_references),
             Self::Snapshot(file) => file.references.write_to(writer),
@@ -1007,7 +1009,7 @@ impl FileView<'_> {
         }
     }
 
-    fn write_source_snapshot(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
+    fn write_source_snapshot(&self, writer: &mut ValueWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
             Self::Artifacts(file, program, resolved_names, _, _, targets) => {
                 let snapshot =
@@ -1018,12 +1020,12 @@ impl FileView<'_> {
                         ))
                     })?;
 
-                snapshot.write_to(writer).map_err(|error| {
+                snapshot.write_values_to(writer).map_err(|error| {
                     protocol(format!("failed to encode syntax for `{}`: {error}", String::from_utf8_lossy(&file.name)))
                 })
             }
             Self::Snapshot(file) => {
-                writer.write_raw(&file.encoded_source);
+                writer.write_values(&file.encoded_source);
                 Ok(())
             }
         }
@@ -1031,7 +1033,7 @@ impl FileView<'_> {
 
     fn write_target_source_snapshot(
         &self,
-        writer: &mut PayloadWriter,
+        writer: &mut ValueWriter,
         plan: Option<&NodeAnalysisPlan<'_, '_>>,
         include_trivia: bool,
     ) -> Result<(), ExternalAnalyzerError> {
@@ -1051,7 +1053,7 @@ impl FileView<'_> {
                     ))
                 })?
                 .ok_or_else(|| protocol("targeted file summary contains no matching syntax nodes"))?;
-                snapshot.write_to(writer).map_err(|error| {
+                snapshot.write_values_to(writer).map_err(|error| {
                     protocol(format!(
                         "failed to encode targeted syntax for `{}`: {error}",
                         String::from_utf8_lossy(&file.name)
@@ -1060,34 +1062,38 @@ impl FileView<'_> {
                 write_target_analysis(writer, artifacts, codebase, program.dialect, plan, snapshot.target_count())
             }
             Self::Snapshot(file) => {
-                writer.write_raw(&file.encoded_target_source);
-                writer.write_raw(&file.encoded_target_analysis);
+                writer.write_values(&file.encoded_target_source);
+                writer.write_values(&file.encoded_target_analysis);
                 Ok(())
             }
         }
     }
 }
 
+/// Writes the count of `records`, then their table as one string, each record a span's start and end and the place and
+/// length of its type in `encoded`, which follows as one list, so the SDK finds a span's type without reading the rest.
 fn write_expression_type_records(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     records: &[((u32, u32), Range<usize>)],
-    encoded: &[u8],
+    encoded: &[Value],
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_u32(u32::try_from(records.len()).map_err(|_| protocol("too many expression types"))?);
+    let mut table = PayloadWriter::with_capacity(records.len() * 16);
     for (span, range) in records {
-        writer.write_u32(span.0);
-        writer.write_u32(span.1);
-        writer.write_u32(u32::try_from(range.start).map_err(|_| protocol("expression type offset exceeds u32::MAX"))?);
-        writer.write_u32(u32::try_from(range.len()).map_err(|_| protocol("expression type length exceeds u32::MAX"))?);
+        table.write_u32(span.0);
+        table.write_u32(span.1);
+        table.write_u32(u32::try_from(range.start).map_err(|_| protocol("expression type offset exceeds u32::MAX"))?);
+        table.write_u32(u32::try_from(range.len()).map_err(|_| protocol("expression type length exceeds u32::MAX"))?);
     }
-    writer.write_bytes(encoded)?;
+    writer.write_bytes(&table.finish())?;
+    writer.write_value(Value::List(encoded.to_vec()));
     Ok(())
 }
 
 pub(super) fn encode_before_analysis_request(
     generation: u64,
     plugins: &[u16],
-) -> Result<Vec<u8>, ExternalAnalyzerError> {
+) -> Result<Vec<Value>, ExternalAnalyzerError> {
     let writer = lifecycle_writer(BEFORE_ANALYSIS_REQUEST, generation, plugins)?;
     Ok(writer.finish())
 }
@@ -1103,7 +1109,7 @@ pub(super) fn encode_after_file_analysis_request(
     include_expression_types: bool,
     node_analysis_requirements: Option<&NodeAnalysisRequirements>,
     backend: u16,
-) -> Result<Vec<u8>, ExternalAnalyzerError> {
+) -> Result<Vec<Value>, ExternalAnalyzerError> {
     let mut writer = lifecycle_writer(AFTER_FILE_ANALYSIS_REQUEST, generation, plugins)?;
     let node_analysis_plan = node_analysis_requirements
         .map(|requirements| build_node_analysis_plan(program, artifacts, resolved_names, codebase, requirements));
@@ -1136,7 +1142,7 @@ pub(super) fn encode_after_file_analysis_batch_request(
     node_analysis_requirements: Option<&NodeAnalysisRequirements>,
     session: &ExternalAnalysisSession,
     backend: u16,
-) -> Result<Vec<u8>, ExternalAnalyzerError> {
+) -> Result<Vec<Value>, ExternalAnalyzerError> {
     let mut writer = lifecycle_writer(AFTER_FILE_ANALYSIS_BATCH_REQUEST, generation, plugins)?;
     writer.write_u32(u32::try_from(files.len()).map_err(|_| protocol("after-file batch exceeds u32::MAX files"))?);
     for file in files {
@@ -1178,7 +1184,7 @@ pub(super) fn encode_after_analysis_request(
     plugins: &[u16],
     result: &AnalysisResult,
     files: &[Arc<FileAnalysisSnapshot>],
-) -> Result<Vec<u8>, ExternalAnalyzerError> {
+) -> Result<Vec<Value>, ExternalAnalyzerError> {
     let mut writer = lifecycle_writer(AFTER_ANALYSIS_REQUEST, generation, plugins)?;
     writer
         .write_u32(u32::try_from(result.issues.len()).map_err(|_| protocol("analysis has more than u32::MAX issues"))?);
@@ -1191,7 +1197,7 @@ pub(super) fn encode_after_analysis_request(
     Ok(writer.finish())
 }
 
-fn lifecycle_writer(kind: u16, generation: u64, plugins: &[u16]) -> Result<PayloadWriter, ExternalAnalyzerError> {
+fn lifecycle_writer(kind: u16, generation: u64, plugins: &[u16]) -> Result<ValueWriter, ExternalAnalyzerError> {
     let mut writer = protocol::message_writer(kind);
     writer.write_u64(generation);
     writer
@@ -1204,7 +1210,7 @@ fn lifecycle_writer(kind: u16, generation: u64, plugins: &[u16]) -> Result<Paylo
 }
 
 fn write_file_summary(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     file: FileView<'_>,
     include_expression_types: bool,
     node_analysis_requirements: Option<&NodeAnalysisRequirements>,
@@ -1243,14 +1249,14 @@ fn write_file_summary(
     Ok(())
 }
 
-fn write_reference_summary(writer: &mut PayloadWriter, references: &SymbolReferences) {
+fn write_reference_summary(writer: &mut ValueWriter, references: &SymbolReferences) {
     writer.write_u64(references.count_body_references() as u64);
     writer.write_u64(references.count_signature_references() as u64);
     writer.write_u64(references.total_map_entries() as u64);
 }
 
 pub(super) fn decode_lifecycle_response(
-    payload: &[u8],
+    payload: &[Value],
     request_kind: u16,
     active_plugins: &[u16],
     plugins: &[ExternalPlugin],
@@ -1325,11 +1331,7 @@ pub(super) fn decode_lifecycle_response(
                 value => return Err(protocol(format!("invalid lifecycle annotation kind {value}"))),
             };
 
-            let named_file = if reader.read_bool("lifecycle annotation file presence")? {
-                Some(reader.read_bytes("lifecycle annotation file")?)
-            } else {
-                None
-            };
+            let named_file = reader.read_optional_bytes("lifecycle annotation file")?;
 
             let (file_id, size) = match named_file {
                 Some(name) => session.source(name).ok_or_else(|| {
@@ -1370,11 +1372,7 @@ pub(super) fn decode_lifecycle_response(
         let edit_count = reader.read_count("lifecycle issue edits", MAXIMUM_EDITS)?;
         let mut edits = HashMap::default();
         for _ in 0..edit_count {
-            let named_file = if reader.read_bool("lifecycle edit file presence")? {
-                Some(reader.read_bytes("lifecycle edit file")?)
-            } else {
-                None
-            };
+            let named_file = reader.read_optional_bytes("lifecycle edit file")?;
 
             let (file_id, size) = match named_file {
                 Some(name) => session.source(name).ok_or_else(|| {
@@ -1512,7 +1510,7 @@ pub(super) fn decode_lifecycle_response(
     Ok(LifecycleEffects { issues, issues_by_file, references, references_by_file })
 }
 
-fn read_safety(reader: &mut PayloadReader<'_>) -> Result<Safety, ExternalAnalyzerError> {
+fn read_safety(reader: &mut ValueReader<'_>) -> Result<Safety, ExternalAnalyzerError> {
     match reader.read_u8("lifecycle edit safety")? {
         1 => Ok(Safety::Safe),
         2 => Ok(Safety::PotentiallyUnsafe),
@@ -1522,10 +1520,10 @@ fn read_safety(reader: &mut PayloadReader<'_>) -> Result<Safety, ExternalAnalyze
 }
 
 pub(super) fn handle_analysis_query(
-    payload: &[u8],
+    payload: &[Value],
     session: &ExternalAnalysisSession,
     store: &AnalysisStore<'_>,
-) -> Result<Vec<u8>, ExternalAnalyzerError> {
+) -> Result<Vec<Value>, ExternalAnalyzerError> {
     let mut reader = protocol::message_reader(payload, ANALYSIS_QUERY_REQUEST)?;
     let generation = reader.read_u64("analysis query generation")?;
     if generation != session.generation() {
@@ -1598,16 +1596,16 @@ pub(super) fn handle_analysis_query(
     Ok(writer.finish())
 }
 
-pub(super) fn is_symbol_reference_query(payload: &[u8]) -> Result<bool, ExternalAnalyzerError> {
+pub(super) fn is_symbol_reference_query(payload: &[Value]) -> Result<bool, ExternalAnalyzerError> {
     Ok(protocol::message_kind(payload)? == SYMBOL_REFERENCE_QUERY_REQUEST)
 }
 
 pub(super) fn handle_symbol_reference_query(
-    payload: &[u8],
+    payload: &[Value],
     session: &ExternalAnalysisSession,
     codebase: &CodebaseMetadata,
     store: &SymbolReferenceStore<'_>,
-) -> Result<Vec<u8>, ExternalAnalyzerError> {
+) -> Result<Vec<Value>, ExternalAnalyzerError> {
     let mut reader = protocol::message_reader(payload, SYMBOL_REFERENCE_QUERY_REQUEST)?;
     let generation = reader.read_u64("symbol-reference query generation")?;
     if generation != session.generation() {
@@ -1662,7 +1660,7 @@ struct RecordedReference {
 }
 
 fn write_recorded_references(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     references: &[RecordedReference],
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_u32(u32::try_from(references.len()).map_err(|_| protocol("too many symbol references"))?);
@@ -1683,7 +1681,7 @@ fn write_recorded_references(
 }
 
 fn read_reference_origin(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     codebase: &CodebaseMetadata,
 ) -> Result<ReferenceOrigin, ExternalAnalyzerError> {
     let endpoint = reader.read_u8("reference origin kind")?;
@@ -1699,7 +1697,7 @@ fn read_reference_origin(
     read_symbol_identifier_with_kind(reader, codebase, false, endpoint).map(ReferenceOrigin::Symbol)
 }
 
-fn write_reference_origin(writer: &mut PayloadWriter, source: ReferenceOrigin) -> Result<(), ExternalAnalyzerError> {
+fn write_reference_origin(writer: &mut ValueWriter, source: ReferenceOrigin) -> Result<(), ExternalAnalyzerError> {
     match source {
         ReferenceOrigin::Symbol(symbol) => write_symbol_identifier(writer, symbol),
         ReferenceOrigin::File(file) => {
@@ -1714,7 +1712,7 @@ fn write_reference_origin(writer: &mut PayloadWriter, source: ReferenceOrigin) -
 }
 
 fn read_symbol_identifier(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     codebase: &CodebaseMetadata,
     target: bool,
 ) -> Result<SymbolIdentifier, ExternalAnalyzerError> {
@@ -1723,7 +1721,7 @@ fn read_symbol_identifier(
 }
 
 fn read_symbol_identifier_with_kind(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     codebase: &CodebaseMetadata,
     target: bool,
     kind: u8,
@@ -1775,7 +1773,7 @@ fn normalize_symbol(codebase: &CodebaseMetadata, bytes: Word, target: bool) -> m
     if target { word(bytes) } else { lowercase }
 }
 
-fn write_symbol_identifier(writer: &mut PayloadWriter, symbol: SymbolIdentifier) -> Result<(), ExternalAnalyzerError> {
+fn write_symbol_identifier(writer: &mut ValueWriter, symbol: SymbolIdentifier) -> Result<(), ExternalAnalyzerError> {
     if symbol.0.is_empty() {
         return Err(protocol("symbol reference name cannot be empty"));
     }
@@ -1792,7 +1790,7 @@ fn write_symbol_identifier(writer: &mut PayloadWriter, symbol: SymbolIdentifier)
     Ok(())
 }
 
-fn read_reference_kind(reader: &mut PayloadReader<'_>) -> Result<SymbolReferenceKind, ExternalAnalyzerError> {
+fn read_reference_kind(reader: &mut ValueReader<'_>) -> Result<SymbolReferenceKind, ExternalAnalyzerError> {
     match reader.read_u8("symbol reference kind")? {
         1 => Ok(SymbolReferenceKind::Body),
         2 => Ok(SymbolReferenceKind::Signature),
@@ -1841,7 +1839,7 @@ fn validate_reference_target(
 }
 
 fn write_types(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     types: &[TUnion],
     codebase: &CodebaseMetadata,
     dialect: Dialect,
@@ -1855,23 +1853,23 @@ fn write_types(
 }
 
 fn write_encoded_types(
-    writer: &mut PayloadWriter,
-    payload: &[u8],
+    writer: &mut ValueWriter,
+    encoded: &[Value],
     ranges: &[Range<usize>],
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_u32(u32::try_from(ranges.len()).map_err(|_| protocol("too many inferred types"))?);
     for range in ranges {
-        let bytes = payload
+        let values = encoded
             .get(range.clone())
             .ok_or_else(|| protocol("retained analysis type points outside its encoded payload"))?;
-        writer.write_raw(bytes);
+        writer.write_values(values);
     }
 
     Ok(())
 }
 
 fn write_type(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     ty: &TUnion,
     codebase: &CodebaseMetadata,
     dialect: Dialect,
@@ -1879,7 +1877,7 @@ fn write_type(
     protocol::encode_union_snapshot(writer, ty, &mut Vec::new(), codebase, dialect, 0)
 }
 
-fn read_level(reader: &mut PayloadReader<'_>) -> Result<Level, ExternalAnalyzerError> {
+fn read_level(reader: &mut ValueReader<'_>) -> Result<Level, ExternalAnalyzerError> {
     match reader.read_u8("lifecycle issue level")? {
         1 => Ok(Level::Note),
         2 => Ok(Level::Help),
@@ -1909,7 +1907,8 @@ mod tests {
     use mago_codex::ttype::union::TUnion;
     use mago_database::file::File;
     use mago_database::file::FileType;
-    use mago_extension::PayloadWriter;
+    use mago_extension::Value;
+    use mago_extension::ValueWriter;
     use mago_span::Span;
     use mago_syntax::cst::NodeKind;
     use mago_word::empty_word;
@@ -1965,7 +1964,7 @@ mod tests {
         artifacts: &AnalysisArtifacts,
         operation: u8,
         spans: &[(u32, u32)],
-    ) -> Vec<u8> {
+    ) -> Vec<Value> {
         let session = ExternalAnalysisSession::from_files(analysis.files.iter().cloned());
         let mut writer = protocol::message_writer(ANALYSIS_QUERY_REQUEST);
         writer.write_u64(session.generation());
@@ -2186,7 +2185,7 @@ mod tests {
 
     /// The answer to the symbol-reference query `operation` about each of `endpoints`, as a worker writes them, over the
     /// references Mago records for `BOX`, by the codebase's keys: `openLid` calls `tag`, and `tag` returns a `Tagged`.
-    fn reference_answer(operation: u8, endpoints: &[SymbolIdentifier]) -> Vec<u8> {
+    fn reference_answer(operation: u8, endpoints: &[SymbolIdentifier]) -> Vec<Value> {
         analyzed(&[BOX, TAGGED], |analysis| {
             let session = ExternalAnalysisSession::from_files(analysis.files.iter().cloned());
             let mut writer = protocol::message_writer(SYMBOL_REFERENCE_QUERY_REQUEST);
@@ -2224,7 +2223,7 @@ mod tests {
 
     #[test]
     fn outbound_reference_endpoints_reject_empty_names() {
-        let mut writer = PayloadWriter::new();
+        let mut writer = ValueWriter::new();
         assert!(write_symbol_identifier(&mut writer, (empty_word(), empty_word())).is_err());
         assert!(write_reference_origin(&mut writer, ReferenceOrigin::File(empty_word())).is_err());
     }
@@ -2232,7 +2231,7 @@ mod tests {
     /// A lifecycle response of `kind` with no issue and no reference, and a read entry for each of `files`: the file
     /// it names, if any, then an issue read of the class `Issue` and a code read of the class `Code`, then the entries
     /// `loads` from the start of worker 1's class log.
-    fn response_with_reads(kind: u16, files: &[Option<&[u8]>], loads: &[&[u8]]) -> Vec<u8> {
+    fn response_with_reads(kind: u16, files: &[Option<&[u8]>], loads: &[&[u8]]) -> Vec<Value> {
         let mut writer = protocol::message_writer(kind);
         writer.write_u32(0);
         writer.write_u32(0);
@@ -2260,7 +2259,7 @@ mod tests {
 
     /// Decodes `response` to a request of `kind` against a session of `src/a.php`, and returns the session's reads, or
     /// the protocol error the response gives.
-    fn decoded_reads(kind: u16, response: &[u8]) -> Result<SessionReads, String> {
+    fn decoded_reads(kind: u16, response: &[Value]) -> Result<SessionReads, String> {
         let file = File::new(Cow::Borrowed(b"src/a.php"), FileType::Host, None, Cow::Borrowed(b"<?php\n"));
         let session = ExternalAnalysisSession::from_files([Arc::new(file)]);
         match decode_lifecycle_response(response, kind, &[], &[], &session, None, &CodebaseMetadata::new()) {

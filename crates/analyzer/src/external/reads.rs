@@ -11,8 +11,9 @@ use foldhash::HashSet;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::symbol::SymbolIdentifier;
 use mago_database::file::FileId;
-use mago_extension::PayloadReader;
-use mago_extension::PayloadWriter;
+use mago_extension::Value;
+use mago_extension::ValueReader;
+use mago_extension::ValueWriter;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
@@ -70,7 +71,7 @@ impl ExtensionReads {
 
     /// Reads the two lists of reads the SDK writes, the issue reads then the code reads, and the class loads of the
     /// worker that follow them, whose end the callbacks read.
-    pub(super) fn decode(reader: &mut PayloadReader<'_>) -> Result<(Self, ClassLoads), ExternalAnalyzerError> {
+    pub(super) fn decode(reader: &mut ValueReader<'_>) -> Result<(Self, ClassLoads), ExternalAnalyzerError> {
         let issues = FileReads::decode(reader)?;
         let code = FileReads::decode(reader)?;
         let loads = ClassLoads::decode(reader)?;
@@ -103,7 +104,7 @@ impl ClassLoads {
         self.from.saturating_add(u32::try_from(self.classes.len()).unwrap_or(u32::MAX))
     }
 
-    fn decode(reader: &mut PayloadReader<'_>) -> Result<Self, ExternalAnalyzerError> {
+    fn decode(reader: &mut ValueReader<'_>) -> Result<Self, ExternalAnalyzerError> {
         let worker = reader.read_u64("class loads worker")?;
         let from = reader.read_u32("class loads start")?;
         let count = reader.read_count("class loads", MAXIMUM_READS)?;
@@ -204,7 +205,7 @@ impl FileReads {
 
     /// Reads a list of reads as the SDK writes it: a count, then each read's codebase query
     /// operation, argument, and name.
-    pub(super) fn decode(reader: &mut PayloadReader<'_>) -> Result<Self, ExternalAnalyzerError> {
+    pub(super) fn decode(reader: &mut ValueReader<'_>) -> Result<Self, ExternalAnalyzerError> {
         let mut reads = Self::default();
         for _ in 0..reader.read_count("codebase reads", MAXIMUM_READS)? {
             let operation = reader.read_u8("codebase read operation")?;
@@ -278,16 +279,41 @@ impl Listing {
             Self::Descendants(name) => hash_names(&mut hasher, codebase.get_class_descendants(*name)),
             Self::Namespace(name) => codebase.namespace_exists(*name).hash(&mut hasher),
             Self::Methods(search) => {
-                let mut found = PayloadWriter::new();
+                let mut found = ValueWriter::new();
                 // A search that fails, as one that finds more methods than an answer holds, answers apart from each
                 // result one gives.
                 let failed = metadata::write_found_methods(search.as_bytes(), &mut found, codebase, session).is_err();
                 failed.hash(&mut hasher);
-                found.finish().hash(&mut hasher);
+                hash_values(&mut hasher, &found.finish());
             }
         }
 
         hasher.finish()
+    }
+}
+
+/// Hashes `values` by their kinds and contents, each float by its bits.
+fn hash_values(hasher: &mut DefaultHasher, values: &[Value]) {
+    values.len().hash(hasher);
+    for value in values {
+        match value {
+            Value::Null => 0u8.hash(hasher),
+            Value::Bool(value) => (1u8, value).hash(hasher),
+            Value::Int(value) => (2u8, value).hash(hasher),
+            Value::Float(value) => (3u8, value.to_bits()).hash(hasher),
+            Value::String(value) => (4u8, value).hash(hasher),
+            Value::List(values) => {
+                5u8.hash(hasher);
+                hash_values(hasher, values);
+            }
+            Value::Map(entries) => {
+                (6u8, entries.len()).hash(hasher);
+                for (key, value) in entries {
+                    key.hash(hasher);
+                    hash_values(hasher, std::slice::from_ref(value));
+                }
+            }
+        }
     }
 }
 
@@ -306,8 +332,8 @@ mod tests {
 
     /// Two lists of reads as the SDK writes them, `issues` then `code`, each read an operation and its name, then the
     /// entries `from` on of worker 7's class log.
-    fn written_with(issues: &[(u8, &[u8])], code: &[(u8, &[u8])], from: u32, classes: &[&[u8]]) -> Vec<u8> {
-        let mut writer = PayloadWriter::new();
+    fn written_with(issues: &[(u8, &[u8])], code: &[(u8, &[u8])], from: u32, classes: &[&[u8]]) -> Vec<Value> {
+        let mut writer = ValueWriter::new();
         for reads in [issues, code] {
             writer.write_u32(reads.len() as u32);
             for (operation, name) in reads {
@@ -326,8 +352,8 @@ mod tests {
         writer.finish()
     }
 
-    fn decoded_with(bytes: &[u8]) -> Result<(ExtensionReads, ClassLoads), ExternalAnalyzerError> {
-        let mut reader = PayloadReader::new(bytes);
+    fn decoded_with(values: &[Value]) -> Result<(ExtensionReads, ClassLoads), ExternalAnalyzerError> {
+        let mut reader = ValueReader::new(values);
         let decoded = ExtensionReads::decode(&mut reader)?;
         reader.finish()?;
 

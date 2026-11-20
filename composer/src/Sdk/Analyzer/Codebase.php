@@ -23,7 +23,7 @@ use Mago\Sdk\Internal\Analyzer\MetadataCache;
 use Mago\Sdk\Internal\Analyzer\MetadataCodec;
 use Mago\Sdk\Internal\Analyzer\Protocol;
 use Mago\Sdk\Internal\HostClient;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
+use Mago\Sdk\Internal\Protocol\ValueReader;
 
 use function array_key_exists;
 use function array_keys;
@@ -709,7 +709,7 @@ final class Codebase
     /**
      * @template T of object
      * @param list<string> $names
-     * @param Closure(PayloadReader): T $decode
+     * @param Closure(ValueReader): T $decode
      * @return list<T|null>
      */
     private function queryNames(int $operation, array $names, ?int $classLikeKind, Closure $decode): array
@@ -731,7 +731,7 @@ final class Codebase
     /**
      * @template T of object
      * @param list<MemberIdentifier> $members
-     * @param Closure(PayloadReader): T $decode
+     * @param Closure(ValueReader): T $decode
      * @return list<T|null>
      */
     private function queryMembers(int $operation, array $members, Closure $decode): array
@@ -750,7 +750,7 @@ final class Codebase
      * @template T of object
      * @param list<string>|list<MemberIdentifier>|list<FunctionLikeIdentifier> $requests
      * @param list<string> $keys
-     * @param Closure(PayloadReader): T $decode
+     * @param Closure(ValueReader): T $decode
      * @return list<T|null>
      */
     private function query(int $operation, ?int $classLikeKind, array $requests, array $keys, Closure $decode): array

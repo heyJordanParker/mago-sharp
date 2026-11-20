@@ -92,11 +92,11 @@ pub(crate) trait LinterTransport: std::fmt::Debug + Send + Sync {
 
 impl LinterTransport for Host {
     fn broadcast(&self, payload: &[Value]) -> Result<Vec<Value>, WorkerError> {
-        Self::broadcast_values(self, payload)
+        Self::broadcast(self, payload)
     }
 
     fn request(&self, payload: Vec<Value>, running: &dyn std::fmt::Display) -> Result<Vec<Value>, WorkerError> {
-        Self::request_values(self, payload, Some(running), &mut |_: &[u8]| {
+        Self::request(self, payload, Some(running), &mut |_: &[Value]| {
             Err(b"a linter rule queries no codebase".to_vec())
         })
     }

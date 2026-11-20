@@ -9,7 +9,7 @@ use Mago\Sdk\Internal\Analyzer\NodeAnalysisData;
 use Mago\Sdk\Internal\Analyzer\Protocol;
 use Mago\Sdk\Internal\Analyzer\TypeCodec;
 use Mago\Sdk\Internal\HostClient;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
+use Mago\Sdk\Internal\Protocol\ValueReader;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\Span;
 use Mago\Sdk\Syntax\Node;
@@ -19,7 +19,6 @@ use Mago\Sdk\Syntax\SourceFile;
 use function array_key_exists;
 use function array_keys;
 use function count;
-use function strlen;
 use function unpack;
 
 /**
@@ -47,6 +46,9 @@ final class FileAnalysis
      * @internal
      * @param list<NodeKind> $nodeKinds
      * @param list<NodeAnalysisData> $nodeAnalysisData
+     * @param string $expressionTypeRecords each expression's span and the place and length of its type, four 32-bit
+     *   big-endian integers, sorted by span
+     * @param list<null|bool|int|float|string|list<mixed>> $encodedExpressionTypes
      * @param non-empty-string $file
      */
     public function __construct(
@@ -58,7 +60,7 @@ final class FileAnalysis
         private readonly array $nodeAnalysisData,
         private readonly bool $hasLocalExpressionTypes,
         private readonly string $expressionTypeRecords,
-        private readonly string $encodedExpressionTypes,
+        private readonly array $encodedExpressionTypes,
         public readonly string $file,
         public readonly int $size,
         public readonly int $expressionCount,
@@ -266,11 +268,11 @@ final class FileAnalysis
                 continue;
             }
 
-            if (($record[3] + $record[4]) > strlen($this->encodedExpressionTypes)) {
+            if (($record[3] + $record[4]) > count($this->encodedExpressionTypes)) {
                 return null;
             }
 
-            return TypeCodec::readComplete(new PayloadReader($this->encodedExpressionTypes, $record[3]));
+            return TypeCodec::readComplete(new ValueReader($this->encodedExpressionTypes, $record[3]));
         }
 
         return null;

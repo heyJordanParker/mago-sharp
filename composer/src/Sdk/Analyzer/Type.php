@@ -29,8 +29,6 @@ use Mago\Sdk\Internal\Analyzer\TypeCodec;
 use function count;
 use function implode;
 use function is_bool;
-use function pack;
-use function strlen;
 
 /**
  * An immutable semantic type returned by an analyzer provider.
@@ -62,10 +60,11 @@ final class Type
     private const COMPLETE = 20;
 
     /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
      * @param non-empty-list<AtomicType> $atomicTypes
      */
     private function __construct(
-        private readonly string $payload,
+        private readonly array $payload,
         private readonly string $description,
         public readonly array $atomicTypes,
         public readonly TypeFlags $flags,
@@ -118,7 +117,7 @@ final class Type
     public static function literalInt(int $value): self
     {
         return new self(
-            pack('CJ', self::LITERAL_INT, $value),
+            [self::LITERAL_INT, $value],
             "int({$value})",
             [new ScalarType(ScalarTypeKind::Integer, new IntegerType(IntegerTypeKind::Literal, $value, $value))],
             new TypeFlags(),
@@ -171,7 +170,7 @@ final class Type
     public static function literalString(string $value): self
     {
         return new self(
-            pack('CN', self::LITERAL_STRING, strlen($value)) . $value,
+            [self::LITERAL_STRING, $value],
             "'{$value}'",
             [new ScalarType(
                 ScalarTypeKind::String,
@@ -195,10 +194,10 @@ final class Type
             throw new InvalidArgumentException('A named object type requires a class name.');
         }
 
-        $payload = pack('CN', self::NAMED_OBJECT, strlen($class)) . $class . pack('N', count($parameters));
+        $payload = [self::NAMED_OBJECT, $class, count($parameters)];
         $descriptions = [];
         foreach ($parameters as $parameter) {
-            $payload .= $parameter->encode();
+            $payload = [...$payload, ...$parameter->encode()];
             $descriptions[] = $parameter->description;
         }
 
@@ -218,7 +217,7 @@ final class Type
     public static function array(self $key, self $value): self
     {
         return new self(
-            pack('C', self::ARRAY) . $key->encode() . $value->encode(),
+            [self::ARRAY, ...$key->encode(), ...$value->encode()],
             "array<{$key->description}, {$value->description}>",
             [new KeyedArrayType(null, $key, $value, false)],
             new TypeFlags(),
@@ -228,7 +227,7 @@ final class Type
     public static function list(self $element): self
     {
         return new self(
-            pack('C', self::LIST) . $element->encode(),
+            [self::LIST, ...$element->encode()],
             "list<{$element->description}>",
             [new ListType($element, null, null, false)],
             new TypeFlags(),
@@ -238,11 +237,11 @@ final class Type
     public static function union(self $first, self $second, self ...$additional): self
     {
         $members = [$first, $second, ...$additional];
-        $payload = pack('CN', self::UNION, count($members));
+        $payload = [self::UNION, count($members)];
         $descriptions = [];
         $atomicTypes = [];
         foreach ($members as $member) {
-            $payload .= $member->encode();
+            $payload = [...$payload, ...$member->encode()];
             $descriptions[] = $member->description;
             foreach ($member->atomicTypes as $atomicType) {
                 $atomicTypes[] = $atomicType;
@@ -254,14 +253,14 @@ final class Type
 
     public static function fromAtomic(AtomicType $atomicType, ?TypeFlags $flags = null): self
     {
-        return new self('', (string) $atomicType, [$atomicType], $flags ?? new TypeFlags());
+        return new self([], (string) $atomicType, [$atomicType], $flags ?? new TypeFlags());
     }
 
     public static function fromAtomics(AtomicType $first, AtomicType ...$additional): self
     {
         $atomicTypes = [$first, ...$additional];
 
-        return new self('', self::describeAtomics($atomicTypes), $atomicTypes, new TypeFlags());
+        return new self([], self::describeAtomics($atomicTypes), $atomicTypes, new TypeFlags());
     }
 
     public function withFlags(TypeFlags $flags): self
@@ -270,7 +269,7 @@ final class Type
             return $this;
         }
 
-        return new self('', $this->description, $this->atomicTypes, $flags);
+        return new self([], $this->description, $this->atomicTypes, $flags);
     }
 
     /**
@@ -280,7 +279,7 @@ final class Type
      */
     public static function reference(int $handle, string $description, array $atomicTypes, TypeFlags $flags): self
     {
-        return new self(pack('CN', self::REFERENCE, $handle), $description, $atomicTypes, $flags);
+        return new self([self::REFERENCE, $handle], $description, $atomicTypes, $flags);
     }
 
     public function getLiteralInt(): ?int
@@ -346,20 +345,23 @@ final class Type
         return $atomic instanceof ScalarType && is_bool($atomic->refinement) ? $atomic->refinement : null;
     }
 
-    /** @internal */
-    public function encode(): string
+    /**
+     * @return non-empty-list<null|bool|int|float|string|list<mixed>>
+     * @internal
+     */
+    public function encode(): array
     {
-        if ($this->payload !== '') {
+        if ($this->payload !== []) {
             return $this->payload;
         }
 
-        return pack('C', self::COMPLETE) . TypeCodec::encode($this);
+        return [self::COMPLETE, ...TypeCodec::encode($this)];
     }
 
     /** @internal */
     public function isRequestReference(): bool
     {
-        return $this->payload !== '' && $this->payload[0] === "\0";
+        return $this->payload !== [] && $this->payload[0] === self::REFERENCE;
     }
 
     public function __toString(): string
@@ -369,7 +371,7 @@ final class Type
 
     private static function simple(int $kind, string $description, AtomicType $atomicType): self
     {
-        return new self(pack('C', $kind), $description, [$atomicType], new TypeFlags());
+        return new self([$kind], $description, [$atomicType], new TypeFlags());
     }
 
     /** @param non-empty-list<AtomicType> $atomicTypes */

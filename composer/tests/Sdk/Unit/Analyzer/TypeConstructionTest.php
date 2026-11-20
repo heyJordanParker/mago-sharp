@@ -25,15 +25,15 @@ use Mago\Sdk\Analyzer\Type\StringLiteralKind;
 use Mago\Sdk\Analyzer\Type\StringType;
 use Mago\Sdk\Exception\InvalidArgumentException;
 use Mago\Sdk\Internal\Analyzer\TypeCodec;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
-use Mago\Sdk\Internal\Protocol\PayloadWriter;
+use Mago\Sdk\Internal\Protocol\ValueReader;
+use Mago\Sdk\Internal\Protocol\ValueWriter;
 use PHPUnit\Framework\TestCase;
 
 final class TypeConstructionTest extends TestCase
 {
     public function testCallableParameterClosureThisTypeDecodesFromSnapshot(): void
     {
-        $writer = new PayloadWriter();
+        $writer = new ValueWriter();
         $writer->writeU32(0);
         $writer->writeU16(0);
         $writer->writeLength(1);
@@ -65,7 +65,7 @@ final class TypeConstructionTest extends TestCase
         $writer->writeBoolean(false);
         $writer->writeLength(0);
 
-        $decoded = TypeCodec::readComplete(new PayloadReader($writer->finish()));
+        $decoded = TypeCodec::readComplete(new ValueReader($writer->finish()));
         $callable = $decoded->atomicTypes[0];
         self::assertInstanceOf(CallableType::class, $callable);
         self::assertNotNull($callable->signature);

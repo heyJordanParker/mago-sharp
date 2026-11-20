@@ -69,14 +69,14 @@ pub trait WorkerRequestHandler {
     /// # Errors
     ///
     /// Returns why the query failed, which the worker receives as an exception.
-    fn handle(&mut self, query: &[u8]) -> Result<Vec<u8>, Vec<u8>>;
+    fn handle(&mut self, query: &[Value]) -> Result<Vec<Value>, Vec<u8>>;
 }
 
 impl<F> WorkerRequestHandler for F
 where
-    F: FnMut(&[u8]) -> Result<Vec<u8>, Vec<u8>>,
+    F: FnMut(&[Value]) -> Result<Vec<Value>, Vec<u8>>,
 {
-    fn handle(&mut self, query: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
+    fn handle(&mut self, query: &[Value]) -> Result<Vec<Value>, Vec<u8>> {
         self(query)
     }
 }
@@ -87,7 +87,7 @@ struct Bootstrap {
     sequence: u64,
     host: usize,
     group: Option<u64>,
-    request: Value,
+    request: Vec<Value>,
 }
 
 /// What one thread's interpreter has done: its id, the last bootstrap it received, and how many reloads it checked.
@@ -198,7 +198,7 @@ impl Hosts {
 
     /// Gives the calling thread's interpreter each bootstrap after `replayed`, in order.
     fn replay(&self, replayed: u64) -> Result<(), WorkerError> {
-        let pending: Vec<(u64, usize, Value)> = lock(&self.bootstraps)
+        let pending: Vec<(u64, usize, Vec<Value>)> = lock(&self.bootstraps)
             .iter()
             .filter(|bootstrap| bootstrap.sequence > replayed)
             .map(|bootstrap| (bootstrap.sequence, bootstrap.host, bootstrap.request.clone()))
@@ -228,7 +228,7 @@ impl Hosts {
         }
 
         let classes: Vec<&[u8]> = changed.iter().map(Vec::as_slice).collect();
-        let answer = self.handle_list(0, reduction::class_loads_request(&classes)?, None, &mut no_queries)?;
+        let answer = self.handle(0, reduction::class_loads_request(&classes)?, None, &mut no_queries)?;
         if reduction::decode_class_loads_response(&answer)? {
             tracing::debug!(
                 interpreter = prepared.interpreter,
@@ -279,36 +279,39 @@ impl Hosts {
         }
     }
 
-    /// Serves `request` with the worker of host `host` in the calling thread's interpreter, answering its codebase
-    /// queries with `handler`. `running` names the request for its deadline's error, unless the worker names the unit
-    /// it started.
+    /// Serves `request`, a message of values, with the worker of host `host` in the calling thread's interpreter, which
+    /// answers with one, answering its codebase queries with `handler`. `running` names the request for its deadline's
+    /// error, unless the worker names the unit it started.
     fn handle(
         &self,
         host: usize,
-        request: Value,
+        request: Vec<Value>,
         running: Option<&dyn Display>,
         handler: &mut dyn WorkerRequestHandler,
-    ) -> Result<Value, WorkerError> {
+    ) -> Result<Vec<Value>, WorkerError> {
         let file = &self.files[host];
         let mut progressed = None;
         let index = i64::try_from(host).unwrap_or(i64::MAX);
-        let returned = self.engine.call(HANDLE, &[Value::Int(index), request], file.deadline, &mut |asked| match asked
-            .as_slice()
-        {
-            [Value::String(question), Value::String(query)] if question == b"query" => {
-                handler.handle(query).map(Value::String).map_err(|error| String::from_utf8_lossy(&error).into())
-            }
-            [Value::String(question), Value::String(unit)] if question == b"progress" => {
-                progressed = Some(String::from_utf8_lossy(unit).into_owned());
-                self.engine.restart_deadline();
-                Ok(Value::Null)
-            }
-            _ => Err("mago answers a `query` or a `progress` with one string".to_owned()),
-        });
+        let returned = self.engine.call(
+            HANDLE,
+            &[Value::Int(index), Value::List(request)],
+            file.deadline,
+            &mut |asked| match asked.as_slice() {
+                [Value::String(question), Value::List(query)] if question == b"query" => {
+                    handler.handle(query).map(Value::List).map_err(|error| String::from_utf8_lossy(&error).into())
+                }
+                [Value::String(question), Value::String(unit)] if question == b"progress" => {
+                    progressed = Some(String::from_utf8_lossy(unit).into_owned());
+                    self.engine.restart_deadline();
+                    Ok(Value::Null)
+                }
+                _ => Err("mago answers a `query` of one list or a `progress` of one string".to_owned()),
+            },
+        );
 
         match returned {
             Ok(Value::List(answer)) => match <[Value; 2]>::try_from(answer) {
-                Ok([Value::Bool(true), response @ (Value::String(_) | Value::List(_))]) => Ok(response),
+                Ok([Value::Bool(true), Value::List(response)]) => Ok(response),
                 Ok([Value::Bool(false), Value::String(message)]) => Err(WorkerError::Remote {
                     host: file.name.clone(),
                     message: String::from_utf8_lossy(&message).into(),
@@ -325,31 +328,6 @@ impl Hosts {
         }
     }
 
-    /// Serves `request`, a message of values, with the worker of host `host`, which answers with one.
-    fn handle_list(
-        &self,
-        host: usize,
-        request: Vec<Value>,
-        running: Option<&dyn Display>,
-        handler: &mut dyn WorkerRequestHandler,
-    ) -> Result<Vec<Value>, WorkerError> {
-        list_of(&self.files[host], self.handle(host, Value::List(request), running, handler)?)
-    }
-
-    /// Serves `request`, a message of bytes, with the worker of host `host`, which answers with one.
-    fn handle_bytes(
-        &self,
-        host: usize,
-        request: Vec<u8>,
-        running: Option<&dyn Display>,
-        handler: &mut dyn WorkerRequestHandler,
-    ) -> Result<Vec<u8>, WorkerError> {
-        match self.handle(host, Value::String(request), running, handler)? {
-            Value::String(response) => Ok(response),
-            _ => Err(unanswered(&self.files[host])),
-        }
-    }
-
     /// Runs the worker reducers of host `host`: collects each interpreter's state, on the thread it runs on, and reduces
     /// it all in the calling thread's interpreter.
     fn reduce(&self, host: usize) -> Result<(), WorkerError> {
@@ -359,7 +337,7 @@ impl Hosts {
                 .with_borrow(|prepared| prepared.get(&self.id).copied())
                 .filter(|p| Some(p.interpreter) == current)?;
 
-            Some(self.handle_list(host, reduction::collect_request(), None, &mut no_queries))
+            Some(self.handle(host, reduction::collect_request(), None, &mut no_queries))
         };
         let mut collected: Vec<Result<Vec<Value>, WorkerError>> = if self.pooled.load(Ordering::Acquire) {
             rayon::broadcast(|_| collect()).into_iter().flatten().collect()
@@ -380,7 +358,7 @@ impl Hosts {
         }
 
         self.prepare()?;
-        let answer = self.handle_list(host, reduction::reduce_request(&responses)?, None, &mut no_queries)?;
+        let answer = self.handle(host, reduction::reduce_request(&responses)?, None, &mut no_queries)?;
 
         reduction::decode_reduce_response(&answer)
     }
@@ -419,48 +397,28 @@ impl Host {
         &self.hosts.files[self.index].name
     }
 
-    /// Sends `request` to the host's worker in every interpreter, this thread's now and each other one before its next
-    /// request, and returns this thread's response.
+    /// Sends `request`, a message of values, to the host's worker in every interpreter, this thread's now and each other
+    /// one before its next request, and returns this thread's response.
     ///
     /// # Errors
     ///
     /// Returns an error when the interpreter can't be made ready or the worker fails the request.
-    pub fn broadcast(&self, request: &[u8]) -> Result<Vec<u8>, WorkerError> {
+    pub fn broadcast(&self, request: &[Value]) -> Result<Vec<Value>, WorkerError> {
         Ok(self.broadcast_sequence(None, &[request.to_vec()])?.pop().unwrap_or_default())
     }
 
-    /// Sends `requests` in order as [`Self::broadcast`] sends one. Those of a `group` replace the ones an earlier
-    /// sequence of that group sent, so an interpreter that starts later receives only the latest.
+    /// Sends `requests` in order as [`Self::broadcast`] sends one, and keeps each as a bootstrap. Those of a `group`
+    /// replace the ones an earlier sequence of that group sent, so an interpreter that starts later receives only the
+    /// latest.
     ///
     /// # Errors
     ///
     /// Returns an error when the interpreter can't be made ready or the worker fails a request.
-    pub fn broadcast_sequence(&self, group: Option<u64>, requests: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, WorkerError> {
-        let file = &self.hosts.files[self.index];
-        let requests = requests.iter().map(|request| Value::String(request.clone())).collect();
-        self.broadcast_messages(group, requests)?
-            .into_iter()
-            .map(|response| match response {
-                Value::String(response) => Ok(response),
-                _ => Err(unanswered(file)),
-            })
-            .collect()
-    }
-
-    /// Sends `request`, a message of values, as [`Self::broadcast`] sends one of bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the interpreter can't be made ready or the worker fails the request.
-    pub fn broadcast_values(&self, request: &[Value]) -> Result<Vec<Value>, WorkerError> {
-        let response = self.broadcast_messages(None, vec![Value::List(request.to_vec())])?.pop();
-
-        list_of(&self.hosts.files[self.index], response.unwrap_or(Value::Null))
-    }
-
-    /// Sends `requests` to the host's worker in every interpreter, and keeps each as a bootstrap, which replaces those an
-    /// earlier sequence of `group` sent.
-    fn broadcast_messages(&self, group: Option<u64>, requests: Vec<Value>) -> Result<Vec<Value>, WorkerError> {
+    pub fn broadcast_sequence(
+        &self,
+        group: Option<u64>,
+        requests: &[Vec<Value>],
+    ) -> Result<Vec<Vec<Value>>, WorkerError> {
         let hosts = &self.hosts;
         hosts.prepare()?;
         let responses = requests
@@ -474,15 +432,16 @@ impl Host {
         }
         for request in requests {
             let sequence = hosts.next_bootstrap.fetch_add(1, Ordering::Relaxed);
-            bootstraps.push(Bootstrap { sequence, host: self.index, group, request });
+            bootstraps.push(Bootstrap { sequence, host: self.index, group, request: request.clone() });
             hosts.mark_replayed(sequence);
         }
 
         Ok(responses)
     }
 
-    /// Sends `request` to the host's worker in the calling thread's interpreter, answering its codebase queries with
-    /// `handler`. `running` names the request for its deadline's error, unless the worker names the unit it started.
+    /// Sends `request`, a message of values, to the host's worker in the calling thread's interpreter, answering its
+    /// codebase queries with `handler`. `running` names the request for its deadline's error, unless the worker names
+    /// the unit it started.
     ///
     /// # Errors
     ///
@@ -490,28 +449,12 @@ impl Host {
     /// its deadline.
     pub fn request(
         &self,
-        request: Vec<u8>,
-        running: Option<&dyn Display>,
-        handler: &mut dyn WorkerRequestHandler,
-    ) -> Result<Vec<u8>, WorkerError> {
-        self.hosts.prepare()?;
-        self.hosts.handle_bytes(self.index, request, running, handler)
-    }
-
-    /// Sends `request`, a message of values, as [`Self::request`] sends one of bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the interpreter can't be made ready, the worker fails the request, or the request runs past
-    /// its deadline.
-    pub fn request_values(
-        &self,
         request: Vec<Value>,
         running: Option<&dyn Display>,
         handler: &mut dyn WorkerRequestHandler,
     ) -> Result<Vec<Value>, WorkerError> {
         self.hosts.prepare()?;
-        self.hosts.handle_list(self.index, request, running, handler)
+        self.hosts.handle(self.index, request, running, handler)
     }
 
     /// Takes in that the compiled files of `classes`, each a lowercase class name, changed: each interpreter that loaded
@@ -631,20 +574,12 @@ fn unanswered(file: &HostFile) -> WorkerError {
     WorkerError::Failed { host: file.name.clone(), message: "its worker answered with no response".to_owned() }
 }
 
-/// The fields of `response`, the answer of `file`'s worker to a message of values, which is one too.
-fn list_of(file: &HostFile, response: Value) -> Result<Vec<Value>, WorkerError> {
-    match response {
-        Value::List(response) => Ok(response),
-        _ => Err(unanswered(file)),
-    }
-}
-
 fn path_value(path: &Path) -> Value {
     Value::String(path.as_os_str().as_encoded_bytes().to_vec())
 }
 
 /// Answers a worker that asks a codebase query during a request that takes none.
-fn no_queries(_: &[u8]) -> Result<Vec<u8>, Vec<u8>> {
+fn no_queries(_: &[Value]) -> Result<Vec<Value>, Vec<u8>> {
     Err(b"mago answers no codebase query during this request".to_vec())
 }
 
@@ -691,7 +626,7 @@ mod tests {
         let declaring = format!("final class Shared {{}}\n\n{WORKER}");
         let hosts = hosts_of("clash", &[("routes", &declaring), ("models", &declaring)]);
 
-        let error = hosts.hosts()[0].broadcast(b"describe").unwrap_err();
+        let error = hosts.hosts()[0].broadcast(&[Value::String(b"describe".to_vec())]).unwrap_err();
 
         assert_eq!(
             error.to_string(),
@@ -725,7 +660,7 @@ mod tests {
         };
         let hosts = Hosts::new(vec![host], directory.clone(), &directory.join("sdk")).unwrap();
 
-        let served = hosts.hosts()[0].broadcast(b"describe");
+        let served = hosts.hosts()[0].broadcast(&[Value::String(b"describe".to_vec())]);
 
         assert!(matches!(served, Err(WorkerError::Remote { .. })), "the host loaded and its worker served: {served:?}");
         let logged = std::fs::read_to_string(&log).unwrap();
@@ -736,7 +671,7 @@ mod tests {
     fn a_host_whose_file_registers_no_worker_is_refused_naming_it() {
         let hosts = hosts_of("silent", &[("routes", "final class Quiet {}")]);
 
-        let error = hosts.hosts()[0].broadcast(b"describe").unwrap_err().to_string();
+        let error = hosts.hosts()[0].broadcast(&[Value::String(b"describe".to_vec())]).unwrap_err().to_string();
 
         assert!(error.starts_with("extension host `routes` could not load: "), "{error}");
         assert!(error.contains("must call Mago\\Sdk\\Worker::run() once"), "{error}");

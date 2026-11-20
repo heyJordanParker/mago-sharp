@@ -12,9 +12,14 @@ use function get_declared_interfaces;
 use function get_declared_traits;
 
 /**
- * The question mago's engine lets the PHP it runs ask, which these tests answer as mago does.
+ * The question mago's engine lets the PHP it runs ask, which these tests answer as mago does: a `query` of a message
+ * of values, which mago answers with one, or a `progress` of the unit a request starts.
+ *
+ * @param string|list<null|bool|int|float|string|list<mixed>> $payload
+ *
+ * @return null|list<null|bool|int|float|string|list<mixed>>
  */
-function ask(string $question, string $payload): ?string
+function ask(string $question, string|array $payload): ?array
 {
     return Mago::ask($question, $payload);
 }

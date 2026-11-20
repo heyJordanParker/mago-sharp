@@ -24,7 +24,7 @@ use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
 use mago_database::file::FileId;
-use mago_extension::PayloadReader;
+use mago_extension::ValueReader;
 use mago_names::display_sharp_member;
 use mago_names::short_name;
 use mago_reporting::Annotation;
@@ -118,7 +118,7 @@ struct SignatureRefinement {
 /// `plugin_of_hook` names the plugin that registered each hook, so reported issue codes
 /// carry their plugin's identifier exactly as lifecycle issues do.
 pub(super) fn decode(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     files: &HashMap<&[u8], &File>,
     plugin_of_hook: &dyn Fn(u16) -> Option<String>,
 ) -> Result<Vec<DeclarationRefinement>, ExternalAnalyzerError> {
@@ -628,7 +628,7 @@ fn apply_inherited(class: &mut ClassLikeMetadata, application: InheritedApplicat
 }
 
 fn read_signature(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     file: &File,
     plugin: &str,
 ) -> Result<SignatureRefinement, ExternalAnalyzerError> {
@@ -648,7 +648,7 @@ fn read_signature(
 }
 
 fn read_members(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     file: &File,
     what: &'static str,
 ) -> Result<Vec<(Word, RefinedType)>, ExternalAnalyzerError> {
@@ -661,7 +661,7 @@ fn read_members(
     Ok(members)
 }
 
-fn read_templates(reader: &mut PayloadReader<'_>, file: &File) -> Result<Vec<RefinedTemplate>, ExternalAnalyzerError> {
+fn read_templates(reader: &mut ValueReader<'_>, file: &File) -> Result<Vec<RefinedTemplate>, ExternalAnalyzerError> {
     let count = reader.read_count("refined type parameters", MAXIMUM_MEMBERS)?;
     let mut templates = Vec::with_capacity(count);
     for _ in 0..count {
@@ -684,13 +684,13 @@ fn read_templates(reader: &mut PayloadReader<'_>, file: &File) -> Result<Vec<Ref
     Ok(templates)
 }
 
-fn read_refined_type(reader: &mut PayloadReader<'_>, file: &File) -> Result<RefinedType, ExternalAnalyzerError> {
+fn read_refined_type(reader: &mut ValueReader<'_>, file: &File) -> Result<RefinedType, ExternalAnalyzerError> {
     let type_union = decode_refined_type(reader)?;
     Ok(RefinedType { type_union, span: read_span(reader, file)? })
 }
 
 /// An anonymous declaration is named by where it starts, exactly as the scanner names it.
-fn read_offset(reader: &mut PayloadReader<'_>, file: &File) -> Result<Span, ExternalAnalyzerError> {
+fn read_offset(reader: &mut ValueReader<'_>, file: &File) -> Result<Span, ExternalAnalyzerError> {
     let offset = reader.read_u32("anonymous declaration offset")?;
     if offset > file.size {
         return Err(protocol(format!(
@@ -701,7 +701,7 @@ fn read_offset(reader: &mut PayloadReader<'_>, file: &File) -> Result<Span, Exte
     Ok(Span::new(file.id, Position::new(offset), Position::new(offset)))
 }
 
-fn read_span(reader: &mut PayloadReader<'_>, file: &File) -> Result<Span, ExternalAnalyzerError> {
+fn read_span(reader: &mut ValueReader<'_>, file: &File) -> Result<Span, ExternalAnalyzerError> {
     let start = reader.read_u32("refinement span start")?;
     let end = reader.read_u32("refinement span end")?;
     if start > end || end > file.size {

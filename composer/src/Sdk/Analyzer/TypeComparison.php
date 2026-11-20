@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Analyzer;
 
-use function pack;
+use function serialize;
 
 /**
  * One native type comparison, suitable for batched evaluation.
@@ -13,9 +13,11 @@ use function pack;
  */
 final class TypeComparison
 {
-    private ?string $leftEncoding = null;
+    /** @var null|non-empty-list<null|bool|int|float|string|list<mixed>> */
+    private ?array $leftEncoding = null;
 
-    private ?string $rightEncoding = null;
+    /** @var null|non-empty-list<null|bool|int|float|string|list<mixed>> */
+    private ?array $rightEncoding = null;
 
     private ?string $cacheKey = null;
 
@@ -40,14 +42,20 @@ final class TypeComparison
         return new self(TypeComparisonKind::CanBeIdentical, $left, $right);
     }
 
-    /** @internal */
-    public function encodeLeft(): string
+    /**
+     * @return non-empty-list<null|bool|int|float|string|list<mixed>>
+     * @internal
+     */
+    public function encodeLeft(): array
     {
         return $this->leftEncoding ??= $this->left->encode();
     }
 
-    /** @internal */
-    public function encodeRight(): string
+    /**
+     * @return non-empty-list<null|bool|int|float|string|list<mixed>>
+     * @internal
+     */
+    public function encodeRight(): array
     {
         return $this->rightEncoding ??= $this->right->encode();
     }
@@ -55,6 +63,6 @@ final class TypeComparison
     /** @internal */
     public function cacheKey(): string
     {
-        return $this->cacheKey ??= pack('C', $this->kind->value) . $this->encodeLeft() . $this->encodeRight();
+        return $this->cacheKey ??= serialize([$this->kind->value, $this->encodeLeft(), $this->encodeRight()]);
     }
 }

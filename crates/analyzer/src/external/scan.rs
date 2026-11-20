@@ -9,7 +9,8 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_database::matcher::ExclusionMatcher;
-use mago_extension::PayloadWriter;
+use mago_extension::Value;
+use mago_extension::ValueWriter;
 
 use crate::external::AnalyzerTransport;
 use crate::external::Backend;
@@ -20,7 +21,8 @@ use crate::external::metadata;
 use crate::external::protocol;
 
 const BOOTSTRAP_GROUP: u64 = 0x434F_4445_5343_414E;
-const MESSAGE_OVERHEAD: usize = 12 + 1 + 1 + 4 + 4;
+/// The values of a request besides its hooks and files: its header, its two flags, and its two counts.
+const MESSAGE_OVERHEAD: usize = 2 + 1 + 1 + 1 + 1;
 
 #[derive(Debug, Clone)]
 struct HookMatcher {
@@ -133,7 +135,7 @@ impl CodebaseScanPlan {
             return Ok(None);
         }
 
-        let mut writer = PayloadWriter::default();
+        let mut writer = ValueWriter::default();
         let holds_member_reads = metadata::write_declarations(&mut writer, metadata, None, file)?;
         Ok(Some(CodebaseScanFile {
             file: Arc::clone(file),
@@ -154,7 +156,7 @@ struct CodebaseScanRoute {
 #[derive(Debug, Clone)]
 pub struct CodebaseScanFile {
     file: Arc<File>,
-    declarations: Arc<[u8]>,
+    declarations: Arc<[Value]>,
     routes: Box<[CodebaseScanRoute]>,
     /// The file's own scan, kept while its attributes hold a PHP# member read, which only the merged scan resolves.
     scan: Option<Arc<CodebaseMetadata>>,
@@ -186,7 +188,7 @@ impl CodebaseScanFile {
             return Ok(false);
         };
 
-        let mut writer = PayloadWriter::default();
+        let mut writer = ValueWriter::default();
         metadata::write_declarations(&mut writer, metadata, Some(scan), &self.file)?;
         let declarations = writer.finish();
         let changed = *self.declarations != *declarations;
@@ -199,12 +201,9 @@ impl CodebaseScanFile {
         self.routes.iter().find(|route| route.backend == backend).map(|route| route.hooks.as_ref())
     }
 
+    /// The values the file's part of a request holds: its hook count and hooks, its name, and its declarations.
     fn encoded_len(&self, hooks: &[u16]) -> usize {
-        4usize
-            .saturating_add(hooks.len().saturating_mul(2))
-            .saturating_add(4)
-            .saturating_add(self.file.name.len())
-            .saturating_add(self.declarations.len())
+        2usize.saturating_add(hooks.len()).saturating_add(self.declarations.len())
     }
 }
 
@@ -228,12 +227,12 @@ where
             files.iter().filter_map(|file| file.route(backend_index).map(|hooks| (file, hooks))).collect::<Vec<_>>();
         let active_hooks = backend.registration.codebase_scan_hooks.iter().map(|hook| hook.index).collect::<Vec<_>>();
         let request = encode_batch(&active_hooks, &selected)?;
-        let request_bytes = request.len();
+        let request_fields = request.len();
         let started_at = tracing::enabled!(tracing::Level::TRACE).then(Instant::now);
         tracing::trace!(
             backend = backend_index,
             files = selected.len(),
-            request_bytes,
+            request_fields,
             "Broadcasting filtered codebase-scan snapshots."
         );
         let responses = backend.transport.broadcast_sequence(BOOTSTRAP_GROUP, &[request])?;
@@ -257,7 +256,7 @@ where
             tracing::trace!(
                 backend = backend_index,
                 files = selected.len(),
-                request_bytes,
+                request_fields,
                 elapsed = ?started_at.elapsed(),
                 "Filtered codebase-scan broadcast completed."
             );
@@ -268,7 +267,10 @@ where
 }
 
 /// The one codebase-scan request of `files`, which is both the first and the last batch of the scan.
-fn encode_batch(active_hooks: &[u16], files: &[(&CodebaseScanFile, &[u16])]) -> Result<Vec<u8>, ExternalAnalyzerError> {
+fn encode_batch(
+    active_hooks: &[u16],
+    files: &[(&CodebaseScanFile, &[u16])],
+) -> Result<Vec<Value>, ExternalAnalyzerError> {
     let capacity = files
         .iter()
         .fold(MESSAGE_OVERHEAD.saturating_add(active_hooks.len().saturating_mul(2)), |size, (file, hooks)| {
@@ -288,7 +290,7 @@ fn encode_batch(active_hooks: &[u16], files: &[(&CodebaseScanFile, &[u16])]) -> 
             writer.write_u16(*hook);
         }
         writer.write_bytes(&file.file.name)?;
-        writer.write_raw(&file.declarations);
+        writer.write_values(&file.declarations);
     }
 
     Ok(writer.finish())

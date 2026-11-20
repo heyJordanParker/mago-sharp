@@ -10,7 +10,7 @@ use Mago\Sdk\Analyzer\Type\DerivedTypeKind;
 use Mago\Sdk\Analyzer\Type\ListType;
 use Mago\Sdk\Analyzer\Type\NamedObjectType;
 use Mago\Sdk\Analyzer\Type\TypeFlags;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
+use Mago\Sdk\Internal\Protocol\ValueReader;
 use PHPUnit\Framework\TestCase;
 
 final class TypeEncodingTest extends TestCase
@@ -20,7 +20,7 @@ final class TypeEncodingTest extends TestCase
         $type = Type::fromAtomic(new ListType(Type::string(), null, null, true))->withFlags(
             new TypeFlags(possiblyUndefined: true),
         );
-        $reader = new PayloadReader($type->encode());
+        $reader = new ValueReader($type->encode());
 
         self::assertSame(20, $reader->readU8());
         self::assertSame(1 << 4, $reader->readU16());
@@ -45,7 +45,7 @@ final class TypeEncodingTest extends TestCase
     {
         $order = new NamedObjectType('App\\Order', null, null, false, false, null, false);
         $type = Type::fromAtomic(new DerivedType(DerivedTypeKind::KeyOf, [Type::fromAtomic($order)]));
-        $reader = new PayloadReader($type->encode());
+        $reader = new ValueReader($type->encode());
 
         self::assertSame(20, $reader->readU8());
         self::assertSame(0, $reader->readU16());

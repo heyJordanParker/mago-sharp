@@ -26,7 +26,7 @@ use Mago\Sdk\Exception\InvalidArgumentException;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Internal\Analyzer\Protocol;
 use Mago\Sdk\Internal\Hosts;
-use Mago\Sdk\Internal\Protocol\PayloadWriter;
+use Mago\Sdk\Internal\Protocol\ValueWriter;
 use Mago\Sdk\Internal\Worker\Protocol as WorkerProtocol;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\Syntax\NodeKind;
@@ -38,13 +38,12 @@ use ReflectionProperty;
 use RuntimeException;
 
 use function count;
-use function pack;
+use function is_string;
 
 require_once __DIR__ . '/Engine.php';
 
 final class WorkerTest extends TestCase
 {
-    private const ANALYZER_MAGIC = 0x4D41_4E41;
     private const CODEBASE_QUERY_RESPONSE = 0x8004;
     private const GENERATION = 1;
     private const ROUTE_CLASS = 'App\Http\Routes';
@@ -367,23 +366,35 @@ final class WorkerTest extends TestCase
      * Registers `$worker` as mago's engine runs a host's file, then calls it with every request in `$requests`, in
      * order, answering each codebase query with one route.
      *
-     * @param non-empty-array<non-empty-string, string|list<null|bool|int|float|string|list<mixed>>> $requests each request's payload, by a label for it
+     * @param non-empty-array<non-empty-string, list<null|bool|int|float|string|list<mixed>>> $requests each request's payload, by a label for it
      *
      * @return list<string> everything the worker told mago, in order, named by its request's label
      */
     private static function serve(Worker $worker, array $requests): array
     {
-        /** @var list<\Closure(string|list<null|bool|int|float|string|list<mixed>>): (string|list<null|bool|int|float|string|list<mixed>>)> $handlers */
+        /** @var list<\Closure(list<null|bool|int|float|string|list<mixed>>): list<null|bool|int|float|string|list<mixed>>> $handlers */
         $handlers = (new ReflectionProperty(Hosts::class, 'handlers'))->getValue();
         $place = count($handlers);
         $worker->run();
         $sent = [];
         foreach ($requests as $label => $payload) {
-            Mago::$answer = static function (string $question, string $asked) use ($label, &$sent): ?string {
-                $sent[] = $question === 'progress' ? "{$label}: start {$asked}" : "{$label}: query";
+            Mago::$answer =
+                /**
+                 * @param string|list<null|bool|int|float|string|list<mixed>> $asked
+                 *
+                 * @return null|list<null|bool|int|float|string|list<mixed>>
+                 */
+                static function (string $question, string|array $asked) use ($label, &$sent): ?array {
+                    if (is_string($asked)) {
+                        $sent[] = "{$label}: start {$asked}";
 
-                return $question === 'progress' ? null : self::routesResponse();
-            };
+                        return null;
+                    }
+
+                    $sent[] = "{$label}: {$question}";
+
+                    return self::routesResponse();
+                };
             $answer = Hosts::handle($place, $payload);
             $sent[] = "{$label}: " . ($answer[0] ? 'response' : "error {$answer[1]}");
         }
@@ -393,9 +404,12 @@ final class WorkerTest extends TestCase
         return $sent;
     }
 
-    private static function describeRequest(int $version = Protocol::VERSION_U32): string
+    /**
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    private static function describeRequest(): array
     {
-        $message = self::analyzerMessage(Protocol::DESCRIBE_REQUEST, $version);
+        $message = self::analyzerMessage(Protocol::DESCRIBE_REQUEST);
         $message->writeU32(PHPVersion::fromParts(8, 4)->id);
         $message->writeCount(NodeKind::cases());
         foreach (NodeKind::cases() as $kind) {
@@ -408,8 +422,10 @@ final class WorkerTest extends TestCase
     /**
      * An after-file batch of `$file` alone. A batch runs several files' hooks, so the worker names each file as it
      * starts its hooks, which shows when each request started.
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    private static function afterFileRequest(string $file): string
+    private static function afterFileRequest(string $file): array
     {
         $message = self::analyzerMessage(Protocol::AFTER_FILE_ANALYSIS_BATCH_REQUEST);
         $message->writeU64(self::GENERATION);
@@ -433,8 +449,10 @@ final class WorkerTest extends TestCase
 
     /**
      * The initialization of the first plugin, then the second.
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    private static function initializeRequest(): string
+    private static function initializeRequest(): array
     {
         $message = self::analyzerMessage(Protocol::INITIALIZE_REQUEST);
         $message->writeLength(2);
@@ -446,8 +464,10 @@ final class WorkerTest extends TestCase
 
     /**
      * The only batch of a codebase scan, for the first plugin's codebase-scan hook, then the second's, with no file.
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    private static function codebaseScanRequest(): string
+    private static function codebaseScanRequest(): array
     {
         $message = self::analyzerMessage(Protocol::CODEBASE_SCAN_REQUEST);
         $message->writeBoolean(true);
@@ -463,8 +483,10 @@ final class WorkerTest extends TestCase
     /**
      * A before-analysis or after-analysis request of `$kind` for the first plugin, then the second. An after-analysis
      * request carries a project of no file and no issue.
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    private static function projectRequest(int $kind): string
+    private static function projectRequest(int $kind): array
     {
         $message = self::analyzerMessage($kind);
         $message->writeU64(self::GENERATION);
@@ -483,7 +505,10 @@ final class WorkerTest extends TestCase
         return $message->finish();
     }
 
-    private static function routesResponse(): string
+    /**
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    private static function routesResponse(): array
     {
         $message = self::analyzerMessage(self::CODEBASE_QUERY_RESPONSE);
         $message->writeU64(self::GENERATION);
@@ -501,9 +526,9 @@ final class WorkerTest extends TestCase
         return $message->finish();
     }
 
-    private static function analyzerMessage(int $kind, int $version = Protocol::VERSION_U32): PayloadWriter
+    private static function analyzerMessage(int $kind): ValueWriter
     {
-        return new PayloadWriter(pack('N3', self::ANALYZER_MAGIC, $version, $kind << 16));
+        return new ValueWriter([Protocol::NAME, $kind]);
     }
 
     /**

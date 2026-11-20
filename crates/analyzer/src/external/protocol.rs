@@ -87,9 +87,10 @@ use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::visibility::Visibility;
 use mago_database::file::File;
-use mago_extension::PayloadReader;
-use mago_extension::PayloadWriter;
-use mago_extension::source::write_node_kind_table;
+use mago_extension::Value;
+use mago_extension::ValueReader;
+use mago_extension::ValueWriter;
+use mago_extension::source::write_node_kind_values;
 use mago_php_version::PHPVersion;
 use mago_reporting::AnnotationKind;
 use mago_reporting::Issue;
@@ -138,16 +139,16 @@ use crate::invocation::Invocation;
 use crate::invocation::MethodInvocationKind;
 use crate::invocation::MethodTargetContext;
 
-pub const ANALYZER_PROTOCOL_MAGIC: [u8; 4] = *b"MANA";
-pub const ANALYZER_PROTOCOL_MAJOR: u16 = 1;
-pub const ANALYZER_PROTOCOL_MINOR: u16 = 16;
+/// The name the first value of each analyzer message holds.
+const PROTOCOL: &[u8] = b"analyzer";
 /// A method identifier's rule, as the codebase answers it for its class: a PHP# class-like, spec section 24.
 const METHOD_OF_SHARP_CLASS: u8 = 1;
 /// A method identifier's rule: its class keys its methods by their declared names.
 const METHOD_OF_EXACT_NAMES: u8 = 2;
 
-const HEADER_LENGTH: usize = 12;
-const INITIAL_MESSAGE_CAPACITY: usize = 256;
+/// The values of a message before its fields: its protocol's name and its kind.
+const HEADER_LENGTH: usize = 2;
+const INITIAL_MESSAGE_CAPACITY: usize = 16;
 const DESCRIBE_REQUEST: u16 = 1;
 const RETURN_TYPE_REQUEST: u16 = 2;
 const TYPE_COMPARISON_REQUEST: u16 = 3;
@@ -274,7 +275,7 @@ pub(super) struct InitializationStub {
 }
 
 pub(super) struct ReturnTypeRequest<'type_info> {
-    pub payload: Vec<u8>,
+    pub payload: Vec<Value>,
     pub types: Vec<Cow<'type_info, TUnion>>,
     pub receiver_type_count: usize,
     pub snapshotted_types: usize,
@@ -284,7 +285,7 @@ pub(super) struct ReturnTypeRequest<'type_info> {
 }
 
 pub(super) struct PropertyTypeRequest<'type_info> {
-    pub payload: Vec<u8>,
+    pub payload: Vec<Value>,
     pub types: Vec<Cow<'type_info, TUnion>>,
     pub snapshotted_types: usize,
     pub type_snapshot_duration: Duration,
@@ -306,42 +307,29 @@ pub(super) enum NestedRequestKind {
     SymbolReferenceQuery,
 }
 
-pub(super) fn encode_describe_request(php_version: PHPVersion) -> Vec<u8> {
+pub(super) fn encode_describe_request(php_version: PHPVersion) -> Vec<Value> {
     let mut writer = message_writer(DESCRIBE_REQUEST);
     writer.write_u32(php_version.to_version_id());
-    write_node_kind_table(&mut writer);
+    write_node_kind_values(&mut writer);
     writer.finish()
 }
 
 pub(super) fn decode_codebase_scan_response(
-    payload: &[u8],
+    payload: &[Value],
     files: &foldhash::HashMap<&[u8], &File>,
     plugin_of_hook: &dyn Fn(u16) -> Option<String>,
 ) -> Result<Vec<crate::external::DeclarationRefinement>, ExternalAnalyzerError> {
-    let mut reader = message_kind_reader(payload, CODEBASE_SCAN_RESPONSE)?;
+    let mut reader = message_reader(payload, CODEBASE_SCAN_RESPONSE)?;
     let refinements = crate::external::refinement::decode(&mut reader, files, plugin_of_hook)?;
     reader.finish()?;
     Ok(refinements)
 }
 
-pub(super) fn decode_refined_type(reader: &mut PayloadReader<'_>) -> Result<TUnion, ExternalAnalyzerError> {
+pub(super) fn decode_refined_type(reader: &mut ValueReader<'_>) -> Result<TUnion, ExternalAnalyzerError> {
     decode_type(reader, &|_| None, 0)
 }
 
-/// Reads a message whose body layout changed with the current minor version, so a worker built
-/// against an older protocol is refused instead of being read as if it spoke this one.
-fn message_kind_reader(payload: &[u8], expected_kind: u16) -> Result<PayloadReader<'_>, ExternalAnalyzerError> {
-    let kind = message_kind(payload)?;
-    if kind != expected_kind {
-        return Err(protocol(format!("expected analyzer message kind {expected_kind}, received {kind}")));
-    }
-
-    let mut reader = PayloadReader::new(payload);
-    reader.read_array::<HEADER_LENGTH>("analyzer header")?;
-    Ok(reader)
-}
-
-pub(super) fn encode_initialization_request(plugins: &[u16]) -> Result<Vec<u8>, ExternalAnalyzerError> {
+pub(super) fn encode_initialization_request(plugins: &[u16]) -> Result<Vec<Value>, ExternalAnalyzerError> {
     let mut writer = message_writer(INITIALIZE_REQUEST);
     writer.write_length(plugins.len())?;
     for plugin in plugins {
@@ -352,7 +340,7 @@ pub(super) fn encode_initialization_request(plugins: &[u16]) -> Result<Vec<u8>, 
 }
 
 pub(super) fn decode_initialization_response(
-    payload: &[u8],
+    payload: &[Value],
     expected_plugins: &[u16],
 ) -> Result<Vec<InitializationStub>, ExternalAnalyzerError> {
     let mut reader = message_reader(payload, INITIALIZE_RESPONSE)?;
@@ -397,7 +385,7 @@ pub(super) fn decode_initialization_response(
     Ok(stubs)
 }
 
-pub(super) fn decode_registration(payload: &[u8]) -> Result<Registration, ExternalAnalyzerError> {
+pub(super) fn decode_registration(payload: &[Value]) -> Result<Registration, ExternalAnalyzerError> {
     let mut reader = message_reader(payload, DESCRIBE_RESPONSE)?;
     let extension_count = reader.read_count("extensions", MAXIMUM_EXTENSIONS)?;
     if extension_count == 0 {
@@ -715,12 +703,12 @@ pub(super) fn decode_registration(payload: &[u8]) -> Result<Registration, Extern
 }
 
 fn read_providers<T>(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     plugin: u16,
     list: &'static str,
     description: &'static str,
-    read_capabilities: fn(&mut PayloadReader<'_>, u16, &'static str) -> Result<u8, ExternalAnalyzerError>,
-    read_target: fn(&mut PayloadReader<'_>, u16, &'static str) -> Result<T, ExternalAnalyzerError>,
+    read_capabilities: fn(&mut ValueReader<'_>, u16, &'static str) -> Result<u8, ExternalAnalyzerError>,
+    read_target: fn(&mut ValueReader<'_>, u16, &'static str) -> Result<T, ExternalAnalyzerError>,
 ) -> Result<Vec<ProviderRegistration<T>>, ExternalAnalyzerError> {
     let count = reader.read_count(list, MAXIMUM_PROVIDERS)?;
     let mut providers = Vec::with_capacity(count);
@@ -734,7 +722,7 @@ fn read_providers<T>(
 }
 
 fn read_capabilities(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     index: u16,
     description: &'static str,
 ) -> Result<u8, ExternalAnalyzerError> {
@@ -746,7 +734,7 @@ fn read_capabilities(
 }
 
 fn no_capabilities(
-    _reader: &mut PayloadReader<'_>,
+    _reader: &mut ValueReader<'_>,
     _index: u16,
     _description: &'static str,
 ) -> Result<u8, ExternalAnalyzerError> {
@@ -754,10 +742,10 @@ fn no_capabilities(
 }
 
 fn read_targets<T>(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     description: &'static str,
     index: u16,
-    mut read: impl FnMut(&mut PayloadReader<'_>, u16, &'static str) -> Result<T, ExternalAnalyzerError>,
+    mut read: impl FnMut(&mut ValueReader<'_>, u16, &'static str) -> Result<T, ExternalAnalyzerError>,
 ) -> Result<Vec<T>, ExternalAnalyzerError> {
     let count = reader.read_count(description, MAXIMUM_TARGETS)?;
     if count == 0 {
@@ -772,11 +760,11 @@ fn read_targets<T>(
 }
 
 fn read_analysis_hooks<T>(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     plugin: u16,
     list: &'static str,
     description: &'static str,
-    read_target: fn(&mut PayloadReader<'_>, u16, &'static str) -> Result<T, ExternalAnalyzerError>,
+    read_target: fn(&mut ValueReader<'_>, u16, &'static str) -> Result<T, ExternalAnalyzerError>,
 ) -> Result<Vec<AnalysisHookRegistration<T>>, ExternalAnalyzerError>
 where
     T: Eq + std::hash::Hash,
@@ -800,7 +788,7 @@ where
 }
 
 fn read_node_target(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     index: u16,
     _description: &'static str,
 ) -> Result<NodeKind, ExternalAnalyzerError> {
@@ -809,7 +797,7 @@ fn read_node_target(
 }
 
 fn read_class_like_target(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     index: u16,
     _description: &'static str,
 ) -> Result<Word, ExternalAnalyzerError> {
@@ -825,7 +813,7 @@ fn read_class_like_target(
 }
 
 fn read_function_target(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     index: u16,
     description: &'static str,
 ) -> Result<FunctionTarget, ExternalAnalyzerError> {
@@ -845,7 +833,7 @@ fn read_function_target(
 }
 
 fn read_method_target(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     _index: u16,
     _description: &'static str,
 ) -> Result<MethodTarget, ExternalAnalyzerError> {
@@ -857,7 +845,7 @@ fn read_method_target(
 }
 
 fn read_property_target(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     _index: u16,
     _description: &'static str,
 ) -> Result<PropertyTarget, ExternalAnalyzerError> {
@@ -869,7 +857,7 @@ fn read_property_target(
 }
 
 fn read_class_target(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     _index: u16,
     _description: &'static str,
 ) -> Result<Vec<u8>, ExternalAnalyzerError> {
@@ -879,7 +867,7 @@ fn read_class_target(
 }
 
 fn read_source_file_target(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     index: u16,
     _description: &'static str,
 ) -> Result<String, ExternalAnalyzerError> {
@@ -994,7 +982,7 @@ pub(super) fn encode_property_type_request<'type_info>(
 }
 
 pub(super) fn decode_property_type_response<'type_info>(
-    payload: &[u8],
+    payload: &[Value],
     resolve: impl Fn(usize) -> Option<&'type_info TUnion>,
 ) -> Result<Option<EffectivePropertyType>, ExternalAnalyzerError> {
     let mut reader = message_reader(payload, PROPERTY_TYPE_RESPONSE)?;
@@ -1053,7 +1041,7 @@ pub(super) fn encode_call_forwarding_request<'type_info>(
 }
 
 pub(super) fn decode_call_forwarding_response<'type_info>(
-    payload: &[u8],
+    payload: &[Value],
     resolve: impl Fn(usize) -> Option<&'type_info TUnion>,
 ) -> Result<Option<ForwardedCall>, ExternalAnalyzerError> {
     let mut reader = message_reader(payload, CALL_FORWARDING_RESPONSE)?;
@@ -1085,7 +1073,7 @@ pub(super) fn encode_property_initialization_request(
     generation: u64,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
-) -> Result<Vec<u8>, ExternalAnalyzerError> {
+) -> Result<Vec<Value>, ExternalAnalyzerError> {
     let mut writer = message_writer(PROPERTY_INITIALIZATION_REQUEST);
     writer.write_u64(generation);
     writer.write_u16(
@@ -1101,7 +1089,7 @@ pub(super) fn encode_property_initialization_request(
     Ok(writer.finish())
 }
 
-pub(super) fn decode_property_initialization_response(payload: &[u8]) -> Result<bool, ExternalAnalyzerError> {
+pub(super) fn decode_property_initialization_response(payload: &[Value]) -> Result<bool, ExternalAnalyzerError> {
     let mut reader = message_reader(payload, PROPERTY_INITIALIZATION_RESPONSE)?;
     let initialized = reader.read_bool("property initialized flag")?;
     reader.finish()?;
@@ -1114,7 +1102,7 @@ pub(super) fn encode_class_initializer_request(
     generation: u64,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
-) -> Result<Vec<u8>, ExternalAnalyzerError> {
+) -> Result<Vec<Value>, ExternalAnalyzerError> {
     let mut writer = message_writer(CLASS_INITIALIZER_REQUEST);
     writer.write_u64(generation);
     writer.write_u16(
@@ -1127,7 +1115,7 @@ pub(super) fn encode_class_initializer_request(
     Ok(writer.finish())
 }
 
-pub(super) fn decode_class_initializer_response(payload: &[u8]) -> Result<WordSet, ExternalAnalyzerError> {
+pub(super) fn decode_class_initializer_response(payload: &[Value]) -> Result<WordSet, ExternalAnalyzerError> {
     let mut reader = message_reader(payload, CLASS_INITIALIZER_RESPONSE)?;
     let count = reader.read_count("class initializer methods", MAXIMUM_TARGETS)?;
     let mut methods = WordSet::default();
@@ -1148,7 +1136,7 @@ pub(super) fn encode_issue_filter_request(
     issues: &[&Issue],
     generation: u64,
     session: &ExternalAnalysisSession,
-) -> Result<Vec<u8>, ExternalAnalyzerError> {
+) -> Result<Vec<Value>, ExternalAnalyzerError> {
     if hook_indices.is_empty() {
         return Err(protocol("an issue-filter request must contain at least one hook"));
     }
@@ -1182,7 +1170,7 @@ pub(super) fn encode_issue_filter_request(
 }
 
 pub(super) fn decode_issue_filter_response(
-    payload: &[u8],
+    payload: &[Value],
     expected_issues: usize,
 ) -> Result<Vec<usize>, ExternalAnalyzerError> {
     let mut reader = message_reader(payload, ISSUE_FILTER_RESPONSE)?;
@@ -1211,7 +1199,7 @@ pub(super) fn decode_issue_filter_response(
 }
 
 fn write_issue_filter_candidate(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     issue: &Issue,
     default_file: &File,
     session: &ExternalAnalysisSession,
@@ -1222,10 +1210,7 @@ fn write_issue_filter_candidate(
         Level::Warning => 3,
         Level::Error => 4,
     });
-    writer.write_bool(issue.code.is_some());
-    if let Some(code) = &issue.code {
-        writer.write_string(code)?;
-    }
+    writer.write_optional_string(issue.code.as_deref())?;
 
     writer.write_string(&issue.message)?;
     writer.write_u32(u32::try_from(issue.notes.len()).map_err(|_| protocol("too many issue notes"))?);
@@ -1233,8 +1218,8 @@ fn write_issue_filter_candidate(
         writer.write_string(note)?;
     }
 
-    write_optional_string(writer, issue.help.as_deref())?;
-    write_optional_string(writer, issue.link.as_deref())?;
+    writer.write_optional_string(issue.help.as_deref())?;
+    writer.write_optional_string(issue.link.as_deref())?;
     writer.write_u32(u32::try_from(issue.annotations.len()).map_err(|_| protocol("too many issue annotations"))?);
     for annotation in &issue.annotations {
         writer.write_u8(match annotation.kind {
@@ -1245,7 +1230,7 @@ fn write_issue_filter_candidate(
         write_issue_source(writer, annotation.span.file_id, default_file, session)?;
         writer.write_u32(annotation.span.start.offset);
         writer.write_u32(annotation.span.end.offset);
-        write_optional_string(writer, annotation.message.as_deref())?;
+        writer.write_optional_string(annotation.message.as_deref())?;
     }
 
     let edit_count = issue.edits.values().map(Vec::len).sum::<usize>();
@@ -1273,30 +1258,20 @@ fn write_issue_filter_candidate(
 }
 
 fn write_issue_source(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     file_id: mago_database::file::FileId,
     default_file: &File,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     if file_id == default_file.id {
-        writer.write_bool(false);
+        writer.write_value(Value::Null);
         return Ok(());
     }
 
     let name = session
         .source_name(file_id)
         .ok_or_else(|| protocol(format!("issue references unknown source file identifier {}", file_id.as_u64())))?;
-    writer.write_bool(true);
     writer.write_bytes(name)?;
-    Ok(())
-}
-
-fn write_optional_string(writer: &mut PayloadWriter, value: Option<&str>) -> Result<(), ExternalAnalyzerError> {
-    writer.write_bool(value.is_some());
-    if let Some(value) = value {
-        writer.write_string(value)?;
-    }
-
     Ok(())
 }
 
@@ -1388,7 +1363,7 @@ fn encode_return_type_request<'type_info>(
 
 #[allow(clippy::too_many_arguments)]
 fn encode_return_type_arguments<'type_info>(
-    mut writer: PayloadWriter,
+    mut writer: ValueWriter,
     invocation: &Invocation<'_, '_, '_>,
     artifacts: &'type_info AnalysisArtifacts,
     source_file: &File,
@@ -1486,7 +1461,7 @@ fn get_method_receiver_type(method_context: &MethodTargetContext<'_>) -> Result<
 /// Encodes `union` as the code of `dialect` sees it: a keyed array in PHP# code is a `Sharp\Map`, the object it runs
 /// as, and in plain PHP code a PHP array.
 pub(super) fn encode_union_snapshot<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     union: &'type_info TUnion,
     types: &mut Vec<Cow<'type_info, TUnion>>,
     codebase: &CodebaseMetadata,
@@ -1497,7 +1472,7 @@ pub(super) fn encode_union_snapshot<'type_info>(
 }
 
 fn encode_union_snapshot_with_offset<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     union: &'type_info TUnion,
     types: &mut Vec<Cow<'type_info, TUnion>>,
     codebase: &CodebaseMetadata,
@@ -1512,7 +1487,7 @@ fn encode_union_snapshot_with_offset<'type_info>(
 /// Encodes an atomic type the snapshot makes rather than borrows. Its handles own every type in it, numbered on from
 /// the handles before them.
 fn encode_owned_atomic_snapshot(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     atomic: &TAtomic,
     types: &mut SnapshotTypeTable<'_, '_>,
     depth: usize,
@@ -1549,7 +1524,7 @@ impl<'type_info> SnapshotTypeTable<'_, 'type_info> {
 }
 
 fn encode_union_snapshot_inner<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     union: &'type_info TUnion,
     types: &mut SnapshotTypeTable<'_, 'type_info>,
     depth: usize,
@@ -1580,7 +1555,7 @@ fn encode_union_snapshot_inner<'type_info>(
 
 #[allow(clippy::too_many_lines)]
 fn encode_atomic_snapshot<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     atomic: &'type_info TAtomic,
     types: &mut SnapshotTypeTable<'_, 'type_info>,
     depth: usize,
@@ -1676,7 +1651,7 @@ fn encode_atomic_snapshot<'type_info>(
 }
 
 fn encode_scalar_snapshot<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     scalar: &'type_info TScalar,
     types: &mut SnapshotTypeTable<'_, 'type_info>,
     depth: usize,
@@ -1724,7 +1699,7 @@ fn encode_scalar_snapshot<'type_info>(
                 TFloat::UnspecifiedLiteral => writer.write_u8(2),
                 TFloat::Literal(value) => {
                     writer.write_u8(3);
-                    writer.write_u64(value.into_inner().to_bits());
+                    writer.write_f64(value.into_inner());
                 }
             }
         }
@@ -1788,7 +1763,7 @@ fn encode_scalar_snapshot<'type_info>(
 }
 
 fn encode_callable_snapshot<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     callable: &'type_info TCallable,
     types: &mut SnapshotTypeTable<'_, 'type_info>,
     depth: usize,
@@ -1852,7 +1827,7 @@ fn encode_callable_snapshot<'type_info>(
 
 #[allow(clippy::too_many_lines)]
 fn encode_object_snapshot<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     object: &'type_info TObject,
     types: &mut SnapshotTypeTable<'_, 'type_info>,
     depth: usize,
@@ -1900,7 +1875,7 @@ fn encode_object_snapshot<'type_info>(
 }
 
 fn encode_array_snapshot<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     array: &'type_info TArray,
     types: &mut SnapshotTypeTable<'_, 'type_info>,
     depth: usize,
@@ -1967,7 +1942,7 @@ fn collection_object(array: &TArray, types: &SnapshotTypeTable<'_, '_>) -> Optio
 }
 
 fn encode_reference_snapshot<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     reference: &'type_info TReference,
     types: &mut SnapshotTypeTable<'_, 'type_info>,
     depth: usize,
@@ -2019,7 +1994,7 @@ fn encode_reference_snapshot<'type_info>(
 }
 
 fn encode_derived_snapshot<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     derived: &'type_info TDerived,
     types: &mut SnapshotTypeTable<'_, 'type_info>,
     depth: usize,
@@ -2085,7 +2060,7 @@ fn encode_derived_snapshot<'type_info>(
 }
 
 fn encode_optional_unions<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     unions: Option<&'type_info [TUnion]>,
     types: &mut SnapshotTypeTable<'_, 'type_info>,
     depth: usize,
@@ -2101,7 +2076,7 @@ fn encode_optional_unions<'type_info>(
 }
 
 fn encode_optional_atomic_snapshots<'type_info>(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     atomics: Option<&'type_info [TAtomic]>,
     types: &mut SnapshotTypeTable<'_, 'type_info>,
     depth: usize,
@@ -2118,7 +2093,7 @@ fn encode_optional_atomic_snapshots<'type_info>(
 }
 
 fn encode_optional_variances(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     variances: Option<&[Variance]>,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_bool(variances.is_some());
@@ -2138,7 +2113,7 @@ fn encode_optional_variances(
 }
 
 pub(super) fn encode_generic_parent(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     parent: GenericParent,
 ) -> Result<(), ExternalAnalyzerError> {
     match parent {
@@ -2159,7 +2134,7 @@ pub(super) fn encode_generic_parent(
 /// Writes `identifier`, a method with its class's rule as `codebase` answers it, so the SDK tells `Box::total` from
 /// `Box::Total` of a class with exact names, spec section 24.
 pub(super) fn encode_function_like_identifier(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     identifier: FunctionLikeIdentifier,
     codebase: &CodebaseMetadata,
 ) -> Result<(), ExternalAnalyzerError> {
@@ -2187,7 +2162,7 @@ pub(super) fn encode_function_like_identifier(
     Ok(())
 }
 
-fn encode_class_like_string_kind(writer: &mut PayloadWriter, kind: TClassLikeStringKind) {
+fn encode_class_like_string_kind(writer: &mut ValueWriter, kind: TClassLikeStringKind) {
     writer.write_u8(match kind {
         TClassLikeStringKind::Class => 1,
         TClassLikeStringKind::Interface => 2,
@@ -2196,7 +2171,7 @@ fn encode_class_like_string_kind(writer: &mut PayloadWriter, kind: TClassLikeStr
     });
 }
 
-fn encode_array_key(writer: &mut PayloadWriter, key: &ArrayKey) -> Result<(), ExternalAnalyzerError> {
+fn encode_array_key(writer: &mut ValueWriter, key: &ArrayKey) -> Result<(), ExternalAnalyzerError> {
     match key {
         ArrayKey::Integer(value) => {
             writer.write_u8(1);
@@ -2217,7 +2192,7 @@ fn encode_array_key(writer: &mut PayloadWriter, key: &ArrayKey) -> Result<(), Ex
 }
 
 fn write_snapshot_count(
-    writer: &mut PayloadWriter,
+    writer: &mut ValueWriter,
     count: usize,
     field: &'static str,
 ) -> Result<(), ExternalAnalyzerError> {
@@ -2238,7 +2213,7 @@ fn ensure_type_depth(depth: usize) -> Result<(), ExternalAnalyzerError> {
 }
 
 pub(super) fn decode_return_type_response<'type_info, F>(
-    payload: &[u8],
+    payload: &[Value],
     argument_type: F,
 ) -> Result<Option<TUnion>, ExternalAnalyzerError>
 where
@@ -2252,7 +2227,7 @@ where
 }
 
 pub(super) fn decode_callable_signature_response<'type_info, F>(
-    payload: &[u8],
+    payload: &[Value],
     request_type: F,
 ) -> Result<Option<EffectiveCallableSignature>, ExternalAnalyzerError>
 where
@@ -2264,19 +2239,17 @@ where
         return Ok(None);
     }
 
-    let display_name = if reader.read_bool("effective callable display name presence")? {
-        Some(word(non_empty(reader.read_bytes("effective callable display name")?, "effective callable display name")?))
-    } else {
-        None
-    };
+    let display_name = reader
+        .read_optional_bytes("effective callable display name")?
+        .map(|name| non_empty(name, "effective callable display name").map(word))
+        .transpose()?;
     let allows_named_arguments = reader.read_bool("allows named arguments flag")?;
     let count = reader.read_count("effective callable parameters", MAXIMUM_TYPE_MEMBERS)?;
     let mut parameters = Vec::with_capacity(count);
     let mut names = HashSet::with_capacity_and_hasher(count, RandomState::default());
     let mut optional = false;
     for index in 0..count {
-        let name = if reader.read_bool("effective callable parameter name presence")? {
-            let name = reader.read_bytes("effective callable parameter name")?;
+        let name = if let Some(name) = reader.read_optional_bytes("effective callable parameter name")? {
             if !is_valid_variable_name(name) {
                 return Err(protocol("effective callable parameter name must be a PHP variable name"));
             }
@@ -2338,7 +2311,7 @@ where
 }
 
 pub(super) fn decode_assertion_response<'type_info, F>(
-    payload: &[u8],
+    payload: &[Value],
     request_type: F,
 ) -> Result<Option<crate::plugin::provider::assertion::InvocationAssertions>, ExternalAnalyzerError>
 where
@@ -2364,7 +2337,7 @@ where
 }
 
 fn decode_assertion_map<'type_info, F>(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     request_type: &F,
 ) -> Result<BTreeMap<Word, Conjunction<Assertion>>, ExternalAnalyzerError>
 where
@@ -2397,7 +2370,7 @@ where
 
 #[allow(clippy::too_many_lines)]
 fn decode_assertion<'type_info, F>(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     request_type: &F,
 ) -> Result<Assertion, ExternalAnalyzerError>
 where
@@ -2457,7 +2430,7 @@ where
 }
 
 fn decode_assertion_atomic<'type_info, F>(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     request_type: &F,
 ) -> Result<TAtomic, ExternalAnalyzerError>
 where
@@ -2472,7 +2445,7 @@ where
     types.pop().ok_or_else(|| protocol("invocation type assertion contains no atomic type"))
 }
 
-fn decode_assertion_array_key(reader: &mut PayloadReader<'_>) -> Result<ArrayKey, ExternalAnalyzerError> {
+fn decode_assertion_array_key(reader: &mut ValueReader<'_>) -> Result<ArrayKey, ExternalAnalyzerError> {
     Ok(match reader.read_u8("invocation assertion array-key kind")? {
         1 => ArrayKey::Integer(reader.read_u64("invocation assertion integer array key")? as i64),
         2 => ArrayKey::String(word(reader.read_bytes("invocation assertion string array key")?)),
@@ -2484,16 +2457,16 @@ fn decode_assertion_array_key(reader: &mut PayloadReader<'_>) -> Result<ArrayKey
     })
 }
 
-fn decode_assertion_count(reader: &mut PayloadReader<'_>) -> Result<usize, ExternalAnalyzerError> {
+fn decode_assertion_count(reader: &mut ValueReader<'_>) -> Result<usize, ExternalAnalyzerError> {
     usize::try_from(reader.read_u64("invocation assertion count")?)
         .map_err(|_| protocol("invocation assertion count exceeds usize::MAX"))
 }
 
 pub(super) fn handle_type_comparison_request<'type_info, F>(
-    payload: &[u8],
+    payload: &[Value],
     codebase: &CodebaseMetadata,
     argument_type: F,
-) -> Result<Vec<u8>, ExternalAnalyzerError>
+) -> Result<Vec<Value>, ExternalAnalyzerError>
 where
     F: Fn(usize) -> Option<&'type_info TUnion>,
 {
@@ -2506,10 +2479,10 @@ where
 }
 
 fn handle_type_comparison_batch_request<'type_info, F>(
-    payload: &[u8],
+    payload: &[Value],
     codebase: &CodebaseMetadata,
     argument_type: F,
-) -> Result<(usize, Vec<u8>), ExternalAnalyzerError>
+) -> Result<(usize, Vec<Value>), ExternalAnalyzerError>
 where
     F: Fn(usize) -> Option<&'type_info TUnion>,
 {
@@ -2531,8 +2504,8 @@ where
 /// Answers one comparison with whether it holds, then with every class-like either compared type names, nested ones
 /// included, so the SDK records a class-level read of each for the file whose provider or hook asked.
 fn answer_type_comparison<'type_info, F>(
-    reader: &mut PayloadReader<'_>,
-    writer: &mut PayloadWriter,
+    reader: &mut ValueReader<'_>,
+    writer: &mut ValueWriter,
     codebase: &CodebaseMetadata,
     argument_type: &F,
 ) -> Result<(), ExternalAnalyzerError>
@@ -2586,11 +2559,11 @@ fn compare_types(
 }
 
 pub(super) fn handle_nested_request<'type_info, F>(
-    payload: &[u8],
+    payload: &[Value],
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
     argument_type: F,
-) -> Result<(NestedRequestKind, Vec<u8>), ExternalAnalyzerError>
+) -> Result<(NestedRequestKind, Vec<Value>), ExternalAnalyzerError>
 where
     F: Fn(usize) -> Option<&'type_info TUnion>,
 {
@@ -2612,7 +2585,7 @@ where
 }
 
 fn decode_type<'type_info, F>(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     argument_type: &F,
     depth: usize,
 ) -> Result<TUnion, ExternalAnalyzerError>
@@ -2697,7 +2670,7 @@ where
 }
 
 pub(super) fn decode_complete_union(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     depth: usize,
 ) -> Result<TUnion, ExternalAnalyzerError> {
     ensure_type_depth(depth)?;
@@ -2728,7 +2701,7 @@ pub(super) fn decode_complete_union(
 }
 
 #[allow(clippy::too_many_lines)]
-fn decode_complete_atomic(reader: &mut PayloadReader<'_>, depth: usize) -> Result<TAtomic, ExternalAnalyzerError> {
+fn decode_complete_atomic(reader: &mut ValueReader<'_>, depth: usize) -> Result<TAtomic, ExternalAnalyzerError> {
     ensure_type_depth(depth)?;
     Ok(match reader.read_u8("complete atomic type tag")? {
         SNAPSHOT_SCALAR => TAtomic::Scalar(decode_complete_scalar(reader, depth + 1)?),
@@ -2794,7 +2767,7 @@ fn decode_complete_atomic(reader: &mut PayloadReader<'_>, depth: usize) -> Resul
     })
 }
 
-fn decode_complete_scalar(reader: &mut PayloadReader<'_>, depth: usize) -> Result<TScalar, ExternalAnalyzerError> {
+fn decode_complete_scalar(reader: &mut ValueReader<'_>, depth: usize) -> Result<TScalar, ExternalAnalyzerError> {
     Ok(match reader.read_u8("complete scalar type kind")? {
         1 => TScalar::Generic,
         2 => TScalar::Numeric,
@@ -2819,7 +2792,7 @@ fn decode_complete_scalar(reader: &mut PayloadReader<'_>, depth: usize) -> Resul
         6 => TScalar::Float(match reader.read_u8("float refinement")? {
             1 => TFloat::Float,
             2 => TFloat::UnspecifiedLiteral,
-            3 => TFloat::literal(f64::from_bits(reader.read_u64("literal float")?)),
+            3 => TFloat::literal(reader.read_f64("literal float")?),
             unknown => return Err(protocol(format!("unknown float refinement {unknown}"))),
         }),
         7 => {
@@ -2851,7 +2824,7 @@ fn decode_complete_scalar(reader: &mut PayloadReader<'_>, depth: usize) -> Resul
 }
 
 fn decode_complete_class_like_string(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     depth: usize,
 ) -> Result<TClassLikeString, ExternalAnalyzerError> {
     Ok(match reader.read_u8("class-like string variant")? {
@@ -2871,9 +2844,7 @@ fn decode_complete_class_like_string(
     })
 }
 
-fn decode_class_like_string_kind(
-    reader: &mut PayloadReader<'_>,
-) -> Result<TClassLikeStringKind, ExternalAnalyzerError> {
+fn decode_class_like_string_kind(reader: &mut ValueReader<'_>) -> Result<TClassLikeStringKind, ExternalAnalyzerError> {
     Ok(match reader.read_u8("class-like string kind")? {
         1 => TClassLikeStringKind::Class,
         2 => TClassLikeStringKind::Interface,
@@ -2883,7 +2854,7 @@ fn decode_class_like_string_kind(
     })
 }
 
-fn decode_complete_callable(reader: &mut PayloadReader<'_>, depth: usize) -> Result<TCallable, ExternalAnalyzerError> {
+fn decode_complete_callable(reader: &mut ValueReader<'_>, depth: usize) -> Result<TCallable, ExternalAnalyzerError> {
     let kind = reader.read_u8("complete callable kind")?;
     if kind == 2 {
         return Ok(TCallable::Alias(decode_function_like_identifier(reader)?));
@@ -2988,7 +2959,7 @@ fn into_collection(object: TObject) -> TAtomic {
     TAtomic::Object(object)
 }
 
-fn decode_complete_object(reader: &mut PayloadReader<'_>, depth: usize) -> Result<TObject, ExternalAnalyzerError> {
+fn decode_complete_object(reader: &mut ValueReader<'_>, depth: usize) -> Result<TObject, ExternalAnalyzerError> {
     Ok(match reader.read_u8("complete object kind")? {
         1 => TObject::Any,
         2 => {
@@ -3041,7 +3012,7 @@ fn decode_complete_object(reader: &mut PayloadReader<'_>, depth: usize) -> Resul
     })
 }
 
-fn decode_complete_array(reader: &mut PayloadReader<'_>, depth: usize) -> Result<TArray, ExternalAnalyzerError> {
+fn decode_complete_array(reader: &mut ValueReader<'_>, depth: usize) -> Result<TArray, ExternalAnalyzerError> {
     Ok(match reader.read_u8("complete array kind")? {
         1 => {
             let element_type = Arc::new(decode_complete_union(reader, depth + 1)?);
@@ -3101,7 +3072,7 @@ fn decode_complete_array(reader: &mut PayloadReader<'_>, depth: usize) -> Result
     })
 }
 
-fn decode_array_key(reader: &mut PayloadReader<'_>) -> Result<ArrayKey, ExternalAnalyzerError> {
+fn decode_array_key(reader: &mut ValueReader<'_>) -> Result<ArrayKey, ExternalAnalyzerError> {
     Ok(match reader.read_u8("array key kind")? {
         1 => ArrayKey::Integer(reader.read_u64("integer array key")? as i64),
         2 => ArrayKey::String(word(reader.read_bytes("string array key")?)),
@@ -3113,10 +3084,7 @@ fn decode_array_key(reader: &mut PayloadReader<'_>) -> Result<ArrayKey, External
     })
 }
 
-fn decode_complete_reference(
-    reader: &mut PayloadReader<'_>,
-    depth: usize,
-) -> Result<TReference, ExternalAnalyzerError> {
+fn decode_complete_reference(reader: &mut ValueReader<'_>, depth: usize) -> Result<TReference, ExternalAnalyzerError> {
     Ok(match reader.read_u8("complete reference kind")? {
         1 => TReference::Symbol {
             name: word(reader.read_bytes("referenced symbol name")?),
@@ -3146,7 +3114,7 @@ fn decode_complete_reference(
     })
 }
 
-fn decode_complete_derived(reader: &mut PayloadReader<'_>, depth: usize) -> Result<TDerived, ExternalAnalyzerError> {
+fn decode_complete_derived(reader: &mut ValueReader<'_>, depth: usize) -> Result<TDerived, ExternalAnalyzerError> {
     Ok(match reader.read_u8("complete derived type kind")? {
         1 => TDerived::KeyOf(TKeyOf::new(Arc::new(decode_complete_union(reader, depth + 1)?))),
         2 => TDerived::ValueOf(TValueOf::new(Arc::new(decode_complete_union(reader, depth + 1)?))),
@@ -3196,7 +3164,7 @@ fn decode_complete_derived(reader: &mut PayloadReader<'_>, depth: usize) -> Resu
 }
 
 fn decode_optional_complete_unions(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     depth: usize,
 ) -> Result<Option<Vec<TUnion>>, ExternalAnalyzerError> {
     if !reader.read_bool("nested union types presence")? {
@@ -3213,7 +3181,7 @@ fn decode_optional_complete_unions(
 }
 
 fn decode_optional_complete_atomics(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
     depth: usize,
 ) -> Result<Option<Vec<TAtomic>>, ExternalAnalyzerError> {
     if !reader.read_bool("intersection types presence")? {
@@ -3229,7 +3197,7 @@ fn decode_optional_complete_atomics(
     Ok(Some(atomics))
 }
 
-fn decode_optional_variances(reader: &mut PayloadReader<'_>) -> Result<Option<Vec<Variance>>, ExternalAnalyzerError> {
+fn decode_optional_variances(reader: &mut ValueReader<'_>) -> Result<Option<Vec<Variance>>, ExternalAnalyzerError> {
     if !reader.read_bool("variances presence")? {
         return Ok(None);
     }
@@ -3249,7 +3217,7 @@ fn decode_optional_variances(reader: &mut PayloadReader<'_>) -> Result<Option<Ve
     Ok(Some(variances))
 }
 
-fn decode_generic_parent(reader: &mut PayloadReader<'_>) -> Result<GenericParent, ExternalAnalyzerError> {
+fn decode_generic_parent(reader: &mut ValueReader<'_>) -> Result<GenericParent, ExternalAnalyzerError> {
     Ok(match reader.read_u8("generic parent kind")? {
         1 => GenericParent::ClassLike(word(reader.read_bytes("generic parent class")?)),
         2 => GenericParent::FunctionLike((
@@ -3261,7 +3229,7 @@ fn decode_generic_parent(reader: &mut PayloadReader<'_>) -> Result<GenericParent
 }
 
 pub(super) fn decode_function_like_identifier(
-    reader: &mut PayloadReader<'_>,
+    reader: &mut ValueReader<'_>,
 ) -> Result<FunctionLikeIdentifier, ExternalAnalyzerError> {
     Ok(match reader.read_u8("function-like identifier kind")? {
         1 => FunctionLikeIdentifier::Function(word(reader.read_bytes("function name")?)),
@@ -3279,43 +3247,22 @@ pub(super) fn decode_function_like_identifier(
     })
 }
 
-pub(super) fn message_writer(kind: u16) -> PayloadWriter {
+pub(super) fn message_writer(kind: u16) -> ValueWriter {
     message_writer_with_capacity(kind, INITIAL_MESSAGE_CAPACITY)
 }
 
-pub(super) fn message_writer_with_capacity(kind: u16, capacity: usize) -> PayloadWriter {
-    let mut writer = PayloadWriter::with_capacity(capacity);
-    writer.write_raw(&ANALYZER_PROTOCOL_MAGIC);
-    writer.write_u16(ANALYZER_PROTOCOL_MAJOR);
-    writer.write_u16(ANALYZER_PROTOCOL_MINOR);
+pub(super) fn message_writer_with_capacity(kind: u16, capacity: usize) -> ValueWriter {
+    let mut writer = ValueWriter::with_capacity(capacity);
+    writer.write_value(Value::String(PROTOCOL.to_vec()));
     writer.write_u16(kind);
-    writer.write_u16(0);
     writer
 }
 
-pub(super) fn message_reader(payload: &[u8], expected_kind: u16) -> Result<PayloadReader<'_>, ExternalAnalyzerError> {
-    if payload.len() < HEADER_LENGTH {
-        return Err(protocol("analyzer payload is shorter than its header"));
-    }
-
-    let mut reader = PayloadReader::new(payload);
-    if reader.read_array::<4>("analyzer magic")? != ANALYZER_PROTOCOL_MAGIC {
-        return Err(protocol("invalid analyzer payload magic"));
-    }
-
-    let major = reader.read_u16("analyzer protocol major")?;
-    let _minor = reader.read_u16("analyzer protocol minor")?;
-    if major != ANALYZER_PROTOCOL_MAJOR {
-        return Err(protocol(format!("unsupported analyzer protocol major {major}")));
-    }
-
-    let kind = reader.read_u16("analyzer message kind")?;
+pub(super) fn message_reader(payload: &[Value], expected_kind: u16) -> Result<ValueReader<'_>, ExternalAnalyzerError> {
+    let mut reader = ValueReader::new(payload);
+    let kind = read_message_kind(&mut reader)?;
     if kind != expected_kind {
         return Err(protocol(format!("expected analyzer message kind {expected_kind}, received {kind}")));
-    }
-
-    if reader.read_u16("analyzer reserved bits")? != 0 {
-        return Err(protocol("analyzer message reserved bits are non-zero"));
     }
 
     Ok(reader)
@@ -3324,40 +3271,28 @@ pub(super) fn message_reader(payload: &[u8], expected_kind: u16) -> Result<Paylo
 /// Splits the codebase reads a provider or issue filter made, with its worker's class loads, which the SDK places right
 /// after the header, from the response they came with.
 pub(super) fn take_codebase_reads(
-    response: &[u8],
-) -> Result<(ExtensionReads, ClassLoads, Vec<u8>), ExternalAnalyzerError> {
-    let header =
-        response.get(..HEADER_LENGTH).ok_or_else(|| protocol("analyzer response is shorter than its header"))?;
-    let mut reader = PayloadReader::new(&response[HEADER_LENGTH..]);
+    mut response: Vec<Value>,
+) -> Result<(ExtensionReads, ClassLoads, Vec<Value>), ExternalAnalyzerError> {
+    let fields =
+        response.get(HEADER_LENGTH..).ok_or_else(|| protocol("analyzer response is shorter than its header"))?;
+    let mut reader = ValueReader::new(fields);
     let (reads, loads) = ExtensionReads::decode(&mut reader)?;
+    let end = response.len() - reader.remaining();
+    response.drain(HEADER_LENGTH..end);
 
-    Ok((reads, loads, [header, &response[response.len() - reader.remaining()..]].concat()))
+    Ok((reads, loads, response))
 }
 
-pub(super) fn message_kind(payload: &[u8]) -> Result<u16, ExternalAnalyzerError> {
-    if payload.len() < HEADER_LENGTH {
-        return Err(protocol("analyzer message is shorter than its header"));
+pub(super) fn message_kind(payload: &[Value]) -> Result<u16, ExternalAnalyzerError> {
+    read_message_kind(&mut ValueReader::new(payload))
+}
+
+fn read_message_kind(reader: &mut ValueReader<'_>) -> Result<u16, ExternalAnalyzerError> {
+    if reader.read_bytes("message protocol")? != PROTOCOL {
+        return Err(protocol("the message is no analyzer message"));
     }
 
-    let mut reader = PayloadReader::new(payload);
-    let magic = reader.read_array::<4>("analyzer protocol magic")?;
-    if magic != ANALYZER_PROTOCOL_MAGIC {
-        return Err(protocol("invalid analyzer protocol magic"));
-    }
-
-    let major = reader.read_u16("analyzer protocol major version")?;
-    let minor = reader.read_u16("analyzer protocol minor version")?;
-    if major != ANALYZER_PROTOCOL_MAJOR || minor != ANALYZER_PROTOCOL_MINOR {
-        return Err(protocol(format!("unsupported analyzer protocol version {major}.{minor}")));
-    }
-
-    let kind = reader.read_u16("analyzer message kind")?;
-    let reserved = reader.read_u16("analyzer reserved header field")?;
-    if reserved != 0 {
-        return Err(protocol("analyzer reserved header field is non-zero"));
-    }
-
-    Ok(kind)
+    Ok(reader.read_u16("analyzer message kind")?)
 }
 
 fn non_empty<T>(value: T, field: &str) -> Result<T, ExternalAnalyzerError>
@@ -3520,8 +3455,12 @@ pub(super) mod testing {
     }
 
     /// Whether `payload` names `class`.
-    pub fn names(payload: &[u8], class: &[u8]) -> bool {
-        payload.windows(class.len()).any(|window| window == class)
+    pub fn names(payload: &[Value], class: &[u8]) -> bool {
+        payload.iter().any(|value| match value {
+            Value::String(bytes) => bytes.windows(class.len()).any(|window| window == class),
+            Value::List(values) => names(values, class),
+            _ => false,
+        })
     }
 
     #[test]
@@ -3531,7 +3470,7 @@ pub(super) mod testing {
             ty = get_list(ty);
         }
 
-        let mut writer = PayloadWriter::new();
+        let mut writer = ValueWriter::new();
         let mut types = Vec::new();
         encode_union_snapshot(&mut writer, &ty, &mut types, &CodebaseMetadata::new(), Dialect::Php, 0).unwrap();
 
@@ -3543,7 +3482,7 @@ pub(super) mod testing {
     /// array by its values, and never PHP#'s `Iterable<T>`, which holds a `Map` by its entries.
     #[test]
     fn an_iterable_comes_back_as_phps_iterable() {
-        let mut writer = PayloadWriter::new();
+        let mut writer = ValueWriter::new();
         writer.write_u16(0);
         writer.write_u32(1);
         writer.write_u8(SNAPSHOT_ITERABLE);
@@ -3562,7 +3501,7 @@ pub(super) mod testing {
         writer.write_bool(false);
         let payload = writer.finish();
 
-        let union = decode_complete_union(&mut PayloadReader::new(&payload), 0).unwrap();
+        let union = decode_complete_union(&mut ValueReader::new(&payload), 0).unwrap();
 
         assert!(
             matches!(union.types.as_ref(), [TAtomic::Iterable(TIterable { holds_map_entries: false, .. })]),
@@ -3580,11 +3519,11 @@ pub(super) mod testing {
             let class_value =
                 TClassLikeString::OfType { kind: TClassLikeStringKind::Class, constraint: Arc::new(held) };
             let union = TUnion::from_atomic(TAtomic::Scalar(TScalar::ClassLikeString(class_value)));
-            let mut writer = PayloadWriter::new();
+            let mut writer = ValueWriter::new();
             encode_union_snapshot(&mut writer, &union, &mut Vec::new(), &CodebaseMetadata::new(), Dialect::Sharp, 0)
                 .unwrap();
             let payload = writer.finish();
-            let mut reader = PayloadReader::new(&payload);
+            let mut reader = ValueReader::new(&payload);
             reader.read_u32("union handle").unwrap();
 
             decode_complete_union(&mut reader, 0).unwrap().get_id().to_string()
@@ -3603,22 +3542,25 @@ pub(super) mod testing {
             let sent = |class: &[u8], method: &[u8]| {
                 let identifier = FunctionLikeIdentifier::Method(word(class), word(method));
                 let union = TUnion::from_atomic(TAtomic::Callable(TCallable::Alias(identifier)));
-                let mut writer = PayloadWriter::new();
+                let mut writer = ValueWriter::new();
                 encode_union_snapshot(&mut writer, &union, &mut Vec::new(), analysis.codebase, Dialect::Php, 0)
                     .unwrap();
 
                 writer.finish()
             };
+            let ruled = |sent: &[Value], method: &[u8], rule: i64| {
+                sent.windows(2).any(|pair| pair == [Value::String(method.to_vec()), Value::Int(rule)])
+            };
 
-            assert!(names(&sent(b"App\\Shelf", b"total"), b"total\x03"));
-            assert!(names(&sent(b"Lib\\Sink", b"take"), b"take\x00"));
+            assert!(ruled(&sent(b"App\\Shelf", b"total"), b"total", 3));
+            assert!(ruled(&sent(b"Lib\\Sink", b"take"), b"take", 0));
         });
     }
 
     /// An external analyzer's payload has no spec section 13 readonly flag, so a class it names is never readonly.
     #[test]
     fn an_external_analyzers_class_is_never_readonly() {
-        let mut writer = PayloadWriter::new();
+        let mut writer = ValueWriter::new();
         writer.write_u16(0);
         writer.write_u32(2);
         writer.write_u8(SNAPSHOT_OBJECT);
@@ -3635,7 +3577,7 @@ pub(super) mod testing {
         }
         let payload = writer.finish();
 
-        let union = decode_complete_union(&mut PayloadReader::new(&payload), 0).unwrap();
+        let union = decode_complete_union(&mut ValueReader::new(&payload), 0).unwrap();
 
         assert!(
             matches!(
@@ -3678,10 +3620,10 @@ pub(super) mod testing {
     /// What an external analyzer receives for `array`, a type of one atomic part, in code of `dialect`.
     fn sent_as_type(array: &TUnion, codebase: &CodebaseMetadata, dialect: Dialect) -> String {
         let mut types = Vec::new();
-        let mut writer = PayloadWriter::new();
+        let mut writer = ValueWriter::new();
         encode_union_snapshot(&mut writer, array, &mut types, codebase, dialect, 0).unwrap();
         let payload = writer.finish();
-        let mut reader = PayloadReader::new(&payload);
+        let mut reader = ValueReader::new(&payload);
         reader.read_u32("union handle").unwrap();
         reader.read_u16("union flags").unwrap();
         reader.read_u32("union atomic types").unwrap();
@@ -3758,7 +3700,9 @@ pub(super) mod testing {
             writer.write_u16(0);
             writer.write_u32(1);
             writer.write_u8(SNAPSHOT_SCALAR);
-            writer.write_raw(scalar);
+            for field in scalar {
+                writer.write_u8(*field);
+            }
         }
         for _ in 0..5 {
             writer.write_bool(false);
@@ -3877,7 +3821,7 @@ pub(super) mod testing {
 
         for nested in [list, key, value, set] {
             let refusal = encode_union_snapshot(
-                &mut PayloadWriter::new(),
+                &mut ValueWriter::new(),
                 &nested,
                 &mut Vec::new(),
                 &CodebaseMetadata::new(),
@@ -3904,30 +3848,16 @@ pub(super) mod testing {
         assert!(matches!(result, Err(ExternalAnalyzerError::Protocol(message)) if message.contains("more than once")));
     }
 
-    /// A worker of protocol 1.12 sends a bare file path as a progress frame, where 1.13 sends what it starts, so Mago
-    /// refuses it instead of printing "the hooks of the hooks of app/Hung.php".
+    /// A message whose first value names another protocol is no analyzer message, so Mago refuses it instead of reading
+    /// its fields as an analyzer message's.
     #[test]
-    fn a_response_of_the_protocol_before_named_progress_is_refused() {
+    fn a_message_of_another_protocol_is_refused() {
         let mut response = message_writer(INITIALIZE_RESPONSE).finish();
-        response[6..8].copy_from_slice(&12u16.to_be_bytes());
+        response[0] = Value::String(b"linter".to_vec());
 
         let refusal = message_kind(&response);
         assert!(
-            matches!(&refusal, Err(ExternalAnalyzerError::Protocol(message)) if message == "unsupported analyzer protocol version 1.12"),
-            "{refusal:?}"
-        );
-    }
-
-    /// A worker of protocol 1.11 records no before-analysis reads and writes no whole method search, so Mago refuses
-    /// its responses instead of reading them as 1.12.
-    #[test]
-    fn a_response_of_the_protocol_before_whole_method_searches_is_refused() {
-        let mut response = message_writer(INITIALIZE_RESPONSE).finish();
-        response[6..8].copy_from_slice(&11u16.to_be_bytes());
-
-        let refusal = message_kind(&response);
-        assert!(
-            matches!(&refusal, Err(ExternalAnalyzerError::Protocol(message)) if message == "unsupported analyzer protocol version 1.11"),
+            matches!(&refusal, Err(ExternalAnalyzerError::Protocol(message)) if message == "the message is no analyzer message"),
             "{refusal:?}"
         );
     }
@@ -3983,12 +3913,12 @@ pub(super) mod testing {
     }
 
     /// The class-likes a comparison's answer names, in the order it names them.
-    fn compared_class_likes(reader: &mut PayloadReader<'_>) -> Vec<String> {
+    fn compared_class_likes(reader: &mut ValueReader<'_>) -> Vec<String> {
         let count = reader.read_count("compared class-likes", MAXIMUM_TYPE_MEMBERS).unwrap();
         std::iter::repeat_with(|| reader.read_string("compared class-like").unwrap()).take(count).collect()
     }
 
-    fn write_named_object(writer: &mut PayloadWriter, name: &[u8], parameters: u32) {
+    fn write_named_object(writer: &mut ValueWriter, name: &[u8], parameters: u32) {
         writer.write_u8(TYPE_NAMED_OBJECT);
         writer.write_bytes(name).unwrap();
         writer.write_u32(parameters);
@@ -4063,11 +3993,9 @@ pub(super) mod testing {
         let request_type = get_literal_string(word(b"value"));
         let mut writer = message_writer(CALLABLE_SIGNATURE_RESPONSE);
         writer.write_bool(true);
-        writer.write_bool(true);
         writer.write_bytes(b"Demo::run").unwrap();
         writer.write_bool(false);
         writer.write_u32(1);
-        writer.write_bool(true);
         writer.write_bytes(b"$value").unwrap();
         writer.write_bool(true);
         writer.write_u8(TYPE_REFERENCE);
@@ -4097,10 +4025,9 @@ pub(super) mod testing {
     fn callable_signature_response_rejects_invalid_parameter_names() {
         let mut writer = message_writer(CALLABLE_SIGNATURE_RESPONSE);
         writer.write_bool(true);
-        writer.write_bool(false);
+        writer.write_value(Value::Null);
         writer.write_bool(true);
         writer.write_u32(1);
-        writer.write_bool(true);
         writer.write_bytes(b"$").unwrap();
         writer.write_bool(false);
         writer.write_u8(0);
@@ -4264,11 +4191,11 @@ pub(super) mod testing {
         decode_issue_filter_response(&writer.finish(), 4).unwrap_err();
     }
 
-    pub fn registration_response() -> Vec<u8> {
+    pub fn registration_response() -> Vec<Value> {
         registration_response_with_lifecycle(0)
     }
 
-    pub fn registration_response_with_plugin(extension: &str, identifier: &str, aliases: &[&str]) -> Vec<u8> {
+    pub fn registration_response_with_plugin(extension: &str, identifier: &str, aliases: &[&str]) -> Vec<Value> {
         let mut writer = message_writer(DESCRIBE_RESPONSE);
         writer.write_u32(1);
         writer.write_string(extension).unwrap();
@@ -4303,11 +4230,11 @@ pub(super) mod testing {
         writer.finish()
     }
 
-    pub fn registration_response_with_initialization() -> Vec<u8> {
+    pub fn registration_response_with_initialization() -> Vec<Value> {
         registration_response_with_lifecycle(8)
     }
 
-    fn registration_response_with_lifecycle(lifecycle: u8) -> Vec<u8> {
+    fn registration_response_with_lifecycle(lifecycle: u8) -> Vec<Value> {
         let mut writer = message_writer(DESCRIBE_RESPONSE);
         writer.write_u32(1);
         writer.write_string("demo/extension").unwrap();
@@ -4345,7 +4272,7 @@ pub(super) mod testing {
         writer.finish()
     }
 
-    pub fn initialization_response(filename: &[u8], contents: &[u8]) -> Vec<u8> {
+    pub fn initialization_response(filename: &[u8], contents: &[u8]) -> Vec<Value> {
         let mut writer = message_writer(INITIALIZE_RESPONSE);
         writer.write_u32(1);
         writer.write_u16(0);
@@ -4355,7 +4282,7 @@ pub(super) mod testing {
         writer.finish()
     }
 
-    pub fn named_object_response(name: &str) -> Vec<u8> {
+    pub fn named_object_response(name: &str) -> Vec<Value> {
         let mut writer = message_writer(RETURN_TYPE_RESPONSE);
         writer.write_bool(true);
         writer.write_u8(TYPE_NAMED_OBJECT);
@@ -4364,7 +4291,7 @@ pub(super) mod testing {
         writer.finish()
     }
 
-    pub fn reference_response(handle: u32) -> Vec<u8> {
+    pub fn reference_response(handle: u32) -> Vec<Value> {
         let mut writer = message_writer(RETURN_TYPE_RESPONSE);
         writer.write_bool(true);
         writer.write_u8(TYPE_REFERENCE);
@@ -4372,22 +4299,22 @@ pub(super) mod testing {
         writer.finish()
     }
 
-    fn refined_scalar_response(tag: u8) -> Vec<u8> {
+    fn refined_scalar_response(tag: u8) -> Vec<Value> {
         let mut writer = message_writer(RETURN_TYPE_RESPONSE);
         writer.write_bool(true);
         writer.write_u8(tag);
         writer.finish()
     }
 
-    pub fn non_negative_int_response() -> Vec<u8> {
+    pub fn non_negative_int_response() -> Vec<Value> {
         refined_scalar_response(TYPE_NON_NEGATIVE_INT)
     }
 
-    pub fn non_empty_string_response() -> Vec<u8> {
+    pub fn non_empty_string_response() -> Vec<Value> {
         refined_scalar_response(TYPE_NON_EMPTY_STRING)
     }
 
-    pub fn complete_non_empty_string_list_response() -> Vec<u8> {
+    pub fn complete_non_empty_string_list_response() -> Vec<Value> {
         let mut writer = message_writer(RETURN_TYPE_RESPONSE);
         writer.write_bool(true);
         writer.write_u8(TYPE_COMPLETE);
@@ -4410,7 +4337,7 @@ pub(super) mod testing {
 
     /// The registration of one plugin with a property type provider and a call forwarding provider, each for the
     /// member `stock` of `Lib\Shelf`.
-    pub fn registration_response_with_property_providers() -> Vec<u8> {
+    pub fn registration_response_with_property_providers() -> Vec<Value> {
         let mut writer = message_writer(DESCRIBE_RESPONSE);
         writer.write_u32(1);
         writer.write_string("demo/extension").unwrap();
@@ -4442,7 +4369,7 @@ pub(super) mod testing {
     /// `stock` of `Lib\Shelf`, an assertion provider of each, a property type, property initialization and call
     /// forwarding provider of that member, a class initializer provider of `Lib\Shelf`, and an issue-filter hook of
     /// `non-existent-function`.
-    pub fn registration_response_with_every_provider() -> Vec<u8> {
+    pub fn registration_response_with_every_provider() -> Vec<Value> {
         let mut writer = message_writer(DESCRIBE_RESPONSE);
         writer.write_u32(1);
         writer.write_string("demo/extension").unwrap();
@@ -4494,7 +4421,7 @@ pub(super) mod testing {
 
     /// A provider list of one provider, index 0, for the function `demo_fn`, whose capabilities `write_capabilities`
     /// writes.
-    fn write_demo_function_provider(writer: &mut PayloadWriter, write_capabilities: impl FnOnce(&mut PayloadWriter)) {
+    fn write_demo_function_provider(writer: &mut ValueWriter, write_capabilities: impl FnOnce(&mut ValueWriter)) {
         writer.write_u32(1);
         writer.write_u16(0);
         write_capabilities(writer);
@@ -4505,7 +4432,7 @@ pub(super) mod testing {
 
     /// A nested request that asks whether request-local type handle 0 equals `mixed`, as a hook that compares an
     /// argument's type does.
-    pub fn type_comparison_of_handle_zero() -> Vec<u8> {
+    pub fn type_comparison_of_handle_zero() -> Vec<Value> {
         let mut writer = message_writer(TYPE_COMPARISON_REQUEST);
         writer.write_u8(TYPE_COMPARISON_EQUAL);
         writer.write_u8(TYPE_REFERENCE);
@@ -4515,7 +4442,7 @@ pub(super) mod testing {
     }
 
     /// A provider list of one provider, index 0, for the member `stock` of `Lib\Shelf`.
-    fn write_stock_provider(writer: &mut PayloadWriter) {
+    fn write_stock_provider(writer: &mut ValueWriter) {
         writer.write_u32(1);
         writer.write_u16(0);
         writer.write_u32(1);
@@ -4525,7 +4452,7 @@ pub(super) mod testing {
 
     /// The response that declines `request`, a property type or call forwarding request, after the codebase reads
     /// the worker made for it: no issue read and no code read.
-    pub fn declined_response(request: &[u8]) -> Vec<u8> {
+    pub fn declined_response(request: &[Value]) -> Vec<Value> {
         let kind = match message_kind(request).unwrap() {
             PROPERTY_TYPE_REQUEST => PROPERTY_TYPE_RESPONSE,
             CALL_FORWARDING_REQUEST => CALL_FORWARDING_RESPONSE,

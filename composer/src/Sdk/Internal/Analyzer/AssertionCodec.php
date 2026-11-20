@@ -21,7 +21,7 @@ use Mago\Sdk\Analyzer\InvocationAssertions;
 use Mago\Sdk\Analyzer\Type\ArrayKey;
 use Mago\Sdk\Analyzer\Type\ArrayKeyKind;
 use Mago\Sdk\Exception\ProtocolException;
-use Mago\Sdk\Internal\Protocol\PayloadWriter;
+use Mago\Sdk\Internal\Protocol\ValueWriter;
 
 use function count;
 use function is_int;
@@ -32,7 +32,7 @@ use function is_string;
  */
 final class AssertionCodec
 {
-    public static function write(PayloadWriter $writer, InvocationAssertions $assertions): void
+    public static function write(ValueWriter $writer, InvocationAssertions $assertions): void
     {
         self::writeMap($writer, $assertions->assertions);
         self::writeMap($writer, $assertions->ifTrueAssertions);
@@ -40,7 +40,7 @@ final class AssertionCodec
     }
 
     /** @param array<string, list<Assertion>> $assertions */
-    private static function writeMap(PayloadWriter $writer, array $assertions): void
+    private static function writeMap(ValueWriter $writer, array $assertions): void
     {
         $writer->writeCount($assertions);
         foreach ($assertions as $parameter => $facts) {
@@ -52,7 +52,7 @@ final class AssertionCodec
         }
     }
 
-    private static function writeAssertion(PayloadWriter $writer, Assertion $assertion): void
+    private static function writeAssertion(ValueWriter $writer, Assertion $assertion): void
     {
         $kind = match (true) {
             $assertion instanceof SimpleAssertion => match ($assertion->kind) {
@@ -126,7 +126,7 @@ final class AssertionCodec
                 throw new ProtocolException("Assertion `{$assertion->kind->name}` requires exactly one atomic type.");
             }
 
-            $writer->writeRaw($assertion->type->encode());
+            $writer->writeValues($assertion->type->encode());
             return;
         }
 
@@ -155,7 +155,7 @@ final class AssertionCodec
         }
     }
 
-    private static function writeArrayKey(PayloadWriter $writer, ArrayKey $key): void
+    private static function writeArrayKey(ValueWriter $writer, ArrayKey $key): void
     {
         $writer->writeU8(match ($key->kind) {
             ArrayKeyKind::Integer => 1,
@@ -184,7 +184,7 @@ final class AssertionCodec
         self::writeClassLikeConstant($writer, $key);
     }
 
-    private static function writeClassLikeConstant(PayloadWriter $writer, ArrayKey $key): void
+    private static function writeClassLikeConstant(ValueWriter $writer, ArrayKey $key): void
     {
         if (!is_string($key->value) || $key->constant === null) {
             throw new ProtocolException('A class-like constant assertion array key is incomplete.');

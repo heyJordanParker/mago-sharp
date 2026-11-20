@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Internal;
 
-use Mago\Sdk\Internal\Protocol\PayloadWriter;
+use Mago\Sdk\Internal\Protocol\ValueWriter;
 use ReflectionClass;
 
 use function array_diff;
@@ -113,7 +113,7 @@ final class ClassLoads
      * Writes the entries Mago has not been sent, up to `$end`: the worker's id, the place of the first one in the log,
      * and each one's name.
      */
-    public function write(PayloadWriter $writer, int $end): void
+    public function write(ValueWriter $writer, int $end): void
     {
         $entries = array_slice($this->log, $this->sent, max(0, $end - $this->sent));
         $writer->writeU64($this->worker);

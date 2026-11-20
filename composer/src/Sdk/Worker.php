@@ -59,7 +59,6 @@ use Mago\Sdk\Internal\HostClient;
 use Mago\Sdk\Internal\Hosts;
 use Mago\Sdk\Internal\Linter\Protocol as LinterProtocol;
 use Mago\Sdk\Internal\Linter\RegisteredRule;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
 use Mago\Sdk\Internal\Protocol\ValueReader;
 use Mago\Sdk\Internal\Worker\Protocol as WorkerProtocol;
 use Mago\Sdk\Linter\LintContext;
@@ -76,7 +75,6 @@ use function in_array;
 use function is_array;
 use function str_contains;
 use function strtolower;
-use function substr;
 
 /**
  * Serves one or more Mago extensions from the file of an extension host, which mago runs in the interpreter of each analysis thread.
@@ -516,41 +514,29 @@ final class Worker
     }
 
     /**
-     * @param string|list<null|bool|int|float|string|list<mixed>> $payload
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
      *
-     * @return string|list<null|bool|int|float|string|list<mixed>>
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    private function handleRequest(string|array $payload): string|array
+    private function handleRequest(array $payload): array
     {
-        $host = new HostClient();
-        if (is_array($payload)) {
-            $protocol = match ($payload[0] ?? null) {
-                LinterProtocol::NAME => LinterProtocol::class,
-                WorkerProtocol::NAME => WorkerProtocol::class,
-                default => throw new ProtocolException('Unknown Mago extension capability protocol.'),
-            };
-            try {
-                [$kind, $reader] = $protocol::readRequest($payload);
-            } catch (ProtocolException $exception) {
-                throw $this->unreadable($exception);
-            }
-
-            return $protocol === LinterProtocol::class
-                ? $this->handleLinterRequest($kind, $reader)
-                : $this->handleWorkerRequest($kind, $reader, $host);
-        }
-
-        if (substr($payload, 0, 4) !== 'MANA') {
-            throw new ProtocolException('Unknown Mago extension capability protocol.');
-        }
-
+        $protocol = match ($payload[0] ?? null) {
+            AnalyzerProtocol::NAME => AnalyzerProtocol::class,
+            LinterProtocol::NAME => LinterProtocol::class,
+            WorkerProtocol::NAME => WorkerProtocol::class,
+            default => throw new ProtocolException('Unknown Mago extension capability protocol.'),
+        };
         try {
-            [$kind, $reader] = AnalyzerProtocol::readRequest($payload);
+            [$kind, $reader] = $protocol::readRequest($payload);
         } catch (ProtocolException $exception) {
             throw $this->unreadable($exception);
         }
 
-        return $this->handleAnalyzerRequest($kind, $reader, $host);
+        return match ($protocol) {
+            AnalyzerProtocol::class => $this->handleAnalyzerRequest($kind, $reader, new HostClient()),
+            LinterProtocol::class => $this->handleLinterRequest($kind, $reader),
+            WorkerProtocol::class => $this->handleWorkerRequest($kind, $reader, new HostClient()),
+        };
     }
 
     /**
@@ -679,7 +665,10 @@ final class Worker
         return LinterProtocol::writeLintResponse($reportedIssues);
     }
 
-    private function handleAnalyzerRequest(int $kind, PayloadReader $reader, HostClient $host): string
+    /**
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    private function handleAnalyzerRequest(int $kind, ValueReader $reader, HostClient $host): array
     {
         if ($kind === AnalyzerProtocol::DESCRIBE_REQUEST) {
             [$this->phpVersion, $this->nodeKinds] = AnalyzerProtocol::readDescribeRequest($reader);
@@ -721,14 +710,15 @@ final class Worker
      * analyzing: in `$codeReads` when the plugin that made it registers a provider, as every provider's plugin does,
      * and in `$issueReads` otherwise.
      *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
     private function handleProviderRequest(
         int $kind,
-        PayloadReader $reader,
+        ValueReader $reader,
         HostClient $host,
         CodebaseReads $issueReads,
         CodebaseReads $codeReads,
-    ): string {
+    ): array {
         if ($kind === AnalyzerProtocol::PROPERTY_TYPE_REQUEST) {
             $request = AnalyzerProtocol::readPropertyTypeRequest($reader);
             if ($this->metadataCache === null || $this->metadataCache->generation !== $request->generation) {
@@ -1043,7 +1033,10 @@ final class Worker
         return AnalyzerProtocol::writeReturnTypeResponse(null);
     }
 
-    private function handleAnalyzerInitialization(PayloadReader $reader, HostClient $host): string
+    /**
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    private function handleAnalyzerInitialization(ValueReader $reader, HostClient $host): array
     {
         $pluginIndices = AnalyzerProtocol::readInitializationRequest($reader);
         $stubs = [];
@@ -1073,7 +1066,10 @@ final class Worker
         return AnalyzerProtocol::writeInitializationResponse($stubs);
     }
 
-    private function handleCodebaseScanRequest(PayloadReader $reader, HostClient $host): string
+    /**
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    private function handleCodebaseScanRequest(ValueReader $reader, HostClient $host): array
     {
         [$firstBatch, $lastBatch, $activeHooks, $filesByHook] = AnalyzerProtocol::readCodebaseScanRequest($reader);
         $refinements = [];
@@ -1107,7 +1103,10 @@ final class Worker
         return AnalyzerProtocol::writeCodebaseScanResponse($refinements);
     }
 
-    private function handleAnalyzerLifecycleRequest(int $kind, PayloadReader $reader, HostClient $host): string
+    /**
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    private function handleAnalyzerLifecycleRequest(int $kind, ValueReader $reader, HostClient $host): array
     {
         $request = AnalyzerProtocol::readLifecycleRequest($kind, $reader, $host, $this->phpVersion, $this->nodeKinds);
         if ($this->metadataCache === null || $this->metadataCache->generation !== $request->generation) {

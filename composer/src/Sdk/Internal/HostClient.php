@@ -7,7 +7,7 @@ namespace Mago\Sdk\Internal;
 use Mago\Sdk\Exception\ProtocolException;
 use RuntimeException;
 
-use function is_string;
+use function is_array;
 use function Mago\Engine\ask;
 
 /**
@@ -18,11 +18,15 @@ use function Mago\Engine\ask;
 final class HostClient
 {
     /**
-     * Sends mago a codebase query and returns its answer.
+     * Sends mago a codebase query, a message of values, and returns its answer, which is one too.
+     *
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      *
      * @throws ProtocolException when mago refuses the query.
      */
-    public function request(string $payload): string
+    public function request(array $payload): array
     {
         try {
             $answer = ask('query', $payload);
@@ -30,8 +34,8 @@ final class HostClient
             throw new ProtocolException($exception->getMessage(), 0, $exception);
         }
 
-        if (!is_string($answer)) {
-            throw new ProtocolException('mago answered a codebase query with no payload.');
+        if (!is_array($answer)) {
+            throw new ProtocolException('mago answered a codebase query with no message.');
         }
 
         return $answer;

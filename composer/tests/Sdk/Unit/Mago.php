@@ -12,10 +12,17 @@ use RuntimeException;
  */
 final class Mago
 {
-    /** @var null|Closure(string, string): ?string */
+    /**
+     * @var null|Closure(string, string|list<null|bool|int|float|string|list<mixed>>): ?list<null|bool|int|float|string|list<mixed>>
+     */
     public static ?Closure $answer = null;
 
-    public static function ask(string $question, string $payload): ?string
+    /**
+     * @param string|list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return null|list<null|bool|int|float|string|list<mixed>>
+     */
+    public static function ask(string $question, string|array $payload): ?array
     {
         $answer = self::$answer ?? throw new RuntimeException("The worker asked `{$question}` where it asks nothing.");
 

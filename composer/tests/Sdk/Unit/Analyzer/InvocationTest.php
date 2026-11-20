@@ -12,16 +12,12 @@ use Mago\Sdk\Exception\ProtocolException;
 use Mago\Sdk\Internal\Analyzer\Protocol;
 use Mago\Sdk\Internal\Analyzer\ReturnTypeRequest;
 use Mago\Sdk\Internal\Analyzer\TypeCodec;
-use Mago\Sdk\Internal\Protocol\PayloadWriter;
+use Mago\Sdk\Internal\Protocol\ValueWriter;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Throwable;
 
-use function array_diff;
-use function pack;
-use function range;
-use function sprintf;
-use function substr;
+use function array_slice;
 
 final class InvocationTest extends TestCase
 {
@@ -83,7 +79,7 @@ final class InvocationTest extends TestCase
 
         $response = Protocol::writeReturnTypeResponse($receiver);
 
-        self::assertSame(pack('CN', 0, 0), substr($response, 13));
+        self::assertSame([0, 0], array_slice($response, 3));
     }
 
     public function testMethodWithoutReceiverIsRejected(): void
@@ -96,7 +92,7 @@ final class InvocationTest extends TestCase
         $writer->writeU16(0);
 
         $this->expectException(Throwable::class);
-        self::decode(self::message($writer));
+        self::decode(self::message($writer->finish()));
     }
 
     public function testFunctionWithReceiverIsRejected(): void
@@ -109,7 +105,7 @@ final class InvocationTest extends TestCase
         $writer->writeU16(0);
 
         $this->expectException(Throwable::class);
-        self::decode(self::message($writer));
+        self::decode(self::message($writer->finish()));
     }
 
     public function testTruncatedReceiverIsRejected(): void
@@ -120,7 +116,7 @@ final class InvocationTest extends TestCase
         self::writeReceiver($writer, Type::namedObject('User'));
 
         $this->expectException(Throwable::class);
-        self::decode(self::messagePayload(substr($writer->finish(), 0, -3) . "\x02"));
+        self::decode(self::message(array_slice($writer->finish(), 0, -1)));
     }
 
     public function testEmptyMethodDeclaringClassIsRejected(): void
@@ -131,55 +127,17 @@ final class InvocationTest extends TestCase
         self::decode(self::request(2, '', Type::namedObject('User')));
     }
 
-    /**
-     * @return iterable<string, array{int, int}>
-     */
-    public static function requestsFromOtherVersions(): iterable
-    {
-        $currentMinor = Protocol::VERSION_U32 & 0xFFFF;
-        foreach (array_diff(range(0, $currentMinor + 1), [$currentMinor]) as $minor) {
-            yield "return type, minor {$minor}" => [Protocol::RETURN_TYPE_REQUEST, $minor];
-            yield "callable signature, minor {$minor}" => [Protocol::CALLABLE_SIGNATURE_REQUEST, $minor];
-            yield "assertion, minor {$minor}" => [Protocol::ASSERTION_REQUEST, $minor];
-        }
-    }
-
-    #[DataProvider('requestsFromOtherVersions')]
-    public function testRequestFromAnotherVersionIsRejected(int $kind, int $minor): void
-    {
-        $major = Protocol::VERSION_U32 >> 16;
-        $this->expectException(ProtocolException::class);
-        $this->expectExceptionMessage(sprintf('`mago` speaks analyzer protocol %d.%d,', $major, $minor));
-
-        Protocol::readRequest(pack('N3', 0x4D41_4E41, ($major << 16) | $minor, $kind << 16));
-    }
-
-    /**
-     * Mago of protocol 1.11 reads no before-analysis reads and no whole method search, so the worker refuses its first
-     * request.
-     */
-    public function testDescribeRequestOfTheProtocolBeforeWholeMethodSearchesIsRejected(): void
+    /** A message whose first value names another protocol is no analyzer message, so the worker refuses it. */
+    public function testAMessageOfAnotherProtocolIsRejected(): void
     {
         $this->expectException(ProtocolException::class);
-        $this->expectExceptionMessage('`mago` speaks analyzer protocol 1.11,');
+        $this->expectExceptionMessage('The message is no analyzer message.');
 
-        Protocol::readRequest(pack('N3', 0x4D41_4E41, (1 << 16) | 11, Protocol::DESCRIBE_REQUEST << 16));
+        Protocol::readRequest(['linter', Protocol::DESCRIBE_REQUEST]);
     }
 
     /**
-     * Mago of protocol 1.12 prints a progress frame as the file whose hooks it names, so the worker, whose frames name
-     * what it starts, refuses its first request.
-     */
-    public function testDescribeRequestOfTheProtocolBeforeNamedProgressIsRejected(): void
-    {
-        $this->expectException(ProtocolException::class);
-        $this->expectExceptionMessage('`mago` speaks analyzer protocol 1.12,');
-
-        Protocol::readRequest(pack('N3', 0x4D41_4E41, (1 << 16) | 12, Protocol::DESCRIBE_REQUEST << 16));
-    }
-
-    /**
-     * @return iterable<string, array{string, int}>
+     * @return iterable<string, array{list<null|bool|int|float|string|list<mixed>>, int}>
      */
     public static function unhandledResponses(): iterable
     {
@@ -188,8 +146,11 @@ final class InvocationTest extends TestCase
         yield 'assertion' => [Protocol::writeAssertionResponse(null), 0x8012];
     }
 
+    /**
+     * @param list<null|bool|int|float|string|list<mixed>> $response
+     */
     #[DataProvider('unhandledResponses')]
-    public function testUnhandledResponseCarriesTheCurrentVersion(string $response, int $kind): void
+    public function testUnhandledResponseSaysItHandledNothing(array $response, int $kind): void
     {
         [$decodedKind, $reader] = Protocol::readRequest($response);
 
@@ -198,12 +159,15 @@ final class InvocationTest extends TestCase
         $reader->finish();
     }
 
+    /**
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
     private static function request(
         int $kind,
         ?string $declaringClass = null,
         ?Type $receiver = null,
         ?FunctionLikeIdentifier $callingFunctionLike = null,
-    ): string {
+    ): array {
         $writer = self::requestPrefix($kind);
         if ($declaringClass !== null) {
             $writer->writeBytes($declaringClass);
@@ -220,12 +184,12 @@ final class InvocationTest extends TestCase
             TypeCodec::writeFunctionLikeIdentifier($writer, $callingFunctionLike);
         }
 
-        return self::message($writer);
+        return self::message($writer->finish());
     }
 
-    private static function requestPrefix(int $kind): PayloadWriter
+    private static function requestPrefix(int $kind): ValueWriter
     {
-        $writer = new PayloadWriter();
+        $writer = new ValueWriter();
         $writer->writeU64(1);
         $writer->writeU8($kind);
         $writer->writeU16(1);
@@ -234,23 +198,28 @@ final class InvocationTest extends TestCase
         return $writer;
     }
 
-    private static function writeReceiver(PayloadWriter $writer, Type $receiver): void
+    private static function writeReceiver(ValueWriter $writer, Type $receiver): void
     {
         $writer->writeU32(0);
         TypeCodec::writeComplete($writer, $receiver);
     }
 
-    private static function message(PayloadWriter $writer): string
+    /**
+     * The return-type request of `$fields`.
+     *
+     * @param list<null|bool|int|float|string|list<mixed>> $fields
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    private static function message(array $fields): array
     {
-        return self::messagePayload($writer->finish());
+        return [Protocol::NAME, Protocol::RETURN_TYPE_REQUEST, ...$fields];
     }
 
-    private static function messagePayload(string $payload): string
-    {
-        return pack('N3', 0x4D41_4E41, Protocol::VERSION_U32, 2 << 16) . $payload;
-    }
-
-    private static function decode(string $payload): ReturnTypeRequest
+    /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     */
+    private static function decode(array $payload): ReturnTypeRequest
     {
         [, $reader] = Protocol::readRequest($payload);
 

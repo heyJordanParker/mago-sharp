@@ -46,7 +46,7 @@ use Mago\Sdk\Analyzer\Type\GenericParentKind;
 use Mago\Sdk\Analyzer\Type\Variance;
 use Mago\Sdk\Analyzer\Type\Visibility;
 use Mago\Sdk\Exception\ProtocolException;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
+use Mago\Sdk\Internal\Protocol\ValueReader;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\SourceLocation;
 use Mago\Sdk\Span;
@@ -58,7 +58,7 @@ final class MetadataCodec
 {
     private const MAXIMUM_MEMBERS = 65_536;
 
-    public static function readClassLike(PayloadReader $reader): ClassLikeMetadata
+    public static function readClassLike(ValueReader $reader): ClassLikeMetadata
     {
         return new ClassLikeMetadata(
             $reader->readBytes(),
@@ -95,7 +95,7 @@ final class MetadataCodec
         );
     }
 
-    public static function readFunctionLike(PayloadReader $reader): FunctionLikeMetadata
+    public static function readFunctionLike(ValueReader $reader): FunctionLikeMetadata
     {
         $identifier = TypeCodec::readFunctionLikeIdentifier($reader);
         $kind = match ($value = $reader->readU8()) {
@@ -183,7 +183,7 @@ final class MetadataCodec
         );
     }
 
-    public static function readMethodProjection(PayloadReader $reader, int $fields): MethodMetadataProjection
+    public static function readMethodProjection(ValueReader $reader, int $fields): MethodMetadataProjection
     {
         $method = new MemberIdentifier($reader->readBytes(), $reader->readBytes());
         $identifier = TypeCodec::readFunctionLikeIdentifier($reader);
@@ -308,7 +308,7 @@ final class MetadataCodec
     }
 
     /** @return array<string, list<Assertion>> */
-    private static function readAssertions(PayloadReader $reader): array
+    private static function readAssertions(ValueReader $reader): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $assertions = [];
@@ -325,7 +325,7 @@ final class MetadataCodec
         return $assertions;
     }
 
-    private static function readAssertion(PayloadReader $reader): Assertion
+    private static function readAssertion(ValueReader $reader): Assertion
     {
         return match ($kind = $reader->readU8()) {
             1 => new SimpleAssertion(SimpleAssertionKind::Any),
@@ -381,7 +381,7 @@ final class MetadataCodec
         };
     }
 
-    private static function readArrayKey(PayloadReader $reader): ArrayKey
+    private static function readArrayKey(ValueReader $reader): ArrayKey
     {
         return match ($kind = $reader->readU8()) {
             1 => new ArrayKey(ArrayKeyKind::Integer, $reader->readI64()),
@@ -391,7 +391,7 @@ final class MetadataCodec
         };
     }
 
-    public static function readProperty(PayloadReader $reader): PropertyMetadata
+    public static function readProperty(ValueReader $reader): PropertyMetadata
     {
         $name = $reader->readBytes();
         $location = self::readOptionalLocation($reader);
@@ -424,7 +424,7 @@ final class MetadataCodec
     }
 
     /** @return array<string, PropertyHookMetadata> */
-    private static function readPropertyHooks(PayloadReader $reader): array
+    private static function readPropertyHooks(ValueReader $reader): array
     {
         $hooks = [];
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
@@ -446,7 +446,7 @@ final class MetadataCodec
         return $hooks;
     }
 
-    public static function readClassConstant(PayloadReader $reader): ClassConstantMetadata
+    public static function readClassConstant(ValueReader $reader): ClassConstantMetadata
     {
         return new ClassConstantMetadata(
             $reader->readBytes(),
@@ -461,7 +461,7 @@ final class MetadataCodec
         );
     }
 
-    public static function readEnumCase(PayloadReader $reader): EnumCaseMetadata
+    public static function readEnumCase(ValueReader $reader): EnumCaseMetadata
     {
         return new EnumCaseMetadata(
             $reader->readBytes(),
@@ -474,7 +474,7 @@ final class MetadataCodec
         );
     }
 
-    public static function readConstant(PayloadReader $reader): ConstantMetadata
+    public static function readConstant(ValueReader $reader): ConstantMetadata
     {
         return new ConstantMetadata(
             $reader->readBytes(),
@@ -487,7 +487,7 @@ final class MetadataCodec
         );
     }
 
-    private static function readParameter(PayloadReader $reader): ParameterMetadata
+    private static function readParameter(ValueReader $reader): ParameterMetadata
     {
         return new ParameterMetadata(
             $reader->readBytes(),
@@ -503,12 +503,12 @@ final class MetadataCodec
         );
     }
 
-    private static function readFlags(PayloadReader $reader): MetadataFlags
+    private static function readFlags(ValueReader $reader): MetadataFlags
     {
         return new MetadataFlags($reader->readI64());
     }
 
-    private static function readTypeMetadata(PayloadReader $reader): TypeMetadata
+    private static function readTypeMetadata(ValueReader $reader): TypeMetadata
     {
         return new TypeMetadata(
             self::readLocation($reader),
@@ -518,18 +518,18 @@ final class MetadataCodec
         );
     }
 
-    private static function readOptionalTypeMetadata(PayloadReader $reader): ?TypeMetadata
+    private static function readOptionalTypeMetadata(ValueReader $reader): ?TypeMetadata
     {
         return $reader->readBoolean() ? self::readTypeMetadata($reader) : null;
     }
 
-    private static function readOptionalType(PayloadReader $reader): ?Type
+    private static function readOptionalType(ValueReader $reader): ?Type
     {
         return $reader->readBoolean() ? TypeCodec::readComplete($reader) : null;
     }
 
     /** @return list<Type> */
-    private static function readTypes(PayloadReader $reader): array
+    private static function readTypes(ValueReader $reader): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $types = [];
@@ -541,7 +541,7 @@ final class MetadataCodec
     }
 
     /** @return list<TemplateMetadata> */
-    private static function readTemplates(PayloadReader $reader): array
+    private static function readTemplates(ValueReader $reader): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $templates = [];
@@ -560,7 +560,7 @@ final class MetadataCodec
     }
 
     /** @return list<AttributeMetadata> */
-    private static function readAttributes(PayloadReader $reader): array
+    private static function readAttributes(ValueReader $reader): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $attributes = [];
@@ -585,7 +585,7 @@ final class MetadataCodec
         return $attributes;
     }
 
-    private static function readConstantExpression(PayloadReader $reader): ConstantExpression
+    private static function readConstantExpression(ValueReader $reader): ConstantExpression
     {
         return match ($kind = $reader->readU8()) {
             1 => new ConstantExpression(ConstantExpressionKind::Literal),
@@ -615,7 +615,7 @@ final class MetadataCodec
     }
 
     /** @return list<array{ConstantExpression|null, ConstantExpression}> */
-    private static function readConstantExpressionItems(PayloadReader $reader): array
+    private static function readConstantExpressionItems(ValueReader $reader): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $items = [];
@@ -630,7 +630,7 @@ final class MetadataCodec
     }
 
     /** @return list<array{string|null, ConstantExpression}> */
-    private static function readConstantExpressionArguments(PayloadReader $reader): array
+    private static function readConstantExpressionArguments(ValueReader $reader): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $arguments = [];
@@ -642,7 +642,7 @@ final class MetadataCodec
     }
 
     /** @return array<string, TypeMetadata> */
-    private static function readTypeMetadataMap(PayloadReader $reader): array
+    private static function readTypeMetadataMap(ValueReader $reader): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $values = [];
@@ -653,20 +653,20 @@ final class MetadataCodec
         return $values;
     }
 
-    private static function readLocation(PayloadReader $reader): SourceLocation
+    private static function readLocation(ValueReader $reader): SourceLocation
     {
         $file = $reader->readBoolean() ? $reader->readBytes() : null;
 
         return new SourceLocation($file, new Span($reader->readU32(), $reader->readU32()));
     }
 
-    private static function readOptionalLocation(PayloadReader $reader): ?SourceLocation
+    private static function readOptionalLocation(ValueReader $reader): ?SourceLocation
     {
         return $reader->readBoolean() ? self::readLocation($reader) : null;
     }
 
     /** @return list<string> */
-    private static function readStrings(PayloadReader $reader): array
+    private static function readStrings(ValueReader $reader): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $values = [];
@@ -678,13 +678,13 @@ final class MetadataCodec
     }
 
     /** @return list<string>|null */
-    private static function readOptionalStrings(PayloadReader $reader): ?array
+    private static function readOptionalStrings(ValueReader $reader): ?array
     {
         return $reader->readBoolean() ? self::readStrings($reader) : null;
     }
 
     /** @return list<VersionRange> */
-    private static function readVersionRanges(PayloadReader $reader): array
+    private static function readVersionRanges(ValueReader $reader): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $ranges = [];
@@ -697,7 +697,7 @@ final class MetadataCodec
         return $ranges;
     }
 
-    private static function readOptionalBoolean(PayloadReader $reader): ?bool
+    private static function readOptionalBoolean(ValueReader $reader): ?bool
     {
         return match ($value = $reader->readU8()) {
             0 => null,
@@ -707,7 +707,7 @@ final class MetadataCodec
         };
     }
 
-    private static function readClassLikeKind(PayloadReader $reader): ClassLikeKind
+    private static function readClassLikeKind(ValueReader $reader): ClassLikeKind
     {
         return match ($value = $reader->readU8()) {
             1 => ClassLikeKind::Class_,
@@ -718,7 +718,7 @@ final class MetadataCodec
         };
     }
 
-    private static function readVisibility(PayloadReader $reader): Visibility
+    private static function readVisibility(ValueReader $reader): Visibility
     {
         return match ($value = $reader->readU8()) {
             1 => Visibility::Public,
@@ -728,7 +728,7 @@ final class MetadataCodec
         };
     }
 
-    private static function readVariance(PayloadReader $reader): Variance
+    private static function readVariance(ValueReader $reader): Variance
     {
         return match ($value = $reader->readU8()) {
             1 => Variance::Invariant,
@@ -739,7 +739,7 @@ final class MetadataCodec
         };
     }
 
-    private static function readGenericParent(PayloadReader $reader): GenericParent
+    private static function readGenericParent(ValueReader $reader): GenericParent
     {
         return match ($value = $reader->readU8()) {
             1 => new GenericParent(GenericParentKind::ClassLike, $reader->readBytes()),

@@ -25,6 +25,7 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_extension::Host;
+use mago_extension::Value;
 use mago_extension::WorkerError;
 use mago_extension::WorkerRequestHandler;
 use mago_names::ResolvedNames;
@@ -217,7 +218,11 @@ impl ExternalAnalysisSession {
 
     /// Records the codebase reads a provider or issue filter made while Mago analyzed `file_id`, which lead its
     /// `response` with its worker's class loads, and returns the response without them.
-    fn record_response_reads(&self, file_id: FileId, response: &[u8]) -> Result<Vec<u8>, ExternalAnalyzerError> {
+    fn record_response_reads(
+        &self,
+        file_id: FileId,
+        response: Vec<Value>,
+    ) -> Result<Vec<Value>, ExternalAnalyzerError> {
         let (reads, loads, response) = protocol::take_codebase_reads(response)?;
         self.record_reads(Some(file_id), reads, loads);
 
@@ -262,8 +267,8 @@ struct ExternalAnalyzerTelemetry {
     issue_filter_candidates: AtomicU64,
     issue_filter_removed: AtomicU64,
     issue_filter_errors: AtomicU64,
-    issue_filter_request_bytes: AtomicU64,
-    issue_filter_response_bytes: AtomicU64,
+    issue_filter_request_fields: AtomicU64,
+    issue_filter_response_fields: AtomicU64,
     signature_lookups: AtomicU64,
     assertion_lookups: AtomicU64,
     backend_checks: AtomicU64,
@@ -284,12 +289,12 @@ struct ExternalAnalyzerTelemetry {
     snapshotted_types: AtomicU64,
     arguments: AtomicU64,
     typed_arguments: AtomicU64,
-    request_bytes: AtomicU64,
-    response_bytes: AtomicU64,
+    request_fields: AtomicU64,
+    response_fields: AtomicU64,
     nested_requests: AtomicU64,
     nested_errors: AtomicU64,
-    nested_request_bytes: AtomicU64,
-    nested_response_bytes: AtomicU64,
+    nested_request_fields: AtomicU64,
+    nested_response_fields: AtomicU64,
     comparison_batches: AtomicU64,
     comparisons: AtomicU64,
     metadata_queries: AtomicU64,
@@ -302,8 +307,8 @@ struct ExternalAnalyzerTelemetry {
     lifecycle_plugins: AtomicU64,
     lifecycle_issues: AtomicU64,
     lifecycle_errors: AtomicU64,
-    lifecycle_request_bytes: AtomicU64,
-    lifecycle_response_bytes: AtomicU64,
+    lifecycle_request_fields: AtomicU64,
+    lifecycle_response_fields: AtomicU64,
     matching_ns: AtomicU64,
     encode_ns: AtomicU64,
     type_snapshot_ns: AtomicU64,
@@ -328,12 +333,12 @@ struct ExternalAnalyzerTelemetry {
 impl ExternalAnalyzerTelemetry {
     fn record_nested_request(
         &self,
-        request_bytes: usize,
+        request_fields: usize,
         elapsed: Duration,
-        result: &Result<(protocol::NestedRequestKind, Vec<u8>), ExternalAnalyzerError>,
+        result: &Result<(protocol::NestedRequestKind, Vec<Value>), ExternalAnalyzerError>,
     ) {
         self.nested_requests.fetch_add(1, Ordering::Relaxed);
-        self.nested_request_bytes.fetch_add(request_bytes as u64, Ordering::Relaxed);
+        self.nested_request_fields.fetch_add(request_fields as u64, Ordering::Relaxed);
         self.nested_ns.fetch_add(duration_nanos(elapsed), Ordering::Relaxed);
 
         let Ok((kind, response)) = result else {
@@ -342,7 +347,7 @@ impl ExternalAnalyzerTelemetry {
             return;
         };
 
-        self.nested_response_bytes.fetch_add(response.len() as u64, Ordering::Relaxed);
+        self.nested_response_fields.fetch_add(response.len() as u64, Ordering::Relaxed);
         match kind {
             protocol::NestedRequestKind::TypeComparison => {
                 self.comparisons.fetch_add(1, Ordering::Relaxed);
@@ -787,14 +792,14 @@ pub trait AnalyzerTransport: std::fmt::Debug + Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the worker cannot process the request.
-    fn broadcast(&self, payload: &[u8]) -> Result<Vec<u8>, WorkerError>;
+    fn broadcast(&self, payload: &[Value]) -> Result<Vec<Value>, WorkerError>;
 
     /// Sends an ordered, replayable state-replacement sequence to the host's worker in every interpreter.
     ///
     /// # Errors
     ///
     /// Returns an error if the worker cannot process the complete sequence.
-    fn broadcast_sequence(&self, _group: u64, payloads: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, WorkerError> {
+    fn broadcast_sequence(&self, _group: u64, payloads: &[Vec<Value>]) -> Result<Vec<Vec<Value>>, WorkerError> {
         payloads.iter().map(|payload| self.broadcast(payload)).collect()
     }
 
@@ -810,20 +815,20 @@ pub trait AnalyzerTransport: std::fmt::Debug + Send + Sync {
     /// Returns an error if the worker or the query handler fails.
     fn request_with_handler<H>(
         &self,
-        payload: Vec<u8>,
+        payload: Vec<Value>,
         running: Option<&dyn Display>,
         handler: &mut H,
-    ) -> Result<Vec<u8>, WorkerError>
+    ) -> Result<Vec<Value>, WorkerError>
     where
         H: WorkerRequestHandler;
 }
 
 impl AnalyzerTransport for Host {
-    fn broadcast(&self, payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
+    fn broadcast(&self, payload: &[Value]) -> Result<Vec<Value>, WorkerError> {
         Self::broadcast(self, payload)
     }
 
-    fn broadcast_sequence(&self, group: u64, payloads: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, WorkerError> {
+    fn broadcast_sequence(&self, group: u64, payloads: &[Vec<Value>]) -> Result<Vec<Vec<Value>>, WorkerError> {
         Self::broadcast_sequence(self, Some(group), payloads)
     }
 
@@ -833,10 +838,10 @@ impl AnalyzerTransport for Host {
 
     fn request_with_handler<H>(
         &self,
-        payload: Vec<u8>,
+        payload: Vec<Value>,
         running: Option<&dyn Display>,
         handler: &mut H,
-    ) -> Result<Vec<u8>, WorkerError>
+    ) -> Result<Vec<Value>, WorkerError>
     where
         H: WorkerRequestHandler,
     {
@@ -1783,12 +1788,12 @@ where
                 self.telemetry.issue_filter_encode_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
                 self.telemetry.issue_filter_batches.fetch_add(1, Ordering::Relaxed);
                 self.telemetry.issue_filter_candidates.fetch_add(issue_count as u64, Ordering::Relaxed);
-                self.telemetry.issue_filter_request_bytes.fetch_add(request.len() as u64, Ordering::Relaxed);
+                self.telemetry.issue_filter_request_fields.fetch_add(request.len() as u64, Ordering::Relaxed);
             }
 
             let nested_telemetry = &self.telemetry;
             let trace_enabled = self.trace_enabled;
-            let mut handler = |query: &[u8]| {
+            let mut handler = |query: &[Value]| {
                 let nested_start = trace_enabled.then(Instant::now);
                 let result = protocol::handle_nested_request(query, codebase, session, |_| None);
                 if let Some(start) = nested_start {
@@ -1810,12 +1815,13 @@ where
 
             if let Some(start) = ipc_start {
                 self.telemetry.issue_filter_ipc_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
-                self.telemetry.issue_filter_response_bytes.fetch_add(response.len() as u64, Ordering::Relaxed);
+                self.telemetry.issue_filter_response_fields.fetch_add(response.len() as u64, Ordering::Relaxed);
             }
 
+            let response_fields = response.len();
             let decode_start = self.trace_enabled.then(Instant::now);
             let removed = session
-                .record_response_reads(file.id, &response)
+                .record_response_reads(file.id, response)
                 .and_then(|response| protocol::decode_issue_filter_response(&response, issue_count))
                 .inspect_err(|_| self.record_issue_filter_error())?;
             let removed = removed.into_iter().map(|index| candidate_indices[index]).collect::<Vec<_>>();
@@ -1849,7 +1855,7 @@ where
                         candidates = issue_count,
                         removed = removed_count,
                         retained = issues.len(),
-                        response_bytes = response.len(),
+                        response_fields,
                         elapsed = ?elapsed,
                         "Slow external analyzer issue-filter batch completed."
                     );
@@ -1866,7 +1872,7 @@ where
         phase: LifecyclePhase,
         plugins: &[u16],
         logical_callbacks: usize,
-        request: Vec<u8>,
+        request: Vec<Value>,
         handler: &mut H,
         session: &ExternalAnalysisSession,
         default_file: Option<&File>,
@@ -1890,7 +1896,7 @@ where
             }
 
             self.telemetry.lifecycle_plugins.fetch_add(logical_callbacks as u64, Ordering::Relaxed);
-            self.telemetry.lifecycle_request_bytes.fetch_add(request.len() as u64, Ordering::Relaxed);
+            self.telemetry.lifecycle_request_fields.fetch_add(request.len() as u64, Ordering::Relaxed);
         }
 
         // Only an after-file request names a file, whose hooks are its one unit, so Mago names them. The worker names
@@ -1908,7 +1914,7 @@ where
 
         if let Some(start) = ipc_start {
             self.telemetry.lifecycle_ipc_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
-            self.telemetry.lifecycle_response_bytes.fetch_add(response.len() as u64, Ordering::Relaxed);
+            self.telemetry.lifecycle_response_fields.fetch_add(response.len() as u64, Ordering::Relaxed);
         }
 
         let decode_start = self.trace_enabled.then(Instant::now);
@@ -1938,7 +1944,7 @@ where
                     phase = phase.name(),
                     plugins = plugins.len(),
                     file,
-                    response_bytes = response.len(),
+                    response_fields = response.len(),
                     issues = issues.issue_count(),
                     elapsed = ?elapsed,
                     "Slow external analyzer lifecycle request completed."
@@ -1986,7 +1992,7 @@ where
 
             let nested_telemetry = &self.telemetry;
             let trace_enabled = self.trace_enabled;
-            let mut handler = |query: &[u8]| {
+            let mut handler = |query: &[Value]| {
                 let nested_start = trace_enabled.then(Instant::now);
                 let result = protocol::handle_nested_request(query, codebase, session, |_| None);
                 if let Some(start) = nested_start {
@@ -2067,7 +2073,7 @@ where
 
             let nested_telemetry = &self.telemetry;
             let trace_enabled = self.trace_enabled;
-            let mut handler = |query: &[u8]| {
+            let mut handler = |query: &[Value]| {
                 let nested_start = trace_enabled.then(Instant::now);
                 let result = if protocol::message_kind(query).map_err(|error| error.to_string().into_bytes())? == 8 {
                     lifecycle::handle_analysis_query(query, session, &store)
@@ -2152,7 +2158,7 @@ where
 
             let nested_telemetry = &self.telemetry;
             let trace_enabled = self.trace_enabled;
-            let mut handler = |query: &[u8]| {
+            let mut handler = |query: &[Value]| {
                 let nested_start = trace_enabled.then(Instant::now);
                 let result = if protocol::message_kind(query).map_err(|error| error.to_string().into_bytes())? == 8 {
                     lifecycle::handle_analysis_query(query, session, &store)
@@ -2212,7 +2218,7 @@ where
 
             let nested_telemetry = &self.telemetry;
             let trace_enabled = self.trace_enabled;
-            let mut handler = |query: &[u8]| {
+            let mut handler = |query: &[Value]| {
                 let nested_start = trace_enabled.then(Instant::now);
                 let kind = protocol::message_kind(query).map_err(|error| error.to_string().into_bytes())?;
                 let result = if kind == 8 {
@@ -2258,7 +2264,7 @@ where
         file_id: FileId,
         codebase: &CodebaseMetadata,
         session: &ExternalAnalysisSession,
-    ) -> Result<Vec<u8>, ExternalAnalyzerError> {
+    ) -> Result<Vec<Value>, ExternalAnalyzerError> {
         if self.trace_enabled {
             self.telemetry.requests.fetch_add(1, Ordering::Relaxed);
             self.telemetry.snapshotted_types.fetch_add(request.snapshotted_types as u64, Ordering::Relaxed);
@@ -2267,7 +2273,7 @@ where
             self.telemetry
                 .type_snapshot_ns
                 .fetch_add(duration_nanos(request.type_snapshot_duration), Ordering::Relaxed);
-            self.telemetry.request_bytes.fetch_add(request.payload.len() as u64, Ordering::Relaxed);
+            self.telemetry.request_fields.fetch_add(request.payload.len() as u64, Ordering::Relaxed);
         }
 
         let payload = std::mem::take(&mut request.payload);
@@ -2275,7 +2281,7 @@ where
             protocol::resolve_type_handle(&request.types, handle)
         })?;
 
-        session.record_response_reads(file_id, &response)
+        session.record_response_reads(file_id, response)
     }
 
     fn decode_provider_response<R>(
@@ -2293,15 +2299,15 @@ where
     fn exchange_provider_payload<'type_info>(
         &self,
         backend: &Backend<T>,
-        request: Vec<u8>,
+        request: Vec<Value>,
         running: &dyn Display,
         codebase: &CodebaseMetadata,
         session: &ExternalAnalysisSession,
         resolve_type: impl Fn(usize) -> Option<&'type_info TUnion>,
-    ) -> Result<Vec<u8>, ExternalAnalyzerError> {
+    ) -> Result<Vec<Value>, ExternalAnalyzerError> {
         let nested_telemetry = &self.telemetry;
         let trace_enabled = self.trace_enabled;
-        let mut handler = |query: &[u8]| {
+        let mut handler = |query: &[Value]| {
             let nested_start = trace_enabled.then(Instant::now);
             let result = protocol::handle_nested_request(query, codebase, session, &resolve_type);
             if let Some(start) = nested_start {
@@ -2321,7 +2327,7 @@ where
             .inspect_err(|_| self.record_error())?;
         if let Some(start) = ipc_start {
             self.telemetry.ipc_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
-            self.telemetry.response_bytes.fetch_add(response.len() as u64, Ordering::Relaxed);
+            self.telemetry.response_fields.fetch_add(response.len() as u64, Ordering::Relaxed);
         }
 
         Ok(response)
@@ -2830,7 +2836,7 @@ where
                     arguments = request.arguments,
                     typed_arguments = request.typed_arguments,
                     argument_types = request.types.len().saturating_sub(request.receiver_type_count),
-                    response_bytes = response.len(),
+                    response_fields = response.len(),
                     elapsed = ?start.elapsed(),
                     provided = result.is_some(),
                     "Slow external return-type provider request completed."
@@ -2915,7 +2921,7 @@ where
                 self.telemetry
                     .type_snapshot_ns
                     .fetch_add(duration_nanos(request.type_snapshot_duration), Ordering::Relaxed);
-                self.telemetry.request_bytes.fetch_add(request.payload.len() as u64, Ordering::Relaxed);
+                self.telemetry.request_fields.fetch_add(request.payload.len() as u64, Ordering::Relaxed);
             }
 
             let running = backend.provider_names(
@@ -2927,7 +2933,7 @@ where
                 self.exchange_provider_payload(backend, request.payload, &running, codebase, session, |handle| {
                     protocol::resolve_type_handle(&request.types, handle)
                 })?;
-            let response = session.record_response_reads(span.file_id, &response)?;
+            let response = session.record_response_reads(span.file_id, response)?;
 
             let decode_start = self.trace_enabled.then(Instant::now);
             let result = protocol::decode_property_type_response(&response, |handle| {
@@ -2947,7 +2953,7 @@ where
                     access = ?access,
                     providers = indices.as_slice().len(),
                     receiver_types = request.types.len(),
-                    response_bytes = response.len(),
+                    response_fields = response.len(),
                     elapsed = ?start.elapsed(),
                     provided = result.is_some(),
                     "Slow external property type provider request completed."
@@ -3012,7 +3018,7 @@ where
                 self.exchange_provider_payload(backend, request.payload, &running, codebase, session, |handle| {
                     protocol::resolve_type_handle(&request.types, handle)
                 })?;
-            let response = session.record_response_reads(source_file.id, &response)?;
+            let response = session.record_response_reads(source_file.id, response)?;
 
             let result = protocol::decode_call_forwarding_response(&response, |handle| {
                 protocol::resolve_type_handle(&request.types, handle)
@@ -3080,7 +3086,7 @@ where
 
             if let Some(start) = encode_start {
                 self.telemetry.encode_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
-                self.telemetry.request_bytes.fetch_add(request.len() as u64, Ordering::Relaxed);
+                self.telemetry.request_fields.fetch_add(request.len() as u64, Ordering::Relaxed);
             }
 
             let running = backend.provider_names(
@@ -3090,7 +3096,7 @@ where
             );
             let response = session.record_response_reads(
                 source_file.id,
-                &self.exchange_provider_payload(backend, request, &running, codebase, session, |_| None)?,
+                self.exchange_provider_payload(backend, request, &running, codebase, session, |_| None)?,
             )?;
 
             let decode_start = self.trace_enabled.then(Instant::now);
@@ -3108,7 +3114,7 @@ where
                     class = %mago_bytes::BytesDisplay(declaring_class.as_bytes()),
                     property = %mago_bytes::BytesDisplay(property_name),
                     providers = indices.as_slice().len(),
-                    response_bytes = response.len(),
+                    response_fields = response.len(),
                     elapsed = ?start.elapsed(),
                     initialized,
                     "Slow external property initialization provider request completed."
@@ -3182,7 +3188,7 @@ where
             .inspect_err(|_| self.record_error())?;
             if let Some(start) = encode_start {
                 self.telemetry.encode_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
-                self.telemetry.request_bytes.fetch_add(request.len() as u64, Ordering::Relaxed);
+                self.telemetry.request_fields.fetch_add(request.len() as u64, Ordering::Relaxed);
             }
 
             let running = backend.provider_names(
@@ -3192,7 +3198,7 @@ where
             );
             let response = session.record_response_reads(
                 source_file.id,
-                &self.exchange_provider_payload(backend, request, &running, codebase, session, |_| None)?,
+                self.exchange_provider_payload(backend, request, &running, codebase, session, |_| None)?,
             )?;
 
             let decode_start = self.trace_enabled.then(Instant::now);
@@ -3215,7 +3221,7 @@ where
                     class = %class.original_name,
                     providers = indices.as_slice().len(),
                     initializers = provided.len(),
-                    response_bytes = response.len(),
+                    response_fields = response.len(),
                     elapsed = ?start.elapsed(),
                     "Slow external class initializer provider request completed."
                 );
@@ -3269,7 +3275,7 @@ where
             let backend_start = trace_enabled.then(Instant::now);
             tracing::trace!(
                 backend = backend_index,
-                request_bytes = describe.len(),
+                request_fields = describe.len(),
                 "Describing external analyzer backend."
             );
 
@@ -3373,7 +3379,7 @@ where
             if let Some(start) = backend_start {
                 tracing::trace!(
                     backend = backend_index,
-                    response_bytes = response.len(),
+                    response_fields = response.len(),
                     extensions = registration.extensions.len(),
                     plugins = registration.plugins.len(),
                     initialization_plugins = registration.initialization_plugins.len(),
@@ -3530,16 +3536,16 @@ impl<T> Drop for ExternalAnalyzer<T> {
             arguments = self.telemetry.arguments.load(Ordering::Relaxed),
             typed_arguments = self.telemetry.typed_arguments.load(Ordering::Relaxed),
             snapshotted_types = self.telemetry.snapshotted_types.load(Ordering::Relaxed),
-            request_bytes = self.telemetry.request_bytes.load(Ordering::Relaxed),
-            response_bytes = self.telemetry.response_bytes.load(Ordering::Relaxed),
+            request_fields = self.telemetry.request_fields.load(Ordering::Relaxed),
+            response_fields = self.telemetry.response_fields.load(Ordering::Relaxed),
             "External analyzer provider summary."
         );
 
         tracing::trace!(
             nested_requests,
             nested_errors = self.telemetry.nested_errors.load(Ordering::Relaxed),
-            nested_request_bytes = self.telemetry.nested_request_bytes.load(Ordering::Relaxed),
-            nested_response_bytes = self.telemetry.nested_response_bytes.load(Ordering::Relaxed),
+            nested_request_fields = self.telemetry.nested_request_fields.load(Ordering::Relaxed),
+            nested_response_fields = self.telemetry.nested_response_fields.load(Ordering::Relaxed),
             comparison_batches,
             comparisons,
             metadata_queries,
@@ -3556,8 +3562,8 @@ impl<T> Drop for ExternalAnalyzer<T> {
             lifecycle_plugins = self.telemetry.lifecycle_plugins.load(Ordering::Relaxed),
             lifecycle_issues = self.telemetry.lifecycle_issues.load(Ordering::Relaxed),
             lifecycle_errors = self.telemetry.lifecycle_errors.load(Ordering::Relaxed),
-            lifecycle_request_bytes = self.telemetry.lifecycle_request_bytes.load(Ordering::Relaxed),
-            lifecycle_response_bytes = self.telemetry.lifecycle_response_bytes.load(Ordering::Relaxed),
+            lifecycle_request_fields = self.telemetry.lifecycle_request_fields.load(Ordering::Relaxed),
+            lifecycle_response_fields = self.telemetry.lifecycle_response_fields.load(Ordering::Relaxed),
             "External analyzer lifecycle summary."
         );
 
@@ -3567,8 +3573,8 @@ impl<T> Drop for ExternalAnalyzer<T> {
             candidates = self.telemetry.issue_filter_candidates.load(Ordering::Relaxed),
             removed = self.telemetry.issue_filter_removed.load(Ordering::Relaxed),
             errors = self.telemetry.issue_filter_errors.load(Ordering::Relaxed),
-            request_bytes = self.telemetry.issue_filter_request_bytes.load(Ordering::Relaxed),
-            response_bytes = self.telemetry.issue_filter_response_bytes.load(Ordering::Relaxed),
+            request_fields = self.telemetry.issue_filter_request_fields.load(Ordering::Relaxed),
+            response_fields = self.telemetry.issue_filter_response_fields.load(Ordering::Relaxed),
             "External analyzer issue-filter summary."
         );
 
@@ -3723,29 +3729,29 @@ mod tests {
 
     #[derive(Debug)]
     struct TestTransport {
-        requests: Mutex<Vec<Vec<u8>>>,
+        requests: Mutex<Vec<Vec<Value>>>,
     }
 
     #[derive(Debug)]
     struct InitializationTransport {
         broadcasts: Mutex<usize>,
-        initialization_response: Option<Vec<u8>>,
+        initialization_response: Option<Vec<Value>>,
     }
 
     #[derive(Debug)]
-    struct RegistrationTransport(Vec<u8>);
+    struct RegistrationTransport(Vec<Value>);
 
     /// A worker with a property type provider and a call forwarding provider, which declines every request it gets
     /// and keeps each one, with the name Mago gave it.
     #[derive(Debug, Default)]
     struct DecliningTransport {
-        requests: Mutex<Vec<Vec<u8>>>,
+        requests: Mutex<Vec<Vec<Value>>>,
         names: Mutex<Vec<Option<String>>>,
         reloads: Mutex<Vec<Vec<u8>>>,
     }
 
     impl AnalyzerTransport for DecliningTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
+        fn broadcast(&self, _payload: &[Value]) -> Result<Vec<Value>, WorkerError> {
             Ok(protocol::testing::registration_response_with_property_providers())
         }
 
@@ -3755,10 +3761,10 @@ mod tests {
 
         fn request_with_handler<H>(
             &self,
-            payload: Vec<u8>,
+            payload: Vec<Value>,
             running: Option<&dyn Display>,
             _handler: &mut H,
-        ) -> Result<Vec<u8>, WorkerError>
+        ) -> Result<Vec<Value>, WorkerError>
         where
             H: WorkerRequestHandler,
         {
@@ -3777,16 +3783,16 @@ mod tests {
     struct HangingTransport;
 
     impl AnalyzerTransport for HangingTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
+        fn broadcast(&self, _payload: &[Value]) -> Result<Vec<Value>, WorkerError> {
             Ok(protocol::testing::registration_response_with_every_provider())
         }
 
         fn request_with_handler<H>(
             &self,
-            _payload: Vec<u8>,
+            _payload: Vec<Value>,
             running: Option<&dyn Display>,
             handler: &mut H,
-        ) -> Result<Vec<u8>, WorkerError>
+        ) -> Result<Vec<Value>, WorkerError>
         where
             H: WorkerRequestHandler,
         {
@@ -3801,7 +3807,7 @@ mod tests {
     }
 
     impl AnalyzerTransport for TestTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
+        fn broadcast(&self, _payload: &[Value]) -> Result<Vec<Value>, WorkerError> {
             Ok(protocol::testing::registration_response())
         }
 
@@ -3809,10 +3815,10 @@ mod tests {
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn request_with_handler<H>(
             &self,
-            payload: Vec<u8>,
+            payload: Vec<Value>,
             _running: Option<&dyn Display>,
             _handler: &mut H,
-        ) -> Result<Vec<u8>, WorkerError>
+        ) -> Result<Vec<Value>, WorkerError>
         where
             H: WorkerRequestHandler,
         {
@@ -3822,7 +3828,7 @@ mod tests {
     }
 
     impl AnalyzerTransport for InitializationTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
+        fn broadcast(&self, _payload: &[Value]) -> Result<Vec<Value>, WorkerError> {
             let mut broadcasts = self.broadcasts.lock().unwrap();
             let response = if *broadcasts == 0 {
                 protocol::testing::registration_response_with_initialization()
@@ -3837,10 +3843,10 @@ mod tests {
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn request_with_handler<H>(
             &self,
-            _payload: Vec<u8>,
+            _payload: Vec<Value>,
             _running: Option<&dyn Display>,
             _handler: &mut H,
-        ) -> Result<Vec<u8>, WorkerError>
+        ) -> Result<Vec<Value>, WorkerError>
         where
             H: WorkerRequestHandler,
         {
@@ -3849,17 +3855,17 @@ mod tests {
     }
 
     impl AnalyzerTransport for RegistrationTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
+        fn broadcast(&self, _payload: &[Value]) -> Result<Vec<Value>, WorkerError> {
             Ok(self.0.clone())
         }
 
         #[cfg_attr(coverage_nightly, coverage(off))]
         fn request_with_handler<H>(
             &self,
-            _payload: Vec<u8>,
+            _payload: Vec<Value>,
             _running: Option<&dyn Display>,
             _handler: &mut H,
-        ) -> Result<Vec<u8>, WorkerError>
+        ) -> Result<Vec<Value>, WorkerError>
         where
             H: WorkerRequestHandler,
         {

@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Mago\Tests\Sdk\Unit\Syntax;
 
 use Mago\Sdk\Exception\ProtocolException;
-use Mago\Sdk\Internal\Analyzer\Protocol as AnalyzerProtocol;
 use Mago\Sdk\Internal\Protocol\PayloadReader;
 use Mago\Sdk\Internal\Protocol\ValueReader;
 use Mago\Sdk\Internal\Syntax\NodeStore;
@@ -18,7 +17,6 @@ use Mago\Sdk\Syntax\Node;
 use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Syntax\SourceFile;
 use Mago\Sdk\Syntax\TriviaKind;
-use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 use function array_fill;
@@ -154,33 +152,6 @@ final class SourceFileTest extends TestCase
                 static fn(Node $node): bool => $node->kind === NodeKind::FunctionCall,
             )),
         );
-    }
-
-    /**
-     * @return iterable<string, array{class-string<AnalyzerProtocol>, string, string}>
-     */
-    public static function previousProtocolVersions(): iterable
-    {
-        yield 'analyzer' => [
-            AnalyzerProtocol::class,
-            pack('N3', 0x4D41_4E41, 0x0001_000A, 1 << 16),
-            '`mago` speaks analyzer protocol 1.10,',
-        ];
-    }
-
-    /**
-     * @param class-string<AnalyzerProtocol> $protocol
-     */
-    #[DataProvider('previousProtocolVersions')]
-    public function testASnapshotMessageFromThePreviousProtocolVersionIsRefused(
-        string $protocol,
-        string $header,
-        string $message,
-    ): void {
-        $this->expectException(ProtocolException::class);
-        $this->expectExceptionMessage($message);
-
-        $protocol::readRequest($header);
     }
 
     public function testABindingIsOneTheSnapshotCanCarry(): void

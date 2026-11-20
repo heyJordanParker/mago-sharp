@@ -612,6 +612,21 @@ impl<'values> ValueReader<'values> {
         self.read_str(field).map(str::to_owned)
     }
 
+    /// Reads optional bytes, which null leaves out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when every field was read, or the field is neither null nor a string.
+    #[inline]
+    pub fn read_optional_bytes(&mut self, field: &'static str) -> Result<Option<&'values [u8]>, PayloadError> {
+        if matches!(self.values.get(self.position), Some(Value::Null)) {
+            self.position += 1;
+            return Ok(None);
+        }
+
+        self.read_bytes(field).map(Some)
+    }
+
     /// Reads an optional owned UTF-8 string, which null leaves out.
     ///
     /// # Errors
@@ -619,12 +634,9 @@ impl<'values> ValueReader<'values> {
     /// Returns an error when every field was read, or the field is neither null nor a valid UTF-8 string.
     #[inline]
     pub fn read_optional_string(&mut self, field: &'static str) -> Result<Option<String>, PayloadError> {
-        if matches!(self.values.get(self.position), Some(Value::Null)) {
-            self.position += 1;
-            return Ok(None);
-        }
-
-        self.read_string(field).map(Some)
+        self.read_optional_bytes(field)?
+            .map(|bytes| std::str::from_utf8(bytes).map(str::to_owned).map_err(|_| PayloadError::InvalidUtf8 { field }))
+            .transpose()
     }
 
     /// Validates that every field was read.
