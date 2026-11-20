@@ -3480,11 +3480,12 @@ fn counting_cache(folder: &Path) -> PathBuf {
     cache_with_runner(folder, &format!("tee '{}/'$$ | \"$real\" \"$@\"", started.display()))
 }
 
-/// The generated Lean module of `name` in the request of the one runner `counting_cache` started in `folder`: the
-/// request's header and the threads and heartbeats it answers with, the modules an earlier runner stopped in, then each
-/// generated module's name and source.
+/// What the request of the one runner `counting_cache` started in `folder` holds: each generated module's name and
+/// source, and each theorem's statement, text and fixed steps, the empty string when it has none. The request is its
+/// header and the threads and heartbeats it answers with, the modules an earlier runner stopped in, the generated
+/// modules, then each check's modules and theorems.
 #[cfg(unix)]
-fn generated_module(folder: &Path, name: &str) -> String {
+fn runner_request(folder: &Path) -> (Vec<(String, String)>, Vec<(String, String, String)>) {
     let mut started = std::fs::read_dir(folder.join("started")).unwrap();
     let request = std::fs::read(started.next().unwrap().unwrap().path()).unwrap();
     assert!(started.next().is_none(), "one runner started");
@@ -3502,14 +3503,49 @@ fn generated_module(folder: &Path, name: &str) -> String {
     for _ in 0..length(&mut at) {
         string(&mut at);
     }
+    let modules = (0..length(&mut at)).map(|_| (string(&mut at), string(&mut at))).collect();
+    let mut theorems = Vec::new();
     for _ in 0..length(&mut at) {
-        let (module, text) = (string(&mut at), string(&mut at));
-        if module == name {
-            return text;
+        for _ in 0..length(&mut at) {
+            string(&mut at);
+        }
+        for _ in 0..length(&mut at) {
+            theorems.push((string(&mut at), string(&mut at), string(&mut at)));
+            at += 1;
         }
     }
+    assert_eq!(at, request.len(), "the request ends after its checks");
 
-    panic!("the request holds no module {name}")
+    (modules, theorems)
+}
+
+/// The generated Lean module of `name` in the request of the one runner `counting_cache` started in `folder`.
+#[cfg(unix)]
+fn generated_module(folder: &Path, name: &str) -> String {
+    let (modules, _) = runner_request(folder);
+
+    modules.into_iter().find(|(module, _)| module == name).map(|(_, text)| text).expect("the request holds the module")
+}
+
+/// Spec section 28: a law with a body has fixed steps too, which close each of its cases as the fixed steps close a law
+/// without one, and the law checker tries them before Lean's search. Money's laws with bodies, a recursion on an `int`
+/// and one on a list, prove with them.
+#[cfg(unix)]
+#[test]
+fn a_law_with_a_body_has_fixed_steps_for_each_of_its_cases() {
+    let directory = library_project(&[("app/Shared/Money.sharp", SPECIMEN_MONEY)]);
+    let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
+
+    let output = process::output(command(root, "never").env("XDG_CACHE_HOME", counting_cache(lake.path()))).unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let (_, theorems) = runner_request(lake.path());
+    for statement in ["App.Shared.Money.timesKeepsCurrency", "App.Shared.Money.sumKeepsCurrency"] {
+        let (_, text, steps) = theorems.iter().find(|(written, ..)| written == statement).expect("the law's theorem");
+        assert_eq!(text.matches("sharp_close").count(), 2, "{text}");
+        assert!(!steps.is_empty() && !steps.contains("sharp_close"), "{statement}: {steps}");
+    }
 }
 
 /// One runner proves the laws of every stale file of a compile, so the compile imports Lean once.
@@ -5895,11 +5931,20 @@ fn compile_proves_a_law_whose_body_tests_its_bound_with_a_comparison_arm() {
 }
 
 /// Spec section 28: a case the body leaves open is `law-unproven`, with the case's conditions and the goal still to
-/// show in PHP#, and the call of the law itself on a smaller value when the case makes none.
+/// show in PHP#, and the call of the law itself on a smaller value when the case makes none. `timesIsZero` holds where
+/// `n <= 0` and is false where `n > 0`, whatever its body calls.
 #[test]
 fn a_case_a_law_s_body_leaves_open_names_its_conditions_and_its_goal_in_php_sharp() {
-    let without_add = SPECIMEN_MONEY.replace("        Money.addKeepsCurrency(m, m.times(n - 1));\n", "");
-    let without_calls = without_add.replace("        Money.timesKeepsCurrency(m, n - 1);\n", "");
+    let times_is_zero = |call: &str| {
+        let law = format!(
+            "\n    law timesIsZero(Money m, int n) => m.times(n).amount == 0\n    {{\n        if (n <= 0) {{\n            return;\n        }}\n{call}    }}\n\n    public static Money sum("
+        );
+        let money = SPECIMEN_MONEY.replacen("\n    public static Money sum(", &law, 1);
+        assert_ne!(money, SPECIMEN_MONEY);
+        money
+    };
+    let with_call = times_is_zero("        Money.timesIsZero(m, n - 1);\n");
+    let without_calls = times_is_zero("");
     let without_sum_calls = SPECIMEN_MONEY.replace(
         "                Money.sumKeepsCurrency(total.add(first), rest);\n                Money.addKeepsCurrency(total, first);\n",
         "",
@@ -5910,12 +5955,12 @@ fn a_case_a_law_s_body_leaves_open_names_its_conditions_and_its_goal_in_php_shar
             "app/Shared/Money.sharp:24:5: error[law-unproven]: law sumKeepsCurrency is not proven\n = when items is [Money first, ...List<Money> rest], still to show: Money.sum(total.add(first), rest).currency == total.currency\n = Help: the law for a smaller items is the call Money.sumKeepsCurrency(total, rest)\n",
         ),
         (
-            without_add.as_str(),
-            "app/Shared/Money.sharp:10:5: error[law-unproven]: law timesKeepsCurrency is not proven\n = when n > 0, still to show: m.add(m.times(n - 1)).currency == m.currency\n",
+            with_call.as_str(),
+            "app/Shared/Money.sharp:19:5: error[law-unproven]: law timesIsZero is not proven\n = when n > 0, still to show: m.add(m.times(n - 1)).amount == 0\n",
         ),
         (
             without_calls.as_str(),
-            "app/Shared/Money.sharp:10:5: error[law-unproven]: law timesKeepsCurrency is not proven\n = when n > 0, still to show: m.add(m.times(n - 1)).currency == m.currency\n = Help: the law for a smaller n is the call Money.timesKeepsCurrency(m, n - 1)\n",
+            "app/Shared/Money.sharp:19:5: error[law-unproven]: law timesIsZero is not proven\n = when n > 0, still to show: m.add(m.times(n - 1)).amount == 0\n = Help: the law for a smaller n is the call Money.timesIsZero(m, n - 1)\n",
         ),
     ] {
         let directory = library_project(&[("app/Shared/Money.sharp", source)]);

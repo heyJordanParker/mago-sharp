@@ -52,7 +52,8 @@ enum Form {
     /// The fixed steps of [`steps`], for laws without a body, which need only the runtime library.
     Steps,
     /// The fixed steps where a law has them, and Lean's search for each law without them and each law they leave
-    /// unproven, in the same runner.
+    /// unproven, in the same runner, which imports `Sharp/Lean/Proof.lean`: the fixed steps of a law with a body use
+    /// its `sharp_call%` and its rewrites.
     StepsThenSearch,
 }
 
@@ -82,6 +83,20 @@ const STEP_LEMMAS: &[&str] = &[
     "Int64.lt_iff_toInt_lt",
     "Int64.toInt_zero",
     "Int64.reduceToInt",
+];
+
+/// The lemmas the fixed steps of a case of a body rewrite with too: a fact `sharp_call%` states about the values a
+/// step binds, which `Sharp/Lean/Proof.lean` reads one by one, as its search does, and a goal over a value one of
+/// several branches gives, which holds when it holds for each.
+const CASE_LEMMAS: &[&str] = &[
+    "bind_eq_pure",
+    "map_eq_pure",
+    "ite_eq_pure",
+    "throw_eq_pure",
+    "or_imp",
+    "forall_and",
+    "forall_exists_index",
+    "and_imp",
 ];
 
 /// The record in the `.sharp` folder of how each law's proof ended, by the proof's key.
@@ -421,22 +436,37 @@ fn proof_key(law: &Law, program: &Program<'_>, laws: &Laws<'_>) -> String {
     })
 }
 
-/// The theorem of `law`, a law without a body, in the [`Form::Steps`] form: closed by [`steps`] with the definitions its
-/// statement uses. A law with a body has none.
+/// The theorem of `law` with its fixed steps, which close it with the definitions its statement uses: a law without a
+/// body closed by [`steps`] with [`STEP_LEMMAS`], and a law with one with each case closed by them with
+/// [`CASE_LEMMAS`] and the statement of each law whose fact a case can hold too. An invariant of a machine has none.
 fn scripted(law: &Law, program: &Program<'_>) -> Option<String> {
-    let opening = law.proof.opening.as_ref()?;
     let (plain, recursive) = program.definitions(&law.statement);
+    if let Some(opening) = &law.proof.opening {
+        return Some(format!("{opening}{}", steps(STEP_LEMMAS, &plain, &recursive)));
+    }
+    if law.proof.closes.is_empty() {
+        return None;
+    }
+    let lemmas: Vec<&str> = STEP_LEMMAS
+        .iter()
+        .chain(CASE_LEMMAS)
+        .copied()
+        .chain(std::iter::once(law.statement.as_str()))
+        .chain(law.proof.laws.iter().map(|(statement, ..)| statement.as_str()))
+        .collect();
 
-    Some(format!("{opening}{}", steps(&plain, &recursive)))
+    let closed = format!("({})", steps(&lemmas, &plain, &recursive));
+
+    Some(law.proof.closes.iter().fold(law.proof.text.clone(), |text, close| text.replace(close.as_str(), &closed)))
 }
 
-/// The fixed steps that close a case: `simp_all` with [`STEP_LEMMAS`] and the definitions `plain` as rewrites, then
-/// `omega` or `decide` on each goal it leaves. With `recursive` definitions, the steps first unfold each of them once,
-/// as a recursion on a value the case does not know needs, and else rewrite with them too, until each recursion ends,
-/// as one on values the law writes out needs.
-fn steps(plain: &[&str], recursive: &[&str]) -> String {
+/// The fixed steps that close a case: `simp_all` with `lemmas` and the definitions `plain` as rewrites, then `omega`
+/// or `decide` on each goal it leaves. With `recursive` definitions, the steps first unfold each of them once, as a
+/// recursion on a value the case does not know needs, and else rewrite with them too, until each recursion ends, as
+/// one on values the law writes out needs.
+fn steps(lemmas: &[&str], plain: &[&str], recursive: &[&str]) -> String {
     let simp = |definitions: &[&[&str]]| {
-        let lemmas: Vec<&str> = STEP_LEMMAS.iter().chain(definitions.iter().copied().flatten()).copied().collect();
+        let lemmas: Vec<&str> = lemmas.iter().chain(definitions.iter().copied().flatten()).copied().collect();
         format!("simp_all (config := {{ decide := true }}) only [{}]", lemmas.join(", "))
     };
     let close = "all_goals (intros; subst_vars; first | rfl | omega | decide)";
@@ -485,8 +515,8 @@ impl Proofs<'_> {
     }
 
     /// Proves the laws of `work`, and gives how each law's proof ended, in the order of `work`. When a law or one it
-    /// calls has a body, one runner proves them all: each law without a body with the fixed steps, and with Lean's
-    /// search when they leave it unproven, and each law with a body with the search. Otherwise the runner imports only
+    /// calls has a body, one runner proves them all, each with its fixed steps, and with Lean's search when they leave
+    /// it unproven or it has none, as an invariant of a machine. Otherwise the runner imports only
     /// the runtime library and proves them with the fixed steps, and each law they leave unproven, apart from one a
     /// generated module refuses or one that calls a law that cannot be proven, which ends the same either way, then
     /// proves with Lean's search in a runner after it, so its proof ends as that search ends it.
@@ -501,7 +531,7 @@ impl Proofs<'_> {
             .iter()
             .flat_map(|(_, laws)| laws)
             .flat_map(|law| self.laws.closure(law))
-            .any(|position| !self.scripts.contains_key(self.laws.ordered[position].1.statement.as_str()));
+            .any(|position| self.laws.ordered[position].1.proof.opening.is_none());
         let mut stopped: Vec<(String, Stop)> = Vec::new();
         let mut ended = Vec::new();
         if searched {

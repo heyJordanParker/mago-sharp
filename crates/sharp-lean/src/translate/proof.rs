@@ -49,6 +49,9 @@ pub(crate) struct Proof {
     /// For a law without a body, its theorem up to the step that closes it, `sharp_prove`, which the law checker's fixed
     /// steps can close it with in that step's place.
     pub(crate) opening: Option<String>,
+    /// Each step that closes one of its cases, `sharp_prove` or `sharp_close` with its index and hypotheses, as the
+    /// theorem writes it, so the law checker's fixed steps can close a law with a body in each one's place.
+    pub(crate) closes: Vec<String>,
     /// The law's claim as PHP# writes it, which a case's goal prints as when it holds a part PHP# writes no other way.
     pub(crate) claim: String,
     /// Each case the proof closes, in the order of its index, from 1.
@@ -538,7 +541,10 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
             .cases
             .push(Case { conditions: scope.hypotheses.iter().map(|(_, written)| written.clone()).collect(), smaller });
 
-        format!("{step} {} [{}]", self.proof.cases.len(), hypotheses.join(", "))
+        let close = format!("{step} {} [{}]", self.proof.cases.len(), hypotheses.join(", "));
+        self.proof.closes.push(close.clone());
+
+        close
     }
 
     /// The call of the law itself on the first smaller value the path `scope` shows, a list pattern's rest before an
