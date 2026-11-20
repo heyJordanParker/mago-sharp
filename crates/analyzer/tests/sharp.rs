@@ -13061,6 +13061,16 @@ fn a_trait_test_on_a_bounded_type_parameter_may_match() {
     );
 }
 
+/// Spec section 22: a value of an open class may be of a subclass that uses a plain PHP trait, so `is` and `is not` of
+/// the trait may each go either way, and neither is a redundant condition.
+#[test]
+fn a_trait_test_on_a_value_of_an_open_class_may_go_either_way() {
+    let library = "<?php\n\nnamespace Lib;\n\ntrait SoftDeletes\n{\n}\n\nabstract class Model\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\nimport Lib.SoftDeletes;\n\npublic static class Check\n{\n    public static bool trashable(Model m) => m is SoftDeletes;\n\n    public static bool kept(Model m) => m is not SoftDeletes;\n\n    public static string label(Model m)\n    {\n        if (m is not SoftDeletes) {\n            return \"kept\";\n        }\n        return \"trashable\";\n    }\n}\n";
+
+    assert_eq!(explained(("src/Demo/Check.sharp", sharp), &[("src/Lib/Models.php", library)]), Vec::<String>::new());
+}
+
 /// An issue that names two types whose short names match names each by its full name, as `App.Schema.Type` and
 /// `Lib.Type`, so the message never reads "expected `List<Type>`, but found `List<Type>`". A `List` of one class
 /// passed where a `List`, an array or an `iterable` of that class is declared fits, and one passed where a
