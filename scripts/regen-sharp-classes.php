@@ -105,10 +105,9 @@ preg_match('/^const STANDARD_NAMESPACED_CLASSES = \[(.*?)\];$/ms', $generator, $
 $list = $listed[1] ?? throw new RuntimeException('sharp/bin/builtins declares no STANDARD_NAMESPACED_CLASSES.');
 $namespaced = array_map(
     static fn(PhpToken $token): string => stripslashes(substr($token->text, 1, -1)),
-    array_values(array_filter(
-        PhpToken::tokenize("<?php {$list}"),
-        static fn(PhpToken $token): bool => $token->is(T_CONSTANT_ENCAPSED_STRING),
-    )),
+    array_values(array_filter(PhpToken::tokenize("<?php {$list}"), static fn(PhpToken $token): bool => $token->is(
+        T_CONSTANT_ENCAPSED_STRING,
+    ))),
 );
 foreach ($namespaced as $class) {
     if (!in_array($class, $imported, true)) {
