@@ -510,7 +510,9 @@ pub fn stamp(root: &Path, path: &[u8]) -> Result<Option<Input>, DatabaseError> {
     }
 
     let full = root.join(String::from_utf8_lossy(path).as_ref());
-    if !folder_holds_name(&full)? {
+    // A path no file is at under its name in any case is absent, which a look at the path says without listing the
+    // folder, as most of a compile's absent inputs are, a folder's `Module.sharp` among them.
+    if matches!(full.try_exists(), Ok(false)) || !folder_holds_name(&full)? {
         return Ok(None);
     }
     // The modification time is taken before the contents. A write between the two leaves a stamp whose time is older
