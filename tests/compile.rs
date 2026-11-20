@@ -5175,7 +5175,8 @@ fn stalling_cache(folder: &Path, work: &str) -> PathBuf {
 /// built the runtime library. Work that never ends runs under a limit of 2 seconds, and costs the compile less than two
 /// limits, which leaves room for the rest of the compile on a slow machine. It spins, and an alarm on the clock makes
 /// it write a line each second, as the runner reports each module and check it starts, so the deadline, which counts
-/// from the last thing written, never stops it, however little of a core a busy machine gives it. It spins with no
+/// from the last thing written or the last processor time used, never stops it, however little of a core a busy
+/// machine gives it. It spins with no
 /// system call, since macOS lets a process that spends its time in system calls run past its limit. It ends with no
 /// answer once it has used 10 processor seconds, so a limit that no longer stops it fails the row. Work that waits runs
 /// under a limit of 2 seconds, so its deadline is 8 seconds, and it ends with no answer after 60 seconds, so a deadline
@@ -5211,6 +5212,35 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline() {
         );
         waits.join().unwrap();
     });
+}
+
+/// Spec section 28: heartbeats alone bound a proof, so a runner that computes past its deadline without writing, as a
+/// runner on a busy machine does, is not stopped there, and its law proves. The runner replays the answer the tests'
+/// runner gave the same request, after it computes for 12 seconds without writing, with a share of a core small enough
+/// to stay under a limit of 2 processor seconds, whose deadline is 8 seconds.
+#[cfg(unix)]
+#[test]
+fn a_runner_that_computes_past_its_deadline_without_writing_finishes() {
+    let lake = tempfile::tempdir().unwrap();
+    let answer = lake.path().join("answer");
+    let recording = cache_with_runner(lake.path(), &format!("\"$real\" \"$@\" | tee '{}'", answer.display()));
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let recorded = process::output(command(directory.path(), "never").env("XDG_CACHE_HOME", recording)).unwrap();
+    assert!(recorded.status.success(), "{}", printed(&recorded));
+    let busy = tempfile::tempdir().unwrap();
+    let cache = cache_with_runner(
+        busy.path(),
+        &format!(
+            "cat > /dev/null\nperl -MTime::HiRes=time,sleep -e 'my $end = time + 12; while (time < $end) {{ my $spin = time + 0.01; 1 while time < $spin; sleep 0.29 }}'\ncat '{}'",
+            answer.display()
+        ),
+    );
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+
+    let (output, _) = compile_lines_within(directory.path(), 2, &cache);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(directory.path(), "app/Shared/Money.sharp").exists());
 }
 
 /// Each signal that ends a compile from a terminal or `kill` ends the Lean it waits on too, though Mago runs Lake in a

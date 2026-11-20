@@ -83,13 +83,14 @@ pub(crate) enum Answer {
 /// it has them and with Lean's search when it has none or they leave it unproven and a check names
 /// `Sharp.Lean.Proof`, and judges each judged one.
 ///
-/// Mago stops a runner that writes nothing for its deadline, or that runs past the processor-time limit Mago itself
-/// runs under. The answers it wrote before count. When one check is left unanswered, or the runner ran on one thread,
-/// which answers the checks in order, the first check left is the one it stopped in, and its progress names the
-/// generated module it stopped in. That check is refused with the module and how it stopped, and the module joins
-/// `stopped`, which each later runner refuses without elaborating it again. Otherwise the checks left were in flight
-/// together, so a runner on one thread answers them in turn to find the one that stops it, and the checks after that
-/// one go back to `threads` threads. A runner stopped in a check's theorems, or one that fails, fails the compile.
+/// Mago stops a runner that writes nothing and uses no processor time for its deadline, or that runs past the
+/// processor-time limit Mago itself runs under, so heartbeats alone bound a runner that computes. The answers it wrote
+/// before count. When one check is left unanswered, or the runner ran on one thread, which answers the checks in order,
+/// the first check left is the one it stopped in, and its progress names the generated module it stopped in. That check
+/// is refused with the module and how it stopped, and the module joins `stopped`, which each later runner refuses
+/// without elaborating it again. Otherwise the checks left were in flight together, so a runner on one thread answers
+/// them in turn to find the one that stops it, and the checks after that one go back to `threads` threads. A runner
+/// stopped in a check's theorems, or one that fails, fails the compile.
 /// Returns the answer of each check, in order.
 pub(crate) fn check(
     library: &Path,

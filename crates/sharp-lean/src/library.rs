@@ -210,20 +210,21 @@ fn stopped_code(code: i32) -> bool {
 pub(crate) enum Stop {
     /// It ran past `processor_seconds()`.
     Processor,
-    /// It went `deadline()` without finishing: it waited, or it computed on a machine too busy to give it a quarter of a
-    /// core.
+    /// It went `deadline()` without writing and without using processor time: it waited.
     Waited,
 }
 
-/// The wall-clock time Lean work may go without finishing: four times `processor_seconds()`.
+/// The wall-clock time Lean work may go without writing and without using processor time: four times
+/// `processor_seconds()`.
 pub(crate) fn deadline() -> Duration {
     Duration::from_secs(processor_seconds().saturating_mul(4))
 }
 
 /// Runs `command` in a process group of its own with `input` on its standard input, and returns how it exited and what
-/// it wrote, and whether it wrote nothing for `deadline()`, so Mago ended the group. The deadline counts from the last
-/// thing it wrote, so a runner that reports each module and check it starts never reaches it however many it checks,
-/// while a Lean that waits does. A signal that ends Mago ends the group too, as it did while the group was Mago's own.
+/// it wrote, and whether it wrote nothing and used no processor time for `deadline()`, so Mago ended the group. The
+/// deadline counts from the last thing it wrote or the last processor time it used, so a runner that computes never
+/// reaches it however little of a core a busy machine gives it, and heartbeats alone bound its proofs, while a Lean
+/// that waits does. A signal that ends Mago ends the group too, as it did while the group was Mago's own.
 /// An error writing `input` counts only when the command succeeded, since one that fails before it reads its input is
 /// reported by how it exited.
 pub(crate) fn output_before_deadline(command: &mut Command, input: &[u8]) -> io::Result<(Output, bool)> {
@@ -247,10 +248,10 @@ pub(crate) fn output_before_deadline(command: &mut Command, input: &[u8]) -> io:
     Ok(output)
 }
 
-/// What `group`'s leader wrote and how it exited, and whether `end` ended the group once it wrote nothing for
-/// `deadline`. A process of the group that outlives the end, as one the kernel holds on a stalled disk, keeps the
-/// group's pipes open, so the output is what the group wrote before the end, and a leader that still runs counts as
-/// ended by SIGKILL, since waiting for it could wait forever.
+/// What `group`'s leader wrote and how it exited, and whether `end` ended the group once its leader wrote nothing and
+/// used no processor time for `deadline`. A process of the group that outlives the end, as one the kernel holds on a
+/// stalled disk, keeps the group's pipes open, so the output is what the group wrote before the end, and a leader that
+/// still runs counts as ended by SIGKILL, since waiting for it could wait forever.
 fn wait_before_deadline(
     group: &mut ProcessGroup,
     deadline: Duration,
@@ -258,6 +259,7 @@ fn wait_before_deadline(
 ) -> io::Result<(Output, bool)> {
     let missing = || io::Error::other("a law checker process has no output stream");
     let leader = group.leader();
+    let id = leader.id();
     let (stdout, stderr) = (leader.stdout.take().ok_or_else(missing)?, leader.stderr.take().ok_or_else(missing)?);
     let (wrote, written) = mpsc::channel();
     read_all(stdout, 0, wrote.clone());
@@ -265,15 +267,24 @@ fn wait_before_deadline(
     let mut streams = [Vec::new(), Vec::new()];
     let mut open = streams.len();
     let mut waited = false;
+    let mut used = processor_time(id);
     while open > 0 {
         match written.recv_timeout(deadline) {
             Ok((_, Ok(chunk))) if chunk.is_empty() => open -= 1,
-            Ok((stream, Ok(chunk))) => streams[stream].extend_from_slice(&chunk),
+            Ok((stream, Ok(chunk))) => {
+                streams[stream].extend_from_slice(&chunk);
+                used = processor_time(id);
+            }
             Ok((_, Err(error))) => return Err(error),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err(io::Error::other("a reader of a law checker process panicked"));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                let now = processor_time(id);
+                if now > used {
+                    used = now;
+                    continue;
+                }
                 waited = true;
                 match end(group) {
                     Err(error) if error.kind() == io::ErrorKind::TimedOut => {
@@ -303,6 +314,41 @@ fn killed() -> ExitStatus {
     #[cfg(windows)]
     {
         std::os::windows::process::ExitStatusExt::from_raw(1)
+    }
+}
+
+/// The processor time the running process `id` has used, in its platform's own units, which only compare with each
+/// other: the user and system clock ticks of `/proc/<id>/stat` on Linux, and the user and system time of
+/// `proc_pidinfo` on macOS. None where it can't be read, so a process that wrote nothing for the deadline counts as
+/// waiting.
+fn processor_time(id: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = fs::read_to_string(format!("/proc/{id}/stat")).ok()?;
+        // The fields after the parenthesized command name, which may hold spaces: the state first, so the user time
+        // and the system time are the 12th and 13th.
+        let mut fields = stat.rsplit_once(')')?.1.split_whitespace().skip(11);
+        let user: u64 = fields.next()?.parse().ok()?;
+        let system: u64 = fields.next()?.parse().ok()?;
+
+        Some(user + system)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_taskinfo>()).ok()?;
+        // SAFETY: `proc_taskinfo` is plain data, which zeroes make valid.
+        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a valid `proc_taskinfo` of `size` bytes for `proc_pidinfo` to fill.
+        let filled = unsafe {
+            libc::proc_pidinfo(libc::c_int::try_from(id).ok()?, libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), size)
+        };
+
+        (filled == size).then_some(info.pti_total_user + info.pti_total_system)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = id;
+        None
     }
 }
 

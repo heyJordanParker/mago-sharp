@@ -213,9 +213,8 @@ fn when(conditions: &[String]) -> String {
     if conditions.is_empty() { String::new() } else { format!("when {}, ", conditions.join(" && ")) }
 }
 
-/// Why Lean did not finish a module: it ran past the processor-time limit Mago sets on each Lean process, or it reached
-/// Mago's deadline. Work that computes on a busy machine reaches the deadline too, so that reason says only what Mago
-/// measured. `what` names what to make end sooner, such as "the code it reaches".
+/// Why Lean did not finish a module: it ran past the processor-time limit Mago sets on each Lean process, or it waited
+/// until Mago's deadline. `what` names what to make end sooner, such as "the code it reaches".
 fn stopped(stop: Stop, what: &str) -> String {
     match stop {
         Stop::Processor => format!(
