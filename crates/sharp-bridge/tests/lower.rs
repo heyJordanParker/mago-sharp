@@ -1577,7 +1577,9 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                             ZVAL null
                             null
               PROP_GROUP [32772]
-                ZVAL "Closure"
+                SHARP_TYPE_ARGS
+                  ZVAL "Closure"
+                  ZVAL "Function<App.Shop.Money(App.Shop.Offer) uses Sharp.Net.Http>"
                 PROP_DECL
                   PROP_ELEM
                     ZVAL "priceOf"
@@ -1586,7 +1588,9 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                     null
                 null
               PROP_GROUP [32772]
-                ZVAL "Closure"
+                SHARP_TYPE_ARGS
+                  ZVAL "Closure"
+                  ZVAL "Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Net.Http>"
                 PROP_DECL
                   PROP_ELEM
                     ZVAL "charge"
@@ -1610,6 +1614,9 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                     null
                     null
                     null
+                  SHARP_TYPE_ARGS
+                    null
+                    ZVAL "Function<App.Shop.Money(App.Shop.Offer) uses Sharp.Net.Http>, Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Net.Http>"
                 null
                 STMT_LIST
                   ASSIGN
@@ -13150,6 +13157,9 @@ fn a_function_type_is_the_closure_class() {
                 null
                 null
                 null
+              SHARP_TYPE_ARGS
+                null
+                ZVAL "Function<int(string, int) uses Sharp.Net.Http>, Any?"
         "#}
     );
     assert_eq!(
@@ -13179,14 +13189,22 @@ fn lowered_field(code: &str) -> (String, String) {
 /// private \Closure $charge;
 /// ```
 ///
-/// A function type's effects are the checker's alone, so a function type with effects runs as PHP's `\Closure`.
+/// A function type's effects are the checker's alone, so a function type with effects runs as PHP's `\Closure`, under
+/// the type text a write from plain PHP is checked against, whose result the engine checks at each call.
 #[test]
 fn a_function_type_with_effects_is_the_closure_class() {
     let (hint, declaration) = lowered_field(
         "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Charge(Cart) uses Http> charge)\n    {\n        this.charge = charge;\n    }\n}\n",
     );
 
-    assert_eq!(hint, "ZVAL \"Closure\"\n");
+    assert_eq!(
+        hint,
+        indoc! {r#"
+            SHARP_TYPE_ARGS
+              ZVAL "Closure"
+              ZVAL "Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Net.Http>"
+        "#}
+    );
     assert_eq!(declaration, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"charge\"\n    null\n    null\n    null\n");
 }
 
@@ -13201,7 +13219,14 @@ fn a_nullable_function_type_with_effects_is_the_nullable_closure_class() {
         "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback = null;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n}\n",
     );
 
-    assert_eq!(hint, "ZVAL [256] \"Closure\"\n");
+    assert_eq!(
+        hint,
+        indoc! {r#"
+            SHARP_TYPE_ARGS
+              ZVAL [256] "Closure"
+              ZVAL "Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Net.Http>?"
+        "#}
+    );
     assert_eq!(declaration, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"fallback\"\n    ZVAL null\n    null\n    null\n");
 }
 
@@ -13237,7 +13262,14 @@ fn a_function_type_taking_a_function_type_with_effects_is_the_closure_class() {
         "namespace App.Shop;\n\nclass Checkout\n{\n    Function<int(Function<int(int) uses Http>) uses Mail> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>) uses Mail> apply)\n    {\n        this.apply = apply;\n    }\n}\n",
     );
 
-    assert_eq!(hint, "ZVAL \"Closure\"\n");
+    assert_eq!(
+        hint,
+        indoc! {r#"
+            SHARP_TYPE_ARGS
+              ZVAL "Closure"
+              ZVAL "Function<int(Function<int(int) uses Sharp.Net.Http>) uses Sharp.Net.Mail>"
+        "#}
+    );
     assert_eq!(declaration, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"apply\"\n    null\n    null\n    null\n");
 }
 
@@ -20541,11 +20573,14 @@ fn a_declared_member_wins_over_a_magic_one() {
               ASSIGN
                 VAR
                   ZVAL "save"
-                METHOD_CALL
-                  VAR
-                    ZVAL "order"
-                  ZVAL "save"
-                  CALLABLE_CONVERT
+                VERIFY_TYPE_ARGS
+                  METHOD_CALL
+                    VAR
+                      ZVAL "order"
+                    ZVAL "save"
+                    CALLABLE_CONVERT
+                  ZVAL "Function<int()>"
+                  ZVAL "Lib\\Order::save()"
               RETURN
                 CALL
                   PROP
@@ -21683,9 +21718,12 @@ fn an_extension_method_or_plain_php_function_value_calls_what_it_names() {
         indoc! {r#"
             STMT_LIST
               RETURN
-                CALL
-                  ZVAL "capitalize"
-                  CALLABLE_CONVERT
+                VERIFY_TYPE_ARGS
+                  CALL
+                    ZVAL "capitalize"
+                    CALLABLE_CONVERT
+                  ZVAL "Function<string(string)>"
+                  ZVAL "capitalize()"
         "#}
     );
     assert_eq!(
@@ -21693,9 +21731,12 @@ fn an_extension_method_or_plain_php_function_value_calls_what_it_names() {
         indoc! {r#"
             STMT_LIST
               RETURN
-                CALL
-                  ZVAL "Vendor\\Pdf\\render"
-                  CALLABLE_CONVERT
+                VERIFY_TYPE_ARGS
+                  CALL
+                    ZVAL "Vendor\\Pdf\\render"
+                    CALLABLE_CONVERT
+                  ZVAL "Function<string(string)>"
+                  ZVAL "Vendor\\Pdf\\render()"
         "#}
     );
 }
@@ -28260,11 +28301,14 @@ fn a_plain_php_method_of_a_property_s_name_read_as_a_function_is_a_first_class_c
                 ASSIGN
                   VAR
                     ZVAL "typed"
-                  METHOD_CALL
-                    VAR
-                      ZVAL "gadget"
-                    ZVAL "label"
-                    CALLABLE_CONVERT
+                  VERIFY_TYPE_ARGS
+                    METHOD_CALL
+                      VAR
+                        ZVAL "gadget"
+                      ZVAL "label"
+                      CALLABLE_CONVERT
+                    ZVAL "Function<string(string)>"
+                    ZVAL "Lib\\Gadget::label()"
             "#},
             indoc! {r#"
                 ASSIGN
@@ -28439,11 +28483,14 @@ fn a_read_of_a_plain_php_class_with_get_reads_the_property_and_takes_the_method_
                 ASSIGN
                   VAR
                     ZVAL "relation"
-                  METHOD_CALL
-                    VAR
-                      ZVAL "row"
-                    ZVAL "owner"
-                    CALLABLE_CONVERT
+                  VERIFY_TYPE_ARGS
+                    METHOD_CALL
+                      VAR
+                        ZVAL "row"
+                      ZVAL "owner"
+                      CALLABLE_CONVERT
+                    ZVAL "Function<Lib.Contact()>"
+                    ZVAL "Lib\\Row::owner()"
             "#},
             indoc! {r#"
                 ASSIGN
@@ -29301,10 +29348,13 @@ fn a_call_of_a_closure_an_expression_gives_holds_it_for_each_map_it_crosses() {
               ASSIGN
                 VAR
                   ZVAL "function#1"
-                STATIC_CALL
-                  ZVAL "Lib\\Calc"
-                  ZVAL "counter"
-                  ARG_LIST
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "Lib\\Calc"
+                    ZVAL "counter"
+                    ARG_LIST
+                  ZVAL "Function<int(Map<int, string>)>"
+                  ZVAL "Lib\\Calc::counter()"
               ARG_LIST
                 CALL
                   ZVAL "Sharp\\Internal\\arrayOf"

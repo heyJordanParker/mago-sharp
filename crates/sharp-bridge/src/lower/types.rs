@@ -1509,6 +1509,12 @@ impl<'analysis> Types<'analysis> {
                 // Spec section 18: a `string` is valid UTF-8, which PHP's own `string` type doesn't check, so the check
                 // replaces each byte sequence that is not UTF-8.
                 TAtomic::Scalar(TScalar::String(_)) => collections,
+                // Spec section 14: a plain PHP closure's result is checked at each call, as the engine wraps the closure
+                // where it crosses into a function type whose result something can fail.
+                TAtomic::Callable(TCallable::Signature(signature)) => {
+                    collections
+                        && signature.get_return_type().is_some_and(|result| !result.is_void() && constrains(result))
+                }
                 // A `Bytes` takes the PHP string plain PHP passes, which the check wraps.
                 TAtomic::Object(TObject::Named(object)) => {
                     is_sharp_generic(object)
