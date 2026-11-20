@@ -256,12 +256,13 @@ fn an_interpreter_runs_with_the_engine_settings() {
 /// A setting PHP knows nothing of fails the interpreter's start, named, as a typo in `php -d` would go unseen.
 #[test]
 fn a_setting_php_knows_nothing_of_fails_the_call() {
-    let engine = Engine::new(vec![fixture("functions.php")], Vec::new(), vec![(c"memory_limt".into(), c"2G".into())])
-        .expect("the engine starts");
+    let engine =
+        Engine::new(vec![fixture("functions.php")], Vec::new(), vec![(c"no_such_setting".into(), c"2G".into())])
+            .expect("the engine starts");
 
     assert_eq!(
         call(&engine, "count_call"),
-        Err(EngineError::Setting { name: "memory_limt".to_owned(), value: "2G".to_owned() })
+        Err(EngineError::Setting { name: "no_such_setting".to_owned(), value: "2G".to_owned() })
     );
 }
 
