@@ -743,22 +743,6 @@ function constant(string $class, string $name): mixed {}
 function createInstance(string $type, array $arguments): object {}
 
 /**
- * A new lazy object of the class the class value `$type` names, with its type arguments, created empty with no
- * constructor run, as `ReflectionClass::newLazyGhost` creates one: `$initialize` runs on it at its first property read
- * or write. The standard library's `Class<T>.createLazy()` returns it.
- *
- * @template T of object
- *
- * @param class-string<T> $type
- * @param \Closure(T): void $initialize
- *
- * @return T
- *
- * @throws \InvalidArgumentException
- */
-function createLazy(string $type, callable $initialize): object {}
-
-/**
  * The accessors of the property `$name` of the class the class value `$type` names, as `ReflectionProperty::getHook`
  * gives a hook: the row of its `get` and the row of its `set`, each as `methods()` gives a method's, named `$name::get`
  * and `$name::set`, or null for one it runs none of. The standard library's `Property.getter()` and `setter()` read
