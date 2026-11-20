@@ -21,4 +21,6 @@ pub use hosts::Hosts;
 pub use hosts::WorkerRequestHandler;
 pub use payload::PayloadReader;
 pub use payload::PayloadWriter;
+pub use payload::ValueReader;
+pub use payload::ValueWriter;
 pub use process_group::ProcessGroup;

@@ -30,7 +30,8 @@ use crate::reduction;
 
 include!(concat!(env!("OUT_DIR"), "/sdk.rs"));
 
-/// The SDK's entry that serves one request with a host's worker, as `[true, response]` or `[false, message]`.
+/// The SDK's entry that serves one request with a host's worker, as `[true, response]` or `[false, message]`. A
+/// request and its response are both a list of values, or both a string of bytes.
 const HANDLE: &str = "Mago\\Sdk\\Internal\\Hosts::handle";
 /// The SDK's entry that runs a host's file, which registers the host's worker.
 const LOAD: &str = "Mago\\Sdk\\Internal\\Hosts::load";
@@ -200,7 +201,7 @@ impl Hosts {
             .map(|bootstrap| (bootstrap.sequence, bootstrap.host, bootstrap.request.clone()))
             .collect();
         for (sequence, host, request) in pending {
-            self.handle(host, request, None, &mut no_queries)?;
+            self.handle(host, Value::String(request), None, &mut no_queries)?;
             self.mark_replayed(sequence);
         }
 
@@ -224,7 +225,7 @@ impl Hosts {
         }
 
         let classes: Vec<&[u8]> = changed.iter().map(Vec::as_slice).collect();
-        let answer = self.handle(0, reduction::class_loads_request(&classes)?, None, &mut no_queries)?;
+        let answer = self.handle_list(0, reduction::class_loads_request(&classes)?)?;
         if reduction::decode_class_loads_response(&answer)? {
             tracing::debug!(
                 interpreter = prepared.interpreter,
@@ -281,31 +282,30 @@ impl Hosts {
     fn handle(
         &self,
         host: usize,
-        request: Vec<u8>,
+        request: Value,
         running: Option<&dyn Display>,
         handler: &mut dyn WorkerRequestHandler,
-    ) -> Result<Vec<u8>, WorkerError> {
+    ) -> Result<Value, WorkerError> {
         let file = &self.files[host];
         let mut progressed = None;
         let index = i64::try_from(host).unwrap_or(i64::MAX);
-        let returned =
-            self.engine.call(HANDLE, &[Value::Int(index), Value::String(request)], file.deadline, &mut |asked| {
-                match asked.as_slice() {
-                    [Value::String(question), Value::String(query)] if question == b"query" => {
-                        handler.handle(query).map(Value::String).map_err(|error| String::from_utf8_lossy(&error).into())
-                    }
-                    [Value::String(question), Value::String(unit)] if question == b"progress" => {
-                        progressed = Some(String::from_utf8_lossy(unit).into_owned());
-                        self.engine.restart_deadline();
-                        Ok(Value::Null)
-                    }
-                    _ => Err("mago answers a `query` or a `progress` with one string".to_owned()),
-                }
-            });
+        let returned = self.engine.call(HANDLE, &[Value::Int(index), request], file.deadline, &mut |asked| match asked
+            .as_slice()
+        {
+            [Value::String(question), Value::String(query)] if question == b"query" => {
+                handler.handle(query).map(Value::String).map_err(|error| String::from_utf8_lossy(&error).into())
+            }
+            [Value::String(question), Value::String(unit)] if question == b"progress" => {
+                progressed = Some(String::from_utf8_lossy(unit).into_owned());
+                self.engine.restart_deadline();
+                Ok(Value::Null)
+            }
+            _ => Err("mago answers a `query` or a `progress` with one string".to_owned()),
+        });
 
         match returned {
             Ok(Value::List(answer)) => match <[Value; 2]>::try_from(answer) {
-                Ok([Value::Bool(true), Value::String(response)]) => Ok(response),
+                Ok([Value::Bool(true), response @ (Value::String(_) | Value::List(_))]) => Ok(response),
                 Ok([Value::Bool(false), Value::String(message)]) => Err(WorkerError::Remote {
                     host: file.name.clone(),
                     message: String::from_utf8_lossy(&message).into(),
@@ -322,18 +322,40 @@ impl Hosts {
         }
     }
 
+    /// Serves `request`, a message of values, with the worker of host `host`, which answers with one.
+    fn handle_list(&self, host: usize, request: Vec<Value>) -> Result<Vec<Value>, WorkerError> {
+        match self.handle(host, Value::List(request), None, &mut no_queries)? {
+            Value::List(response) => Ok(response),
+            _ => Err(unanswered(&self.files[host])),
+        }
+    }
+
+    /// Serves `request`, a message of bytes, with the worker of host `host`, which answers with one.
+    fn handle_bytes(
+        &self,
+        host: usize,
+        request: Vec<u8>,
+        running: Option<&dyn Display>,
+        handler: &mut dyn WorkerRequestHandler,
+    ) -> Result<Vec<u8>, WorkerError> {
+        match self.handle(host, Value::String(request), running, handler)? {
+            Value::String(response) => Ok(response),
+            _ => Err(unanswered(&self.files[host])),
+        }
+    }
+
     /// Runs the worker reducers of host `host`: collects each interpreter's state, on the thread it runs on, and reduces
     /// it all in the calling thread's interpreter.
     fn reduce(&self, host: usize) -> Result<(), WorkerError> {
-        let collect = || -> Option<Result<Vec<u8>, WorkerError>> {
+        let collect = || -> Option<Result<Vec<Value>, WorkerError>> {
             let current = self.engine.interpreter();
             PREPARED
                 .with_borrow(|prepared| prepared.get(&self.id).copied())
                 .filter(|p| Some(p.interpreter) == current)?;
 
-            Some(self.handle(host, reduction::collect_request(), None, &mut no_queries))
+            Some(self.handle_list(host, reduction::collect_request()))
         };
-        let mut collected: Vec<Result<Vec<u8>, WorkerError>> = if self.pooled.load(Ordering::Acquire) {
+        let mut collected: Vec<Result<Vec<Value>, WorkerError>> = if self.pooled.load(Ordering::Acquire) {
             rayon::broadcast(|_| collect()).into_iter().flatten().collect()
         } else {
             Vec::new()
@@ -352,7 +374,7 @@ impl Hosts {
         }
 
         self.prepare()?;
-        let answer = self.handle(host, reduction::reduce_request(&responses)?, None, &mut no_queries)?;
+        let answer = self.handle_list(host, reduction::reduce_request(&responses)?)?;
 
         reduction::decode_reduce_response(&answer)
     }
@@ -412,7 +434,7 @@ impl Host {
         hosts.prepare()?;
         let responses = requests
             .iter()
-            .map(|request| hosts.handle(self.index, request.clone(), None, &mut no_queries))
+            .map(|request| hosts.handle_bytes(self.index, request.clone(), None, &mut no_queries))
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut bootstraps = lock(&hosts.bootstraps);
@@ -442,7 +464,7 @@ impl Host {
         handler: &mut dyn WorkerRequestHandler,
     ) -> Result<Vec<u8>, WorkerError> {
         self.hosts.prepare()?;
-        self.hosts.handle(self.index, request, running, handler)
+        self.hosts.handle_bytes(self.index, request, running, handler)
     }
 
     /// Takes in that the compiled files of `classes`, each a lowercase class name, changed: each interpreter that loaded

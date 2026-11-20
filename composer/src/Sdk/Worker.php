@@ -60,6 +60,7 @@ use Mago\Sdk\Internal\Hosts;
 use Mago\Sdk\Internal\Linter\Protocol as LinterProtocol;
 use Mago\Sdk\Internal\Linter\RegisteredRule;
 use Mago\Sdk\Internal\Protocol\PayloadReader;
+use Mago\Sdk\Internal\Protocol\ValueReader;
 use Mago\Sdk\Internal\Worker\Protocol as WorkerProtocol;
 use Mago\Sdk\Linter\LintContext;
 use Mago\Sdk\Syntax\NodeKind;
@@ -514,13 +515,23 @@ final class Worker
         Hosts::register($this->handleRequest(...));
     }
 
-    private function handleRequest(string $payload): string
+    /**
+     * @param string|list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return string|list<null|bool|int|float|string|list<mixed>>
+     */
+    private function handleRequest(string|array $payload): string|array
     {
         $host = new HostClient();
+        if (is_array($payload)) {
+            [$kind, $reader] = WorkerProtocol::readRequest($payload);
+
+            return $this->handleWorkerRequest($kind, $reader, $host);
+        }
+
         $protocol = match (substr($payload, 0, 4)) {
             'MLNT' => LinterProtocol::class,
             'MANA' => AnalyzerProtocol::class,
-            'MEXT' => WorkerProtocol::class,
             default => throw new ProtocolException('Unknown Mago extension capability protocol.'),
         };
 
@@ -542,11 +553,13 @@ final class Worker
         return match ($protocol) {
             LinterProtocol::class => $this->handleLinterRequest($kind, $reader),
             AnalyzerProtocol::class => $this->handleAnalyzerRequest($kind, $reader, $host),
-            WorkerProtocol::class => $this->handleWorkerRequest($kind, $reader, $host),
         };
     }
 
-    private function handleWorkerRequest(int $kind, PayloadReader $reader, HostClient $host): string
+    /**
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    private function handleWorkerRequest(int $kind, ValueReader $reader, HostClient $host): array
     {
         if ($kind === WorkerProtocol::CLASS_LOADS_REQUEST) {
             return WorkerProtocol::writeClassLoadsResponse($this->classLoads->holdsAny(WorkerProtocol::readClassLoadsRequest(

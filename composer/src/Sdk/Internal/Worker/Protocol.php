@@ -5,26 +5,23 @@ declare(strict_types=1);
 namespace Mago\Sdk\Internal\Worker;
 
 use Mago\Sdk\Exception\ProtocolException;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
-use Mago\Sdk\Internal\Protocol\PayloadWriter;
+use Mago\Sdk\Internal\Protocol\ValueReader;
+use Mago\Sdk\Internal\Protocol\ValueWriter;
 
 use function count;
-use function Mago\Internal\release_mismatch;
-use function pack;
-use function strlen;
-use function unpack;
 
 /**
  * @internal
  */
 final class Protocol
 {
+    /** The name every worker management message starts with. */
+    public const NAME = 'worker';
+
     public const COLLECT_REQUEST = 1;
     public const REDUCE_REQUEST = 2;
     public const CLASS_LOADS_REQUEST = 3;
 
-    private const MAGIC_U32 = 0x4D45_5854;
-    private const VERSION_U32 = 0x0001_0000;
     private const COLLECT_RESPONSE = 0x8001;
     private const REDUCE_RESPONSE = 0x8002;
     private const CLASS_LOADS_RESPONSE = 0x8003;
@@ -33,9 +30,11 @@ final class Protocol
     private const MAXIMUM_CLASSES = 0x0010_0000;
 
     /**
-     * @return array{int<0, 65535>, PayloadReader}
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return array{int<0, 65535>, ValueReader}
      */
-    public static function readRequest(string $payload): array
+    public static function readRequest(array $payload): array
     {
         [$kind, $reader] = self::readMessage($payload);
         if ($kind !== self::COLLECT_REQUEST && $kind !== self::REDUCE_REQUEST && $kind !== self::CLASS_LOADS_REQUEST) {
@@ -50,7 +49,7 @@ final class Protocol
      *
      * @return list<string>
      */
-    public static function readClassLoadsRequest(PayloadReader $reader): array
+    public static function readClassLoadsRequest(ValueReader $reader): array
     {
         $classes = [];
         for ($count = $reader->readCount(self::MAXIMUM_CLASSES); $count > 0; --$count) {
@@ -64,8 +63,10 @@ final class Protocol
 
     /**
      * Answers whether the worker's class loads hold one of the classes asked after.
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    public static function writeClassLoadsResponse(bool $holds): string
+    public static function writeClassLoadsResponse(bool $holds): array
     {
         $writer = self::createMessage(self::CLASS_LOADS_RESPONSE);
         $writer->writeBoolean($holds);
@@ -75,8 +76,10 @@ final class Protocol
 
     /**
      * @param array<int<0, max>, string> $payloadsByExtension
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    public static function writeCollectResponse(array $payloadsByExtension): string
+    public static function writeCollectResponse(array $payloadsByExtension): array
     {
         $writer = self::createMessage(self::COLLECT_RESPONSE);
         $writer->writeCount($payloadsByExtension);
@@ -93,7 +96,7 @@ final class Protocol
      *
      * @return array<int<0, max>, non-empty-list<string>>
      */
-    public static function readReduceRequest(PayloadReader $reader, array $reducerIndices): array
+    public static function readReduceRequest(ValueReader $reader, array $reducerIndices): array
     {
         $workerCount = $reader->readCount(self::MAXIMUM_WORKERS);
         if ($workerCount === 0) {
@@ -102,7 +105,7 @@ final class Protocol
 
         $payloadsByExtension = [];
         for ($workerIndex = 0; $workerIndex < $workerCount; ++$workerIndex) {
-            $workerPayloads = self::readCollectResponse($reader->readBytes(), $reducerIndices);
+            $workerPayloads = self::readCollectResponse($reader->readList(), $reducerIndices);
             foreach ($workerPayloads as $extensionIndex => $payload) {
                 $payloadsByExtension[$extensionIndex][] = $payload;
             }
@@ -113,17 +116,21 @@ final class Protocol
         return $payloadsByExtension;
     }
 
-    public static function writeReduceResponse(): string
+    /**
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    public static function writeReduceResponse(): array
     {
         return self::createMessage(self::REDUCE_RESPONSE)->finish();
     }
 
     /**
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
      * @param list<int<0, max>> $reducerIndices
      *
      * @return array<int<0, max>, string>
      */
-    private static function readCollectResponse(string $payload, array $reducerIndices): array
+    private static function readCollectResponse(array $payload, array $reducerIndices): array
     {
         [$kind, $reader] = self::readMessage($payload);
         if ($kind !== self::COLLECT_RESPONSE) {
@@ -151,40 +158,22 @@ final class Protocol
     }
 
     /**
-     * @return array{int<0, 65535>, PayloadReader}
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return array{int<0, 65535>, ValueReader}
      */
-    private static function readMessage(string $payload): array
+    private static function readMessage(array $payload): array
     {
-        if (strlen($payload) < 12) {
-            throw new ProtocolException('Worker management payload is shorter than its header.');
+        $reader = new ValueReader($payload);
+        if ($reader->readBytes() !== self::NAME) {
+            throw new ProtocolException('The message is no worker management message.');
         }
 
-        /** @var array{1: int<0, 4294967295>, 2: int<0, 4294967295>, 3: int<0, 4294967295>} $header */
-        $header = unpack('N3', $payload);
-        if ($header[1] !== self::MAGIC_U32) {
-            throw new ProtocolException('Invalid worker management message magic.');
-        }
-
-        if ($header[2] !== self::VERSION_U32) {
-            $major = $header[2] >> 16;
-            $minor = $header[2] & 0xffff;
-            throw new ProtocolException(release_mismatch(
-                "speaks worker management protocol {$major}.{$minor}",
-                'speaks ' . (self::VERSION_U32 >> 16) . '.' . (self::VERSION_U32 & 0xffff),
-            ));
-        }
-
-        $message = $header[3];
-        $reserved = $message & 0xffff;
-        if ($reserved !== 0) {
-            throw new ProtocolException("Worker management message reserved bits are non-zero: {$reserved}.");
-        }
-
-        return [$message >> 16, new PayloadReader($payload, 12)];
+        return [$reader->readU16(), $reader];
     }
 
-    private static function createMessage(int $kind): PayloadWriter
+    private static function createMessage(int $kind): ValueWriter
     {
-        return new PayloadWriter(pack('N3', self::MAGIC_U32, self::VERSION_U32, $kind << 16));
+        return new ValueWriter([self::NAME, $kind]);
     }
 }

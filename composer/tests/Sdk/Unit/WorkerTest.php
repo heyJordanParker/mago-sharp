@@ -46,8 +46,6 @@ final class WorkerTest extends TestCase
 {
     private const ANALYZER_MAGIC = 0x4D41_4E41;
     private const CODEBASE_QUERY_RESPONSE = 0x8004;
-    private const WORKER_MAGIC = 0x4D45_5854;
-    private const WORKER_VERSION = 0x0001_0000;
     private const GENERATION = 1;
     private const ROUTE_CLASS = 'App\Http\Routes';
     private const ROUTE_METHOD = 'index';
@@ -369,13 +367,13 @@ final class WorkerTest extends TestCase
      * Registers `$worker` as mago's engine runs a host's file, then calls it with every request in `$requests`, in
      * order, answering each codebase query with one route.
      *
-     * @param non-empty-array<non-empty-string, string> $requests each request's payload, by a label for it
+     * @param non-empty-array<non-empty-string, string|list<null|bool|int|float|string|list<mixed>>> $requests each request's payload, by a label for it
      *
      * @return list<string> everything the worker told mago, in order, named by its request's label
      */
     private static function serve(Worker $worker, array $requests): array
     {
-        /** @var list<\Closure(string): string> $handlers */
+        /** @var list<\Closure(string|list<null|bool|int|float|string|list<mixed>>): (string|list<null|bool|int|float|string|list<mixed>>)> $handlers */
         $handlers = (new ReflectionProperty(Hosts::class, 'handlers'))->getValue();
         $place = count($handlers);
         $worker->run();
@@ -386,8 +384,8 @@ final class WorkerTest extends TestCase
 
                 return $question === 'progress' ? null : self::routesResponse();
             };
-            [$served, $response] = Hosts::handle($place, $payload);
-            $sent[] = "{$label}: " . ($served ? 'response' : "error {$response}");
+            $answer = Hosts::handle($place, $payload);
+            $sent[] = "{$label}: " . ($answer[0] ? 'response' : "error {$answer[1]}");
         }
 
         Mago::$answer = null;
@@ -508,8 +506,11 @@ final class WorkerTest extends TestCase
         return new PayloadWriter(pack('N3', self::ANALYZER_MAGIC, $version, $kind << 16));
     }
 
-    private static function collectRequest(): string
+    /**
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    private static function collectRequest(): array
     {
-        return pack('N3', self::WORKER_MAGIC, self::WORKER_VERSION, WorkerProtocol::COLLECT_REQUEST << 16);
+        return [WorkerProtocol::NAME, WorkerProtocol::COLLECT_REQUEST];
     }
 }

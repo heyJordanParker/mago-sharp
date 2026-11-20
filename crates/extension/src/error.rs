@@ -18,6 +18,14 @@ pub enum PayloadError {
     CountExceeded { field: &'static str, count: usize, maximum: usize },
     /// A message contained bytes after its last expected field.
     TrailingBytes { remaining: usize },
+    /// A value message ended before the field `field`.
+    MissingValue { field: &'static str },
+    /// A value message's field `field` held a value of another type than `expected`.
+    UnexpectedValue { field: &'static str, expected: &'static str },
+    /// A value message's integer field `field` held `value`, outside the field's range.
+    OutOfRange { field: &'static str, value: i64 },
+    /// A value message contained fields after its last expected one.
+    TrailingValues { remaining: usize },
 }
 
 impl std::fmt::Display for PayloadError {
@@ -36,6 +44,10 @@ impl std::fmt::Display for PayloadError {
                 write!(formatter, "{field} count {count} exceeds limit {maximum}")
             }
             Self::TrailingBytes { remaining } => write!(formatter, "payload contains {remaining} trailing bytes"),
+            Self::MissingValue { field } => write!(formatter, "message ended before {field}"),
+            Self::UnexpectedValue { field, expected } => write!(formatter, "{field} is not {expected}"),
+            Self::OutOfRange { field, value } => write!(formatter, "{field} holds {value}, outside its range"),
+            Self::TrailingValues { remaining } => write!(formatter, "message contains {remaining} trailing fields"),
         }
     }
 }

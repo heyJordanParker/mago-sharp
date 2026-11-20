@@ -24,7 +24,7 @@ use function trait_exists;
  */
 final class Hosts
 {
-    /** @var list<Closure(string): string> */
+    /** @var list<Closure(string|list<null|bool|int|float|string|list<mixed>>): (string|list<null|bool|int|float|string|list<mixed>>)> */
     private static array $handlers = [];
 
     private static ?ClassLoads $classLoads = null;
@@ -32,7 +32,7 @@ final class Hosts
     /**
      * Registers the request handler of the worker a host's file runs.
      *
-     * @param Closure(string): string $handler
+     * @param Closure(string|list<null|bool|int|float|string|list<mixed>>): (string|list<null|bool|int|float|string|list<mixed>>) $handler
      */
     public static function register(Closure $handler): void
     {
@@ -84,11 +84,13 @@ final class Hosts
 
     /**
      * Serves request `$payload` with the worker of the host at `$host`: true and the response, or false and why the
-     * request failed.
+     * request failed. A request and its response are both a list of values, or both a string of bytes.
      *
-     * @return array{bool, string}
+     * @param string|list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return array{true, string|list<null|bool|int|float|string|list<mixed>>}|array{false, string}
      */
-    public static function handle(int $host, string $payload): array
+    public static function handle(int $host, string|array $payload): array
     {
         try {
             return [true, self::$handlers[$host]($payload)];
