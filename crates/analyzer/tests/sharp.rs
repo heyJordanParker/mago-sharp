@@ -29886,6 +29886,34 @@ fn a_name_lookup_of_php_has_the_effect_dns() {
     );
 }
 
+/// Decision 83: a plain PHP library hands PHP# code an `SplFileInfo`, as a file finder's results are one or a subclass
+/// of one, so it is a standard class a `.sharp` file names bare, with no import and no `extern` line of its own. The
+/// standard library declares it `uses Files`, and each member that reads only the path it holds `uses none`, so a
+/// method a pure interface declares reads the path, of a package's subclass too, and is refused the size.
+#[test]
+fn a_sharp_file_names_spl_file_info_bare_and_reads_its_path_purely() {
+    let found = (
+        "vendor/acme/finder/src/FoundFile.php",
+        "<?php\n\nnamespace Acme\\Finder;\n\nclass FoundFile extends \\SplFileInfo\n{\n    public function getRelativePath(): string\n    {\n        return '';\n    }\n}\n",
+    );
+    let paths = (
+        "app/Shop/Paths.sharp",
+        "namespace App.Shop;\n\nimport Acme.Finder.FoundFile;\n\npublic interface Paths\n{\n    string path(SplFileInfo file);\n\n    string named(FoundFile file);\n\n    Any size(SplFileInfo file);\n}\n",
+    );
+    let scan = (
+        "app/Shop/Scan.sharp",
+        "namespace App.Shop;\n\nimport Acme.Finder.FoundFile;\n\npublic class Scan : Paths\n{\n    public string path(SplFileInfo file) => file.getPathname();\n\n    public string named(FoundFile file) => file.getFilename();\n\n    public Any size(SplFileInfo file) => file.getSize();\n}\n",
+    );
+
+    assert_eq!(worded(scan, &[paths, found, BUILTINS]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[scan, paths, found, BUILTINS]),
+        [
+            "app/Shop/Scan.sharp:11:42 incompatible-effects: `Scan.size` calls `SplFileInfo.getSize`, which has the effect `Files`, so the pure `Paths.size` cannot accept it."
+        ]
+    );
+}
+
 /// Spec section 21: `is bool` tests a value PHP gives as `false` or a resource, as `tmpfile()` gives one, and it can
 /// hold after `||` as it can on its own line.
 #[test]
