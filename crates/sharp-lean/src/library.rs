@@ -54,6 +54,11 @@ const PROCESSOR_SECONDS: u64 = 120;
 /// modules from.
 const SYSROOT: &str = "sysroot";
 
+/// The law checker's build for the platform Mago is built for, the zstd archive of its `.lake/build` that
+/// [`write_checker`] writes and the release build embeds, or none in a build that embeds none, which builds the checker
+/// with `lake`.
+const CHECKER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/checker.tar.zst"));
+
 /// Lean's release archive for one platform: its name, which is also the name of the one folder it holds, its SHA-256 and
 /// its size in bytes.
 struct Archive {
@@ -370,14 +375,16 @@ fn unbuilt(failure: impl std::fmt::Display) -> io::Error {
     )
 }
 
-/// The name of the library's build: a hash of each file of `package`, the whole of what the build reads. Its
-/// `lean-toolchain` pins the Lean version, so a build of another Lean or of other sources has another name.
-fn key(package: &[(&str, &str)]) -> String {
+/// The name of the library's build: a hash of each file of `package`, the whole of what the build reads, and of
+/// `checker`, the build Mago embeds, when it embeds one. Its `lean-toolchain` pins the Lean version, so a build of
+/// another Lean or of other sources has another name, and a Mago that embeds its checker runs no other.
+fn key(package: &[(&str, &str)], checker: &[u8]) -> String {
     let mut hasher = Sha256::new();
     for (path, source) in package {
         hasher.update(format!("{path}\0{}\0", source.len()));
         hasher.update(source);
     }
+    hasher.update(checker);
 
     sha256_hex(&hasher.finalize())[..32].to_owned()
 }
@@ -390,36 +397,38 @@ fn printed(output: &Output) -> String {
 /// The library's build in `lean/` in Mago's cache folder, as `built_in` finds it, so the compile runs it with no
 /// `lake`. `None` sends the compile to `build`, which reports what failed when Mago's cache folder can't be named.
 pub(crate) fn built() -> Option<PathBuf> {
-    built_in(&cache_root().ok()?.join("lean"))
+    built_in(&cache_root().ok()?.join("lean"), CHECKER)
 }
 
-/// The library's build in `builds` when it is built. A build moves into place whole, so a build found here is never
-/// half written.
-fn built_in(builds: &Path) -> Option<PathBuf> {
-    let library = builds.join(key(&PACKAGE));
+/// The library's build in `builds` when it is built, from `checker` when it holds a build. A build moves into place
+/// whole, so a build found here is never half written.
+fn built_in(builds: &Path, checker: &[u8]) -> Option<PathBuf> {
+    let library = builds.join(key(&PACKAGE, checker));
 
     is_built(&library).then_some(library)
 }
 
-/// Builds the library in `lean/` in Mago's cache folder, as `build_in` does.
+/// Builds the library in `lean/` in Mago's cache folder, from the build Mago embeds when it embeds one, as `build_in`
+/// does.
 pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
-    build_in(&cache_root()?.join("lean"), lake)
+    build_in(&cache_root()?.join("lean"), lake, CHECKER)
 }
 
-/// Writes the library's package to `<key>.staging` in `builds`, builds it with `lake` and renames it to `<key>`, once
-/// per library source and the Lean version it pins, which `key` names. Builds take turns under an exclusive lock on
-/// `build.lock` in `builds`, across threads and processes alike. A build that lost its runner or a package file, as a
+/// Writes the library's package to `<key>.staging` in `builds`, builds it with `lake`, or unpacks `checker` there when
+/// it holds a build, and renames it to `<key>`, once per library source and the Lean version it pins, and per
+/// `checker`, which `key` names. Builds take turns under an exclusive lock on `build.lock` in `builds`, across
+/// threads and processes alike. A build that lost its runner or a package file, as a
 /// cache cleaner leaves it, or whose Lean is gone, as an uninstalled toolchain leaves it, is deleted and built again.
 /// A finished build deletes every other folder in `builds` but the Lean Mago installs there: older builds, any staging
 /// folder a dead build left, and the Lean an older Mago installed. A build records the folder of the Lean that built
 /// it, which the runner starts with.
-pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
+pub(crate) fn build_in(builds: &Path, lake: &Lake, checker: &[u8]) -> io::Result<PathBuf> {
     let _lock = lock::exclusive(&builds.join("build.lock"))?;
-    if let Some(library) = built_in(builds) {
+    if let Some(library) = built_in(builds, checker) {
         return Ok(library);
     }
 
-    let library = builds.join(key(&PACKAGE));
+    let library = builds.join(key(&PACKAGE, checker));
     let staging = library.with_extension("staging");
     for folder in [&library, &staging] {
         remove_folder(folder)?;
@@ -431,9 +440,13 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
         fs::write(&target, source).map_err(|error| DatabaseError::io(IOAction::WriteFile, &target, error))?;
     }
 
-    let output = process::output(lake.command().arg("build").current_dir(&staging))?;
-    if !output.status.success() {
-        return Err(unbuilt(format!("lake build in {} printed:\n{}", staging.display(), printed(&output))));
+    if checker.is_empty() {
+        let output = process::output(lake.command().arg("build").current_dir(&staging))?;
+        if !output.status.success() {
+            return Err(unbuilt(format!("lake build in {} printed:\n{}", staging.display(), printed(&output))));
+        }
+    } else {
+        tar::Archive::new(zstd::Decoder::new(checker)?).unpack(&staging).map_err(unbuilt)?;
     }
 
     record_sysroot(&staging, lake)?;
@@ -448,6 +461,29 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
     }
 
     Ok(library)
+}
+
+/// Builds the law checker with the Lean a law runs on, in a folder of its own, and writes the zstd archive of its
+/// `.lake/build` to `archive`, which the release build embeds in Mago as its checker.
+///
+/// # Errors
+///
+/// Returns the error of finding Lean, of the build, or of writing the archive.
+pub fn write_checker(archive: &Path) -> io::Result<()> {
+    let lake = match toolchain() {
+        Toolchain::Ready(lake) => lake,
+        Toolchain::Unsupported => return Err(io::Error::other("Mago pins no Lean for this platform")),
+        Toolchain::Failed(failure) => return Err(io::Error::other(failure)),
+    };
+    let builds = tempfile::tempdir()?;
+    let library = build_in(builds.path(), &lake, &[])?;
+    let file = fs::File::create(archive).map_err(|error| DatabaseError::io(IOAction::WriteFile, archive, error))?;
+    let mut tarball = tar::Builder::new(zstd::Encoder::new(file, 19)?);
+    tarball.append_dir_all(".lake/build/bin", library.join(".lake/build/bin"))?;
+    tarball.append_dir_all(".lake/build/lib", library.join(".lake/build/lib"))?;
+    tarball.into_inner()?.finish()?;
+
+    Ok(())
 }
 
 /// What finding the Lean a law runs on came to.
@@ -767,18 +803,18 @@ mod tests {
     /// Lean or of other sources is never used, and nothing else, such as Mago's own Rust code, names another build.
     #[test]
     fn the_library_build_is_named_by_each_file_of_its_package_and_so_by_its_lean_version() {
-        let base = key(&PACKAGE);
-        assert_eq!(base, key(&PACKAGE));
+        let base = key(&PACKAGE, &[]);
+        assert_eq!(base, key(&PACKAGE, &[]));
         assert_eq!(base.len(), 32);
         let other_lean = PACKAGE
             .map(|(path, source)| (path, if path == "lean-toolchain" { "leanprover/lean4:v4.35.0\n" } else { source }));
-        assert_ne!(base, key(&other_lean));
+        assert_ne!(base, key(&other_lean, &[]));
 
         for (index, &(path, source)) in PACKAGE.iter().enumerate() {
             let edited = format!("{source}\n");
             let mut package: [(&str, &str); 8] = PACKAGE;
             package[index] = (path, edited.as_str());
-            assert_ne!(base, key(&package), "{path}");
+            assert_ne!(base, key(&package, &[]), "{path}");
         }
     }
 
@@ -1007,7 +1043,7 @@ mod tests {
         fs::create_dir_all(builds.path().join(archive.name).join("bin"))?;
         fs::create_dir_all(builds.path().join("0123456789abcdef0123456789abcdef"))?;
 
-        let library = build_in(builds.path(), &lake)?;
+        let library = build_in(builds.path(), &lake, &[])?;
 
         assert!(runner(&library).is_file());
         assert!(builds.path().join(archive.name).join("bin").is_dir());
@@ -1025,7 +1061,7 @@ mod tests {
         fs::create_dir_all(lean.path().join("lib/lean"))?;
         let lake =
             lake_in(lean.path(), "#!/bin/sh\nmkdir -p .lake/build/bin && echo rebuilt > .lake/build/bin/sharp-lean\n")?;
-        let library = builds.path().join(key(&PACKAGE));
+        let library = builds.path().join(key(&PACKAGE, &[]));
         for (path, source) in PACKAGE {
             fs::create_dir_all(library.join(path).parent().unwrap_or(&library))?;
             fs::write(library.join(path), source)?;
@@ -1034,13 +1070,40 @@ mod tests {
         fs::write(runner(&library), "built by a Lean that is gone")?;
         fs::write(library.join(SYSROOT), builds.path().join("gone").display().to_string())?;
 
-        assert_eq!(built_in(builds.path()), None);
-        let built = build_in(builds.path(), &lake)?;
+        assert_eq!(built_in(builds.path(), &[]), None);
+        let built = build_in(builds.path(), &lake, &[])?;
 
         assert_eq!(built, library);
         assert_eq!(fs::read_to_string(runner(&library))?, "rebuilt\n");
         assert_eq!(fs::read_to_string(library.join(SYSROOT))?.trim(), lean.path().display().to_string());
-        assert_eq!(built_in(builds.path()), Some(library));
+        assert_eq!(built_in(builds.path(), &[]), Some(library));
+
+        Ok(())
+    }
+
+    /// A Mago that embeds its checker unpacks it on the first build that proves a law, under the build lock, and runs
+    /// no `lake`. The build is named by the checker too, so a Mago never runs another Mago's embedded checker.
+    #[cfg(unix)]
+    #[test]
+    fn a_build_unpacks_the_embedded_checker_and_runs_no_lake() -> io::Result<()> {
+        let lean = tempfile::tempdir()?;
+        let lake = lake_in(lean.path(), "#!/bin/sh\nexit 1\n")?;
+        fs::create_dir_all(lean.path().join("lib/lean"))?;
+        let mut checker = Vec::new();
+        let mut tarball = tar::Builder::new(zstd::Encoder::new(&mut checker, 3)?);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(6);
+        header.set_mode(0o755);
+        tarball.append_data(&mut header, ".lake/build/bin/sharp-lean", &b"runner"[..])?;
+        tarball.into_inner()?.finish()?;
+        let builds = tempfile::tempdir()?;
+
+        let library = build_in(builds.path(), &lake, &checker)?;
+
+        assert_eq!(library, builds.path().join(key(&PACKAGE, &checker)));
+        assert_ne!(key(&PACKAGE, &checker), key(&PACKAGE, &[]), "the build is named by the checker it embeds");
+        assert_eq!(fs::read(runner(&library))?, b"runner");
+        assert_eq!(built_in(builds.path(), &checker), Some(library));
 
         Ok(())
     }

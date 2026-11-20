@@ -19,6 +19,7 @@ pub use lean::Lean;
 pub use lean::PROOFS;
 pub use lean::refusals;
 pub use library::cache_root;
+pub use library::write_checker;
 pub use package::PACKAGE_FOLDER;
 pub use reach::Reach;
 pub use translate::Translation;
