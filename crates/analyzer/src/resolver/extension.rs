@@ -218,6 +218,9 @@ where
             Some(Extension::Value(_)) | None => {}
         }
     }
+    if let [(method, _)] = in_scope.as_slice() {
+        return Some(Extension::Member(*method));
+    }
     let receiver_type = receiver;
     let receiver = display_type(context, receiver);
     let code = if flag == MetadataFlags::EXTENSION_METHOD {
@@ -228,7 +231,6 @@ where
     let access = if read { "Read here." } else { "Called here." };
 
     match (in_scope.as_slice(), other_kind.first(), elsewhere) {
-        ([(method, _)], ..) => Some(Extension::Member(*method)),
         ([(method, _), ..], ..) => {
             let written = String::from_utf8_lossy(name.value);
             let (message, help) = ambiguity(context, &in_scope, &written);
@@ -416,12 +418,18 @@ pub(crate) fn own_member_classes(codebase: &CodebaseMetadata, receiver: &TUnion,
 }
 
 /// Whether a value of type `receiver` fits the receiver of the extension member `metadata` of the static class `class`,
-/// its first parameter, as [`fit`] decides it.
+/// its first parameter, as [`fit`] decides it. The type arguments a receiver gives fill the parts of the member's
+/// receiver, never its kind, so a value of another kind fits none, and they are inferred only for a value of the kind,
+/// unless the member's receiver is a type parameter itself, whose kind is the one the value gives it.
 fn fits<A>(context: &Context<'_, '_, A>, receiver: &TUnion, class: Word, metadata: &FunctionLikeMetadata) -> bool
 where
     A: Arena,
 {
-    fit(context, receiver, class, metadata).is_ok()
+    metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()).is_some_and(|parameter| {
+        metadata.template_types.is_empty()
+            || parameter.type_union.types.iter().any(|atomic| matches!(atomic, TAtomic::GenericParameter(_)))
+            || is_same_kind(context, receiver, class, metadata, &parameter.type_union)
+    }) && fit(context, receiver, class, metadata).is_ok()
 }
 
 /// The type arguments a value of type `receiver` gives the generic extension member `metadata`, with the type parameters
@@ -488,6 +496,32 @@ where
         Cow::Owned(inferred_type_replacer::replace(&parameter.type_union, &template_result, context.codebase))
     };
 
+    (is_same_kind(context, receiver, class, metadata, &parameter)
+        && union_comparator::is_contained_by(
+            context.codebase,
+            receiver,
+            &parameter,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::for_dialect(context.dialect),
+        ))
+    .then_some(())
+    .ok_or(None)
+}
+
+/// Whether a value of type `receiver` is of the kind of collection `parameter`, the receiver of the extension member
+/// `metadata` of the static class `class`, requires, or `parameter` requires none.
+fn is_same_kind<A>(
+    context: &Context<'_, '_, A>,
+    receiver: &TUnion,
+    class: Word,
+    metadata: &FunctionLikeMetadata,
+    parameter: &TUnion,
+) -> bool
+where
+    A: Arena,
+{
     // A `List`, a `Map` and a `Set` are each their own kind, spec section 12, where plain PHP takes a list as an array of
     // any key and any of them as an iterable, so an extension of one kind fits no other, and a type parameter is the
     // kind of its bound. The standard library's members of an `Iterable` belong to a value typed `Iterable`, which is a
@@ -516,7 +550,7 @@ where
         .flat_map(kinds)
         .filter(|kind| *kind != CollectionKind::Iterable || iterable_is_kind)
         .collect();
-    let same_kind = parameter_kinds.is_empty()
+    parameter_kinds.is_empty()
         || if parameter_kinds.contains(&CollectionKind::Iterable) {
             receiver.types.iter().all(|atomic| {
                 let kinds = kinds(atomic);
@@ -524,20 +558,7 @@ where
             })
         } else {
             receiver.types.iter().flat_map(kinds).all(|kind| parameter_kinds.contains(&kind))
-        };
-
-    (same_kind
-        && union_comparator::is_contained_by(
-            context.codebase,
-            receiver,
-            &parameter,
-            false,
-            false,
-            false,
-            &mut ComparisonResult::for_dialect(context.dialect),
-        ))
-    .then_some(())
-    .ok_or(None)
+        }
 }
 
 /// The members of `candidates` whose receiver fits inside every other candidate's, as C# overload resolution and
