@@ -46,10 +46,16 @@ where
         return true;
     }
 
-    is_within_namespace(
-        context.scope.namespace_name().unwrap_or_default(),
-        namespace_of(class.original_name.as_bytes()),
-    )
+    is_within_namespace(context.scope.namespace_name().unwrap_or_default(), declared_namespace(class))
+}
+
+/// The namespace the source declaration of `class` is in, as PHP writes it, which `internal` reaches, spec section 5.
+/// An enum's case runs as a class the lowering names below its enum, as `App\Lamp\Off`, and its block is declared in
+/// its enum's namespace, `App`.
+pub(crate) fn declared_namespace(class: &ClassLikeMetadata) -> &[u8] {
+    let namespace = namespace_of(class.original_name.as_bytes());
+
+    if class.flags.is_enum_case_class() { namespace_of(namespace) } else { namespace }
 }
 
 /// Whether the namespace `inner` is `namespace` or one below it, as PHP writes both. Every namespace is within the
@@ -163,7 +169,7 @@ where
         return true;
     }
 
-    let namespace = namespace_of(class.original_name.as_bytes());
+    let namespace = declared_namespace(class);
     let caller = context.scope.namespace_name().unwrap_or_default();
     let class_name = display_class_like_name(context, class.original_name);
     let (reached, reason) = match member {
@@ -675,10 +681,7 @@ where
     A: Arena,
 {
     !class.flags.is_sharp()
-        || is_within_namespace(
-            context.scope.namespace_name().unwrap_or_default(),
-            namespace_of(class.original_name.as_bytes()),
-        )
+        || is_within_namespace(context.scope.namespace_name().unwrap_or_default(), declared_namespace(class))
 }
 
 /// Reports a write at `span`, from outside its namespace, to the property `property_name` of `class`, named as it
@@ -692,7 +695,7 @@ fn report_set_outside_namespace<A>(
     A: Arena,
 {
     let property = display_member(context, class.original_name, property_name);
-    let namespace = dotted(namespace_of(class.original_name.as_bytes()));
+    let namespace = dotted(declared_namespace(class));
 
     context.collector.report_with_code(
         IssueCode::InternalAccess,

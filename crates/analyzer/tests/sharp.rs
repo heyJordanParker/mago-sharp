@@ -36591,6 +36591,34 @@ fn a_match_over_a_machine_lists_every_case() {
     );
 }
 
+/// Spec sections 5 and 20.2: an `internal` member of a case's block reaches the namespace its file declares, as every
+/// `internal` member does, so the machine's own law and method and a class of that namespace call it, and a class
+/// outside the namespace is refused.
+#[test]
+fn an_internal_move_of_a_case_reaches_the_namespace_its_machine_is_declared_in() {
+    let lamp = (
+        "src/App/Lamp.sharp",
+        "namespace App;\n\npublic machine Lamp\n{\n    case Off\n    {\n        internal Lamp.On turnOn() => Lamp.On;\n    }\n\n    case On\n    {\n        internal Lamp.Off turnOff() => Lamp.Off;\n    }\n\n    public static Lamp.Off start() => Lamp.Off;\n\n    public static bool lit(Lamp.Off off) => off.turnOn() is Lamp.On;\n\n    law turnsOn(Lamp.Off off) => off.turnOn() is Lamp.On;\n}\n",
+    );
+    let inside = (
+        "src/App/Switch.sharp",
+        "namespace App;\n\npublic class Switch\n{\n    law turnsOn(Lamp.Off off) => off.turnOn() is Lamp.On;\n}\n",
+    );
+    let outside = (
+        "src/Web/Switch.sharp",
+        "namespace Web;\n\nimport App.Lamp;\n\npublic class Switch\n{\n    law turnsOn(Lamp.Off off) => off.turnOn() is Lamp.On;\n}\n",
+    );
+
+    assert_eq!(refusals(lamp, &[]), Vec::<String>::new());
+    assert_eq!(refusals(inside, &[lamp]), Vec::<String>::new());
+    assert_eq!(
+        refusals(outside, &[lamp]),
+        [
+            "7:38 internal-access `Off.turnOn` is internal to `App`, and `Web` is outside it. | Make `Off` `public` where it is the API, or move this code under `App`."
+        ]
+    );
+}
+
 /// Spec sections 10 and 20.2: a machine marked `[Tag]` is a family whose cases are its variants, so `Json.encode`
 /// writes a case and `Json.decode` reads one as a family's variant. A backed machine's values name its cases, so a
 /// `[Key]` on its case is refused, naming the value, and a machine with no backing names each case with `[Key]`.
