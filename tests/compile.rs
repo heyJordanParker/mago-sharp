@@ -3480,12 +3480,20 @@ fn counting_cache(folder: &Path) -> PathBuf {
     cache_with_runner(folder, &format!("tee '{}/'$$ | \"$real\" \"$@\"", started.display()))
 }
 
-/// What the request of the one runner `counting_cache` started in `folder` holds: each generated module's name and
-/// source, and each theorem's statement, text and fixed steps, the empty string when it has none. The request is its
-/// header and the threads and heartbeats it answers with, the modules an earlier runner stopped in, the generated
-/// modules, then each check's modules and theorems.
+/// What a runner's request holds.
 #[cfg(unix)]
-fn runner_request(folder: &Path) -> (Vec<(String, String)>, Vec<(String, String, String)>) {
+struct RunnerRequest {
+    /// Each generated module's name and source.
+    modules: Vec<(String, String)>,
+    /// Each theorem's statement, text and fixed steps, the empty string when it has none.
+    theorems: Vec<(String, String, String)>,
+}
+
+/// The request of the one runner `counting_cache` started in `folder`: its header and the threads and heartbeats it
+/// answers with, the modules an earlier runner stopped in, the generated modules, then each check's modules and
+/// theorems.
+#[cfg(unix)]
+fn runner_request(folder: &Path) -> RunnerRequest {
     let mut started = std::fs::read_dir(folder.join("started")).unwrap();
     let request = std::fs::read(started.next().unwrap().unwrap().path()).unwrap();
     assert!(started.next().is_none(), "one runner started");
@@ -3516,20 +3524,23 @@ fn runner_request(folder: &Path) -> (Vec<(String, String)>, Vec<(String, String,
     }
     assert_eq!(at, request.len(), "the request ends after its checks");
 
-    (modules, theorems)
+    RunnerRequest { modules, theorems }
 }
 
 /// The generated Lean module of `name` in the request of the one runner `counting_cache` started in `folder`.
 #[cfg(unix)]
 fn generated_module(folder: &Path, name: &str) -> String {
-    let (modules, _) = runner_request(folder);
-
-    modules.into_iter().find(|(module, _)| module == name).map(|(_, text)| text).expect("the request holds the module")
+    runner_request(folder)
+        .modules
+        .into_iter()
+        .find(|(module, _)| module == name)
+        .map(|(_, text)| text)
+        .expect("the request holds the module")
 }
 
 /// Spec section 28: a law with a body has fixed steps too, which close each of its cases as the fixed steps close a law
-/// without one, and the law checker tries them before Lean's search. Money's laws with bodies, a recursion on an `int`
-/// and one on a list, prove with them.
+/// without one, and the law checker tries them before Lean's search. Each of Money's laws with a body, a recursion on an
+/// `int` and one on a list, gets them, and Money proves.
 #[cfg(unix)]
 #[test]
 fn a_law_with_a_body_has_fixed_steps_for_each_of_its_cases() {
@@ -3540,7 +3551,7 @@ fn a_law_with_a_body_has_fixed_steps_for_each_of_its_cases() {
     let output = process::output(command(root, "never").env("XDG_CACHE_HOME", counting_cache(lake.path()))).unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
-    let (_, theorems) = runner_request(lake.path());
+    let theorems = runner_request(lake.path()).theorems;
     for statement in ["App.Shared.Money.timesKeepsCurrency", "App.Shared.Money.sumKeepsCurrency"] {
         let (_, text, steps) = theorems.iter().find(|(written, ..)| written == statement).expect("the law's theorem");
         assert_eq!(text.matches("sharp_close").count(), 2, "{text}");
