@@ -211,13 +211,18 @@ pub struct CompiledFiles {
     files: BTreeMap<Vec<u8>, CompiledFile>,
 }
 
-/// What [`CompiledFiles`] keeps of one file: its compiled file's key and the reads it hashes, its inline forms, what its
-/// inputs depend on, as [`LoweredUnit`] holds them, and what its compiled file holds beside its code, as
-/// [`stamps_hash`] hashes it.
+/// What [`CompiledFiles`] keeps of one file: its compiled file's key, the names of the reads its lowering made, which
+/// the next compile fingerprints again to check the key, its inline forms, what its inputs depend on, as
+/// [`LoweredUnit`] holds them, and what its compiled file holds beside its code, as [`stamps_hash`] hashes it. The
+/// key's other reads come from the next compile's analysis, so the record holds none of them: with the declarations an
+/// extension read, which every file reads, they grew with the project's files times the extension's reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CompiledFile {
     key: [u8; 16],
-    reads: Reads,
+    /// Each library method whose body the file inlines, named `Class::method`.
+    inlined: Vec<Vec<u8>>,
+    /// Each method and lambda the file declares whose function type its key reads.
+    function_types: Vec<Vec<u8>>,
     forms: Vec<(Vec<u8>, InlineForm)>,
     namespace_classes: Vec<Word>,
     reaches_extension: bool,
@@ -1030,7 +1035,8 @@ impl IncrementalAnalysisService {
                             file.name.to_vec(),
                             CompiledFile {
                                 key,
-                                reads,
+                                inlined: reads.inlined.into_iter().map(|read| read.name).collect(),
+                                function_types: reads.function_types.into_iter().map(|read| read.name).collect(),
                                 forms: forms.clone(),
                                 namespace_classes: namespace_classes.clone(),
                                 reaches_extension: *reaches_extension,
@@ -1083,18 +1089,16 @@ impl IncrementalAnalysisService {
             bodies: read.map(|reads| reads.bodies.clone()).unwrap_or_default(),
             listed: read.map(|reads| reads.listed.clone()).unwrap_or_default(),
             inlined: record
-                .reads
                 .inlined
                 .iter()
-                .map(|read| Read { name: read.name.clone(), fingerprint: forms.get(&read.name).copied().unwrap_or(0) })
+                .map(|name| Read { name: name.clone(), fingerprint: forms.get(name).copied().unwrap_or(0) })
                 .collect(),
             function_types: record
-                .reads
                 .function_types
                 .iter()
-                .map(|read| Read {
-                    name: read.name.clone(),
-                    fingerprint: function_type_fingerprint(&self.codebase, effects, &read.name),
+                .map(|name| Read {
+                    name: name.clone(),
+                    fingerprint: function_type_fingerprint(&self.codebase, effects, name),
                 })
                 .collect(),
         };
