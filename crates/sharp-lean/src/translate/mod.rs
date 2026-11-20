@@ -354,7 +354,7 @@ impl Translator<'_, '_> {
             types.push(r#type);
         }
         lines.push(DERIVED.to_owned());
-        let coercions = self.coercions(&mut body, &lean, inheritance);
+        let coercions = self.coercions(&mut body, &lean, self.own_parents(full, inheritance));
         self.declare_type(body, lean.clone(), name.span, lines, coercions);
 
         // Spec section 20.1: an implementer of a sealed interface is a value of the interface, which reads each of its
@@ -365,7 +365,7 @@ impl Translator<'_, '_> {
             fields.iter().zip(&types).map(|(field, r#type)| (String::from_utf8_lossy(field.name), r#type.clone()));
         for (field, r#type) in parent_field.map(|(field, r#type)| (field.into(), r#type)).into_iter().chain(own) {
             let mut body = Body::new(self.checked, self.reach, full, format!("{short}.{field}"));
-            let Some((interface, constructor)) = body.sealed(full) else {
+            let Some((interface, constructor)) = body.sealed(name.span, full) else {
                 break;
             };
             let key = names::member(&constructor, field.as_bytes());
@@ -559,7 +559,7 @@ impl Translator<'_, '_> {
             }
         }
         lines.push(DERIVED.to_owned());
-        let coercions = self.coercions(&mut body, &lean, r#enum.inheritance.as_ref());
+        let coercions = self.coercions(&mut body, &lean, self.own_parents(full, r#enum.inheritance.as_ref()));
         self.declare_type(body, lean.clone(), r#enum.name.span, lines, coercions);
 
         // Spec section 20: a field of a case that carries data reads as the constructor's field, where a test named the
@@ -572,7 +572,8 @@ impl Translator<'_, '_> {
             let mut body =
                 Body::new(self.checked, self.reach, full, format!("{short}.{}", String::from_utf8_lossy(case)));
             let domain = body.class_type(r#enum.name.span, full);
-            let pattern = body.held(full, format!("(.{} {})", names::identifier(case), binders.join(" ")));
+            let pattern =
+                body.held(r#enum.name.span, full, format!("(.{} {})", names::identifier(case), binders.join(" ")));
             let lines = [
                 format!("def {key} : {domain} → {type}"),
                 format!("  | {pattern} => held"),
@@ -588,7 +589,7 @@ impl Translator<'_, '_> {
             let domain = body.class_type(r#enum.name.span, full);
             let mut lines = vec![format!("def {} : {domain} → {type}", names::member(&lean, b"value"))];
             for (case, value) in &values {
-                lines.push(format!("  | {} => {value}", body.held(full, format!(".{case}"))));
+                lines.push(format!("  | {} => {value}", body.held(r#enum.name.span, full, format!(".{case}"))));
             }
             if domain != lean {
                 lines.push("  | _ => default".to_owned());
@@ -607,8 +608,10 @@ impl Translator<'_, '_> {
                 let class = body.class_type(r#enum.name.span, full);
                 let returns = if nullable { format!("(Option {class})") } else { class };
                 let parameter = format!("(value : {})", body.r#type(&backing.hint));
-                let cases: Vec<String> =
-                    values.iter().map(|(case, _)| body.held(full, format!("{lean}.{case}"))).collect();
+                let cases: Vec<String> = values
+                    .iter()
+                    .map(|(case, _)| body.held(r#enum.name.span, full, format!("{lean}.{case}")))
+                    .collect();
                 let (mut lines, uses, unmodeled) = body.finish();
                 let mut chosen = if nullable { "pure none" } else { "throw Throwable.ValueError" }.to_owned();
                 for (case, (_, value)) in cases.into_iter().zip(&values).rev() {
@@ -630,7 +633,7 @@ impl Translator<'_, '_> {
         if self.reach.reaches(full, b"cases") {
             let mut body = Body::new(self.checked, self.reach, full, format!("{short}.cases"));
             let returns = format!("(List {})", body.class_type(r#enum.name.span, full));
-            let cases: Vec<String> = cases.into_iter().map(|case| body.held(full, case)).collect();
+            let cases: Vec<String> = cases.into_iter().map(|case| body.held(r#enum.name.span, full, case)).collect();
             let (mut lines, uses, unmodeled) = body.finish();
             lines.push(format!("return [{}]", cases.join(", ")));
             self.define(
@@ -673,46 +676,81 @@ impl Translator<'_, '_> {
         let lean = names::full_name(full);
         let short = names::short_name(full);
         let mut body = Body::new(self.checked, self.reach, full, short.clone());
-        let lines = match self.reach.implementers(full) {
-            None | Some([]) => vec![format!("abbrev {lean} : Type := Interface \"{lean}\"")],
-            Some(implementers) => {
-                let mut constructors = vec![format!("inductive {lean} where")];
-                for implementer in implementers {
-                    let held = body.own_type(interface.name.span, implementer.as_bytes());
-                    let constructor = names::identifier(names::short_name(implementer.as_bytes()).as_bytes());
-                    constructors.push(format!("  | {constructor} (value : {held})"));
-                }
-                constructors.push(DERIVED.to_owned());
-                constructors
+        let implementers = self.reach.implementers(full).unwrap_or_default();
+        let lines = if implementers.is_empty() {
+            vec![format!("abbrev {lean} : Type := Interface \"{lean}\"")]
+        } else {
+            let mut constructors = vec![format!("inductive {lean} where")];
+            for implementer in implementers {
+                let held = body.own_type(interface.name.span, implementer.as_bytes());
+                let constructor = names::identifier(names::short_name(implementer.as_bytes()).as_bytes());
+                constructors.push(format!("  | {constructor} (value : {held})"));
             }
+            constructors.push(DERIVED.to_owned());
+            constructors
         };
-        let coercions = self.coercions(&mut body, &lean, interface.inheritance.as_ref());
+        // Spec section 20.1: an implementer's value is the sealed interface's, so the interface's declaration holds
+        // the coercion to each interface an implementer's header names.
+        let mut parents = self.header(interface.inheritance.as_ref());
+        for implementer in implementers {
+            parents.extend(
+                self.reach
+                    .interfaces(implementer.as_bytes())
+                    .iter()
+                    .map(|parent| (parent.as_bytes(), interface.name.span)),
+            );
+        }
+        let coercions = self.coercions(&mut body, &lean, parents);
         self.declare_type(body, lean.clone(), interface.name.span, lines, coercions);
         self.members(full, &lean, &short, interface.members.as_slice());
     }
 
-    /// A `Coe` from the class-like `lean` to each interface its header names that a law reaches, so a value of it
-    /// passes where the interface is expected. The interface's value is `upcast`'s, of which Lean knows nothing, as of
-    /// every interface value. They follow the class-like's own declaration, so every declaration that uses it can use
-    /// them. A sealed interface needs none, since an implementer's value is the interface's.
-    fn coercions(&self, body: &mut Body<'_, '_>, lean: &str, inheritance: Option<&Inheritance>) -> Vec<String> {
+    /// A `Coe` from the class-like `lean` to each interface of `parents` that a law reaches, once each, so a value of it
+    /// passes where the interface is expected. Each parent is a full name and where it is named. The interface's value
+    /// is `upcast`'s, of which Lean knows nothing, as of every interface value. They follow the class-like's own
+    /// declaration, so every declaration that uses it can use them. A sealed interface needs none, since an
+    /// implementer's value is the interface's.
+    fn coercions<'name>(
+        &self,
+        body: &mut Body<'_, '_>,
+        lean: &str,
+        parents: impl IntoIterator<Item = (&'name [u8], Span)>,
+    ) -> Vec<String> {
+        let mut coerced: Vec<&[u8]> = Vec::new();
         let mut coercions = Vec::new();
-        for (index, name) in inheritance.iter().flat_map(|inheritance| inheritance.names()).enumerate() {
-            let parent = self.checked.names().get(&name);
+        for (parent, span) in parents {
             let translated = self.reach.class(parent).is_some_and(|reached| reached.sharp);
             if self.checked.types().class_declaration(word(parent)).kind != DeclarationKind::Interface
                 || !translated
                 || !self.reach.reaches(parent, b"")
                 || self.reach.implementers(parent).is_some()
+                || coerced.iter().any(|known| self.reach.same_class(known, parent))
             {
                 continue;
             }
 
-            let interface = body.class_type(name.span(), parent);
-            coercions.push(format!("instance {lean}.«$coe{index}» : Coe {lean} {interface} := ⟨upcast⟩"));
+            let interface = body.class_type(span, parent);
+            coercions.push(format!("instance {lean}.«$coe{}» : Coe {lean} {interface} := ⟨upcast⟩", coerced.len()));
+            coerced.push(parent);
         }
 
         coercions
+    }
+
+    /// The interfaces whose coercions the declaration of the class or enum `full` holds: those its header names, or
+    /// none for an implementer of a sealed interface, whose value is the interface's, spec section 20.1, so the
+    /// interface's declaration holds them.
+    fn own_parents(&self, full: &[u8], inheritance: Option<&Inheritance>) -> Vec<(&[u8], Span)> {
+        if self.reach.sealed_interfaces(full).is_empty() { self.header(inheritance) } else { Vec::new() }
+    }
+
+    /// Each class-like the header `inheritance` names, by its full name and where the header names it.
+    fn header(&self, inheritance: Option<&Inheritance>) -> Vec<(&[u8], Span)> {
+        inheritance
+            .iter()
+            .flat_map(|inheritance| inheritance.names())
+            .map(|name| (self.checked.names().get(&name), name.span()))
+            .collect()
     }
 
     /// The reached methods, extension members and constants, and every law, of a class-like. A machine's invariant is

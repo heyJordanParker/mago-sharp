@@ -73,6 +73,12 @@ pub(crate) fn open_interface(interface: &str) -> String {
     format!("A law tells apart only the implementers of a sealed interface. Declare `{interface}` sealed.")
 }
 
+/// Why a law cannot take a value of a class that is a state of the sealed interfaces `first` and `second`: in a law, a
+/// state's value is a value of its one sealed interface.
+pub(crate) fn two_sealed_interfaces(first: &str, second: &str) -> String {
+    format!("It is a state of both `{first}` and `{second}`, and a state belongs to one sealed interface in a law.")
+}
+
 /// A construct the translation does not model, which `law` reaches: on the construct when the law's file holds it, and
 /// else on the law, pointing to the construct.
 pub(crate) fn unmodeled(law: &Law, construct: &Unmodeled) -> Issue {

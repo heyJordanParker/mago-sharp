@@ -669,11 +669,7 @@ impl<'body, 'program> Body<'body, 'program> {
         }
         let owner = types.call_target(expression).class;
         let owner = owner.as_bytes();
-        let held = self.reach.same_class(owner, class)
-            || self
-                .reach
-                .interface_of(class)
-                .is_some_and(|interface| self.reach.same_class(interface.as_bytes(), owner));
+        let held = self.reach.same_class(owner, class) || self.implements(class, owner);
         if !held || self.reach.method(owner, comparison).is_none() {
             return None;
         }
@@ -768,7 +764,7 @@ impl<'body, 'program> Body<'body, 'program> {
 
         let mut values = Vec::new();
         for side in ["a", "b"] {
-            values.push(match self.sealed(class) {
+            values.push(match self.sealed(span, class) {
                 Some((_, constructor)) => {
                     let key = names::member(&constructor, field);
                     self.uses(class, &key, format!("{}.{}", names::short_name(class), String::from_utf8_lossy(field)));
@@ -1027,7 +1023,7 @@ impl<'body, 'program> Body<'body, 'program> {
         }
         self.checked.types().enum_case_class(word(r#enum), word(case))?;
         self.reads(r#enum);
-        let held = self.sealed(r#enum).map(|(_, constructor)| constructor);
+        let held = self.sealed(hint.span(), r#enum).map(|(_, constructor)| constructor);
 
         Some((held, names::member(&names::full_name(&self.reached_name(r#enum)), case)))
     }
@@ -1043,12 +1039,12 @@ impl<'body, 'program> Body<'body, 'program> {
             return None;
         }
 
-        self.sealed(class).map(|(_, constructor)| constructor)
+        self.sealed(hint.span(), class).map(|(_, constructor)| constructor)
     }
 
-    /// Whether `class` implements the sealed interface `interface`, as the Lean type it has.
+    /// Whether `class` implements the sealed interface `interface`, spec section 20.1.
     fn implements(&self, class: &[u8], interface: &[u8]) -> bool {
-        self.reach.interface_of(class).is_some_and(|sealed| self.reach.same_class(sealed.as_bytes(), interface))
+        self.reach.sealed_interfaces(class).iter().any(|sealed| self.reach.same_class(sealed.as_bytes(), interface))
     }
 
     /// The name of the interface `atomic` is, when it is not sealed, so its implementers are open.
@@ -1189,7 +1185,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 let mut constructor = vec![names::member(&lean, case)];
                 constructor.extend(arguments);
 
-                return self.held(class, format!("({})", constructor.join(" ")));
+                return self.held(expression.span(), class, format!("({})", constructor.join(" ")));
             }
             let target = self.checked.types().call_target(expression);
             if target.kind != DeclarationKind::StaticMethod {
@@ -1498,7 +1494,7 @@ impl<'body, 'program> Body<'body, 'program> {
         }
         let mut upcast = value;
         let mut below = class.to_vec();
-        let mut sealed = self.sealed(class);
+        let mut sealed = self.sealed(span, class);
         while !self.reach.same_class(&below, ancestor) {
             let Some(parent) = self.reach.class(&below).and_then(|reached| reached.parent) else {
                 unreachable!("{} is no class above {}", names::short_name(ancestor), names::short_name(class));
@@ -1570,7 +1566,7 @@ impl<'body, 'program> Body<'body, 'program> {
 
         let made = self.construct(instantiation.span(), class, instantiation.argument_list.as_ref());
 
-        self.held(class, made)
+        self.held(instantiation.span(), class, made)
     }
 
     /// A value of `class`'s own type, which its constructor builds from `arguments`, as `new` and `: super(…)` run it.
@@ -1654,7 +1650,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 // Spec section 20: a plain case of an enum whose cases carry data is the constructor without fields.
                 DeclarationKind::EnumCase | DeclarationKind::CaseObject => {
                     self.uses(class, &lean, short);
-                    self.held(class, names::member(&lean, member.value))
+                    self.held(expression.span(), class, names::member(&lean, member.value))
                 }
                 DeclarationKind::Constant => {
                     let key = names::member(&lean, member.value);
@@ -1748,7 +1744,7 @@ impl<'body, 'program> Body<'body, 'program> {
         let read = if !self.reach.same_class(declaring, class.as_bytes()) {
             let parent = self.upcast(expression.span(), object, class.as_bytes(), declaring);
             format!("{parent}.{}", names::identifier(property.as_bytes()))
-        } else if let Some((_, constructor)) = self.sealed(class.as_bytes()) {
+        } else if let Some((_, constructor)) = self.sealed(expression.span(), class.as_bytes()) {
             let key = names::member(&constructor, property.as_bytes());
             self.uses(class.as_bytes(), &key, place);
             format!("({key} {object})")
@@ -1869,7 +1865,7 @@ impl<'body, 'program> Body<'body, 'program> {
         {
             return self.class_type(span, &class[..separator]);
         }
-        match self.sealed(class) {
+        match self.sealed(span, class) {
             Some((interface, _)) => interface,
             None => self.own_type(span, class),
         }
@@ -1888,9 +1884,19 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// The Lean type of the sealed interface `class` implements, spec section 20.1, and the constructor that holds a
-    /// value of `class`.
-    pub(crate) fn sealed(&mut self, class: &[u8]) -> Option<(String, String)> {
-        let interface = self.reach.interface_of(class)?;
+    /// value of `class`. A class that is a state of two sealed interfaces has no one Lean type, so the body that takes
+    /// its value is refused at `span`.
+    pub(crate) fn sealed(&mut self, span: Span, class: &[u8]) -> Option<(String, String)> {
+        let interfaces = self.reach.sealed_interfaces(class);
+        if let [first, second, ..] = interfaces.as_slice() {
+            let what = format!("the class {}", names::short_name(&self.reached_name(class)));
+            let reason = issues::two_sealed_interfaces(
+                &names::short_name(first.as_bytes()),
+                &names::short_name(second.as_bytes()),
+            );
+            self.unmodeled(span, what, reason);
+        }
+        let interface = interfaces.first()?;
         let lean = names::full_name(interface.as_bytes());
         self.uses(interface.as_bytes(), &lean, names::short_name(interface.as_bytes()));
         let constructor = names::member(&lean, names::short_name(&self.reached_name(class)).as_bytes());
@@ -1899,9 +1905,9 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// `value`, a value of the class-like `class`'s own type, as a value of its Lean type: held by the constructor of
-    /// the sealed interface `class` implements.
-    pub(super) fn held(&mut self, class: &[u8], value: String) -> String {
-        match self.sealed(class) {
+    /// the sealed interface `class` implements. `span` is where a refusal stands.
+    pub(super) fn held(&mut self, span: Span, class: &[u8], value: String) -> String {
+        match self.sealed(span, class) {
             Some((_, constructor)) => format!("({constructor} {value})"),
             None => value,
         }

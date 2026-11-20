@@ -67,6 +67,9 @@ pub struct Reach {
     files: HashMap<FileId, Vec<FileId>>,
     /// The implementers of each reached sealed interface, by the interface's key, each by its full name, in name order.
     implementers: HashMap<Word, Vec<Word>>,
+    /// The interfaces each reached class names in its own header, by the class's key, each by its full name, in name
+    /// order.
+    interfaces: HashMap<Word, Vec<Word>>,
 }
 
 impl Reach {
@@ -147,6 +150,16 @@ impl Reach {
                         .map(|parent| parent.original_name),
                     plain_constructor: plain_constructor(codebase, metadata),
                 });
+                reach.interfaces.entry(class).or_insert_with(|| {
+                    let mut interfaces: Vec<Word> = metadata
+                        .direct_parent_interfaces
+                        .iter()
+                        .filter_map(|interface| codebase.get_class_like(*interface))
+                        .map(|interface| interface.original_name)
+                        .collect();
+                    interfaces.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+                    interfaces
+                });
                 if member.is_empty() {
                     reach.record_member(codebase, class, metadata.method_key(word("__construct")));
                 } else {
@@ -225,16 +238,24 @@ impl Reach {
         self.implementers.get(&self.class_key(interface)).map(Vec::as_slice)
     }
 
-    /// The full name of the reached sealed interface `class` implements, spec section 20.1, the first by name when it
-    /// implements several.
-    pub(crate) fn interface_of(&self, class: &[u8]) -> Option<Word> {
-        self.implementers
+    /// The full names of the reached sealed interfaces `class` implements, spec section 20.1, in name order.
+    pub(crate) fn sealed_interfaces(&self, class: &[u8]) -> Vec<Word> {
+        let mut interfaces: Vec<Word> = self
+            .implementers
             .iter()
             .filter(|(_, implementers)| {
                 implementers.iter().any(|implementer| self.same_class(implementer.as_bytes(), class))
             })
             .filter_map(|(interface, _)| self.classes.get(interface).map(|reached| reached.name))
-            .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()))
+            .collect();
+        interfaces.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+        interfaces
+    }
+
+    /// The full names of the interfaces the reached class `class` names in its own header, in name order.
+    pub(crate) fn interfaces(&self, class: &[u8]) -> &[Word] {
+        self.interfaces.get(&self.class_key(class)).map_or(&[], Vec::as_slice)
     }
 
     /// Whether the names `left` and `right` name one class, by [`Reach::class_key`].

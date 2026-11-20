@@ -4302,6 +4302,51 @@ fn compile_proves_a_law_over_a_state_beside_one_that_holds_an_instant() {
     assert!(compiled(root, "app/Delivery/Pending.sharp").exists());
 }
 
+/// Spec section 28: a state of a sealed family passes where an open interface it implements is expected, so a law
+/// proves that passes one there, and two states that implement the same open interface both pass as it.
+#[test]
+fn compile_proves_a_law_that_passes_a_sealed_state_as_an_open_interface_it_implements() {
+    let directory = lawful_project(&[
+        ("app/Shop/Printable.sharp", "namespace App.Shop;\n\npublic interface Printable\n{\n}\n"),
+        ("app/Shop/OrderStatus.sharp", "namespace App.Shop;\n\npublic sealed interface OrderStatus\n{\n}\n"),
+        (
+            "app/Shop/Paid.sharp",
+            "namespace App.Shop;\n\npublic class Paid : OrderStatus, Printable\n{\n    public Paid(public int at { get; }) { }\n}\n",
+        ),
+        (
+            "app/Shop/Pending.sharp",
+            "namespace App.Shop;\n\npublic class Pending : OrderStatus, Printable\n{\n    public static bool keep(Printable value) => true;\n\n    law keepsPending(Pending pending) => Pending.keep(pending);\n    law keepsPaid(int at) => Pending.keep(new Paid(at));\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shop/Pending.sharp").exists());
+}
+
+/// Spec section 28: a law refuses a class that is a state of two sealed interfaces, as whichever one it passes the
+/// value as, since a state belongs to one sealed family in a law.
+#[test]
+fn a_law_reaching_a_state_of_two_sealed_interfaces_is_refused() {
+    let source = "namespace App.Shared;\n\npublic class Shape : Drawn, Colored\n{\n    public Shape(public int size { get; }) { }\n\n    public static bool keepColored(Colored colored) => true;\n    public static bool keepDrawn(Drawn drawn) => true;\n\n    law keepsColored(Shape shape) => Shape.keepColored(shape);\n    law keepsDrawn(Shape shape) => Shape.keepDrawn(shape);\n}\n";
+    let others = [
+        ("app/Shared/Colored.sharp", "namespace App.Shared;\n\npublic sealed interface Colored\n{\n}\n"),
+        ("app/Shared/Drawn.sharp", "namespace App.Shared;\n\npublic sealed interface Drawn\n{\n}\n"),
+    ];
+
+    for law in ["keepsColored", "keepsDrawn"] {
+        assert_unmodeled_beside(
+            source,
+            &others,
+            &format!(
+                "Law {law} reaches the class Shape in Shape.{law}. It is a state of both `Colored` and `Drawn`, and a state belongs to one sealed interface in a law."
+            ),
+        );
+    }
+}
+
 /// Spec section 28: `<` on two values of a class runs the class's own `<=>`, so a law that compares two `Instant`s
 /// proves through `Instant`'s, which compares their seconds, then their nanoseconds. A false order is not proven.
 #[test]
