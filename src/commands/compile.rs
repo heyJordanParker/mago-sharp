@@ -697,7 +697,7 @@ fn write_hosts_folder(
         if let Some(input) = stamps.get(path) {
             return Ok(Some(input.clone()));
         }
-        let input = unit::stamp(root, path)?;
+        let input = stamp_of(root, &held, path)?;
         if let Some(input) = &input
             && (held.get_id(path).is_some() || path.ends_with(unit::SOURCE_LISTING.as_bytes()))
         {
@@ -933,7 +933,7 @@ pub(crate) fn project_database(
     let packaged: Vec<File> = database
         .files()
         .filter(|file| file.file_type == FileType::Vendored && Dialect::of(file).is_sharp())
-        .map(|file| copy_of(&file, FileType::Host, file.contents.clone()))
+        .map(|file| File { modified_ns: file.modified_ns, ..copy_of(&file, FileType::Host, file.contents.clone()) })
         .collect();
     let included: HashSet<FileId> = packaged.iter().map(|file| file.id).collect();
     for file in packaged {
@@ -980,7 +980,7 @@ pub(crate) fn whole_workspace(
 /// Returns the error of reading a file.
 fn served_stamps(
     root: &Path,
-    database: &impl DatabaseReader,
+    database: &(impl DatabaseReader + Sync),
     autoloader: Option<&Autoloader>,
 ) -> Result<Vec<Stamp>, Error> {
     let Some(autoloader) = autoloader else {
@@ -994,8 +994,10 @@ fn served_stamps(
         .collect();
 
     // Stamped at once, and the first file in order that can't be read is the one named, as one after another.
-    let stamped: Vec<Result<Stamp, Error>> =
-        served.par_iter().map(|file| Ok(recorded(&file.name, unit::stamp(root, &file.name)?.as_ref()))).collect();
+    let stamped: Vec<Result<Stamp, Error>> = served
+        .par_iter()
+        .map(|file| Ok(recorded(&file.name, stamp_of(root, database, &file.name)?.as_ref())))
+        .collect();
 
     stamped.into_iter().collect()
 }
@@ -1222,7 +1224,7 @@ fn compiled(
     let compilations = server.compile(
         Folder { last: &last, compiled: &mut compiled, intact: &mut intact },
         hosts_folder,
-        recording_stamp(&root, &stamped),
+        recording_stamp(&root, &read_database, &stamped),
         |translations, reach| lean.check(translations, reach),
         &library,
         |mut issues| {
@@ -1835,17 +1837,29 @@ fn is_unchanged(path: &Path, output: Option<&(Status, [u8; 16])>, filesystems: &
 /// An input as [`Record`] holds it: its path, size and hash, both zero when no file is there.
 type Stamp = (String, u64, [u8; 16]);
 
-/// The `stamp` a compile of the project at `root` takes, which stamps each input it is given and keeps the stamp in
-/// `stamped`, from whichever thread stamps it.
+/// The `stamp` a compile of the project at `root` takes, which stamps each input it is given as [`stamp_of`] does from
+/// `database`, and keeps the stamp in `stamped`, from whichever thread stamps it.
 fn recording_stamp<'a>(
     root: &'a Path,
+    database: &'a ReadDatabase,
     stamped: &'a Mutex<Vec<Stamp>>,
 ) -> impl Fn(&[u8]) -> Result<Option<unit::Input>, DatabaseError> + Sync + 'a {
     move |path| {
-        let input = unit::stamp(root, path)?;
+        let input = stamp_of(root, database, path)?;
         stamped.lock().unwrap_or_else(PoisonError::into_inner).push(recorded(path, input.as_ref()));
 
         Ok(input)
+    }
+}
+
+/// The stamp of the input at `path` of the project at `root`: from the bytes the loader read into `database`, as
+/// [`unit::loaded_stamp`] gives it, so a file the analysis read is not read again, and from disk, as [`unit::stamp`]
+/// reads it, for every other input.
+fn stamp_of(root: &Path, database: &impl DatabaseReader, path: &[u8]) -> Result<Option<unit::Input>, DatabaseError> {
+    let loaded = database.get_id(path).and_then(|id| database.get_ref(&id).ok());
+    match loaded.and_then(unit::loaded_stamp) {
+        Some(input) => Ok(Some(input)),
+        None => unit::stamp(root, path),
     }
 }
 

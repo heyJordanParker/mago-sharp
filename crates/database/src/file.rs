@@ -4,6 +4,8 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use crate::error::DatabaseError;
 use crate::utils::read_file;
@@ -86,6 +88,11 @@ pub struct File {
     /// The contents of the file, if available.
     pub contents: Cow<'static, [u8]>,
 
+    /// The modification time of the file, in nanoseconds since the Unix epoch, as [`nanos_since_epoch`] gives it, taken just
+    /// before the loader read `contents`. The loader sets it on each file a walk listed under its exact name, and a
+    /// file any other way builds, or whose contents change in memory, has none.
+    pub modified_ns: Option<i64>,
+
     /// The size of the file's contents in bytes.
     pub size: u32,
 
@@ -137,6 +144,7 @@ impl File {
             folder_namespace: None,
             is_project: false,
             contents,
+            modified_ns: None,
             size,
             lines,
         }
@@ -362,4 +370,13 @@ pub(crate) fn line_starts(source: &[u8]) -> Vec<u32> {
     }
 
     lines
+}
+
+/// `time` in nanoseconds since the Unix epoch, negative before it, and clamped to what an `i64` holds.
+#[must_use]
+pub fn nanos_since_epoch(time: SystemTime) -> i64 {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_nanos()).unwrap_or(i64::MAX),
+        Err(before) => i64::try_from(before.duration().as_nanos()).map_or(i64::MIN, |nanos| -nanos),
+    }
 }

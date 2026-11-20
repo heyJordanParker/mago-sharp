@@ -22,6 +22,7 @@ use crate::file::File;
 use crate::file::FileId;
 use crate::file::FileType;
 use crate::file::FolderNamespace;
+use crate::file::nanos_since_epoch;
 use crate::matcher::build_glob_set;
 use crate::utils::bytes_to_os_str;
 use crate::utils::bytes_to_path;
@@ -401,7 +402,7 @@ impl<'config> DatabaseLoader<'config> {
                 return Some(Ok(FileWithSpecificity { file, specificity }));
             }
 
-            read_listed_file(workspace, &path, file_type)
+            read_listed_file(workspace, &path, file_type, !skip_ext_check)
                 .map(|file| file.map(|file| FileWithSpecificity { file, specificity }))
         };
 
@@ -455,14 +456,24 @@ fn workspace_relative_string(path: &Path, workspace: &Path) -> String {
     }
 }
 
-/// Reads the file a walk listed at `path`, or none when [`read_listed`] finds it gone.
-fn read_listed_file(workspace: &Path, path: &Path, file_type: FileType) -> Option<Result<File, DatabaseError>> {
+/// Reads the file at `path`, or none when [`read_listed`] finds it gone. A file a walk `listed` under its exact name
+/// keeps the modification time taken just before the read.
+fn read_listed_file(
+    workspace: &Path,
+    path: &Path,
+    file_type: FileType,
+    listed: bool,
+) -> Option<Result<File, DatabaseError>> {
+    let modified = listed.then(|| std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok()).flatten();
     let bytes = match read_listed(path) {
         Ok(bytes) => bytes?,
         Err(error) => return Some(Err(error)),
     };
 
-    Some(file_from(workspace, path, file_type, bytes))
+    Some(file_from(workspace, path, file_type, bytes).map(|mut file| {
+        file.modified_ns = modified.map(nanos_since_epoch);
+        file
+    }))
 }
 
 /// The bytes of the file a listing named at `path`, or none when no file is there any more.
@@ -1238,13 +1249,30 @@ mod tests {
         assert!(!names.iter().any(|n| n.ends_with("bin/console")), "extensionless console should be skipped");
     }
 
+    /// A file a walk listed keeps the modification time taken before its read, which a compile stamps it with, and a
+    /// file the configuration names exactly, whose name may differ in case from the one on disk, keeps none.
+    #[test]
+    fn a_listed_file_keeps_its_modification_time_and_an_exactly_named_one_none() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "src/a.php", "<?php");
+        create_test_file(&temp_dir, "bin/console", "<?php");
+
+        let config = create_test_config(&temp_dir, vec!["src", "bin/console"], vec![]);
+        let db = DatabaseLoader::new(config).load().unwrap();
+        let modified = |name: &str| db.files().find(|f| name_str(&f.name).ends_with(name)).unwrap().modified_ns;
+        let on_disk = std::fs::metadata(temp_dir.path().join("src/a.php")).unwrap().modified().unwrap();
+
+        assert_eq!(modified("src/a.php"), Some(nanos_since_epoch(on_disk)));
+        assert_eq!(modified("bin/console"), None);
+    }
+
     /// A file a walk listed that is gone by the time it is read, as one deleted during the walk, is left out, while any
     /// other failure to read one is an error.
     #[test]
     fn a_listed_file_that_is_gone_when_read_is_left_out() {
         let temp_dir = TempDir::new().unwrap();
         create_test_file(&temp_dir, "src/a.php", "<?php");
-        let read = |name: &str| read_listed_file(temp_dir.path(), &temp_dir.path().join(name), FileType::Host);
+        let read = |name: &str| read_listed_file(temp_dir.path(), &temp_dir.path().join(name), FileType::Host, true);
 
         assert!(matches!(read("src/a.php"), Some(Ok(_))));
         assert!(read("src/gone.php").is_none());

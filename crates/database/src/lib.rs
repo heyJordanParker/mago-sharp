@@ -303,7 +303,8 @@ impl<'config> Database<'config> {
 
     /// Updates a file's content using its stable `FileId`.
     ///
-    /// This recalculates derived data like file size, line endings, and `FileRevision`.
+    /// This recalculates derived data like file size, line endings, and `FileRevision`, and drops the modification time
+    /// the loader read, which no longer belongs to these contents.
     /// If another `ReadDatabase` snapshot holds a reference to the file (preventing in-place
     /// mutation), a new `Arc<File>` is created with the updated contents.
     ///
@@ -320,6 +321,7 @@ impl<'config> Database<'config> {
 
         if let Some(file) = Arc::get_mut(arc) {
             file.contents = new_contents;
+            file.modified_ns = None;
             file.size = file.contents.len() as u32;
             file.lines = line_starts(file.contents.as_ref());
         } else {
@@ -689,5 +691,28 @@ mod tests {
         assert!(database.update(id, Cow::Borrowed(b"b")));
         assert!(database.get(&id).unwrap().is_standard_library);
         assert_eq!(snapshot.get(&id).unwrap().contents.as_ref(), b"a");
+    }
+
+    /// The modification time the loader read belongs to the bytes it read, so an update drops it, with a snapshot
+    /// holding the file and without one, and a compile then stamps the file from disk.
+    #[test]
+    fn an_update_drops_the_modification_time_the_loader_read() {
+        let mut database = Database::new(configuration());
+        let mut file = File::new(Cow::Borrowed(b"app/Order.sharp"), FileType::Host, None, Cow::Borrowed(b"a"));
+        file.modified_ns = Some(1);
+        let id = database.add(file);
+
+        assert!(database.update(id, Cow::Borrowed(b"b")));
+        assert_eq!(database.get(&id).unwrap().modified_ns, None);
+
+        let mut held = Database::new(configuration());
+        let mut file = File::new(Cow::Borrowed(b"app/Order.sharp"), FileType::Host, None, Cow::Borrowed(b"a"));
+        file.modified_ns = Some(1);
+        let id = held.add(file);
+        let snapshot = held.read_only();
+
+        assert!(held.update(id, Cow::Borrowed(b"b")));
+        assert_eq!(held.get(&id).unwrap().modified_ns, None);
+        assert_eq!(snapshot.get(&id).unwrap().modified_ns, Some(1));
     }
 }

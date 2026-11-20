@@ -11,12 +11,13 @@ use std::mem::offset_of;
 use std::mem::size_of;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::UNIX_EPOCH;
 
 use mago_build_id::BUILD_ID;
 use mago_codex::signature::FileSignature;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
+use mago_database::file::File;
+use mago_database::file::nanos_since_epoch;
 use xxhash_rust::xxh3::Xxh3;
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -522,18 +523,28 @@ pub fn stamp(root: &Path, path: &[u8]) -> Result<Option<Input>, DatabaseError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &full, error)),
     };
-    let mtime_ns = match modified.duration_since(UNIX_EPOCH) {
-        Ok(after) => i64::try_from(after.as_nanos()).unwrap_or(i64::MAX),
-        Err(before) => i64::try_from(before.duration().as_nanos()).map_or(i64::MIN, |nanos| -nanos),
-    };
 
-    Ok(Some(Input {
+    Ok(Some(file_stamp(path, &contents, nanos_since_epoch(modified))))
+}
+
+/// The stamp [`stamp`] gives `file` at its name, from the bytes the loader read.
+///
+/// It takes the modification time the loader took just before the read, so the compile hashes the bytes its analysis
+/// read without reading the file again. None when `file` has no modification time, as a file no walk listed.
+#[must_use]
+pub fn loaded_stamp(file: &File) -> Option<Input> {
+    file.modified_ns.map(|mtime_ns| file_stamp(&file.name, &file.contents, mtime_ns))
+}
+
+/// The stamp of the file at `path` that holds `contents` and was modified at `mtime_ns`.
+fn file_stamp(path: &[u8], contents: &[u8], mtime_ns: i64) -> Input {
+    Input {
         path: path.to_vec(),
         size: contents.len() as u64,
         mtime_ns,
-        hash: source_hash(&contents),
+        hash: source_hash(contents),
         declarations_hash: [0; 16],
-    }))
+    }
 }
 
 /// Whether the folder of the file at `full` holds a file of exactly its name, case included. A disk that ignores case,

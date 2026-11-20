@@ -11,6 +11,7 @@
 
 use crate::common;
 
+use std::borrow::Cow;
 use std::fmt::Write;
 use std::fs;
 use std::mem::align_of;
@@ -23,6 +24,8 @@ use std::slice;
 use mago_build_id::BUILD_ID;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
+use mago_database::file::File;
+use mago_database::file::FileType;
 use mago_database::process;
 use mago_sharp_bridge::SHARP_UNIT_ABI;
 use mago_sharp_bridge::Unit;
@@ -43,6 +46,7 @@ use mago_sharp_bridge::unit::header;
 use mago_sharp_bridge::unit::inputs_changed;
 use mago_sharp_bridge::unit::is_stale;
 use mago_sharp_bridge::unit::key;
+use mago_sharp_bridge::unit::loaded_stamp;
 use mago_sharp_bridge::unit::restamp;
 use mago_sharp_bridge::unit::sharp_input;
 use mago_sharp_bridge::unit::sharp_unit_header;
@@ -405,6 +409,23 @@ fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
         assert!(path.ends_with("app/Report.sharp"), "{}", path.display());
         assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory, "{}", String::from_utf8_lossy(under_a_file));
     }
+}
+
+/// A file the loader read with its modification time stamps as the disk stamps it, without a read of its own, and a
+/// file with no time, as one made in memory, has no loaded stamp, so a compile stamps it from disk.
+#[test]
+fn a_loaded_file_stamps_as_the_disk_does_and_one_with_no_time_has_no_loaded_stamp() {
+    let directory = tempfile::tempdir().unwrap();
+    write(directory.path(), "app/Report.sharp", SOURCE);
+    let on_disk = stamp(directory.path(), b"app/Report.sharp").unwrap().expect("a file is there");
+    let mut file =
+        File::new(Cow::Borrowed(b"app/Report.sharp"), FileType::Host, None, Cow::Borrowed(SOURCE.as_bytes()));
+
+    assert_eq!(loaded_stamp(&file), None);
+
+    file.modified_ns = Some(on_disk.mtime_ns);
+
+    assert_eq!(loaded_stamp(&file), Some(on_disk));
 }
 
 /// An input file the stamp can't read fails it with the file's path and "read the file". Root reads a file of mode
