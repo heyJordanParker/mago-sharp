@@ -270,6 +270,7 @@ pub fn run(main_start: Instant) -> Result<ExitCode, Error> {
         MagoCommand::Compile(cmd) => cmd.execute(configuration, arguments.colors).map(|outcome| outcome.exit_code),
         MagoCommand::Convert(cmd) => cmd.execute(configuration, arguments.colors).map(|outcome| outcome.exit_code),
         MagoCommand::Move(cmd) => cmd.execute(configuration, arguments.colors),
+        MagoCommand::Machine(cmd) => cmd.execute(configuration, arguments.colors),
         MagoCommand::Guard(cmd) => cmd.execute(configuration, arguments.colors).map(|outcome| outcome.exit_code),
         MagoCommand::InspectBaseline(cmd) => cmd.execute(configuration, arguments.colors),
         MagoCommand::GenerateCompletions(cmd) => cmd.execute(),

@@ -31,6 +31,7 @@
 //! - **`analyze`** ([`AnalyzeCommand`]): Perform static analysis
 //! - **`compile`** ([`CompileCommand`]): Compile every PHP# file into the `.sharp` folder
 //! - **`move`** ([`MoveCommand`]): Move a PHP# class, or every class of a namespace, into another namespace
+//! - **`machine`** ([`MachineCommand`]): Print a PHP# machine's graph as a Mermaid state diagram
 //! - **`format`** ([`FormatCommand`]): Format PHP code
 //! - **`guard`** ([`GuardCommand`]): Enforce architectural rules
 //! - **`inspect-baseline`** ([`InspectBaselineCommand`]): Visualize a baseline file
@@ -73,6 +74,7 @@ use crate::commands::init::InitCommand;
 use crate::commands::inspect_baseline::InspectBaselineCommand;
 use crate::commands::lint::LintCommand;
 use crate::commands::list_files::ListFilesCommand;
+use crate::commands::machine::MachineCommand;
 use crate::commands::r#move::MoveCommand;
 use crate::commands::self_update::SelfUpdateCommand;
 use crate::error::Error;
@@ -93,6 +95,7 @@ pub mod init;
 pub mod inspect_baseline;
 pub mod lint;
 pub mod list_files;
+pub mod machine;
 pub mod r#move;
 mod outcome;
 pub mod self_update;
@@ -253,6 +256,15 @@ pub enum MagoCommand {
     /// **Usage**: `mago move <NAME> <TARGET>`
     #[command(name = "move")]
     Move(MoveCommand),
+
+    /// Print a PHP# machine's graph as a Mermaid state diagram.
+    ///
+    /// Draws an arrow from the start to the case each entry point gives, one from each
+    /// case to each case a move from it gives, and one from each `final` case to the end.
+    ///
+    /// **Usage**: `mago machine <NAME>`
+    #[command(name = "machine")]
+    Machine(MachineCommand),
 
     /// Enforce architectural rules and layer dependencies.
     ///

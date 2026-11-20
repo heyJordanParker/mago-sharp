@@ -490,6 +490,35 @@ fn write(root: &Path, name: &str, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
+/// Spec section 20.2: `mago machine` prints a machine's graph as a Mermaid state diagram, each arrow named by the entry
+/// point or the move that makes it, and each `final` case leading to the end. A name no machine has fails.
+#[test]
+fn machine_prints_a_machine_s_graph_as_a_mermaid_state_diagram() {
+    let directory = tempfile::tempdir().unwrap();
+    write(directory.path(), "mago.toml", include_str!("fixtures/sharp/mago.toml"));
+    write(directory.path(), "composer.json", LIBRARY);
+    write(
+        directory.path(),
+        "src/Shop/OrderStatus.sharp",
+        "namespace Shop;\n\npublic machine OrderStatus\n{\n    case Draft\n    {\n        public OrderStatus.Paid pay(int cents) => OrderStatus.Paid(cents);\n        public OrderStatus.Cancelled cancel() => OrderStatus.Cancelled;\n    }\n    case Paid(int cents)\n    {\n        public OrderStatus.Shipped ship() => OrderStatus.Shipped;\n    }\n    final case Shipped;\n    final case Cancelled;\n\n    public static OrderStatus.Draft open() => OrderStatus.Draft;\n}\n",
+    );
+
+    let output = run(directory.path(), "machine", &["Shop.OrderStatus"]);
+    let missing = run(directory.path(), "machine", &["Shop.Order"]);
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "stateDiagram-v2\n    [*] --> Draft: open()\n    Draft --> Paid: pay(cents)\n    Draft --> Cancelled: cancel()\n    Paid --> Shipped: ship()\n    Shipped --> [*]\n    Cancelled --> [*]\n"
+    );
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("The project declares no machine named `Shop.Order`."),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+}
+
 /// The standard library's members of `string`, with a native body, spec section 29, and the `split` `Http` calls.
 const STRING_MEMBERS: &str = include_str!("../../composer/library/Sharp/Text/StringMembers.sharp");
 
