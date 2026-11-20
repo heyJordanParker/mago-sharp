@@ -23219,7 +23219,7 @@ fn a_type_parameter_without_a_bound_passes_as_any_nullable_and_never_as_any() {
 }
 
 /// An unused type parameter is named with the kind that declares it, and the help removes it from the declaration as
-/// PHP# writes it. The PHP twin keeps Mago's `@template` text.
+/// PHP# writes it. The PHP twin keeps Mago's `@template` text. A PHP# interface's type parameter is never reported.
 #[test]
 fn an_unused_type_parameter_is_named_as_sharp_declares_it() {
     let sharp = [
@@ -23244,10 +23244,70 @@ fn an_unused_type_parameter_is_named_as_sharp_declares_it() {
         each_file(worded, &sharp, &[]).concat(),
         [
             "3:14 unused-template-parameter Type parameter `TItem` is never used in class `Page`. | Type parameter `TItem` is defined on this class but never referenced | Remove `TItem` from `Page<…>`.",
-            "3:18 unused-template-parameter Type parameter `TItem` is never used in interface `Feed`. | Type parameter `TItem` is defined on this interface but never referenced | Remove `TItem` from `Feed<…>`.",
             "5:24 unused-template-parameter Type parameter `TItem` is never used in method `run`. | Type parameter `TItem` is defined on this method but never referenced | Remove `TItem` from `run<…>`.",
         ]
     );
+}
+
+/// Spec section 11: a type argument is real while the code runs, so a class's type parameter that only its members'
+/// code reads, through `typeof`, `is`, `as`, a type argument or a pattern, is used. One no member names is still
+/// reported, and so is one only a method's own type parameter of the same name hides.
+#[test]
+fn a_type_parameter_read_through_typeof_is_used() {
+    let sharp = [
+        (
+            "src/Demo/RecordReference.sharp",
+            "namespace Demo;\n\npublic class RecordReference<TRecord>\n{\n    public Class<Any?> document() => typeof(TRecord);\n}\n",
+        ),
+        (
+            "src/Demo/Check.sharp",
+            "namespace Demo;\n\npublic class Check<TValue>\n{\n    public bool holds(Any? value) => value is TValue;\n}\n",
+        ),
+        (
+            "src/Demo/Cast.sharp",
+            "namespace Demo;\n\npublic class Cast<TValue>\n{\n    public Any? cast(Any? value) => value as TValue;\n}\n",
+        ),
+        (
+            "src/Demo/Bucket.sharp",
+            "namespace Demo;\n\npublic class Bucket<TItem>\n{\n    public int size()\n    {\n        List<TItem> items = [];\n        return items.count();\n    }\n}\n",
+        ),
+        (
+            "src/Demo/Matcher.sharp",
+            "namespace Demo;\n\npublic class Matcher<TValue>\n{\n    public bool held(Any? value)\n    {\n        if (value is TValue held)\n        {\n            return held != null;\n        }\n        return false;\n    }\n}\n",
+        ),
+        (
+            "src/Demo/Tag.sharp",
+            "namespace Demo;\n\npublic class Tag<TItem>\n{\n    public string name() => \"tag\";\n}\n",
+        ),
+        (
+            "src/Demo/Shadow.sharp",
+            "namespace Demo;\n\npublic class Shadow<T>\n{\n    public static Class<Any?> named<T>() => typeof(T);\n}\n",
+        ),
+    ];
+
+    assert_eq!(
+        each_file(explained, &sharp, &[]).concat(),
+        [
+            "3:14 unused-template-parameter Type parameter `TItem` is never used in class `Tag`. Remove `TItem` from `Tag<…>`.",
+            "3:14 unused-template-parameter Type parameter `T` is never used in class `Shadow`. Remove `T` from `Shadow<…>`.",
+        ]
+    );
+}
+
+/// Each implementer of an interface gives its type parameter a type argument, which reflection and `is Keyed<int>`
+/// read, so an interface's type parameter is used though no member names it.
+#[test]
+fn an_interface_type_parameter_is_used_by_its_implementers() {
+    let sharp = [
+        ("src/Demo/Keyed.sharp", "namespace Demo;\n\npublic interface Keyed<T>\n{\n}\n"),
+        ("src/Demo/Account.sharp", "namespace Demo;\n\npublic class Account : Keyed<int>\n{\n}\n"),
+        (
+            "src/Demo/Report.sharp",
+            "namespace Demo;\n\npublic class Report\n{\n    public static Class<Any?> key() => Class.of(new Account()).interfaces()[0].typeArguments()[0];\n}\n",
+        ),
+    ];
+
+    assert_eq!(each_file(explained, &sharp, &REFLECTION).concat(), Vec::<String>::new());
 }
 
 /// An override returns what the member it overrides returns, as C# requires: `int` is no `T` and no `TItem`. A method

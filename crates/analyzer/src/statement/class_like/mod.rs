@@ -52,6 +52,7 @@ use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::visibility::Visibility;
+use mago_names::TypeParametersNamed;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
 use mago_names::display_sharp_member;
@@ -81,6 +82,7 @@ use mago_syntax::cst::Property;
 use mago_syntax::cst::Trait;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::token::is_sharp_keyword;
+use mago_syntax::walker::Walker;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
@@ -506,9 +508,15 @@ fn type_contains_template_param(type_union: &TUnion, param_name: Word, defining_
 /// - A method return type
 /// - An `@extends`, `@implements`, or `@use` annotation
 /// - A bound the checker refused, as `TOther` in `<TOther, THolder : Order & TOther>`
+/// - A PHP# member's code, as `typeof(TRecord)` or `value is TValue` names it, since a type argument is real while the
+///   code runs
+///
+/// A PHP# interface's type parameter is always used, since each implementer gives it a type argument that reflection
+/// and `is` read.
 fn check_unused_template_parameters<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
+    members: &[ClassLikeMember<'_>],
 ) where
     A: Arena,
 {
@@ -516,8 +524,25 @@ fn check_unused_template_parameters<'ctx, A>(
         return;
     }
 
-    if class_like_metadata.template_types.is_empty() {
+    if class_like_metadata.template_types.is_empty()
+        || (context.dialect.is_sharp() && class_like_metadata.kind.is_interface())
+    {
         return;
+    }
+
+    let mut named_in_members = Vec::new();
+    if context.dialect.is_sharp() {
+        let walker = TypeParametersNamed(context.resolved_names);
+        for member in members {
+            let mut named = Vec::new();
+            walker.walk_class_like_member(member, &mut named);
+            if let ClassLikeMember::Method(method) = member
+                && let Some(own) = method.type_parameters
+            {
+                named.retain(|name| own.parameters.iter().all(|parameter| parameter.name.value != *name));
+            }
+            named_in_members.extend(named);
+        }
     }
 
     let class_name = class_like_metadata.name;
@@ -527,7 +552,10 @@ fn check_unused_template_parameters<'ctx, A>(
     let sharp_class = context.dialect.is_sharp().then(|| short_name(class_original_name));
 
     'templates: for (template_name, template) in &class_like_metadata.template_types {
-        if template_name.as_bytes().starts_with(b"_") || template.named_by_refused_bound {
+        if template_name.as_bytes().starts_with(b"_")
+            || template.named_by_refused_bound
+            || named_in_members.contains(&template_name.as_bytes())
+        {
             continue;
         }
 
@@ -1621,7 +1649,7 @@ where
     }
 
     if has_complete_hierarchy {
-        check_unused_template_parameters(context, class_like_metadata);
+        check_unused_template_parameters(context, class_like_metadata, members);
     }
     report_undefined_bound_types(context, &class_like_metadata.template_types);
     check_class_like_properties(context, class_like_metadata);
