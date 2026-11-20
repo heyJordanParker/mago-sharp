@@ -382,12 +382,16 @@ impl Translator<'_, '_> {
         self.constructor(full, &lean, &short, (name.span, parent), constructor, &fields, &types);
         self.members(full, &lean, &short, members.as_slice());
         if r#struct {
-            self.value_equality(full, &lean, &short, name.span, members, &fields);
+            self.value_equality(full, &lean, &short, name.span, members, |body| {
+                fields_equality(body, full, name.span, &fields)
+            });
         }
     }
 
-    /// The `==` a struct that declares none gets, spec section 19, as its `op_Equality`: each field compared with that
-    /// field's own `==`. A struct that declares `operator ==` runs its own, as [`Translator::operator`] gives it.
+    /// The `==` a struct, or an enum whose cases run as classes, gets when it declares none, spec section 19, as its
+    /// `op_Equality` of `a` and `b`, the terms `equal` gives joined by `&&`. A struct compares each field with that
+    /// field's own `==`, as [`fields_equality`] gives it, and an enum compares the case and its fields, as Lean's `==`
+    /// on its inductive type does. One that declares `operator ==` runs its own, as [`Translator::operator`] gives it.
     fn value_equality(
         &mut self,
         full: &[u8],
@@ -395,7 +399,7 @@ impl Translator<'_, '_> {
         short: &str,
         span: Span,
         members: &Sequence<'_, ClassLikeMember<'_>>,
-        fields: &[Field],
+        equal: impl FnOnce(&mut Body<'_, '_>) -> Vec<String>,
     ) {
         let Some(name) = php_operator_name(&BinaryOperator::Equal(span), 2) else {
             unreachable!("`==` runs as a static method of its class");
@@ -409,21 +413,7 @@ impl Translator<'_, '_> {
 
         let mut body = Body::new(self.checked, self.reach, full, format!("{short}.operator =="));
         let r#type = body.class_type(span, full);
-        let mut equal = Vec::new();
-        for field in fields {
-            let Some(hint) = field.hint else {
-                equal.push(body.unmodeled(span, "a declaration without a type".to_owned(), issues::MISSING_TYPE));
-                continue;
-            };
-            let field_type = get_union_from_hint(
-                hint,
-                Some(word(full)),
-                self.checked.names(),
-                &TypeResolutionContext::new(),
-                Dialect::Sharp,
-            );
-            equal.push(body.fields_equal(span, full, field.name, &field_type));
-        }
+        let equal = equal(&mut body);
         let (mut lines, uses, unmodeled) = body.finish();
         lines.push(format!("return {}", if equal.is_empty() { "true".to_owned() } else { equal.join(" && ") }));
 
@@ -647,6 +637,11 @@ impl Translator<'_, '_> {
         }
 
         self.members(full, &lean, &short, r#enum.members.as_slice());
+        if r#enum.runs_as_classes() {
+            self.value_equality(full, &lean, &short, r#enum.name.span, &r#enum.members, |_| {
+                vec!["(a == b)".to_owned()]
+            });
+        }
         // Spec section 20.2: the class of a machine's case holds the members of its block, each a definition on the
         // machine's inductive type, as `Shop.OrderStatus.Draft.pay`.
         for member in &r#enum.members {
@@ -1081,6 +1076,28 @@ enum FieldValue<'field, 'arena> {
     Parameter,
     Initial(&'field mago_syntax::cst::Expression<'arena>),
     Absent,
+}
+
+/// Whether each of the struct `full`'s `fields` holds equal values in `a` and `b`, by that field's own `==`, spec
+/// section 19, each a term of `body`, whose refusals stand at `span`.
+fn fields_equality(body: &mut Body<'_, '_>, full: &[u8], span: Span, fields: &[Field]) -> Vec<String> {
+    let mut equal = Vec::new();
+    for field in fields {
+        let Some(hint) = field.hint else {
+            equal.push(body.unmodeled(span, "a declaration without a type".to_owned(), issues::MISSING_TYPE));
+            continue;
+        };
+        let field_type = get_union_from_hint(
+            hint,
+            Some(word(full)),
+            body.checked.names(),
+            &TypeResolutionContext::new(),
+            Dialect::Sharp,
+        );
+        equal.push(body.fields_equal(span, full, field.name, &field_type));
+    }
+
+    equal
 }
 
 /// Whether `property` holds a value: it is not static and has no accessor body.

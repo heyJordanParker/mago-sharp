@@ -1486,10 +1486,13 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// `value`, a value of `class`'s Lean type, as a value of the PHP# class `ancestor` above it, which its structure
     /// holds: `value.toParent`, once for each class up to `ancestor`. A value of a sealed interface's implementer reads
-    /// its parent's value through the interface's accessor, spec section 20.1. A plain PHP class between them, whose
-    /// state the structure does not hold, is refused at `span`.
+    /// its parent's value through the interface's accessor, spec section 20.1. A value of a case's class is already
+    /// one of its enum's, spec section 20. A plain PHP class between them, whose state the structure does not hold, is
+    /// refused at `span`.
     fn upcast(&mut self, span: Span, value: String, class: &[u8], ancestor: &[u8]) -> String {
-        if self.reach.same_class(class, ancestor) {
+        if self.reach.same_class(class, ancestor)
+            || self.case_enum(class).is_some_and(|r#enum| self.reach.same_class(r#enum, ancestor))
+        {
             return value;
         }
         let mut upcast = value;
@@ -1858,17 +1861,22 @@ impl<'body, 'program> Body<'body, 'program> {
     /// The Lean type of the class `class` a hint names: the sealed interface it implements, spec section 20.1, as a
     /// data case's is its enum, and else its own.
     pub(crate) fn class_type(&mut self, span: Span, class: &[u8]) -> String {
-        // Spec section 20: the class a case that carries data runs as is a constructor of its enum, as a machine's
-        // `OrderStatus.Paid` is of `OrderStatus`.
-        if let Some(separator) = class.iter().rposition(|&byte| byte == b'\\')
-            && self.checked.types().enum_case_class(word(&class[..separator]), word(&class[separator + 1..])).is_some()
-        {
-            return self.class_type(span, &class[..separator]);
+        if let Some(r#enum) = self.case_enum(class) {
+            return self.class_type(span, r#enum);
         }
         match self.sealed(span, class) {
             Some((interface, _)) => interface,
             None => self.own_type(span, class),
         }
+    }
+
+    /// The enum whose case the class `class` runs as, spec section 20: a constructor of the enum's inductive type, as a
+    /// machine's `OrderStatus.Paid` is of `OrderStatus`.
+    fn case_enum<'class>(&self, class: &'class [u8]) -> Option<&'class [u8]> {
+        let separator = class.iter().rposition(|&byte| byte == b'\\')?;
+        let (r#enum, case) = (&class[..separator], &class[separator + 1..]);
+
+        self.checked.types().enum_case_class(word(r#enum), word(case)).map(|_| r#enum)
     }
 
     /// The Lean type the class-like `class` declares itself, which the constructor of a sealed interface it implements
@@ -1964,6 +1972,8 @@ impl<'body, 'program> Body<'body, 'program> {
         "default".to_owned()
     }
 
+    /// What a value of `r#type` is in Lean. A machine's value, spec section 20.2, and a value of the class an enum's case
+    /// runs as are values of the enum's inductive type, the closed set of its cases, as any enum's are.
     pub(super) fn kind(&self, r#type: &TUnion) -> Kind {
         let mut kinds = r#type.types.iter().filter(|atomic| !atomic.is_null()).map(|atomic| match atomic {
             TAtomic::Scalar(TScalar::Integer(_)) => Kind::Int,
@@ -1972,7 +1982,11 @@ impl<'body, 'program> Body<'body, 'program> {
             TAtomic::Scalar(TScalar::Float(_)) => Kind::Float,
             TAtomic::Object(TObject::Enum(_)) => Kind::Enum,
             TAtomic::Object(TObject::Named(named)) => {
-                if matches!(self.checked.types().class_declaration(named.name).kind, DeclarationKind::Enum { .. }) {
+                let types = self.checked.types();
+                if matches!(types.class_declaration(named.name).kind, DeclarationKind::Enum { .. })
+                    || types.machine(named.name).is_some()
+                    || self.case_enum(named.name.as_bytes()).is_some()
+                {
                     Kind::Enum
                 } else {
                     Kind::Object

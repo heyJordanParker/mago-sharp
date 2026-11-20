@@ -4347,6 +4347,56 @@ fn a_law_reaching_a_state_of_two_sealed_interfaces_is_refused() {
     }
 }
 
+/// Spec sections 20.2 and 28: a machine's cases are every value it has, so a law reasons about `is` on a machine
+/// value, `this` included, and about `==` between two of its values, which compares the case and its fields. A law
+/// that is false in a case is not proven.
+#[test]
+fn a_law_reasons_about_a_machine_value_s_case_tests_and_equality() {
+    let lamp = |laws: &str| {
+        format!(
+            "namespace App;\n\npublic machine Lamp\n{{\n    case Off {{ public Lamp.On turnOn() => Lamp.On; }}\n    final case On;\n    public static Lamp.Off off() => Lamp.Off;\n    public bool lit() => this is Lamp.On;\n    {laws}\n}}\n"
+        )
+    };
+    let walk = |laws: &str| {
+        format!(
+            "namespace App;\n\npublic machine Walk\n{{\n    case A {{ public Walk.B go() => Walk.B; }}\n    case B {{ public Walk.A back() => Walk.A; }}\n    public static Walk.A enter() => Walk.A;\n    {laws}\n}}\n"
+        )
+    };
+    let toggle = "namespace App;\n\npublic machine Lamp\n{\n    case Off { public Lamp.On turnOn() => Lamp.On; }\n    case On { public Lamp.Off turnOff() => Lamp.Off; }\n    public static Lamp.Off enter() => Lamp.Off;\n    law turningOnLightsTheLamp() => Lamp.enter().turnOn() == Lamp.On;\n}\n";
+    for (name, source) in [
+        (
+            "app/Lamp.sharp",
+            lamp(
+                "law turningOnLights() => Lamp.off().turnOn().lit();\n    law turningOnLightsTheLamp() => Lamp.off().turnOn() == Lamp.On;",
+            ),
+        ),
+        ("app/Lamp.sharp", toggle.to_owned()),
+        ("app/Walk.sharp", walk("law roundTrip() => Walk.enter().go().back() == Walk.enter();")),
+    ] {
+        let directory = lawful_project(&[(name, &source)]);
+
+        let output = compile(directory.path());
+
+        assert!(output.status.success(), "{}", printed(&output));
+        assert!(compiled(directory.path(), name).exists());
+    }
+    for (name, source, law) in [
+        ("app/Lamp.sharp", lamp("law dark() => Lamp.off().turnOn().lit() == false;"), "dark"),
+        ("app/Walk.sharp", walk("law wrong() => Walk.enter().go() == Walk.enter();"), "wrong"),
+    ] {
+        let directory = lawful_project(&[(name, &source)]);
+
+        let output = compile(directory.path());
+
+        assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+        assert!(
+            printed(&output).contains(&format!("error[law-unproven]: law {law} is not proven\n")),
+            "{}",
+            printed(&output)
+        );
+    }
+}
+
 /// Spec section 28: `<` on two values of a class runs the class's own `<=>`, so a law that compares two `Instant`s
 /// proves through `Instant`'s, which compares their seconds, then their nanoseconds. A false order is not proven.
 #[test]
