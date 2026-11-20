@@ -317,6 +317,113 @@ zval *engine_array_insert(zval *array, const char *key, size_t length)
 	return zend_symtable_str_update(Z_ARRVAL_P(array), key, length, &slot);
 }
 
+/* Writes an object of the loaded class `name` into `value`, with no constructor run, and returns whether one is loaded
+ * that can be built. It never autoloads. */
+bool engine_value_object(zval *value, const char *name, size_t length)
+{
+	zend_class_entry *class = zend_hash_str_find_ptr_lc(EG(class_table), name, length);
+	if (class == NULL
+		|| (class->ce_flags
+			& (ZEND_ACC_INTERFACE | ZEND_ACC_TRAIT | ZEND_ACC_ENUM | ZEND_ACC_IMPLICIT_ABSTRACT_CLASS
+				| ZEND_ACC_EXPLICIT_ABSTRACT_CLASS))
+			!= 0) {
+		return false;
+	}
+
+	if (object_init_ex(value, class) != SUCCESS) {
+		zend_clear_exception();
+		return false;
+	}
+
+	return true;
+}
+
+/* Whether a property of `type` takes `value` as it is, with no conversion: a value of a type it names, or an object of a
+ * class it names or of a class below one. It throws nothing, since no PHP runs while Mago writes a call's values. */
+static bool engine_type_takes(const zend_type *type, const zval *value)
+{
+	if (ZEND_TYPE_CONTAINS_CODE(*type, Z_TYPE_P(value))) {
+		return true;
+	}
+
+	if (Z_TYPE_P(value) != IS_OBJECT || !ZEND_TYPE_IS_COMPLEX(*type)) {
+		return false;
+	}
+
+	const zend_type *single;
+	ZEND_TYPE_FOREACH(*type, single) {
+		if (ZEND_TYPE_HAS_NAME(*single)) {
+			zend_class_entry *named = zend_lookup_class_ex(ZEND_TYPE_NAME(*single), NULL, ZEND_FETCH_CLASS_NO_AUTOLOAD);
+			if (named != NULL && instanceof_function(Z_OBJCE_P(value), named)) {
+				return true;
+			}
+		}
+	} ZEND_TYPE_FOREACH_END();
+
+	return false;
+}
+
+/* Sets the property `name` that the class of `object` declares to `property`, which it takes, once, and returns
+ * whether the class declares it unset, as an instance property whose type takes the value with no conversion. */
+bool engine_object_set(zval *object, const char *name, size_t length, zval *property)
+{
+	zend_object *built = Z_OBJ_P(object);
+	zend_property_info *info = zend_hash_str_find_ptr(&built->ce->properties_info, name, length);
+	if (info == NULL || (info->flags & ZEND_ACC_STATIC) != 0) {
+		zval_ptr_dtor(property);
+		return false;
+	}
+
+	zval *slot = OBJ_PROP(built, info->offset);
+	if (Z_TYPE_P(slot) != IS_UNDEF || (ZEND_TYPE_IS_SET(info->type) && !engine_type_takes(&info->type, property))) {
+		zval_ptr_dtor(property);
+		return false;
+	}
+
+	ZVAL_COPY_VALUE(slot, property);
+	Z_PROP_FLAG_P(slot) &= ~(IS_PROP_UNINIT | IS_PROP_REINITABLE);
+	return true;
+}
+
+/* The name of an instance property the class of `object` declares that is still unset, or NULL when each one is set. */
+const char *engine_object_unset(const zval *object, size_t *length)
+{
+	zend_object *built = Z_OBJ_P(object);
+	zend_property_info *info;
+	ZEND_HASH_MAP_FOREACH_PTR(&built->ce->properties_info, info) {
+		if ((info->flags & ZEND_ACC_STATIC) == 0 && Z_TYPE_P(OBJ_PROP(built, info->offset)) == IS_UNDEF) {
+			const char *class = NULL;
+			const char *unmangled = NULL;
+			zend_unmangle_property_name_ex(info->name, &class, &unmangled, length);
+			return unmangled;
+		}
+	} ZEND_HASH_FOREACH_END();
+
+	return NULL;
+}
+
+/* Writes the case `name` of the loaded enum `enumeration` into `value`, and returns whether the enum has that case. */
+bool engine_value_case(zval *value, const char *enumeration, size_t length, const char *name, size_t name_length)
+{
+	zend_class_entry *class = zend_hash_str_find_ptr_lc(EG(class_table), enumeration, length);
+	if (class == NULL || (class->ce_flags & ZEND_ACC_ENUM) == 0) {
+		return false;
+	}
+
+	zend_class_constant *constant = zend_hash_str_find_ptr(CE_CONSTANTS_TABLE(class), name, name_length);
+	if (constant == NULL || (ZEND_CLASS_CONST_FLAGS(constant) & ZEND_CLASS_CONST_IS_CASE) == 0) {
+		return false;
+	}
+
+	if (Z_TYPE(constant->value) == IS_CONSTANT_AST && zval_update_constant_ex(&constant->value, constant->ce) != SUCCESS) {
+		zend_clear_exception();
+		return false;
+	}
+
+	ZVAL_OBJ_COPY(value, Z_OBJ(constant->value));
+	return true;
+}
+
 void engine_value_release(zval *value)
 {
 	zval_ptr_dtor(value);

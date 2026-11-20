@@ -32,7 +32,7 @@ final class ValueReader
     private readonly int $count;
 
     /**
-     * @param list<null|bool|int|float|string|list<mixed>> $values
+     * @param list<null|bool|int|float|string|object|list<mixed>> $values
      * @param non-negative-int $position
      */
     public function __construct(
@@ -194,6 +194,25 @@ final class ValueReader
         }
 
         /** @var list<null|bool|int|float|string|list<mixed>> $value mago's engine sends no other values. */
+        return $value;
+    }
+
+    /**
+     * Reads a field that holds an object mago's engine built of the class `$class`.
+     *
+     * @template T of object
+     *
+     * @param class-string<T> $class
+     *
+     * @return T
+     */
+    public function readObject(string $class): object
+    {
+        $value = $this->values[$this->position++] ?? null;
+        if (!$value instanceof $class) {
+            throw self::unexpected("an object of {$class}", $value);
+        }
+
         return $value;
     }
 

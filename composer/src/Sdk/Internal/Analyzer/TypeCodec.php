@@ -76,16 +76,9 @@ final class TypeCodec
     /** A method identifier's rule: its class keys its methods by their declared names. */
     private const EXACT_NAMES = 2;
 
-    public static function read(ValueReader $reader, ?string $description = null): Type
-    {
-        [$handle, $flags, $atomicTypes] = self::readUnion($reader, true);
-
-        return Type::reference($handle, $description ?? self::describeAtomics($atomicTypes), $atomicTypes, $flags);
-    }
-
     public static function readComplete(ValueReader $reader): Type
     {
-        [, $flags, $atomicTypes] = self::readUnion($reader, false);
+        [$flags, $atomicTypes] = self::readUnion($reader);
         $first = $atomicTypes[0];
         $type = Type::fromAtomics($first, ...array_slice($atomicTypes, 1));
 
@@ -759,10 +752,10 @@ final class TypeCodec
         }
     }
 
-    /** @return array{int<0, 4294967295>, TypeFlags, non-empty-list<AtomicType>} */
-    private static function readUnion(ValueReader $reader, bool $references): array
+    /** @return array{TypeFlags, non-empty-list<AtomicType>} */
+    private static function readUnion(ValueReader $reader): array
     {
-        $handle = $reader->readU32();
+        $reader->readU32();
         $bits = $reader->readU16();
         $flags = new TypeFlags(
             hadTemplate: ($bits & 1) !== 0,
@@ -785,36 +778,24 @@ final class TypeCodec
 
         $atomicTypes = [];
         for ($index = 0; $index < $count; ++$index) {
-            $atomicTypes[] = self::readAtomic($reader, $references);
+            $atomicTypes[] = self::readAtomic($reader);
         }
 
-        return [$handle, $flags, $atomicTypes];
+        return [$flags, $atomicTypes];
     }
 
-    private static function readNestedType(ValueReader $reader, bool $references): Type
-    {
-        [$handle, $flags, $atomicTypes] = self::readUnion($reader, $references);
-
-        if (!$references) {
-            $first = $atomicTypes[0];
-            return Type::fromAtomics($first, ...array_slice($atomicTypes, 1))->withFlags($flags);
-        }
-
-        return Type::reference($handle, self::describeAtomics($atomicTypes), $atomicTypes, $flags);
-    }
-
-    private static function readAtomic(ValueReader $reader, bool $references): AtomicType
+    private static function readAtomic(ValueReader $reader): AtomicType
     {
         return match ($tag = $reader->readU8()) {
-            1 => self::readScalar($reader, $references),
-            2 => self::readCallable($reader, $references),
+            1 => self::readScalar($reader),
+            2 => self::readCallable($reader),
             3 => self::readMixed($reader),
-            4 => self::readObject($reader, $references),
-            5 => self::readArray($reader, $references),
+            4 => self::readObject($reader),
+            5 => self::readArray($reader),
             6 => new IterableType(
-                self::readNestedType($reader, $references),
-                self::readNestedType($reader, $references),
-                self::readOptionalAtomics($reader, $references),
+                self::readComplete($reader),
+                self::readComplete($reader),
+                self::readOptionalAtomics($reader),
             ),
             7 => new ResourceType(match ($state = $reader->readU8()) {
                 0 => null,
@@ -822,22 +803,22 @@ final class TypeCodec
                 2 => true,
                 default => throw new ProtocolException("Unknown resource state {$state}."),
             }),
-            8 => self::readReference($reader, $references),
+            8 => self::readReference($reader),
             9 => new GenericParameterType(
                 $reader->readBytes(),
-                self::readNestedType($reader, $references),
+                self::readComplete($reader),
                 self::readGenericParent($reader),
-                self::readOptionalAtomics($reader, $references),
+                self::readOptionalAtomics($reader),
             ),
             10 => new VariableType($reader->readBytes()),
             11 => new ConditionalType(
-                self::readNestedType($reader, $references),
-                self::readNestedType($reader, $references),
-                self::readNestedType($reader, $references),
-                self::readNestedType($reader, $references),
+                self::readComplete($reader),
+                self::readComplete($reader),
+                self::readComplete($reader),
+                self::readComplete($reader),
                 $reader->readBoolean(),
             ),
-            12 => self::readDerived($reader, $references),
+            12 => self::readDerived($reader),
             13 => new AliasType($reader->readBytes(), $reader->readBytes()),
             14 => new SimpleAtomicType(SimpleAtomicTypeKind::Never),
             15 => new SimpleAtomicType(SimpleAtomicTypeKind::Null),
@@ -847,7 +828,7 @@ final class TypeCodec
         };
     }
 
-    private static function readScalar(ValueReader $reader, bool $references): ScalarType
+    private static function readScalar(ValueReader $reader): ScalarType
     {
         return match ($kind = $reader->readU8()) {
             1 => new ScalarType(ScalarTypeKind::Scalar),
@@ -862,7 +843,7 @@ final class TypeCodec
             5 => new ScalarType(ScalarTypeKind::Integer, self::readInteger($reader)),
             6 => new ScalarType(ScalarTypeKind::Float, self::readFloat($reader)),
             7 => new ScalarType(ScalarTypeKind::String, self::readString($reader)),
-            8 => new ScalarType(ScalarTypeKind::ClassLikeString, self::readClassLikeString($reader, $references)),
+            8 => new ScalarType(ScalarTypeKind::ClassLikeString, self::readClassLikeString($reader)),
             default => throw new ProtocolException("Unknown analyzer scalar type kind {$kind}."),
         };
     }
@@ -917,7 +898,7 @@ final class TypeCodec
         );
     }
 
-    private static function readClassLikeString(ValueReader $reader, bool $references): ClassLikeStringType
+    private static function readClassLikeString(ValueReader $reader): ClassLikeStringType
     {
         return match ($variant = $reader->readU8()) {
             1 => new ClassLikeStringType(ClassLikeStringVariant::Any, self::readClassLikeStringKind($reader)),
@@ -926,19 +907,19 @@ final class TypeCodec
                 self::readClassLikeStringKind($reader),
                 parameterName: $reader->readBytes(),
                 definingEntity: self::readGenericParent($reader),
-                constraint: self::readAtomic($reader, $references),
+                constraint: self::readAtomic($reader),
             ),
             3 => new ClassLikeStringType(ClassLikeStringVariant::Literal, literal: $reader->readBytes()),
             4 => new ClassLikeStringType(
                 ClassLikeStringVariant::OfType,
                 self::readClassLikeStringKind($reader),
-                constraint: self::readAtomic($reader, $references),
+                constraint: self::readAtomic($reader),
             ),
             default => throw new ProtocolException("Unknown class-like string variant {$variant}."),
         };
     }
 
-    private static function readCallable(ValueReader $reader, bool $references): CallableType
+    private static function readCallable(ValueReader $reader): CallableType
     {
         $kind = $reader->readU8();
         if ($kind === 2) {
@@ -954,18 +935,18 @@ final class TypeCodec
         $parameters = [];
         for ($index = 0; $index < $parameterCount; ++$index) {
             $name = $reader->readBoolean() ? $reader->readBytes() : null;
-            $type = $reader->readBoolean() ? self::readNestedType($reader, $references) : null;
+            $type = $reader->readBoolean() ? self::readComplete($reader) : null;
             $parameters[] = new CallableParameter(
                 $name,
                 $type,
-                $reader->readBoolean() ? self::readNestedType($reader, $references) : null,
+                $reader->readBoolean() ? self::readComplete($reader) : null,
                 $reader->readBoolean(),
                 $reader->readBoolean(),
                 $reader->readBoolean(),
             );
         }
 
-        $returnType = $reader->readBoolean() ? self::readNestedType($reader, $references) : null;
+        $returnType = $reader->readBoolean() ? self::readComplete($reader) : null;
         $source = $reader->readBoolean() ? self::readFunctionLikeIdentifier($reader) : null;
         $constraintCount = $reader->readCount(self::MAXIMUM_MEMBERS);
         $constraints = [];
@@ -976,11 +957,7 @@ final class TypeCodec
                 $names[] = $reader->readBytes();
             }
 
-            $constraints[] = new CallableConstraint(
-                $names,
-                self::readNestedType($reader, $references),
-                self::readNestedType($reader, $references),
-            );
+            $constraints[] = new CallableConstraint($names, self::readComplete($reader), self::readComplete($reader));
         }
 
         return new CallableType(
@@ -1003,28 +980,28 @@ final class TypeCodec
         });
     }
 
-    private static function readObject(ValueReader $reader, bool $references): AtomicType
+    private static function readObject(ValueReader $reader): AtomicType
     {
         return match ($kind = $reader->readU8()) {
             1 => new AnyObjectType(),
             2 => new NamedObjectType(
                 $reader->readBytes(),
-                self::readOptionalTypes($reader, $references),
+                self::readOptionalTypes($reader),
                 self::readOptionalVariances($reader),
                 $reader->readBoolean(),
                 $reader->readBoolean(),
-                self::readOptionalAtomics($reader, $references),
+                self::readOptionalAtomics($reader),
                 $reader->readBoolean(),
             ),
             3 => new EnumType($reader->readBytes(), $reader->readOptionalString()),
-            4 => self::readObjectShape($reader, $references),
-            5 => new ObjectWithMethodType($reader->readBytes(), self::readOptionalAtomics($reader, $references)),
-            6 => new ObjectWithPropertyType($reader->readBytes(), self::readOptionalAtomics($reader, $references)),
+            4 => self::readObjectShape($reader),
+            5 => new ObjectWithMethodType($reader->readBytes(), self::readOptionalAtomics($reader)),
+            6 => new ObjectWithPropertyType($reader->readBytes(), self::readOptionalAtomics($reader)),
             default => throw new ProtocolException("Unknown object type kind {$kind}."),
         };
     }
 
-    private static function readObjectShape(ValueReader $reader, bool $references): ObjectShapeType
+    private static function readObjectShape(ValueReader $reader): ObjectShapeType
     {
         $sealed = $reader->readBoolean();
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
@@ -1033,35 +1010,31 @@ final class TypeCodec
             $properties[] = new ObjectProperty(
                 $reader->readBytes(),
                 $reader->readBoolean(),
-                self::readNestedType($reader, $references),
+                self::readComplete($reader),
             );
         }
 
         return new ObjectShapeType($properties, $sealed);
     }
 
-    private static function readArray(ValueReader $reader, bool $references): AtomicType
+    private static function readArray(ValueReader $reader): AtomicType
     {
         return match ($kind = $reader->readU8()) {
-            1 => self::readList($reader, $references),
-            2 => self::readKeyedArray($reader, $references),
+            1 => self::readList($reader),
+            2 => self::readKeyedArray($reader),
             default => throw new ProtocolException("Unknown array type kind {$kind}."),
         };
     }
 
-    private static function readList(ValueReader $reader, bool $references): ListType
+    private static function readList(ValueReader $reader): ListType
     {
-        $elementType = self::readNestedType($reader, $references);
+        $elementType = self::readComplete($reader);
         $elements = null;
         if ($reader->readBoolean()) {
             $count = $reader->readCount(self::MAXIMUM_MEMBERS);
             $elements = [];
             for ($index = 0; $index < $count; ++$index) {
-                $elements[] = new ListElement(
-                    $reader->readU64(),
-                    $reader->readBoolean(),
-                    self::readNestedType($reader, $references),
-                );
+                $elements[] = new ListElement($reader->readU64(), $reader->readBoolean(), self::readComplete($reader));
             }
         }
 
@@ -1070,7 +1043,7 @@ final class TypeCodec
         return new ListType($elementType, $elements, $knownCount, $reader->readBoolean());
     }
 
-    private static function readKeyedArray(ValueReader $reader, bool $references): KeyedArrayType
+    private static function readKeyedArray(ValueReader $reader): KeyedArrayType
     {
         $items = null;
         if ($reader->readBoolean()) {
@@ -1080,7 +1053,7 @@ final class TypeCodec
                 $items[] = new ArrayItem(
                     self::readArrayKey($reader),
                     $reader->readBoolean(),
-                    self::readNestedType($reader, $references),
+                    self::readComplete($reader),
                 );
             }
         }
@@ -1088,8 +1061,8 @@ final class TypeCodec
         $keyType = null;
         $valueType = null;
         if ($reader->readBoolean()) {
-            $keyType = self::readNestedType($reader, $references);
-            $valueType = self::readNestedType($reader, $references);
+            $keyType = self::readComplete($reader);
+            $valueType = self::readComplete($reader);
         }
 
         return new KeyedArrayType($items, $keyType, $valueType, $reader->readBoolean());
@@ -1105,15 +1078,15 @@ final class TypeCodec
         };
     }
 
-    private static function readReference(ValueReader $reader, bool $references): ReferenceType
+    private static function readReference(ValueReader $reader): ReferenceType
     {
         return match ($kind = $reader->readU8()) {
             1 => new ReferenceType(
                 ReferenceTypeKind::Symbol,
                 $reader->readBytes(),
-                self::readOptionalTypes($reader, $references),
+                self::readOptionalTypes($reader),
                 self::readOptionalVariances($reader),
-                self::readOptionalAtomics($reader, $references),
+                self::readOptionalAtomics($reader),
                 null,
                 null,
             ),
@@ -1149,34 +1122,34 @@ final class TypeCodec
         };
     }
 
-    private static function readDerived(ValueReader $reader, bool $references): DerivedType
+    private static function readDerived(ValueReader $reader): DerivedType
     {
         return match ($kind = $reader->readU8()) {
-            1 => new DerivedType(DerivedTypeKind::KeyOf, [self::readNestedType($reader, $references)]),
-            2 => new DerivedType(DerivedTypeKind::ValueOf, [self::readNestedType($reader, $references)]),
-            3 => new DerivedType(DerivedTypeKind::IntMask, self::readTypes($reader, $references)),
-            4 => new DerivedType(DerivedTypeKind::IntMaskOf, [self::readNestedType($reader, $references)]),
-            5 => self::readPropertiesOf($reader, $references),
+            1 => new DerivedType(DerivedTypeKind::KeyOf, [self::readComplete($reader)]),
+            2 => new DerivedType(DerivedTypeKind::ValueOf, [self::readComplete($reader)]),
+            3 => new DerivedType(DerivedTypeKind::IntMask, self::readTypes($reader)),
+            4 => new DerivedType(DerivedTypeKind::IntMaskOf, [self::readComplete($reader)]),
+            5 => self::readPropertiesOf($reader),
             6 => new DerivedType(DerivedTypeKind::IndexAccess, [
-                self::readNestedType($reader, $references),
-                self::readNestedType($reader, $references),
+                self::readComplete($reader),
+                self::readComplete($reader),
             ]),
-            7 => new DerivedType(DerivedTypeKind::New_, [self::readNestedType($reader, $references)]),
+            7 => new DerivedType(DerivedTypeKind::New_, [self::readComplete($reader)]),
             8 => new DerivedType(DerivedTypeKind::TemplateType, [
-                self::readNestedType($reader, $references),
-                self::readNestedType($reader, $references),
-                self::readNestedType($reader, $references),
+                self::readComplete($reader),
+                self::readComplete($reader),
+                self::readComplete($reader),
             ]),
             9 => new DerivedType(
                 DerivedTypeKind::Intersection,
-                [self::readNestedType($reader, $references)],
-                self::readAtomics($reader, $references),
+                [self::readComplete($reader)],
+                self::readAtomics($reader),
             ),
             default => throw new ProtocolException("Unknown derived type kind {$kind}."),
         };
     }
 
-    private static function readPropertiesOf(ValueReader $reader, bool $references): DerivedType
+    private static function readPropertiesOf(ValueReader $reader): DerivedType
     {
         $visibility = match ($kind = $reader->readU8()) {
             0 => null,
@@ -1186,11 +1159,7 @@ final class TypeCodec
             default => throw new ProtocolException("Unknown properties-of visibility {$kind}."),
         };
 
-        return new DerivedType(
-            DerivedTypeKind::PropertiesOf,
-            [self::readNestedType($reader, $references)],
-            visibility: $visibility,
-        );
+        return new DerivedType(DerivedTypeKind::PropertiesOf, [self::readComplete($reader)], visibility: $visibility);
     }
 
     private static function readClassLikeStringKind(ValueReader $reader): ClassLikeStringKind
@@ -1242,36 +1211,36 @@ final class TypeCodec
     }
 
     /** @return null|list<Type> */
-    private static function readOptionalTypes(ValueReader $reader, bool $references): ?array
+    private static function readOptionalTypes(ValueReader $reader): ?array
     {
-        return $reader->readBoolean() ? self::readTypes($reader, $references) : null;
+        return $reader->readBoolean() ? self::readTypes($reader) : null;
     }
 
     /** @return list<Type> */
-    private static function readTypes(ValueReader $reader, bool $references): array
+    private static function readTypes(ValueReader $reader): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $types = [];
         for ($index = 0; $index < $count; ++$index) {
-            $types[] = self::readNestedType($reader, $references);
+            $types[] = self::readComplete($reader);
         }
 
         return $types;
     }
 
     /** @return null|list<AtomicType> */
-    private static function readOptionalAtomics(ValueReader $reader, bool $references): ?array
+    private static function readOptionalAtomics(ValueReader $reader): ?array
     {
-        return $reader->readBoolean() ? self::readAtomics($reader, $references) : null;
+        return $reader->readBoolean() ? self::readAtomics($reader) : null;
     }
 
     /** @return list<AtomicType> */
-    private static function readAtomics(ValueReader $reader, bool $references): array
+    private static function readAtomics(ValueReader $reader): array
     {
         $count = $reader->readCount(self::MAXIMUM_MEMBERS);
         $types = [];
         for ($index = 0; $index < $count; ++$index) {
-            $types[] = self::readAtomic($reader, $references);
+            $types[] = self::readAtomic($reader);
         }
 
         return $types;
@@ -1297,16 +1266,5 @@ final class TypeCodec
         }
 
         return $variances;
-    }
-
-    /** @param non-empty-list<AtomicType> $atomicTypes */
-    private static function describeAtomics(array $atomicTypes): string
-    {
-        $description = '';
-        foreach ($atomicTypes as $atomicType) {
-            $description .= ($description === '' ? '' : '|') . (string) $atomicType;
-        }
-
-        return $description;
     }
 }

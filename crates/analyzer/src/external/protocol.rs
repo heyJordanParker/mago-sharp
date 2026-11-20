@@ -274,6 +274,13 @@ pub(super) struct InitializationStub {
     pub contents: Vec<u8>,
 }
 
+/// The SDK's class `name`, under `Mago\Sdk`.
+macro_rules! sdk_class {
+    ($name:literal) => {
+        concat!("Mago\\Sdk\\", $name)
+    };
+}
+
 pub(super) struct ReturnTypeRequest<'type_info> {
     pub payload: Vec<Value>,
     pub types: Vec<Cow<'type_info, TUnion>>,
@@ -956,27 +963,38 @@ pub(super) fn encode_property_type_request<'type_info>(
     generation: u64,
     trace_enabled: bool,
 ) -> Result<PropertyTypeRequest<'type_info>, ExternalAnalyzerError> {
-    let mut writer = message_writer(PROPERTY_TYPE_REQUEST);
-    writer.write_u64(generation);
-    writer.write_u16(
-        u16::try_from(provider_indices.len()).map_err(|_| protocol("more than u16::MAX providers matched"))?,
-    );
-    for index in provider_indices {
-        writer.write_u16(*index);
-    }
-
-    writer.write_bytes(class)?;
-    writer.write_bytes(property)?;
-    writer.write_u8(match access {
-        PropertyAccessKind::Read => 1,
-        PropertyAccessKind::Write => 2,
-    });
     let snapshot_start = trace_enabled.then(Instant::now);
     let mut types = Vec::new();
-    encode_union_snapshot(&mut writer, receiver_type, &mut types, codebase, dialect, 0)?;
+    let receiver_type = type_object(receiver_type, None, &mut types, codebase, dialect, 0)?;
     let type_snapshot_duration = snapshot_start.map_or(Duration::ZERO, |start| start.elapsed());
-    writer.write_u32(span.start.offset);
-    writer.write_u32(span.end.offset);
+    let access = object(
+        sdk_class!("Analyzer\\PropertyAccess"),
+        vec![
+            ("class", Value::String(class.to_vec())),
+            ("property", Value::String(property.to_vec())),
+            (
+                "kind",
+                case(
+                    sdk_class!("Analyzer\\PropertyAccessKind"),
+                    match access {
+                        PropertyAccessKind::Read => "Read",
+                        PropertyAccessKind::Write => "Write",
+                    },
+                ),
+            ),
+            ("receiverType", receiver_type),
+            ("span", span_object(span)),
+        ],
+    );
+    let mut writer = message_writer(PROPERTY_TYPE_REQUEST);
+    writer.write_value(object(
+        sdk_class!("Internal\\Analyzer\\PropertyTypeRequest"),
+        vec![
+            ("generation", Value::Int(generation.cast_signed())),
+            ("providerIndices", provider_indices_value(provider_indices)),
+            ("access", access),
+        ],
+    ));
 
     Ok(PropertyTypeRequest { payload: writer.finish(), snapshotted_types: types.len(), types, type_snapshot_duration })
 }
@@ -1020,22 +1038,22 @@ pub(super) fn encode_call_forwarding_request<'type_info>(
     generation: u64,
     trace_enabled: bool,
 ) -> Result<PropertyTypeRequest<'type_info>, ExternalAnalyzerError> {
-    let mut writer = message_writer(CALL_FORWARDING_REQUEST);
-    writer.write_u64(generation);
-    writer.write_u16(
-        u16::try_from(provider_indices.len()).map_err(|_| protocol("more than u16::MAX providers matched"))?,
-    );
-    for index in provider_indices {
-        writer.write_u16(*index);
-    }
-
-    writer.write_bytes(class)?;
-    writer.write_bytes(member)?;
-    writer.write_bool(property);
     let snapshot_start = trace_enabled.then(Instant::now);
     let mut types = Vec::new();
-    encode_union_snapshot(&mut writer, receiver_type, &mut types, codebase, dialect, 0)?;
+    let receiver_type = type_object(receiver_type, None, &mut types, codebase, dialect, 0)?;
     let type_snapshot_duration = snapshot_start.map_or(Duration::ZERO, |start| start.elapsed());
+    let mut writer = message_writer(CALL_FORWARDING_REQUEST);
+    writer.write_value(object(
+        sdk_class!("Internal\\Analyzer\\CallForwardingRequest"),
+        vec![
+            ("generation", Value::Int(generation.cast_signed())),
+            ("providerIndices", provider_indices_value(provider_indices)),
+            ("class", Value::String(class.to_vec())),
+            ("member", Value::String(member.to_vec())),
+            ("property", Value::Bool(property)),
+            ("receiverType", receiver_type),
+        ],
+    ));
 
     Ok(PropertyTypeRequest { payload: writer.finish(), snapshotted_types: types.len(), types, type_snapshot_duration })
 }
@@ -1290,110 +1308,44 @@ fn encode_return_type_request<'type_info>(
     trace_enabled: bool,
     calling_function_like: Option<FunctionLikeIdentifier>,
 ) -> Result<ReturnTypeRequest<'type_info>, ExternalAnalyzerError> {
-    let mut writer = message_writer(message_kind);
     let include_argument_types = message_kind == RETURN_TYPE_REQUEST || message_kind == ASSERTION_REQUEST;
     let mut type_snapshot_duration = Duration::ZERO;
-    writer.write_u64(generation);
-    writer.write_u8(invocation_kind);
-    writer.write_u16(
-        u16::try_from(provider_indices.len()).map_err(|_| protocol("more than u16::MAX providers matched"))?,
-    );
+    let (kind, declaring_class, receiver_type) = match (invocation_kind, class, receiver_type) {
+        (INVOCATION_FUNCTION, None, None) => ("Function", Value::Null, None),
+        (INVOCATION_INSTANCE_METHOD, Some(class), Some(receiver_type)) => {
+            ("InstanceMethod", Value::String(class.to_vec()), Some(receiver_type))
+        }
+        (INVOCATION_STATIC_METHOD, Some(class), Some(receiver_type)) => {
+            ("StaticMethod", Value::String(class.to_vec()), Some(receiver_type))
+        }
+        _ => return Err(protocol("analyzer invocation kind, declaring class, and receiver type are inconsistent")),
+    };
 
-    for index in provider_indices {
-        writer.write_u16(*index);
-    }
-
-    match (invocation_kind, class, receiver_type) {
-        (INVOCATION_FUNCTION, None, None) => {}
-        (INVOCATION_INSTANCE_METHOD | INVOCATION_STATIC_METHOD, Some(class), Some(receiver_type)) => {
-            writer.write_bytes(class)?;
-            writer.write_bytes(name)?;
+    let mut receiver_type_references = Vec::new();
+    let receiver_type = match receiver_type {
+        Some(receiver_type) => {
             let snapshot_start = trace_enabled.then(Instant::now);
-            let mut receiver_type_references = Vec::new();
-            encode_union_snapshot(
-                &mut writer,
-                receiver_type,
-                &mut receiver_type_references,
-                codebase,
-                Dialect::of(source_file),
-                0,
-            )?;
+            let built =
+                type_object(receiver_type, None, &mut receiver_type_references, codebase, Dialect::of(source_file), 0)?;
             if let Some(start) = snapshot_start {
                 type_snapshot_duration = type_snapshot_duration.saturating_add(start.elapsed());
             }
-
-            writer.write_u32(invocation.span.start.offset);
-            writer.write_u32(invocation.span.end.offset);
-            let receiver_types = receiver_type_references.into_iter().map(Cow::into_owned).collect();
-            return encode_return_type_arguments(
-                writer,
-                invocation,
-                artifacts,
-                source_file,
-                codebase,
-                receiver_types,
-                0,
-                type_snapshot_duration,
-                trace_enabled,
-                include_argument_types,
-                calling_function_like,
-            );
+            built
         }
-        _ => return Err(protocol("analyzer invocation kind, declaring class, and receiver type are inconsistent")),
-    }
-
-    writer.write_bytes(name)?;
-    writer.write_u32(invocation.span.start.offset);
-    writer.write_u32(invocation.span.end.offset);
-
-    encode_return_type_arguments(
-        writer,
-        invocation,
-        artifacts,
-        source_file,
-        codebase,
-        Vec::new(),
-        0,
-        type_snapshot_duration,
-        trace_enabled,
-        include_argument_types,
-        calling_function_like,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn encode_return_type_arguments<'type_info>(
-    mut writer: ValueWriter,
-    invocation: &Invocation<'_, '_, '_>,
-    artifacts: &'type_info AnalysisArtifacts,
-    source_file: &File,
-    codebase: &CodebaseMetadata,
-    receiver_types: Vec<TUnion>,
-    mut typed_arguments: usize,
-    mut type_snapshot_duration: Duration,
-    trace_enabled: bool,
-    include_argument_types: bool,
-    calling_function_like: Option<FunctionLikeIdentifier>,
-) -> Result<ReturnTypeRequest<'type_info>, ExternalAnalyzerError> {
+        None => Value::Null,
+    };
+    let receiver_types: Vec<TUnion> = receiver_type_references.into_iter().map(Cow::into_owned).collect();
     let receiver_type_count = receiver_types.len();
     let mut argument_types = Vec::new();
+    let mut typed_arguments = 0;
     let argument_count = invocation.arguments_source.argument_count();
-    writer
-        .write_u16(u16::try_from(argument_count).map_err(|_| protocol("invocation has more than u16::MAX arguments"))?);
+    let mut arguments = Vec::with_capacity(argument_count);
     for argument in invocation.arguments_source.iter_arguments() {
-        writer.write_optional_string(argument.get_parameter_name().map(String::from_utf8_lossy).as_deref())?;
-        writer.write_bool(argument.is_unpacked());
-        writer.write_bool(argument.is_placeholder());
-        let span = argument.span();
-        writer.write_u32(span.start.offset);
-        writer.write_u32(span.end.offset);
         let value = argument.value();
         let expression = value
             .map(HasSpan::span)
             .and_then(|span| source_file.contents.get(span.start.offset as usize..span.end.offset as usize))
             .unwrap_or_default();
-
-        writer.write_bytes(expression)?;
         // Each argument as the target receives it, as a plugin's provider reads it: a `Map` or a `Set` PHP# passes to
         // plain PHP as the PHP array it crosses into, spec section 12, which is plain PHP's type.
         let received = value
@@ -1403,33 +1355,70 @@ fn encode_return_type_arguments<'type_info>(
             Some(received) => (Some(&**received), Dialect::Php),
             None => (value.and_then(|value| artifacts.get_expression_type(value)), Dialect::of(source_file)),
         };
-        let argument_type = argument_type.filter(|_| include_argument_types);
-        writer.write_bool(argument_type.is_some());
-        if let Some(argument_type) = argument_type {
-            typed_arguments += 1;
-            writer.write_bytes(argument_type.get_id().as_bytes())?;
-            let snapshot_start = trace_enabled.then(Instant::now);
-            encode_union_snapshot_with_offset(
-                &mut writer,
-                argument_type,
-                &mut argument_types,
-                codebase,
-                dialect,
-                receiver_type_count,
-                0,
-            )?;
-            if let Some(start) = snapshot_start {
-                type_snapshot_duration = type_snapshot_duration.saturating_add(start.elapsed());
+        let argument_type = match argument_type.filter(|_| include_argument_types) {
+            Some(argument_type) => {
+                typed_arguments += 1;
+                let snapshot_start = trace_enabled.then(Instant::now);
+                let built = type_object(
+                    argument_type,
+                    Some(argument_type.get_id().to_string()),
+                    &mut argument_types,
+                    codebase,
+                    dialect,
+                    receiver_type_count,
+                )?;
+                if let Some(start) = snapshot_start {
+                    type_snapshot_duration = type_snapshot_duration.saturating_add(start.elapsed());
+                }
+                built
             }
-        }
+            None => Value::Null,
+        };
+        arguments.push(object(
+            sdk_class!("Analyzer\\Argument"),
+            vec![
+                (
+                    "name",
+                    argument.get_parameter_name().map_or(Value::Null, |name| {
+                        Value::String(String::from_utf8_lossy(name).into_owned().into_bytes())
+                    }),
+                ),
+                ("unpacked", Value::Bool(argument.is_unpacked())),
+                ("placeholder", Value::Bool(argument.is_placeholder())),
+                ("span", span_object(argument.span())),
+                ("expression", Value::String(expression.to_vec())),
+                ("type", argument_type),
+            ],
+        ));
     }
 
     // The function-like whose body makes this call, so a provider can answer from
     // the declaration it is written in. A call outside any function-like has none.
-    writer.write_bool(calling_function_like.is_some());
-    if let Some(calling_function_like) = calling_function_like {
-        encode_function_like_identifier(&mut writer, calling_function_like, codebase)?;
-    }
+    let calling_function_like = match calling_function_like {
+        Some(calling_function_like) => function_like_object(calling_function_like, codebase)?,
+        None => Value::Null,
+    };
+    let invocation_object = object(
+        sdk_class!("Analyzer\\Invocation"),
+        vec![
+            ("kind", case(sdk_class!("Analyzer\\InvocationKind"), kind)),
+            ("name", Value::String(name.to_vec())),
+            ("declaringClass", declaring_class),
+            ("receiverType", receiver_type),
+            ("span", span_object(invocation.span)),
+            ("arguments", Value::List(arguments)),
+            ("callingFunctionLike", calling_function_like),
+        ],
+    );
+    let mut writer = message_writer(message_kind);
+    writer.write_value(object(
+        sdk_class!("Internal\\Analyzer\\ReturnTypeRequest"),
+        vec![
+            ("generation", Value::Int(generation.cast_signed())),
+            ("providerIndices", provider_indices_value(provider_indices)),
+            ("invocation", invocation_object),
+        ],
+    ));
 
     let mut types = Vec::with_capacity(receiver_type_count + argument_types.len());
     types.extend(receiver_types.into_iter().map(Cow::Owned));
@@ -1482,6 +1471,733 @@ fn encode_union_snapshot_with_offset<'type_info>(
 ) -> Result<(), ExternalAnalyzerError> {
     let mut table = SnapshotTypeTable { offset, types, codebase, dialect };
     encode_union_snapshot_inner(writer, union, &mut table, depth)
+}
+
+fn object(class: &'static str, properties: Vec<(&'static str, Value)>) -> Value {
+    Value::Object { class, properties }
+}
+
+fn case(enumeration: &'static str, case: &'static str) -> Value {
+    Value::Case { enumeration, case }
+}
+
+fn span_object(span: mago_span::Span) -> Value {
+    object(
+        sdk_class!("Span"),
+        vec![("start", Value::Int(i64::from(span.start.offset))), ("end", Value::Int(i64::from(span.end.offset)))],
+    )
+}
+
+fn provider_indices_value(provider_indices: &[u16]) -> Value {
+    Value::List(provider_indices.iter().map(|index| Value::Int(i64::from(*index))).collect())
+}
+
+/// The SDK's `Type` of `union`, as a provider request names it: every type in it a reference to its handle, numbered
+/// on from `offset` in `types`, and its description `description`, or the one its atomic types give when it has none.
+fn type_object<'type_info>(
+    union: &'type_info TUnion,
+    description: Option<String>,
+    types: &mut Vec<Cow<'type_info, TUnion>>,
+    codebase: &CodebaseMetadata,
+    dialect: Dialect,
+    offset: usize,
+) -> Result<Value, ExternalAnalyzerError> {
+    let mut snapshot = ValueWriter::new();
+    encode_union_snapshot_with_offset(&mut snapshot, union, types, codebase, dialect, offset, 0)?;
+    let mut objects = SnapshotObjects { values: snapshot.finish().into_iter() };
+    let built =
+        objects.union(description.map_or(Value::Null, |description| Value::String(description.into_bytes())))?;
+    objects.finish()?;
+    Ok(built)
+}
+
+/// The SDK's `FunctionLikeIdentifier` of `identifier`.
+fn function_like_object(
+    identifier: FunctionLikeIdentifier,
+    codebase: &CodebaseMetadata,
+) -> Result<Value, ExternalAnalyzerError> {
+    let mut snapshot = ValueWriter::new();
+    encode_function_like_identifier(&mut snapshot, identifier, codebase)?;
+    let mut objects = SnapshotObjects { values: snapshot.finish().into_iter() };
+    let built = objects.function_like()?;
+    objects.finish()?;
+    Ok(built)
+}
+
+/// Builds the SDK's objects from the values of a type snapshot, each the object the SDK's own constructor builds from
+/// them.
+struct SnapshotObjects {
+    values: std::vec::IntoIter<Value>,
+}
+
+const TYPE_FLAGS: [&str; 11] = [
+    "hadTemplate",
+    "byReference",
+    "referenceFree",
+    "possiblyUndefinedFromTry",
+    "possiblyUndefined",
+    "ignoreNullableIssues",
+    "ignoreFalsableIssues",
+    "fromTemplateDefault",
+    "populated",
+    "nullsafeNull",
+    "fromUnspecifiedTemplate",
+];
+
+impl SnapshotObjects {
+    fn next(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        self.values.next().ok_or_else(|| protocol("a type snapshot ends before its last field"))
+    }
+
+    fn finish(&mut self) -> Result<(), ExternalAnalyzerError> {
+        match self.values.next() {
+            None => Ok(()),
+            Some(_) => Err(protocol("a type snapshot holds values past its last field")),
+        }
+    }
+
+    fn int(&mut self) -> Result<i64, ExternalAnalyzerError> {
+        match self.next()? {
+            Value::Int(number) => Ok(number),
+            other => Err(protocol(format!("a type snapshot holds {other:?} where it holds an integer"))),
+        }
+    }
+
+    fn tag(&mut self) -> Result<i64, ExternalAnalyzerError> {
+        self.int()
+    }
+
+    fn count(&mut self) -> Result<usize, ExternalAnalyzerError> {
+        usize::try_from(self.int()?).map_err(|_| protocol("a type snapshot holds a negative count"))
+    }
+
+    fn bool(&mut self) -> Result<bool, ExternalAnalyzerError> {
+        match self.next()? {
+            Value::Bool(flag) => Ok(flag),
+            other => Err(protocol(format!("a type snapshot holds {other:?} where it holds a boolean"))),
+        }
+    }
+
+    fn bytes(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        match self.next()? {
+            bytes @ Value::String(_) => Ok(bytes),
+            other => Err(protocol(format!("a type snapshot holds {other:?} where it holds a string"))),
+        }
+    }
+
+    fn optional_bytes(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        match self.next()? {
+            value @ (Value::String(_) | Value::Null) => Ok(value),
+            other => Err(protocol(format!("a type snapshot holds {other:?} where it holds a string or none"))),
+        }
+    }
+
+    fn unknown(field: &str, tag: i64) -> ExternalAnalyzerError {
+        protocol(format!("a type snapshot holds the unknown {field} {tag}"))
+    }
+
+    fn union(&mut self, description: Value) -> Result<Value, ExternalAnalyzerError> {
+        let handle = self.int()?;
+        let bits = self.int()?;
+        let flags = TYPE_FLAGS.iter().enumerate().map(|(bit, name)| (*name, Value::Bool(bits & (1 << bit) != 0)));
+        let count = self.count()?;
+        if count == 0 {
+            return Err(protocol("a type snapshot holds a union of no atomic types"));
+        }
+
+        let atomic_types = self.atomic_list(count)?;
+        Ok(object(
+            sdk_class!("Analyzer\\Type"),
+            vec![
+                ("payload", Value::List(vec![Value::Int(0), Value::Int(handle)])),
+                ("description", description),
+                ("atomicTypes", atomic_types),
+                ("flags", object(sdk_class!("Analyzer\\Type\\TypeFlags"), flags.collect())),
+            ],
+        ))
+    }
+
+    fn nested(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        self.union(Value::Null)
+    }
+
+    fn nested_types(&mut self) -> Result<Vec<Value>, ExternalAnalyzerError> {
+        let count = self.count()?;
+        std::iter::repeat_with(|| self.nested()).take(count).collect()
+    }
+
+    fn nested_list(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        self.nested_types().map(Value::List)
+    }
+
+    fn optional_nested(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        if self.bool()? { self.nested() } else { Ok(Value::Null) }
+    }
+
+    fn optional_nested_list(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        if self.bool()? { self.nested_list() } else { Ok(Value::Null) }
+    }
+
+    fn atomic_list(&mut self, count: usize) -> Result<Value, ExternalAnalyzerError> {
+        std::iter::repeat_with(|| self.atomic()).take(count).collect::<Result<_, _>>().map(Value::List)
+    }
+
+    fn atomics(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let count = self.count()?;
+        self.atomic_list(count)
+    }
+
+    fn optional_atomics(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        if self.bool()? { self.atomics() } else { Ok(Value::Null) }
+    }
+
+    fn optional_variances(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        if !self.bool()? {
+            return Ok(Value::Null);
+        }
+
+        let count = self.count()?;
+        std::iter::repeat_with(|| {
+            let variance = match self.tag()? {
+                1 => "Invariant",
+                2 => "Covariant",
+                3 => "Contravariant",
+                4 => "Bivariant",
+                tag => return Err(Self::unknown("variance", tag)),
+            };
+            Ok(case(sdk_class!("Analyzer\\Type\\Variance"), variance))
+        })
+        .take(count)
+        .collect::<Result<_, _>>()
+        .map(Value::List)
+    }
+
+    fn atomic(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let simple = |kind| {
+            object(
+                sdk_class!("Analyzer\\Type\\SimpleAtomicType"),
+                vec![("kind", case(sdk_class!("Analyzer\\Type\\SimpleAtomicTypeKind"), kind))],
+            )
+        };
+        Ok(match self.tag()? {
+            1 => self.scalar()?,
+            2 => self.callable()?,
+            3 => self.mixed()?,
+            4 => self.object_type()?,
+            5 => match self.tag()? {
+                1 => self.list()?,
+                2 => self.keyed_array()?,
+                tag => return Err(Self::unknown("array type kind", tag)),
+            },
+            6 => object(
+                sdk_class!("Analyzer\\Type\\IterableType"),
+                vec![
+                    ("keyType", self.nested()?),
+                    ("valueType", self.nested()?),
+                    ("intersections", self.optional_atomics()?),
+                ],
+            ),
+            7 => {
+                let closed = match self.tag()? {
+                    0 => Value::Null,
+                    1 => Value::Bool(false),
+                    2 => Value::Bool(true),
+                    tag => return Err(Self::unknown("resource state", tag)),
+                };
+                object(sdk_class!("Analyzer\\Type\\ResourceType"), vec![("closed", closed)])
+            }
+            8 => self.reference()?,
+            9 => object(
+                sdk_class!("Analyzer\\Type\\GenericParameterType"),
+                vec![
+                    ("name", self.bytes()?),
+                    ("constraint", self.nested()?),
+                    ("definingEntity", self.generic_parent()?),
+                    ("intersections", self.optional_atomics()?),
+                ],
+            ),
+            10 => object(sdk_class!("Analyzer\\Type\\VariableType"), vec![("name", self.bytes()?)]),
+            11 => object(
+                sdk_class!("Analyzer\\Type\\ConditionalType"),
+                vec![
+                    ("subject", self.nested()?),
+                    ("target", self.nested()?),
+                    ("then", self.nested()?),
+                    ("otherwise", self.nested()?),
+                    ("negated", Value::Bool(self.bool()?)),
+                ],
+            ),
+            12 => self.derived()?,
+            13 => object(
+                sdk_class!("Analyzer\\Type\\AliasType"),
+                vec![("class", self.bytes()?), ("alias", self.bytes()?)],
+            ),
+            14 => simple("Never"),
+            15 => simple("Null"),
+            16 => simple("Void"),
+            17 => simple("Placeholder"),
+            tag => return Err(Self::unknown("atomic type tag", tag)),
+        })
+    }
+
+    fn scalar(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let (kind, refinement) = match self.tag()? {
+            1 => ("Scalar", Value::Null),
+            2 => ("Numeric", Value::Null),
+            3 => ("ArrayKey", Value::Null),
+            4 => (
+                "Boolean",
+                match self.tag()? {
+                    0 => Value::Null,
+                    1 => Value::Bool(false),
+                    2 => Value::Bool(true),
+                    tag => return Err(Self::unknown("boolean refinement", tag)),
+                },
+            ),
+            5 => ("Integer", self.integer()?),
+            6 => ("Float", self.float()?),
+            7 => ("String", self.string()?),
+            8 => ("ClassLikeString", self.class_like_string()?),
+            tag => return Err(Self::unknown("scalar type kind", tag)),
+        };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\ScalarType"),
+            vec![("kind", case(sdk_class!("Analyzer\\Type\\ScalarTypeKind"), kind)), ("refinement", refinement)],
+        ))
+    }
+
+    fn integer(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let (kind, minimum, maximum) = match self.tag()? {
+            1 => {
+                let value = self.int()?;
+                ("Literal", Value::Int(value), Value::Int(value))
+            }
+            2 => ("From", Value::Int(self.int()?), Value::Null),
+            3 => ("To", Value::Null, Value::Int(self.int()?)),
+            4 => ("Range", Value::Int(self.int()?), Value::Int(self.int()?)),
+            5 => ("General", Value::Null, Value::Null),
+            6 => ("UnspecifiedLiteral", Value::Null, Value::Null),
+            tag => return Err(Self::unknown("integer type kind", tag)),
+        };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\IntegerType"),
+            vec![
+                ("kind", case(sdk_class!("Analyzer\\Type\\IntegerTypeKind"), kind)),
+                ("minimum", minimum),
+                ("maximum", maximum),
+            ],
+        ))
+    }
+
+    fn float(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let (kind, value) = match self.tag()? {
+            1 => ("General", Value::Null),
+            2 => ("UnspecifiedLiteral", Value::Null),
+            3 => match self.next()? {
+                number @ Value::Float(_) => ("Literal", number),
+                other => return Err(protocol(format!("a type snapshot holds {other:?} where it holds a float"))),
+            },
+            tag => return Err(Self::unknown("float type kind", tag)),
+        };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\FloatType"),
+            vec![("kind", case(sdk_class!("Analyzer\\Type\\FloatTypeKind"), kind)), ("value", value)],
+        ))
+    }
+
+    fn string(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let (literal_kind, literal_value) = match self.tag()? {
+            0 => ("General", Value::Null),
+            1 => ("Unspecified", Value::Null),
+            2 => ("Value", self.bytes()?),
+            tag => return Err(Self::unknown("string literal kind", tag)),
+        };
+        let bits = self.int()?;
+        let casing = match self.tag()? {
+            0 => "Unspecified",
+            1 => "Lowercase",
+            2 => "Uppercase",
+            tag => return Err(Self::unknown("string casing", tag)),
+        };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\StringType"),
+            vec![
+                ("literalKind", case(sdk_class!("Analyzer\\Type\\StringLiteralKind"), literal_kind)),
+                ("literalValue", literal_value),
+                ("numeric", Value::Bool(bits & 1 != 0)),
+                ("truthy", Value::Bool(bits & (1 << 1) != 0)),
+                ("nonEmpty", Value::Bool(bits & (1 << 2) != 0)),
+                ("callable", Value::Bool(bits & (1 << 3) != 0)),
+                ("casing", case(sdk_class!("Analyzer\\Type\\StringCasing"), casing)),
+            ],
+        ))
+    }
+
+    fn class_like_string_kind(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let kind = match self.tag()? {
+            1 => "Class_",
+            2 => "Interface",
+            3 => "Enum",
+            4 => "Trait",
+            tag => return Err(Self::unknown("class-like string kind", tag)),
+        };
+        Ok(case(sdk_class!("Analyzer\\Type\\ClassLikeStringKind"), kind))
+    }
+
+    fn class_like_string(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let (variant, kind, literal, parameter_name, defining_entity, constraint) = match self.tag()? {
+            1 => ("Any", self.class_like_string_kind()?, Value::Null, Value::Null, Value::Null, Value::Null),
+            2 => {
+                let kind = self.class_like_string_kind()?;
+                let parameter_name = self.bytes()?;
+                let defining_entity = self.generic_parent()?;
+                ("Generic", kind, Value::Null, parameter_name, defining_entity, self.atomic()?)
+            }
+            3 => ("Literal", Value::Null, self.bytes()?, Value::Null, Value::Null, Value::Null),
+            4 => {
+                let kind = self.class_like_string_kind()?;
+                ("OfType", kind, Value::Null, Value::Null, Value::Null, self.atomic()?)
+            }
+            tag => return Err(Self::unknown("class-like string variant", tag)),
+        };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\ClassLikeStringType"),
+            vec![
+                ("variant", case(sdk_class!("Analyzer\\Type\\ClassLikeStringVariant"), variant)),
+                ("kind", kind),
+                ("literal", literal),
+                ("parameterName", parameter_name),
+                ("definingEntity", defining_entity),
+                ("constraint", constraint),
+            ],
+        ))
+    }
+
+    fn generic_parent(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let (kind, name, member) = match self.tag()? {
+            1 => ("ClassLike", self.bytes()?, Value::Null),
+            2 => ("FunctionLike", self.bytes()?, self.bytes()?),
+            tag => return Err(Self::unknown("generic parent kind", tag)),
+        };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\GenericParent"),
+            vec![
+                ("kind", case(sdk_class!("Analyzer\\Type\\GenericParentKind"), kind)),
+                ("name", name),
+                ("member", member),
+            ],
+        ))
+    }
+
+    fn function_like(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let (kind, name, class, sharp, exact_names) = match self.tag()? {
+            1 => ("Function_", self.bytes()?, Value::Null, false, false),
+            2 => {
+                let class = self.bytes()?;
+                let name = self.bytes()?;
+                let rule = self.int()?;
+                if rule & !3 != 0 {
+                    return Err(Self::unknown("method identifier rule", rule));
+                }
+                ("Method", name, class, rule & 1 != 0, rule & 2 != 0)
+            }
+            3 => ("Closure", self.bytes()?, Value::Null, false, false),
+            tag => return Err(Self::unknown("function-like identifier kind", tag)),
+        };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\FunctionLikeIdentifier"),
+            vec![
+                ("kind", case(sdk_class!("Analyzer\\Type\\FunctionLikeKind"), kind)),
+                ("name", name),
+                ("class", class),
+                ("sharp", Value::Bool(sharp)),
+                ("exactNames", Value::Bool(exact_names)),
+            ],
+        ))
+    }
+
+    fn callable(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let callable = |signature, alias| {
+            object(sdk_class!("Analyzer\\Type\\CallableType"), vec![("signature", signature), ("alias", alias)])
+        };
+        match self.tag()? {
+            2 => return Ok(callable(Value::Null, self.function_like()?)),
+            1 => {}
+            tag => return Err(Self::unknown("callable type kind", tag)),
+        }
+
+        let pure = self.bool()?;
+        let closure = self.bool()?;
+        let parameter_count = self.count()?;
+        let mut parameters = Vec::with_capacity(parameter_count);
+        for _ in 0..parameter_count {
+            let name = if self.bool()? { self.bytes()? } else { Value::Null };
+            parameters.push(object(
+                sdk_class!("Analyzer\\Type\\CallableParameter"),
+                vec![
+                    ("name", name),
+                    ("type", self.optional_nested()?),
+                    ("closureThisType", self.optional_nested()?),
+                    ("byReference", Value::Bool(self.bool()?)),
+                    ("variadic", Value::Bool(self.bool()?)),
+                    ("hasDefault", Value::Bool(self.bool()?)),
+                ],
+            ));
+        }
+
+        let return_type = self.optional_nested()?;
+        let source = if self.bool()? { self.function_like()? } else { Value::Null };
+        let constraint_count = self.count()?;
+        let mut constraints = Vec::with_capacity(constraint_count);
+        for _ in 0..constraint_count {
+            let name_count = self.count()?;
+            let names = std::iter::repeat_with(|| self.bytes()).take(name_count).collect::<Result<_, _>>()?;
+            constraints.push(object(
+                sdk_class!("Analyzer\\Type\\CallableConstraint"),
+                vec![
+                    ("parameterNames", Value::List(names)),
+                    ("inputType", self.nested()?),
+                    ("parameterType", self.nested()?),
+                ],
+            ));
+        }
+
+        let signature = object(
+            sdk_class!("Analyzer\\Type\\CallableSignature"),
+            vec![
+                ("pure", Value::Bool(pure)),
+                ("closure", Value::Bool(closure)),
+                ("parameters", Value::List(parameters)),
+                ("returnType", return_type),
+                ("source", source),
+                ("constraints", Value::List(constraints)),
+            ],
+        );
+        Ok(callable(signature, Value::Null))
+    }
+
+    fn mixed(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let bits = self.int()?;
+        let truthiness = match self.tag()? {
+            0 => "Undetermined",
+            1 => "Truthy",
+            2 => "Falsy",
+            tag => return Err(Self::unknown("mixed truthiness", tag)),
+        };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\MixedType"),
+            vec![
+                ("issetFromLoop", Value::Bool(bits & 1 != 0)),
+                ("nonNull", Value::Bool(bits & (1 << 1) != 0)),
+                ("empty", Value::Bool(bits & (1 << 2) != 0)),
+                ("truthiness", case(sdk_class!("Analyzer\\Type\\MixedTruthiness"), truthiness)),
+            ],
+        ))
+    }
+
+    fn object_type(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        Ok(match self.tag()? {
+            1 => object(sdk_class!("Analyzer\\Type\\AnyObjectType"), Vec::new()),
+            2 => object(
+                sdk_class!("Analyzer\\Type\\NamedObjectType"),
+                vec![
+                    ("name", self.bytes()?),
+                    ("parameters", self.optional_nested_list()?),
+                    ("variances", self.optional_variances()?),
+                    ("static", Value::Bool(self.bool()?)),
+                    ("isThis", Value::Bool(self.bool()?)),
+                    ("intersections", self.optional_atomics()?),
+                    ("remappedParameters", Value::Bool(self.bool()?)),
+                ],
+            ),
+            3 => object(
+                sdk_class!("Analyzer\\Type\\EnumType"),
+                vec![("name", self.bytes()?), ("case", self.optional_bytes()?)],
+            ),
+            4 => {
+                let sealed = self.bool()?;
+                let count = self.count()?;
+                let mut properties = Vec::with_capacity(count);
+                for _ in 0..count {
+                    properties.push(object(
+                        sdk_class!("Analyzer\\Type\\ObjectProperty"),
+                        vec![
+                            ("name", self.bytes()?),
+                            ("optional", Value::Bool(self.bool()?)),
+                            ("type", self.nested()?),
+                        ],
+                    ));
+                }
+                object(
+                    sdk_class!("Analyzer\\Type\\ObjectShapeType"),
+                    vec![("properties", Value::List(properties)), ("sealed", Value::Bool(sealed))],
+                )
+            }
+            5 => object(
+                sdk_class!("Analyzer\\Type\\ObjectWithMethodType"),
+                vec![("method", self.bytes()?), ("intersections", self.optional_atomics()?)],
+            ),
+            6 => object(
+                sdk_class!("Analyzer\\Type\\ObjectWithPropertyType"),
+                vec![("property", self.bytes()?), ("intersections", self.optional_atomics()?)],
+            ),
+            tag => return Err(Self::unknown("object type kind", tag)),
+        })
+    }
+
+    fn list(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let element_type = self.nested()?;
+        let known_elements = if self.bool()? {
+            let count = self.count()?;
+            let mut elements = Vec::with_capacity(count);
+            for _ in 0..count {
+                elements.push(object(
+                    sdk_class!("Analyzer\\Type\\ListElement"),
+                    vec![
+                        ("index", Value::Int(self.int()?)),
+                        ("optional", Value::Bool(self.bool()?)),
+                        ("type", self.nested()?),
+                    ],
+                ));
+            }
+            Value::List(elements)
+        } else {
+            Value::Null
+        };
+        let known_count = if self.bool()? { Value::Int(self.int()?) } else { Value::Null };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\ListType"),
+            vec![
+                ("elementType", element_type),
+                ("knownElements", known_elements),
+                ("knownCount", known_count),
+                ("nonEmpty", Value::Bool(self.bool()?)),
+            ],
+        ))
+    }
+
+    fn keyed_array(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let known_items = if self.bool()? {
+            let count = self.count()?;
+            let mut items = Vec::with_capacity(count);
+            for _ in 0..count {
+                items.push(object(
+                    sdk_class!("Analyzer\\Type\\ArrayItem"),
+                    vec![("key", self.array_key()?), ("optional", Value::Bool(self.bool()?)), ("type", self.nested()?)],
+                ));
+            }
+            Value::List(items)
+        } else {
+            Value::Null
+        };
+        let (key_type, value_type) =
+            if self.bool()? { (self.nested()?, self.nested()?) } else { (Value::Null, Value::Null) };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\KeyedArrayType"),
+            vec![
+                ("knownItems", known_items),
+                ("keyType", key_type),
+                ("valueType", value_type),
+                ("nonEmpty", Value::Bool(self.bool()?)),
+            ],
+        ))
+    }
+
+    fn array_key(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let (kind, value, constant) = match self.tag()? {
+            1 => ("Integer", Value::Int(self.int()?), Value::Null),
+            2 => ("String", self.bytes()?, Value::Null),
+            3 => ("ClassLikeConstant", self.bytes()?, self.bytes()?),
+            tag => return Err(Self::unknown("array key kind", tag)),
+        };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\ArrayKey"),
+            vec![
+                ("kind", case(sdk_class!("Analyzer\\Type\\ArrayKeyKind"), kind)),
+                ("value", value),
+                ("constant", constant),
+            ],
+        ))
+    }
+
+    fn reference(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let (kind, name, parameters, variances, intersections) = match self.tag()? {
+            1 => (
+                "Symbol",
+                self.bytes()?,
+                self.optional_nested_list()?,
+                self.optional_variances()?,
+                self.optional_atomics()?,
+            ),
+            2 => ("Member", self.bytes()?, Value::Null, Value::Null, Value::Null),
+            3 => ("Global", Value::Null, Value::Null, Value::Null, Value::Null),
+            tag => return Err(Self::unknown("reference type kind", tag)),
+        };
+        let (member, selector) = if kind == "Symbol" {
+            (Value::Null, Value::Null)
+        } else {
+            let (member, selector) = match self.tag()? {
+                1 => (Value::Null, "Wildcard"),
+                2 => (self.bytes()?, "Identifier"),
+                3 => (self.bytes()?, "StartsWith"),
+                4 => (self.bytes()?, "EndsWith"),
+                tag => return Err(Self::unknown("reference selector kind", tag)),
+            };
+            (member, case(sdk_class!("Analyzer\\Type\\ReferenceSelectorKind"), selector))
+        };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\ReferenceType"),
+            vec![
+                ("kind", case(sdk_class!("Analyzer\\Type\\ReferenceTypeKind"), kind)),
+                ("name", name),
+                ("parameters", parameters),
+                ("variances", variances),
+                ("intersections", intersections),
+                ("member", member),
+                ("selector", selector),
+            ],
+        ))
+    }
+
+    fn derived(&mut self) -> Result<Value, ExternalAnalyzerError> {
+        let mut visibility = Value::Null;
+        let mut intersections = Value::List(Vec::new());
+        let (kind, operands) = match self.tag()? {
+            1 => ("KeyOf", vec![self.nested()?]),
+            2 => ("ValueOf", vec![self.nested()?]),
+            3 => ("IntMask", self.nested_types()?),
+            4 => ("IntMaskOf", vec![self.nested()?]),
+            5 => {
+                let kind = match self.tag()? {
+                    0 => None,
+                    1 => Some("Public"),
+                    2 => Some("Protected"),
+                    3 => Some("Private"),
+                    tag => return Err(Self::unknown("properties-of visibility", tag)),
+                };
+                visibility = kind.map_or(Value::Null, |kind| case(sdk_class!("Analyzer\\Type\\Visibility"), kind));
+                ("PropertiesOf", vec![self.nested()?])
+            }
+            6 => ("IndexAccess", vec![self.nested()?, self.nested()?]),
+            7 => ("New_", vec![self.nested()?]),
+            8 => ("TemplateType", vec![self.nested()?, self.nested()?, self.nested()?]),
+            9 => {
+                let operands = vec![self.nested()?];
+                intersections = self.atomics()?;
+                ("Intersection", operands)
+            }
+            tag => return Err(Self::unknown("derived type kind", tag)),
+        };
+        Ok(object(
+            sdk_class!("Analyzer\\Type\\DerivedType"),
+            vec![
+                ("kind", case(sdk_class!("Analyzer\\Type\\DerivedTypeKind"), kind)),
+                ("operands", Value::List(operands)),
+                ("intersections", intersections),
+                ("visibility", visibility),
+            ],
+        ))
+    }
 }
 
 /// Encodes an atomic type the snapshot makes rather than borrows. Its handles own every type in it, numbered on from
@@ -3459,6 +4175,9 @@ pub(super) mod testing {
         payload.iter().any(|value| match value {
             Value::String(bytes) => bytes.windows(class.len()).any(|window| window == class),
             Value::List(values) => names(values, class),
+            Value::Object { properties, .. } => {
+                properties.iter().any(|(_, value)| names(std::slice::from_ref(value), class))
+            }
             _ => false,
         })
     }

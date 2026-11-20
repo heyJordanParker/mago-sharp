@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Internal\Analyzer;
 
-use Mago\Sdk\Analyzer\Argument;
 use Mago\Sdk\Analyzer\CallableSignatureOverride;
 use Mago\Sdk\Analyzer\CallableSignatureProvider;
 use Mago\Sdk\Analyzer\ClassLikeTarget;
@@ -21,14 +20,10 @@ use Mago\Sdk\Analyzer\FileAnalysis;
 use Mago\Sdk\Analyzer\FileAnalysisRequirement;
 use Mago\Sdk\Analyzer\ForwardedCall;
 use Mago\Sdk\Analyzer\FunctionTarget;
-use Mago\Sdk\Analyzer\Invocation;
 use Mago\Sdk\Analyzer\InvocationAssertions;
-use Mago\Sdk\Analyzer\InvocationKind;
 use Mago\Sdk\Analyzer\Metadata\MemberIdentifier;
 use Mago\Sdk\Analyzer\MethodTarget;
 use Mago\Sdk\Analyzer\ProjectAnalysis;
-use Mago\Sdk\Analyzer\PropertyAccess;
-use Mago\Sdk\Analyzer\PropertyAccessKind;
 use Mago\Sdk\Analyzer\PropertyTarget;
 use Mago\Sdk\Analyzer\PropertyType;
 use Mago\Sdk\Analyzer\ReferenceKind;
@@ -170,9 +165,6 @@ final class Protocol
     private const MAXIMUM_ISSUE_NOTES = 0x0001_0000;
     private const MAXIMUM_ISSUE_ANNOTATIONS = 0x0001_0000;
     private const MAXIMUM_ISSUE_EDITS = 0x0001_0000;
-    private const INVOCATION_FUNCTION = 1;
-    private const INVOCATION_INSTANCE_METHOD = 2;
-    private const INVOCATION_STATIC_METHOD = 3;
     private const METHOD_SEARCH_ANY_CLASS = 0;
     private const METHOD_SEARCH_EXACT_CLASS = 1;
     private const METHOD_SEARCH_DESCENDANTS = 2;
@@ -1181,61 +1173,13 @@ final class Protocol
         return $reader->readBoolean() ? TypeCodec::readComplete($reader) : null;
     }
 
+    /** Reads a return-type request, which mago's engine builds whole. */
     public static function readReturnTypeRequest(ValueReader $reader): ReturnTypeRequest
     {
-        $generation = $reader->readU64();
-        $encodedKind = $reader->readU8();
-        $kind = match ($encodedKind) {
-            self::INVOCATION_FUNCTION => InvocationKind::Function,
-            self::INVOCATION_INSTANCE_METHOD => InvocationKind::InstanceMethod,
-            self::INVOCATION_STATIC_METHOD => InvocationKind::StaticMethod,
-            default => throw new ProtocolException("Unknown analyzer invocation kind {$encodedKind}."),
-        };
-
-        $providerCount = $reader->readU16();
-        if ($providerCount === 0) {
-            throw new ProtocolException('A return-type request contains no providers.');
-        }
-        $providers = [];
-        for ($index = 0; $index < $providerCount; ++$index) {
-            $providers[] = $reader->readU16();
-        }
-
-        $method = $kind !== InvocationKind::Function;
-        $declaringClass = $method ? $reader->readBytes() : null;
-        $name = $reader->readBytes();
-        if ($name === '' || $declaringClass === '') {
-            throw new ProtocolException('Analyzer invocation names cannot be empty.');
-        }
-
-        $receiverType = $method ? TypeCodec::read($reader) : null;
-
-        $span = new Span($reader->readU32(), $reader->readU32());
-        $argumentCount = $reader->readU16();
-        $arguments = [];
-        for ($index = 0; $index < $argumentCount; ++$index) {
-            $argumentName = $reader->readOptionalString();
-            $unpacked = $reader->readBoolean();
-            $placeholder = $reader->readBoolean();
-            $argumentSpan = new Span($reader->readU32(), $reader->readU32());
-            $expression = $reader->readBytes();
-            $type = null;
-            if ($reader->readBoolean()) {
-                $description = $reader->readBytes();
-                $type = TypeCodec::read($reader, $description);
-            }
-            $arguments[] = new Argument($argumentName, $unpacked, $placeholder, $argumentSpan, $expression, $type);
-        }
-
-        $callingFunctionLike = $reader->readBoolean() ? TypeCodec::readFunctionLikeIdentifier($reader) : null;
-
+        $request = $reader->readObject(ReturnTypeRequest::class);
         $reader->finish();
 
-        return new ReturnTypeRequest(
-            $generation,
-            $providers,
-            new Invocation($kind, $name, $declaringClass, $receiverType, $span, $arguments, $callingFunctionLike),
-        );
+        return $request;
     }
 
     /** @return list<null|bool|int|float|string|list<mixed>> */
@@ -1302,35 +1246,13 @@ final class Protocol
         return $writer->finish();
     }
 
+    /** Reads a property-type request, which mago's engine builds whole. */
     public static function readPropertyTypeRequest(ValueReader $reader): PropertyTypeRequest
     {
-        $generation = $reader->readU64();
-        $providerCount = $reader->readU16();
-        if ($providerCount === 0) {
-            throw new ProtocolException('A property-type request contains no providers.');
-        }
-
-        $providers = [];
-        for ($index = 0; $index < $providerCount; ++$index) {
-            $providers[] = $reader->readU16();
-        }
-
-        $class = $reader->readBytes();
-        $property = $reader->readBytes();
-        $kind = match ($encodedKind = $reader->readU8()) {
-            1 => PropertyAccessKind::Read,
-            2 => PropertyAccessKind::Write,
-            default => throw new ProtocolException("Unknown analyzer property access kind {$encodedKind}."),
-        };
-        $receiverType = TypeCodec::read($reader);
-        $span = new Span($reader->readU32(), $reader->readU32());
+        $request = $reader->readObject(PropertyTypeRequest::class);
         $reader->finish();
 
-        return new PropertyTypeRequest(
-            $generation,
-            $providers,
-            new PropertyAccess($class, $property, $kind, $receiverType, $span),
-        );
+        return $request;
     }
 
     /** @return list<null|bool|int|float|string|list<mixed>> */
@@ -1357,30 +1279,13 @@ final class Protocol
         return $writer->finish();
     }
 
+    /** Reads a call-forwarding request, which mago's engine builds whole. */
     public static function readCallForwardingRequest(ValueReader $reader): CallForwardingRequest
     {
-        $generation = $reader->readU64();
-        $providerCount = $reader->readU16();
-        if ($providerCount === 0) {
-            throw new ProtocolException('A call-forwarding request contains no providers.');
-        }
-
-        $providers = [];
-        for ($index = 0; $index < $providerCount; ++$index) {
-            $providers[] = $reader->readU16();
-        }
-
-        $class = $reader->readBytes();
-        $member = $reader->readBytes();
-        if ($class === '' || $member === '') {
-            throw new ProtocolException('A call-forwarding request names no class or member.');
-        }
-
-        $property = $reader->readBoolean();
-        $receiverType = TypeCodec::read($reader);
+        $request = $reader->readObject(CallForwardingRequest::class);
         $reader->finish();
 
-        return new CallForwardingRequest($generation, $providers, $class, $member, $property, $receiverType);
+        return $request;
     }
 
     /** @return list<null|bool|int|float|string|list<mixed>> */

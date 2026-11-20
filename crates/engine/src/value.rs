@@ -15,6 +15,17 @@ pub enum Value {
     String(Vec<u8>),
     List(Vec<Value>),
     Map(Vec<(Vec<u8>, Value)>),
+    /// An object of the loaded class `class`, with no constructor run, and each instance property the class declares
+    /// set once to its value, which its type takes as it is.
+    Object {
+        class: &'static str,
+        properties: Vec<(&'static str, Value)>,
+    },
+    /// The case `case` of the loaded enum `enumeration`.
+    Case {
+        enumeration: &'static str,
+        case: &'static str,
+    },
 }
 
 /// The storage of one engine value, a `zval`, which the engine reads and writes through its own API.
@@ -44,6 +55,16 @@ unsafe extern "C" {
     fn engine_value_array(value: *mut Zval, size: u32);
     fn engine_array_push(array: *mut Zval) -> *mut Zval;
     fn engine_array_insert(array: *mut Zval, key: *const c_char, length: usize) -> *mut Zval;
+    fn engine_value_object(value: *mut Zval, name: *const c_char, length: usize) -> bool;
+    fn engine_object_set(object: *mut Zval, name: *const c_char, length: usize, property: *mut Zval) -> bool;
+    fn engine_object_unset(object: *const Zval, length: *mut usize) -> *const c_char;
+    fn engine_value_case(
+        value: *mut Zval,
+        enumeration: *const c_char,
+        length: usize,
+        name: *const c_char,
+        name_length: usize,
+    ) -> bool;
     pub(crate) fn engine_value_release(value: *mut Zval);
     fn engine_value_type(value: *const Zval) -> u8;
     fn engine_value_long(value: *const Zval) -> i64;
@@ -62,7 +83,12 @@ unsafe extern "C" {
 }
 
 impl Value {
-    /// Writes this value into `slot`, which the engine owns afterwards.
+    /// Writes this value into `slot`, which the engine owns afterwards, also when an object in it can't be built.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an object or a case in it names no loaded class, enum, property or case, or leaves a
+    /// property unset or sets one to a value its type doesn't take.
     ///
     /// # Safety
     ///
@@ -71,7 +97,7 @@ impl Value {
         clippy::multiple_unsafe_ops_per_block,
         reason = "each operation is one step of the same engine API call sequence, which the block's SAFETY note covers"
     )]
-    pub(crate) unsafe fn write(&self, slot: *mut Zval) {
+    pub(crate) unsafe fn write(&self, slot: *mut Zval) -> Result<(), EngineError> {
         // SAFETY: the caller gives an empty slot on a thread that runs an interpreter, and every pointer and length
         // passed here comes from a live Rust slice.
         unsafe {
@@ -84,17 +110,61 @@ impl Value {
                 Self::List(items) => {
                     engine_value_array(slot, items.len() as u32);
                     for item in items {
-                        item.write(engine_array_push(slot));
+                        item.write(engine_array_push(slot))?;
                     }
                 }
                 Self::Map(entries) => {
                     engine_value_array(slot, entries.len() as u32);
                     for (key, item) in entries {
-                        item.write(engine_array_insert(slot, key.as_ptr().cast(), key.len()));
+                        item.write(engine_array_insert(slot, key.as_ptr().cast(), key.len()))?;
+                    }
+                }
+                Self::Object { class, properties } => {
+                    if !engine_value_object(slot, class.as_ptr().cast(), class.len()) {
+                        engine_value_null(slot);
+                        return Err(EngineError::Build(format!("no class `{class}` that can be built is loaded")));
+                    }
+
+                    for (name, property) in properties {
+                        let mut value = Zval::new();
+                        let written = property.write(&raw mut value);
+                        if let Err(error) = written {
+                            engine_value_release(&raw mut value);
+                            return Err(error);
+                        }
+
+                        if !engine_object_set(slot, name.as_ptr().cast(), name.len(), &raw mut value) {
+                            return Err(EngineError::Build(format!(
+                                "`{class}` declares no unset instance property `{name}` whose type takes the value given"
+                            )));
+                        }
+                    }
+
+                    let mut length = 0;
+                    let unset = engine_object_unset(slot, &raw mut length);
+                    if !unset.is_null() {
+                        let name = String::from_utf8_lossy(std::slice::from_raw_parts(unset.cast::<u8>(), length));
+                        return Err(EngineError::Build(format!("`{class}` leaves its property `{name}` unset")));
+                    }
+                }
+                Self::Case { enumeration, case } => {
+                    if !engine_value_case(
+                        slot,
+                        enumeration.as_ptr().cast(),
+                        enumeration.len(),
+                        case.as_ptr().cast(),
+                        case.len(),
+                    ) {
+                        engine_value_null(slot);
+                        return Err(EngineError::Build(format!(
+                            "no loaded enum `{enumeration}` has the case `{case}`"
+                        )));
                     }
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Reads the value `value` holds.
