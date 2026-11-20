@@ -19,7 +19,7 @@ use function count;
 use function get_declared_classes;
 use function get_declared_interfaces;
 use function get_declared_traits;
-use function Mago\Engine\classCount;
+use function Mago\Engine\class_count;
 use function max;
 use function random_int;
 use function spl_autoload_register;
@@ -76,7 +76,7 @@ final class ClassLoads
      */
     public function end(): int
     {
-        $classCount = classCount();
+        $classCount = class_count();
         if ($classCount === $this->classCount && $this->asked === []) {
             return count($this->log);
         }

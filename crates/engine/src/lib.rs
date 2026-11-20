@@ -3,7 +3,7 @@
 //! Each thread that calls into an [`Engine`] owns one interpreter. The thread starts it on its first call, runs the
 //! engine's scripts in it once, and serves every later call from it. A call passes [`Value`]s and receives one, and
 //! the PHP it runs asks Mago questions through `\Mago\Engine\ask(...$arguments)`, which the call's `answer` answers.
-//! `\Mago\Engine\classCount()` returns how many class-likes the interpreter has declared, which grows with each one.
+//! `\Mago\Engine\class_count()` returns how many class-likes the interpreter has declared, which grows with each one.
 
 use std::cell::Cell;
 use std::cell::RefCell;

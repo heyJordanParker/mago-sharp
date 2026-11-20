@@ -41,11 +41,11 @@ static ZEND_FUNCTION(ask)
 	}
 }
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_classCount, 0, 0, IS_LONG, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_count, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
 /* How many classes, interfaces, traits and enums the interpreter has declared, which grows with each one it declares. */
-static ZEND_FUNCTION(classCount)
+static ZEND_FUNCTION(class_count)
 {
 	ZEND_PARSE_PARAMETERS_NONE();
 
@@ -54,7 +54,7 @@ static ZEND_FUNCTION(classCount)
 
 static const zend_function_entry engine_functions[] = {
 	ZEND_NS_FE("Mago\\Engine", ask, arginfo_ask)
-	ZEND_NS_FE("Mago\\Engine", classCount, arginfo_classCount)
+	ZEND_NS_FE("Mago\\Engine", class_count, arginfo_class_count)
 	ZEND_FE_END
 };
 

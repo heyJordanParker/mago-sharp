@@ -27,7 +27,7 @@ function ask(string $question, string|array $payload): ?array
 /**
  * How many classes, interfaces, traits and enums PHP has declared, as mago's engine counts its class table.
  */
-function classCount(): int
+function class_count(): int
 {
     return count(get_declared_classes()) + count(get_declared_interfaces()) + count(get_declared_traits());
 }
