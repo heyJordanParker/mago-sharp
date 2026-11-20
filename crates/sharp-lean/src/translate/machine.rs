@@ -74,7 +74,13 @@ impl Translator<'_, '_> {
         let shown = self.shown(&machine);
         let moves = self.moves(&machine);
         let file = self.translation.file;
-        let use_of = |key: &str, place: String| Use { key: key.to_owned(), file: Some(file), place, smaller: None };
+        let use_of = |key: &str, place: String| Use {
+            key: key.to_owned(),
+            file: Some(file),
+            place,
+            smaller: None,
+            names_only: false,
+        };
 
         for (law, case) in &invariants {
             let name = String::from_utf8_lossy(law.name.value).into_owned();
@@ -164,6 +170,7 @@ impl Translator<'_, '_> {
                 unmodeled: Vec::new(),
                 role: Role::Definition,
                 measure: None,
+                opaque: None,
             });
             uses.push(use_of(&trace, place.clone()));
 
@@ -190,6 +197,7 @@ impl Translator<'_, '_> {
                 unmodeled,
                 role: Role::Definition,
                 measure: None,
+                opaque: None,
             });
         }
     }
@@ -286,6 +294,7 @@ impl Translator<'_, '_> {
                     file: Some(self.translation.file),
                     place: place_of(&move_key),
                     smaller: None,
+                    names_only: false,
                 });
             }
             if !steps.is_empty() {
@@ -302,6 +311,7 @@ impl Translator<'_, '_> {
             unmodeled,
             role: Role::Definition,
             measure: None,
+            opaque: None,
         });
 
         key
@@ -325,6 +335,7 @@ impl Translator<'_, '_> {
                 file: Some(self.translation.file),
                 place: place_of(&entry_key),
                 smaller: None,
+                names_only: false,
             });
         }
 

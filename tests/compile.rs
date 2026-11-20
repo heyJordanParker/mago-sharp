@@ -4048,6 +4048,49 @@ fn a_move_that_breaks_a_machine_s_invariant_on_no_small_value_is_refused_by_name
     );
 }
 
+/// `Holder`, which holds a `JsonValue?`, whose `Any?` a law cannot read, beside the law `law`.
+fn holder(law: &str) -> String {
+    format!(
+        "namespace App.Shared;\n\nimport Sharp.Encoding.JsonValue;\n\npublic final class Holder\n{{\n    public Holder(public int id {{ get; }}, public JsonValue? payload {{ get; }} = null) {{}}\n\n    {law}\n}}\n"
+    )
+}
+
+/// Spec section 28: a value whose type a law cannot read is one the law knows nothing inside, so a law that only
+/// builds and carries it proves, as `Holder`'s `JsonValue?` here.
+#[test]
+fn a_law_that_only_carries_a_value_it_cannot_read_proves() {
+    let directory = library_project(&[(
+        "app/Shared/Holder.sharp",
+        &holder("law holdingKeepsTheId(int id) => new Holder(id, null).id == id;"),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Holder.sharp").exists());
+}
+
+/// A law that reads into a value whose type a law cannot read is refused for what it reads, as `JsonValue`'s `Any?`.
+#[test]
+fn a_law_that_reads_into_a_value_it_cannot_read_is_refused() {
+    let law = "law readsThePayload(int id, JsonValue payload) => new Holder(id, payload).payload?.value == null;";
+    let directory = library_project(&[("app/Shared/Holder.sharp", &holder(law))]);
+    let root = directory.path();
+
+    let output = compile_without_lean(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error - unmodeled-construct: Law readsThePayload reaches Any in JsonValue. It reads types while the code runs."
+        ),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Shared/Holder.sharp").exists());
+}
+
 /// A law never calls an interface's method, which a law cannot reason about, even when every implementation is
 /// pure as spec section 29 holds `Card.amount` to. A call through `?.` is refused too.
 #[test]

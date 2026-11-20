@@ -193,7 +193,7 @@ impl<'body, 'program> Body<'body, 'program> {
             Hint::Float(_) => self.unmodeled(hint.span(), "a float".to_owned(), issues::FLOAT),
             Hint::Nullable(nullable) => format!("(Option {})", self.r#type(nullable.hint)),
             Hint::Parenthesized(parenthesized) => self.r#type(parenthesized.hint),
-            Hint::Self_(_) => self.class_type(hint.span(), self.class),
+            Hint::Self_(_) => self.named_type(hint.span(), self.class),
             Hint::Identifier(identifier) if self.checked.names().is_type_parameter(identifier) => self.unmodeled(
                 hint.span(),
                 format!("the type parameter {}", String::from_utf8_lossy(identifier.value())),
@@ -202,7 +202,7 @@ impl<'body, 'program> Body<'body, 'program> {
             Hint::Identifier(identifier) => {
                 let class = self.checked.names().get(identifier);
 
-                self.class_type(hint.span(), class)
+                self.named_type(hint.span(), class)
             }
             Hint::Generic(generic) => {
                 // The name resolver leaves the built-in collections' names as written.
@@ -215,7 +215,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 } else if is_collection(name) {
                     self.unmodeled(hint.span(), "a collection".to_owned(), issues::COLLECTION)
                 } else {
-                    self.class_type(hint.span(), name)
+                    self.named_type(hint.span(), name)
                 }
             }
             Hint::Function(_) => self.unmodeled(hint.span(), "a function type".to_owned(), issues::LAMBDA),
@@ -1026,6 +1026,7 @@ impl<'body, 'program> Body<'body, 'program> {
             return None;
         }
         self.checked.types().enum_case_class(word(r#enum), word(case))?;
+        self.reads(r#enum);
         let held = self.sealed(r#enum).map(|(_, constructor)| constructor);
 
         Some((held, names::member(&names::full_name(&self.reached_name(r#enum)), case)))
@@ -1513,7 +1514,10 @@ impl<'body, 'program> Body<'body, 'program> {
                     self.uses(class, &key, format!("{}.{field}", names::short_name(&self.reached_name(class))));
                     format!("({key} {upcast})")
                 }
-                None => format!("({upcast}).{field}"),
+                None => {
+                    self.reads(&below);
+                    format!("({upcast}).{field}")
+                }
             };
             below = parent.as_bytes().to_vec();
         }
@@ -1749,7 +1753,7 @@ impl<'body, 'program> Body<'body, 'program> {
             self.uses(class.as_bytes(), &key, place);
             format!("({key} {object})")
         } else {
-            self.uses(class.as_bytes(), &names::full_name(&class_name), short);
+            self.reads(class.as_bytes());
             format!("{object}.{}", names::identifier(property.as_bytes()))
         };
         if self.reach.is_nullable_field(declaring, property.as_bytes())
@@ -1878,11 +1882,9 @@ impl<'body, 'program> Body<'body, 'program> {
             return "default".to_owned();
         }
 
-        let class_name = self.reached_name(class);
-        let lean = names::full_name(&class_name);
-        self.uses(class, &lean, names::short_name(&class_name));
+        self.reads(class);
 
-        lean
+        names::full_name(&self.reached_name(class))
     }
 
     /// The Lean type of the sealed interface `class` implements, spec section 20.1, and the constructor that holds a
@@ -1918,7 +1920,26 @@ impl<'body, 'program> Body<'body, 'program> {
     /// [`Body::uses`], for a call that passes the `smaller` value.
     fn use_of(&mut self, class: &[u8], key: &str, place: String, smaller: Option<Smaller>) {
         let file = self.reach.class(class).map(|reached| reached.file);
-        self.uses.push(Use { key: key.to_owned(), file, place, smaller });
+        self.uses.push(Use { key: key.to_owned(), file, place, smaller, names_only: false });
+    }
+
+    /// Records that the body reads inside the values of `class`'s own type, as a read of its field or the structure
+    /// its constructor builds does.
+    pub(crate) fn reads(&mut self, class: &[u8]) {
+        let class_name = self.reached_name(class);
+        self.uses(class, &names::full_name(&class_name), names::short_name(&class_name));
+    }
+
+    /// The Lean type a declared type names, `class`'s, as [`Body::class_type`] gives it: naming a type reads nothing
+    /// inside its values.
+    fn named_type(&mut self, span: Span, class: &[u8]) -> String {
+        let start = self.uses.len();
+        let r#type = self.class_type(span, class);
+        for named in &mut self.uses[start..] {
+            named.names_only = true;
+        }
+
+        r#type
     }
 
     /// The source text at `span`, as messages quote it.

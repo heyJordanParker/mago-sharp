@@ -101,6 +101,9 @@ pub(crate) struct Declaration {
     pub(crate) role: Role,
     /// What a method makes smaller on each call it makes of itself or of a method that calls it back.
     pub(crate) measure: Option<Measure>,
+    /// A type's Lean text where its own text has a problem and laws only name it: the values of an interface of its
+    /// name, of which Lean knows nothing, then its coercions.
+    pub(crate) opaque: Option<String>,
 }
 
 /// What a declaration is in Lean.
@@ -124,6 +127,9 @@ pub(crate) struct Use {
     pub(crate) place: String,
     /// The smaller value the use passes, when it is a call of a method of the same class.
     pub(crate) smaller: Option<Smaller>,
+    /// Whether it only names a type, as a parameter's or a field's declared type does, and reads nothing inside the
+    /// type's values, so the type's own problems are not the user's.
+    pub(crate) names_only: bool,
 }
 
 /// The parameter a recursive method's calls each make smaller, by the same step, and the `termination_by` that tells
@@ -340,8 +346,8 @@ impl Translator<'_, '_> {
             types.push(r#type);
         }
         lines.push(DERIVED.to_owned());
-        lines.extend(self.coercions(&mut body, &lean, inheritance));
-        self.declare(body, lean.clone(), name.span, lines.join("\n"), Role::Type);
+        let coercions = self.coercions(&mut body, &lean, inheritance);
+        self.declare_type(body, lean.clone(), name.span, lines, coercions);
 
         // Spec section 20.1: an implementer of a sealed interface is a value of the interface, which reads each of its
         // properties through the interface's accessor, and each property a PHP# parent declares through the accessor of
@@ -355,6 +361,7 @@ impl Translator<'_, '_> {
                 break;
             };
             let key = names::member(&constructor, field.as_bytes());
+            body.reads(full);
             let lines = [
                 format!("def {key} : {interface} → {type}"),
                 format!("  | {constructor} held => held.{}", names::identifier(field.as_bytes())),
@@ -477,6 +484,7 @@ impl Translator<'_, '_> {
             values.push(format!("{} := {value}", names::identifier(field.name)));
         }
 
+        body.reads(full);
         let (mut lines, uses, unmodeled) = body.finish();
         lines.push(format!("return {{ {} }}", values.join(", ")));
         let text = format!(
@@ -492,6 +500,7 @@ impl Translator<'_, '_> {
             unmodeled,
             role: Role::Constructor,
             measure: None,
+            opaque: None,
         });
     }
 
@@ -542,8 +551,8 @@ impl Translator<'_, '_> {
             }
         }
         lines.push(DERIVED.to_owned());
-        lines.extend(self.coercions(&mut body, &lean, r#enum.inheritance.as_ref()));
-        self.declare(body, lean.clone(), r#enum.name.span, lines.join("\n"), Role::Type);
+        let coercions = self.coercions(&mut body, &lean, r#enum.inheritance.as_ref());
+        self.declare_type(body, lean.clone(), r#enum.name.span, lines, coercions);
 
         // Spec section 20: a field of a case that carries data reads as the constructor's field, where a test named the
         // case. Any other case gives the field's default, which no such read sees. The value of an enum that implements
@@ -656,7 +665,7 @@ impl Translator<'_, '_> {
         let lean = names::full_name(full);
         let short = names::short_name(full);
         let mut body = Body::new(self.checked, self.reach, full, short.clone());
-        let mut lines = match self.reach.implementers(full) {
+        let lines = match self.reach.implementers(full) {
             None | Some([]) => vec![format!("abbrev {lean} : Type := Interface \"{lean}\"")],
             Some(implementers) => {
                 let mut constructors = vec![format!("inductive {lean} where")];
@@ -669,8 +678,8 @@ impl Translator<'_, '_> {
                 constructors
             }
         };
-        lines.extend(self.coercions(&mut body, &lean, interface.inheritance.as_ref()));
-        self.declare(body, lean.clone(), interface.name.span, lines.join("\n"), Role::Type);
+        let coercions = self.coercions(&mut body, &lean, interface.inheritance.as_ref());
+        self.declare_type(body, lean.clone(), interface.name.span, lines, coercions);
         self.members(full, &lean, &short, interface.members.as_slice());
     }
 
@@ -911,6 +920,7 @@ impl Translator<'_, '_> {
             unmodeled,
             role: Role::Definition,
             measure,
+            opaque: None,
         });
     }
 
@@ -964,6 +974,7 @@ impl Translator<'_, '_> {
             unmodeled,
             role: Role::Definition,
             measure: None,
+            opaque: None,
         });
     }
 
@@ -973,7 +984,43 @@ impl Translator<'_, '_> {
 
     fn declare(&mut self, body: Body<'_, '_>, key: String, span: Span, text: String, role: Role) {
         let (_, uses, unmodeled) = body.finish();
-        self.translation.declarations.push(Declaration { key, span, text, uses, unmodeled, role, measure: None });
+        self.translation.declarations.push(Declaration {
+            key,
+            span,
+            text,
+            uses,
+            unmodeled,
+            role,
+            measure: None,
+            opaque: None,
+        });
+    }
+
+    /// The class-like type `key`, of its Lean `lines` and then the `coercions` to the interfaces it implements, and its
+    /// opaque text, which a law that only names the type proves with when its own text has a problem.
+    fn declare_type(
+        &mut self,
+        body: Body<'_, '_>,
+        key: String,
+        span: Span,
+        lines: Vec<String>,
+        coercions: Vec<String>,
+    ) {
+        let (_, uses, unmodeled) = body.finish();
+        let opaque = std::iter::once(format!("abbrev {key} : Type := Interface \"{key}\""))
+            .chain(coercions.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.translation.declarations.push(Declaration {
+            key,
+            span,
+            text: lines.into_iter().chain(coercions).collect::<Vec<_>>().join("\n"),
+            uses,
+            unmodeled,
+            role: Role::Type,
+            measure: None,
+            opaque: Some(opaque),
+        });
     }
 }
 

@@ -20,7 +20,8 @@ instance : Inhabited Values := ⟨⟨Unit⟩⟩
 what they are, nor whether two interfaces' values are the same type. -/
 opaque values (name : String) : Values
 
-/-- The PHP# interface whose Lean name is `name`. -/
+/-- The PHP# interface whose Lean name is `name`, and a class-like type whose own text Lean cannot hold, as a class
+whose field holds `Any`: a law that only builds, passes and compares its values knows nothing inside them. -/
 abbrev Interface (name : String) : Type := (values name).type
 
 instance : Inhabited (Interface name) := (values name).inhabited

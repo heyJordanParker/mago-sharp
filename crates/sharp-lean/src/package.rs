@@ -120,8 +120,10 @@ impl<'program> Program<'program> {
         Self { translations, declarations, recursive, terminating }
     }
 
-    /// Every declaration `key` uses, transitively, `key`'s own included.
-    fn closure(&self, key: &str) -> (Vec<&'program str>, Vec<Use>) {
+    /// Every declaration `key` uses, transitively, `key`'s own included. With `reads`, only those it reads inside: a use
+    /// that only names a type reaches nothing of it, since the type is written as the values of an interface when its
+    /// own text has a problem.
+    fn closure(&self, key: &str, reads: bool) -> (Vec<&'program str>, Vec<Use>) {
         let mut reached = Vec::new();
         let mut missing: Vec<Use> = Vec::new();
         let mut seen: HashSet<&str> = HashSet::default();
@@ -136,7 +138,9 @@ impl<'program> Program<'program> {
             reached.push(key);
             for used in &declaration.uses {
                 if self.declarations.contains_key(used.key.as_str()) {
-                    pending.push(used.key.as_str());
+                    if !(reads && used.names_only) {
+                        pending.push(used.key.as_str());
+                    }
                 } else if !missing.iter().any(|known| known.key == used.key) {
                     missing.push(used.clone());
                 }
@@ -154,7 +158,7 @@ impl<'program> Program<'program> {
         let mut seen: HashSet<&str> = HashSet::default();
         let mut pending = vec![key];
         while let Some(next) = pending.pop() {
-            for found in self.closure(next).0 {
+            for found in self.closure(next, false).0 {
                 if seen.insert(found) {
                     reached.push(found);
                     pending.extend(found.rsplit_once('.').map(|(owner, _)| owner));
@@ -168,16 +172,16 @@ impl<'program> Program<'program> {
     /// The definitions and constructors `key` uses, transitively, `key`'s own included: those that recurse on no value,
     /// then the methods that recurse on a value that gets smaller, which the fixed steps of a proof unfold differently.
     pub(crate) fn definitions(&self, key: &str) -> (Vec<&'program str>, Vec<&'program str>) {
-        self.closure(key)
+        self.closure(key, false)
             .0
             .into_iter()
             .filter(|reached| self.declarations[reached].1.role != Role::Type)
             .partition(|reached| !self.terminating.contains(reached))
     }
 
-    /// Why the declaration `key`, or one it uses, cannot be written to Lean.
+    /// Why the declaration `key`, or one it reads inside, cannot be written to Lean.
     pub(crate) fn problems(&self, key: &str) -> Problems {
-        let (reached, missing) = self.closure(key);
+        let (reached, missing) = self.closure(key, true);
         let mut problems = Problems { unmodeled: Vec::new(), missing };
         for reached in reached {
             let declaration = self.declarations[reached].1;
@@ -201,7 +205,9 @@ impl<'program> Program<'program> {
         let sound: HashSet<&str> = reached
             .iter()
             .copied()
-            .filter(|key| self.declarations.contains_key(key) && self.problems(key).is_empty())
+            .filter(|key| {
+                self.declarations.contains_key(key) && (self.problems(key).is_empty() || self.opaque(key).is_some())
+            })
             .collect();
 
         let named: Vec<usize> = (0..self.translations.len())
@@ -291,11 +297,22 @@ impl<'program> Program<'program> {
     /// The Lean text of the declaration `key`: a method that recurses ends in the measure Lean sees it end by.
     pub(crate) fn text(&self, key: &str) -> Option<String> {
         let declaration = self.declarations.get(key)?.1;
+        if let Some(opaque) = self.opaque(key) {
+            return Some(opaque.to_owned());
+        }
 
         Some(match &declaration.measure {
             Some(measure) if self.terminating.contains(key) => format!("{}\n{}", declaration.text, measure.termination),
             _ => declaration.text.clone(),
         })
+    }
+
+    /// The opaque text of the type `key` when its own text has a problem, which a law that only names the type proves
+    /// with.
+    fn opaque(&self, key: &str) -> Option<&'program str> {
+        let declaration = self.declarations.get(key)?.1;
+
+        declaration.opaque.as_deref().filter(|_| !self.problems(key).is_empty())
     }
 
     /// The sound declarations of the translations at `indexes`, in groups that use each other, each group after every
