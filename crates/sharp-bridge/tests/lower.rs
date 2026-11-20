@@ -36304,3 +36304,131 @@ fn a_family_reads_and_writes_a_variant_by_its_name() {
         "##}
     );
 }
+
+/// The machine of spec section 20.2's specimen: each case's block holds the moves out of it, `open` is its entry
+/// point, and `Shipped` and `Cancelled` are `final`.
+const ORDER_STATUS: &str = "namespace Shop;\n\npublic machine OrderStatus : string\n{\n    case Draft = \"draft\"\n    {\n        public OrderStatus.Paid pay(int cents)\n        {\n            if (cents <= 0) {\n                throw new ValueError(\"A payment is positive.\");\n            }\n            return OrderStatus.Paid(cents);\n        }\n\n        public OrderStatus.Cancelled cancel() => OrderStatus.Cancelled;\n    }\n\n    case Paid(int cents) = \"paid\"\n    {\n        public OrderStatus.Shipped ship() => OrderStatus.Shipped;\n    }\n\n    final case Shipped = \"shipped\";\n    final case Cancelled = \"cancelled\";\n\n    public static OrderStatus.Draft open() => OrderStatus.Draft;\n\n    law paidIsPositive(OrderStatus.Paid paid) => paid.cents > 0;\n}\n";
+
+/// ```php
+/// final class OrderStatus\Draft extends \Shop\OrderStatus implements \Sharp\Struct
+/// {
+///     public function pay(int $cents): \Shop\OrderStatus\Paid { … }
+///     public function ship() { throw new \Sharp\StateError('OrderStatus is Draft, and ship moves from Paid.'); }
+/// }
+/// final class OrderStatus\Paid extends \Shop\OrderStatus implements \Sharp\Struct
+/// {
+///     public function '#invariants'() { $paid = $this; if (!($paid->cents > 0)) { throw new \ValueError('OrderStatus.Paid breaks paidIsPositive.'); } }
+/// }
+/// ```
+///
+/// Spec section 20.2: a machine runs as the classes an enum whose cases carry data runs as, and the class of each case
+/// holds the moves of its block. Each move of the machine that doesn't move from a case is a method of the case's
+/// class that throws `Sharp\StateError`, naming the machine, the case and the cases the move moves from. The class of a
+/// case with fields evaluates each invariant, a law whose one parameter is the case, in its `#invariants`, which the
+/// engine calls on each case it reads.
+#[test]
+fn a_machine_case_holds_its_moves_and_throws_a_state_error_for_each_move_it_lacks() {
+    let lowered = [Lowered::new(ORDER_STATUS)];
+    let method = |class_name: &str, name: &str| {
+        let (lowered, class) = class_in(&lowered, class_name);
+        let members = lowered.child(class, 2);
+        let method = (0..lowered.nodes()[members as usize].child_count)
+            .map(|index| lowered.child(members, index))
+            .find(|member| {
+                let node = &lowered.nodes()[*member as usize];
+                node.kind == sharp_kind::SHARP_AST_METHOD && lowered.text(node.text) == name
+            })
+            .unwrap_or_else(|| panic!("`{class_name}` declares `{name}`"));
+
+        lowered.render(method)
+    };
+
+    assert_eq!(
+        method("OrderStatus\\Draft", "ship"),
+        indoc! {r#"
+            METHOD [1] "ship" @5-5
+              PARAM_LIST
+              null
+              STMT_LIST
+                THROW
+                  NEW
+                    ZVAL "Sharp\\StateError"
+                    ARG_LIST
+                      ZVAL "OrderStatus is Draft, and ship moves from Paid."
+              null
+              null
+        "#}
+    );
+    assert_eq!(
+        method("OrderStatus\\Shipped", "pay"),
+        indoc! {r#"
+            METHOD [1] "pay" @23-23
+              PARAM_LIST
+                PARAM
+                  null
+                  ZVAL "cents"
+                  null
+                  null
+                  null
+                  null
+              null
+              STMT_LIST
+                THROW
+                  NEW
+                    ZVAL "Sharp\\StateError"
+                    ARG_LIST
+                      ZVAL "OrderStatus is Shipped, and pay moves from Draft."
+              null
+              null
+        "#}
+    );
+    assert_eq!(
+        method("OrderStatus\\Draft", "cancel"),
+        indoc! {r#"
+            METHOD [1] "cancel" @15-15
+              PARAM_LIST
+              null
+              STMT_LIST
+                RETURN
+                  STATIC_CALL
+                    ZVAL "Shop\\OrderStatus\\Cancelled"
+                    ZVAL "instance"
+                    ARG_LIST
+              SHARP_TYPE_ARGS
+                ZVAL "Shop\\OrderStatus\\Cancelled"
+                ZVAL "Function<Shop.OrderStatus.Cancelled()>"
+              null
+        "#}
+    );
+    assert_eq!(
+        method("OrderStatus\\Paid", "#invariants"),
+        indoc! {r##"
+            METHOD [1] "#invariants" @18-18
+              PARAM_LIST
+              null
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "paid"
+                  VAR
+                    ZVAL "this"
+                IF
+                  IF_ELEM
+                    UNARY_OP [14]
+                      GREATER
+                        PROP
+                          VAR
+                            ZVAL "paid"
+                          ZVAL "cents"
+                        ZVAL 0
+                    STMT_LIST
+                      THROW
+                        NEW
+                          ZVAL "ValueError"
+                          ARG_LIST
+                            ZVAL "OrderStatus.Paid breaks paidIsPositive."
+              null
+              null
+        "##}
+    );
+}

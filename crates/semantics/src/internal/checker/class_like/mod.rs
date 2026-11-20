@@ -955,7 +955,12 @@ pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Contex
 
     check_members(&r#enum.members, r#enum.span(), "enum", enum_name_bytes, enum_fqcn_bytes, context);
 
-    for member in &r#enum.members {
+    // A machine's case holds members of the machine's kinds, spec section 20.2, which the checks below hold to them.
+    let case_members = r#enum.members.iter().flat_map(|member| match member {
+        ClassLikeMember::EnumCase(case) => case.members(),
+        _ => &[],
+    });
+    for member in r#enum.members.iter().chain(case_members) {
         match &member {
             ClassLikeMember::EnumCase(case) => {
                 let item_name = BytesDisplay(case.item.name().value);

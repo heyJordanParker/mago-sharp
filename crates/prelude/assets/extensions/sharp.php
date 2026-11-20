@@ -254,6 +254,11 @@ final class Container
 final class ContainerError extends \Error {}
 
 /**
+ * A move called on a case of a machine it doesn't move from, as `pay` on an `OrderStatus` that is `Paid`.
+ */
+final class StateError extends \Error {}
+
+/**
  * The handle of a listener `Events.on` starts: the engine stops the listener when the handle is destroyed.
  */
 final class Listening

@@ -36351,3 +36351,20 @@ fn a_match_over_a_machine_lists_every_case() {
         ]
     );
 }
+
+/// Spec sections 10 and 20.2: a machine marked `[Tag]` is a family whose `[Key]` cases are its variants, so
+/// `Json.encode` writes a case and `Json.decode` reads one as a family's variant.
+#[test]
+fn a_tagged_machine_reads_and_writes_its_cases_as_a_family() {
+    let status = (
+        "src/Shop/OrderStatus.sharp",
+        "namespace Shop;\n\nimport Sharp.Key;\nimport Sharp.Tag;\n\n[Tag(\"status\")]\npublic machine OrderStatus\n{\n    [Key(\"draft\")] case Draft\n    {\n        public OrderStatus.Paid pay(int cents) => OrderStatus.Paid(cents);\n    }\n\n    [Key(\"paid\")] case Paid(int cents)\n    {\n        public OrderStatus.Shipped ship() => OrderStatus.Shipped;\n    }\n\n    [Key(\"shipped\")] final case Shipped;\n\n    public static OrderStatus.Draft open() => OrderStatus.Draft;\n}\n",
+    );
+    let stored = (
+        "src/Shop/Stored.sharp",
+        "namespace Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class Stored\n{\n    public static string encode(OrderStatus status) => Json.encode(status);\n\n    public static OrderStatus decode(string json) => Json.decode<OrderStatus>(json);\n}\n",
+    );
+
+    assert_eq!(refusals(status, &[KEY, TAG]), Vec::<String>::new());
+    assert_eq!(refusals(stored, &[KEY, TAG, JSON, JSON_VALUE, status]), Vec::<String>::new());
+}

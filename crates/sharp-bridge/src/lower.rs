@@ -2334,25 +2334,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn data_enum(&mut self, r#enum: &Enum, statements: &mut Vec<u32>) {
         self.class = self.names.get(&r#enum.name);
         let enum_name = self.class;
-        let mut members = Vec::new();
-        // A law, spec section 28, is checked and never runs, so the engine gets no node for it.
-        for member in &r#enum.members {
-            members.push(match member {
-                ClassLikeMember::Method(method) => {
-                    self.method(method, modifier_flags_or_private(&method.modifiers), &[])
-                }
-                ClassLikeMember::Constant(constant) => self.constant(constant),
-                ClassLikeMember::Property(property) if runs_static_accessors(property) => {
-                    members.extend(self.static_accessors(property, None));
-
-                    continue;
-                }
-                ClassLikeMember::Property(property @ Property::Computed(_)) => self.property(property, None),
-                ClassLikeMember::Operator(operator) => self.operator(operator, None),
-                ClassLikeMember::EnumCase(_) | ClassLikeMember::Law(_) => continue,
-                _ => unreachable!("check_slice refuses the enum member `{member}`"),
-            });
-        }
+        let mut members = self.enum_members(r#enum.members.as_slice());
         members.extend(self.class_metadata(word(self.class), self.line(r#enum.name), r#enum.members.as_slice()));
         members.extend(self.parse_methods(&r#enum.members, r#enum.name.span));
         let cases: Vec<Vec<u8>> = r#enum
@@ -2411,8 +2393,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     members
                 }
             };
+            self.class = class;
+            members.extend(self.enum_members(case.members()));
+            members.extend(self.refused_moves(r#enum, case));
+            members.extend(self.invariants(r#enum, case));
+            self.class = enum_name;
             // A case of a generic enum passes its type arguments to the enum, as `Ok<T, TError>` to `Result<T, TError>`.
-            members.extend(self.class_metadata(word(&case_class), line, &[]));
+            members.extend(self.class_metadata(word(&case_class), line, case.members()));
             let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
             let marker = self.string(ZEND_NAME_FQ, line, b"Sharp\\Struct");
             let header = self.node(SHARP_AST_NAME_LIST, 0, line, &[marker]);
@@ -2429,6 +2416,185 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 &[parent, header, members, attributes, NULL],
             ));
         }
+    }
+
+    /// The constants, methods, operators and static or computed properties of an enum that runs as classes, or of a
+    /// machine's case, spec section 20.2, for the class being lowered. A case and a law, spec section 28, which is
+    /// checked and never runs, get no node.
+    fn enum_members(&mut self, declared: &[ClassLikeMember]) -> Vec<u32> {
+        let mut members = Vec::new();
+        for member in declared {
+            members.push(match member {
+                ClassLikeMember::Method(method) => {
+                    self.method(method, modifier_flags_or_private(&method.modifiers), &[])
+                }
+                ClassLikeMember::Constant(constant) => self.constant(constant),
+                ClassLikeMember::Property(property) if runs_static_accessors(property) => {
+                    members.extend(self.static_accessors(property, None));
+
+                    continue;
+                }
+                ClassLikeMember::Property(property @ Property::Computed(_)) => self.property(property, None),
+                ClassLikeMember::Operator(operator) => self.operator(operator, None),
+                ClassLikeMember::EnumCase(_) | ClassLikeMember::Law(_) => continue,
+                _ => unreachable!("check_slice refuses the enum member `{member}`"),
+            });
+        }
+
+        members
+    }
+
+    /// A method of the class of the case `case` of the machine `machine`, spec section 20.2, for each move of the
+    /// machine that doesn't move from the case, which throws `Sharp\StateError`:
+    /// `public function pay($cents) { throw new \Sharp\StateError('OrderStatus is Shipped, and pay moves from Draft.'); }`.
+    /// It takes the move's parameters by name, so a call that names its arguments throws too.
+    fn refused_moves(&mut self, machine: &Enum, case: &EnumCase) -> Vec<u32> {
+        let Some(metadata) = self.types.machine(word(self.names.get(&machine.name))) else {
+            return Vec::new();
+        };
+        let case_name = case.item.name();
+        let line = self.line(case_name.span);
+        let mut names: Vec<Word> = Vec::new();
+        for r#move in &metadata.moves {
+            if !names.contains(&r#move.name) {
+                names.push(r#move.name);
+            }
+        }
+
+        let mut members = Vec::new();
+        for name in names {
+            let from: Vec<&[u8]> = metadata
+                .moves
+                .iter()
+                .filter(|r#move| r#move.name == name)
+                .flat_map(|r#move| r#move.from.iter().map(Word::as_bytes))
+                .collect();
+            if from.is_empty() || from.contains(&case_name.value) {
+                continue;
+            }
+            let Some(declared) = machine
+                .members
+                .iter()
+                .flat_map(|member| match member {
+                    ClassLikeMember::EnumCase(case) => case.members(),
+                    member => std::slice::from_ref(member),
+                })
+                .find_map(|member| match member {
+                    ClassLikeMember::Method(method) if method.name.value == name.as_bytes() => Some(method),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+
+            let parameters: Vec<u32> = declared
+                .parameter_list
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    let parameter = self.local_name(0, line, parameter.variable.name);
+
+                    self.node(SHARP_AST_PARAM, 0, line, &[NULL, parameter, NULL, NULL, NULL, NULL])
+                })
+                .collect();
+            let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
+            let message = [
+                machine.name.value,
+                b" is ",
+                case_name.value,
+                b", and ",
+                name.as_bytes(),
+                b" moves from ",
+                &listed(&from),
+                b".",
+            ]
+            .concat();
+            let exception = self.string(ZEND_NAME_FQ, line, b"Sharp\\StateError");
+            let message = self.string(0, line, &message);
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[message]);
+            let created = self.node(SHARP_AST_NEW, 0, line, &[exception, arguments]);
+            let thrown = self.node(SHARP_AST_THROW, 0, line, &[created]);
+            let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[thrown]);
+            members.push(self.declaration(
+                SHARP_AST_METHOD,
+                ZEND_ACC_PUBLIC,
+                case_name.span,
+                case_name.span,
+                name.as_bytes(),
+                &[parameters, NULL, body, NULL, NULL],
+            ));
+        }
+
+        members
+    }
+
+    /// The `#invariants` of the class of the case `case` of the machine `machine`, spec section 20.2, which the engine
+    /// calls on each case it reads, as `Json.decode` and `parse` do: each law of the machine whose one parameter is the
+    /// case, an invariant, holds of it, or the method throws a `ValueError` that names the invariant:
+    /// `public function '#invariants'() { $paid = $this; if (!($paid->cents > 0)) { throw new \ValueError('OrderStatus.Paid breaks paidIsPositive.'); } }`.
+    /// A law with a `when` condition holds where the condition does. None for a case no invariant names.
+    fn invariants(&mut self, machine: &Enum, case: &EnumCase) -> Option<u32> {
+        if !machine.is_machine() || !matches!(case.item, EnumCaseItem::Data(_)) {
+            return None;
+        }
+        let case_name = case.item.name();
+        let line = self.line(case_name.span);
+        let class = self.class;
+        self.enter(b"#invariants");
+        let taken = self.temporaries;
+        let mut statements = Vec::new();
+        for member in &machine.members {
+            let ClassLikeMember::Law(law) = member else {
+                continue;
+            };
+            let [parameter] = law.parameter_list.parameters.as_slice() else {
+                continue;
+            };
+            let names_case = parameter.hint.as_ref().is_some_and(|hint| {
+                self.types
+                    .declared_type(hint)
+                    .get_single_named_object()
+                    .is_some_and(|named| named.name.as_bytes().eq_ignore_ascii_case(class))
+            });
+            if !names_case {
+                continue;
+            }
+
+            let this = self.variable(case_name.span, b"this");
+            statements.push(self.assign(parameter.variable.span, parameter.variable.name, this));
+            let claim = self.expression(law.claim);
+            let broken = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[claim]);
+            let broken = match &law.condition {
+                Some(condition) => {
+                    let condition = self.expression(condition.expression);
+                    self.node(SHARP_AST_AND, 0, line, &[condition, broken])
+                }
+                None => broken,
+            };
+            let message = [machine.name.value, b".", case_name.value, b" breaks ", law.name.value, b"."].concat();
+            let exception = self.string(ZEND_NAME_FQ, line, b"ValueError");
+            let message = self.string(0, line, &message);
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[message]);
+            let created = self.node(SHARP_AST_NEW, 0, line, &[exception, arguments]);
+            let thrown = self.node(SHARP_AST_THROW, 0, line, &[created]);
+            statements.push(self.if_chain(law.span(), &[(broken, thrown)]));
+        }
+        self.temporaries = taken;
+        if statements.is_empty() {
+            return None;
+        }
+
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+
+        Some(self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            case_name.span,
+            case_name.span,
+            b"#invariants",
+            &[parameters, NULL, body, NULL, NULL],
+        ))
     }
 
     /// The members of the class `class` of a plain case of an enum that runs as classes, at `name`: the private static
@@ -10189,6 +10355,19 @@ fn declares_equality(members: &Sequence<ClassLikeMember>) -> bool {
     members.iter().any(|member| {
         matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
     })
+}
+
+/// `names` as one text, the last after "or", as `Draft, Open or Paid`.
+fn listed(names: &[&[u8]]) -> Vec<u8> {
+    let mut text = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        if index > 0 {
+            text.extend_from_slice(if index + 1 == names.len() { b" or " } else { b", " });
+        }
+        text.extend_from_slice(name);
+    }
+
+    text
 }
 
 /// The static constructor among `members`, spec section 6, if any.

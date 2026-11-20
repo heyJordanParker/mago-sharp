@@ -18,6 +18,7 @@ use mago_codex::metadata::attribute::ConstantExpression;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::machine::MachineMetadata;
 use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::module::dispatcher;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
@@ -1999,6 +2000,11 @@ impl<'analysis> Types<'analysis> {
     /// Whether the class-like `class` is a family, marked `[Tag]`, whose `parse` builds a variant by its name.
     pub(crate) fn is_family(&self, class: Word) -> bool {
         self.codebase.get_class_like(class).is_some_and(|class| class.tag_key().is_some())
+    }
+
+    /// The cases and moves of the PHP# machine `class`, spec section 20.2. None for any other class.
+    pub(crate) fn machine(&self, class: Word) -> Option<&'analysis MachineMetadata> {
+        self.codebase.get_class_like(class)?.machine.as_ref()
     }
 
     /// The key of the family above the class `class` and the class's name in it, which its encoding writes first, as
