@@ -52,7 +52,6 @@ use mago_database::DatabaseReader;
 use mago_database::ReadDatabase;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
-use mago_database::file::COMPANION_START;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
@@ -1152,10 +1151,6 @@ fn unreached(configuration: &Configuration, root: &Path, path: &Path) -> Result<
     if path.is_absolute() {
         return Ok(format!("{shown} is outside the workspace {}.", root.display()));
     }
-    if std::fs::read(&on_disk).is_ok_and(|contents| contents.starts_with(COMPANION_START.as_bytes())) {
-        let sharp = path.with_extension("sharp");
-        return Ok(format!("{shown} is what mago compile writes for `{}`, which is already PHP#.", sharp.display()));
-    }
     let sources = &configuration.source.paths;
     let inside = sources.is_empty()
         || if on_disk.is_dir() {
@@ -2012,7 +2007,6 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         let elsewhere = tempfile::tempdir().unwrap();
         let outside = elsewhere.path().canonicalize().unwrap().join("Outside.php");
         let class = "<?php\n\nnamespace Generated;\n\nfinal class Made\n{\n}\n";
-        let written = format!("{COMPANION_START}src/Contracts/Order.sharp\n");
         for (path, code) in [
             ("config/app.php", "<?php\n\nreturn ['name' => 'app'];\n"),
             ("database/seeders/DatabaseSeeder.php", class),
@@ -2020,8 +2014,6 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             ("src/Generated/Made.php", class),
             ("src/Notes/readme.md", "notes\n"),
             ("src/Contracts/notes.txt", "notes\n"),
-            ("src/Contracts/Order.sharp", "namespace Generated.Contracts;\n\npublic interface Order\n{\n}\n"),
-            ("src/Contracts/Order.php", &written),
         ] {
             std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
             std::fs::write(root.join(path), code).unwrap();
@@ -2048,7 +2040,6 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             "src/Generated/Made.php",
             "src/Notes",
             "src/Contracts/notes.txt",
-            "src/Contracts/Order.php",
         ];
         let mut named: Vec<PathBuf> = paths.iter().map(|path| root.join(path)).collect();
         named.push(outside.clone());
@@ -2067,7 +2058,6 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
                 "src/Generated/Made.php is excluded from the project's analysis.".to_owned(),
                 "src/Notes holds no plain PHP file the project's analysis loads.".to_owned(),
                 "src/Contracts/notes.txt is no plain PHP file.".to_owned(),
-                "src/Contracts/Order.php is what mago compile writes for `src/Contracts/Order.sharp`, which is already PHP#.".to_owned(),
                 format!("{} is outside the workspace {}.", outside.display(), root.display()),
             ]
         );

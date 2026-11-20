@@ -534,11 +534,9 @@ impl<'config> DatabaseWatcher<'config> {
                                 &self.include_base_paths,
                             );
                             let mut file = file_from(&workspace, path, file_type, contents)?;
-                            if !file.is_companion() {
-                                mark_package(&mut file, &workspace, &mut manifests);
-                                self.database.add(file);
-                                tracing::debug!("Added new file to database: {}", path.display());
-                            }
+                            mark_package(&mut file, &workspace, &mut manifests);
+                            self.database.add(file);
+                            tracing::debug!("Added new file to database: {}", path.display());
                         }
                     }
                 }

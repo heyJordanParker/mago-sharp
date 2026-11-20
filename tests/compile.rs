@@ -2108,6 +2108,30 @@ fn analyze_refuses_a_php_file_and_a_source_that_declare_one_class() {
     );
 }
 
+/// Composer's loader finds a class's `.php` file before the PHP# loader finds its `.sharp` file, so a plain PHP class
+/// that takes a PHP# class's name is what a request would run. It meets that PHP# type, and the compile refuses its file
+/// with the analysis's duplicate-definition error, and still compiles the `.sharp` file.
+#[test]
+fn compile_refuses_a_plain_php_class_that_takes_a_php_sharp_class_s_name() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "app/Shop/StoreService.sharp", "namespace App.Shop;\n\npublic class StoreService\n{\n}\n");
+    write(root, "app/Shop/StoreService.php", "<?php\n\nnamespace App\\Shop;\n\nfinal class StoreService\n{\n}\n");
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "app/Shop/StoreService.php:5:1: error[duplicate-definition]: Class `App\\Shop\\StoreService` is already defined in `app/Shop/StoreService.sharp`."
+        ),
+        "{}",
+        printed(&output)
+    );
+    assert!(printed(&output).contains("1 plain PHP file was refused"), "{}", printed(&output));
+    assert!(compiled(root, "app/Shop/StoreService.sharp").exists());
+}
+
 /// The compiled files get the mode any new file gets, `0644` under the usual umask, as the source itself got, so a
 /// server that runs PHP as another user, as PHP-FPM's pool user, reads them.
 #[cfg(unix)]

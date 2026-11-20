@@ -455,17 +455,14 @@ fn workspace_relative_string(path: &Path, workspace: &Path) -> String {
     }
 }
 
-/// Reads the file a walk listed at `path`, or none when it is a companion or [`read_listed`] finds it gone.
+/// Reads the file a walk listed at `path`, or none when [`read_listed`] finds it gone.
 fn read_listed_file(workspace: &Path, path: &Path, file_type: FileType) -> Option<Result<File, DatabaseError>> {
     let bytes = match read_listed(path) {
         Ok(bytes) => bytes?,
         Err(error) => return Some(Err(error)),
     };
 
-    match file_from(workspace, path, file_type, bytes) {
-        Ok(file) if file.is_companion() => None,
-        file => Some(file),
-    }
+    Some(file_from(workspace, path, file_type, bytes))
 }
 
 /// The bytes of the file a listing named at `path`, or none when no file is there any more.

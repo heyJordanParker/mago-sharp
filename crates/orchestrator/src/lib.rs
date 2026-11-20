@@ -162,9 +162,8 @@ impl Autoloader {
             return Ok(None);
         };
         let name = File::logical_name(&self.workspace, path);
-        let file = File::new(Cow::Owned(name), FileType::Vendored, Some(path.to_path_buf()), Cow::Owned(contents));
 
-        Ok((!file.is_companion()).then_some(file))
+        Ok(Some(File::new(Cow::Owned(name), FileType::Vendored, Some(path.to_path_buf()), Cow::Owned(contents))))
     }
 
     /// The patterns that keep the database from reading the plain PHP files the maps serve: those of the configured

@@ -884,13 +884,25 @@ impl IncrementalAnalysisService {
     /// Refuses each plain PHP file that declares a class extending or implementing a PHP# type that it doesn't satisfy,
     /// spec section 22: each error the analysis reports at the class's declaration that names a PHP# declaration, as a
     /// missing `Defaults` trait or a member whose signature doesn't fit the PHP# member it implements, a case the engine
-    /// refuses when it links the class. The analysis names the class in each error of its declaration's checks. Every
-    /// other error in a plain PHP file stays the analysis's, as kotlinc checks a Java type only where it meets a Kotlin
-    /// declaration and leaves every other Java error to javac: the type arguments a docblock's `@implements` or
-    /// `@extends` gives a PHP# generic type among them, since the engine erases type parameters and reads no docblock.
+    /// refuses when it links the class. The analysis names the class in each error of its declaration's checks. A plain
+    /// PHP class that takes a PHP# class's name meets that type too, and its duplicate-definition error is refused, since
+    /// Composer's loader would load it in the PHP# class's place. Every other error in a plain PHP file stays the
+    /// analysis's, as kotlinc checks a Java type only where it meets a Kotlin declaration and leaves every other Java
+    /// error to javac: the type arguments a docblock's `@implements` or `@extends` gives a PHP# generic type among them,
+    /// since the engine erases type parameters and reads no docblock.
     fn unlinkable_plain_php_classes(&self, errors: &HashMap<FileId, IssueCollection>) -> Vec<(FileId, Compilation)> {
         let in_sharp_file = |annotation: &Annotation| {
             self.database.get(&annotation.span.file_id).is_ok_and(|file| Dialect::of(&file).is_sharp())
+        };
+        let in_plain_php_file = |file_id: &FileId| {
+            self.database
+                .get(file_id)
+                .is_ok_and(|file| file.file_type == FileType::Host && !Dialect::of(&file).is_sharp())
+        };
+        let duplicates_here = |issue: &Issue, annotation: &Annotation| {
+            annotation.is_primary()
+                && issue.code.as_deref() == Some(IssueCode::DuplicateDefinition.as_str())
+                && in_plain_php_file(&annotation.span.file_id)
         };
         let reads_docblock = |issue: &Issue| {
             issue.code.as_deref().is_some_and(|code| {
@@ -911,18 +923,16 @@ impl IncrementalAnalysisService {
             .class_likes
             .values()
             .filter(|class| class.all_parent_classes.iter().chain(&class.all_parent_interfaces).any(names_sharp_type))
-            .filter(|class| {
-                self.database
-                    .get(&class.span.file_id)
-                    .is_ok_and(|file| file.file_type == FileType::Host && !Dialect::of(&file).is_sharp())
-            })
+            .filter(|class| in_plain_php_file(&class.span.file_id))
             .map(|class| class.name_span.unwrap_or(class.span))
             .collect();
 
         let mut refused: HashMap<FileId, IssueCollection> = HashMap::default();
         for issue in errors.values().flat_map(IssueCollection::iter).filter(|issue| !reads_docblock(issue)) {
-            if let Some(declaration) =
-                issue.annotations.iter().find(|annotation| declarations.contains(&annotation.span))
+            if let Some(declaration) = issue
+                .annotations
+                .iter()
+                .find(|annotation| declarations.contains(&annotation.span) || duplicates_here(issue, annotation))
                 && issue.annotations.iter().any(in_sharp_file)
             {
                 refused.entry(declaration.span.file_id).or_default().push(issue.clone());
