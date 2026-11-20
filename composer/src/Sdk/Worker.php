@@ -524,36 +524,50 @@ final class Worker
     {
         $host = new HostClient();
         if (is_array($payload)) {
-            [$kind, $reader] = WorkerProtocol::readRequest($payload);
+            $protocol = match ($payload[0] ?? null) {
+                LinterProtocol::NAME => LinterProtocol::class,
+                WorkerProtocol::NAME => WorkerProtocol::class,
+                default => throw new ProtocolException('Unknown Mago extension capability protocol.'),
+            };
+            try {
+                [$kind, $reader] = $protocol::readRequest($payload);
+            } catch (ProtocolException $exception) {
+                throw $this->unreadable($exception);
+            }
 
-            return $this->handleWorkerRequest($kind, $reader, $host);
+            return $protocol === LinterProtocol::class
+                ? $this->handleLinterRequest($kind, $reader)
+                : $this->handleWorkerRequest($kind, $reader, $host);
         }
 
-        $protocol = match (substr($payload, 0, 4)) {
-            'MLNT' => LinterProtocol::class,
-            'MANA' => AnalyzerProtocol::class,
-            default => throw new ProtocolException('Unknown Mago extension capability protocol.'),
-        };
+        if (substr($payload, 0, 4) !== 'MANA') {
+            throw new ProtocolException('Unknown Mago extension capability protocol.');
+        }
 
         try {
-            [$kind, $reader] = $protocol::readRequest($payload);
+            [$kind, $reader] = AnalyzerProtocol::readRequest($payload);
         } catch (ProtocolException $exception) {
-            $extensions = implode(', ', array_map(
-                static fn(Extension $extension): string => "`{$extension->identifier}`",
-                $this->extensions,
-            ));
-
-            throw new ProtocolException(
-                "The worker of {$extensions} can't read mago's request: {$exception->getMessage()}",
-                0,
-                $exception,
-            );
+            throw $this->unreadable($exception);
         }
 
-        return match ($protocol) {
-            LinterProtocol::class => $this->handleLinterRequest($kind, $reader),
-            AnalyzerProtocol::class => $this->handleAnalyzerRequest($kind, $reader, $host),
-        };
+        return $this->handleAnalyzerRequest($kind, $reader, $host);
+    }
+
+    /**
+     * The error for a request of mago's that `$exception` says this worker can't read, which names its extensions.
+     */
+    private function unreadable(ProtocolException $exception): ProtocolException
+    {
+        $extensions = implode(', ', array_map(
+            static fn(Extension $extension): string => "`{$extension->identifier}`",
+            $this->extensions,
+        ));
+
+        return new ProtocolException(
+            "The worker of {$extensions} can't read mago's request: {$exception->getMessage()}",
+            0,
+            $exception,
+        );
     }
 
     /**
@@ -605,7 +619,10 @@ final class Worker
         return WorkerProtocol::writeReduceResponse();
     }
 
-    private function handleLinterRequest(int $kind, PayloadReader $reader): string
+    /**
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    private function handleLinterRequest(int $kind, ValueReader $reader): array
     {
         if ($kind === LinterProtocol::DESCRIBE_REQUEST) {
             [$this->phpVersion, $this->nodeKinds] = LinterProtocol::readDescribeRequest($reader);

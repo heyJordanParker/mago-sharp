@@ -19,6 +19,7 @@ pub use hosts::Host;
 pub use hosts::HostFile;
 pub use hosts::Hosts;
 pub use hosts::WorkerRequestHandler;
+pub use mago_engine::Value;
 pub use payload::PayloadReader;
 pub use payload::PayloadWriter;
 pub use payload::ValueReader;

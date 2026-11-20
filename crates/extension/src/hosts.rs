@@ -85,7 +85,7 @@ struct Bootstrap {
     sequence: u64,
     host: usize,
     group: Option<u64>,
-    request: Vec<u8>,
+    request: Value,
 }
 
 /// What one thread's interpreter has done: its id, the last bootstrap it received, and how many reloads it checked.
@@ -195,13 +195,13 @@ impl Hosts {
 
     /// Gives the calling thread's interpreter each bootstrap after `replayed`, in order.
     fn replay(&self, replayed: u64) -> Result<(), WorkerError> {
-        let pending: Vec<(u64, usize, Vec<u8>)> = lock(&self.bootstraps)
+        let pending: Vec<(u64, usize, Value)> = lock(&self.bootstraps)
             .iter()
             .filter(|bootstrap| bootstrap.sequence > replayed)
             .map(|bootstrap| (bootstrap.sequence, bootstrap.host, bootstrap.request.clone()))
             .collect();
         for (sequence, host, request) in pending {
-            self.handle(host, Value::String(request), None, &mut no_queries)?;
+            self.handle(host, request, None, &mut no_queries)?;
             self.mark_replayed(sequence);
         }
 
@@ -225,7 +225,7 @@ impl Hosts {
         }
 
         let classes: Vec<&[u8]> = changed.iter().map(Vec::as_slice).collect();
-        let answer = self.handle_list(0, reduction::class_loads_request(&classes)?)?;
+        let answer = self.handle_list(0, reduction::class_loads_request(&classes)?, None, &mut no_queries)?;
         if reduction::decode_class_loads_response(&answer)? {
             tracing::debug!(
                 interpreter = prepared.interpreter,
@@ -323,11 +323,14 @@ impl Hosts {
     }
 
     /// Serves `request`, a message of values, with the worker of host `host`, which answers with one.
-    fn handle_list(&self, host: usize, request: Vec<Value>) -> Result<Vec<Value>, WorkerError> {
-        match self.handle(host, Value::List(request), None, &mut no_queries)? {
-            Value::List(response) => Ok(response),
-            _ => Err(unanswered(&self.files[host])),
-        }
+    fn handle_list(
+        &self,
+        host: usize,
+        request: Vec<Value>,
+        running: Option<&dyn Display>,
+        handler: &mut dyn WorkerRequestHandler,
+    ) -> Result<Vec<Value>, WorkerError> {
+        list_of(&self.files[host], self.handle(host, Value::List(request), running, handler)?)
     }
 
     /// Serves `request`, a message of bytes, with the worker of host `host`, which answers with one.
@@ -353,7 +356,7 @@ impl Hosts {
                 .with_borrow(|prepared| prepared.get(&self.id).copied())
                 .filter(|p| Some(p.interpreter) == current)?;
 
-            Some(self.handle_list(host, reduction::collect_request()))
+            Some(self.handle_list(host, reduction::collect_request(), None, &mut no_queries))
         };
         let mut collected: Vec<Result<Vec<Value>, WorkerError>> = if self.pooled.load(Ordering::Acquire) {
             rayon::broadcast(|_| collect()).into_iter().flatten().collect()
@@ -374,7 +377,7 @@ impl Hosts {
         }
 
         self.prepare()?;
-        let answer = self.handle_list(host, reduction::reduce_request(&responses)?)?;
+        let answer = self.handle_list(host, reduction::reduce_request(&responses)?, None, &mut no_queries)?;
 
         reduction::decode_reduce_response(&answer)
     }
@@ -430,11 +433,36 @@ impl Host {
     ///
     /// Returns an error when the interpreter can't be made ready or the worker fails a request.
     pub fn broadcast_sequence(&self, group: Option<u64>, requests: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, WorkerError> {
+        let file = &self.hosts.files[self.index];
+        let requests = requests.iter().map(|request| Value::String(request.clone())).collect();
+        self.broadcast_messages(group, requests)?
+            .into_iter()
+            .map(|response| match response {
+                Value::String(response) => Ok(response),
+                _ => Err(unanswered(file)),
+            })
+            .collect()
+    }
+
+    /// Sends `request`, a message of values, as [`Self::broadcast`] sends one of bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the interpreter can't be made ready or the worker fails the request.
+    pub fn broadcast_values(&self, request: &[Value]) -> Result<Vec<Value>, WorkerError> {
+        let response = self.broadcast_messages(None, vec![Value::List(request.to_vec())])?.pop();
+
+        list_of(&self.hosts.files[self.index], response.unwrap_or(Value::Null))
+    }
+
+    /// Sends `requests` to the host's worker in every interpreter, and keeps each as a bootstrap, which replaces those an
+    /// earlier sequence of `group` sent.
+    fn broadcast_messages(&self, group: Option<u64>, requests: Vec<Value>) -> Result<Vec<Value>, WorkerError> {
         let hosts = &self.hosts;
         hosts.prepare()?;
         let responses = requests
             .iter()
-            .map(|request| hosts.handle_bytes(self.index, request.clone(), None, &mut no_queries))
+            .map(|request| hosts.handle(self.index, request.clone(), None, &mut no_queries))
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut bootstraps = lock(&hosts.bootstraps);
@@ -443,7 +471,7 @@ impl Host {
         }
         for request in requests {
             let sequence = hosts.next_bootstrap.fetch_add(1, Ordering::Relaxed);
-            bootstraps.push(Bootstrap { sequence, host: self.index, group, request: request.clone() });
+            bootstraps.push(Bootstrap { sequence, host: self.index, group, request });
             hosts.mark_replayed(sequence);
         }
 
@@ -465,6 +493,22 @@ impl Host {
     ) -> Result<Vec<u8>, WorkerError> {
         self.hosts.prepare()?;
         self.hosts.handle_bytes(self.index, request, running, handler)
+    }
+
+    /// Sends `request`, a message of values, as [`Self::request`] sends one of bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the interpreter can't be made ready, the worker fails the request, or the request runs past
+    /// its deadline.
+    pub fn request_values(
+        &self,
+        request: Vec<Value>,
+        running: Option<&dyn Display>,
+        handler: &mut dyn WorkerRequestHandler,
+    ) -> Result<Vec<Value>, WorkerError> {
+        self.hosts.prepare()?;
+        self.hosts.handle_list(self.index, request, running, handler)
     }
 
     /// Takes in that the compiled files of `classes`, each a lowercase class name, changed: each interpreter that loaded
@@ -553,6 +597,14 @@ fn redeclared(message: &str) -> Option<String> {
 
 fn unanswered(file: &HostFile) -> WorkerError {
     WorkerError::Failed { host: file.name.clone(), message: "its worker answered with no response".to_owned() }
+}
+
+/// The fields of `response`, the answer of `file`'s worker to a message of values, which is one too.
+fn list_of(file: &HostFile, response: Value) -> Result<Vec<Value>, WorkerError> {
+    match response {
+        Value::List(response) => Ok(response),
+        _ => Err(unanswered(file)),
+    }
 }
 
 fn path_value(path: &Path) -> Value {

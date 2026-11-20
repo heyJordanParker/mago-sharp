@@ -12,8 +12,11 @@ use mago_syntax::cst::Program;
 use mago_syntax::cst::TriviaKind;
 use strum::IntoEnumIterator;
 
+use mago_engine::Value;
+
 use crate::PayloadError;
 use crate::PayloadWriter;
+use crate::ValueWriter;
 
 /// Sentinel used by packed node records for absent parent and sibling links.
 pub const NO_NODE: u32 = u32::MAX;
@@ -34,6 +37,14 @@ pub fn write_node_kind_table(writer: &mut PayloadWriter) {
         let name = kind.to_string();
         writer.write_u32(name.len() as u32);
         writer.write_raw(name.as_bytes());
+    }
+}
+
+/// Writes the ordered node-kind table used to validate SDK compatibility, as fields of a message of values.
+pub fn write_node_kind_values(writer: &mut ValueWriter) {
+    writer.write_u32(NodeKind::COUNT as u32);
+    for kind in NodeKind::iter() {
+        writer.write_value(Value::String(kind.to_string().into_bytes()));
     }
 }
 
@@ -310,6 +321,59 @@ impl<'arena> SourceSnapshot<'arena> {
             writer.write_u32(*start);
             writer.write_u32(*end);
         }
+
+        Ok(())
+    }
+
+    /// Writes the target identifiers, then the syntax, name, and trivia tables, each one string of packed records
+    /// after its count, as fields of a message of values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a table or name buffer exceeds `u32::MAX` bytes.
+    pub fn write_values_to(&self, writer: &mut ValueWriter) -> Result<(), PayloadError> {
+        writer.write_length(self.targets.len())?;
+        for target in &self.targets {
+            writer.write_u32(*target);
+        }
+
+        writer.write_length(self.nodes.len())?;
+        let mut nodes = PayloadWriter::with_capacity(self.nodes.len().saturating_mul(NODE_RECORD_SIZE));
+        for node in &self.nodes {
+            nodes.write_u16(node.kind as u16);
+            nodes.write_u32(node.start);
+            nodes.write_u32(node.end);
+            nodes.write_u32(node.parent.unwrap_or(NO_NODE));
+            nodes.write_u32(node.first_child.unwrap_or(NO_NODE));
+            nodes.write_u32(node.next_sibling.unwrap_or(NO_NODE));
+        }
+        writer.write_bytes(&nodes.finish())?;
+
+        writer.write_length(self.names.len())?;
+        let mut starts = PayloadWriter::with_capacity(self.names.len().saturating_mul(4));
+        let mut records = PayloadWriter::with_capacity(self.names.len().saturating_mul(NAME_RECORD_SIZE));
+        let mut text = Vec::new();
+        for (start, end, name, imported, binding) in &self.names {
+            starts.write_u32(*start);
+            records.write_u32(*end);
+            records.write_length(text.len())?;
+            records.write_length(name.len())?;
+            records.write_bool(*imported);
+            records.write_u8(*binding);
+            text.extend_from_slice(name);
+        }
+        writer.write_bytes(&starts.finish())?;
+        writer.write_bytes(&records.finish())?;
+        writer.write_bytes(&text)?;
+
+        writer.write_length(self.trivia.len())?;
+        let mut trivia = PayloadWriter::with_capacity(self.trivia.len().saturating_mul(TRIVIA_RECORD_SIZE));
+        for (kind, start, end) in &self.trivia {
+            trivia.write_u8(*kind);
+            trivia.write_u32(*start);
+            trivia.write_u32(*end);
+        }
+        writer.write_bytes(&trivia.finish())?;
 
         Ok(())
     }

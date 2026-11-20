@@ -6,8 +6,8 @@ namespace Mago\Tests\Sdk\Unit\Syntax;
 
 use Mago\Sdk\Exception\ProtocolException;
 use Mago\Sdk\Internal\Analyzer\Protocol as AnalyzerProtocol;
-use Mago\Sdk\Internal\Linter\Protocol as LinterProtocol;
 use Mago\Sdk\Internal\Protocol\PayloadReader;
+use Mago\Sdk\Internal\Protocol\ValueReader;
 use Mago\Sdk\Internal\Syntax\NodeStore;
 use Mago\Sdk\Internal\Syntax\ResolvedNameStore;
 use Mago\Sdk\Internal\Syntax\SourceFileCodec;
@@ -104,6 +104,25 @@ final class SourceFileTest extends TestCase
         );
     }
 
+    public function testASnapshotOfValuesWhoseNodeTableEndsEarlyIsRefused(): void
+    {
+        $noNode = 4_294_967_295;
+        $nodes = pack('nNNNNN', 0, 0, 10, $noNode, $noNode, $noNode);
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage(
+            'The source snapshot holds 22 bytes of node records, where its 2 records take 44.',
+        );
+
+        SourceFileCodec::readValues(
+            new ValueReader([0, 2, $nodes]),
+            PHPVersion::fromParts(8, 4),
+            [NodeKind::Program],
+            'a.php',
+            '',
+        );
+    }
+
     public function testTheNodesOfAKindAreTheScannedNodesOfThatKindInOrder(): void
     {
         $noNode = 4_294_967_295;
@@ -138,7 +157,7 @@ final class SourceFileTest extends TestCase
     }
 
     /**
-     * @return iterable<string, array{class-string<AnalyzerProtocol|LinterProtocol>, string, string}>
+     * @return iterable<string, array{class-string<AnalyzerProtocol>, string, string}>
      */
     public static function previousProtocolVersions(): iterable
     {
@@ -147,15 +166,10 @@ final class SourceFileTest extends TestCase
             pack('N3', 0x4D41_4E41, 0x0001_000A, 1 << 16),
             '`mago` speaks analyzer protocol 1.10,',
         ];
-        yield 'linter' => [
-            LinterProtocol::class,
-            pack('N3', 0x4D4C_4E54, 0x0001_0001, 1 << 16),
-            '`mago` speaks linter protocol 1.1,',
-        ];
     }
 
     /**
-     * @param class-string<AnalyzerProtocol|LinterProtocol> $protocol
+     * @param class-string<AnalyzerProtocol> $protocol
      */
     #[DataProvider('previousProtocolVersions')]
     public function testASnapshotMessageFromThePreviousProtocolVersionIsRefused(

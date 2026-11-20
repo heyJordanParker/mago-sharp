@@ -6,70 +6,49 @@ namespace Mago\Sdk\Internal\Linter;
 
 use Mago\Sdk\Exception\ProtocolException;
 use Mago\Sdk\Extension;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
-use Mago\Sdk\Internal\Protocol\PayloadWriter;
+use Mago\Sdk\Internal\Protocol\ValueReader;
+use Mago\Sdk\Internal\Protocol\ValueWriter;
 use Mago\Sdk\Internal\Syntax\SourceFileCodec;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\Reporting\Issue;
 use Mago\Sdk\Syntax\NodeKind;
 
 use function count;
-use function Mago\Internal\release_mismatch;
-use function pack;
-use function strlen;
-use function unpack;
 
 /**
  * @internal
  */
 final class Protocol
 {
+    /** The name every linter message starts with. */
+    public const NAME = 'linter';
+
     public const DESCRIBE_REQUEST = 1;
     public const LINT_FILE_REQUEST = 2;
 
-    private const MAGIC = 'MLNT';
-    private const MAGIC_U32 = 0x4D4C_4E54;
-    private const MAJOR = 1;
-    private const MINOR = 2;
-    private const VERSION_U32 = (self::MAJOR << 16) | self::MINOR;
     private const DESCRIBE_RESPONSE = 0x8001;
     private const LINT_FILE_RESPONSE = 0x8002;
     private const MAXIMUM_ISSUES = 1_000_000;
 
     /**
-     * @return array{int<0, 65535>, PayloadReader}
+     * @param list<null|bool|int|float|string|list<mixed>> $payload
+     *
+     * @return array{int<0, 65535>, ValueReader}
      */
-    public static function readRequest(string $payload): array
+    public static function readRequest(array $payload): array
     {
-        /** @var array{1: int<0, 4294967295>, 2: int<0, 4294967295>, 3: int<0, 4294967295>} $header */
-        $header = unpack('N3', $payload);
-        if ($header[1] !== self::MAGIC_U32) {
-            throw new ProtocolException('Invalid linter message magic.');
+        $reader = new ValueReader($payload);
+        if ($reader->readBytes() !== self::NAME) {
+            throw new ProtocolException('The message is no linter message.');
         }
 
-        $version = $header[2];
-        if ($version !== self::VERSION_U32) {
-            $major = $version >> 16;
-            $minor = $version & 0xffff;
-            throw new ProtocolException(release_mismatch(
-                "speaks linter protocol {$major}.{$minor}",
-                'speaks ' . self::MAJOR . '.' . self::MINOR,
-            ));
-        }
-
-        $message = $header[3];
-        $reserved = $message & 0xffff;
-        if ($reserved !== 0) {
-            throw new ProtocolException("Linter message reserved bits are non-zero: {$reserved}.");
-        }
-
-        return [$message >> 16, new PayloadReader($payload, 12)];
+        return [$reader->readU16(), $reader];
     }
 
     /**
      * @return array{PHPVersion, list<NodeKind>}
      */
-    public static function readDescribeRequest(PayloadReader $reader): array
+    public static function readDescribeRequest(ValueReader $reader): array
     {
         $version = new PHPVersion($reader->readU32());
         $kinds = SourceFileCodec::readNodeKinds($reader);
@@ -80,8 +59,10 @@ final class Protocol
 
     /**
      * @param non-empty-list<Extension> $extensions
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    public static function writeDescribeResponse(array $extensions): string
+    public static function writeDescribeResponse(array $extensions): array
     {
         $writer = self::createMessage(self::DESCRIBE_RESPONSE);
         $writer->writeCount($extensions);
@@ -111,12 +92,12 @@ final class Protocol
     /**
      * @param list<NodeKind> $kinds
      */
-    public static function readLintRequest(PayloadReader $reader, PHPVersion $phpVersion, array $kinds): LintRequest
+    public static function readLintRequest(ValueReader $reader, PHPVersion $phpVersion, array $kinds): LintRequest
     {
         $file = $reader->readBytes();
         $source = $reader->readBytes();
         $activeRules = self::readActiveRules($reader);
-        $sourceFile = SourceFileCodec::read($reader, $phpVersion, $kinds, $file, $source);
+        $sourceFile = SourceFileCodec::readValues($reader, $phpVersion, $kinds, $file, $source);
 
         $reader->finish();
 
@@ -126,7 +107,7 @@ final class Protocol
     /**
      * @return list<int<0, 65535>>
      */
-    private static function readActiveRules(PayloadReader $reader): array
+    private static function readActiveRules(ValueReader $reader): array
     {
         $activeRules = [];
         $count = $reader->readU16();
@@ -139,8 +120,10 @@ final class Protocol
 
     /**
      * @param list<int<0, 65535>|Issue> $reportedIssues Flat rule index and issue pairs.
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
      */
-    public static function writeLintResponse(array $reportedIssues): string
+    public static function writeLintResponse(array $reportedIssues): array
     {
         $valueCount = count($reportedIssues);
         $issueCount = $valueCount >> 1;
@@ -148,48 +131,50 @@ final class Protocol
             throw new ProtocolException('A linter response contains too many issues.');
         }
 
-        $payload = pack('N4', self::MAGIC_U32, self::VERSION_U32, self::LINT_FILE_RESPONSE << 16, $issueCount);
+        $values = [self::NAME, self::LINT_FILE_RESPONSE, $issueCount];
         for ($index = 0; $index < $valueCount; $index += 2) {
             /** @var int<0, 65535> $ruleIndex */
             $ruleIndex = $reportedIssues[$index];
             /** @var Issue $issue */
             $issue = $reportedIssues[$index + 1];
-            $payload .= pack('nN', $ruleIndex, strlen($issue->message)) . $issue->message;
-            $payload .= pack('N', count($issue->notes));
+            $values[] = $ruleIndex;
+            $values[] = $issue->message;
+            $values[] = count($issue->notes);
             foreach ($issue->notes as $note) {
-                $payload .= pack('N', strlen($note)) . $note;
+                $values[] = $note;
             }
 
-            $payload .= $issue->help === null ? "\0" : "\1" . pack('N', strlen($issue->help)) . $issue->help;
-            $payload .= $issue->link === null ? "\0" : "\1" . pack('N', strlen($issue->link)) . $issue->link;
-            $payload .= pack('N', count($issue->annotations));
+            $values[] = $issue->help;
+            $values[] = $issue->link;
+            $values[] = count($issue->annotations);
             foreach ($issue->annotations as $annotation) {
-                $payload .= pack('CNN', $annotation->kind->value, $annotation->span->start, $annotation->span->end);
-                $payload .= $annotation->message === null
-                    ? "\0"
-                    : "\1" . pack('N', strlen($annotation->message)) . $annotation->message;
+                $values[] = $annotation->kind->value;
+                $values[] = $annotation->span->start;
+                $values[] = $annotation->span->end;
+                $values[] = $annotation->message;
             }
 
-            $payload .= pack('N', count($issue->edits));
+            $values[] = count($issue->edits);
             foreach ($issue->edits as $edit) {
                 if ($edit->file !== null) {
                     throw new ProtocolException('A linter text edit cannot target another file.');
                 }
 
-                $payload .=
-                    pack('NNCN', $edit->span->start, $edit->span->end, $edit->safety->value, strlen($edit->newText))
-                    . $edit->newText;
+                $values[] = $edit->span->start;
+                $values[] = $edit->span->end;
+                $values[] = $edit->safety->value;
+                $values[] = $edit->newText;
             }
         }
 
-        return $payload;
+        return $values;
     }
 
     /**
      * @param int<0, 65535> $kind
      */
-    private static function createMessage(int $kind): PayloadWriter
+    private static function createMessage(int $kind): ValueWriter
     {
-        return new PayloadWriter(pack('N3', self::MAGIC_U32, self::VERSION_U32, $kind << 16));
+        return new ValueWriter([self::NAME, $kind]);
     }
 }

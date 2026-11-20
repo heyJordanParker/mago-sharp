@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use mago_database::file::File;
 use mago_extension::Host;
+use mago_extension::Value;
 use mago_extension::WorkerError;
 use mago_names::ResolvedNames;
 use mago_php_version::PHPVersion;
@@ -47,8 +48,8 @@ struct ExternalLintTelemetry {
     names: AtomicU64,
     trivia: AtomicU64,
     issues: AtomicU64,
-    request_bytes: AtomicU64,
-    response_bytes: AtomicU64,
+    request_fields: AtomicU64,
+    response_fields: AtomicU64,
     encode_ns: AtomicU64,
     snapshot_ns: AtomicU64,
     serialization_ns: AtomicU64,
@@ -84,18 +85,20 @@ pub struct ExternalExtension {
 }
 
 pub(crate) trait LinterTransport: std::fmt::Debug + Send + Sync {
-    fn broadcast(&self, payload: &[u8]) -> Result<Vec<u8>, WorkerError>;
+    fn broadcast(&self, payload: &[Value]) -> Result<Vec<Value>, WorkerError>;
     /// Sends one lint request, named by `running` for its deadline's error.
-    fn request(&self, payload: Vec<u8>, running: &dyn std::fmt::Display) -> Result<Vec<u8>, WorkerError>;
+    fn request(&self, payload: Vec<Value>, running: &dyn std::fmt::Display) -> Result<Vec<Value>, WorkerError>;
 }
 
 impl LinterTransport for Host {
-    fn broadcast(&self, payload: &[u8]) -> Result<Vec<u8>, WorkerError> {
-        Self::broadcast(self, payload)
+    fn broadcast(&self, payload: &[Value]) -> Result<Vec<Value>, WorkerError> {
+        Self::broadcast_values(self, payload)
     }
 
-    fn request(&self, payload: Vec<u8>, running: &dyn std::fmt::Display) -> Result<Vec<u8>, WorkerError> {
-        Self::request(self, payload, Some(running), &mut |_: &[u8]| Err(b"a linter rule queries no codebase".to_vec()))
+    fn request(&self, payload: Vec<Value>, running: &dyn std::fmt::Display) -> Result<Vec<Value>, WorkerError> {
+        Self::request_values(self, payload, Some(running), &mut |_: &[u8]| {
+            Err(b"a linter rule queries no codebase".to_vec())
+        })
     }
 }
 
@@ -193,7 +196,7 @@ impl<T> ExternalLinter<T> {
         let mut file_decode_ns = 0u64;
         let mut file_requests = 0u64;
         let mut file_issues = 0u64;
-        let mut file_request_bytes = 0u64;
+        let mut file_request_fields = 0u64;
         let mut file_targets = 0u64;
         let mut file_nodes = 0u64;
         if self.trace_enabled {
@@ -253,13 +256,13 @@ impl<T> ExternalLinter<T> {
                 self.telemetry.nodes.fetch_add(request.nodes as u64, Ordering::Relaxed);
                 self.telemetry.names.fetch_add(request.names as u64, Ordering::Relaxed);
                 self.telemetry.trivia.fetch_add(request.trivia as u64, Ordering::Relaxed);
-                self.telemetry.request_bytes.fetch_add(request.payload.len() as u64, Ordering::Relaxed);
+                self.telemetry.request_fields.fetch_add(request.payload.len() as u64, Ordering::Relaxed);
                 self.telemetry.snapshot_ns.fetch_add(duration_nanos(request.snapshot_duration), Ordering::Relaxed);
                 self.telemetry
                     .serialization_ns
                     .fetch_add(duration_nanos(request.serialization_duration), Ordering::Relaxed);
                 file_requests += 1;
-                file_request_bytes = file_request_bytes.saturating_add(request.payload.len() as u64);
+                file_request_fields = file_request_fields.saturating_add(request.payload.len() as u64);
                 file_targets = file_targets.saturating_add(request.targets as u64);
                 file_nodes = file_nodes.saturating_add(request.nodes as u64);
             }
@@ -277,7 +280,7 @@ impl<T> ExternalLinter<T> {
                 let elapsed = duration_nanos(start.elapsed());
                 file_ipc_ns = file_ipc_ns.saturating_add(elapsed);
                 self.telemetry.ipc_ns.fetch_add(elapsed, Ordering::Relaxed);
-                self.telemetry.response_bytes.fetch_add(response.len() as u64, Ordering::Relaxed);
+                self.telemetry.response_fields.fetch_add(response.len() as u64, Ordering::Relaxed);
             }
             let decode_start = self.trace_enabled.then(Instant::now);
             let backend_issues =
@@ -306,7 +309,7 @@ impl<T> ExternalLinter<T> {
                     elapsed = ?elapsed,
                     requests = file_requests,
                     issues = file_issues,
-                    request_bytes = file_request_bytes,
+                    request_fields = file_request_fields,
                     targets = file_targets,
                     nodes = file_nodes,
                     encode_ms = nanos_millis(file_encode_ns),
@@ -344,7 +347,7 @@ impl<T> ExternalLinter<T> {
             let backend_start = trace_enabled.then(Instant::now);
             tracing::trace!(
                 backend = backend_index,
-                request_bytes = describe.len(),
+                request_fields = describe.len(),
                 "Describing external linter backend."
             );
             let response = transport.broadcast(&describe)?;
@@ -366,7 +369,7 @@ impl<T> ExternalLinter<T> {
             if let Some(start) = backend_start {
                 tracing::trace!(
                     backend = backend_index,
-                    response_bytes = response.len(),
+                    response_fields = response.len(),
                     extensions = registration.extensions.len(),
                     rules = registration.rules.len(),
                     elapsed = ?start.elapsed(),
@@ -422,8 +425,8 @@ impl<T> Drop for ExternalLinter<T> {
             nodes = self.telemetry.nodes.load(Ordering::Relaxed),
             resolved_names = self.telemetry.names.load(Ordering::Relaxed),
             trivia = self.telemetry.trivia.load(Ordering::Relaxed),
-            request_bytes = self.telemetry.request_bytes.load(Ordering::Relaxed),
-            response_bytes = self.telemetry.response_bytes.load(Ordering::Relaxed),
+            request_fields = self.telemetry.request_fields.load(Ordering::Relaxed),
+            response_fields = self.telemetry.response_fields.load(Ordering::Relaxed),
             "External linter snapshot summary."
         );
         tracing::trace!(
@@ -479,21 +482,21 @@ mod tests {
 
     #[derive(Debug)]
     struct MockTransport {
-        registration: Vec<u8>,
-        response: Vec<u8>,
+        registration: Vec<Value>,
+        response: Vec<Value>,
         request: Mutex<Option<testing::DecodedRequest>>,
     }
 
     impl LinterTransport for MockTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, mago_extension::WorkerError> {
+        fn broadcast(&self, _payload: &[Value]) -> Result<Vec<Value>, mago_extension::WorkerError> {
             Ok(self.registration.clone())
         }
 
         fn request(
             &self,
-            payload: Vec<u8>,
+            payload: Vec<Value>,
             _running: &dyn std::fmt::Display,
-        ) -> Result<Vec<u8>, mago_extension::WorkerError> {
+        ) -> Result<Vec<Value>, mago_extension::WorkerError> {
             *self.request.lock().unwrap() = Some(testing::decode_lint_request(&payload).unwrap());
             Ok(self.response.clone())
         }
@@ -506,7 +509,7 @@ mod tests {
     }
 
     impl LinterTransport for NamingTransport {
-        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<u8>, mago_extension::WorkerError> {
+        fn broadcast(&self, _payload: &[Value]) -> Result<Vec<Value>, mago_extension::WorkerError> {
             Ok(testing::describe_response(
                 "acme/tools",
                 "Acme Tools",
@@ -517,9 +520,9 @@ mod tests {
 
         fn request(
             &self,
-            _payload: Vec<u8>,
+            _payload: Vec<Value>,
             running: &dyn std::fmt::Display,
-        ) -> Result<Vec<u8>, mago_extension::WorkerError> {
+        ) -> Result<Vec<Value>, mago_extension::WorkerError> {
             self.names.lock().unwrap().push(running.to_string());
             Ok(testing::lint_response(&[]))
         }

@@ -1,22 +1,18 @@
-//! Stable binary messages carried inside `mago-extension` frames.
-//!
-//! All integers are unsigned and big-endian. Strings and byte strings are a
-//! `u32` byte length followed by that many bytes. The fixed message header is:
-//! `MLNT`, protocol major, protocol minor, message kind, reserved zero.
-
-#![allow(clippy::big_endian_bytes, reason = "network byte order is part of the stable linter wire format")]
+//! The linter's messages to and from an extension host: each a list of engine values, one per field, that starts with
+//! the protocol's name, `linter`, and the message kind.
 
 use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
 use mago_database::file::File;
-use mago_extension::PayloadReader;
-use mago_extension::PayloadWriter;
+use mago_extension::Value;
+use mago_extension::ValueReader;
+use mago_extension::ValueWriter;
 #[cfg(test)]
 use mago_extension::source::NO_NODE;
 use mago_extension::source::SourceSnapshot;
-use mago_extension::source::write_node_kind_table;
+use mago_extension::source::write_node_kind_values;
 use mago_names::ResolvedNames;
 use mago_php_version::PHPVersion;
 use mago_reporting::Annotation;
@@ -37,11 +33,8 @@ use strum::IntoEnumIterator;
 use super::ExternalLintError;
 use super::ExternalRule;
 
-pub const LINTER_PROTOCOL_MAGIC: [u8; 4] = *b"MLNT";
-pub const LINTER_PROTOCOL_MAJOR: u16 = 1;
-pub const LINTER_PROTOCOL_MINOR: u16 = 2;
-
-const HEADER_LENGTH: usize = 12;
+/// The name every linter message starts with, which the SDK routes it by.
+const PROTOCOL: &[u8] = b"linter";
 const DESCRIBE_REQUEST: u16 = 1;
 const LINT_FILE_REQUEST: u16 = 2;
 const DESCRIBE_RESPONSE: u16 = 0x8001;
@@ -63,7 +56,7 @@ pub(super) struct Registration {
 
 #[derive(Debug)]
 pub(super) struct LintRequest {
-    pub payload: Vec<u8>,
+    pub payload: Vec<Value>,
     pub targets: usize,
     pub nodes: usize,
     pub names: usize,
@@ -72,15 +65,15 @@ pub(super) struct LintRequest {
     pub serialization_duration: Duration,
 }
 
-pub(super) fn encode_describe_request(php_version: PHPVersion) -> Vec<u8> {
+pub(super) fn encode_describe_request(php_version: PHPVersion) -> Vec<Value> {
     let mut writer = message_writer(DESCRIBE_REQUEST);
     writer.write_u32(php_version.to_version_id());
-    write_node_kind_table(&mut writer);
+    write_node_kind_values(&mut writer);
 
     writer.finish()
 }
 
-pub(super) fn decode_registration(payload: &[u8]) -> Result<Registration, ExternalLintError> {
+pub(super) fn decode_registration(payload: &[Value]) -> Result<Registration, ExternalLintError> {
     let mut reader = message_reader(payload, DESCRIBE_RESPONSE)?;
     let extension_count = reader.read_count("extensions", MAXIMUM_EXTENSIONS)?;
     if extension_count == 0 {
@@ -196,15 +189,7 @@ pub(super) fn encode_lint_request<'arena>(
     let node_count = snapshot.node_count();
     let name_count = snapshot.name_count();
     let trivia_count = snapshot.trivia_count();
-    let payload_capacity = HEADER_LENGTH
-        + 4
-        + file.name.len()
-        + 4
-        + file.contents.len()
-        + 2
-        + (active_rules.len() * 2)
-        + snapshot.encoded_len();
-    let mut writer = message_writer_with_capacity(LINT_FILE_REQUEST, payload_capacity);
+    let mut writer = message_writer(LINT_FILE_REQUEST);
     writer.write_bytes(file.name.as_ref())?;
     writer.write_bytes(file.contents.as_ref())?;
     writer.write_u16(
@@ -213,7 +198,7 @@ pub(super) fn encode_lint_request<'arena>(
     for index in active_rules {
         writer.write_u16(*index);
     }
-    snapshot.write_to(&mut writer)?;
+    snapshot.write_values_to(&mut writer)?;
 
     Ok(Some(LintRequest {
         payload: writer.finish(),
@@ -227,7 +212,7 @@ pub(super) fn encode_lint_request<'arena>(
 }
 
 pub(super) fn decode_lint_response(
-    payload: &[u8],
+    payload: &[Value],
     file: &File,
     rules: &[ExternalRule],
     active_rules: &[u16],
@@ -322,30 +307,17 @@ fn protocol(message: impl Into<String>) -> ExternalLintError {
     ExternalLintError::Protocol(message.into())
 }
 
-fn message_writer(kind: u16) -> PayloadWriter {
-    message_writer_with_capacity(kind, HEADER_LENGTH)
-}
-
-fn message_writer_with_capacity(kind: u16, capacity: usize) -> PayloadWriter {
-    let mut writer = PayloadWriter::with_capacity(capacity);
-    writer.write_raw(&LINTER_PROTOCOL_MAGIC);
-    writer.write_u16(LINTER_PROTOCOL_MAJOR);
-    writer.write_u16(LINTER_PROTOCOL_MINOR);
+fn message_writer(kind: u16) -> ValueWriter {
+    let mut writer = ValueWriter::new();
+    writer.write_value(Value::String(PROTOCOL.to_vec()));
     writer.write_u16(kind);
-    writer.write_u16(0);
     writer
 }
 
-fn message_reader(payload: &[u8], expected_kind: u16) -> Result<PayloadReader<'_>, ExternalLintError> {
-    let mut reader = PayloadReader::new(payload);
-    if reader.read_array::<4>("message magic")? != LINTER_PROTOCOL_MAGIC {
-        return Err(protocol("invalid linter message magic"));
-    }
-
-    let major = reader.read_u16("protocol major version")?;
-    let minor = reader.read_u16("protocol minor version")?;
-    if major != LINTER_PROTOCOL_MAJOR {
-        return Err(protocol(format!("unsupported linter protocol version {major}.{minor}")));
+fn message_reader(payload: &[Value], expected_kind: u16) -> Result<ValueReader<'_>, ExternalLintError> {
+    let mut reader = ValueReader::new(payload);
+    if reader.read_bytes("message protocol")? != PROTOCOL {
+        return Err(protocol("the message is no linter message"));
     }
 
     let kind = reader.read_u16("message kind")?;
@@ -353,15 +325,10 @@ fn message_reader(payload: &[u8], expected_kind: u16) -> Result<PayloadReader<'_
         return Err(protocol(format!("expected linter message kind {expected_kind}, received {kind}")));
     }
 
-    let reserved = reader.read_u16("reserved header")?;
-    if reserved != 0 {
-        return Err(protocol(format!("linter message reserved header is non-zero: {reserved:#06x}")));
-    }
-
     Ok(reader)
 }
 
-fn read_level(reader: &mut PayloadReader<'_>) -> Result<Level, ExternalLintError> {
+fn read_level(reader: &mut ValueReader<'_>) -> Result<Level, ExternalLintError> {
     match reader.read_u8("severity level")? {
         1 => Ok(Level::Note),
         2 => Ok(Level::Help),
@@ -371,7 +338,7 @@ fn read_level(reader: &mut PayloadReader<'_>) -> Result<Level, ExternalLintError
     }
 }
 
-fn read_annotation_kind(reader: &mut PayloadReader<'_>) -> Result<AnnotationKind, ExternalLintError> {
+fn read_annotation_kind(reader: &mut ValueReader<'_>) -> Result<AnnotationKind, ExternalLintError> {
     match reader.read_u8("annotation kind")? {
         1 => Ok(AnnotationKind::Primary),
         2 => Ok(AnnotationKind::Secondary),
@@ -379,7 +346,7 @@ fn read_annotation_kind(reader: &mut PayloadReader<'_>) -> Result<AnnotationKind
     }
 }
 
-fn read_safety(reader: &mut PayloadReader<'_>, description: &'static str) -> Result<Safety, ExternalLintError> {
+fn read_safety(reader: &mut ValueReader<'_>, description: &'static str) -> Result<Safety, ExternalLintError> {
     match reader.read_u8(description)? {
         1 => Ok(Safety::Safe),
         2 => Ok(Safety::PotentiallyUnsafe),
@@ -391,6 +358,8 @@ fn read_safety(reader: &mut PayloadReader<'_>, description: &'static str) -> Res
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 pub(super) mod testing {
+    use mago_extension::PayloadReader;
+
     use super::*;
 
     type RuleDescription<'rule> = (&'rule str, &'rule str, &'rule str, Level, bool, &'rule [NodeKind]);
@@ -415,11 +384,11 @@ pub(super) mod testing {
         pub trivia: Vec<(String, u32, u32)>,
     }
 
-    pub fn describe_response(identifier: &str, name: &str, version: &str, rules: &[RuleDescription<'_>]) -> Vec<u8> {
+    pub fn describe_response(identifier: &str, name: &str, version: &str, rules: &[RuleDescription<'_>]) -> Vec<Value> {
         describe_extensions_response(&[(identifier, name, version, rules)])
     }
 
-    pub fn describe_extensions_response(extensions: &[(&str, &str, &str, &[RuleDescription<'_>])]) -> Vec<u8> {
+    pub fn describe_extensions_response(extensions: &[(&str, &str, &str, &[RuleDescription<'_>])]) -> Vec<Value> {
         let mut writer = message_writer(DESCRIBE_RESPONSE);
         writer.write_length(extensions.len()).unwrap();
         for (identifier, extension_name, version, rules) in extensions {
@@ -444,7 +413,7 @@ pub(super) mod testing {
         writer.finish()
     }
 
-    pub fn lint_response(issues: &[(u16, Issue)]) -> Vec<u8> {
+    pub fn lint_response(issues: &[(u16, Issue)]) -> Vec<Value> {
         let mut writer = message_writer(LINT_FILE_RESPONSE);
         writer.write_length(issues.len()).unwrap();
         for (rule_index, issue) in issues {
@@ -486,7 +455,7 @@ pub(super) mod testing {
         writer.finish()
     }
 
-    pub fn decode_lint_request(payload: &[u8]) -> Result<DecodedRequest, ExternalLintError> {
+    pub fn decode_lint_request(payload: &[Value]) -> Result<DecodedRequest, ExternalLintError> {
         let mut reader = message_reader(payload, LINT_FILE_REQUEST)?;
         let file_name = reader.read_bytes("file name")?.to_vec();
         let source = reader.read_bytes("source")?.to_vec();
@@ -505,22 +474,24 @@ pub(super) mod testing {
         }
 
         let node_count = reader.read_u32("node count")? as usize;
+        let mut records = PayloadReader::new(reader.read_bytes("node records")?);
         let mut raw_nodes = Vec::with_capacity(node_count);
         for _ in 0..node_count {
-            let kind_index = reader.read_u16("node kind index")? as usize;
+            let kind_index = records.read_u16("node kind index")? as usize;
             let kind =
                 kinds.get(kind_index).ok_or_else(|| protocol(format!("invalid node kind index {kind_index}")))?.clone();
-            let start = reader.read_u32("node start")?;
-            let end = reader.read_u32("node end")?;
-            let parent = match reader.read_u32("node parent")? {
+            let start = records.read_u32("node start")?;
+            let end = records.read_u32("node end")?;
+            let parent = match records.read_u32("node parent")? {
                 NO_NODE => None,
                 parent => Some(parent),
             };
-            let first_child = reader.read_u32("first child")?;
-            let next_sibling = reader.read_u32("next sibling")?;
+            let first_child = records.read_u32("first child")?;
+            let next_sibling = records.read_u32("next sibling")?;
 
             raw_nodes.push((kind, start, end, parent, first_child, next_sibling));
         }
+        records.finish()?;
 
         let mut nodes = Vec::with_capacity(node_count);
         for (kind, start, end, parent, first_child, _) in &raw_nodes {
@@ -542,22 +513,26 @@ pub(super) mod testing {
         }
 
         let name_count = reader.read_u32("name count")? as usize;
+        let mut starts = PayloadReader::new(reader.read_bytes("name starts")?);
         let mut name_starts = Vec::with_capacity(name_count);
         for _ in 0..name_count {
-            name_starts.push(reader.read_u32("name start")?);
+            name_starts.push(starts.read_u32("name start")?);
         }
+        starts.finish()?;
 
+        let mut records = PayloadReader::new(reader.read_bytes("name records")?);
         let mut name_records = Vec::with_capacity(name_count);
         for _ in 0..name_count {
             name_records.push((
-                reader.read_u32("name end")?,
-                reader.read_u32("name offset")? as usize,
-                reader.read_u32("name length")? as usize,
-                reader.read_bool("imported")?,
+                records.read_u32("name end")?,
+                records.read_u32("name offset")? as usize,
+                records.read_u32("name length")? as usize,
+                records.read_bool("imported")?,
             ));
             // A PHP file's names have no binding, and the linter refuses PHP# files.
-            reader.read_u8("name binding")?;
+            records.read_u8("name binding")?;
         }
+        records.finish()?;
 
         let names_buffer = reader.read_bytes("resolved names")?;
         let mut names = Vec::with_capacity(name_count);
@@ -569,23 +544,25 @@ pub(super) mod testing {
         }
 
         let trivia_count = reader.read_u32("trivia count")? as usize;
+        let mut records = PayloadReader::new(reader.read_bytes("trivia records")?);
         let mut trivia = Vec::with_capacity(trivia_count);
         for _ in 0..trivia_count {
-            let kind = match reader.read_u8("trivia kind")? {
+            let kind = match records.read_u8("trivia kind")? {
                 1 => "SingleLineComment",
                 2 => "MultiLineComment",
                 3 => "HashComment",
                 4 => "DocBlockComment",
                 value => return Err(protocol(format!("invalid trivia kind {value}"))),
             };
-            trivia.push((kind.to_owned(), reader.read_u32("trivia start")?, reader.read_u32("trivia end")?));
+            trivia.push((kind.to_owned(), records.read_u32("trivia start")?, records.read_u32("trivia end")?));
         }
+        records.finish()?;
 
         reader.finish()?;
         Ok(DecodedRequest { file_name, source, active_rules, targets, nodes, names, trivia })
     }
 
-    fn optional_string(writer: &mut PayloadWriter, value: Option<&str>) {
+    fn optional_string(writer: &mut ValueWriter, value: Option<&str>) {
         writer.write_optional_string(value).unwrap();
     }
 
