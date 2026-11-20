@@ -5,11 +5,12 @@ Mago writes one `Check` request to standard input and reads the answer from stan
 source of each generated module its checks reach, and checks, each the generated modules some laws of one `.sharp`
 file reach and the theorems of those laws, after the theorems of each law they call. The runner reads no file of the
 project. It imports the runtime library once, then answers the checks on as many threads as the request asks: for each
-check it elaborates the generated modules the check reaches, elaborates each theorem with the steps its text names,
-Lean's own or those of `Sharp.Lean.Proof`, and answers for each law: proven, each case and condition its proof left open with the goal, the law
-not proven it holds through, Lean's error, or that its theorem ran out of the time budget the request gives each one. A
-generated module Lean rejects refuses its check, with the line of its first error. This elaboration is the only one a
-generated module gets: nothing builds the package.
+check it elaborates the generated modules the check reaches, then each theorem: with its fixed steps when it has them,
+and with Lean's search of `Sharp.Lean.Proof` when it has none or they leave it unproven and the runner imported that
+search. It answers for each law: proven, each case and condition its proof left open with the goal, the law not proven
+it holds through, Lean's error, or that its theorem ran out of the time budget the request gives each one. A generated
+module Lean rejects refuses its check, with the line of its first error. This elaboration is the only one a generated
+module gets: nothing builds the package.
 
 One runner answers every check of a request, so each check shares the one environment the runner imports: the modules
 of the runtime library its modules and checks name, which is all of Lean only when a check names `Sharp.Lean.Proof`. Each generated module is elaborated once per runner, whichever check reaches it first,
@@ -84,7 +85,7 @@ def putString (b : ByteArray) (s : String) : ByteArray :=
 message kind, and a reserved `u16`. -/
 
 def lawMagic : ByteArray := "MLAW".toUTF8
-def major : UInt16 := 3
+def major : UInt16 := 4
 def checkRequest : UInt16 := 1
 def checkedResponse : UInt16 := 2
 
@@ -105,10 +106,12 @@ def header (kind : UInt16) : ByteArray :=
 
 /-! The `Check` request and its answer. -/
 
-/-- One theorem of a request: the statement of the law it proves, its Lean text, and whether the answer judges it. -/
+/-- One theorem of a request: the statement of the law it proves, its Lean text, which Lean's search proves, the text of
+its fixed steps, empty when it has none, and whether the answer judges it. -/
 structure Theorem where
   statement : Name
   text : String
+  steps : String
   judged : Bool
 
 /-- One check of a request: the modules its theorems import, and the theorems, each after every theorem it uses. -/
@@ -130,7 +133,7 @@ def moduleName (name : String) : Name :=
 #guard moduleName "Sharp.Lean.Proof" == `Sharp.Lean.Proof
 
 def theorem_ : Decode Theorem := do
-  return { statement := (← string).toName, text := ← string, judged := (← u8) != 0 }
+  return { statement := (← string).toName, text := ← string, steps := ← string, judged := (← u8) != 0 }
 
 def check : Decode Check := do
   return { modules := (← many string).map moduleName, theorems := ← many theorem_ }
@@ -206,14 +209,15 @@ def holdsAll (env : Environment) (names : NameSet) : Bool := Id.run do
     unless env.contains name do return false
   return true
 
-/-- Elaborates `item` in `env`, within `heartbeats` thousand heartbeats, and gives
+/-- Elaborates the theorem `text` of the law `statement` in `env`, within `heartbeats` thousand heartbeats, and gives
 the environment with its theorem and what elaborating it gave. The steps `Sharp/Lean/Proof.lean` runs share that budget,
 so a theorem that runs out of it fails alone, and the other checks of the runner go on. -/
-def elaborate (env : Environment) (item : Theorem) (heartbeats : Nat) : IO (Environment × Elaborated) := do
-  let input := Parser.mkInputContext s!"open Sharp\n{item.text}" "<law>"
+def elaborate (env : Environment) (statement : Name) (text : String) (heartbeats : Nat) :
+    IO (Environment × Elaborated) := do
+  let input := Parser.mkInputContext s!"open Sharp\n{text}" "<law>"
   let state ← IO.processCommands input {} (Command.mkState env {} (maxHeartbeats.set unlinted heartbeats))
   let elaborated := state.commandState.env
-  let name := item.statement ++ `proof
+  let name := statement ++ `proof
   let mut steps := #[]
   let mut outOfTime := false
   let mut rejected := none
@@ -233,6 +237,11 @@ def elaborate (env : Environment) (item : Theorem) (heartbeats : Nat) : IO (Envi
       if holdsAll env uses then some (.thmDecl val, uses) else none
     | _ => none
   return (elaborated, { steps, outOfTime, rejected, declared, axioms, declaration })
+
+/-- Whether elaborating a theorem proved it: Lean declared it, with no step left open, no error and no gap. -/
+def Elaborated.proved (elaborated : Elaborated) : Bool :=
+  elaborated.declared && elaborated.steps.isEmpty && !elaborated.outOfTime && elaborated.rejected.isNone
+    && !hasGap elaborated.axioms
 
 /-! The generated modules, under the root `Code`, which the request holds and the runner elaborates, and the runtime
 library they import, which the runner imports once. -/
@@ -255,12 +264,13 @@ inductive Refusal where
   | stopped (module : Name)
   deriving Inhabited
 
-/-- What every check of a runner shares: the request's generated modules, the runtime library, the modules that stopped
-an earlier runner of the compile, the generated modules whose imports lead back to them, the time budget of each
-theorem in thousands of heartbeats, and what the checks elaborated so far. -/
+/-- What every check of a runner shares: the request's generated modules, the runtime library, whether it holds Lean's
+search, the modules that stopped an earlier runner of the compile, the generated modules whose imports lead back to
+them, the time budget of each theorem in thousands of heartbeats, and what the checks elaborated so far. -/
 structure Shared where
   sources : NameMap Source
   library : Environment
+  searches : Bool
   stopped : NameSet
   cyclic : NameSet
   heartbeats : Nat
@@ -362,16 +372,24 @@ partial def withImports (check : Nat) (modules : Array Name) : ModulesM (Environ
 
 end
 
+/-- `env` with `item`'s theorem elaborated in it, and what that gave: with its fixed steps when it has them, and with
+Lean's search when it has none or they leave it unproven and the runner holds that search. -/
+def proved (env : Environment) (item : Theorem) (shared : Shared) : IO (Environment × Elaborated) := do
+  unless item.steps.isEmpty do
+    let fixed ← elaborate env item.statement item.steps shared.heartbeats
+    if fixed.2.proved || !shared.searches then return fixed
+  elaborate env item.statement item.text shared.heartbeats
+
 /-- `env` with `item`'s theorem, and what elaborating it gave: what a check of the runner gave before, when `env` holds
 each constant its declaration uses, so the runner adds the declaration Lean already checked, and else elaborated in
-`env`. -/
+`env`, as [`proved`] elaborates it. -/
 def withTheorem (env : Environment) (item : Theorem) (shared : Shared) : IO (Environment × Elaborated) := do
   if let some elaborated := (← shared.theorems.get).find? item.statement then
     if let some (declaration, uses) := elaborated.declaration then
       if holdsAll env uses then
         if let .ok added := env.addDeclCore 0 0 declaration none (doCheck := false) then
           return (added, elaborated)
-  let (env, elaborated) ← elaborate env item shared.heartbeats
+  let (env, elaborated) ← proved env item shared
   shared.theorems.modify (·.insert item.statement elaborated)
   return (env, elaborated)
 
@@ -477,6 +495,7 @@ def respond : IO Unit := do
   let shared : Shared := {
     sources := sources.foldl (fun sources source => sources.insert (moduleName source.name) source) {}
     library := env
+    searches := library.contains `Sharp.Lean.Proof
     stopped := stopped.foldl (fun stopped module => stopped.insert (moduleName module)) {}
     cyclic := cyclicModules imports
     heartbeats

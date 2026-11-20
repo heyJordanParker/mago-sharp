@@ -17,7 +17,7 @@ use crate::package::Module;
 use crate::package::Refusal;
 
 const LAW_PROTOCOL_MAGIC: [u8; 4] = *b"MLAW";
-const LAW_PROTOCOL_MAJOR: u16 = 3;
+const LAW_PROTOCOL_MAJOR: u16 = 4;
 const LAW_PROTOCOL_MINOR: u16 = 0;
 const CHECK_REQUEST: u16 = 1;
 const CHECKED_RESPONSE: u16 = 2;
@@ -26,8 +26,11 @@ const CHECKED_RESPONSE: u16 = 2;
 pub(crate) struct Theorem<'theorem> {
     /// The Lean name of the statement of the law it proves.
     pub(crate) statement: &'theorem str,
-    /// Its Lean text.
+    /// Its Lean text, which Lean's search proves.
     pub(crate) text: &'theorem str,
+    /// Its Lean text with the fixed steps of a law without a body, which the runner elaborates first. Lean's search
+    /// then proves the theorem the steps leave unproven, when the runner imports `Sharp.Lean.Proof`.
+    pub(crate) steps: Option<&'theorem str>,
     /// Whether the answer judges it: a theorem of the file's own laws, after the theorems of the laws they call.
     pub(crate) judged: bool,
 }
@@ -76,7 +79,9 @@ pub(crate) enum Answer {
 /// Runs runners of `library` until each of `checks` has its answer, with the generated `modules` in each request. A
 /// runner imports Lean once and answers the checks on `threads` threads, which share every generated module it
 /// elaborates, and gives each theorem `heartbeats` thousand heartbeats. It elaborates the generated modules a check
-/// reaches, which refuse it when Lean rejects one, then each of its theorems in order, and judges each judged one.
+/// reaches, which refuse it when Lean rejects one, then each of its theorems in order, with its fixed steps first when
+/// it has them and with Lean's search when it has none or they leave it unproven and a check names
+/// `Sharp.Lean.Proof`, and judges each judged one.
 ///
 /// Mago stops a runner that writes nothing for its deadline, or that runs past the processor-time limit Mago itself
 /// runs under. The answers it wrote before count. When one check is left unanswered, or the runner ran on one thread,
@@ -180,7 +185,7 @@ fn run(library: &Path, request: &[u8]) -> io::Result<(Output, bool)> {
 
 /// A `Check` request: the threads to answer on, the heartbeats of each theorem in thousands, each module an earlier
 /// runner of the compile stopped in, each generated module's name and source, then for each check, each module to
-/// import, then each theorem's statement, text, and whether the answer judges it.
+/// import, then each theorem's statement, text, fixed steps or the empty string, and whether the answer judges it.
 fn encode(
     threads: usize,
     heartbeats: u32,
@@ -215,6 +220,7 @@ fn encode(
         for theorem in &check.theorems {
             writer.write_string(theorem.statement).map_err(io::Error::other)?;
             writer.write_string(theorem.text).map_err(io::Error::other)?;
+            writer.write_string(theorem.steps.unwrap_or_default()).map_err(io::Error::other)?;
             writer.write_u8(u8::from(theorem.judged));
         }
     }
@@ -490,7 +496,7 @@ mod tests {
         ];
         let proving = |module: &str, statement: &'static str, text: &'static str| Check {
             modules: vec![module.to_owned()],
-            theorems: vec![Theorem { statement, text, judged: true }],
+            theorems: vec![Theorem { statement, text, steps: None, judged: true }],
         };
         let checks = [
             proving("Code.App.Fine", "App.Fine.isOne", "theorem App.Fine.isOne.proof : App.Fine.one = 1 := rfl"),
@@ -527,11 +533,13 @@ mod tests {
         let proved = || Theorem {
             statement: "App.Fine.isOne",
             text: "theorem App.Fine.isOne.proof : App.Fine.one = 1 := rfl",
+            steps: None,
             judged: true,
         };
         let slow = Theorem {
             statement: "App.Fine.slow",
             text: "theorem App.Fine.slow.proof : (List.range 120).foldl (· + ·) 0 = 7140 := by decide",
+            steps: None,
             judged: true,
         };
         let checks = [
@@ -544,6 +552,50 @@ mod tests {
         assert_eq!(
             answers,
             [Answer::Judged(vec![Judgment::OutOfTime, Judgment::Proved]), Answer::Judged(vec![Judgment::Proved]),]
+        );
+
+        Ok(())
+    }
+
+    /// A theorem whose fixed steps leave it unproven proves with Lean's search in the same runner, when a check names
+    /// `Sharp.Lean.Proof`, and the search's judgment is its answer. A runner that imports only the runtime library
+    /// answers with the steps' judgment.
+    #[test]
+    fn a_theorem_the_fixed_steps_leave_unproven_proves_with_lean_s_search_in_the_same_runner() -> io::Result<()> {
+        let library = library()?;
+        let modules = [module("Code.App.Fine", "import Sharp.Lean.Law\n\ndef App.Fine.one : Nat := 1\n")];
+        let theorem = || Theorem {
+            statement: "App.Fine.isOne",
+            text: "theorem App.Fine.isOne.proof : App.Fine.one = 1 := rfl",
+            steps: Some("theorem App.Fine.isOne.proof : App.Fine.one = 1 := by contradiction"),
+            judged: true,
+        };
+        let checking = |imported: &[&str]| Check {
+            modules: imported.iter().map(|module| (*module).to_owned()).collect(),
+            theorems: vec![theorem()],
+        };
+
+        let searched = check(
+            &library,
+            &modules.each_ref(),
+            &[checking(&["Code.App.Fine", "Sharp.Lean.Proof"])],
+            THREADS,
+            HEARTBEATS,
+            &mut Vec::new(),
+        )?;
+        let fixed = check(
+            &library,
+            &modules.each_ref(),
+            &[checking(&["Code.App.Fine", "Sharp.Lean.Law"])],
+            THREADS,
+            HEARTBEATS,
+            &mut Vec::new(),
+        )?;
+
+        assert_eq!(searched, [Answer::Judged(vec![Judgment::Proved])]);
+        assert!(
+            matches!(fixed.as_slice(), [Answer::Judged(judged)] if matches!(judged.as_slice(), [Judgment::Rejected(_)])),
+            "{fixed:?}"
         );
 
         Ok(())
@@ -583,7 +635,12 @@ mod tests {
     fn a_stopped_runner_keeps_the_answers_it_wrote_whole_in_any_order() {
         let check = || Check {
             modules: vec!["Code.App.Shared.Money".to_owned()],
-            theorems: vec![Theorem { statement: "App.Shared.Money.addKeepsCurrency", text: "", judged: true }],
+            theorems: vec![Theorem {
+                statement: "App.Shared.Money.addKeepsCurrency",
+                text: "",
+                steps: None,
+                judged: true,
+            }],
         };
         let checks = [check(), check(), check()];
         let checks: Vec<&Check<'_>> = checks.iter().collect();
