@@ -29,6 +29,7 @@ pub fn host(file: &Path, deadline: Duration, environment: &[(&str, &str)]) -> Ho
         file: file.to_path_buf(),
         deadline,
         environment: environment.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect(),
+        ini: Default::default(),
     };
     let sdk = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sdk");
 

@@ -36,13 +36,14 @@ use value::engine_value_release;
 /// What a call's `answer` gives the PHP that asked: a value, or a message the PHP receives as a `\RuntimeException`.
 pub type Answer = Result<Value, String>;
 
-/// The scripts each thread's interpreter runs when it starts, before it serves any call, and the environment
-/// variables it reads.
+/// The scripts each thread's interpreter runs when it starts, before it serves any call, the environment variables it
+/// reads, and the PHP settings it runs with.
 #[derive(Debug)]
 pub struct Engine {
     id: u64,
     scripts: Vec<PathBuf>,
     variables: Arc<[(CString, CString)]>,
+    settings: Vec<(CString, CString)>,
     reset: Mutex<Vec<u64>>,
 }
 
@@ -53,6 +54,8 @@ pub enum EngineError {
     Start,
     /// A thread's interpreter could not start a request.
     Interpreter,
+    /// PHP refused the setting `name` of `value`: it knows no such setting, or the value is not one it takes.
+    Setting { name: String, value: String },
     /// A script failed while the interpreter ran it at its start, with what it threw or printed.
     Script { script: PathBuf, message: String },
     /// The called function threw, as `Class: message in file:line`.
@@ -72,6 +75,7 @@ impl fmt::Display for EngineError {
         match self {
             Self::Start => write!(formatter, "the PHP# engine could not start"),
             Self::Interpreter => write!(formatter, "a PHP# interpreter could not start a request"),
+            Self::Setting { name, value } => write!(formatter, "PHP refused the setting `{name}` = `{value}`"),
             Self::Script { script, message } => write!(formatter, "{} failed: {message}", script.display()),
             Self::Threw(message) => write!(formatter, "{message}"),
             Self::Failed(message) => write!(formatter, "{}", message.trim()),
@@ -97,6 +101,7 @@ static NEXT_INTERPRETER: AtomicU64 = AtomicU64::new(1);
 unsafe extern "C" {
     fn engine_start() -> i32;
     fn engine_interpreter_start() -> i32;
+    fn engine_set(name: *const c_char, name_length: usize, value: *const c_char, value_length: usize) -> i32;
     fn engine_interpreter_stop();
     fn engine_thread_end();
     fn engine_run_script(path: *const c_char, result: *mut Zval) -> i32;
@@ -161,14 +166,18 @@ thread_local! {
 }
 
 impl Engine {
-    /// An engine whose interpreters each run `scripts`, in order, when they start, and read `variables` as
-    /// environment variables, through `getenv()`, `$_ENV` and `$_SERVER`, over the process's own. The engine starts
-    /// in this process on the first one.
+    /// An engine whose interpreters each run with the PHP `settings`, by name, as `php -d` sets them, then run
+    /// `scripts`, in order, when they start, and read `variables` as environment variables, through `getenv()`, `$_ENV`
+    /// and `$_SERVER`, over the process's own. The engine starts in this process on the first one.
     ///
     /// # Errors
     ///
     /// Returns an error when the engine can't start in this process.
-    pub fn new(scripts: Vec<PathBuf>, variables: Vec<(CString, CString)>) -> Result<Self, EngineError> {
+    pub fn new(
+        scripts: Vec<PathBuf>,
+        variables: Vec<(CString, CString)>,
+        settings: Vec<(CString, CString)>,
+    ) -> Result<Self, EngineError> {
         static STARTED: OnceLock<bool> = OnceLock::new();
         // SAFETY: the engine starts once per process, here.
         if !*STARTED.get_or_init(|| unsafe { engine_start() } == 0) {
@@ -179,6 +188,7 @@ impl Engine {
             id: NEXT_ENGINE.fetch_add(1, Ordering::Relaxed),
             scripts,
             variables: Arc::from(variables),
+            settings,
             reset: Mutex::default(),
         })
     }
@@ -336,7 +346,7 @@ impl Engine {
         }
     }
 
-    /// Starts the calling thread's interpreter and runs this engine's scripts in it.
+    /// Starts the calling thread's interpreter, sets this engine's settings in it, and runs its scripts.
     #[allow(
         clippy::multiple_unsafe_ops_per_block,
         reason = "each operation is one step of the same engine API call sequence, which the block's SAFETY note covers"
@@ -358,6 +368,15 @@ impl Engine {
                 variables,
             };
             watch.arm(interpreter.globals);
+            for (name, value) in &self.settings {
+                let (name, value) = (name.as_bytes(), value.as_bytes());
+                if engine_set(name.as_ptr().cast(), name.len(), value.as_ptr().cast(), value.len()) != 0 {
+                    return Err(EngineError::Setting {
+                        name: String::from_utf8_lossy(name).into_owned(),
+                        value: String::from_utf8_lossy(value).into_owned(),
+                    });
+                }
+            }
             for script in &self.scripts {
                 let path = std::ffi::CString::new(script.as_os_str().as_encoded_bytes()).map_err(|_| {
                     EngineError::Script { script: script.clone(), message: "the path holds a NUL byte".into() }

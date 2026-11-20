@@ -158,6 +158,17 @@ int engine_interpreter_start(void)
 	return 0;
 }
 
+/* Sets the PHP setting name to value for the running interpreter's request, as `php -d` sets it, a setting only
+ * php.ini may change included. */
+int engine_set(const char *name, size_t name_length, const char *value, size_t value_length)
+{
+	zend_string *setting = zend_string_init(name, name_length, 0);
+	zend_result set = zend_alter_ini_entry_chars(setting, value, value_length, ZEND_INI_ALL, ZEND_INI_STAGE_ACTIVATE);
+	zend_string_release(setting);
+
+	return set == SUCCESS ? 0 : -1;
+}
+
 void engine_interpreter_stop(void)
 {
 	php_request_shutdown(NULL);

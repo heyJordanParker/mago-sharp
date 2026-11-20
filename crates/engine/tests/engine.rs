@@ -16,7 +16,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn engine() -> Engine {
-    Engine::new(vec![fixture("functions.php")], Vec::new()).expect("the engine starts")
+    Engine::new(vec![fixture("functions.php")], Vec::new(), Vec::new()).expect("the engine starts")
 }
 
 fn no_questions(arguments: Vec<Value>) -> Answer {
@@ -192,7 +192,7 @@ fn a_call_that_ends_before_its_deadline_leaves_the_next_call_alone() {
 #[test]
 fn a_script_that_throws_at_the_start_fails_the_call_and_names_the_script() {
     let script = fixture("throws.php");
-    let engine = Engine::new(vec![script.clone()], Vec::new()).expect("the engine starts");
+    let engine = Engine::new(vec![script.clone()], Vec::new(), Vec::new()).expect("the engine starts");
 
     let failed = engine.call("count", &[], DEADLINE, &mut no_questions);
 
@@ -222,6 +222,46 @@ fn an_interpreter_reads_no_php_ini_and_sets_no_memory_limit() {
             (b"php.ini".to_vec(), Value::Bool(false)),
             (b"max_execution_time".to_vec(), Value::String(b"0".to_vec())),
         ]))
+    );
+}
+
+/// An interpreter runs with its engine's PHP settings, as `php -d` sets them: one a script may change, such as
+/// `memory_limit`, and one only `php.ini` may, such as `max_input_time`.
+#[test]
+fn an_interpreter_runs_with_the_engine_settings() {
+    let engine = Engine::new(
+        vec![fixture("functions.php")],
+        Vec::new(),
+        vec![(c"memory_limit".into(), c"2G".into()), (c"max_input_time".into(), c"7".into())],
+    )
+    .expect("the engine starts");
+
+    let read = engine.call(
+        "Mago\\Tests\\Engine\\setting",
+        &[Value::String(b"memory_limit".to_vec())],
+        DEADLINE,
+        &mut no_questions,
+    );
+    let system = engine.call(
+        "Mago\\Tests\\Engine\\setting",
+        &[Value::String(b"max_input_time".to_vec())],
+        DEADLINE,
+        &mut no_questions,
+    );
+
+    assert_eq!(read, Ok(Value::String(b"2G".to_vec())));
+    assert_eq!(system, Ok(Value::String(b"7".to_vec())));
+}
+
+/// A setting PHP knows nothing of fails the interpreter's start, named, as a typo in `php -d` would go unseen.
+#[test]
+fn a_setting_php_knows_nothing_of_fails_the_call() {
+    let engine = Engine::new(vec![fixture("functions.php")], Vec::new(), vec![(c"memory_limt".into(), c"2G".into())])
+        .expect("the engine starts");
+
+    assert_eq!(
+        call(&engine, "count_call"),
+        Err(EngineError::Setting { name: "memory_limt".to_owned(), value: "2G".to_owned() })
     );
 }
 
@@ -277,8 +317,12 @@ fn an_answer_that_restarts_the_deadline_keeps_a_call_that_progresses_running() {
 
 #[test]
 fn an_interpreter_reads_the_engine_variables_through_getenv_env_and_server() {
-    let engine = Engine::new(vec![fixture("functions.php")], vec![(c"MAGO_ENGINE_STAGE".into(), c"analysis".into())])
-        .expect("the engine starts");
+    let engine = Engine::new(
+        vec![fixture("functions.php")],
+        vec![(c"MAGO_ENGINE_STAGE".into(), c"analysis".into())],
+        Vec::new(),
+    )
+    .expect("the engine starts");
     let stage = Value::String(b"analysis".to_vec());
 
     let read = engine.call(
@@ -293,8 +337,12 @@ fn an_interpreter_reads_the_engine_variables_through_getenv_env_and_server() {
 
 #[test]
 fn a_shutdown_function_reads_the_engine_variables_as_its_thread_ends() {
-    let engine = Engine::new(vec![fixture("functions.php")], vec![(c"MAGO_ENGINE_STAGE".into(), c"shutdown".into())])
-        .expect("the engine starts");
+    let engine = Engine::new(
+        vec![fixture("functions.php")],
+        vec![(c"MAGO_ENGINE_STAGE".into(), c"shutdown".into())],
+        Vec::new(),
+    )
+    .expect("the engine starts");
     let file = std::env::temp_dir().join(format!("mago-engine-shutdown-{}", std::process::id()));
     let arguments =
         [Value::String(b"MAGO_ENGINE_STAGE".to_vec()), Value::String(file.as_os_str().as_encoded_bytes().to_vec())];

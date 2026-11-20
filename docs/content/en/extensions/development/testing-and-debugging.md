@@ -117,7 +117,7 @@ Enable trace output:
 MAGO_LOG=trace mago analyze --reporting-format count
 ```
 
-A worker that fails or throws names its host in the error, with what PHP reported, as ``extension host `reports` failed: PHP Fatal error: ...``. Log concise context to `STDERR`; output a worker prints never reaches Mago's report.
+A worker that fails or throws names its host in the error, with what PHP reported, as ``extension host `reports` failed: PHP Fatal error: ...``. Log concise context with `error_log()`, which writes to the file the host's `ini` names as `error_log`, as `php -d error_log=...` did for a worker process; output a worker prints never reaches Mago's report.
 
 Useful isolation switches are:
 

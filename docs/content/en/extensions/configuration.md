@@ -13,6 +13,7 @@ Extension hosts are configured under `[extension-hosts]`. Each named entry names
 enabled = true
 file = ".mago/framework-worker.php"
 environment = { APP_ENV = "analysis" }
+ini = { memory_limit = "2G", error_log = "var/log/mago-host.log" }
 request-timeout-ms = 30000
 ```
 
@@ -23,13 +24,14 @@ request-timeout-ms = 30000
 | `enabled` | boolean | `true` | Whether Mago runs this host. A disabled host may omit `file`. |
 | `file` | path | none | The PHP file that registers the host's worker, as `(new Worker(...))->run()` does. Required when enabled. A relative path resolves from the directory of the configuration file Mago loaded, whether `--config` names it or Mago finds it, for an inherited host too. With no configuration file, it resolves from the workspace. |
 | `environment` | string map | `{}` | Variables the worker reads through `getenv()`, `$_ENV` and `$_SERVER`, over Mago's own environment. |
+| `ini` | string map | `{}` | PHP settings the worker runs with, as `php -d` sets them, before the host's file runs: `memory_limit`, `error_log` for the file PHP logs to, or any other `php.ini` directive. A relative `error_log` resolves from the directory the interpreter starts in. A setting PHP doesn't know, or a value it refuses, fails the run and names the setting. |
 | `request-timeout-ms` | positive integer | `30000` | Longest one unit of a request may run. It counts from when the worker starts a request, and starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker reducer. So a batch of many files, or the after-analysis hooks of many plugins, lives while each unit finishes in time. A provider, lint, issue-filter or single after-file request is one unit. Nested metadata or type-comparison requests don't start it again, so a hook that never finishes fails, and the error names the host, the unit that made no progress, such as the after-analysis hooks of plugin `dead-routes`, and this option. |
 
 ## How a host runs
 
 Each analysis thread runs one PHP# interpreter. An interpreter starts in the directory of the configuration file Mago loaded, loads Mago's own copy of the extension SDK, and then runs the file of every enabled host, in the order of their names. The copy of the SDK in the project's `vendor` folder never loads, so a host always speaks the protocol of the `mago` that runs it.
 
-The interpreter ignores `php.ini` and runs without a memory limit. It has the extensions of the PHP# runtime image, so a host loads the classes of the project and its packages as the app does.
+The interpreter ignores `php.ini` and runs without a memory limit, with the `ini` settings of every enabled host over that. All hosts share each interpreter, so two hosts that set one setting set it to the same value, or the run fails naming both. It has the extensions of the PHP# runtime image, so a host loads the classes of the project and its packages as the app does.
 
 A file that fails, or registers no worker, fails the whole run, and the error names the host. A hook that makes no progress for `request-timeout-ms` is interrupted, and its interpreter starts again before its next request.
 

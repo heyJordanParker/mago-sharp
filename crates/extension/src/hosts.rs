@@ -58,6 +58,8 @@ pub struct HostFile {
     pub deadline: Duration,
     /// The environment variables the host's worker reads.
     pub environment: BTreeMap<String, String>,
+    /// The PHP settings the host's worker runs with, by name.
+    pub ini: BTreeMap<String, String>,
 }
 
 /// Answers the codebase queries a worker asks while it serves a request.
@@ -126,13 +128,14 @@ impl Hosts {
     ///
     /// # Errors
     ///
-    /// Returns an error when two hosts set one environment variable to different values, the SDK can't be written, or
-    /// the engine can't start.
+    /// Returns an error when two hosts set one environment variable or one PHP setting to different values, the SDK
+    /// can't be written, or the engine can't start.
     pub fn new(hosts: Vec<HostFile>, directory: PathBuf, cache: &Path) -> Result<Arc<Self>, WorkerError> {
         let id = NEXT_HOSTS.fetch_add(1, Ordering::Relaxed);
-        let variables = variables(&hosts)?;
+        let variables = shared(&hosts, Shared::Variable)?;
+        let settings = shared(&hosts, Shared::Setting)?;
         let preload = write_sdk(cache, id).map_err(WorkerError::Sdk)?;
-        let engine = Engine::new(vec![preload], variables).map_err(WorkerError::Start)?;
+        let engine = Engine::new(vec![preload], variables, settings).map_err(WorkerError::Start)?;
         let reducing = hosts.iter().map(|_| AtomicBool::new(false)).collect();
 
         Ok(Arc::new(Self {
@@ -523,18 +526,47 @@ impl Host {
     }
 }
 
-/// The variables of every host, which every interpreter reads.
-fn variables(hosts: &[HostFile]) -> Result<Vec<(CString, CString)>, WorkerError> {
+/// What every host sets for each interpreter, which all hosts share: an environment variable, or a PHP setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shared {
+    Variable,
+    Setting,
+}
+
+impl Shared {
+    fn of(self, host: &HostFile) -> &BTreeMap<String, String> {
+        match self {
+            Self::Variable => &host.environment,
+            Self::Setting => &host.ini,
+        }
+    }
+
+    /// The error of the hosts `first` and `second`, which set `name` to different values.
+    fn clash(self, name: String, first: String, second: String) -> WorkerError {
+        match self {
+            Self::Variable => WorkerError::Variable { name, first, second },
+            Self::Setting => WorkerError::Setting { name, first, second },
+        }
+    }
+}
+
+impl std::fmt::Display for Shared {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Variable => "environment variable",
+            Self::Setting => "PHP setting",
+        })
+    }
+}
+
+/// The `kind` every host sets, by name, which every interpreter reads.
+fn shared(hosts: &[HostFile], kind: Shared) -> Result<Vec<(CString, CString)>, WorkerError> {
     let mut set: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
     for host in hosts {
-        for (name, value) in &host.environment {
+        for (name, value) in kind.of(host) {
             match set.get(name.as_str()) {
                 Some((first, held)) if held != value => {
-                    return Err(WorkerError::Variable {
-                        name: name.clone(),
-                        first: (*first).to_owned(),
-                        second: host.name.clone(),
-                    });
+                    return Err(kind.clash(name.clone(), (*first).to_owned(), host.name.clone()));
                 }
                 Some(_) => {}
                 None => {
@@ -549,7 +581,7 @@ fn variables(hosts: &[HostFile]) -> Result<Vec<(CString, CString)>, WorkerError>
             (Ok(name), Ok(value)) => Ok((name, value)),
             _ => Err(WorkerError::Load {
                 host: host.to_owned(),
-                message: format!("its environment variable `{name}` holds a NUL byte"),
+                message: format!("its {kind} `{name}` holds a NUL byte"),
             }),
         })
         .collect()
@@ -644,6 +676,7 @@ mod tests {
                     file,
                     deadline: Duration::from_secs(5),
                     environment: BTreeMap::new(),
+                    ini: BTreeMap::new(),
                 }
             })
             .collect();
@@ -664,6 +697,39 @@ mod tests {
             error.to_string(),
             "extension hosts `routes` and `models` both declare `Shared`, which PHP declares once: give one of them another name"
         );
+    }
+
+    /// A host's file runs with the PHP settings of its configuration, as `php -d` set them for its worker process: its
+    /// `memory_limit`, and its `error_log`, the file PHP logs to, from the configuration's directory.
+    #[test]
+    fn a_host_runs_with_its_php_settings_and_logs_to_its_error_log() {
+        let directory = std::env::temp_dir().join(format!("mago-hosts-ini-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let log = directory.join("host-errors.log");
+        let _ = std::fs::remove_file(&log);
+        let file = directory.join("reports.php");
+        std::fs::write(
+            &file,
+            format!("<?php\n\nerror_log('memory_limit is ' . ini_get('memory_limit'));\n\n{WORKER}\n"),
+        )
+        .unwrap();
+        let host = HostFile {
+            name: "reports".to_owned(),
+            file,
+            deadline: Duration::from_secs(5),
+            environment: BTreeMap::new(),
+            ini: BTreeMap::from([
+                ("memory_limit".to_owned(), "2G".to_owned()),
+                ("error_log".to_owned(), "host-errors.log".to_owned()),
+            ]),
+        };
+        let hosts = Hosts::new(vec![host], directory.clone(), &directory.join("sdk")).unwrap();
+
+        let served = hosts.hosts()[0].broadcast(b"describe");
+
+        assert!(matches!(served, Err(WorkerError::Remote { .. })), "the host loaded and its worker served: {served:?}");
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert!(logged.ends_with("] memory_limit is 2G\n"), "{logged}");
     }
 
     #[test]
@@ -690,23 +756,41 @@ mod tests {
         assert_eq!(redeclared("PHP Fatal error:  Allowed memory size exhausted"), None);
     }
 
-    #[test]
-    fn two_hosts_that_set_one_variable_to_different_values_are_refused() {
-        let host = |name: &str, value: &str| HostFile {
+    /// The host `name`, which sets the environment variable `APP_ENV` and the PHP setting `memory_limit` to `value`.
+    fn setting(name: &str, value: &str) -> HostFile {
+        HostFile {
             name: name.to_owned(),
             file: PathBuf::from(format!("{name}.php")),
             deadline: Duration::from_secs(1),
             environment: BTreeMap::from([("APP_ENV".to_owned(), value.to_owned())]),
-        };
+            ini: BTreeMap::from([("memory_limit".to_owned(), value.to_owned())]),
+        }
+    }
 
-        let same = variables(&[host("routes", "analysis"), host("models", "analysis")]);
-        let different = variables(&[host("routes", "analysis"), host("models", "test")]);
+    #[test]
+    fn two_hosts_that_set_one_variable_to_different_values_are_refused() {
+        let same = shared(&[setting("routes", "2G"), setting("models", "2G")], Shared::Variable);
+        let different = shared(&[setting("routes", "2G"), setting("models", "1G")], Shared::Variable);
 
         assert_eq!(same.map(|variables| variables.len()).ok(), Some(1));
         assert_eq!(
             different.err().map(|error| error.to_string()).as_deref(),
             Some(
                 "extension hosts `routes` and `models` set the environment variable `APP_ENV` to different values, which their shared interpreters can't both read"
+            )
+        );
+    }
+
+    #[test]
+    fn two_hosts_that_set_one_php_setting_to_different_values_are_refused() {
+        let same = shared(&[setting("routes", "2G"), setting("models", "2G")], Shared::Setting);
+        let different = shared(&[setting("routes", "2G"), setting("models", "1G")], Shared::Setting);
+
+        assert_eq!(same.map(|settings| settings.len()).ok(), Some(1));
+        assert_eq!(
+            different.err().map(|error| error.to_string()).as_deref(),
+            Some(
+                "extension hosts `routes` and `models` set the PHP setting `memory_limit` to different values, which their shared interpreters can't both run with"
             )
         );
     }

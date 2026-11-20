@@ -67,6 +67,8 @@ pub enum WorkerError {
     Clash { class: String, first: String, second: String },
     /// Two hosts set the environment variable `name` to different values.
     Variable { name: String, first: String, second: String },
+    /// Two hosts set the PHP setting `name` to different values.
+    Setting { name: String, first: String, second: String },
     /// The host's worker failed the request, with what it threw.
     Remote { host: String, message: String },
     /// A request made no progress within its deadline: `running` is the unit the worker last said the request started,
@@ -92,6 +94,10 @@ impl std::fmt::Display for WorkerError {
             Self::Variable { name, first, second } => write!(
                 formatter,
                 "extension hosts `{first}` and `{second}` set the environment variable `{name}` to different values, which their shared interpreters can't both read"
+            ),
+            Self::Setting { name, first, second } => write!(
+                formatter,
+                "extension hosts `{first}` and `{second}` set the PHP setting `{name}` to different values, which their shared interpreters can't both run with"
             ),
             Self::Remote { host, message } => {
                 write!(formatter, "extension host `{host}` failed the request: {message}")

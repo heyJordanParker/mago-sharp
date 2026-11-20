@@ -28,6 +28,11 @@ pub struct ExtensionHostConfiguration {
     /// hosts share each interpreter, so two hosts that set one variable set it to the same value.
     pub environment: BTreeMap<String, String>,
 
+    /// PHP settings the host's worker runs with, by name, as `php -d` sets them before the host's file runs:
+    /// `memory_limit`, `error_log` for the file PHP logs to, or any other `php.ini` directive. All hosts share each
+    /// interpreter, so two hosts that set one setting set it to the same value.
+    pub ini: BTreeMap<String, String>,
+
     /// Longest one unit of a request may run, in milliseconds. It counts from when the worker starts a request, and
     /// starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one
     /// plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker
@@ -45,6 +50,7 @@ impl Default for ExtensionHostConfiguration {
             enabled: true,
             file: PathBuf::new(),
             environment: BTreeMap::new(),
+            ini: BTreeMap::new(),
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             base_directory: PathBuf::new(),
         }
@@ -70,8 +76,8 @@ impl ExtensionHostConfiguration {
         Ok(())
     }
 
-    /// The host `name` as mago runs it: its file resolved from the configuration's directory, its deadline and its
-    /// environment.
+    /// The host `name` as mago runs it: its file resolved from the configuration's directory, its deadline, its
+    /// environment and its PHP settings.
     #[must_use]
     pub fn host_file(&self, name: &str) -> HostFile {
         HostFile {
@@ -79,6 +85,7 @@ impl ExtensionHostConfiguration {
             file: self.base_directory.join(&self.file),
             deadline: Duration::from_millis(self.request_timeout_ms),
             environment: self.environment.clone(),
+            ini: self.ini.clone(),
         }
     }
 

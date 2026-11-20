@@ -922,6 +922,7 @@ mod tests {
 file = "vendor/acme/host.php"
 request-timeout-ms = 1234
 environment = { APP_ENV = "test" }
+ini = { memory_limit = "2G" }
 "#,
         );
 
@@ -936,6 +937,7 @@ environment = { APP_ENV = "test" }
                 file: directory.join("vendor/acme/host.php"),
                 deadline: std::time::Duration::from_millis(1234),
                 environment: [("APP_ENV".to_owned(), "test".to_owned())].into(),
+                ini: [("memory_limit".to_owned(), "2G".to_owned())].into(),
             }
         );
     }

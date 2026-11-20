@@ -69,6 +69,11 @@ function variable(string $name): array
     return [getenv($name), $_ENV[$name] ?? false, $_SERVER[$name] ?? false];
 }
 
+function setting(string $name): string|false
+{
+    return ini_get($name);
+}
+
 function settings(): array
 {
     return [
