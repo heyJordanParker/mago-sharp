@@ -5,6 +5,7 @@
 //! staged files in pre-commit hooks.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -239,27 +240,50 @@ fn missing_git_folder(workspace: &Path) -> Option<(PathBuf, PathBuf)> {
     (!target.exists()).then_some((file, target))
 }
 
-/// Records in the index the rename of the tracked file `from` to `to`, both relative to `workspace`, with `from`'s
-/// contents in the index, as `git mv` records it, and leaves both files on disk as they are. The next commit is then
-/// the rename alone, which `git log --follow` follows, and what the caller writes to `to` shows as unstaged.
-pub fn stage_rename(workspace: &Path, from: &Path, to: &Path) -> Result<(), Error> {
+/// Records in the index the rename of each tracked file of `renames` to the name it pairs it with, all relative to
+/// `workspace`, with the old file's contents in the index, as `git mv` records it, and leaves the files on disk as they
+/// are. The next commit is then the renames alone, which `git log --follow` follows, and what the caller writes to each
+/// new name shows as unstaged. It runs git twice, however many files it renames.
+pub fn stage_renames(workspace: &Path, renames: &[(PathBuf, PathBuf)]) -> Result<(), Error> {
     let listed = run_git(
         "ls-files",
         Command::new("git")
-            .args(["ls-files", "--format=%(objectmode),%(objectname)", "--"])
-            .arg(from)
+            .args(["ls-files", "-z", "--error-unmatch", "--format=%(objectmode) %(objectname)\t%(path)", "--"])
+            .args(renames.iter().map(|(from, _)| from))
             .current_dir(workspace),
     )?;
-    let mut cacheinfo = OsString::from(String::from_utf8_lossy(&listed.stdout).trim());
-    cacheinfo.push(",");
-    cacheinfo.push(to.as_os_str());
-    run_git(
+    let entries: HashMap<&[u8], &[u8]> = listed
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| {
+            let tab = entry.iter().position(|byte| *byte == b'\t')?;
+
+            Some((&entry[tab + 1..], &entry[..tab]))
+        })
+        .collect();
+    // Each rename is the old file's mode and object at the new name, and mode 0 at the old name, which removes it.
+    let mut index_info = Vec::new();
+    for (from, to) in renames {
+        let Some(entry) = entries.get(from.as_os_str().as_encoded_bytes()) else {
+            return Err(Error::GitFailed {
+                command: "ls-files",
+                status: listed.status,
+                reason: format!("git lists no index entry for {}", from.display()),
+            });
+        };
+        let object = entry.split(|byte| *byte == b' ').nth(1).unwrap_or_default();
+        for (mode, object, path) in [(*entry, &[][..], to), (&b"0 "[..], object, from)] {
+            index_info.extend_from_slice(mode);
+            index_info.extend_from_slice(object);
+            index_info.push(b'\t');
+            index_info.extend_from_slice(path.as_os_str().as_encoded_bytes());
+            index_info.push(0);
+        }
+    }
+    run_git_with_input(
         "update-index",
-        Command::new("git").args(["update-index", "--add", "--cacheinfo"]).arg(cacheinfo).current_dir(workspace),
-    )?;
-    run_git(
-        "update-index",
-        Command::new("git").args(["update-index", "--force-remove", "--"]).arg(from).current_dir(workspace),
+        Command::new("git").args(["update-index", "-z", "--index-info"]).current_dir(workspace),
+        index_info,
     )?;
 
     Ok(())
@@ -334,26 +358,11 @@ fn get_files_with_unstaged_changes(workspace: &Path) -> Result<HashSet<PathBuf>,
 ///
 /// A string containing the id of the newly created blob
 fn create_blob(workspace: &Path, path: &Path, content: Vec<u8>) -> Result<String, Error> {
-    let mut child = process::spawn(
-        Command::new("git")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .args(["hash-object", "-w", "--stdin", "--path"])
-            .arg(path)
-            .current_dir(workspace),
-    )
-    .map_err(|source| Error::RunningGit { command: "hash-object", source })?;
-
-    let mut stdin = child.stdin.take().expect("failed to get stdin");
-    std::thread::spawn(move || {
-        mago_extension::process_group::block_sigpipe(&stdin);
-        // A git that exits before it reads the content closes the pipe, and its exit status reports why.
-        let _result = stdin.write_all(&content);
-    });
-
-    let output = child.wait_with_output().map_err(|source| Error::RunningGit { command: "hash-object", source })?;
-    let output = succeeded("hash-object", output)?;
+    let output = run_git_with_input(
+        "hash-object",
+        Command::new("git").args(["hash-object", "-w", "--stdin", "--path"]).arg(path).current_dir(workspace),
+        content,
+    )?;
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -384,6 +393,28 @@ fn get_mode(workspace: &Path, path: &Path) -> Result<String, Error> {
 /// Returns [`Error::RunningGit`] when git can't start, and [`Error::GitFailed`] when it exits with an error.
 fn run_git(command: &'static str, git: &mut Command) -> Result<Output, Error> {
     let output = process::output(git).map_err(|source| Error::RunningGit { command, source })?;
+
+    succeeded(command, output)
+}
+
+/// Runs `git`, a command that runs the `git` subcommand `command`, with `input` on its standard input, and returns its
+/// output.
+///
+/// # Errors
+///
+/// Returns [`Error::RunningGit`] when git can't start, and [`Error::GitFailed`] when it exits with an error.
+fn run_git_with_input(command: &'static str, git: &mut Command, input: Vec<u8>) -> Result<Output, Error> {
+    let mut child = process::spawn(git.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))
+        .map_err(|source| Error::RunningGit { command, source })?;
+
+    let mut stdin = child.stdin.take().expect("failed to get stdin");
+    std::thread::spawn(move || {
+        mago_extension::process_group::block_sigpipe(&stdin);
+        // A git that exits before it reads the input closes the pipe, and its exit status reports why.
+        let _result = stdin.write_all(&input);
+    });
+
+    let output = child.wait_with_output().map_err(|source| Error::RunningGit { command, source })?;
 
     succeeded(command, output)
 }
@@ -510,11 +541,41 @@ mod tests {
         git(root, &["commit", "--quiet", "-m", "plain PHP"]);
         std::fs::write(root.join("Order.sharp"), "public final class Order { }\n").unwrap();
 
-        stage_rename(root, Path::new("Order.php"), Path::new("Order.sharp")).unwrap();
+        stage_renames(root, &[(PathBuf::from("Order.php"), PathBuf::from("Order.sharp"))]).unwrap();
         std::fs::remove_file(root.join("Order.php")).unwrap();
 
         assert_eq!(git(root, &["diff", "--cached", "-M", "--name-status"]), "R100\tOrder.php\tOrder.sharp\n");
         assert_eq!(git(root, &["diff", "--name-only"]), "Order.sharp\n");
         assert_eq!(git(root, &["status", "--porcelain"]), "RM Order.php -> Order.sharp\n");
+    }
+
+    /// One call records each rename of a folder's files, a file in a subfolder and a name with a space among them, each
+    /// with its own old contents.
+    #[test]
+    fn one_call_stages_the_rename_of_each_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir(root.join("Shop")).unwrap();
+        for name in ["Order.php", "Shop/Cart.php", "Shop/Line Item.php"] {
+            std::fs::write(root.join(name), format!("<?php\n\n// {name}\n")).unwrap();
+        }
+        git(root, &["init", "--quiet"]);
+        git(root, &["add", "--all"]);
+        git(root, &["commit", "--quiet", "-m", "plain PHP"]);
+        let renames: Vec<(PathBuf, PathBuf)> = ["Order", "Shop/Cart", "Shop/Line Item"]
+            .into_iter()
+            .map(|name| (PathBuf::from(format!("{name}.php")), PathBuf::from(format!("{name}.sharp"))))
+            .collect();
+        for (from, to) in &renames {
+            std::fs::write(root.join(to), "public final class Order { }\n").unwrap();
+            std::fs::remove_file(root.join(from)).unwrap();
+        }
+
+        stage_renames(root, &renames).unwrap();
+
+        assert_eq!(
+            git(root, &["diff", "--cached", "-M", "--name-status"]),
+            "R100\tOrder.php\tOrder.sharp\nR100\tShop/Cart.php\tShop/Cart.sharp\nR100\tShop/Line Item.php\tShop/Line Item.sharp\n"
+        );
     }
 }
