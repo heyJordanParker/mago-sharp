@@ -100,13 +100,13 @@ preg_match_all('/^extern (\w+) uses [\w, ]+;$/m', $builtins, $externs);
 // import, by its full name. A class of a namespace it imports only to declare its effects, as
 // `Random\RandomException`, stays out, and so does a root class it imports, as `DateTimeImmutable`.
 $generator = read(dirname($library, 2) . '/bin/builtins');
-if (!preg_match('/^const STANDARD_NAMESPACED_CLASSES = \[(.*?)\];$/ms', $generator, $listed)) {
-    throw new RuntimeException('sharp/bin/builtins declares no STANDARD_NAMESPACED_CLASSES.');
-}
+$listed = [];
+preg_match('/^const STANDARD_NAMESPACED_CLASSES = \[(.*?)\];$/ms', $generator, $listed);
+$list = $listed[1] ?? throw new RuntimeException('sharp/bin/builtins declares no STANDARD_NAMESPACED_CLASSES.');
 $namespaced = array_map(
     static fn(PhpToken $token): string => stripslashes(substr($token->text, 1, -1)),
     array_values(array_filter(
-        PhpToken::tokenize("<?php {$listed[1]}"),
+        PhpToken::tokenize("<?php {$list}"),
         static fn(PhpToken $token): bool => $token->is(T_CONSTANT_ENCAPSED_STRING),
     )),
 );
