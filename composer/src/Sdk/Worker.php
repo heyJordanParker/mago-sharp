@@ -54,6 +54,7 @@ use Mago\Sdk\Internal\Analyzer\Protocol as AnalyzerProtocol;
 use Mago\Sdk\Internal\Analyzer\RegisteredPlugin;
 use Mago\Sdk\Internal\Analyzer\RegisteredTargetedCallback;
 use Mago\Sdk\Internal\Analyzer\ReportedIssue;
+use Mago\Sdk\Internal\Analyzer\SentReads;
 use Mago\Sdk\Internal\ClassLoads;
 use Mago\Sdk\Internal\HostClient;
 use Mago\Sdk\Internal\Hosts;
@@ -158,9 +159,12 @@ final class Worker
 
     private readonly ClassLoads $classLoads;
 
+    private readonly SentReads $sentReads;
+
     public function __construct(Extension $extension, Extension ...$additionalExtensions)
     {
         $this->classLoads = Hosts::classLoads();
+        $this->sentReads = Hosts::sentReads();
         $extensions = [$extension, ...array_values($additionalExtensions)];
         $extensionIdentifiers = [];
         $ruleCodes = [];
@@ -699,8 +703,12 @@ final class Worker
 
         return AnalyzerProtocol::withCodebaseReads(
             $response,
-            $issueReads->take(),
-            $codeReads->take(),
+            $this->sentReads,
+            (
+                $this->metadataCache ?? throw new ProtocolException('A provider request named no analysis generation.')
+            )->generation,
+            $issueReads,
+            $codeReads,
             $this->classLoads,
         );
     }
@@ -1248,8 +1256,8 @@ final class Worker
             if ($recording) {
                 $recordedReads[] = [
                     $analysis instanceof FileAnalysis ? $analysis->file : null,
-                    $issueReads->take(),
-                    $codeReads->take(),
+                    $issueReads,
+                    $codeReads,
                     $this->classLoads->end(),
                 ];
             }
@@ -1258,6 +1266,8 @@ final class Worker
         return AnalyzerProtocol::writeLifecycleResponse(
             $kind,
             $this->classLoads,
+            $this->sentReads,
+            $request->generation,
             $reportedIssues,
             $contributedReferences,
             $recordedReads,

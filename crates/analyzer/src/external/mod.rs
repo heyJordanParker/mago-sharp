@@ -56,6 +56,8 @@ pub use reads::ClassLogs;
 pub use reads::ExtensionReads;
 pub use reads::FileReads;
 pub use reads::Listing;
+use reads::RecordedReads;
+use reads::ResponseReads;
 pub use reads::SessionReads;
 
 mod error;
@@ -135,7 +137,7 @@ pub(crate) struct ForwardedCall {
 pub struct ExternalAnalysisSession {
     generation: u64,
     sources: foldhash::HashMap<FileId, Arc<File>>,
-    reads: Mutex<SessionReads>,
+    reads: Mutex<RecordedReads>,
     member_reads: MemberReads,
 }
 
@@ -196,24 +198,13 @@ impl ExternalAnalysisSession {
     /// Takes what the hooks, issue filters and providers read from the codebase in this run.
     #[must_use]
     pub fn take_reads(&self) -> SessionReads {
-        std::mem::take(&mut self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+        std::mem::take(&mut *self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner)).into_session_reads()
     }
 
     /// Records what the callbacks read while Mago analyzed `file_id`, or what the before-analysis hooks read, and the
     /// class loads their worker reported with them.
-    fn record_reads(&self, file_id: Option<FileId>, reads: ExtensionReads, loads: ClassLoads) {
-        let mut session = self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !loads.classes.is_empty() {
-            session.class_logs.record(loads);
-        }
-        if reads.is_empty() {
-            return;
-        }
-
-        match file_id {
-            Some(file_id) => session.files.entry(file_id).or_default().extend(reads),
-            None => session.before_analysis.extend(reads),
-        }
+    fn record_reads(&self, file_id: Option<FileId>, reads: ResponseReads) -> Result<(), ExternalAnalyzerError> {
+        self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record(file_id, reads)
     }
 
     /// Records the codebase reads a provider or issue filter made while Mago analyzed `file_id`, which lead its
@@ -223,8 +214,8 @@ impl ExternalAnalysisSession {
         file_id: FileId,
         response: Vec<Value>,
     ) -> Result<Vec<Value>, ExternalAnalyzerError> {
-        let (reads, loads, response) = protocol::take_codebase_reads(response)?;
-        self.record_reads(Some(file_id), reads, loads);
+        let (reads, response) = protocol::take_codebase_reads(response)?;
+        self.record_reads(Some(file_id), reads)?;
 
         Ok(response)
     }

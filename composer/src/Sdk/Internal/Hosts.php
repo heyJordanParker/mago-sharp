@@ -6,6 +6,7 @@ namespace Mago\Sdk\Internal;
 
 use Closure;
 use Mago\Sdk\Exception\ProtocolException;
+use Mago\Sdk\Internal\Analyzer\SentReads;
 use Throwable;
 
 use function class_exists;
@@ -28,6 +29,8 @@ final class Hosts
     private static array $handlers = [];
 
     private static ?ClassLoads $classLoads = null;
+
+    private static ?SentReads $sentReads = null;
 
     /**
      * Registers the request handler of the worker a host's file runs.
@@ -103,5 +106,11 @@ final class Hosts
     public static function classLoads(): ClassLoads
     {
         return self::$classLoads ??= new ClassLoads();
+    }
+
+    /** The codebase reads this interpreter sent Mago, which every worker in it shares, as it shares the class log. */
+    public static function sentReads(): SentReads
+    {
+        return self::$sentReads ??= new SentReads();
     }
 }

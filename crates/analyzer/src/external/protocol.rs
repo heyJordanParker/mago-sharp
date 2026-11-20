@@ -110,11 +110,9 @@ use crate::external::AnalysisHookRegistration;
 use crate::external::AttributedEntryPoint;
 use crate::external::ClassInitializerProvider;
 use crate::external::ClassLikeAnalysisHookRegistration;
-use crate::external::ClassLoads;
 use crate::external::CodebaseScanHookRegistration;
 use crate::external::EffectivePropertyType;
 use crate::external::EntryPoint;
-use crate::external::ExtensionReads;
 use crate::external::ExternalAnalysisSession;
 use crate::external::ExternalExtension;
 use crate::external::ExternalPlugin;
@@ -134,6 +132,7 @@ use crate::external::ProviderRegistration;
 use crate::external::error::ExternalAnalyzerError;
 use crate::external::error::protocol;
 use crate::external::metadata;
+use crate::external::reads::ResponseReads;
 use crate::invocation::EffectiveCallableSignature;
 use crate::invocation::Invocation;
 use crate::invocation::MethodInvocationKind;
@@ -3988,15 +3987,15 @@ pub(super) fn message_reader(payload: &[Value], expected_kind: u16) -> Result<Va
 /// after the header, from the response they came with.
 pub(super) fn take_codebase_reads(
     mut response: Vec<Value>,
-) -> Result<(ExtensionReads, ClassLoads, Vec<Value>), ExternalAnalyzerError> {
+) -> Result<(ResponseReads, Vec<Value>), ExternalAnalyzerError> {
     let fields =
         response.get(HEADER_LENGTH..).ok_or_else(|| protocol("analyzer response is shorter than its header"))?;
     let mut reader = ValueReader::new(fields);
-    let (reads, loads) = ExtensionReads::decode(&mut reader)?;
+    let reads = ResponseReads::decode(&mut reader)?;
     let end = response.len() - reader.remaining();
     response.drain(HEADER_LENGTH..end);
 
-    Ok((reads, loads, response))
+    Ok((reads, response))
 }
 
 pub(super) fn message_kind(payload: &[Value]) -> Result<u16, ExternalAnalyzerError> {
@@ -5170,7 +5169,7 @@ pub(super) mod testing {
     }
 
     /// The response that declines `request`, a property type or call forwarding request, after the codebase reads
-    /// the worker made for it: no issue read and no code read.
+    /// the worker made for it: no issue read and no code read, sent as lists 0 and 1.
     pub fn declined_response(request: &[Value]) -> Vec<Value> {
         let kind = match message_kind(request).unwrap() {
             PROPERTY_TYPE_REQUEST => PROPERTY_TYPE_RESPONSE,
@@ -5178,8 +5177,11 @@ pub(super) mod testing {
             kind => unreachable!("no test declines a request of kind {kind}"),
         };
         let mut writer = message_writer(kind);
-        writer.write_u32(0);
-        writer.write_u32(0);
+        for number in [0, 1] {
+            writer.write_u32(number);
+            writer.write_bool(true);
+            writer.write_u32(0);
+        }
         writer.write_u64(1);
         writer.write_u32(0);
         writer.write_u32(0);

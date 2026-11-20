@@ -64,21 +64,145 @@ impl ExtensionReads {
         self.issues.extend(other.issues);
         self.code.extend(other.code);
         for (worker, end) in other.classes {
-            let read = self.classes.entry(worker).or_default();
-            *read = (*read).max(end);
+            read_to(&mut self.classes, worker, end);
         }
     }
+}
 
-    /// Reads the two lists of reads the SDK writes, the issue reads then the code reads, and the class loads of the
-    /// worker that follow them, whose end the callbacks read.
-    pub(super) fn decode(reader: &mut ValueReader<'_>) -> Result<(Self, ClassLoads), ExternalAnalyzerError> {
-        let issues = FileReads::decode(reader)?;
-        let code = FileReads::decode(reader)?;
-        let loads = ClassLoads::decode(reader)?;
-        let end = loads.end();
-        let classes = if end == 0 { HashMap::default() } else { HashMap::from_iter([(loads.worker, end)]) };
+/// Notes that callbacks read `worker`'s class log up to `end`, the furthest end any of them read.
+fn read_to(classes: &mut HashMap<u64, u32>, worker: u64, end: u32) {
+    let read = classes.entry(worker).or_default();
+    *read = (*read).max(end);
+}
 
-        Ok((Self { issues, code, classes }, loads))
+/// The codebase reads one response reports, as the SDK writes them: the issue reads, then the code reads, then the
+/// class loads of the worker, whose end the callbacks read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResponseReads {
+    issues: SentReads,
+    code: SentReads,
+    loads: ClassLoads,
+}
+
+impl ResponseReads {
+    pub(super) fn decode(reader: &mut ValueReader<'_>) -> Result<Self, ExternalAnalyzerError> {
+        Ok(Self {
+            issues: SentReads::decode(reader)?,
+            code: SentReads::decode(reader)?,
+            loads: ClassLoads::decode(reader)?,
+        })
+    }
+}
+
+/// One list of reads a response names: the number its worker sent it under, and the list itself the first time the
+/// worker sends it in the session's generation. Providers and hooks often read the same symbols on every call, so the
+/// list goes whole once and by its number after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SentReads {
+    number: u32,
+    reads: Option<FileReads>,
+}
+
+impl SentReads {
+    fn decode(reader: &mut ValueReader<'_>) -> Result<Self, ExternalAnalyzerError> {
+        let number = reader.read_u32("codebase reads number")?;
+        let reads = if reader.read_bool("codebase reads sent")? { Some(FileReads::decode(reader)?) } else { None };
+
+        Ok(Self { number, reads })
+    }
+}
+
+/// What a session's responses reported, as the workers sent it: each list of reads once, by its worker and number,
+/// and the numbers each file's callbacks read, which [`RecordedReads::into_session_reads`] joins once the session ends.
+#[derive(Debug, Default)]
+pub(super) struct RecordedReads {
+    lists: HashMap<(u64, u32), FileReads>,
+    files: HashMap<Option<FileId>, ReadLists>,
+    class_logs: ClassLogs,
+}
+
+/// The lists of reads one file's callbacks read, or the before-analysis hooks', each by its worker and number.
+#[derive(Debug, Default)]
+struct ReadLists {
+    issues: HashSet<(u64, u32)>,
+    code: HashSet<(u64, u32)>,
+    classes: HashMap<u64, u32>,
+}
+
+impl RecordedReads {
+    /// Records what the callbacks read while Mago analyzed `file_id`, or what the before-analysis hooks read, with the
+    /// class loads their worker reported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the response names a list its worker never sent in this session.
+    pub(super) fn record(
+        &mut self,
+        file_id: Option<FileId>,
+        reads: ResponseReads,
+    ) -> Result<(), ExternalAnalyzerError> {
+        let worker = reads.loads.worker;
+        let end = reads.loads.end();
+        if !reads.loads.classes.is_empty() {
+            self.class_logs.record(reads.loads);
+        }
+
+        let issues = self.keep(worker, reads.issues)?;
+        let code = self.keep(worker, reads.code)?;
+        if issues.is_none() && code.is_none() && end == 0 {
+            return Ok(());
+        }
+
+        let lists = self.files.entry(file_id).or_default();
+        lists.issues.extend(issues);
+        lists.code.extend(code);
+        if end != 0 {
+            read_to(&mut lists.classes, worker, end);
+        }
+
+        Ok(())
+    }
+
+    /// Keeps the list `sent` names, and returns its key, or None when it holds no read.
+    fn keep(&mut self, worker: u64, sent: SentReads) -> Result<Option<(u64, u32)>, ExternalAnalyzerError> {
+        let key = (worker, sent.number);
+        let reads = match sent.reads {
+            Some(reads) => self.lists.entry(key).insert_entry(reads).into_mut(),
+            None => self.lists.get(&key).ok_or_else(|| {
+                protocol(format!("a worker named codebase reads {} it never sent in this session", sent.number))
+            })?,
+        };
+
+        Ok((!reads.is_empty()).then_some(key))
+    }
+
+    /// Joins the lists each file's callbacks read into what they read.
+    #[must_use]
+    pub(super) fn into_session_reads(self) -> SessionReads {
+        let join = |numbers: &HashSet<(u64, u32)>| {
+            let mut reads = FileReads::default();
+            for list in numbers.iter().filter_map(|key| self.lists.get(key)) {
+                reads.symbols.extend(list.symbols.iter().copied());
+                reads.listings.extend(list.listings.iter().copied());
+            }
+
+            reads
+        };
+
+        let mut session = SessionReads::default();
+        for (file_id, lists) in &self.files {
+            let reads =
+                ExtensionReads { issues: join(&lists.issues), code: join(&lists.code), classes: lists.classes.clone() };
+            match file_id {
+                Some(file_id) => {
+                    session.files.insert(*file_id, reads);
+                }
+                None => session.before_analysis = reads,
+            }
+        }
+        session.class_logs = self.class_logs;
+
+        session
     }
 }
 
@@ -338,60 +462,83 @@ fn hash_names(hasher: &mut DefaultHasher, names: impl IntoIterator<Item = Word>)
 mod tests {
     use super::*;
 
-    /// Two lists of reads as the SDK writes them, `issues` then `code`, each read an operation and its name, then the
-    /// entries `from` on of worker 7's class log.
-    fn written_with(issues: &[(u8, &[u8])], code: &[(u8, &[u8])], from: u32, classes: &[&[u8]]) -> Vec<Value> {
-        let mut writer = ValueWriter::new();
-        for reads in [issues, code] {
-            writer.write_u32(reads.len() as u32);
-            for (operation, name) in reads {
-                writer.write_u8(*operation);
-                writer.write_u8(0);
-                writer.write_bytes(name).expect("the name should fit in a frame");
-            }
+    /// One list of reads as the SDK sends it the first time: its number, then each read, an operation and its name.
+    fn write_list(writer: &mut ValueWriter, number: u32, reads: &[(u8, &[u8])]) {
+        writer.write_u32(number);
+        writer.write_bool(true);
+        writer.write_u32(reads.len() as u32);
+        for (operation, name) in reads {
+            writer.write_u8(*operation);
+            writer.write_u8(0);
+            writer.write_bytes(name).expect("the name should fit in a frame");
         }
+    }
+
+    /// The entries `from` on of worker 7's class log, as the SDK writes them after a response's reads.
+    fn write_loads(writer: &mut ValueWriter, from: u32, classes: &[&[u8]]) {
         writer.write_u64(7);
         writer.write_u32(from);
         writer.write_u32(classes.len() as u32);
         for class in classes {
             writer.write_bytes(class).expect("the class should fit in a frame");
         }
+    }
+
+    /// A response's reads as worker 7 writes them: `issues` sent whole as list 0, `code` as list 1, then the entries
+    /// `from` on of its class log.
+    fn written_with(issues: &[(u8, &[u8])], code: &[(u8, &[u8])], from: u32, classes: &[&[u8]]) -> Vec<Value> {
+        let mut writer = ValueWriter::new();
+        write_list(&mut writer, 0, issues);
+        write_list(&mut writer, 1, code);
+        write_loads(&mut writer, from, classes);
 
         writer.finish()
     }
 
-    fn decoded_with(values: &[Value]) -> Result<(ExtensionReads, ClassLoads), ExternalAnalyzerError> {
-        let mut reader = ValueReader::new(values);
-        let decoded = ExtensionReads::decode(&mut reader)?;
-        reader.finish()?;
+    /// What a session records of `responses`, each the reads of the file it is paired with.
+    fn recorded(responses: &[(&[u8], Vec<Value>)]) -> Result<SessionReads, ExternalAnalyzerError> {
+        let mut recorded = RecordedReads::default();
+        for (file, response) in responses {
+            let mut reader = ValueReader::new(response);
+            let reads = ResponseReads::decode(&mut reader)?;
+            reader.finish()?;
+            recorded.record(Some(FileId::new(file)), reads)?;
+        }
 
-        Ok(decoded)
+        Ok(recorded.into_session_reads())
     }
 
+    /// What the callbacks of one file read in one response.
     fn decoded(issues: &[(u8, &[u8])], code: &[(u8, &[u8])]) -> Result<ExtensionReads, ExternalAnalyzerError> {
-        Ok(decoded_with(&written_with(issues, code, 0, &[]))?.0)
+        let reads = recorded(&[(b"a.php", written_with(issues, code, 0, &[]))])?;
+
+        Ok(reads.files.get(&FileId::new(b"a.php")).cloned().unwrap_or_default())
     }
 
     /// The class loads after a response's reads report the entries of the worker's log Mago has not had, and the reads
     /// read every entry of the log before their end, the ones earlier responses reported too.
     #[test]
     fn reads_read_every_class_their_worker_loaded_before_they_ended() {
-        let mut logs = ClassLogs::default();
-        let (first, loads) = decoded_with(&written_with(&[], &[], 0, &[b"app\\rule"])).expect("a first class load");
-        logs.record(loads);
-        let (later, loads) = decoded_with(&written_with(&[], &[], 1, &[b"app\\order"])).expect("a later class load");
-        logs.record(loads);
-        let (none, loads) = decoded_with(&written_with(&[], &[], 0, &[])).expect("no class load");
-        logs.record(loads);
+        let reads = recorded(&[
+            (b"first.php", written_with(&[], &[], 0, &[b"app\\rule"])),
+            (b"later.php", written_with(&[], &[], 1, &[b"app\\order"])),
+            (b"none.php", written_with(&[], &[], 0, &[])),
+        ])
+        .expect("three files' class loads");
+        let first = &reads.files[&FileId::new(b"first.php")];
+        let later = &reads.files[&FileId::new(b"later.php")];
 
         assert_eq!(first.classes, HashMap::from_iter([(7, 1)]));
         assert_eq!(later.classes, HashMap::from_iter([(7, 2)]));
-        assert!(none.is_empty(), "reads that end at the log's start read no class");
+        assert!(
+            !reads.files.contains_key(&FileId::new(b"none.php")),
+            "reads that end at the log's start read no class"
+        );
         let rule = HashSet::from_iter([word(b"app\\rule")]);
         let order = HashSet::from_iter([word(b"app\\order")]);
-        assert!(logs.read_any(&later, &rule), "a later file reads the class an earlier file's hooks loaded");
-        assert!(logs.read_any(&later, &order));
-        assert!(!logs.read_any(&first, &order), "a file reads no class its worker loaded after it");
+        assert!(reads.class_logs.read_any(later, &rule), "a later file reads the class an earlier file's hooks loaded");
+        assert!(reads.class_logs.read_any(later, &order));
+        assert!(!reads.class_logs.read_any(first, &order), "a file reads no class its worker loaded after it");
     }
 
     /// A plugin's reads come as two lists, its issue reads and then its code reads, and each keeps its own, so a read
@@ -407,6 +554,59 @@ mod tests {
         assert!(reads.code.symbols.is_empty());
         assert_eq!(reads.code.listings, HashSet::from_iter([Listing::Functions]));
         assert!(decoded(&[], &[]).expect("two empty lists").is_empty());
+    }
+
+    /// A list a worker sent once it names by its number after, and each file that names it reads all of it, while
+    /// another worker's list of the same number is another list.
+    #[test]
+    fn a_list_of_reads_sent_once_reads_the_same_for_each_file_that_names_it() {
+        let mut named = ValueWriter::new();
+        for number in [0, 1] {
+            named.write_u32(number);
+            named.write_bool(false);
+        }
+        write_loads(&mut named, 0, &[]);
+        let mut other_worker = written_with(&[], &[(metadata::GET_CONSTANTS, b"LIMIT")], 0, &[]);
+        let worker = other_worker.len() - 3;
+        other_worker[worker] = Value::Int(8);
+
+        let reads = recorded(&[
+            (
+                b"a.php",
+                written_with(&[(metadata::GET_CLASS_LIKES, b"Order")], &[(metadata::LIST_FUNCTIONS, b"")], 0, &[]),
+            ),
+            (b"b.php", named.finish()),
+            (b"c.php", other_worker),
+        ])
+        .expect("lists sent once and named after");
+
+        assert_eq!(reads.files[&FileId::new(b"a.php")], reads.files[&FileId::new(b"b.php")]);
+        assert_eq!(
+            reads.files[&FileId::new(b"b.php")].issues.symbols,
+            HashSet::from_iter([(word(b"Order"), empty_word())])
+        );
+        assert_eq!(
+            reads.files[&FileId::new(b"c.php")].code.symbols,
+            HashSet::from_iter([(word(b"LIMIT"), empty_word())])
+        );
+        assert_eq!(reads.files[&FileId::new(b"a.php")].code.listings, HashSet::from_iter([Listing::Functions]));
+    }
+
+    /// A list named by a number its worker never sent in the session is refused, since Mago can't know what it read.
+    #[test]
+    fn a_list_of_reads_never_sent_is_refused() {
+        let mut named = ValueWriter::new();
+        named.write_u32(4);
+        named.write_bool(false);
+        write_list(&mut named, 5, &[]);
+        write_loads(&mut named, 0, &[]);
+
+        let refusal = recorded(&[(b"a.php", named.finish())]);
+
+        assert!(
+            matches!(&refusal, Err(ExternalAnalyzerError::Protocol(message)) if message == "a worker named codebase reads 4 it never sent in this session"),
+            "{refusal:?}"
+        );
     }
 
     /// A read of a class-like's direct descendants or of all its descendants lists the class-like as written, without
@@ -443,13 +643,13 @@ mod tests {
     /// file's callbacks read every class their worker loaded before the last of them ended.
     #[test]
     fn reads_that_arrive_apart_read_each_class_log_to_the_furthest_end() {
-        let (mut reads, _) =
-            decoded_with(&written_with(&[], &[], 0, &[b"app\\rule", b"app\\order"])).expect("two class loads");
-        let (earlier, _) = decoded_with(&written_with(&[], &[], 0, &[b"app\\rule"])).expect("one class load");
+        let reads = recorded(&[
+            (b"a.php", written_with(&[], &[], 0, &[b"app\\rule", b"app\\order"])),
+            (b"a.php", written_with(&[], &[], 0, &[b"app\\rule"])),
+        ])
+        .expect("two class loads of one file");
 
-        reads.extend(earlier);
-
-        assert_eq!(reads.classes, HashMap::from_iter([(7, 2)]));
+        assert_eq!(reads.files[&FileId::new(b"a.php")].classes, HashMap::from_iter([(7, 2)]));
     }
 
     /// Reads include another's when they hold each of its symbols and listings, and not when either misses one.

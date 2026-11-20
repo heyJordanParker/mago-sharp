@@ -52,7 +52,6 @@ use crate::utils::names::member_namespace;
 use crate::utils::names::namespace_function_name;
 use crate::utils::names::namespace_member;
 
-use super::ExtensionReads;
 use super::ExternalAnalysisSession;
 use super::ExternalPlugin;
 use super::NODE_REQUIREMENT_ARGUMENT_TYPES;
@@ -63,6 +62,7 @@ use super::NodeAnalysisRequirements;
 use super::error::ExternalAnalyzerError;
 use super::error::protocol;
 use super::protocol;
+use super::reads::ResponseReads;
 
 pub(super) const BEFORE_ANALYSIS_REQUEST: u16 = 5;
 pub(super) const AFTER_FILE_ANALYSIS_REQUEST: u16 = 6;
@@ -1498,13 +1498,12 @@ pub(super) fn decode_lifecycle_response(
 
             Some(file_id)
         };
-        let (file_reads, loads) = ExtensionReads::decode(&mut reader)?;
-        reads.push((file_id, file_reads, loads));
+        reads.push((file_id, ResponseReads::decode(&mut reader)?));
     }
 
     reader.finish()?;
-    for (file_id, file_reads, loads) in reads {
-        session.record_reads(file_id, file_reads, loads);
+    for (file_id, file_reads) in reads {
+        session.record_reads(file_id, file_reads)?;
     }
 
     Ok(LifecycleEffects { issues, issues_by_file, references, references_by_file })
@@ -2229,22 +2228,27 @@ mod tests {
     }
 
     /// A lifecycle response of `kind` with no issue and no reference, and a read entry for each of `files`: the file
-    /// it names, if any, then an issue read of the class `Issue` and a code read of the class `Code`, then the entries
-    /// `loads` from the start of worker 1's class log.
+    /// it names, if any, then an issue read of the class `Issue` and a code read of the class `Code`, sent as lists 0
+    /// and 1 the first time and by their numbers after, then the entries `loads` from the start of worker 1's class
+    /// log.
     fn response_with_reads(kind: u16, files: &[Option<&[u8]>], loads: &[&[u8]]) -> Vec<Value> {
         let mut writer = protocol::message_writer(kind);
         writer.write_u32(0);
         writer.write_u32(0);
         writer.write_u32(files.len() as u32);
-        for file in files {
+        for (place, file) in files.iter().enumerate() {
             if let Some(file) = file {
                 writer.write_bytes(file).expect("the name should fit in a frame");
             }
-            for class in [b"Issue".as_slice(), b"Code"] {
-                writer.write_u32(1);
-                writer.write_u8(GET_CLASS_LIKES);
-                writer.write_u8(0);
-                writer.write_bytes(class).expect("the class should fit in a frame");
+            for (number, class) in [b"Issue".as_slice(), b"Code"].into_iter().enumerate() {
+                writer.write_u32(number as u32);
+                writer.write_bool(place == 0);
+                if place == 0 {
+                    writer.write_u32(1);
+                    writer.write_u8(GET_CLASS_LIKES);
+                    writer.write_u8(0);
+                    writer.write_bytes(class).expect("the class should fit in a frame");
+                }
             }
             writer.write_u64(1);
             writer.write_u32(0);

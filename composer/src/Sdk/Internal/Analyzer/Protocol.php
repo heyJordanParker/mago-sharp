@@ -852,15 +852,18 @@ final class Protocol
      *   whose after-file hooks reported it, which a project-level hook's issue has none of. Mago keeps an after-file
      *   issue with that file's analysis, so it stays until the hooks of that file run again.
      * @param list<int|string|MemberIdentifier|ReferenceOrigin|ReferenceKind|null> $contributedReferences
-     * @param list<array{string|null, list<array{int, int, string}>, list<array{int, int, string}>, int}> $recordedReads
-     *   each file's codebase reads, or the before-analysis hooks', which name no file: the reads of plugins with no
-     *   provider, then those of plugins with one, then the end of `$classLoads` when the hooks finished
+     * @param list<array{string|null, CodebaseReads, CodebaseReads, int}> $recordedReads each file's codebase reads,
+     *   or the before-analysis hooks', which name no file: the reads of plugins with no provider, then those of plugins
+     *   with one, then the end of `$classLoads` when the hooks finished, each list written through `$sentReads` for
+     *   `$generation`
      *
      * @return list<null|bool|int|float|string|list<mixed>>
      */
     public static function writeLifecycleResponse(
         int $requestKind,
         ClassLoads $classLoads,
+        SentReads $sentReads,
+        int $generation,
         array $reportedIssues,
         array $contributedReferences = [],
         array $recordedReads = [],
@@ -959,7 +962,7 @@ final class Protocol
                 $writer->writeBytes($file ?? throw new ProtocolException('A file analysis read names no file.'));
             }
 
-            self::writeCodebaseReads($writer, $issueReads, $codeReads, $classLoads, $end);
+            self::writeCodebaseReads($writer, $sentReads, $generation, $issueReads, $codeReads, $classLoads, $end);
         }
 
         return $writer->finish();
@@ -970,19 +973,27 @@ final class Protocol
      * its worker made up to now, so Mago reads them in one place whatever kind the response is.
      *
      * @param list<null|bool|int|float|string|list<mixed>> $response
-     * @param list<array{int, int, string}> $issueReads
-     * @param list<array{int, int, string}> $codeReads
      *
      * @return list<null|bool|int|float|string|list<mixed>>
      */
     public static function withCodebaseReads(
         array $response,
-        array $issueReads,
-        array $codeReads,
+        SentReads $sentReads,
+        int $generation,
+        CodebaseReads $issueReads,
+        CodebaseReads $codeReads,
         ClassLoads $classLoads,
     ): array {
         $writer = new ValueWriter(array_slice($response, 0, 2));
-        self::writeCodebaseReads($writer, $issueReads, $codeReads, $classLoads, $classLoads->end());
+        self::writeCodebaseReads(
+            $writer,
+            $sentReads,
+            $generation,
+            $issueReads,
+            $codeReads,
+            $classLoads,
+            $classLoads->end(),
+        );
         $writer->writeValues(array_slice($response, 2));
 
         return $writer->finish();
@@ -990,27 +1001,20 @@ final class Protocol
 
     /**
      * Writes the reads of plugins with no provider, which decide only the issues reported, then those of plugins with
-     * one, which can change the analyzed code, then the class loads of the worker up to `$end`, which the callbacks
-     * read.
-     *
-     * @param list<array{int, int, string}> $issueReads
-     * @param list<array{int, int, string}> $codeReads
+     * one, which can change the analyzed code, each list through `$sentReads` for `$generation`, then the class loads
+     * of the worker up to `$end`, which the callbacks read.
      */
     private static function writeCodebaseReads(
         ValueWriter $writer,
-        array $issueReads,
-        array $codeReads,
+        SentReads $sentReads,
+        int $generation,
+        CodebaseReads $issueReads,
+        CodebaseReads $codeReads,
         ClassLoads $classLoads,
         int $end,
     ): void {
-        foreach ([$issueReads, $codeReads] as $reads) {
-            $writer->writeCount($reads);
-            foreach ($reads as [$operation, $argument, $name]) {
-                $writer->writeU8($operation);
-                $writer->writeU8($argument);
-                $writer->writeBytes($name);
-            }
-        }
+        $sentReads->write($writer, $generation, $issueReads);
+        $sentReads->write($writer, $generation, $codeReads);
 
         $classLoads->write($writer, $end);
     }
