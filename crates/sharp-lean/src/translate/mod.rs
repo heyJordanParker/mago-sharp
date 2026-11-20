@@ -162,16 +162,24 @@ impl Measure {
             Bound::Literal(value) => format!("({value} : int).toInt"),
             Bound::Parameter(index) => format!("{}.toInt", parameters[index]),
         };
-        let measure = match step {
-            Step::Rest => format!("{parameter}.length"),
-            Step::Down(below) => format!("({parameter}.toInt - {}).toNat", bound(below)),
-            Step::Up(above) => format!("({} - {parameter}.toInt).toNat", bound(above)),
+        let tested = |bound: Bound| match bound {
+            Bound::Literal(_) => String::new(),
+            Bound::Parameter(index) => format!(" {}", parameters[index]),
+        };
+        let (measure, smaller) = match step {
+            Step::Rest => (format!("{parameter}.length"), "smaller_value".to_owned()),
+            Step::Down(below) => {
+                (format!("({parameter}.toInt - {}).toNat", bound(below)), format!("smaller_down{}", tested(below)))
+            }
+            Step::Up(above) => {
+                (format!("({} - {parameter}.toInt).toNat", bound(above)), format!("smaller_up{}", tested(above)))
+            }
         };
 
         Measure {
             parameter: place,
             step,
-            termination: format!("termination_by {measure}\ndecreasing_by all_goals smaller_value"),
+            termination: format!("termination_by {measure}\ndecreasing_by all_goals {smaller}"),
         }
     }
 }

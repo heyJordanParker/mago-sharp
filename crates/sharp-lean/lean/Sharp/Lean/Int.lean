@@ -228,4 +228,34 @@ macro "smaller_value" : tactic => `(tactic| (
     | (rw [Sharp.int.toInt_sub_one (by grind)]; grind)
     | (rw [Sharp.int.toInt_add_one (by grind)]; grind)))
 
+/-- `smaller_value` for a recursion that steps an `int` one down towards a bound its path tested, as `n - 1` below
+`n <= 0`: the step's own lemma and `omega`, with the bounds of `bound`, the parameter the path tested against, when the
+bound is one. A goal of another shape gets `smaller_value`. -/
+syntax "smaller_down" (ppSpace ident)? : tactic
+
+/-- `smaller_down` for a recursion that steps an `int` one up towards its bound, as `i + 1` below `i >= top`. -/
+syntax "smaller_up" (ppSpace ident)? : tactic
+
+macro_rules
+  | `(tactic| smaller_down) => `(tactic| first
+      | (simp_all only [decide_eq_true_eq, Bool.not_eq_true, Int64.le_iff_toInt_le, Int64.lt_iff_toInt_lt,
+          Int64.toInt_zero, Int64.reduceToInt]
+         rw [Sharp.int.toInt_sub_one (by omega)]; omega)
+      | smaller_value)
+  | `(tactic| smaller_down $bound) => `(tactic| first
+      | (simp_all only [decide_eq_true_eq, Bool.not_eq_true, Int64.le_iff_toInt_le, Int64.lt_iff_toInt_lt]
+         have := Sharp.int.toInt_bounds $bound
+         rw [Sharp.int.toInt_sub_one (by omega)]; omega)
+      | smaller_value)
+  | `(tactic| smaller_up) => `(tactic| first
+      | (simp_all only [decide_eq_true_eq, Bool.not_eq_true, Int64.le_iff_toInt_le, Int64.lt_iff_toInt_lt,
+          Int64.toInt_zero, Int64.reduceToInt]
+         rw [Sharp.int.toInt_add_one (by omega)]; omega)
+      | smaller_value)
+  | `(tactic| smaller_up $bound) => `(tactic| first
+      | (simp_all only [decide_eq_true_eq, Bool.not_eq_true, Int64.le_iff_toInt_le, Int64.lt_iff_toInt_lt]
+         have := Sharp.int.toInt_bounds $bound
+         rw [Sharp.int.toInt_add_one (by omega)]; omega)
+      | smaller_value)
+
 end Sharp

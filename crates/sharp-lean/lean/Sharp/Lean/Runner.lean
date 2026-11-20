@@ -148,6 +148,10 @@ def hasGap (axioms : Array Name) : Bool := axioms.any (!standardAxioms.contains 
 #guard hasGap #[``sorryAx]
 #guard hasGap #[`Sharp.unproven]
 
+/-- The options every generated module and theorem elaborates with: Lean's linters off, since no warning reaches an
+answer. -/
+def unlinted : Options := ({} : Options).setBool `linter.all false
+
 def runCore (env : Environment) (action : CoreM α) : IO α := do
   let (value, _) ← action.toIO { fileName := "sharp-lean", fileMap := default, maxHeartbeats := 0 } { env }
   return value
@@ -207,7 +211,7 @@ the environment with its theorem and what elaborating it gave. The steps `Sharp/
 so a theorem that runs out of it fails alone, and the other checks of the runner go on. -/
 def elaborate (env : Environment) (item : Theorem) (heartbeats : Nat) : IO (Environment × Elaborated) := do
   let input := Parser.mkInputContext s!"open Sharp\n{item.text}" "<law>"
-  let state ← IO.processCommands input {} (Command.mkState env {} (maxHeartbeats.set {} heartbeats))
+  let state ← IO.processCommands input {} (Command.mkState env {} (maxHeartbeats.set unlinted heartbeats))
   let elaborated := state.commandState.env
   let name := item.statement ++ `proof
   let mut steps := #[]
@@ -280,13 +284,13 @@ def progress (line : String) : IO Unit := do
   stderr.putStr s!"{line}\n"
   stderr.flush
 
-/-- `env` with the generated `module` elaborated from its parsed source as the main module, with no options, as Lean
-elaborates a module it compiles. -/
+/-- `env` with the generated `module` elaborated from its parsed source as the main module, with the linters off and no
+other option, as Lean elaborates a module it compiles. -/
 def elaborateIn (env : Environment) (module : Name)
     (parsed : Parser.InputContext × Parser.ModuleParserState × MessageLog × Array Name) : ModulesM Environment := do
   let (input, parserState, messages, _) := parsed
   let main := env.mainModule
-  let state ← IO.processCommands input parserState (Command.mkState (env.setMainModule module) messages {})
+  let state ← IO.processCommands input parserState (Command.mkState (env.setMainModule module) messages unlinted)
   if let some error := state.commandState.messages.toList.find? (·.severity == .error) then
     throwThe Refusal (.rejected module error.pos.line)
   return state.commandState.env.setMainModule main
