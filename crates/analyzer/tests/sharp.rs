@@ -21745,6 +21745,21 @@ fn a_type_test_the_value_always_passes_says_the_value_already_has_the_type() {
     );
 }
 
+/// Spec section 21: a pattern binds a name only through a typed declaration, so an arm that reads its value in its
+/// `when` writes `string n when …` though the subject is a `string`. That declaration binds without a type test, and
+/// neither it nor its `when` is redundant. A type test that binds nothing and always holds is still reported.
+#[test]
+fn a_guard_binding_of_the_subjects_own_type_is_not_redundant() {
+    let sharp = "namespace Demo;\n\npublic class Plugins\n{\n    public static string kind(string name) => match (name) {\n        string n when n != \"wp\" => \"core\",\n        default => \"plugin\",\n    };\n\n    public static bool always(string name) => name is string;\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Plugins.sharp", sharp), &[]),
+        [
+            "10:52 redundant-type-comparison `name` is already a `string`, so `is string` is always true. Remove the test."
+        ]
+    );
+}
+
 /// Spec section 21: `as` converts a value to a type, or gives null, so its type is the target type made nullable, for a
 /// class, an interface, an intersection, a collection, and a type parameter with a bound and without one, whatever the
 /// value's type, its bound's type included. Only a value already of the target type never gives null, and that `as` is

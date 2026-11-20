@@ -2365,9 +2365,10 @@ where
 }
 
 /// Each function a pattern's PHP calls to test a value, at the span `called_functions` gives it, the type a list
-/// pattern's element or a case pattern's field is tested against, each list pattern with its `[`, and the start of
-/// each case pattern with fields, whose tests the case's own field types can make always true, as
-/// `PaymentResult.Paid(string transactionId)` unpacks the field the case declares a `string`.
+/// pattern's element, a case pattern's field or a typed declaration that binds a name is tested against, each list
+/// pattern with its `[`, and the start of each case pattern with fields, whose tests the case's own field types can
+/// make always true, as `PaymentResult.Paid(string transactionId)` unpacks the field the case declares a `string`.
+/// Only a typed declaration binds a value for a `when` (spec section 21), so its test is part of the pattern too.
 #[derive(Default)]
 struct PatternCalls {
     calls: Vec<LocalIdentifier<'static>>,
@@ -2385,6 +2386,9 @@ struct PatternCallWalker;
 impl<'ast, 'arena> Walker<'ast, 'arena, PatternCalls> for PatternCallWalker {
     fn walk_in_type_pattern(&self, type_pattern: &'ast TypePattern<'arena>, calls: &mut PatternCalls) {
         calls.calls.extend(called_functions(Node::TypePattern(type_pattern)));
+        if type_pattern.variable.is_some() && type_pattern.fields.is_none() && type_pattern.properties.is_none() {
+            calls.element_tests.push(type_pattern.hint.span());
+        }
         if let Some(fields) = type_pattern.fields {
             calls.case_patterns.push(type_pattern.hint.span().start.offset);
             calls.element_tests.extend(fields.fields.iter().filter_map(|field| match field {
