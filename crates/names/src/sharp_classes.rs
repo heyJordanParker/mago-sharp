@@ -57,7 +57,8 @@ pub(crate) const SHARP_CLASSES: [&str; 46] = [
 /// of a namespace, as `Dom\HTMLDocument`, through its import.
 ///
 /// `Builtins.sharp` declares each: the exception classes, `Throwable`, `Attribute`, the interfaces a PHP# class
-/// implements for a plain PHP library, and the DOM that reads and writes markup. Sorted.
+/// implements for a plain PHP library, the classes a plain PHP library hands PHP# code, and the DOM that reads and
+/// writes markup. Sorted.
 pub const STANDARD_ROOT_CLASSES: [&str; 71] = [
     "ArgumentCountError",
     "ArithmeticError",

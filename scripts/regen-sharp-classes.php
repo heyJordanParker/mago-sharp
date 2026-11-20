@@ -157,7 +157,7 @@ echo
     rust(
         'pub',
         'STANDARD_ROOT_CLASSES',
-        "/// The PHP built-in classes a `.sharp` file names, spec section 23: each root one by a bare name by default, and each\n/// of a namespace, as `Dom\\HTMLDocument`, through its import.\n///\n/// `Builtins.sharp` declares each: the exception classes, `Throwable`, `Attribute`, the interfaces a PHP# class\n/// implements for a plain PHP library, and the DOM that reads and writes markup. Sorted.",
+        "/// The PHP built-in classes a `.sharp` file names, spec section 23: each root one by a bare name by default, and each\n/// of a namespace, as `Dom\\HTMLDocument`, through its import.\n///\n/// `Builtins.sharp` declares each: the exception classes, `Throwable`, `Attribute`, the interfaces a PHP# class\n/// implements for a plain PHP library, the classes a plain PHP library hands PHP# code, and the DOM that reads and\n/// writes markup. Sorted.",
         $roots,
     );
 echo "\n";
