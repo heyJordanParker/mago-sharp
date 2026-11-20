@@ -31368,6 +31368,24 @@ fn typeof_void_and_never_are_class_values_as_any_other() {
     assert_eq!(messages(report, &REFLECTION), ["A local cannot be `void`: `void` is only a return type."]);
 }
 
+/// Spec section 25: two class values are equal when they name the same class, and a `Class<T>` holds `T` or a class
+/// that extends it, so an `==` or `!=` with a class literal holds always only for a class value that is that one class.
+/// A chain of them, a `Class<Order>` and a `Class<T>` bounded by `Order` compared with `typeof(Order)` report nothing.
+#[test]
+fn a_chain_of_class_value_comparisons_is_not_redundant() {
+    let order = ("src/App/Order.sharp", "namespace App;\n\npublic class Order\n{\n}\n");
+    let invoice = ("src/App/Invoice.sharp", "namespace App;\n\npublic class Invoice\n{\n}\n");
+    let refund = ("src/App/Refund.sharp", "namespace App;\n\npublic class Refund\n{\n}\n");
+    let kinds = "namespace App;\n\npublic static class Kinds\n{\n    public static bool billable(Class<Any> type) => type == typeof(Order) || type == typeof(Invoice) || type == typeof(Refund);\n\n    public static bool unbilled(Class<Any> type, bool early) => type != typeof(Order) || early;\n\n    public static bool ordered(Class<Order> type, bool early) => early || type == typeof(Order);\n\n    public static bool bounded<T : Order>(Class<T> type, bool early) => early || type == typeof(Order);\n\n    public static bool always(bool early)\n    {\n        const type = typeof(Order);\n        return early || type == typeof(Order);\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/App/Kinds.sharp", kinds), &[order, invoice, refund]),
+        [
+            "16:25 redundant-type-comparison Redundant condition: variable `type` (type `Class<Order>`) is already known to be `Class<Order>`. This condition is always `true` and the associated code block will always execute if reached. Consider simplifying."
+        ]
+    );
+}
+
 /// Spec section 25: a reflection boolean is named `isNullable` and `isOptional`, as the standard library names every
 /// boolean, so 0.6.10's `nullable` and `optional` name no member.
 #[test]

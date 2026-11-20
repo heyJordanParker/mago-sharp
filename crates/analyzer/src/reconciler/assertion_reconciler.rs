@@ -1280,13 +1280,6 @@ where
                         &mut ComparisonResult::for_dialect(context.dialect),
                     )
                 }) {
-                    if existing_var_type.is_single()
-                        && let Some(key) = &key
-                        && let Some(span) = span
-                    {
-                        trigger_issue_for_impossible(context, old_var_type_atom, key, assertion, true, negated, span);
-                    }
-
                     return if matches!(class_like_string, TClassLikeString::Generic { .. }) {
                         existing_var_type.clone()
                     } else {
