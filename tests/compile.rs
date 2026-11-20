@@ -4455,6 +4455,40 @@ fn a_law_reasons_about_a_type_test_inside_or_and_not() {
     }
 }
 
+/// Spec sections 20.2 and 28: a union of one machine's cases is a part of the machine's closed set of cases, so a law
+/// reasons about a move that gives one of them, and about which case it gives. A law that is false in the case the move
+/// gives is not proven.
+#[test]
+fn a_law_reasons_about_a_union_of_one_machine_s_cases() {
+    let counter = |law: &str| {
+        format!(
+            "namespace App;\n\npublic machine Counter\n{{\n    case Counting(int left)\n    {{\n        public Counter.Counting|Counter.Done step() => this.left > 1 ? Counter.Counting(this.left - 1) : Counter.Done;\n    }}\n\n    final case Done;\n\n    public static Counter.Counting start(int left) => Counter.Counting(left);\n\n    {law}\n}}\n"
+        )
+    };
+
+    let directory = lawful_project(&[(
+        "app/Counter.sharp",
+        &counter(
+            "law twoCount() => Counter.start(2).step() is Counter.Counting;\n    law oneIsDone() => Counter.start(1).step() is Counter.Done;",
+        ),
+    )]);
+
+    let output = compile(directory.path());
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(directory.path(), "app/Counter.sharp").exists());
+
+    let directory = lawful_project(&[(
+        "app/Counter.sharp",
+        &counter("law oneCounts() => Counter.start(1).step() is Counter.Counting;"),
+    )]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("error[law-unproven]: law oneCounts is not proven\n"), "{}", printed(&output));
+}
+
 /// Spec section 28: `<` on two values of a class runs the class's own `<=>`, so a law that compares two `Instant`s
 /// proves through `Instant`'s, which compares their seconds, then their nanoseconds. A false order is not proven.
 #[test]

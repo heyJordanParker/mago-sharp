@@ -221,6 +221,7 @@ impl<'body, 'program> Body<'body, 'program> {
             Hint::Function(_) => self.unmodeled(hint.span(), "a function type".to_owned(), issues::LAMBDA),
             Hint::Mixed(_) => self.unmodeled(hint.span(), "Any".to_owned(), issues::TYPE_TEST),
             Hint::Iterable(_) => self.unmodeled(hint.span(), "Iterable".to_owned(), issues::LAZY),
+            Hint::Union(_) if let Some(r#enum) = self.union_enum(hint) => self.named_type(hint.span(), r#enum),
             _ => self.unmodeled(hint.span(), format!("the type `{}`", self.source(hint.span())), issues::TYPE),
         }
     }
@@ -1028,6 +1029,22 @@ impl<'body, 'program> Body<'body, 'program> {
         Some((held, names::member(&names::full_name(&self.reached_name(r#enum)), case)))
     }
 
+    /// The Lean constructor of the case `value` names, as `Counter.Counting`, when its enum's cases run as classes,
+    /// spec section 20.2.
+    fn case_constructor(&mut self, value: &Expression) -> Option<String> {
+        let Expression::Access(Access::Property(access)) = value.unparenthesized() else {
+            return None;
+        };
+        let ClassLikeMemberSelector::Identifier(case) = &access.property else {
+            return None;
+        };
+        let r#enum = self.checked.names().get(&self.checked.names().static_property_class(access)?.name);
+        self.checked.types().enum_case_class(word(r#enum), word(case.value))?;
+        self.reads(r#enum);
+
+        Some(names::member(&names::full_name(&self.reached_name(r#enum)), case.value))
+    }
+
     /// The Lean constructor of the sealed interface `atomic` is that holds a value of the implementer `hint` names,
     /// spec section 20.1.
     pub(super) fn implementer(&mut self, hint: &Hint, atomic: &TAtomic) -> Option<String> {
@@ -1073,6 +1090,16 @@ impl<'body, 'program> Body<'body, 'program> {
     pub(super) fn pattern(&mut self, subject: &str, r#type: &TUnion, pattern: &Pattern) -> Option<String> {
         let kind = self.kind(r#type);
         match pattern {
+            // Spec section 20.2: a case of an enum whose cases run as classes, as a machine's do, tests which case the
+            // subject is, whatever fields the case holds.
+            Pattern::Value(value)
+                if kind == Kind::Enum
+                    && let Some(case) = self.case_constructor(value) =>
+            {
+                let case = if r#type.is_nullable() { format!("some ({case} ..)") } else { format!("({case} ..)") };
+
+                Some(format!("(match {subject} with | {case} => true | _ => false)"))
+            }
             // A value an object is compared with is `null`: a pattern takes constants, and an object's identity is
             // nothing a law reasons about.
             Pattern::Value(value)
@@ -1883,6 +1910,21 @@ impl<'body, 'program> Body<'body, 'program> {
         let (r#enum, case) = (&class[..separator], &class[separator + 1..]);
 
         self.checked.types().enum_case_class(word(r#enum), word(case)).map(|_| r#enum)
+    }
+
+    /// The enum whose cases the union `hint` joins, spec section 20.2, as `Counter.Counting|Counter.Done` joins
+    /// `Counter`'s, whose Lean type holds each of them, or `None` when it joins anything else.
+    fn union_enum(&self, hint: &Hint) -> Option<&'program [u8]> {
+        match hint {
+            Hint::Union(union) => {
+                let (left, right) = (self.union_enum(union.left)?, self.union_enum(union.right)?);
+
+                self.reach.same_class(left, right).then_some(left)
+            }
+            Hint::Parenthesized(parenthesized) => self.union_enum(parenthesized.hint),
+            Hint::Identifier(identifier) => self.case_enum(self.checked.names().get(identifier)),
+            _ => None,
+        }
     }
 
     /// The Lean type the class-like `class` declares itself, which the constructor of a sealed interface it implements
