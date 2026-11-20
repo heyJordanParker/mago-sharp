@@ -119,6 +119,9 @@ where
                 Some(T!["enum"]) => {
                     return Ok(Statement::Enum(self.parse_enum_with_attributes_and_modifiers(attributes, modifiers)?));
                 }
+                Some(T![Identifier]) if self.is_at_machine()? => {
+                    return Ok(Statement::Enum(self.parse_enum_with_attributes_and_modifiers(attributes, modifiers)?));
+                }
                 Some(T!["trait"]) => {
                     return Ok(Statement::Trait(
                         self.parse_trait_with_attributes_and_modifiers(attributes, modifiers)?,
@@ -256,11 +259,13 @@ where
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
     ) -> Result<Enum<'arena>, ParseError<'arena>> {
-        let r#enum = self.expect_keyword(T!["enum"])?;
+        let is_machine = self.is_at_machine()?;
+        let r#enum = if is_machine { self.expect_any_keyword()? } else { self.expect_keyword(T!["enum"])? };
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?;
         let type_parameter_names = self.type_parameter_names(type_parameters.as_ref());
         let (backing_type_hint, inheritance) = self.parse_enum_header()?;
+        let members_of = if is_machine { "A machine" } else { "An enum" };
 
         Ok(Enum {
             attribute_lists: attributes,
@@ -272,9 +277,24 @@ where
             inheritance,
             implements: self.parse_optional_implements()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: self.parse_class_like_members("An enum", Some(&name), type_parameter_names)?,
+            members: self.parse_class_like_members(members_of, Some(&name), type_parameter_names)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
+    }
+
+    /// Whether a PHP# machine starts here, spec section 20.2: `machine`, a name, and `:` or `{`. The name may be a
+    /// reserved word, as a class's may, and the checks refuse it there. Everywhere else `machine` is a name, such as a
+    /// local `machine`.
+    pub(crate) fn is_at_machine(&mut self) -> Result<bool, ParseError<'arena>> {
+        let starts_with_machine =
+            self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"machine");
+        let names_a_machine =
+            self.stream.peek_kind(1)?.is_some_and(|kind| kind.is_identifier_maybe_reserved() && !kind.is_infix());
+
+        Ok(self.dialect.is_sharp()
+            && starts_with_machine
+            && names_a_machine
+            && matches!(self.stream.peek_kind(2)?, Some(T![":" | "{"])))
     }
 
     /// The backing type after `:`, as PHP writes `: string`, and in PHP# the interfaces, as in `: string, HasLabel` or

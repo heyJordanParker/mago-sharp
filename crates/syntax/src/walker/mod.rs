@@ -70,6 +70,7 @@ use crate::cst::cst::Enum;
 use crate::cst::cst::EnumBackingTypeHint;
 use crate::cst::cst::EnumCase;
 use crate::cst::cst::EnumCaseBackedItem;
+use crate::cst::cst::EnumCaseBody;
 use crate::cst::cst::EnumCaseDataItem;
 use crate::cst::cst::EnumCaseItem;
 use crate::cst::cst::EnumCaseUnitItem;
@@ -1426,9 +1427,20 @@ generate_ast_walker! {
             walker.walk_attribute_list(attribute_list, context);
         }
 
+        for modifier in &enum_case.modifiers {
+            walker.walk_modifier(modifier, context);
+        }
+
         walker.walk_keyword(&enum_case.case, context);
         walker.walk_enum_case_item(&enum_case.item, context);
-        walker.walk_terminator(&enum_case.terminator, context);
+        match &enum_case.body {
+            EnumCaseBody::Terminator(terminator) => walker.walk_terminator(terminator, context),
+            EnumCaseBody::Members(members) => {
+                for member in &members.members {
+                    walker.walk_class_like_member(member, context);
+                }
+            }
+        }
     }
 
     'arena EnumCaseItem as enum_case_item => {
@@ -1452,6 +1464,9 @@ generate_ast_walker! {
     'arena EnumCaseDataItem as enum_case_data_item => {
         walker.walk_local_identifier(&enum_case_data_item.name, context);
         walker.walk_function_like_parameter_list(&enum_case_data_item.parameter_list, context);
+        if let Some(backing) = &enum_case_data_item.backing {
+            walker.walk_expression(backing.value, context);
+        }
     }
 
     'arena EnumCaseBackedItem as enum_case_backed_item => {

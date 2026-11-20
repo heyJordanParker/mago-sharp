@@ -15,6 +15,7 @@ use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumBackingTypeHint;
 use mago_syntax::cst::EnumCase;
+use mago_syntax::cst::EnumCaseBody;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
@@ -604,8 +605,17 @@ impl Fingerprintable for EnumCase<'_> {
         for attribute_list in &self.attribute_lists {
             attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
         }
+        crate::modifier::fingerprint_modifiers(self.modifiers.iter(), hasher, resolved_names, options);
         self.item.fingerprint_with_hasher(hasher, resolved_names, options);
-        self.terminator.fingerprint_with_hasher(hasher, resolved_names, options);
+        match &self.body {
+            EnumCaseBody::Terminator(terminator) => terminator.fingerprint_with_hasher(hasher, resolved_names, options),
+            EnumCaseBody::Members(members) => {
+                "enum_case_members".hash(hasher);
+                for member in &members.members {
+                    member.fingerprint_with_hasher(hasher, resolved_names, options);
+                }
+            }
+        }
     }
 }
 
@@ -633,6 +643,9 @@ impl Fingerprintable for EnumCaseItem<'_> {
                 "enum_case_data".hash(hasher);
                 item.name.fingerprint_with_hasher(hasher, resolved_names, options);
                 item.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+                if let Some(backing) = &item.backing {
+                    backing.value.fingerprint_with_hasher(hasher, resolved_names, options);
+                }
             }
         }
     }

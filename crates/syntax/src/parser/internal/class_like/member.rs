@@ -95,6 +95,9 @@ where
             T!["function"] => {
                 ClassLikeMember::Method(self.parse_method_with_attributes_and_modifiers(attributes, modifiers)?)
             }
+            T!["case"] if self.dialect.is_sharp() => {
+                ClassLikeMember::EnumCase(self.parse_enum_case_with_attributes_and_modifiers(attributes, modifiers)?)
+            }
             _ if self.dialect.is_sharp() => {
                 self.parse_sharp_member_with_attributes_and_modifiers(attributes, modifiers)?
             }

@@ -131,6 +131,7 @@ pub mod enum_case;
 pub mod initialization;
 pub mod law;
 pub mod listener;
+pub mod machine;
 pub mod method;
 pub mod method_signature;
 pub mod override_attribute;
@@ -1134,6 +1135,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
         )?;
 
         check_duplicate_enum_case_values(context, artifacts, name, self);
+        machine::check_machine(context, class_like_metadata);
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
         listener::check_listener(class_like_metadata, self.members.as_slice(), context);
@@ -1783,6 +1785,7 @@ where
         report_members_named_like_inherited_members(context, class_like_metadata);
         check_sharp_elements(context, class_like_metadata);
         check_public_types_named(context, class_like_metadata);
+        machine::check_machine_properties(context, class_like_metadata, members);
     }
 
     // Check trait constant overrides AFTER constants have been analyzed

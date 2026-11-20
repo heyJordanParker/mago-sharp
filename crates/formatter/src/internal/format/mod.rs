@@ -25,6 +25,7 @@ use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumBackingTypeHint;
 use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::EnumCaseBackedItem;
+use mago_syntax::cst::EnumCaseBody;
 use mago_syntax::cst::EnumCaseDataItem;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::EnumCaseUnitItem;
@@ -972,10 +973,20 @@ where
                 parts.push(Document::Line(Line::hard()));
             }
 
+            if !self.modifiers.is_empty() {
+                parts.extend(print_modifiers(f, &self.modifiers));
+                parts.push(Document::space());
+            }
+
             parts.push(self.case.format(f));
             parts.push(Document::space());
             parts.push(self.item.format(f));
-            parts.push(self.terminator.format(f));
+            parts.push(match &self.body {
+                EnumCaseBody::Terminator(terminator) => terminator.format(f),
+                EnumCaseBody::Members(members) => {
+                    print_class_like_body(f, &members.left_brace, &members.members, &members.right_brace, None)
+                }
+            });
 
             Document::Group(Group::new(parts))
         })
@@ -1012,7 +1023,13 @@ where
 {
     fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
         wrap!(f, self, EnumCaseDataItem, {
-            Document::Array(vec_in![f.arena; self.name.format(f), self.parameter_list.format(f)])
+            let mut parts = vec_in![f.arena; self.name.format(f), self.parameter_list.format(f)];
+            if let Some(backing) = &self.backing {
+                parts.push(Document::String(b" = "));
+                parts.push(backing.value.format(f));
+            }
+
+            Document::Array(parts)
         })
     }
 }

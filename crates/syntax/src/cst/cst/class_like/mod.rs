@@ -165,6 +165,7 @@ pub struct Enum<'arena> {
     pub attribute_lists: Sequence<'arena, AttributeList<'arena>>,
     /// PHP#'s `public`, as in `public enum Foo {}`. Always empty in PHP.
     pub modifiers: Sequence<'arena, Modifier<'arena>>,
+    /// `enum`, or PHP#'s `machine`, spec section 20.2: a value that moves between its cases.
     pub r#enum: Keyword<'arena>,
     pub name: LocalIdentifier<'arena>,
     /// PHP#'s type parameters, as in `public enum Result<T, TError : Error> {}`. Always `None` in PHP.
@@ -268,11 +269,19 @@ impl HasSpan for Enum<'_> {
 }
 
 impl Enum<'_> {
+    /// Whether this is a PHP# machine, spec section 20.2, declared with `machine` in place of `enum`.
+    #[must_use]
+    pub fn is_machine(&self) -> bool {
+        self.r#enum.value == b"machine"
+    }
+
     /// Whether this PHP# enum runs as an abstract class with each case a class of its own: a case carries data, spec
-    /// section 20, or the enum has type parameters, which a PHP enum's cases can't carry, spec section 31.
+    /// section 20, the enum has type parameters, which a PHP enum's cases can't carry, spec section 31, or it is a
+    /// machine, whose cases hold its moves, spec section 20.2.
     #[must_use]
     pub fn runs_as_classes(&self) -> bool {
-        self.type_parameters.is_some()
+        self.is_machine()
+            || self.type_parameters.is_some()
             || self.members.iter().any(
                 |member| matches!(member, ClassLikeMember::EnumCase(case) if matches!(case.item, EnumCaseItem::Data(_))),
             )

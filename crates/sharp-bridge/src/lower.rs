@@ -2424,7 +2424,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 SHARP_AST_CLASS,
                 ZEND_ACC_FINAL,
                 case.case.span,
-                case.terminator.span(),
+                case.body.span(),
                 &class_name,
                 &[parent, header, members, attributes, NULL],
             ));

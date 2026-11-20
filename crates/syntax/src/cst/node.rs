@@ -75,6 +75,7 @@ use crate::cst::cst::Enum;
 use crate::cst::cst::EnumBackingTypeHint;
 use crate::cst::cst::EnumCase;
 use crate::cst::cst::EnumCaseBackedItem;
+use crate::cst::cst::EnumCaseBody;
 use crate::cst::cst::EnumCaseDataItem;
 use crate::cst::cst::EnumCaseItem;
 use crate::cst::cst::EnumCaseUnitItem;
@@ -1540,9 +1541,20 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     f(Node::AttributeList(attr));
                 }
 
+                for item in &node.modifiers {
+                    f(Node::Modifier(item));
+                }
+
                 f(Node::Keyword(&node.case));
                 f(Node::EnumCaseItem(&node.item));
-                f(Node::Terminator(&node.terminator));
+                match &node.body {
+                    EnumCaseBody::Terminator(terminator) => f(Node::Terminator(terminator)),
+                    EnumCaseBody::Members(members) => {
+                        for item in &members.members {
+                            f(Node::ClassLikeMember(item));
+                        }
+                    }
+                }
             }
             Node::EnumCaseBackedItem(node) => {
                 f(Node::LocalIdentifier(&node.name));
@@ -1557,6 +1569,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::EnumCaseDataItem(node) => {
                 f(Node::LocalIdentifier(&node.name));
                 f(Node::FunctionLikeParameterList(&node.parameter_list));
+                if let Some(backing) = &node.backing {
+                    f(Node::Expression(backing.value));
+                }
             }
             Node::Extends(node) => {
                 f(Node::Keyword(&node.extends));

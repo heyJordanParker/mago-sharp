@@ -27,6 +27,7 @@ use mago_syntax::cst::Closure;
 use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Constant;
 use mago_syntax::cst::Enum;
+use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extension;
@@ -93,11 +94,13 @@ use crate::misc::GenericParent;
 use crate::scanner::attribute::scan_attribute_lists;
 use crate::scanner::class_alias::scan_class_like_alias;
 use crate::scanner::class_like::add_iterator_method;
+use crate::scanner::class_like::case_class_key;
 use crate::scanner::class_like::register_anonymous_class;
 use crate::scanner::class_like::register_class;
 use crate::scanner::class_like::register_enum;
 use crate::scanner::class_like::register_event;
 use crate::scanner::class_like::register_interface;
+use crate::scanner::class_like::register_machine;
 use crate::scanner::class_like::register_module;
 use crate::scanner::class_like::register_struct;
 use crate::scanner::class_like::register_trait;
@@ -1416,8 +1419,42 @@ where
         finalize_class_like(self, context);
     }
 
+    /// The members of a machine's case, spec section 20.2, are members of the class the case runs as, which
+    /// `register_case_classes` registered with the machine.
     #[inline]
-    fn walk_out_enum(&mut self, _enum: &'arena Enum<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+    fn walk_in_enum_case(&mut self, case: &'arena EnumCase<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        if case.members().is_empty() {
+            return;
+        }
+        let Some(machine) = self.stack.last().and_then(|machine| self.codebase.class_likes.get(machine)) else {
+            return;
+        };
+        let case_class = case_class_key(machine.original_name, case.item.name().value);
+        if self.codebase.class_likes.get(&case_class).is_some_and(|class| class.span == case.span()) {
+            self.stack.push(case_class);
+        }
+    }
+
+    #[inline]
+    fn walk_out_enum_case(&mut self, case: &'arena EnumCase<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        if self
+            .stack
+            .last()
+            .and_then(|class| self.codebase.class_likes.get(class))
+            .is_some_and(|class| class.span == case.span())
+        {
+            self.stack.pop();
+        }
+    }
+
+    #[inline]
+    fn walk_out_enum(&mut self, r#enum: &'arena Enum<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        if r#enum.is_machine()
+            && let Some(&machine) = self.stack.last()
+        {
+            register_machine(&mut self.codebase, r#enum, machine);
+        }
+
         finalize_class_like(self, context);
     }
 

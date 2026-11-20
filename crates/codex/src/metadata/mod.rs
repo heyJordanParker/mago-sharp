@@ -66,6 +66,7 @@ pub mod enum_case;
 pub mod r#extern;
 pub mod flags;
 pub mod function_like;
+pub mod machine;
 pub mod module;
 pub mod parameter;
 pub mod property;

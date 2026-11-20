@@ -19,6 +19,7 @@ use crate::metadata::class_like_constant::ClassLikeConstantMetadata;
 use crate::metadata::enum_case::EnumCaseMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeMetadata;
+use crate::metadata::machine::MachineMetadata;
 use crate::metadata::property::PropertyMetadata;
 use crate::metadata::shared::Shared;
 use crate::metadata::ttype::TypeMetadata;
@@ -140,6 +141,9 @@ pub struct ClassLikeMetadata {
     /// can be accessed via magic methods (__call, __get, __set, __callStatic)
     pub mixins: Vec<TypeMetadata>,
     pub version_constraint: VersionConstraint,
+    /// The cases and moves of a PHP# machine, spec section 20.2, which runs as this abstract class.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub machine: Option<MachineMetadata>,
 }
 
 /// A key a PHP# struct's `parse` reads, spec section 10: a main constructor parameter, or a property an object
@@ -300,6 +304,7 @@ impl ClassLikeMetadata {
             imported_type_aliases: WordMap::default(),
             mixins: Vec::default(),
             version_constraint: VersionConstraint::unconstrained(),
+            machine: None,
         }
     }
 

@@ -11,6 +11,9 @@ use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumBackingTypeHint;
+use mago_syntax::cst::EnumCase;
+use mago_syntax::cst::EnumCaseBody;
+use mago_syntax::cst::EnumCaseDataItem;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Interface;
@@ -956,6 +959,7 @@ pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Contex
         match &member {
             ClassLikeMember::EnumCase(case) => {
                 let item_name = BytesDisplay(case.item.name().value);
+                check_machine_case_parts(r#enum, case, context);
 
                 match &case.item {
                     EnumCaseItem::Unit(_) => {
@@ -1003,9 +1007,22 @@ pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Contex
                         }
                     }
                     // Spec section 20: an enum is backed, every case with a value, or not, its cases plain or
-                    // carrying data.
+                    // carrying data. A backed machine backs its cases that carry data too, spec section 20.2.
                     EnumCaseItem::Data(item) => {
-                        if enum_is_backed {
+                        if enum_is_backed && r#enum.is_machine() && item.backing.is_none() {
+                            context.report(
+                                Issue::error(format!(
+                                    "Case `{item_name}` of backed machine `{enum_name}` must have a value."
+                                ))
+                                .with_annotation(
+                                    Annotation::primary(case.span())
+                                        .with_message(format!("Case `{item_name}` defined here.")),
+                                )
+                                .with_help(format!(
+                                    "Add a value after its fields, as `case {item_name}(…) = …`, or remove the backing from the machine `{enum_name}`."
+                                )),
+                            );
+                        } else if enum_is_backed && !r#enum.is_machine() {
                             context.report(
                                 Issue::error(format!(
                                     "Case `{item_name}` of backed enum `{enum_name}` must not carry data."
@@ -1143,6 +1160,54 @@ pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Contex
             }
             _ => {}
         }
+    }
+}
+
+/// Keeps the parts only a machine's case takes to a machine, spec section 20.2: `final`, a block of members, and a
+/// value beside the fields of a case that carries data. A case takes no other modifier.
+fn check_machine_case_parts(r#enum: &Enum, case: &EnumCase, context: &mut Context<'_, '_, '_>) {
+    let case_name = BytesDisplay(case.item.name().value);
+    let enum_name = BytesDisplay(r#enum.name.value);
+    for modifier in &case.modifiers {
+        let keyword = BytesDisplay(modifier.get_keyword().value);
+        let message = if !matches!(modifier, Modifier::Final(_)) {
+            format!("Case `{case_name}` takes no `{keyword}`: only a machine's case takes `final`.")
+        } else if !r#enum.is_machine() {
+            format!("Case `{case_name}` of enum `{enum_name}` takes no `final`: only a machine's case does.")
+        } else {
+            continue;
+        };
+        context.report(
+            Issue::error(message)
+                .with_annotation(Annotation::primary(modifier.span()).with_message("Written here."))
+                .with_help(format!("Remove `{keyword}`.")),
+        );
+    }
+
+    if r#enum.is_machine() {
+        return;
+    }
+
+    if let EnumCaseBody::Members(members) = &case.body {
+        context.report(
+            Issue::error(format!(
+                "Case `{case_name}` of enum `{enum_name}` takes no members: only a machine's case holds the moves out of it."
+            ))
+            .with_annotation(Annotation::primary(members.span()).with_message("Written here."))
+            .with_help(format!("End the case with `;`, or declare `{enum_name}` as a `machine`.")),
+        );
+    }
+
+    if let EnumCaseItem::Data(EnumCaseDataItem { backing: Some(backing), .. }) = &case.item {
+        context.report(
+            Issue::error(format!(
+                "Case `{case_name}` of enum `{enum_name}` carries data and takes no value: only a machine's case takes both."
+            ))
+            .with_annotation(
+                Annotation::primary(backing.equals.join(backing.value.span())).with_message("Written here."),
+            )
+            .with_help("Remove the value, or the data."),
+        );
     }
 }
 

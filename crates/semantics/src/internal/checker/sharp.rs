@@ -1237,18 +1237,34 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(Enum)
         }
+        // A machine's case, spec section 20.2, takes `final` and a block of members, which `check_enum` keeps to a
+        // machine, and its members are checked as the machine's own.
         (Node::EnumCase(case), Enum) => {
             check_declared_name(case.item.name().value, case.item.name().span, "Enum case", NameCase::Pascal, context);
+            for attribute_list in &case.attribute_lists {
+                enter_tree(Node::AttributeList(attribute_list), Enum, context);
+            }
+            enter_tree(Node::EnumCaseItem(&case.item), Enum, context);
+            for member in case.members() {
+                enter_tree(Node::ClassLikeMember(member), Enum, context);
+            }
 
-            Some(Enum)
+            None
         }
         (
             Node::ClassLikeMember(ClassLikeMember::EnumCase(_)) | Node::EnumCaseItem(_) | Node::EnumCaseUnitItem(_),
             Enum,
         ) => Some(Enum),
         // A case's data are its fields, which run as the public get-only properties of the case's class, as an
-        // event's parameters do.
-        (Node::EnumCaseDataItem(_), Enum) => Some(Place::Case),
+        // event's parameters do. A machine's case backs them with a value, as a backed case does.
+        (Node::EnumCaseDataItem(item), Enum) => {
+            enter_tree(Node::FunctionLikeParameterList(&item.parameter_list), Place::Case, context);
+            if let Some(backing) = &item.backing {
+                enter_tree(Node::Expression(backing.value), Constant, context);
+            }
+
+            None
+        }
         (Node::FunctionLikeParameter(parameter), Place::Case) => check_property_parameter(parameter, Place::Case, context),
         (Node::EnumCaseBackedItem(_), Enum) => Some(Constant),
         // Spec section 13: a field or a property keeps its value with `{ get; }`, and only a computed property's type,

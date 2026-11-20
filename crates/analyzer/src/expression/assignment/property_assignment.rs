@@ -33,6 +33,7 @@ use crate::expression::assignment::get_written_literal_type;
 use crate::expression::is_refused_type;
 use crate::resolver::method::get_declared_type;
 use crate::resolver::property::resolve_instance_properties;
+use crate::statement::class_like::machine;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::get_property_access_expression_id;
 use crate::utils::expression::is_this;
@@ -141,6 +142,7 @@ where
     if let Some(declared_type) = &declared_type {
         if let Some(assigned_value) = assigned_value {
             check_sharp_literal_kind(context, Some(block_context), artifacts, assigned_value, declared_type);
+            machine::check_machine_write(context, block_context, &target, declared_type, assigned_value);
         }
         literal_type = get_written_literal_type(
             context,

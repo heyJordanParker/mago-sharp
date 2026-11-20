@@ -25,6 +25,7 @@ use crate::error::AnalysisError;
 use crate::resolver::class_name::report_full_class_name;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
+use crate::statement::class_like::analyze_class_like;
 use crate::statement::class_like::constant::path_back;
 use crate::statement::class_like::constant::report_cycle;
 use crate::statement::class_like::defined_in;
@@ -147,6 +148,20 @@ where
         );
 
         return Ok(());
+    }
+    // A machine's case holds its moves, spec section 20.2, which are members of the class the case runs as.
+    if !case.members().is_empty() {
+        analyze_class_like(
+            context,
+            artifacts,
+            Some(name.span),
+            case.span(),
+            None,
+            None,
+            None,
+            case_metadata,
+            case.members(),
+        )?;
     }
     let EnumCaseItem::Data(item) = &case.item else {
         return Ok(());

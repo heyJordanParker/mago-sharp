@@ -36271,3 +36271,121 @@ fn a_family_enum_reads_its_cases_by_name_and_tag_and_key_go_only_on_a_family() {
         ["7:60 invalid-struct `Outcome.parse` can't read `Hooked.run`: `Function<int()>` is a function. | "]
     );
 }
+
+/// The machine of spec section 20.2's specimen: each case's block holds the moves out of it, `open` is its entry
+/// point, and `Shipped` and `Cancelled` are `final`.
+const ORDER_STATUS: (&str, &str) = (
+    "src/Shop/OrderStatus.sharp",
+    "namespace Shop;\n\npublic machine OrderStatus : string\n{\n    case Draft = \"draft\"\n    {\n        public OrderStatus.Paid pay(int cents)\n        {\n            if (cents <= 0) {\n                throw new ValueError(\"A payment is positive.\");\n            }\n            return OrderStatus.Paid(cents);\n        }\n\n        public OrderStatus.Cancelled cancel() => OrderStatus.Cancelled;\n    }\n\n    case Paid(int cents) = \"paid\"\n    {\n        public OrderStatus.Shipped ship() => OrderStatus.Shipped;\n    }\n\n    final case Shipped = \"shipped\";\n    final case Cancelled = \"cancelled\";\n\n    public static OrderStatus.Draft open() => OrderStatus.Draft;\n\n    law paidIsPositive(OrderStatus.Paid paid) => paid.cents > 0;\n}\n",
+);
+
+/// Spec section 20.2: the specimen's machine compiles, and its holder compiles where it changes its machine property by
+/// a move of its own, and is refused at each other way of changing it.
+#[test]
+fn a_machine_property_changes_only_by_a_move_of_its_own() {
+    let order = (
+        "src/Shop/Order.sharp",
+        "namespace Shop;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n\n    public OrderStatus status { get; private set; } = OrderStatus.open();\n    public OrderStatus copied { get; set; } = OrderStatus.open();\n    public OrderStatus started { get; private set; } = OrderStatus.Shipped;\n\n    public void pay(int cents) { this.status = this.status.pay(cents); }\n    public void copy(Order o) { this.status = o.status; }\n    public void force() { this.status = OrderStatus.Paid(5); }\n    public void restart() { this.status = OrderStatus.open(); }\n}\n",
+    );
+
+    assert_eq!(refusals(ORDER_STATUS, &[order]), Vec::<String>::new());
+    assert_eq!(
+        refusals(order, &[ORDER_STATUS]),
+        [
+            "12:47 invalid-machine `this.status` holds the machine `OrderStatus`, so it changes only by a move of its own, as `this.status = this.status.pay(…)`. | Call a move of `this.status`.",
+            "13:41 invalid-machine Only the entry points and moves of `OrderStatus` build its case `OrderStatus.Paid`. | Call an entry point, as `OrderStatus.open()`, or a move of a value of `OrderStatus`.",
+            "14:43 invalid-machine `this.status` holds the machine `OrderStatus`, so it changes only by a move of its own, as `this.status = this.status.pay(…)`. | Call a move of `this.status`.",
+            "8:24 invalid-machine `Order.copied` holds the machine `OrderStatus`, so its `set` is `private`. | Write `{ get; private set; }`, and change it only by a move, as `this.copied = this.copied.pay(…)`.",
+            "9:56 invalid-machine `Order.started` holds the machine `OrderStatus`, so its initial value is an entry point of `OrderStatus`, as `OrderStatus.open()`. | Start it with an entry point.",
+        ]
+    );
+}
+
+/// Spec section 20.2: a constructor starts a machine property with an entry point, and a property the constructor
+/// takes is refused, since its caller's value came from no entry point.
+#[test]
+fn a_constructor_starts_a_machine_property_with_an_entry_point() {
+    let started = (
+        "src/Shop/Order.sharp",
+        "namespace Shop;\n\npublic class Order\n{\n    public OrderStatus status { get; private set; }\n\n    public Order()\n    {\n        this.status = OrderStatus.open();\n    }\n}\n",
+    );
+    let taken = (
+        "src/Shop/Order.sharp",
+        "namespace Shop;\n\npublic class Order\n{\n    public Order(public OrderStatus status { get; private set; }) { }\n}\n",
+    );
+
+    assert_eq!(refusals(started, &[ORDER_STATUS]), Vec::<String>::new());
+    assert_eq!(
+        refusals(taken, &[ORDER_STATUS]),
+        [
+            "5:37 invalid-machine `Order.status` holds the machine `OrderStatus`, so its initial value is an entry point of `OrderStatus`, as `OrderStatus.open()`. | Start it with an entry point."
+        ]
+    );
+}
+
+/// Spec section 20.2: `final`, a block of members and a value beside a case's data are a machine's alone, and a case
+/// takes no other modifier.
+#[test]
+fn only_a_machine_case_takes_final_members_and_a_value_beside_its_data() {
+    let status = (
+        "src/Shop/Status.sharp",
+        "namespace Shop;\n\npublic enum Status\n{\n    final case Open;\n    case Paid(int cents) = 1;\n    case Shipped\n    {\n        public int rank() => 1;\n    }\n}\n",
+    );
+    let ticket = (
+        "src/Shop/Ticket.sharp",
+        "namespace Shop;\n\npublic machine Ticket\n{\n    public case Open\n    {\n        public Ticket.Closed close() => Ticket.Closed;\n    }\n\n    final case Closed;\n\n    public static Ticket.Open open() => Ticket.Open;\n}\n",
+    );
+
+    assert_eq!(
+        refusals(status, &[]),
+        [
+            "5:5 semantics Case `Open` of enum `Status` takes no `final`: only a machine's case does. | Remove `final`.",
+            "6:26 semantics Case `Paid` of enum `Status` carries data and takes no value: only a machine's case takes both. | Remove the value, or the data.",
+            "8:5 semantics Case `Shipped` of enum `Status` takes no members: only a machine's case holds the moves out of it. | End the case with `;`, or declare `Status` as a `machine`.",
+        ]
+    );
+    assert_eq!(
+        refusals(ticket, &[]),
+        ["5:5 semantics Case `Open` takes no `public`: only a machine's case takes `final`. | Remove `public`."]
+    );
+}
+
+/// Spec section 20.2: a machine's graph is checked. Every case is reachable from an entry point, a case with no move
+/// out is `final`, a `final` case has no move out, and every case reaches a `final` one when the machine has one.
+#[test]
+fn a_machine_graph_names_each_case_it_refuses() {
+    let machine = (
+        "src/Shop/Ticket.sharp",
+        "namespace Shop;\n\npublic machine Ticket\n{\n    case Open\n    {\n        public Ticket.Working take() => Ticket.Working;\n        public Ticket.Closed close() => Ticket.Closed;\n    }\n\n    case Working\n    {\n        public Ticket.Waiting wait() => Ticket.Waiting;\n    }\n\n    case Waiting\n    {\n        public Ticket.Working resume() => Ticket.Working;\n    }\n\n    case Stuck;\n\n    final case Closed\n    {\n        public Ticket.Open reopen() => Ticket.Open;\n    }\n\n    case Lost\n    {\n        public Ticket.Closed close() => Ticket.Closed;\n    }\n\n    public static Ticket.Open open() => Ticket.Open;\n}\n",
+    );
+
+    assert_eq!(
+        refusals(machine, &[]),
+        [
+            "11:10 invalid-machine The case `Ticket.Working` reaches no `final` case. | Give `Ticket.Working` a move that leads to a `final` case.",
+            "16:10 invalid-machine The case `Ticket.Waiting` reaches no `final` case. | Give `Ticket.Waiting` a move that leads to a `final` case.",
+            "21:10 invalid-machine The case `Ticket.Stuck` has no move out, so it is `final`. | Write `final case Stuck`, or give it a move.",
+            "21:10 invalid-machine No entry point or move reaches the case `Ticket.Stuck`. | Give `Ticket` an entry point or a move that gives `Ticket.Stuck`, or remove it.",
+            "23:16 invalid-machine The `final` case `Ticket.Closed` has a move out, `reopen`. | Remove `final`, or remove the move.",
+            "28:10 invalid-machine No entry point or move reaches the case `Ticket.Lost`. | Give `Ticket` an entry point or a move that gives `Ticket.Lost`, or remove it.",
+        ]
+    );
+}
+
+/// Spec sections 20.2 and 21: a `match` over a machine lists its cases and takes no `default`, so a case added to the
+/// machine makes a `match` that misses it a compile error.
+#[test]
+fn a_match_over_a_machine_lists_every_case() {
+    let report = (
+        "src/Shop/Report.sharp",
+        "namespace Shop;\n\npublic class Report\n{\n    public static int rank(OrderStatus status) => match (status) {\n        OrderStatus.Draft => 1,\n        OrderStatus.Paid => 2,\n        OrderStatus.Shipped => 3,\n    };\n\n    public static int kind(OrderStatus status) => match (status) {\n        OrderStatus.Paid paid => paid.cents,\n        default => 2,\n    };\n}\n",
+    );
+
+    assert_eq!(
+        refusals(report, &[ORDER_STATUS]),
+        [
+            "5:51 match-not-exhaustive This `match` misses `OrderStatus.Cancelled`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "13:9 match-not-exhaustive A `match` on `OrderStatus` lists its cases; missing: `OrderStatus.Draft`, `OrderStatus.Shipped` and `OrderStatus.Cancelled`. | Replace `default` with arms for the cases it misses, and join the cases that share an arm with `or`.",
+        ]
+    );
+}

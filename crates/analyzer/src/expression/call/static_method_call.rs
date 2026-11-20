@@ -51,6 +51,7 @@ use crate::resolver::class_name::statics_type_arguments;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
 use crate::statement::class_like::listener::check_events_on;
+use crate::statement::class_like::machine::check_case_built;
 use crate::statement::class_like::r#struct::check_parsed_type_argument;
 use crate::statement::class_like::r#struct::check_struct_parse;
 use crate::utils::expression::expression_is_nullsafe;
@@ -224,6 +225,9 @@ where
                 ))
                 .with_annotation(Annotation::primary(call.span).with_message("Called without `new` here.")),
             );
+        }
+        if context.dialect.is_sharp() {
+            check_case_built(context, block_context, metadata, method_name, call.span);
         }
 
         let method_target_context = MethodTargetContext {
