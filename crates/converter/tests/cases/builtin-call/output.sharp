@@ -25,7 +25,7 @@ internal final class Words
 
     internal string digest(string data)
     {
-        return Hash.md5(data);
+        return Hash.md5(data.toBytes());
     }
 
     internal float rounded(float value)

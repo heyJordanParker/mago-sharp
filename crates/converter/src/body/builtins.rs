@@ -14,6 +14,8 @@ use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by_with_erased_template_arguments;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_string;
+use mago_codex::ttype::takes_bytes;
 use mago_codex::ttype::union::TUnion;
 use mago_sharp_bridge::PhpCallArgument;
 use mago_span::HasSpan;
@@ -59,12 +61,12 @@ impl<'input> Converter<'input, '_> {
             return;
         };
         let mut values = Vec::new();
-        for slot in slots {
+        for (slot, as_bytes) in slots {
             let Some(argument) = passed.as_ref().and_then(|passed| passed[slot].argument) else {
                 return;
             };
             self.expression(argument, None);
-            values.push((self.render(argument), is_primary(argument)));
+            values.push(slot_value(self.render(argument), is_primary(argument), as_bytes));
         }
         match self.member_text(member, &values) {
             Ok(text) => self.edits.replace(call.span(), text),
@@ -136,7 +138,8 @@ impl<'input> Converter<'input, '_> {
         let Some((member, slots)) = self.fitting(span, function, name, Some(&lambda_parameters)) else {
             return;
         };
-        let values: Vec<(String, bool)> = slots.iter().map(|slot| (chosen_names[*slot].clone(), true)).collect();
+        let values: Vec<(String, bool)> =
+            slots.iter().map(|(slot, as_bytes)| slot_value(chosen_names[*slot].clone(), true, *as_bytes)).collect();
         match self.member_text(member, &values) {
             Ok(text) => self.edits.replace(span, format!("({}) => {text}", written.join(", "))),
             Err(reason) => self.refuse(span, reason),
@@ -144,17 +147,18 @@ impl<'input> Converter<'input, '_> {
     }
 
     /// The first standard library member that runs the built-in `function`, named `name`, with PHP's meaning for a call
-    /// that passes `passed`, with the place in `passed` of the value in each of its slots, or a refusal at `span` that
-    /// names how each member doesn't. A member that fits the call but for the literal its body needs runs the function
-    /// with this call's values, so its reason alone is the call's, and a member that passes other values says nothing
-    /// of it. `passed` is `None` for a call with a named or spread argument.
+    /// that passes `passed`, with the place in `passed` of the value in each of its slots and whether the slot takes it
+    /// as `Bytes`, as [`Converter::fits`] says, or a refusal at `span` that names how each member doesn't. A member
+    /// that fits the call but for the literal its body needs runs the function with this call's values, so its reason
+    /// alone is the call's, and a member that passes other values says nothing of it. `passed` is `None` for a call
+    /// with a named or spread argument.
     fn fitting(
         &mut self,
         span: Span,
         function: &FunctionLikeMetadata,
         name: &str,
         passed: Option<&[Passed<'_, '_>]>,
-    ) -> Option<(&'input Member, Vec<usize>)> {
+    ) -> Option<(&'input Member, Vec<(usize, bool)>)> {
         let members = self.input.library.members(name.as_bytes());
         if members.is_empty() {
             self.refuse(
@@ -181,13 +185,15 @@ impl<'input> Converter<'input, '_> {
     }
 
     /// The place in `passed` of the value in each of `member`'s slots, when `member` runs `function` with PHP's meaning
-    /// for a call that passes `passed`, or how it doesn't.
+    /// for a call that passes `passed`, or how it doesn't, with whether the slot is a `Bytes` that takes the call's
+    /// `string` as its bytes, as `md5($data)` is `Hash.md5(data.toBytes())`: the member passes PHP the `Bytes`'s string,
+    /// which holds the text's bytes (spec section 18).
     fn fits(
         &self,
         member: &Member,
         function: &FunctionLikeMetadata,
         passed: Option<&[Passed<'_, '_>]>,
-    ) -> Result<Vec<usize>, String> {
+    ) -> Result<Vec<(usize, bool)>, String> {
         let codebase = self.input.codebase;
         if let Some(reason) = differs(member, function, codebase) {
             return Err(reason);
@@ -250,24 +256,30 @@ impl<'input> Converter<'input, '_> {
             .collect::<Option<_>>()
             .ok_or_else(|| "reads a value this call doesn't pass".to_owned())?;
 
+        let mut taken = Vec::with_capacity(slots.len());
         for (index, (slot, parameter)) in slots.iter().zip(&method.parameters).enumerate() {
             let declared = parameter.get_type_metadata().map_or_else(get_mixed, |metadata| metadata.type_union.clone());
             let passed = &arguments[*slot].union;
-            if !is_contained_by_with_erased_template_arguments(
-                codebase,
-                passed,
-                &declared,
-                &mut ComparisonResult::new(),
-            ) {
+            let fits = |container: &TUnion| {
+                is_contained_by_with_erased_template_arguments(
+                    codebase,
+                    passed,
+                    container,
+                    &mut ComparisonResult::new(),
+                )
+            };
+            let as_bytes = takes_bytes(&declared) && fits(&get_string());
+            if !as_bytes && !fits(&declared) {
                 return Err(format!("takes `{}` where this call passes `{}`", declared.get_id(), passed.get_id()));
             }
             // A value read after the form's first call, or out of order, runs in the form's order, not the call's.
             if index >= member.in_order && !arguments[*slot].argument.is_none_or(runs_nothing) {
                 return Err("reads this call's arguments in another order, and one of them runs code".to_owned());
             }
+            taken.push((*slot, as_bytes));
         }
 
-        Ok(slots)
+        Ok(taken)
     }
 
     /// The call of `member` with `values` in its slots, each in PHP# with whether it binds tighter than any operator:
@@ -294,9 +306,9 @@ impl<'input> Converter<'input, '_> {
 /// How `member`, which takes the values a call passes, `passed`, in its `slots`, still runs the function without PHP's
 /// meaning: an argument its body folds as a literal, which this call doesn't pass as one that decides the body as the
 /// function's meaning needs.
-fn literal_needed(member: &Member, passed: &[Passed<'_, '_>], slots: &[usize]) -> Option<String> {
+fn literal_needed(member: &Member, passed: &[Passed<'_, '_>], slots: &[(usize, bool)]) -> Option<String> {
     let fixed = member.fixed.iter().find(|fixed| {
-        !slots.get(fixed.slot).and_then(|slot| passed[*slot].argument).is_some_and(|slot| fixed.holds(slot))
+        !slots.get(fixed.slot).and_then(|(slot, _)| passed[*slot].argument).is_some_and(|slot| fixed.holds(slot))
     })?;
     let position = member.call.arguments.iter().position(|argument| *argument == PhpCallArgument::Slot(fixed.slot));
 
@@ -306,6 +318,16 @@ fn literal_needed(member: &Member, passed: &[Passed<'_, '_>], slots: &[usize]) -
         if fixed.equal { "equal to" } else { "other than" },
         String::from_utf8_lossy(&fixed.literal)
     ))
+}
+
+/// `value`, PHP# text that binds tighter than any operator when `primary`, as a slot takes it, with whether the result
+/// binds tighter than any operator: as its bytes when `as_bytes`, as `(a ?? b).toBytes()` is, and as it is otherwise.
+fn slot_value(value: String, primary: bool, as_bytes: bool) -> (String, bool) {
+    match (as_bytes, primary) {
+        (false, _) => (value, primary),
+        (true, true) => (format!("{value}.toBytes()"), true),
+        (true, false) => (format!("({value}).toBytes()"), true),
+    }
 }
 
 /// Whether reading `argument` runs nothing: a variable, a literal, a constant or a property read.
