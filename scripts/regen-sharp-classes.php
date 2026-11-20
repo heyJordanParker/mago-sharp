@@ -8,7 +8,8 @@ declare(strict_types=1);
  *
  * - the class-likes declared directly in `Sharp`, spec section 23: each public one of `Sharp/*.sharp`, and each one of
  *   the prelude;
- * - the standard root classes, spec section 23: each class `Sharp/Internal/Builtins.sharp` declares with no import;
+ * - the standard root classes, spec section 23: each class `Sharp/Internal/Builtins.sharp` declares with no import,
+ *   and each class of `sharp/bin/builtins`'s `STANDARD_NAMESPACED_CLASSES`, which it imports;
  * - the standard effects, spec section 29: each `foreign` class of the standard library, in any of its namespaces;
  * - the class marked `EffectOfEmit`, the effect of `emit`, and the interface marked `PropertyBehavior`, the one a
  *   property behavior implements.
@@ -94,20 +95,27 @@ foreach ($imports as $import) {
 }
 $externs = [];
 preg_match_all('/^extern (\w+) uses [\w, ]+;$/m', $builtins, $externs);
-$any = [];
-preg_match_all('/^extern (\w+) uses any;$/m', $builtins, $any);
-$any = array_flip($any[1]);
-// Each root class `Builtins.sharp` declares with no import, by its name, and each class of a namespace it imports and
-// declares `uses any`, the DOM's, as `Dom\HTMLDocument`, by its full name, which a `.sharp` file names through its
-// import. A class of a namespace it declares with its effects, as `Random\RandomException`, stays out, and so does a
-// root class it imports, as `DateTimeImmutable`.
-$roots = array_values(array_diff($externs[1], array_keys($imported)));
-foreach ($imported as $name => $class) {
-    if (!str_contains($class, '\\') || !array_key_exists($name, $any)) {
-        continue;
-    }
-    $roots[] = $class;
+// Each root class `Builtins.sharp` declares with no import, by its name, and each class of a namespace that
+// `sharp/bin/builtins` lists in `STANDARD_NAMESPACED_CLASSES`, which it imports and a `.sharp` file names through its
+// import, by its full name. A class of a namespace it imports only to declare its effects, as
+// `Random\RandomException`, stays out, and so does a root class it imports, as `DateTimeImmutable`.
+$generator = read(dirname($library, 2) . '/bin/builtins');
+if (!preg_match('/^const STANDARD_NAMESPACED_CLASSES = \[(.*?)\];$/ms', $generator, $listed)) {
+    throw new RuntimeException('sharp/bin/builtins declares no STANDARD_NAMESPACED_CLASSES.');
 }
+$namespaced = array_map(
+    static fn(PhpToken $token): string => stripslashes(substr($token->text, 1, -1)),
+    array_values(array_filter(
+        PhpToken::tokenize("<?php {$listed[1]}"),
+        static fn(PhpToken $token): bool => $token->is(T_CONSTANT_ENCAPSED_STRING),
+    )),
+);
+foreach ($namespaced as $class) {
+    if (!in_array($class, $imported, true)) {
+        throw new RuntimeException("Builtins.sharp does not import {$class}, which STANDARD_NAMESPACED_CLASSES lists.");
+    }
+}
+$roots = [...array_diff($externs[1], array_keys($imported)), ...$namespaced];
 
 $effects = [];
 $marked = ['EffectOfEmit' => [], 'PropertyBehavior' => []];

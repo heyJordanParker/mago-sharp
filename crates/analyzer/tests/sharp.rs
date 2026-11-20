@@ -30024,11 +30024,23 @@ fn the_standard_library_names_the_interfaces_a_plain_php_library_needs_with_no_i
 }
 
 /// The standard classes are the class-likes `Builtins.sharp` names: each root class it declares with no import, which a
-/// bare name names, and each class of a namespace it imports and declares `uses any`, the DOM's, as
-/// `Dom\HTMLDocument`, by its full name. A class of a namespace it declares with its effects, as
+/// bare name names, and each class of a namespace `sharp/bin/builtins` lists in `STANDARD_NAMESPACED_CLASSES`, whose
+/// imports it writes, by its full name. A class of a namespace it imports only to declare its effects, as
 /// `Random\RandomException`, and a root class it imports, as `DateTimeImmutable`, only take the effects its lines give.
 #[test]
 fn the_standard_classes_are_the_classes_the_standard_library_names() {
+    let generator = include_str!("../../../../bin/builtins");
+    let listed = generator
+        .split_once("\nconst STANDARD_NAMESPACED_CLASSES = [")
+        .and_then(|(_, rest)| rest.split_once("\n];"))
+        .map(|(list, _)| list)
+        .expect("sharp/bin/builtins declares STANDARD_NAMESPACED_CLASSES");
+    let mut namespaced: Vec<String> = listed
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix('\'')?.strip_suffix("',"))
+        .map(|class| class.replace("\\\\", "\\"))
+        .collect();
+    namespaced.sort_unstable();
     let imported: HashMap<&str, String> = BUILTINS
         .1
         .lines()
@@ -30038,21 +30050,18 @@ fn the_standard_classes_are_the_classes_the_standard_library_names() {
             (alias, full.replace('.', "\\"))
         })
         .collect();
-    let classes =
-        || BUILTINS.1.lines().filter_map(|line| line.strip_prefix("extern ")?.strip_suffix(';')?.split_once(" uses "));
-    let any: HashSet<&str> = classes().filter(|(_, uses)| *uses == "any").map(|(name, _)| name).collect();
-    let mut root: Vec<&str> = classes()
-        .map(|(name, _)| name)
+    let mut root: Vec<&str> = BUILTINS
+        .1
+        .lines()
+        .filter_map(|line| Some(line.strip_prefix("extern ")?.strip_suffix(';')?.split_once(" uses ")?.0))
         .filter(|name| !name.contains(['.', ' ']) && !imported.contains_key(name))
         .collect();
     root.sort_unstable();
-    let mut named: Vec<String> = imported
-        .iter()
-        .filter(|(name, full)| full.contains('\\') && any.contains(*name))
-        .map(|(_, full)| full.clone())
-        .chain(root.iter().map(|name| (*name).to_owned()))
-        .collect();
+    let mut named: Vec<String> = namespaced.iter().cloned().chain(root.iter().map(|name| (*name).to_owned())).collect();
     named.sort_unstable();
+    let mut imported_namespaced: Vec<String> =
+        imported.values().filter(|full| namespaced.contains(full)).cloned().collect();
+    imported_namespaced.sort_unstable();
     let mut standard: Vec<String> = STANDARD_ROOT_CLASSES.iter().map(|class| (*class).to_owned()).collect();
     standard.sort_unstable();
     let mut bare: Vec<&str> = default_root_classes().collect();
@@ -30060,7 +30069,7 @@ fn the_standard_classes_are_the_classes_the_standard_library_names() {
 
     assert_eq!(standard, named);
     assert_eq!(bare, root);
-    assert!(standard.iter().any(|class| class == "Dom\\HTMLDocument"));
+    assert_eq!(imported_namespaced, namespaced);
     assert!(!standard.iter().any(|class| class == "Random\\RandomException"));
 }
 
@@ -30082,6 +30091,31 @@ fn a_sharp_file_imports_the_html_dom_the_standard_library_names() {
     assert_eq!(issues(page, &[]), Vec::<String>::new());
     assert_ne!(issues(bare, &[]), Vec::<String>::new());
     assert_eq!(issues(legacy, &[]), ["3:8 non-existent-use-import"]);
+}
+
+/// Spec section 29: a DOM document built and read in memory reaches nothing outside the process, so the standard
+/// library declares each `Dom` class `uses none`, and only a member that opens a path, as `createFromFile` does, or
+/// whose options can make it load one, as XML's `createFromString` does, `uses Files`. A method a pure interface
+/// declares builds an element and is refused the file.
+#[test]
+fn a_dom_document_built_in_memory_is_pure_and_its_file_members_have_files() {
+    let pages = (
+        "app/Shop/Pages.sharp",
+        "namespace App.Shop;\n\npublic interface Pages\n{\n    string paragraph();\n\n    string loaded(string path);\n\n    string parsed(string xml);\n}\n",
+    );
+    let page = (
+        "app/Shop/Page.sharp",
+        "namespace App.Shop;\n\nimport Dom.HTMLDocument;\nimport Dom.XMLDocument;\n\npublic class Page : Pages\n{\n    public string paragraph() => HTMLDocument.createEmpty().createElement(\"p\").tagName;\n\n    public string loaded(string path) => HTMLDocument.createFromFile(path).title;\n\n    public string parsed(string xml) => XMLDocument.createFromString(xml).title;\n}\n",
+    );
+
+    assert_eq!(worded(page, &[pages, BUILTINS]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[page, pages, BUILTINS]),
+        [
+            "app/Shop/Page.sharp:10:42 incompatible-effects: `Page.loaded` calls `HTMLDocument.createFromFile`, which has the effect `Files`, so the pure `Pages.loaded` cannot accept it.",
+            "app/Shop/Page.sharp:12:41 incompatible-effects: `Page.parsed` calls `XMLDocument.createFromString`, which has the effect `Files`, so the pure `Pages.parsed` cannot accept it.",
+        ]
+    );
 }
 
 /// Decision 83: a `.sharp` file reads and writes XML through `Dom.XMLDocument`, which the standard library names beside
