@@ -23,6 +23,8 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_mixed_keyed_array;
 use mago_codex::ttype::get_php_declared_type;
 use mago_codex::ttype::get_sharp_received_type;
+use mago_codex::ttype::get_string;
+use mago_codex::ttype::takes_bytes;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::template::variance::Variance;
@@ -686,14 +688,17 @@ fn as_lowered(codebase: &CodebaseMetadata, class: Word, method: &FunctionLikeMet
 
 /// The type the bridge declares in PHP for a PHP# parameter of the type `declared`: the type the codex's
 /// `get_php_declared_type` erases it to, with `array` beside the `Sharp\Map` or `Sharp\Set` it takes, as plain PHP passes
-/// a PHP array there.
+/// a PHP array there, and `string` beside the `Sharp\Bytes` it takes, as plain PHP passes a PHP string there.
 fn lowered_parameter_type(codebase: &CodebaseMetadata, declared: &TUnion) -> TUnion {
     let erased = get_php_declared_type(declared, codebase);
-    if get_crossing_array(declared, codebase).is_none_or(|array| matches!(array, TArray::List(_))) {
-        return erased;
-    }
+    let takes_array = get_crossing_array(declared, codebase).is_some_and(|array| !matches!(array, TArray::List(_)));
+    let plain = match (takes_array, takes_bytes(declared)) {
+        (true, _) => get_mixed_keyed_array(),
+        (false, true) => get_string(),
+        (false, false) => return erased,
+    };
 
-    TUnion::from_vec(erased.types.iter().cloned().chain(get_mixed_keyed_array().types.into_owned()).collect())
+    TUnion::from_vec(erased.types.iter().cloned().chain(plain.types.into_owned()).collect())
 }
 
 /// Adds to `issues` the parameter of a PHP# method that no longer links against the method it overrides or implements

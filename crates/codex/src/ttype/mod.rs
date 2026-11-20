@@ -1672,6 +1672,15 @@ pub fn get_php_declared_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TU
     TUnion::from_vec(combiner::combine(erased.collect(), codebase, combiner::CombinerOptions::default()))
 }
 
+/// Whether `r#type` holds the standard library's `Bytes`, spec section 18, which a parameter takes as the PHP string
+/// plain PHP passes, as the engine wraps it.
+#[must_use]
+pub fn takes_bytes(r#type: &TUnion) -> bool {
+    r#type.types.iter().any(|atomic| {
+        matches!(atomic, TAtomic::Object(TObject::Named(object)) if object.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Bytes"))
+    })
+}
+
 /// Whether plain PHP gets a value of `r#type` with each `Map` and `Set` in it as its PHP array, spec section 12.
 ///
 /// It does for a value that holds one at any depth, or can when it runs, as `Any`, an unbounded type parameter and an

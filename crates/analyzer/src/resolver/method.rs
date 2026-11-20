@@ -1888,6 +1888,19 @@ fn report_non_existent_collection_member<A>(
 
         return;
     }
+    if let Some(replacement) = byte_member_replacement(kind.name(), method_name.as_bytes()) {
+        context.collector.report_with_code(
+            IssueCode::NonExistentMethod,
+            Issue::error(format!("Method `{method_name}` does not exist on `{collection}`."))
+                .with_annotation(Annotation::primary(selector_span).with_message("This method selection is invalid"))
+                .with_annotation(
+                    Annotation::secondary(obj_span).with_message(format!("This expression has type `{collection}`")),
+                )
+                .with_help(replacement),
+        );
+
+        return;
+    }
     let methods = extension_methods(context, parts);
     let article = kind.article();
     let listed = if methods.is_empty() {
@@ -1912,6 +1925,27 @@ fn report_non_existent_collection_member<A>(
     );
 }
 
+/// The member that replaces a byte member 0.6.40 had, spec section 18, as the help of a call of it: a `string` is text,
+/// so its bytes are `Bytes`, and a `List<int>` and an `int` give `Bytes` too. None for any other member.
+fn byte_member_replacement(receiver: &str, method: &[u8]) -> Option<&'static str> {
+    Some(match (receiver, method) {
+        ("string", b"byteLength") => {
+            "A `string` is text, and `text.toBytes()` gives its UTF-8 bytes: count them with `text.toBytes().length()`."
+        }
+        ("string", b"byteSubstring") => {
+            "A `string` is text, and `text.toBytes()` gives its UTF-8 bytes: take a range of them with `text.toBytes().slice(start, end)`, and read it as text with `.toText()`."
+        }
+        ("string", b"bytes") => {
+            "A `string` is text, and `text.toBytes()` gives its UTF-8 bytes: list them with `text.toBytes().toList()`."
+        }
+        ("int", b"toByteString") => "One byte is `Bytes`: write `[n].toBytes()`.",
+        ("List", b"toByteString") => {
+            "A `List<int>`'s values are bytes: write `numbers.toBytes()`, which gives `Bytes`."
+        }
+        _ => return None,
+    })
+}
+
 /// Reports a method a PHP# `string`, `int`, `float` or `bool`, named `scalar`, does not have, naming the extension
 /// methods it has in this file, as the standard library's on `string`, spec section 26, as a collection's error names
 /// its methods.
@@ -1927,7 +1961,9 @@ fn report_non_existent_scalar_method<A>(
 {
     let methods = extension_methods(context, &TUnion::from_atomic(receiver.clone()));
     let article = if scalar.starts_with('i') { "An" } else { "A" };
-    let help = if methods.is_empty() {
+    let help = if let Some(replacement) = byte_member_replacement(scalar, method_name.as_bytes()) {
+        replacement.to_owned()
+    } else if methods.is_empty() {
         format!("{article} `{scalar}` has no methods.")
     } else {
         format!("{article} `{scalar}` has the methods {}.", methods.join(", "))

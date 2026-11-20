@@ -10847,10 +10847,41 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
             ]
         ),
         [
-            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `byteLength`, `byteSubstring`, `bytes`, `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `equals`, `indexOf`, `isDigit`, `isEmpty`, `isLetter`, `isLetterOrDigit`, `isLowercase`, `isNotEmpty`, `isUppercase`, `isWhitespace`, `lastIndexOf`, `length`, `lines`, `lowercase`, `normalized`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `titlecase`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
-            "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `checkedAdd`, `checkedMultiply`, `checkedSubtract`, `clamp`, `floorDiv`, `format`, `mod`, `saturatingAdd`, `saturatingMultiply`, `saturatingSubtract`, `toByteString`, `toBytes`, `toCharacter`, `toHex`.",
+            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `equals`, `indexOf`, `isDigit`, `isEmpty`, `isLetter`, `isLetterOrDigit`, `isLowercase`, `isNotEmpty`, `isUppercase`, `isWhitespace`, `lastIndexOf`, `length`, `lines`, `lowercase`, `normalized`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `titlecase`, `toBytes`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
+            "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `checkedAdd`, `checkedMultiply`, `checkedSubtract`, `clamp`, `floorDiv`, `format`, `mod`, `saturatingAdd`, `saturatingMultiply`, `saturatingSubtract`, `toBytes`, `toCharacter`, `toHex`.",
             "7:40 non-existent-method Method `missing` does not exist on `float`. | A `float` has the methods `abs`, `ceil`, `clamp`, `floor`, `format`, `isFinite`, `isNaN`, `round`.",
             "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
+        ]
+    );
+}
+
+/// Spec section 18: a `string` is text and its bytes are `Bytes`, so a call of a byte member 0.6.40 had is refused with
+/// the member that replaces it, on a `string`, an `int` and a `List<int>`.
+#[test]
+fn a_removed_byte_member_is_refused_with_its_replacement() {
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public int counted(string name) => name.byteLength();\n    public string cut(string name) => name.byteSubstring(0, 2);\n    public List<int> listed(string name) => name.bytes();\n    public string one(int n) => n.toByteString();\n    public string all(List<int> numbers) => numbers.toByteString();\n}\n";
+
+    assert_eq!(
+        refusals(
+            ("src/Demo/Entity.sharp", sharp),
+            &[
+                LIBRARY_TYPE_CLASSES[0],
+                (
+                    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharp",
+                    include_str!("../../../../composer/library/Sharp/Text/StringMembers.sharp"),
+                ),
+                (
+                    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/NormalizationForm.sharp",
+                    include_str!("../../../../composer/library/Sharp/Text/NormalizationForm.sharp"),
+                ),
+            ]
+        ),
+        [
+            "5:45 non-existent-method Method `byteLength` does not exist on `string`. | A `string` is text, and `text.toBytes()` gives its UTF-8 bytes: count them with `text.toBytes().length()`.",
+            "6:44 non-existent-method Method `byteSubstring` does not exist on `string`. | A `string` is text, and `text.toBytes()` gives its UTF-8 bytes: take a range of them with `text.toBytes().slice(start, end)`, and read it as text with `.toText()`.",
+            "7:50 non-existent-method Method `bytes` does not exist on `string`. | A `string` is text, and `text.toBytes()` gives its UTF-8 bytes: list them with `text.toBytes().toList()`.",
+            "8:35 non-existent-method Method `toByteString` does not exist on `int`. | One byte is `Bytes`: write `[n].toBytes()`.",
+            "9:53 non-existent-method Method `toByteString` does not exist on `List<int>`. | A `List<int>`'s values are bytes: write `numbers.toBytes()`, which gives `Bytes`.",
         ]
     );
 }
@@ -15998,7 +16029,7 @@ fn a_collection_lacking_a_method_lists_only_the_methods_its_elements_let_it_call
             .collect::<Vec<_>>(),
         [
             "5:75 non-existent-method Method `missing` does not exist on `List<TItem>`. | A `List<TItem>` has the methods `add`, `all`, `any`, `associateBy`, `binarySearch`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `firstOrNull`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOfFirst`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `maxBy`, `minBy`, `partition`, `partitionPoint`, `removeAll`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sortedByDescending`, `sortedWith`, `sumOf`, `toList`, `toSet`, `windowed`, `zip`.",
-            "6:57 non-existent-method Method `missing` does not exist on `List<int>`. | A `List<int>` has the methods `add`, `all`, `any`, `associateBy`, `binarySearch`, `chunked`, `clear`, `contains`, `count`, `distinct`, `entries`, `filter`, `first`, `firstOrNull`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOf`, `indexOfFirst`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `max`, `maxBy`, `min`, `minBy`, `partition`, `partitionPoint`, `remove`, `removeAll`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sortedByDescending`, `sortedWith`, `sumOf`, `toByteString`, `toList`, `toSet`, `windowed`, `zip`.",
+            "6:57 non-existent-method Method `missing` does not exist on `List<int>`. | A `List<int>` has the methods `add`, `all`, `any`, `associateBy`, `binarySearch`, `chunked`, `clear`, `contains`, `count`, `distinct`, `entries`, `filter`, `first`, `firstOrNull`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOf`, `indexOfFirst`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `max`, `maxBy`, `min`, `minBy`, `partition`, `partitionPoint`, `remove`, `removeAll`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sortedByDescending`, `sortedWith`, `sumOf`, `toBytes`, `toList`, `toSet`, `windowed`, `zip`.",
             "7:56 non-existent-method Method `missing` does not exist on `List<Cart>`. | A `List<Cart>` has the methods `add`, `all`, `any`, `associateBy`, `binarySearch`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `firstOrNull`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOfFirst`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `maxBy`, `minBy`, `partition`, `partitionPoint`, `removeAll`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sortedByDescending`, `sortedWith`, `sumOf`, `toList`, `toSet`, `windowed`, `zip`.",
             "8:81 non-existent-method Method `missing` does not exist on `List<TItem>`. | A `List<TItem>` has the methods `add`, `all`, `any`, `associateBy`, `binarySearch`, `chunked`, `clear`, `contains`, `count`, `distinct`, `entries`, `filter`, `first`, `firstOrNull`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOf`, `indexOfFirst`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `maxBy`, `minBy`, `partition`, `partitionPoint`, `remove`, `removeAll`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sortedByDescending`, `sortedWith`, `sumOf`, `toList`, `toSet`, `windowed`, `zip`.",
             "9:71 non-existent-method Method `missing` does not exist on `Set<TItem>`. | A `Set<TItem>` has the methods `any`, `clear`, `count`, `filter`, `first`, `firstOrNull`, `intersect`, `isEmpty`, `isNotEmpty`, `isSubsetOf`, `map`, `sortedBy`, `subtract`, `sumOf`, `toList`, `union`.",
@@ -18899,7 +18930,7 @@ fn a_list_literal_in_a_coalesce_a_conditional_or_a_match_where_a_set_is_declared
 /// declared `List<Any>`, spec section 12, where 0.6.35 joined each pair as `Any?` and refused the line.
 #[test]
 fn a_conditional_of_two_any_values_or_two_lists_of_any_goes_into_a_declared_any() {
-    let sharp = "namespace Demo;\n\nclass Pipe\n{\n    private List<Any> streams = [];\n\n    public List<Any> pending(int written, string request)\n    {\n        List<Any> write = written < request.byteLength() ? [this.streams[0]] : [];\n        return write;\n    }\n\n    public Any first(bool flag, Any held)\n    {\n        Any picked = flag ? this.streams[0] : held;\n        return picked;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Pipe\n{\n    private List<Any> streams = [];\n\n    public List<Any> pending(int written, string request)\n    {\n        List<Any> write = written < request.length() ? [this.streams[0]] : [];\n        return write;\n    }\n\n    public Any first(bool flag, Any held)\n    {\n        Any picked = flag ? this.streams[0] : held;\n        return picked;\n    }\n}\n";
 
     assert_eq!(
         refusals(
@@ -29960,8 +29991,8 @@ fn unpack_of_one_number_is_a_list_whatever_writes_its_format() {
         "namespace Sharp;\n\npublic enum Order : string\n{\n    case Big = \"J\";\n    case Little = \"P\";\n}\n",
     );
     let bytes = (
-        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Bytes.sharp",
-        "namespace Sharp;\n\npublic class Bytes\n{\n    public static int? literal(string bytes) => global.unpack(\"J\", bytes) is [int value] ? value : null;\n\n    public static int? ordered(string bytes, Order order) => global.unpack(order.value, bytes) is [int value] ? value : null;\n}\n",
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Packed.sharp",
+        "namespace Sharp;\n\npublic class Packed\n{\n    public static int? literal(string bytes) => global.unpack(\"J\", bytes) is [int value] ? value : null;\n\n    public static int? ordered(string bytes, Order order) => global.unpack(order.value, bytes) is [int value] ? value : null;\n}\n",
     );
 
     assert_eq!(issues(bytes, &[order, BUILTINS]), Vec::<String>::new());

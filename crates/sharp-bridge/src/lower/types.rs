@@ -53,6 +53,7 @@ use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_void;
 use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::takes_array;
+use mago_codex::ttype::takes_bytes;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::visibility::Visibility;
@@ -1036,6 +1037,10 @@ impl<'analysis> Types<'analysis> {
         if let Some((class, method)) = self.binding_call(call, in_static) {
             return self.result_check(class, method, r#type);
         }
+        // A pattern's hidden `$match#1 = value` spans the value it tests, whose own lowering checks it.
+        if matches!(call, Expression::Assignment(_)) {
+            return None;
+        }
         let (name, metadata) = self.plain_php_call(call)?;
         let text = self.checked_text(r#type, metadata.flags.is_user_defined())?;
 
@@ -1431,7 +1436,8 @@ impl<'analysis> Types<'analysis> {
     /// refuses the null PHP's `mixed` takes, a PHP# class with a type argument the check can test, a plain PHP trait,
     /// whose PHP type is `object`, a class value of a generic class, since PHP's own `string` type checks no class
     /// value, a type parameter of the class, or, with `collections`, a collection whose elements the check can test,
-    /// since PHP's own `array` type checks none. None for a type only a plain PHP docblock writes, such as
+    /// since PHP's own `array` type checks none, and a `string`, since PHP's own `string` type doesn't check it is valid
+    /// UTF-8. None for a type only a plain PHP docblock writes, such as
     /// `array<array-key, int>`, since the engine reads the check as PHP#. None otherwise: plain PHP's generics are
     /// erased, since an object of a plain PHP generic class carries no type arguments, and a call from plain PHP gives a
     /// method's own type parameters none, so one nested in a type matches any type argument, and a value whose type is
@@ -1500,7 +1506,15 @@ impl<'analysis> Types<'analysis> {
             })
             || r#type.types.iter().any(|atomic| match atomic {
                 TAtomic::Mixed(mixed) => mixed.is_non_null(),
-                TAtomic::Object(TObject::Named(object)) => is_sharp_generic(object) || names_trait(atomic),
+                // Spec section 18: a `string` is valid UTF-8, which PHP's own `string` type doesn't check, so the check
+                // replaces each byte sequence that is not UTF-8.
+                TAtomic::Scalar(TScalar::String(_)) => collections,
+                // A `Bytes` takes the PHP string plain PHP passes, which the check wraps.
+                TAtomic::Object(TObject::Named(object)) => {
+                    is_sharp_generic(object)
+                        || names_trait(atomic)
+                        || (collections && takes_bytes(&TUnion::from_atomic(atomic.clone())))
+                }
                 // A `Class<PaginatedList>` names no type arguments, so PHP's `string` type is the whole of its check. A
                 // `Class<int>` or a `Class<int|string>` takes only the text `typeof` gives its type, which PHP's `string`
                 // type doesn't check.

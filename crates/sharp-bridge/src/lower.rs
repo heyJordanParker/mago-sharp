@@ -30,6 +30,7 @@ use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::may_hold_collection;
 use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::takes_array;
+use mago_codex::ttype::takes_bytes;
 use mago_codex::ttype::takes_int_key_as_string;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
@@ -3670,14 +3671,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A parameter with its lowered type, or with a null type, as a lambda's parameter can be, and with the id of the
     /// service the container gives it when its PHP type drops it. A `Map` or a `Set` parameter also takes the PHP array
-    /// plain PHP passes, `\Sharp\Map|array`, which [`Self::collection_parameters`] turns into the object. A promoted one
-    /// is a plain parameter, beside the property [`Self::promoted_property`] declares, when [`Self::promoted_beside`]
-    /// holds.
+    /// plain PHP passes, `\Sharp\Map|array`, which [`Self::collection_parameters`] turns into the object, and a `Bytes`
+    /// parameter the PHP string, `\Sharp\Bytes|string`, which the engine's check wraps. A promoted one is a plain
+    /// parameter, beside the property [`Self::promoted_property`] declares, when [`Self::promoted_beside`] holds.
     fn parameter_of_type(&mut self, parameter: &FunctionLikeParameter, hint: u32, service: Option<Word>) -> u32 {
-        let hint = if hint != NULL && parameter.hint.as_ref().is_some_and(|hint| self.takes_php_array(hint)) {
-            self.table_or_array(hint, collection_hint(parameter.hint.as_ref()).unwrap_or(false))
-        } else {
-            hint
+        let written = parameter.hint.as_ref().filter(|_| hint != NULL);
+        let hint = match written {
+            Some(written) if self.takes_php_array(written) => {
+                self.with_plain_type(hint, collection_hint(Some(written)).unwrap_or(false), &PhpType::Keyword(IS_ARRAY))
+            }
+            Some(written) if takes_bytes(self.types.declared_type(written)) => {
+                let nullable = matches!(without_readonly(written), Hint::Nullable(_));
+
+                self.with_plain_type(hint, nullable, &PhpType::Named(b"string"))
+            }
+            _ => hint,
         };
         let line = self.line(parameter.variable.span);
         let name = self.local_name(0, line, parameter.variable.name);
@@ -3800,10 +3808,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.crossing_array(self.types.declared_type(hint)).is_some_and(|array| !matches!(array, TArray::List(_)))
     }
 
-    /// `\Sharp\Map|array`, or `\Sharp\Set|array`, of the lowered `Map` or `Set` type `hint`, with `null` when it is
-    /// nullable, and a lowered union that names one with `array` among its types, as `\Sharp\Set|int|array`: what a
-    /// parameter takes where plain PHP passes a PHP array.
-    fn table_or_array(&mut self, hint: u32, nullable: bool) -> u32 {
+    /// The lowered type `hint` with `plain` among its types, and `null` when it is nullable: `\Sharp\Map|array`, or
+    /// `\Sharp\Set|array`, of a `Map` or a `Set`, where plain PHP passes a PHP array, `\Sharp\Bytes|string` of a
+    /// `Bytes`, spec section 18, where plain PHP passes a PHP string, and a lowered union that names one with the plain
+    /// type among its types, as `\Sharp\Set|int|array`.
+    fn with_plain_type(&mut self, hint: u32, nullable: bool, plain: &PhpType) -> u32 {
         let lowered = &mut self.nodes[hint as usize];
         lowered.attr &= !ZEND_TYPE_NULLABLE;
         let (kind, line, first, count) = (lowered.kind, lowered.line, lowered.first_child, lowered.child_count);
@@ -3812,7 +3821,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         } else {
             vec![hint]
         };
-        types.push(self.node(SHARP_AST_TYPE, IS_ARRAY, line, &[]));
+        types.push(self.php_type(plain, line));
         if nullable {
             types.push(self.string(ZEND_NAME_NOT_FQ, line, b"null"));
         }
@@ -4141,7 +4150,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let accepted = match collection {
             Some(nullable) => {
                 let lowered = self.hint(hint);
-                self.table_or_array(lowered, nullable)
+                self.with_plain_type(lowered, nullable, &PhpType::Keyword(IS_ARRAY))
             }
             None => self.php_property_type(hint, variable.name, line),
         };
@@ -9702,6 +9711,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.arriving(value, Arrival::Plain)
                 }
                 (false, _) if let Some(backing) = self.backing_value(line, value, parameter) => backing,
+                (false, _) if let Some(data) = self.bytes_data(line, value, parameter) => data,
                 _ => self.received_value(line, value, takes_array, receiver),
             };
             arguments.push(match argument {
@@ -9797,6 +9807,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let backing = self.string(0, line, b"value");
 
         Some(self.node(read, 0, line, &[case, backing]))
+    }
+
+    /// The lowered `value->data` on line `line`, `?->` for a nullable one, when `value` is a `Bytes` and plain PHP's
+    /// `parameter` natively declares only scalars, as `string $data`, which take the PHP string it holds, spec section
+    /// 18. None otherwise, for a parameter that may take the `Bytes` itself.
+    fn bytes_data(&mut self, line: u32, value: &Expression, parameter: Option<PlainParameter>) -> Option<u32> {
+        let Some(PlainParameter::Declared(parameter, _)) = parameter else {
+            return None;
+        };
+        let native = &parameter.type_declaration_metadata.as_ref()?.type_union;
+        let r#type = self.types.expression_type(value);
+        if !takes_bytes(&r#type.to_non_nullable())
+            || !native.types.iter().all(|atomic| atomic.is_some_scalar() || atomic.is_null())
+        {
+            return None;
+        }
+        let read = if r#type.has_null() { SHARP_AST_NULLSAFE_PROP } else { SHARP_AST_PROP };
+        let bytes = self.arriving(value, Arrival::Plain);
+        let data = self.string(0, line, b"data");
+
+        Some(self.node(read, 0, line, &[bytes, data]))
     }
 
     /// The lowered `value` as plain PHP receives it on line `line`, in a parameter or a place it declares, which
