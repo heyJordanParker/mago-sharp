@@ -313,12 +313,15 @@ impl AnalyzeCommand {
         let mut prelude_duration = None;
         let mut load_database_duration = None;
         // A run over the whole project compiles it too, as an agent's save needs: into the `.sharp` folder and the
-        // hosts' folder, from one analysis and one lowering. A run on named files, staged files or standard input, or
-        // one that only scans, compiles only the hosts' folder.
+        // hosts' folder, from one analysis and one lowering, and the analysis with the hosts reads the files the
+        // compile loaded. A run on named files, staged files or standard input, or one that only scans, compiles only
+        // the hosts' folder.
+        let mut loaded = None;
         let (extension_hosts, compiled) = if scope.is_some() || self.stdin_input || self.scan_only {
             (compile_for_hosts(&configuration)?.0, None)
         } else {
-            let (extension_hosts, outcome) = compile_with_hosts(&configuration, color_choice)?;
+            let (extension_hosts, outcome) =
+                compile_with_hosts(&configuration, color_choice, |database| loaded = Some(database.clone()))?;
             (extension_hosts, Some(outcome.into_parts()))
         };
         let external_analyzer = start_external_analyzer(
@@ -340,7 +343,14 @@ impl AnalyzeCommand {
             },
             || {
                 let start = trace_enabled.then(Instant::now);
-                let database = orchestrator.load_database(&configuration.source.workspace, true, None, stdin_override);
+                let database = match loaded {
+                    Some(mut database) => {
+                        orchestrator.add_external_initialization_files(&mut database).map(|()| database)
+                    }
+                    None => orchestrator
+                        .load_database(&configuration.source.workspace, true, None, stdin_override)
+                        .map(Database::into_static),
+                };
                 load_database_duration = start.map(|s| s.elapsed());
                 database
             },

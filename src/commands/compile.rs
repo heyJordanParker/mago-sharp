@@ -928,7 +928,11 @@ pub(crate) fn project_database(
     orchestrator: &Orchestrator<'_>,
     workspace: &Path,
 ) -> Result<(Database<'static>, HashSet<FileId>), Error> {
-    let mut database = orchestrator.load_database(workspace, true, None, None)?;
+    Ok(with_packages(orchestrator.load_database(workspace, true, None, None)?.into_static()))
+}
+
+/// The project's database, as [`project_database`] gives it, from `database`, every file the analyzer loads.
+fn with_packages(mut database: Database<'static>) -> (Database<'static>, HashSet<FileId>) {
     database.merge_base(Prelude::decode_database(PRELUDE_BYTES).expect("Failed to decode embedded prelude"));
     let packaged: Vec<File> = database
         .files()
@@ -940,7 +944,7 @@ pub(crate) fn project_database(
         database.add(file);
     }
 
-    Ok((database.into_static(), included))
+    (database, included)
 }
 
 /// A copy of `file` as a file of `file_type` that holds `contents`, as a package's `.sharp` file is copied into a file
@@ -1044,15 +1048,17 @@ fn is_lowered(file: &File) -> bool {
 /// Checks every PHP# file the analyzer loads, writes the compiled file of each accepted one, and deletes every other
 /// file in the `.sharp` folder, as [`CompileCommand::execute`] says.
 fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
-    let (outcome, database) = compiled(configuration, color_choice, None)?;
+    let (outcome, database) = compiled(configuration, color_choice, None, |_| {})?;
 
     outcome.print(database, configuration, color_choice)
 }
 
 /// Compiles the project as `mago analyze` does before it analyzes with the hosts: into the `.sharp` folder as
 /// `mago compile --no-extensions` does, and into the hosts' folder as [`compile_for_hosts`] does while it is out of
-/// date, from one analysis without the hosts and one lowering. Returns the project's hosts, as [`compile_for_hosts`]
-/// gives them, and the outcome of the compile into the `.sharp` folder.
+/// date, from one analysis without the hosts and one lowering. `loaded` gets every file the compile loads, as
+/// `mago analyze` loads them with no extension host started, so the analysis with the hosts reads the files the compile
+/// read without loading them again; it isn't called when the compile has nothing to do. Returns the project's hosts, as
+/// [`compile_for_hosts`] gives them, and the outcome of the compile into the `.sharp` folder.
 ///
 /// # Errors
 ///
@@ -1060,19 +1066,20 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
 pub(crate) fn compile_with_hosts(
     configuration: &Configuration,
     color_choice: ColorChoice,
+    loaded: impl FnOnce(&Database<'static>),
 ) -> Result<(BTreeMap<String, ExtensionHostConfiguration>, Outcome), Error> {
     let hosts = HostsCompile::new(configuration)?;
     let mut without_hosts = configuration.clone();
     without_hosts.extension_hosts.clear();
-    let (outcome, _) = compiled(&without_hosts, color_choice, hosts.enabled.then_some(&hosts))?;
+    let (outcome, _) = compiled(&without_hosts, color_choice, hosts.enabled.then_some(&hosts), loaded)?;
 
     Ok((hosts.extension_hosts, outcome))
 }
 
 /// Compiles the project with `configuration` into its `.sharp` folder, as [`compile`] does, and into the folder of
 /// `hosts`, when given, while that folder is out of date, from the same analysis and lowerings, under the folder's
-/// lock as [`compile_for_hosts`] takes it. Returns the outcome of the compile into the `.sharp` folder, with the
-/// database its issues point into.
+/// lock as [`compile_for_hosts`] takes it. `loaded` gets every file the analyzer loads, once they are loaded. Returns the
+/// outcome of the compile into the `.sharp` folder, with the database its issues point into.
 ///
 /// # Errors
 ///
@@ -1081,6 +1088,7 @@ fn compiled(
     configuration: &Configuration,
     color_choice: ColorChoice,
     hosts: Option<&HostsCompile>,
+    loaded: impl FnOnce(&Database<'static>),
 ) -> Result<(Outcome, ReadDatabase), Error> {
     let workspace = configuration.source.workspace.as_path();
     let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.to_path_buf(), error))?;
@@ -1157,7 +1165,9 @@ fn compiled(
         orchestrator.set_external_analyzer_handle(external_analyzer);
     }
 
-    let (database, included) = project_database(&orchestrator, workspace)?;
+    let database = orchestrator.load_database(workspace, true, None, None)?.into_static();
+    loaded(&database);
+    let (database, included) = with_packages(database);
 
     let mut errors = Vec::new();
     let library = match standard_library(&root, &database) {

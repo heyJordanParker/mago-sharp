@@ -393,18 +393,30 @@ impl<'cfg> Orchestrator<'cfg> {
         }
 
         let mut result = loader.load().map_err(OrchestratorError::Database)?;
+        self.add_external_initialization_files(&mut result)?;
 
+        Ok(result)
+    }
+
+    /// Adds to `database` the in-memory source stubs the extension hosts give once they initialize, as
+    /// [`Self::load_database`] adds them to the files it loads. It adds none while no analyzer plugin registry exists,
+    /// as before [`Self::set_external_analyzer_handle`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError`] when a host fails to initialize or gives invalid initialization data.
+    pub fn add_external_initialization_files(&self, database: &mut Database<'_>) -> Result<(), OrchestratorError> {
         if let Some(registry) = self.plugin_registry.get() {
             let files = registry
                 .external_initialization_files()
                 .map_err(|error| OrchestratorError::General(error.to_string()))?;
-            result.reserve(files.len());
+            database.reserve(files.len());
             for file in files {
-                result.add(file);
+                database.add(file);
             }
         }
 
-        Ok(result)
+        Ok(())
     }
 
     /// The configuration [`Self::load_database`] reads the files of `workspace` by, the files of the `includes` list
