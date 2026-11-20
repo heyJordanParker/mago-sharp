@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Mago\Internal;
 
 use Composer\InstalledVersions;
-use PharData;
 use RuntimeException;
 use Throwable;
 
@@ -511,12 +510,13 @@ function get_archive_checksum(string $checksumFile, string $archiveName): string
 }
 
 /**
- * Extract a `.tar.gz` archive to a destination directory with PharData, if its SHA-256 is the one the release pins.
- * The archive is deleted either way.
+ * Extract a `.tar.gz` archive to a destination directory with the system `tar`, if its SHA-256 is the one the release
+ * pins. The archive is deleted either way. `tar` streams the archive, so a release of any size unpacks within PHP's
+ * memory limit, which `PharData` does not: it holds the whole decompressed archive in memory.
  *
  * @param string $checksum The SHA-256 `get_archive_checksum` read for the archive.
  *
- * @throws RuntimeException If the archive's SHA-256 differs, or the archive cannot be opened or extracted.
+ * @throws RuntimeException If the archive's SHA-256 differs, or `tar` cannot start or extract it.
  *
  * @internal
  */
@@ -534,9 +534,25 @@ function extract_archive(string $archiveFile, string $checksum, string $destinat
         );
     }
 
-    $phar = new PharData($archiveFile);
-    $phar->extractTo($destination);
+    $pipes = [];
+    $process = proc_open(['tar', '-xzf', $archiveFile, '-C', $destination], [2 => ['pipe', 'w']], $pipes);
+    $stderr = $pipes[2] ?? null;
+    if (!is_resource($process) || !is_resource($stderr)) {
+        unlink($archiveFile);
+
+        throw new RuntimeException('Unable to start tar to extract ' . basename($archiveFile) . '.');
+    }
+
+    $error = (string) stream_get_contents($stderr);
+    fclose($stderr);
+    $exitCode = proc_close($process);
     unlink($archiveFile);
+
+    if ($exitCode !== 0) {
+        throw new RuntimeException(
+            'tar could not extract ' . basename($archiveFile) . " (exit code {$exitCode}): " . trim($error),
+        );
+    }
 }
 
 /**

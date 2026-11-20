@@ -5,26 +5,35 @@ declare(strict_types=1);
 namespace Mago\Tests\Internal;
 
 use FilesystemIterator;
-use PharData;
 use PHPUnit\Framework\TestCase;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use RuntimeException;
 use SplFileInfo;
 
+use function dirname;
+use function fclose;
 use function file_exists;
 use function file_get_contents;
 use function file_put_contents;
-use function gzencode;
+use function filesize;
+use function fopen;
+use function fwrite;
 use function hash;
 use function hash_file;
 use function Mago\Internal\extract_archive;
 use function Mago\Internal\get_archive_checksum;
 use function mkdir;
+use function proc_close;
+use function proc_open;
 use function rmdir;
+use function str_repeat;
 use function sys_get_temp_dir;
 use function uniqid;
 use function unlink;
+use function var_export;
+
+use const PHP_BINARY;
 
 /**
  * The wrapper runs the `mago` it downloads from the GitHub release, so it extracts an archive only when the archive's
@@ -38,6 +47,7 @@ final class ExtractArchiveTest extends TestCase
     {
         $this->directory = sys_get_temp_dir() . '/' . uniqid('mago-extract-', true);
         mkdir("{$this->directory}/release", 0o755, true);
+        mkdir("{$this->directory}/mago-1.0.0-test");
     }
 
     protected function tearDown(): void
@@ -61,6 +71,7 @@ final class ExtractArchiveTest extends TestCase
 
     public function testAnArchiveWithTheSha256TheReleasePinsInstalls(): void
     {
+        file_put_contents("{$this->directory}/mago-1.0.0-test/mago", 'the mago binary');
         $archive = $this->archive();
 
         extract_archive($archive, (string) hash_file('sha256', $archive), "{$this->directory}/release");
@@ -69,8 +80,47 @@ final class ExtractArchiveTest extends TestCase
         self::assertFileDoesNotExist($archive);
     }
 
+    public function testAnArchiveLargerThanPhpsDefaultMemoryLimitInstalls(): void
+    {
+        $binary = fopen("{$this->directory}/mago-1.0.0-test/mago", 'wb');
+        for ($megabyte = 0; $megabyte < 200; $megabyte++) {
+            fwrite($binary, str_repeat("\0", 1_048_576));
+        }
+        fclose($binary);
+        $archive = $this->archive();
+
+        $log = "{$this->directory}/php.log";
+        $pipes = [];
+        $process = proc_open(
+            [
+                PHP_BINARY,
+                '-d',
+                'memory_limit=128M',
+                '-r',
+                'require '
+                    . var_export(dirname(__DIR__, 3) . '/vendor/autoload.php', true)
+                    . ';'
+                    . 'Mago\\Internal\\extract_archive('
+                    . var_export($archive, true)
+                    . ', '
+                    . var_export((string) hash_file('sha256', $archive), true)
+                    . ', '
+                    . var_export("{$this->directory}/release", true)
+                    . ');',
+            ],
+            [2 => ['file', $log, 'w']],
+            $pipes,
+        );
+
+        self::assertIsResource($process);
+        self::assertSame(0, proc_close($process), (string) file_get_contents($log));
+        self::assertSame(209_715_200, filesize("{$this->directory}/release/mago-1.0.0-test/mago"));
+        self::assertFileDoesNotExist($archive);
+    }
+
     public function testAnArchiveWithAnotherSha256IsRefusedWithBothHashesAndNothingIsExtracted(): void
     {
+        file_put_contents("{$this->directory}/mago-1.0.0-test/mago", 'the mago binary');
         $archive = $this->archive();
         $actual = hash_file('sha256', $archive);
         $pinned = hash('sha256', 'the archive the release built');
@@ -88,6 +138,24 @@ final class ExtractArchiveTest extends TestCase
         }
 
         self::assertFalse(file_exists("{$this->directory}/release/mago-1.0.0-test"));
+        self::assertFileDoesNotExist($archive);
+    }
+
+    public function testAnArchiveTarCannotReadIsRefusedWithTarsErrorAndDeleted(): void
+    {
+        $archive = "{$this->directory}/mago-1.0.0-test.tar.gz";
+        file_put_contents($archive, 'not a gzip stream');
+
+        try {
+            extract_archive($archive, (string) hash_file('sha256', $archive), "{$this->directory}/release");
+            self::fail('An archive tar cannot read was extracted.');
+        } catch (RuntimeException $exception) {
+            self::assertMatchesRegularExpression(
+                '/^tar could not extract mago-1\.0\.0-test\.tar\.gz \(exit code [1-9]\d*\): \S/',
+                $exception->getMessage(),
+            );
+        }
+
         self::assertFileDoesNotExist($archive);
     }
 
@@ -137,21 +205,25 @@ final class ExtractArchiveTest extends TestCase
     }
 
     /**
-     * A release archive as release.yml packs it: one `mago-{version}-{triple}` directory holding the binary. gzencode
-     * compresses it, since PharData reads back an empty file from an archive its own compress() wrote in the same
-     * process.
+     * A release archive as release.yml packs it with the system `tar`: the `mago-1.0.0-test` directory, holding the
+     * binary the test wrote. The directory is deleted, so only the archive's extraction can bring it back.
      */
     private function archive(): string
     {
-        $tar = new PharData("{$this->directory}/mago-1.0.0-test.tar");
-        $tar->addFromString('mago-1.0.0-test/mago', 'the mago binary');
-        unset($tar);
-        file_put_contents(
-            "{$this->directory}/mago-1.0.0-test.tar.gz",
-            gzencode((string) file_get_contents("{$this->directory}/mago-1.0.0-test.tar")),
+        $archive = "{$this->directory}/mago-1.0.0-test.tar.gz";
+        $log = "{$this->directory}/tar.log";
+        $pipes = [];
+        $process = proc_open(
+            ['tar', '-czf', $archive, '-C', $this->directory, 'mago-1.0.0-test'],
+            [2 => ['file', $log, 'w']],
+            $pipes,
         );
-        unlink("{$this->directory}/mago-1.0.0-test.tar");
 
-        return "{$this->directory}/mago-1.0.0-test.tar.gz";
+        self::assertIsResource($process);
+        self::assertSame(0, proc_close($process), (string) file_get_contents($log));
+        unlink("{$this->directory}/mago-1.0.0-test/mago");
+        rmdir("{$this->directory}/mago-1.0.0-test");
+
+        return $archive;
     }
 }
