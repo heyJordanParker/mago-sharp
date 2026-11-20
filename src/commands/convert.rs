@@ -435,17 +435,13 @@ impl ConvertCommand {
 
                 return Ok((outcome.exit_code(), outcome));
             }
-            let mut written = 0;
-            for candidate in &accepted {
-                if let Err(error) = write(&workspace, &candidate.name, &candidate.text) {
-                    outcome.failed = true;
-                    let name = display(&sharp_name(&candidate.name));
-                    tracing::error!(
-                        "{name} could not be written, so it and the files after it stay plain PHP: {error}"
-                    );
-                    break;
-                }
-                written += 1;
+            let files: Vec<(&[u8], &[u8])> =
+                accepted.iter().map(|candidate| (candidate.name.as_slice(), candidate.text.as_slice())).collect();
+            let (written, stopped) = write(&workspace, &files);
+            if let Some(error) = stopped {
+                outcome.failed = true;
+                let name = display(&sharp_name(&accepted[written].name));
+                tracing::error!("{name} could not be written, so it and the files after it stay plain PHP: {error}");
             }
             outcome.converted.truncate(written);
             if written > 0 && !prover.prove_written(&plain, &accepted[..written]) {
@@ -934,16 +930,43 @@ impl Outcome {
     }
 }
 
-/// Writes `text` at the `.sharp` name of the committed plain PHP file `name`, then records the rename in git's index,
-/// as `git mv` would, and only then removes the plain file, so a write that fails leaves it where it was.
-fn write(workspace: &Path, name: &[u8], text: &[u8]) -> Result<(), Error> {
-    let (source, target) = (PathBuf::from(display(name)), PathBuf::from(display(&sharp_name(name))));
-    write_by_rename(&workspace.join(&target), text)?;
-    git::stage_rename(workspace, &source, &target)?;
-    let source = workspace.join(&source);
-    std::fs::remove_file(&source).map_err(|error| DatabaseError::io(IOAction::DeleteFile, &source, error))?;
+/// Writes each text of `files` at the `.sharp` name of its committed plain PHP file, in order, until a write fails,
+/// then records the renames of the files it wrote in git's index in one call, as `git mv` would, and only then removes
+/// their plain files, so a write that fails leaves its plain file and those after it where they were. Returns how many
+/// files it converted, and the error that stopped it. When git can't record the renames, it removes what it wrote, so
+/// every file stays plain PHP.
+fn write(workspace: &Path, files: &[(&[u8], &[u8])]) -> (usize, Option<Error>) {
+    let mut renames = Vec::with_capacity(files.len());
+    let mut stopped = None;
+    for (name, text) in files {
+        let (source, target) = (PathBuf::from(display(name)), PathBuf::from(display(&sharp_name(name))));
+        if let Err(error) = write_by_rename(&workspace.join(&target), text) {
+            stopped = Some(error.into());
+            break;
+        }
+        renames.push((source, target));
+    }
+    if renames.is_empty() {
+        return (0, stopped);
+    }
+    if let Err(error) = git::stage_renames(workspace, &renames) {
+        for (_, target) in &renames {
+            let target = workspace.join(target);
+            if let Err(removing) = std::fs::remove_file(&target) {
+                let target = target.display();
+                tracing::error!("{target} could not be removed, beside the plain file it converts: {removing}");
+            }
+        }
+        return (0, Some(error));
+    }
+    for (converted, (source, _)) in renames.iter().enumerate() {
+        let source = workspace.join(source);
+        if let Err(error) = std::fs::remove_file(&source) {
+            return (converted, Some(DatabaseError::io(IOAction::DeleteFile, &source, error).into()));
+        }
+    }
 
-    Ok(())
+    (renames.len(), stopped)
 }
 
 /// Each issue of `issues` by its file, level, code, message and line, with how many times it is reported, the files
@@ -2494,9 +2517,11 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         project(&root, &[clean(0)]);
         std::fs::create_dir_all(root.join("src/Contracts/Clean0.sharp/kept")).unwrap();
 
-        let written = write(&root, b"src/Contracts/Clean0.php", b"public interface Clean0 { }\n");
+        let (written, stopped) =
+            write(&root, &[(&b"src/Contracts/Clean0.php"[..], &b"public interface Clean0 { }\n"[..])]);
 
-        assert!(written.is_err());
+        assert_eq!(written, 0);
+        assert!(stopped.is_some());
         assert_eq!(std::fs::read_to_string(root.join("src/Contracts/Clean0.php")).unwrap(), clean(0).1);
     }
 
