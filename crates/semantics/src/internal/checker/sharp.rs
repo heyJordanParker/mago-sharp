@@ -6553,14 +6553,33 @@ pub fn check_try_catch_clause(try_catch_clause: &TryCatchClause, context: &mut C
     }
 }
 
+/// Checks the name of a parameter. A parameter of a method written `override` keeps its parent's name, which the
+/// analyzer holds it to, so its case is its parent's choice, as an override field's is. The walk keeps no member on its
+/// ancestors, so the file names the method, and only for a name out of camel case.
 #[inline]
 pub fn check_parameter(parameter: &FunctionLikeParameter, context: &mut Context<'_, '_, '_>) {
-    if parameter.variable.name.starts_with(b"$") {
+    let name = parameter.variable.name;
+    let named_by_parent = || {
+        Node::Program(context.program)
+            .filter_map(|node| match node {
+                Node::Method(method)
+                    if method.parameter_list.parameters.iter().any(|own| own.span() == parameter.span()) =>
+                {
+                    Some(method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Override(_))))
+                }
+                _ => None,
+            })
+            .into_iter()
+            .next()
+            .unwrap_or(false)
+    };
+
+    if name.starts_with(b"$") {
         report_unexpected(parameter.variable.span, context);
-    } else {
+    } else if is_camel_case(name) || is_magic_name(name) || !named_by_parent() {
         // A parameter with an access level or accessors also declares the property of its name.
         let kind = if parameter.is_promoted_property() { "property" } else { "parameter" };
-        check_local_name(parameter.variable.name, parameter.variable.span, kind, context);
+        check_local_name(name, parameter.variable.span, kind, context);
     }
 }
 

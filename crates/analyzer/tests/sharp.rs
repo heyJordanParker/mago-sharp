@@ -4121,6 +4121,29 @@ fn replacing_a_php_method_follows_php_rules_with_override_required() {
     );
 }
 
+/// A method written `override` keeps its parent's parameter names, which `incompatible-parameter-name` holds, so a
+/// plain PHP parent's snake case name draws no case warning there. A parameter of a method that overrides nothing is
+/// still in camel case, and a rename of an inherited name is still refused.
+#[test]
+fn an_override_keeps_its_parents_parameter_names() {
+    let library = "<?php\n\nnamespace Lib;\n\nclass Db\n{\n    public function get_var(?string $query = null, int $column_offset = 0)\n    {\n        return null;\n    }\n}\n";
+    let tenant = "namespace Demo;\n\nimport Lib.Db;\n\npublic class TenantDb : Db\n{\n    public override Any? get_var(string? query = null, int column_offset = 0) => null;\n\n    public Any? read(int row_offset) => row_offset;\n}\n";
+    let renamed = "namespace Demo;\n\nimport Lib.Db;\n\npublic class RenamedDb : Db\n{\n    public override Any? get_var(string? query = null, int columnOffset = 0) => null;\n}\n";
+    let library = ("src/Lib/Db.php", library);
+
+    assert_eq!(
+        [
+            explained(("src/Demo/TenantDb.sharp", tenant), &[library]),
+            explained(("src/Demo/RenamedDb.sharp", renamed), &[library])
+        ]
+        .concat(),
+        [
+            "9:26 semantics Parameter name `row_offset` should be in camel case. Rename it `rowOffset`.",
+            "7:26 incompatible-parameter-name Parameter #2 of `RenamedDb.get_var` is named `columnOffset` but parent `Db.get_var` names it `column_offset` Name it `column_offset`, as the parent does.",
+        ]
+    );
+}
+
 /// A plain PHP parent's parameter named as a PHP# keyword is written with `@`, spec section 2, so an override keeps
 /// `$event` as `@event`, and a rename names the `@event` to write.
 #[test]
