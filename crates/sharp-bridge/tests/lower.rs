@@ -1294,26 +1294,26 @@ fn a_constructor_parameter_whose_php_type_drops_its_service_names_the_service() 
 /// {
 ///     public function run(string $text): bool
 ///     {
-///         return Rx::matches("/a/", $text);
+///         return Rx::parse("/a/")->matches($text);
 ///     }
 /// }
 /// ```
 ///
 /// php-src parses the `use` into `USE [ZEND_SYMBOL_CLASS]` holding `USE_ELEM`, `ZVAL "Sharp\Text\Regex"` and
 /// `ZVAL "Rx"`, and compiles `Rx` to the class it names. The `use` is not lowered: the call names
-/// `Sharp\Text\Regex` in full, as `Regex.matches(…)` under a plain import does.
+/// `Sharp\Text\Regex` in full, as `Regex.parse(…)` under a plain import does.
 #[test]
 fn a_call_through_a_renamed_import_lowers_to_the_call_through_the_plain_import() {
     let library = [(
         "src/Sharp/Text/Regex.php",
-        "<?php namespace Sharp\\Text; final class Regex { public static function matches(string $pattern, string $text): bool { return true; } }",
+        "<?php namespace Sharp\\Text; final class Regex { public static function parse(string $pattern): self { return new self(); } public function matches(string $text): bool { return true; } }",
     )];
     let renamed = Lowered::with(
-        "namespace App.Tenant;\n\nimport Sharp.Text.Regex as Rx;\n\nclass Report\n{\n    public bool run(string text)\n    {\n        return Rx.matches(\"/a/\", text);\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Sharp.Text.Regex as Rx;\n\nclass Report\n{\n    public bool run(string text)\n    {\n        return Rx.parse(\"/a/\").matches(text);\n    }\n}\n",
         &library,
     );
     let plain = Lowered::with(
-        "namespace App.Tenant;\n\nimport Sharp.Text.Regex;\n\nclass Report\n{\n    public bool run(string text)\n    {\n        return Regex.matches(\"/a/\", text);\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Sharp.Text.Regex;\n\nclass Report\n{\n    public bool run(string text)\n    {\n        return Regex.parse(\"/a/\").matches(text);\n    }\n}\n",
         &library,
     );
 
@@ -1322,11 +1322,14 @@ fn a_call_through_a_renamed_import_lowers_to_the_call_through_the_plain_import()
         indoc! {r#"
             STMT_LIST
               RETURN
-                STATIC_CALL
-                  ZVAL "Sharp\\Text\\Regex"
+                METHOD_CALL
+                  STATIC_CALL
+                    ZVAL "Sharp\\Text\\Regex"
+                    ZVAL "parse"
+                    ARG_LIST
+                      ZVAL "/a/"
                   ZVAL "matches"
                   ARG_LIST
-                    ZVAL "/a/"
                     VAR
                       ZVAL "text"
         "#}

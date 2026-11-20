@@ -1927,13 +1927,13 @@ fn a_sharp_import_passes_the_use_statement_and_casing_checks_as_in_php() {
 /// `Sharp\Text\Regex`, a plain PHP class with a static method.
 const REGEX: (&str, &str) = (
     "src/Sharp/Text/Regex.php",
-    "<?php\n\nnamespace Sharp\\Text;\n\nfinal class Regex\n{\n    public static function matches(string $pattern, string $text): bool\n    {\n        return preg_match($pattern, $text) === 1;\n    }\n}\n",
+    "<?php\n\nnamespace Sharp\\Text;\n\nfinal class Regex\n{\n    public static function escape(string $text): string\n    {\n        return preg_quote($text, '/');\n    }\n}\n",
 );
 
 /// The PHP twin of a `.sharp` file that calls `Sharp\Text\Regex` through `import … as Rx`.
 const RENAMED_REGEX_CALL: (&str, &str) = (
     "src/Demo/Report.php",
-    "<?php\n\ndeclare(strict_types=1);\n\nnamespace Demo;\n\nuse Sharp\\Text\\Regex as Rx;\n\nclass Report\n{\n    public static function run(string $text): bool\n    {\n        return Rx::matches('/a/', $text) && Rx::matches(1, $text);\n    }\n}\n",
+    "<?php\n\ndeclare(strict_types=1);\n\nnamespace Demo;\n\nuse Sharp\\Text\\Regex as Rx;\n\nclass Report\n{\n    public static function run(string $text): bool\n    {\n        return Rx::escape($text) === Rx::escape(1);\n    }\n}\n",
 );
 
 /// The issues of `RENAMED_REGEX_CALL`.
@@ -1946,22 +1946,22 @@ fn a_php_call_through_a_use_renamed_with_as_is_checked_as_the_imported_class() {
     assert_eq!(codes(&renamed_regex_call_issues()), ["invalid-argument"]);
 }
 
-/// Spec section 23: `Rx.matches(…)` calls `Sharp\Text\Regex::matches` when the file imports the class as `Rx`, so its
+/// Spec section 23: `Rx.escape(…)` calls `Sharp\Text\Regex::escape` when the file imports the class as `Rx`, so its
 /// arguments are checked against that method, as in PHP.
 #[test]
 fn a_call_through_a_renamed_import_is_checked_as_the_imported_class_as_in_php() {
-    let sharp = "namespace Demo;\n\nimport Sharp.Text.Regex as Rx;\n\nclass Report\n{\n    public static bool run(string text) => Rx.matches(\"/a/\", text) && Rx.matches(1, text);\n}\n";
+    let sharp = "namespace Demo;\n\nimport Sharp.Text.Regex as Rx;\n\nclass Report\n{\n    public static bool run(string text) => Rx.escape(text) == Rx.escape(1);\n}\n";
 
     let sharp_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[REGEX]);
     let located_issues: Vec<String> = sharp_issues.iter().map(|issue| located(sharp, issue)).collect();
 
-    assert_eq!(located_issues, ["7:82 invalid-argument"]);
+    assert_eq!(located_issues, ["7:73 invalid-argument"]);
     assert_eq!(codes(&located_issues), codes(&renamed_regex_call_issues()));
-    assert!(sharp_issues[0].message.contains("`Rx.matches`"), "{}", sharp_issues[0].message);
+    assert!(sharp_issues[0].message.contains("`Rx.escape`"), "{}", sharp_issues[0].message);
     assert_eq!(
         messages(RENAMED_REGEX_CALL, &[REGEX]),
         [
-            "Invalid argument type for argument #1 of `Sharp\\Text\\Regex::matches`: expected `string`, but found `int(1)`."
+            "Invalid argument type for argument #1 of `Sharp\\Text\\Regex::escape`: expected `string`, but found `int(1)`."
         ]
     );
 }

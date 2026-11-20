@@ -577,14 +577,14 @@ fn an_imported_name_is_the_imported_class_and_not_the_standard_library_one() {
 /// of its new name, as any import does, and leaves the standard library class of the old short name in place.
 #[test]
 fn a_renamed_import_names_the_imported_class_by_its_new_name() {
-    const CODE: &str = "namespace App;\n\nimport Sharp.Text.Regex as Rx;\nimport Lib.Store as Position;\nimport Lib.Random as LibRandom;\nimport Stripe.StripeClient as Client;\n\nextern Client uses Http;\n\nclass Report\n{\n    public bool run(string text, Position here, Random store, LibRandom other)\n    {\n        return Rx.matches(\"/a/\", text);\n    }\n}\n";
+    const CODE: &str = "namespace App;\n\nimport Sharp.Text.Regex as Rx;\nimport Lib.Store as Position;\nimport Lib.Random as LibRandom;\nimport Stripe.StripeClient as Client;\n\nextern Client uses Http;\n\nclass Report\n{\n    public bool run(string text, Position here, Random store, LibRandom other)\n    {\n        return Rx.parse(\"/a/\").matches(text);\n    }\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
-    assert_eq!(binding(&names, CODE, "Rx.matches", 0), Some(Binding::Class));
+    assert_eq!(binding(&names, CODE, "Rx.parse", 0), Some(Binding::Class));
     assert_eq!(binding(&names, CODE, "Client uses", 0), Some(Binding::Class));
     for (needle, class) in [
-        ("Rx.matches", "Sharp\\Text\\Regex"),
+        ("Rx.parse", "Sharp\\Text\\Regex"),
         ("Position here", "Lib\\Store"),
         ("Random store", "Sharp\\Random"),
         ("LibRandom other", "Lib\\Random"),
@@ -596,7 +596,7 @@ fn a_renamed_import_names_the_imported_class_by_its_new_name() {
 
 #[test]
 fn a_php_use_renamed_with_as_names_the_imported_class_by_its_new_name() {
-    const CODE: &str = "<?php namespace App; use Sharp\\Text\\Regex as Rx; use Lib\\Cache as LibCache; Rx::matches('/a/', 'a'); new Cache(); new LibCache();";
+    const CODE: &str = "<?php namespace App; use Sharp\\Text\\Regex as Rx; use Lib\\Cache as LibCache; Rx::parse('/a/'); new Cache(); new LibCache();";
     let arena = LocalArena::new();
     let file = File::ephemeral(Cow::Borrowed(b"src/Store.php"), Cow::Borrowed(CODE.as_bytes()));
     let program = parse_file(&arena, &file);
