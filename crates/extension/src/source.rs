@@ -30,16 +30,6 @@ pub const NAME_RECORD_SIZE: usize = 14;
 /// Width of one packed comment-trivia record.
 pub const TRIVIA_RECORD_SIZE: usize = 9;
 
-/// Writes the ordered node-kind table used to validate SDK compatibility.
-pub fn write_node_kind_table(writer: &mut PayloadWriter) {
-    writer.write_u32(NodeKind::COUNT as u32);
-    for kind in NodeKind::iter() {
-        let name = kind.to_string();
-        writer.write_u32(name.len() as u32);
-        writer.write_raw(name.as_bytes());
-    }
-}
-
 /// Writes the ordered node-kind table used to validate SDK compatibility, as fields of a message of values.
 pub fn write_node_kind_values(writer: &mut ValueWriter) {
     writer.write_u32(NodeKind::COUNT as u32);
@@ -268,58 +258,6 @@ impl<'arena> SourceSnapshot<'arena> {
             let start = stack.len();
             node.visit_children(|child| stack.push((child, Some(identifier))));
             stack[start..].reverse();
-        }
-
-        Ok(())
-    }
-
-    /// Writes target identifiers and packed syntax, name, and trivia tables.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a table or name buffer exceeds `u32::MAX` bytes.
-    pub fn write_to(&self, writer: &mut PayloadWriter) -> Result<(), PayloadError> {
-        writer.write_length(self.targets.len())?;
-        for target in &self.targets {
-            writer.write_u32(*target);
-        }
-
-        writer.write_length(self.nodes.len())?;
-        for node in &self.nodes {
-            writer.write_u16(node.kind as u16);
-            writer.write_u32(node.start);
-            writer.write_u32(node.end);
-            writer.write_u32(node.parent.unwrap_or(NO_NODE));
-            writer.write_u32(node.first_child.unwrap_or(NO_NODE));
-            writer.write_u32(node.next_sibling.unwrap_or(NO_NODE));
-        }
-
-        writer.write_length(self.names.len())?;
-        for (start, _, _, _, _) in &self.names {
-            writer.write_u32(*start);
-        }
-
-        let mut name_offset = 0usize;
-        for (_, end, name, imported, binding) in &self.names {
-            writer.write_u32(*end);
-            writer.write_length(name_offset)?;
-            writer.write_length(name.len())?;
-            writer.write_bool(*imported);
-            writer.write_u8(*binding);
-            name_offset =
-                name_offset.checked_add(name.len()).ok_or(PayloadError::LengthOverflow { length: usize::MAX })?;
-        }
-
-        writer.write_length(name_offset)?;
-        for (_, _, name, _, _) in &self.names {
-            writer.write_raw(name);
-        }
-
-        writer.write_length(self.trivia.len())?;
-        for (kind, start, end) in &self.trivia {
-            writer.write_u8(*kind);
-            writer.write_u32(*start);
-            writer.write_u32(*end);
         }
 
         Ok(())

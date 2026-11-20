@@ -2,8 +2,9 @@
 //!
 //! A message to an extension host is a list of engine values, one per field, which [`ValueWriter`] writes and
 //! [`ValueReader`] reads in the order the field's codec gives them. A byte payload, which [`PayloadWriter`] and
-//! [`PayloadReader`] write and read for a pipe to another process, uses network byte order and prefixes each byte
-//! string with its length as a `u32`. Capability-specific crates are responsible for defining message kinds, limits,
+//! [`PayloadReader`] write and read for a pipe to another process and for one field read whole, such as a table of
+//! packed records or a method search, uses network byte order and prefixes each byte string with its length as a
+//! `u32`. Capability-specific crates are responsible for defining message kinds, limits,
 //! and validation.
 
 #![allow(clippy::big_endian_bytes, reason = "network byte order is part of the stable extension wire format")]
@@ -96,21 +97,6 @@ impl PayloadWriter {
     #[inline]
     pub fn write_string(&mut self, value: &str) -> Result<(), PayloadError> {
         self.write_bytes(value.as_bytes())
-    }
-
-    /// Writes an optional length-prefixed UTF-8 string.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the encoded byte length does not fit in a `u32`.
-    #[inline]
-    pub fn write_optional_string(&mut self, value: Option<&str>) -> Result<(), PayloadError> {
-        self.write_bool(value.is_some());
-        if let Some(value) = value {
-            self.write_string(value)?;
-        }
-
-        Ok(())
     }
 
     /// Returns the current payload length.
@@ -276,16 +262,6 @@ impl<'payload> PayloadReader<'payload> {
     #[inline]
     pub fn read_string(&mut self, field: &'static str) -> Result<String, PayloadError> {
         self.read_str(field).map(str::to_owned)
-    }
-
-    /// Reads an optional owned length-prefixed UTF-8 string.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when its presence flag or string encoding is invalid.
-    #[inline]
-    pub fn read_optional_string(&mut self, field: &'static str) -> Result<Option<String>, PayloadError> {
-        if self.read_bool(field)? { self.read_string(field).map(Some) } else { Ok(None) }
     }
 
     /// Validates that the entire payload was consumed.
@@ -680,8 +656,6 @@ mod tests {
         writer.write_bool(false);
         writer.write_bytes(b"bytes").unwrap();
         writer.write_string("string").unwrap();
-        writer.write_optional_string(Some("optional")).unwrap();
-        writer.write_optional_string(None).unwrap();
 
         let payload = writer.finish();
         let mut reader = PayloadReader::new(&payload);
@@ -692,8 +666,6 @@ mod tests {
         assert!(!reader.read_bool("bool").unwrap());
         assert_eq!(reader.read_bytes("bytes").unwrap(), b"bytes");
         assert_eq!(reader.read_str("string").unwrap(), "string");
-        assert_eq!(reader.read_optional_string("optional").unwrap().as_deref(), Some("optional"));
-        assert_eq!(reader.read_optional_string("optional").unwrap(), None);
         reader.finish().unwrap();
     }
 

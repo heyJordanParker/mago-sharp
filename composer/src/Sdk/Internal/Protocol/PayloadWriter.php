@@ -10,47 +10,23 @@ use function pack;
 use function strlen;
 
 /**
+ * Packs the fields of one string mago reads whole, such as a method search, in the byte layout mago's PayloadReader
+ * reads: big-endian integers, a byte for a boolean, and a string after its 32-bit length.
+ *
  * @internal
  */
 final class PayloadWriter
 {
-    public function __construct(
-        private string $payload = '',
-    ) {}
-
-    public function writeRaw(string $value): void
-    {
-        $this->payload .= $value;
-    }
+    private string $payload = '';
 
     public function writeU8(int $value): void
     {
         $this->payload .= chr($value);
     }
 
-    public function writeU16(int $value): void
-    {
-        $this->payload .= pack('n', $value);
-    }
-
     public function writeU32(int $value): void
     {
         $this->payload .= pack('N', $value);
-    }
-
-    public function writeU64(int $value): void
-    {
-        $this->payload .= pack('J', $value);
-    }
-
-    public function writeI64(int $value): void
-    {
-        $this->payload .= pack('J', $value);
-    }
-
-    public function writeF64(float $value): void
-    {
-        $this->payload .= pack('E', $value);
     }
 
     public function writeBoolean(bool $value): void
@@ -66,29 +42,9 @@ final class PayloadWriter
         $this->payload .= pack('N', count($values));
     }
 
-    public function writeLength(int $length): void
-    {
-        $this->payload .= pack('N', $length);
-    }
-
     public function writeBytes(string $value): void
     {
         $this->payload .= pack('N', strlen($value)) . $value;
-    }
-
-    public function writeString(string $value): void
-    {
-        $this->payload .= pack('N', strlen($value)) . $value;
-    }
-
-    public function writeOptionalString(?string $value): void
-    {
-        if ($value === null) {
-            $this->payload .= "\0";
-            return;
-        }
-
-        $this->payload .= "\1" . pack('N', strlen($value)) . $value;
     }
 
     public function finish(): string

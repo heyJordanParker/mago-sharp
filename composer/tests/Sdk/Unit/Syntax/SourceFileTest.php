@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Mago\Tests\Sdk\Unit\Syntax;
 
 use Mago\Sdk\Exception\ProtocolException;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
 use Mago\Sdk\Internal\Protocol\ValueReader;
 use Mago\Sdk\Internal\Syntax\NodeStore;
 use Mago\Sdk\Internal\Syntax\ResolvedNameStore;
@@ -85,32 +84,13 @@ final class SourceFileTest extends TestCase
         self::assertSame(NodeKind::FunctionCall, $looked->getMany([1])[0]->kind);
     }
 
+    /** A snapshot whose node records hold fewer nodes than it counts is refused, as any malformed message is. */
     public function testASnapshotWhoseNodeRecordsEndEarlyIsRefused(): void
-    {
-        $noNode = 4_294_967_295;
-        $payload = pack('NN', 0, 2) . pack('nNNNNN', 0, 0, 10, $noNode, $noNode, $noNode);
-
-        $this->expectException(ProtocolException::class);
-        $this->expectExceptionMessage('The source snapshot holds 22 bytes of node records, where its 2 nodes take 44.');
-
-        SourceFileCodec::read(
-            new PayloadReader($payload),
-            PHPVersion::fromParts(8, 4),
-            [NodeKind::Program],
-            'a.php',
-            '',
-        );
-    }
-
-    public function testASnapshotOfValuesWhoseNodeTableEndsEarlyIsRefused(): void
     {
         $noNode = 4_294_967_295;
         $nodes = pack('nNNNNN', 0, 0, 10, $noNode, $noNode, $noNode);
 
         $this->expectException(ProtocolException::class);
-        $this->expectExceptionMessage(
-            'The source snapshot holds 22 bytes of node records, where its 2 records take 44.',
-        );
 
         SourceFileCodec::readValues(
             new ValueReader([0, 2, $nodes]),

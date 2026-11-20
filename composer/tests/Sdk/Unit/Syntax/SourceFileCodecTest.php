@@ -6,8 +6,8 @@ namespace Mago\Tests\Sdk\Unit\Syntax;
 
 use Composer\InstalledVersions;
 use Mago\Sdk\Exception\ProtocolException;
-use Mago\Sdk\Internal\Protocol\PayloadReader;
-use Mago\Sdk\Internal\Protocol\PayloadWriter;
+use Mago\Sdk\Internal\Protocol\ValueReader;
+use Mago\Sdk\Internal\Protocol\ValueWriter;
 use Mago\Sdk\Internal\Syntax\SourceFileCodec;
 use Mago\Sdk\Syntax\NodeKind;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
@@ -109,15 +109,15 @@ final class SourceFileCodecTest extends TestCase
      *
      * @param list<NodeKind|string> $kinds
      */
-    private static function table(array $kinds): PayloadReader
+    private static function table(array $kinds): ValueReader
     {
-        $writer = new PayloadWriter();
+        $writer = new ValueWriter();
         $writer->writeCount($kinds);
         foreach ($kinds as $kind) {
             $writer->writeString($kind instanceof NodeKind ? $kind->value : $kind);
         }
 
-        return new PayloadReader($writer->finish());
+        return new ValueReader($writer->finish());
     }
 
     private static function sdkVersion(): string
