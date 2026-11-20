@@ -36,6 +36,20 @@ pub(super) struct Test {
     pub(super) conditions: Vec<String>,
 }
 
+impl Test {
+    /// The test of a pattern that names no value as one condition: each of its matches, outermost first, false for a
+    /// value its pattern leaves out, with its conditions inside.
+    pub(super) fn condition(self) -> String {
+        assert!(self.lets.is_empty(), "a pattern that names no value binds no local");
+        let mut condition = if self.conditions.is_empty() { "true".to_owned() } else { self.conditions.join(" && ") };
+        for Destructure { term, pattern } in self.matches.into_iter().rev() {
+            condition = format!("(match {term} with | {pattern} => {condition} | _ => false)");
+        }
+
+        condition
+    }
+}
+
 /// One Lean `match` of a test: the term, and the pattern.
 struct Destructure {
     term: String,
@@ -59,7 +73,7 @@ impl Body<'_, '_> {
             Pattern::List(list) => self.list_test(subject, written, r#type, list),
             Pattern::Parenthesized(parenthesized) => self.test(subject, written, r#type, parenthesized.pattern),
             _ => {
-                let condition = self.pattern(subject, self.kind(r#type), pattern)?;
+                let condition = self.pattern(subject, r#type, pattern)?;
 
                 Some(Test { conditions: vec![condition], ..Test::default() })
             }

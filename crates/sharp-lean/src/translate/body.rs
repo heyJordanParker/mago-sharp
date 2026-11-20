@@ -1067,8 +1067,11 @@ impl<'body, 'program> Body<'body, 'program> {
         translated
     }
 
-    /// The condition that `subject`, a value of `kind`, matches `pattern`, or `None` after recording why it has none.
-    pub(super) fn pattern(&mut self, subject: &str, kind: Kind, pattern: &Pattern) -> Option<String> {
+    /// The condition that `subject`, a value of `r#type`, matches `pattern`, or `None` after recording why it has none.
+    /// A type or list pattern's is the test [`Self::test`] gives it, so `or`, `and` and `not` combine it as any other,
+    /// unless it names a value, which only an arm's own match binds.
+    pub(super) fn pattern(&mut self, subject: &str, r#type: &TUnion, pattern: &Pattern) -> Option<String> {
+        let kind = self.kind(r#type);
         match pattern {
             // A value an object is compared with is `null`: a pattern takes constants, and an object's identity is
             // nothing a law reasons about.
@@ -1110,14 +1113,17 @@ impl<'body, 'program> Body<'body, 'program> {
 
                 Some(condition)
             }
-            Pattern::Not(not) => Some(format!("(!{})", self.pattern(subject, kind, not.pattern)?)),
+            Pattern::Not(not) => Some(format!("(!{})", self.pattern(subject, r#type, not.pattern)?)),
             Pattern::Binary(binary) => {
-                let left = self.pattern(subject, kind, binary.left)?;
-                let right = self.pattern(subject, kind, binary.right)?;
+                let left = self.pattern(subject, r#type, binary.left)?;
+                let right = self.pattern(subject, r#type, binary.right)?;
 
                 Some(format!("({left} {} {right})", if binary.is_and() { "&&" } else { "||" }))
             }
-            Pattern::Parenthesized(parenthesized) => self.pattern(subject, kind, parenthesized.pattern),
+            Pattern::Parenthesized(parenthesized) => self.pattern(subject, r#type, parenthesized.pattern),
+            Pattern::Type(_) | Pattern::List(_) if !names_values(pattern) => {
+                Some(self.test(subject, None, r#type, pattern)?.condition())
+            }
             Pattern::Type(_) | Pattern::Properties(_) | Pattern::List(_) => {
                 self.unmodeled(pattern.span(), "a type test".to_owned(), issues::TYPE_TEST);
                 None

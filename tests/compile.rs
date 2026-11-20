@@ -4397,6 +4397,64 @@ fn a_law_reasons_about_a_machine_value_s_case_tests_and_equality() {
     }
 }
 
+/// Spec sections 21 and 28: a type test is a condition like any pattern's, so `or`, `and` and `not` combine it, of a
+/// sealed interface's implementer, of a machine's case and of a list. A law that is false where the combined test holds
+/// is not proven.
+#[test]
+fn a_law_reasons_about_a_type_test_inside_or_and_not() {
+    let light = |answer: &str, law: &str| {
+        format!(
+            "namespace App;\n\npublic machine Light\n{{\n    case Red(int at)\n    {{\n        public Light.Red answer(Signal signal, int now) => {answer};\n    }}\n\n    public static Light.Red enter(int at) => Light.Red(at);\n\n    {law}\n}}\n"
+        )
+    };
+    let lamp = "namespace App;\n\npublic machine Lamp\n{\n    case Off { public Lamp.On turnOn() => Lamp.On; }\n    final case On;\n    public static Lamp off() => Lamp.Off;\n    public bool known() => this is Lamp.Off or Lamp.On;\n    law offIsKnown() => Lamp.off().known();\n}\n";
+    let count = "namespace App;\n\npublic class Count\n{\n    public static int few(List<int> xs) => xs is [] or [int] ? 1 : 2;\n    law oneIsFew(int x) => Count.few([x]) == 1;\n    law twoAreMany(int x) => Count.few([x, x]) == 2;\n}\n";
+    let signals = |light: String| {
+        lawful_project(&[
+            ("app/Signal.sharp", "namespace App;\n\npublic sealed interface Signal\n{\n}\n"),
+            ("app/Go.sharp", "namespace App;\n\npublic class Go : Signal\n{\n}\n"),
+            (
+                "app/Stop.sharp",
+                "namespace App;\n\npublic class Stop : Signal\n{\n    public Stop(public string reason { get; }) { }\n}\n",
+            ),
+            ("app/Wait.sharp", "namespace App;\n\npublic class Wait : Signal\n{\n}\n"),
+            ("app/Light.sharp", &light),
+            ("app/Lamp.sharp", lamp),
+            ("app/Count.sharp", count),
+        ])
+    };
+    let or = "match (signal) {\n            Go => Light.Red(now),\n            Stop or Wait => this,\n        }";
+    let not = "signal is not Go ? this : Light.Red(now)";
+    for light in [
+        light(or, "law stopKeeps(int now) => Light.enter(1).answer(new Stop(\"r\"), now).at == 1;"),
+        light(not, "law waitKeeps(int now) => Light.enter(1).answer(new Wait(), now).at == 1;"),
+    ] {
+        let directory = signals(light);
+
+        let output = compile(directory.path());
+
+        assert!(output.status.success(), "{}", printed(&output));
+        for name in ["app/Light.sharp", "app/Lamp.sharp", "app/Count.sharp"] {
+            assert!(compiled(directory.path(), name).exists(), "{name}");
+        }
+    }
+    for (light, law) in [
+        (light(or, "law waitMoves(int now) => Light.enter(1).answer(new Wait(), now).at == now;"), "waitMoves"),
+        (light(not, "law stopMoves(int now) => Light.enter(1).answer(new Stop(\"r\"), now).at == now;"), "stopMoves"),
+    ] {
+        let directory = signals(light);
+
+        let output = compile(directory.path());
+
+        assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+        assert!(
+            printed(&output).contains(&format!("error[law-unproven]: law {law} is not proven\n")),
+            "{}",
+            printed(&output)
+        );
+    }
+}
+
 /// Spec section 28: `<` on two values of a class runs the class's own `<=>`, so a law that compares two `Instant`s
 /// proves through `Instant`'s, which compares their seconds, then their nanoseconds. A false order is not proven.
 #[test]
