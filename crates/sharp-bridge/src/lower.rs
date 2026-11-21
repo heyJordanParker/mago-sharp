@@ -2338,6 +2338,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut members = self.enum_members(r#enum.members.as_slice());
         members.extend(self.class_metadata(word(self.class), self.line(r#enum.name), r#enum.members.as_slice()));
         members.extend(self.parse_methods(&r#enum.members, r#enum.name.span));
+        let stores_as_value = self.types.stores_as_value(word(enum_name));
+        if stores_as_value {
+            members.push(self.machine_cases(r#enum));
+        }
         let cases: Vec<Vec<u8>> = r#enum
             .members
             .iter()
@@ -2385,6 +2389,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                     members
                 }
+                EnumCaseItem::Backed(item) if stores_as_value => {
+                    let mut members = self.case_object(word(&case_class), name.span);
+                    self.class = class;
+                    members.push(self.case_value_encoding(name.span, item.value));
+                    self.class = enum_name;
+
+                    members
+                }
                 EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => {
                     let mut members = self.case_object(word(&case_class), name.span);
                     self.class = class;
@@ -2417,6 +2429,61 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 &[parent, header, members, attributes, NULL],
             ));
         }
+    }
+
+    /// The `#cases` of a machine that stores as its case's value, spec section 20.2, which the engine's reader calls to
+    /// build the case a stored value names: a row of each case's value and the class it runs as. No PHP# or plain PHP
+    /// code can call a method whose name holds `#`.
+    ///
+    /// ```php
+    /// public static function '#cases'(): array
+    /// {
+    ///     return [['active', 'App\AccountStatus\Active'], ['frozen', 'App\AccountStatus\Frozen']];
+    /// }
+    /// ```
+    fn machine_cases(&mut self, r#enum: &Enum) -> u32 {
+        let line = self.line(r#enum.name);
+        let enum_name = self.class;
+        let mut rows = Vec::new();
+        for member in &r#enum.members {
+            let ClassLikeMember::EnumCase(case) = member else {
+                continue;
+            };
+            let EnumCaseItem::Backed(item) = &case.item else {
+                unreachable!("a machine that stores as its case's value backs each case and gives none data");
+            };
+            let value = self.expression(item.value);
+            let class = self.string(0, line, &[enum_name, b"\\", item.name.value].concat());
+            let parts = [value, class].map(|part| self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[part, NULL]));
+            let row = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &parts);
+            rows.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[row, NULL]));
+        }
+        let rows = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &rows);
+        let rows = self.node(SHARP_AST_RETURN, 0, line, &[rows]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[rows]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC,
+            r#enum.name.span,
+            r#enum.name.span,
+            b"#cases",
+            &[parameters, NULL, body, NULL, NULL],
+        )
+    }
+
+    /// The `#json` of the case being lowered, at `span`, of a machine that stores as its case's value, spec section
+    /// 20.2, which writes `value`, the case's backing value, as `Json.encode` writes a backed enum's case:
+    /// `public function '#json'() { return 'active'; }`.
+    fn case_value_encoding(&mut self, span: Span, value: &Expression) -> u32 {
+        let line = self.line(span);
+        let value = self.expression(value);
+        let returned = self.node(SHARP_AST_RETURN, 0, line, &[value]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[returned]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+
+        self.declaration(SHARP_AST_METHOD, ZEND_ACC_PUBLIC, span, span, b"#json", &[parameters, NULL, body, NULL, NULL])
     }
 
     /// The constants, methods, operators and static or computed properties of an enum that runs as classes, or of a

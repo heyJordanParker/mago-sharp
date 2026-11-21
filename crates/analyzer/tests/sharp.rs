@@ -702,11 +702,12 @@ fn an_event_s_parameters_are_never_too_wide() {
 
 /// Spec sections 5 and 10: `Json.encode` writes a struct by the fields its `parse` reads, and `parse` and `Json.decode`
 /// read them, so each uses every field of the struct from the namespace of the code that encodes or parses it, inside a
-/// `List` too. `Row`, encoded, `Line`, parsed, and `Item`, decoded as a `List`, report nothing for their fields. A field
-/// the wire never holds and nothing reads by name, as `Row`'s get-only `unused`, is still too wide.
+/// `List` too. `Row`, encoded, `Line`, parsed, and `Item`, decoded as a `List`, report nothing for their fields. A
+/// member the wire never holds and nothing reads by name, as `Row`'s computed `unused`, which stores nothing, is still
+/// too wide.
 #[test]
 fn a_struct_s_fields_are_used_where_it_is_encoded_or_parsed() {
-    let row = "namespace Demo;\n\npublic struct Row\n{\n    public int id { get; init; }\n    public string name { get; init; }\n    public int unused { get; } = 0;\n}\n";
+    let row = "namespace Demo;\n\npublic struct Row\n{\n    public int id { get; init; }\n    public string name { get; init; }\n    public int unused => 0;\n}\n";
     let line = "namespace Demo;\n\npublic struct Line\n{\n    public int amount { get; init; }\n}\n";
     let item = "namespace Demo;\n\npublic struct Item\n{\n    public int cents { get; init; }\n}\n";
     let wire = "namespace Other;\n\nimport Demo.Item;\nimport Demo.Line;\nimport Demo.Row;\nimport Sharp.Encoding.Json;\n\ninternal class Wire\n{\n    internal string sent(Row row) => Json.encode(row);\n\n    internal Line got(Map<string, Any?> input) => Line.parse(input);\n\n    internal List<Item> items(string text) => Json.decode<List<Item>>(text);\n}\n";
@@ -17352,7 +17353,8 @@ fn with_and_an_object_initializer_set_init_and_set_properties() {
 }
 
 /// Spec section 10: every struct has a static `parse` and `tryParse`. `[Key]` renames the key a struct's main
-/// constructor parameter reads, and two parameters may not read one key. A bare `Key` is the standard attribute, spec
+/// constructor parameter reads, and two fields may not read one key, which is refused where `parse` is called, so a
+/// struct nothing parses compiles. A bare `Key` is the standard attribute, spec
 /// section 23. A property the main constructor sets is read once, by
 /// the parameter of its name, or not at all. Any other property a parameter's key names is read twice, whether `[Key]`
 /// or the parameter's own name gives that key, and the help renames the parameter's key, which then compiles.
@@ -17373,7 +17375,7 @@ fn every_struct_parses() {
         ),
         (
             "src/Demo/Twice.sharp",
-            "namespace Demo;\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n",
+            "namespace Demo;\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n\n    public static Twice read(Map<string, Any?> input) => Twice.parse(input);\n}\n",
         ),
         (
             "src/Demo/Feeling.sharp",
@@ -17405,11 +17407,11 @@ fn every_struct_parses() {
         ),
         (
             "src/Demo/Clash.sharp",
-            "namespace Demo;\n\nstruct Clash\n{\n    public Clash([Key(\"y\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n",
+            "namespace Demo;\n\nstruct Clash\n{\n    public Clash([Key(\"y\")] public int x { get; }) { }\n\n    public int y { get; init; }\n\n    public static Clash read(Map<string, Any?> input) => Clash.parse(input);\n}\n",
         ),
         (
             "src/Demo/Split.sharp",
-            "namespace Demo;\n\nstruct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n",
+            "namespace Demo;\n\nstruct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n\n    public static Split read(Map<string, Any?> input) => Split.parse(input);\n}\n",
         ),
         (
             "src/Demo/Renamed.sharp",
@@ -17433,13 +17435,13 @@ fn every_struct_parses() {
     assert_eq!(
         each_file(reported, &sharp, &others).concat(),
         [
-            "5:75 invalid-struct `code` is read twice: by the main constructor parameter `plan` and the main constructor parameter `code`.",
+            "7:58 invalid-struct `code` is read twice in `Twice`: by the main constructor parameter `plan` and the main constructor parameter `code`.",
             "9:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
             "11:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
             "13:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
             "15:50 invalid-struct `Mind.parse` can't read `feeling`: `Mood` has no backing value.",
-            "7:16 invalid-struct `y` is read twice: by the main constructor parameter `x` and the property `y`.",
-            "7:16 invalid-struct `celsius` is read twice: by the main constructor parameter `celsius` and the property `celsius`.",
+            "9:58 invalid-struct `y` is read twice in `Clash`: by the main constructor parameter `x` and the property `y`.",
+            "11:58 invalid-struct `celsius` is read twice in `Split`: by the main constructor parameter `celsius` and the property `celsius`.",
         ]
     );
     assert_eq!(
@@ -17454,7 +17456,7 @@ fn every_struct_parses() {
 
 /// Spec section 10: a PHP# class that can be created parses the same way a struct does, as C#'s `System.Text.Json`
 /// reads a class. It reads the main constructor's parameters, a parameter that declares its property once, then each
-/// property an initializer may set, with the same `[Key]`, the same refusal of a key read twice and the same
+/// other stored property, a private one included, with the same `[Key]`, the same refusal of a key read twice and the same
 /// `tryParse`, and builds a nested class through that class's own `parse`. A class that declares its own `parse` keeps
 /// it, a class whose parent declares one inherits it, as a subclass of a plain PHP class does, and an abstract class
 /// has none, so `[Key]` on its constructor is refused as on any other parameter, and no key of it is read twice. A
@@ -17478,7 +17480,7 @@ fn a_class_parses_as_a_struct_does() {
         ),
         (
             "src/Demo/Bill.sharp",
-            "namespace Demo;\n\nclass Bill\n{\n    public Bill([Key(\"total\")] public int amount { get; }) { }\n\n    public int total { get; set; } = 0;\n}\n",
+            "namespace Demo;\n\nclass Bill\n{\n    public Bill([Key(\"total\")] public int amount { get; }) { }\n\n    public int total { get; set; } = 0;\n\n    public static Bill read(Map<string, Any?> input) => Bill.parse(input);\n}\n",
         ),
         (
             "src/Demo/Money.sharp",
@@ -17516,6 +17518,10 @@ fn a_class_parses_as_a_struct_does() {
             "src/Demo/Holder.sharp",
             "namespace Demo;\n\nclass Holder\n{\n    public Holder(public Object thing { get; }) { }\n\n    public static Holder held(Map<string, Any?> input) => Holder.parse(input);\n}\n",
         ),
+        (
+            "src/Demo/Gate.sharp",
+            "namespace Demo;\n\nclass Gate\n{\n    public Gate(public int id { get; }) { }\n\n    private Function<bool(int)> check = (int x) => x > 0;\n\n    public bool opens(int x) => this.check(x);\n\n    public static Gate read(Map<string, Any?> input) => Gate.parse(input);\n}\n",
+        ),
     ];
     let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
     let php = "<?php namespace Lib; final class Stamp { public function __construct(public readonly int $at) {} }";
@@ -17532,7 +17538,7 @@ fn a_class_parses_as_a_struct_does() {
         each_file(reported, &sharp, &others).concat(),
         [
             "5:19 invalid-struct `Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
-            "7:16 invalid-struct `total` is read twice: by the main constructor parameter `amount` and the property `total`.",
+            "9:57 invalid-struct `total` is read twice in `Bill`: by the main constructor parameter `amount` and the property `total`.",
             "13:50 invalid-struct `Hook.parse` can't read `check`: `Function<bool(int)>` is a function.",
             "15:56 invalid-struct `Drawing.parse` can't read `shape`: `Shape` is abstract.",
             "17:52 invalid-struct `Badge.parse` can't read `owner`: `Named` is an interface.",
@@ -17541,6 +17547,25 @@ fn a_class_parses_as_a_struct_does() {
             "25:15 non-existent-method Method `Shape.parse` does not exist.",
             "28:24 invalid-struct `Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
             "7:59 invalid-struct `Holder.parse` can't read `thing`: `Object` is no type `parse` reads.",
+            "11:57 invalid-struct `Gate.parse` can't read `check`: `Function<bool(int)>` is a function.",
+        ]
+    );
+}
+
+/// Spec section 10: a key two fields of a class's stored form read is refused where `Json.encode` or `Json.decode` of
+/// the class is called, also inside a collection, at the call, and a class that nothing stores compiles.
+#[test]
+fn a_key_read_twice_is_refused_where_the_class_is_stored() {
+    let label = "namespace Demo;\n\nclass Label\n{\n    public Label(public string text { get; }, string tone) { this.shade = tone; }\n\n    private string tone = \"\";\n\n    public string shade { get; private set; } = \"\";\n\n    public string mood() => this.tone;\n}\n";
+    let wire = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\nclass Wire\n{\n    public string sent(Label label) => Json.encode(label);\n\n    public List<Label> got(string text) => Json.decode<List<Label>>(text);\n}\n";
+    let files = [("src/Demo/Label.sharp", label), ("src/Demo/Wire.sharp", wire)];
+
+    assert_eq!(each_file(reported, &files[..1], &[JSON, JSON_VALUE]).concat(), Vec::<String>::new());
+    assert_eq!(
+        each_file(reported, &files, &[JSON, JSON_VALUE]).concat(),
+        [
+            "7:52 invalid-struct `tone` is read twice in `Label`: by the main constructor parameter `tone` and the property `tone`.",
+            "9:44 invalid-struct `tone` is read twice in `Label`: by the main constructor parameter `tone` and the property `tone`.",
         ]
     );
 }

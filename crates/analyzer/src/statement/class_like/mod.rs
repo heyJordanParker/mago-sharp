@@ -660,9 +660,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
             report_duplicate_definition(context, "Class", "class", word(name), self.span(), class_like_metadata.span);
             return Ok(());
         }
-        if context.codebase.parses(word(name)) {
-            r#struct::report_keys_read_twice(context, class_like_metadata, self.name.span);
-        }
 
         // Call plugin on_enter_class hooks
         if context.plugin_registry.has_class_hooks() {

@@ -34085,7 +34085,7 @@ const KEY: (&str, &str) = (
 /// ```
 ///
 /// Spec section 10: the engine's reader builds a struct by the rows of its `#fields`: each main constructor parameter
-/// under its key, which `[Key]` renames, then each property an object initializer may set, each with whether a missing
+/// under its key, which `[Key]` renames, then each other stored property, each with whether a missing
 /// key leaves it to its default. It records every bad or missing field, throws them all at once, and passes the
 /// parameters by name, so a missing key takes its parameter's default, and a missing `T?` property is null. A
 /// parameter that reads the key of a property the main constructor doesn't set is refused, so `parse` never leaves
@@ -34246,11 +34246,11 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
     );
     assert_eq!(
         Lowered::new(
-            "namespace App;\n\npublic struct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n"
+            "namespace App;\n\npublic struct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n\n    public static Split read(Map<string, Any?> input) => Split.parse(input);\n}\n"
         )
         .diagnostics(),
         [
-            "7:16 compile error: `celsius` is read twice: by the main constructor parameter `celsius` and the property `celsius`."
+            "11:58 compile error: `celsius` is read twice in `Split`: by the main constructor parameter `celsius` and the property `celsius`."
         ]
     );
 }
@@ -34271,8 +34271,9 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
 /// declaration writes more than one class, or a union of scalars as `int|string`, lists them in the order it writes
 /// them, so a union of structs takes the first that builds in that order, at any depth, which a method's parameter of
 /// the same name doesn't change. A
-/// private field, a get-only property and one whose `init` is private are no field, and a property the main
-/// constructor sets may be left out.
+/// private field, a get-only property and one whose `init` is private are fields too, each read after the main
+/// constructor runs and left to its initial value when its key is missing, and a property the main constructor sets
+/// may be left out.
 #[test]
 fn parse_reads_each_field_as_its_type() {
     let lowered = Lowered::with(
@@ -34678,6 +34679,60 @@ fn parse_reads_each_field_as_its_type() {
                           null
                         ARRAY_ELEM
                           ZVAL "App.Point, App.Address"
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "secret"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "secret"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "int"
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "fixed"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "fixed"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "int"
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "serial"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "serial"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "int"
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
                           null
                       null
               null

@@ -146,8 +146,8 @@ pub struct ClassLikeMetadata {
     pub machine: Option<MachineMetadata>,
 }
 
-/// A key a PHP# struct's `parse` reads, spec section 10: a main constructor parameter, or a property an object
-/// initializer may set that the constructor does not.
+/// A key a PHP# struct's or class's stored form holds, which its `parse` reads, spec section 10: a main constructor
+/// parameter, or another stored property, whatever its write visibility.
 #[derive(Clone, Copy, Debug)]
 pub struct ParsedField<'codebase> {
     /// The name, without `$`.

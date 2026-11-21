@@ -1137,6 +1137,27 @@ impl CodebaseMetadata {
         self.machine_value(variant).or_else(|| variant.attribute_text(b"Sharp\\Key", b"name"))
     }
 
+    /// Whether the machine `class` stores as its case's value, as a backed enum does, spec section 20.2: it is backed,
+    /// not marked `[Tag]`, and none of its cases holds data. A machine with a case that holds data stores as a tagged
+    /// family.
+    #[must_use]
+    pub fn stores_as_value(&self, class: Word) -> bool {
+        let Some(metadata) = self.get_class_like(class) else {
+            return false;
+        };
+        let Some(machine) = &metadata.machine else {
+            return false;
+        };
+
+        metadata.tag_key().is_none()
+            && machine.cases.iter().all(|case| {
+                case.value.is_some()
+                    && self
+                        .get_class_like(word([metadata.original_name.as_bytes(), b"\\", case.name.as_bytes()].concat()))
+                        .is_some_and(|case| case.struct_properties().is_empty())
+            })
+    }
+
     /// The value the case `case` of a backed machine is backed by, spec section 20.2. None for any other class-like.
     #[must_use]
     pub fn machine_value(&self, case: &ClassLikeMetadata) -> Option<&[u8]> {
@@ -1201,11 +1222,11 @@ impl CodebaseMetadata {
         })
     }
 
-    /// The fields a PHP# struct's or class's `parse` reads, spec section 10: its main constructor's parameters in
-    /// order, then each property an object initializer may set, a public `init` or `set` one, as creation from a `Map`
-    /// is the constructor call and then the initializer. A parameter that declares its property is that property's one
-    /// field. A property the main constructor sets on every path may be left out, as it may be from
-    /// the initializer, and is read once, by the parameter, when a parameter reads its key. Any other property a
+    /// The fields of a PHP# struct's or class's stored form, which its `parse` reads and `Json.encode` writes, spec
+    /// section 10: its main constructor's parameters in order, then each other stored property, whatever its write
+    /// visibility, so a `private set` one and a machine's are kept. A computed property stores nothing. A parameter
+    /// that declares its property is that property's one field. A property the main constructor sets on every path may
+    /// be left out, and is read once, by the parameter, when a parameter reads its key. Any other property a
     /// parameter's key names is a second field of that key, which the struct check refuses.
     #[must_use]
     pub fn struct_parse_fields(&self, class: Word) -> Vec<ParsedField<'_>> {
@@ -1238,7 +1259,7 @@ impl CodebaseMetadata {
             metadata
                 .struct_properties()
                 .into_iter()
-                .filter(|property| property.write_visibility.is_public() && !property.flags.is_promoted_property())
+                .filter(|property| !property.flags.is_promoted_property())
                 .filter_map(|property| {
                     let r#type = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?;
                     let name = property.name.0.as_bytes();

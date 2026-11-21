@@ -54,6 +54,7 @@ use crate::statement::class_like::listener::check_events_on;
 use crate::statement::class_like::machine::check_case_built;
 use crate::statement::class_like::r#struct::check_parsed_type_argument;
 use crate::statement::class_like::r#struct::check_struct_parse;
+use crate::statement::class_like::r#struct::report_keys_read_twice;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
@@ -399,6 +400,7 @@ where
         && let Some(value) = artifacts.get_rc_expression_type(argument.value()).cloned()
     {
         record_parse_fields_in(context.codebase, block_context, artifacts, &value, &mut Vec::new());
+        report_keys_read_twice(context, &value, argument.span(), &mut Vec::new());
 
         if let Some(unwritable) = unwritable_json(context, &value, &mut Vec::new()) {
             let (code, message, help) = match unwritable {
@@ -482,8 +484,8 @@ enum UnwritableJson {
 }
 
 /// The first part of `value` a JSON encoder can't write, spec section 10, wherever `value` holds it: in a collection's
-/// elements, keys and values, and in the properties of a PHP# struct or class and of each variant of a family,
-/// `visiting` the classes it is inside. A `Map` key has text exactly where the engine's `sharp_table_json_key` gives it:
+/// elements, keys and values, in the stored fields of a PHP# struct or class and of each variant of a family, and in
+/// the public properties of a PHP# class with no such `parse`, `visiting` the classes it is inside. A `Map` key has text exactly where the engine's `sharp_table_json_key` gives it:
 /// an `int`, a `string`, a backed enum case, or an object with `toString()`. A struct or class writes the fields its
 /// `parse` reads from its properties, so a main constructor parameter that holds no property can't be written. An
 /// `Any` is decided where it runs.
@@ -525,7 +527,7 @@ where
             let unwritable = written.into_iter().find_map(|class| {
                 let parsed =
                     if codebase.parses(class.name) { codebase.struct_parse_fields(class.name) } else { Vec::new() };
-                let unheld = parsed.into_iter().find(|field| {
+                let unheld = parsed.iter().find(|field| {
                     field.is_parameter
                         && codebase
                             .get_declaring_property(class.name, word([b"$".as_slice(), field.name].concat()))
@@ -536,6 +538,10 @@ where
                         class.name,
                         String::from_utf8_lossy(unheld.name).into_owned(),
                     ));
+                }
+
+                if codebase.parses(class.name) {
+                    return parsed.iter().find_map(|field| unwritable_json(context, field.r#type, visiting));
                 }
 
                 class.properties.values().filter(|property| property.read_visibility.is_public()).find_map(|property| {

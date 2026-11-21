@@ -2022,6 +2022,11 @@ impl<'analysis> Types<'analysis> {
         self.codebase.get_class_like(class).is_some_and(|class| class.tag_key().is_some())
     }
 
+    /// Whether the machine `class` stores as its case's value, as the codex gives it, spec section 20.2.
+    pub(crate) fn stores_as_value(&self, class: Word) -> bool {
+        self.codebase.stores_as_value(class)
+    }
+
     /// The cases and moves of the PHP# machine `class`, spec section 20.2. None for any other class.
     #[must_use]
     pub fn machine(&self, class: Word) -> Option<&'analysis MachineMetadata> {

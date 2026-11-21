@@ -141,24 +141,78 @@ where
         );
     }
 
-    if context.codebase.parses(class_like_metadata.name) {
-        report_keys_read_twice(context, class_like_metadata, r#struct.name.span);
-    }
-
     !inherits
 }
 
-/// Reports each key the `parse` of `class_like_metadata`, a struct or a PHP# class, would read into two fields,
-/// spec section 10's language rule 10, at the second field, or at `name` where the codex has no span for it. The
-/// parameters come first, so the first reader of a key is a main constructor parameter, the one `[Key]` can rename.
+/// Reports each key the stored form of a struct or a PHP# class in `r#type` would read into two fields, spec section
+/// 10's language rule 10, at `span`, where `parse`, `Json.encode` or `Json.decode` of it is called, so a type nothing
+/// stores compiles. It reads each variant of a family and each field's type, also inside a collection, `visiting` the
+/// classes it is inside. The parameters come first, so the first reader of a key is a main constructor parameter, the
+/// one `[Key]` can rename.
 pub(crate) fn report_keys_read_twice<A>(
     context: &mut Context<'_, '_, A>,
-    class_like_metadata: &ClassLikeMetadata,
-    name: Span,
+    r#type: &TUnion,
+    span: Span,
+    visiting: &mut Vec<Word>,
 ) where
     A: Arena,
 {
-    let fields = context.codebase.struct_parse_fields(class_like_metadata.name);
+    let codebase = context.codebase;
+    for atomic in r#type.types.iter() {
+        match atomic {
+            TAtomic::Object(TObject::Named(object)) => {
+                if let Some(class) = codebase.get_class_like(object.name) {
+                    report_class_keys_read_twice(context, class, span, visiting);
+                }
+            }
+            TAtomic::Array(array) => {
+                let (key, value) = get_array_parameters(array, codebase);
+                report_keys_read_twice(context, &key, span, visiting);
+                report_keys_read_twice(context, &value, span, visiting);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Reports each key the stored form of `class` would read into two fields, as [`report_keys_read_twice`] does for a
+/// type: those of each of its variants for a family, and those of each class its fields hold.
+fn report_class_keys_read_twice<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    span: Span,
+    visiting: &mut Vec<Word>,
+) where
+    A: Arena,
+{
+    if visiting.contains(&class.name) {
+        return;
+    }
+    let codebase = context.codebase;
+    visiting.push(class.name);
+    for (parsed, _) in parsed_classes(codebase, class, &[]) {
+        if !codebase.parses(parsed.name) {
+            continue;
+        }
+        let fields = codebase.struct_parse_fields(parsed.name);
+        report_fields_read_twice(context, parsed, &fields, span);
+        for field in &fields {
+            report_keys_read_twice(context, field.r#type, span, visiting);
+        }
+    }
+    visiting.pop();
+}
+
+/// Reports each key two of `fields`, the stored form of `class`, read, at `span`, the call that stores it, and at the
+/// second field where the codex has its span.
+fn report_fields_read_twice<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    fields: &[ParsedField<'_>],
+    span: Span,
+) where
+    A: Arena,
+{
     let reader = |field: &ParsedField<'_>| {
         let kind = if field.is_parameter { "the main constructor parameter" } else { "the property" };
 
@@ -169,17 +223,22 @@ pub(crate) fn report_keys_read_twice<A>(
             continue;
         };
 
+        let mut issue = Issue::error(format!(
+            "`{}` is read twice in `{}`: by {} and {}.",
+            BytesDisplay(field.key),
+            display_class_like_name(context, class.original_name),
+            reader(first),
+            reader(field)
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Stored here."));
+        if let Some(read_again) = field.span {
+            issue = issue.with_annotation(Annotation::secondary(read_again).with_message("Read again here."));
+        }
         context.collector.report_with_code(
             IssueCode::InvalidStruct,
-            Issue::error(format!(
-                "`{}` is read twice: by {} and {}.",
-                BytesDisplay(field.key),
-                reader(first),
-                reader(field)
-            ))
-            .with_annotation(Annotation::primary(field.span.unwrap_or(name)).with_message("Read again here."))
-            .with_note("`parse` reads each key of its input into one field.")
-            .with_help(format!("Give `{}` another key with `[Key(\"…\")]`.", BytesDisplay(first.name))),
+            issue
+                .with_note("`parse` reads each key of its input into one field.")
+                .with_help(format!("Give `{}` another key with `[Key(\"…\")]`.", BytesDisplay(first.name))),
         );
     }
 }
@@ -336,6 +395,7 @@ pub(crate) fn check_struct_parse<A>(
 ) where
     A: Arena,
 {
+    report_class_keys_read_twice(context, r#struct, span, &mut Vec::new());
     let method = if throws { "parse" } else { "tryParse" };
     let class = display_class_like_name(context, r#struct.original_name);
     for (parsed, type_arguments) in parsed_classes(context.codebase, r#struct, type_arguments) {
@@ -405,6 +465,7 @@ where
 
         return;
     }
+    report_keys_read_twice(context, parsed, span, &mut Vec::new());
     let Some((unreadable, why)) = unreadable_part(codebase, parsed, &mut Vec::new()) else {
         return;
     };
@@ -548,7 +609,8 @@ where
 /// no `parse` builds, or any other type but `Any`, a scalar or a union of them, and a collection, which the bridge
 /// writes no `parse` for, also inside a collection or a struct or class `parse` reads through, which `visiting` holds
 /// while it is read. A family, an interface or an abstract class included, reads through each of its variants, and a
-/// value as text, as `Decimal`, and a class whose `parse` reads any value, as `JsonValue`, read through their own.
+/// value as text, as `Decimal`, and a class whose `parse` reads any value, as `JsonValue`, read through their own, and
+/// a machine that stores as its case's value reads that value, spec section 20.2.
 fn unreadable_part(
     codebase: &CodebaseMetadata,
     r#type: &TUnion,
@@ -563,7 +625,8 @@ fn unreadable_part(
         TAtomic::Object(TObject::Named(object))
             if visiting.contains(&object.name)
                 || codebase.is_text_value(object.name)
-                || codebase.parses_any_value(object.name) =>
+                || codebase.parses_any_value(object.name)
+                || codebase.stores_as_value(object.name) =>
         {
             None
         }
