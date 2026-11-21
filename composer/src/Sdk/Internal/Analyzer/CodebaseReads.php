@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Internal\Analyzer;
 
-use function array_keys;
-use function array_values;
-use function implode;
+use function array_fill_keys;
+use function hash;
+use function serialize;
 
 /**
  * The codebase reads one file's hooks and providers made, so Mago runs them again when what they
@@ -19,20 +19,32 @@ use function implode;
  */
 final class CodebaseReads
 {
-    /** @var array<string, array{int, int, string}> */
+    /** @var array<int, array<int, array<array-key, true>>> each read's name, by its operation and argument */
     private array $reads = [];
 
     public function record(int $operation, int $argument, string $name): void
     {
-        $this->reads["{$operation}\0{$argument}\0{$name}"] ??= [$operation, $argument, $name];
+        $this->reads[$operation][$argument][$name] = true;
     }
 
     /**
-     * The reads' identity, which two lists share exactly when they hold the same reads in the same order.
+     * Records a read of each of `$names` by the same operation and argument, as one query of several names reads them.
+     *
+     * @param list<string> $names
+     */
+    public function recordAll(int $operation, int $argument, array $names): void
+    {
+        $this->reads[$operation][$argument] =
+            ($this->reads[$operation][$argument] ?? []) + array_fill_keys($names, true);
+    }
+
+    /**
+     * The reads' identity: the XXH128 of the reads in the order they were made, which two lists share when they hold
+     * the same reads in the same order.
      */
     public function key(): string
     {
-        return implode("\1", array_keys($this->reads));
+        return hash('xxh128', serialize($this->reads), true);
     }
 
     /**
@@ -40,6 +52,15 @@ final class CodebaseReads
      */
     public function reads(): array
     {
-        return array_values($this->reads);
+        $reads = [];
+        foreach ($this->reads as $operation => $arguments) {
+            foreach ($arguments as $argument => $names) {
+                foreach ($names as $name => $_) {
+                    $reads[] = [$operation, $argument, (string) $name];
+                }
+            }
+        }
+
+        return $reads;
     }
 }

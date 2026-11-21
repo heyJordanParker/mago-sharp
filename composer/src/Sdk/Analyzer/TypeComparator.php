@@ -155,8 +155,6 @@ final class TypeComparator
     /** @param list<string> $classLikes the class-likes one answered comparison named */
     private function recordClassLikes(array $classLikes): void
     {
-        foreach ($classLikes as $classLike) {
-            $this->reads?->record(Protocol::GET_CLASS_LIKES, 0, $classLike);
-        }
+        $this->reads?->recordAll(Protocol::GET_CLASS_LIKES, 0, $classLikes);
     }
 }

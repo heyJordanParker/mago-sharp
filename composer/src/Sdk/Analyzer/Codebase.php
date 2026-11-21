@@ -27,7 +27,9 @@ use Mago\Sdk\Internal\Protocol\ValueReader;
 
 use function array_key_exists;
 use function array_keys;
+use function array_map;
 use function count;
+use function in_array;
 use function sort;
 use function strlen;
 use function strpos;
@@ -714,16 +716,14 @@ final class Codebase
      */
     private function queryNames(int $operation, array $names, ?int $classLikeKind, Closure $decode): array
     {
-        $keys = [];
-        foreach ($names as $name) {
-            if ($name === '') {
-                throw new InvalidArgumentException('Codebase metadata names cannot be empty.');
-            }
-            $this->reads?->record($operation, 0, $name);
-            // A function is one name in any case, and a class-like or constant the codebase keys may not be: a PHP#
-            // class-like is keyed by its exact name.
-            $keys[] = $operation === Protocol::GET_FUNCTIONS ? strtolower($name) : $name;
+        if (in_array('', $names, true)) {
+            throw new InvalidArgumentException('Codebase metadata names cannot be empty.');
         }
+
+        $this->reads?->recordAll($operation, 0, $names);
+        // A function is one name in any case, and a class-like or constant the codebase keys may not be: a PHP#
+        // class-like is keyed by its exact name.
+        $keys = $operation === Protocol::GET_FUNCTIONS ? array_map(strtolower(...), $names) : $names;
 
         return $this->query($operation, $classLikeKind, $names, $keys, $decode);
     }
@@ -736,12 +736,14 @@ final class Codebase
      */
     private function queryMembers(int $operation, array $members, Closure $decode): array
     {
+        $classes = [];
         $keys = [];
         foreach ($members as $member) {
-            $this->reads?->record(Protocol::GET_CLASS_LIKES, 0, $member->class);
+            $classes[] = $member->class;
             // As written: a PHP# class-like and its methods are keyed by their exact names.
             $keys[] = $member->class . "\0" . $member->member;
         }
+        $this->reads?->recordAll(Protocol::GET_CLASS_LIKES, 0, $classes);
 
         return $this->query($operation, null, $members, $keys, $decode);
     }
