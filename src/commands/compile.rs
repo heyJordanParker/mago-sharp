@@ -128,6 +128,11 @@ const COMPILED_FILES: &str = "compiled.bin";
 /// compile keeps it, since a lock on a file it deleted would lock nothing.
 const COMPILE_LOCK: &str = "compile.lock";
 
+/// The file in the `.sharp` folder whose exclusive lock each run that writes the folder holds, from before it reads the
+/// folder's record to after it deletes what it did not write, so two runs of one tree take turns on it. It is not
+/// [`COMPILE_LOCK`], which the engine holds while the compile it runs takes this one. The compile keeps it.
+const WRITE_LOCK: &str = "write.lock";
+
 /// What this process holds of each hosts' folder it compiled into.
 static HOSTS_FOLDERS: Mutex<BTreeMap<PathBuf, HeldFolder>> = Mutex::new(BTreeMap::new());
 
@@ -1125,6 +1130,14 @@ fn compiled(
         Some(hosts) => Some((hosts, hosts.lock(&mut listing, &mut sources, &mut filesystems, &orchestrator)?)),
         None => None,
     };
+    // A project with no PHP# file gets no `.sharp` folder to lock. The run takes the write lock once it holds the hosts'
+    // folder's, and lets it go before it gives that one back as shared, which may wait, so a run that holds the write
+    // lock waits on no other lock.
+    let writing = sources
+        .keys()
+        .any(|name| name.ends_with(".sharp"))
+        .then(|| mago_database::lock::exclusive(&compiled_folder.join(WRITE_LOCK)))
+        .transpose()?;
     let mut last = Record::read(&record_path);
     // A host names none of what it reads, so only a compile without hosts can know it has nothing to do.
     if !configuration.extension_hosts.values().any(|host| host.enabled)
@@ -1133,6 +1146,7 @@ fn compiled(
         && every_input_is_current(record, configuration, &root, &sources, &mut filesystems)
         && let Some(database) = record.outcome.report_database(&root)?
     {
+        drop(writing);
         if let Some((hosts, (lock, held, exclusive, _))) = hosts {
             hosts.hold(lock, held, exclusive, None)?;
         }
@@ -1192,10 +1206,11 @@ fn compiled(
         Err(refusal) => {
             let outcome = Outcome { errors, summary: refusal, failed: true, ..Outcome::default() };
             let record = record.filter(|_| logger::warnings() == warnings);
+            let (outcome, database) = finish(record, &record_path, outcome, &database, Vec::new())?;
+            drop(writing);
             if let Some((hosts, lock, held, exclusive)) = held {
                 hosts.hold(lock, held, exclusive, None)?;
             }
-            let (outcome, database) = finish(record, &record_path, outcome, &database, Vec::new())?;
 
             return Ok((outcome, database, loaded));
         }
@@ -1393,7 +1408,7 @@ fn compiled(
             .iter()
             .cloned()
             .chain(record.as_ref().and_then(Record::marker_path))
-            .chain([compiled_folder.join(COMPILE_LOCK)])
+            .chain([compiled_folder.join(COMPILE_LOCK), compiled_folder.join(WRITE_LOCK)])
             .collect();
         delete_all_but(&compiled_folder, &kept, &compiled_folder.join(PACKAGE_FOLDER))?;
     }
@@ -1444,10 +1459,11 @@ fn compiled(
             record,
         )?;
     }
+    let (outcome, database) = finish(record, &record_path, outcome, database, stamped.into_iter().chain(listed))?;
+    drop(writing);
     if let Some((hosts, lock, held, exclusive)) = held {
         hosts.hold(lock, held, exclusive, None)?;
     }
-    let (outcome, database) = finish(record, &record_path, outcome, database, stamped.into_iter().chain(listed))?;
     let loaded = if reports { Loaded::Analysis(Box::new(server), issues) } else { loaded };
 
     Ok((outcome, database, loaded))

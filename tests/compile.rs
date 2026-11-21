@@ -115,7 +115,8 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
             Path::new("inputs.json"),
             Path::new("listeners.php"),
             Path::new("preload.php"),
-            Path::new("vendor/acme/money/src/Money.sharpc")
+            Path::new("vendor/acme/money/src/Money.sharpc"),
+            Path::new("write.lock")
         ]
     );
     for (name, source) in [("app/Order.sharp", ORDER), (MONEY_PATH, MONEY)] {
@@ -2022,7 +2023,8 @@ fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
             Path::new("inputs.json"),
             Path::new("listeners.php"),
             Path::new("preload.php"),
-            Path::new("vendor/acme/money/src/Money.sharpc")
+            Path::new("vendor/acme/money/src/Money.sharpc"),
+            Path::new("write.lock")
         ]
     );
 }
@@ -2102,7 +2104,8 @@ fn compile_reports_a_link_to_a_file_outside_the_project_and_writes_no_compiled_f
             Path::new("compiled.bin"),
             Path::new("inputs.json"),
             Path::new("listeners.php"),
-            Path::new("preload.php")
+            Path::new("preload.php"),
+            Path::new("write.lock")
         ]
     );
 }
@@ -2316,6 +2319,64 @@ fn compiles_with_different_threads_share_one_compile() {
 
     assert!(shared.status.success(), "{}", printed(&shared));
     assert_eq!(compiled_at(root, "app/Order.sharp"), written, "the compile on 2 threads wrote nothing");
+}
+
+/// Compiles of one tree that start together take turns on the `.sharp` folder's write lock, so none deletes a file
+/// another is writing, each passes, and the folder holds what one compile writes. Each round edits every source first,
+/// so every run finds the folder stale, and 60 more files keep each compile writing long enough for three runs to meet
+/// in the folder.
+#[test]
+fn compiles_that_start_together_take_turns_on_the_sharp_folder() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let class = |class: &str, word: &str| {
+        format!(
+            "namespace App.Words;\n\npublic class {class}\n{{\n    public static string text() => \"{word}\";\n}}\n"
+        )
+    };
+
+    for round in 0..10 {
+        let word = if round % 2 == 0 { "first" } else { "second" };
+        for file in 0..60 {
+            write(root, &format!("app/Words/Word{file}.sharp"), &class(&format!("Word{file}"), word));
+        }
+
+        let outputs: Vec<Output> = std::thread::scope(|scope| {
+            let runs: Vec<_> = (0..3).map(|_| scope.spawn(|| compile(root))).collect();
+            runs.into_iter().map(|run| run.join().unwrap()).collect()
+        });
+
+        for output in &outputs {
+            assert!(output.status.success(), "round {round}: {}", printed(output));
+        }
+    }
+    let together = files_under(&root.join(".sharp"));
+    std::fs::remove_dir_all(root.join(".sharp")).unwrap();
+    compile_succeeds(root);
+
+    assert_eq!(together, files_under(&root.join(".sharp")));
+}
+
+/// A compile that starts while another run holds the `.sharp` folder's write lock writes nothing until the lock is let
+/// go, and then compiles.
+#[test]
+fn a_compile_takes_its_turn_after_the_run_that_holds_the_write_lock() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let held = mago_database::lock::exclusive(&root.join(".sharp/write.lock")).unwrap();
+
+    let output = std::thread::scope(|scope| {
+        let run = scope.spawn(|| compile(root));
+        // A compile of a copy of the project, run meanwhile, takes as long as one that took no turn would.
+        let copy = project(ORDER, MONEY);
+        compile_succeeds(copy.path());
+        assert!(!compiled(root, "app/Order.sharp").exists(), "the compile wrote while the lock was held");
+        drop(held);
+        run.join().unwrap()
+    });
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Order.sharp").exists());
 }
 
 /// Two compiles of one tree write the same record of the compiled files, byte for byte, on one thread and on several:
@@ -2643,7 +2704,8 @@ fn compile_warns_again_until_the_cause_of_its_warning_is_gone() {
 }
 
 /// A `.sharp` folder the compile can't open fails the compile with the path it failed on and what the compile was
-/// doing, here the law checker's package in it. Root opens a folder of mode 000, so the test has nothing to show there.
+/// doing, here the write lock the compile takes before it reads the folder. Root opens a folder of mode 000, so the test
+/// has nothing to show there.
 #[cfg(unix)]
 #[test]
 fn compile_names_the_path_in_the_sharp_folder_it_cannot_open() {
@@ -2665,8 +2727,8 @@ fn compile_names_the_path_in_the_sharp_folder_it_cannot_open() {
     assert!(!output.status.success(), "{}", printed(&output));
     assert!(
         printed(&output).contains(&format!(
-            "The laws could not be checked: can't delete the folder `{}`: Permission denied (os error 13)",
-            compiled.join(".lean").display()
+            "can't write the file `{}`: Permission denied (os error 13)",
+            compiled.join("write.lock").display()
         )),
         "{}",
         printed(&output)
@@ -3822,7 +3884,8 @@ fn compile_deletes_the_lean_package_once_no_law_remains() {
             Path::new("app/Order.sharpc"),
             Path::new("compiled.bin"),
             Path::new("listeners.php"),
-            Path::new("preload.php")
+            Path::new("preload.php"),
+            Path::new("write.lock")
         ]
     );
 }
