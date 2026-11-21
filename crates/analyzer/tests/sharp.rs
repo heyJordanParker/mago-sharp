@@ -8548,6 +8548,20 @@ fn a_call_of_a_case_s_name_never_runs_the_name_as_a_function() {
     );
 }
 
+/// A type pattern reports a name no file declares in its type arguments, as a declared type does, and the test then
+/// reports nothing more: neither that it never holds nor a refusal of its lowering.
+#[test]
+fn an_unknown_name_in_a_type_patterns_type_arguments_is_reported_as_a_declared_types_is() {
+    let kinds = "namespace Probe;\n\npublic static class Kinds\n{\n    public static bool anyType(Class<Any?> type) => type is Class<UnitEnum>;\n\n    public static bool listOf(Any? value) => value is List<UnitEnum>;\n\n    public static bool objectType(Class<Object> type) => type is Class<UnitEnum>;\n}\n";
+
+    assert_eq!(
+        explained(("src/Probe/Kinds.sharp", kinds), &[]),
+        ["5:61", "7:55", "9:66"].map(|at| format!(
+            "{at} non-existent-class-like Cannot find type `Probe.UnitEnum`. Check the name's spelling, and import the type with `import` when another namespace declares it."
+        ))
+    );
+}
+
 /// Spec section 21: the name `x is T name` binds is a `T`, as a C# pattern variable has its declared type, whatever
 /// else `x` may be. Over `Reply|Pending`, two interfaces one class may implement together, `reply` is a `Reply` in a
 /// `match` arm, after `is`, and after an `is not` that leaves, so it calls `status()` and has no `wait()`.

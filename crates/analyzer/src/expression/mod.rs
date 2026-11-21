@@ -111,6 +111,7 @@ use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::body_return_type;
 use crate::statement::function_like::expect_type;
 use crate::statement::function_like::known_type_or_error;
+use crate::statement::function_like::report_undefined_types;
 use crate::statement::get_type_from_hint;
 use crate::statement::report_erased_type_test;
 use crate::statement::report_hint_type_arguments;
@@ -502,7 +503,12 @@ where
             _ => false,
         };
         if reads_type_arguments {
+            // A name no file declares is reported where the pattern writes it, as a declared type's is, and the test
+            // reads the error type, so it reports nothing more.
             let tested = get_type_from_hint(context, block_context, artifacts, hint);
+            report_undefined_types(context, &tested, hint.span());
+            let tested = known_type_or_error(tested);
+            is_refused |= is_refused_type(&tested);
             artifacts.record_tested_type(hint, tested);
         }
     }
@@ -698,8 +704,9 @@ where
         _ => None,
     }
     .filter(|(value, hint, _)| {
-        // A value whose expression is refused has no type to be already of.
-        artifacts.get_expression_type(*value).is_some_and(|value| !is_refused_type(value))
+        // A value whose expression is refused has no type to be already of, and a refused type names no type to be of.
+        !is_refused
+            && artifacts.get_expression_type(*value).is_some_and(|value| !is_refused_type(value))
             && tests.iter().any(|(pattern, test)| {
                 pattern.contains(&hint.start)
                     && artifacts.get_rc_expression_type(*test).is_some_and(|test| test.is_true())
