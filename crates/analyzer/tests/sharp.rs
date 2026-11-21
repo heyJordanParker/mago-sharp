@@ -8524,6 +8524,21 @@ fn a_call_of_a_case_s_name_never_runs_the_name_as_a_function() {
     );
 }
 
+/// Spec section 21: the name `x is T name` binds is a `T`, as a C# pattern variable has its declared type, whatever
+/// else `x` may be. Over `Reply|Pending`, two interfaces one class may implement together, `reply` is a `Reply` in a
+/// `match` arm, after `is`, and after an `is not` that leaves, so it calls `status()` and has no `wait()`.
+#[test]
+fn a_name_a_type_pattern_binds_over_a_union_of_interfaces_is_the_type_it_names() {
+    let reply = ("src/Probe/Reply.sharp", "namespace Probe;\n\npublic interface Reply\n{\n    int status();\n}\n");
+    let pending = ("src/Probe/Pending.sharp", "namespace Probe;\n\npublic interface Pending\n{\n    int wait();\n}\n");
+    let replies = "namespace Probe;\n\npublic static class Replies\n{\n    public static int early(Reply|Pending result)\n    {\n        if (result is not Reply reply) {\n            return -1;\n        }\n\n        return reply.status();\n    }\n\n    public static int inside(Reply|Pending result) => result is Reply reply ? reply.status() : -1;\n\n    public static int arm(Reply|Pending result) => match (result) {\n        Reply reply => reply.status(),\n        default => -1,\n    };\n\n    public static int waits(Reply|Pending result) => result is Reply reply ? reply.wait() : -1;\n}\n";
+
+    assert_eq!(
+        refusals(("src/Probe/Replies.sharp", replies), &[reply, pending]),
+        ["21:84 non-existent-method Method `Reply.wait` does not exist. | Ensure the method `Reply.wait` is defined."]
+    );
+}
+
 /// Spec section 20.1: a sealed interface's implementers sit in its namespace. A class of another namespace that
 /// implements it is an error that names the namespace, and an implementer in it is not.
 #[test]

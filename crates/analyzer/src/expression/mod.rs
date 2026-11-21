@@ -597,6 +597,18 @@ where
         )),
         _ => None,
     };
+    // Spec section 21: the name `x is T name` binds is a `T` where its test holds. Its PHP assigns the name first, as
+    // `($name = x) instanceof T`, so the analysis types the name by the pattern's type where that test narrows it.
+    for (variable, hint) in node.filter_map(|node| match node {
+        Node::TypePattern(TypePattern { hint, variable: Some(variable), .. }) => Some((variable.value, hint)),
+        _ => None,
+    }) {
+        let named = match artifacts.get_narrowed_type(hint) {
+            Some(named) => named.clone(),
+            None => get_type_from_hint(context, block_context, artifacts, hint),
+        };
+        block_context.pattern_types.insert(php_variable_name(variable), named);
+    }
     let (result, issues) = context.record(|context| match php {
         Node::Expression(expression) => expression.analyze(context, block_context, artifacts),
         Node::Statement(statement) => statement.analyze(context, block_context, artifacts),

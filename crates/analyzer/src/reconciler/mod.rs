@@ -23,6 +23,8 @@ use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
@@ -292,6 +294,14 @@ pub fn reconcile_keyed_types<'ctx, A>(
         }
 
         let result_type = result_type.unwrap_or_else(get_never);
+        let result_type = match (block_context.pattern_types.get(key), &before_adjustment) {
+            (Some(named), Some(before)) => match pattern_test(new_type_parts, named, context.codebase, context.dialect)
+            {
+                Some(tested) => pattern_bound_type(before, result_type, tested, context.codebase),
+                None => result_type,
+            },
+            _ => result_type,
+        };
 
         if !did_type_exist && result_type.is_never() {
             continue;
@@ -856,6 +866,54 @@ fn refine_array_key(key_type: &TUnion) -> TUnion {
     }
 
     refine_array_key_inner(key_type).unwrap_or_else(|| key_type.clone())
+}
+
+/// The type a type pattern's own test asserts, where `assertions` are that test of the type `named` alone: one
+/// alternative of types, together the same type as `named`. None for any other assertion, as one on the subject a
+/// later pattern tests.
+fn pattern_test(
+    assertions: &AssertionSet,
+    named: &TUnion,
+    codebase: &CodebaseMetadata,
+    dialect: Dialect,
+) -> Option<TUnion> {
+    let [alternatives] = assertions.as_slice() else {
+        return None;
+    };
+    let tested: Vec<TAtomic> = alternatives
+        .iter()
+        .map(|assertion| match assertion {
+            Assertion::IsType(atomic) => Some(atomic.clone()),
+            _ => None,
+        })
+        .collect::<Option<_>>()
+        .filter(|tested: &Vec<TAtomic>| !tested.is_empty())?;
+    let tested = TUnion::from_vec(tested);
+    let contains = |input: &TUnion, container: &TUnion| {
+        let mut result = ComparisonResult::for_dialect(dialect);
+        union_comparator::is_contained_by(codebase, input, container, false, false, false, &mut result)
+    };
+
+    (contains(&tested, named) && contains(named, &tested)).then_some(tested)
+}
+
+/// The type of a name a type pattern binds, which was `before`, where the pattern's test of `tested` holds and narrows
+/// it to `narrowed`, spec section 21: each type of `before` the test keeps stays, and every type the test narrows to
+/// another is `tested`, as a C# pattern variable has its declared type. So a `Reply|Pending` that `is Reply reply`
+/// binds is a `Reply`, never a `Pending&Reply`, whose member PHP# could read on `Pending`.
+fn pattern_bound_type(before: &TUnion, narrowed: TUnion, tested: TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    let (kept, narrowed_further): (Vec<TAtomic>, Vec<TAtomic>) =
+        narrowed.types.iter().cloned().partition(|atomic| before.types.contains(atomic));
+    if narrowed_further.is_empty() {
+        return narrowed;
+    }
+    // Spec section 13: a value narrowed from a readonly value is readonly too.
+    let tested = if before.types.iter().any(TAtomic::is_readonly_value) { tested.to_readonly() } else { tested };
+    if kept.is_empty() {
+        return tested;
+    }
+
+    add_union_type(TUnion::from_vec(kept), &tested, codebase, CombinerOptions::default())
 }
 
 static INTEGER_REGEX: LazyLock<Regex> = LazyLock::new(|| unsafe {

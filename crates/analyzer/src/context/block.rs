@@ -93,6 +93,10 @@ pub struct BlockContext<'ctx> {
     /// type. Every value assigned to the local must have this type.
     pub local_types: WordMap<(Rc<TUnion>, Span)>,
 
+    /// The type each name a PHP# type pattern binds names, `T` in `x is T name`, spec section 21. Where the pattern's
+    /// test holds, the name is a `T`, as a C# pattern variable has its declared type.
+    pub pattern_types: WordMap<TUnion>,
+
     /// The PHP variable of each local of the scopes around a PHP# lambda, which its `locals` hold only where the lambda
     /// captures one. Spec section 3: a name the lambda declares can't reuse one of them.
     pub enclosing_locals: WordSet,
@@ -241,6 +245,7 @@ impl<'ctx> BlockContext<'ctx> {
             references_possibly_from_confusing_scope: WordSet::default(),
             by_reference_constraints: WordMap::default(),
             local_types: WordMap::default(),
+            pattern_types: WordMap::default(),
             enclosing_locals: WordSet::default(),
             flags: BlockContextFlags::new(),
             failed_join: None,
