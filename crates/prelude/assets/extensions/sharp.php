@@ -334,6 +334,23 @@ function tag(string $variant): ?string {}
 function silencedWarning(): ?string {}
 
 /**
+ * The stored form of the field `$path`, as `App.SmtpAccount.password`, whose value is `$value`, with each `Secret` in
+ * it encrypted for that field. Without `$path`, the stored form of the `Secret` or `Hashed` `$value`, which a class's
+ * `#json` writes.
+ */
+function seal(mixed $value, ?string $path = null): mixed {}
+
+/**
+ * The Argon2id hash, as a PHC string, of the stored text of `$value`, which `Hashed` keeps.
+ */
+function hashValue(mixed $value): string {}
+
+/**
+ * Whether `$hash`, a `Hashed`'s PHC string, is that of the stored text of `$value`.
+ */
+function verifyHash(string $hash, mixed $value): bool {}
+
+/**
  * Each address the system resolver gives for `$host`, as text and once, in the order getaddrinfo gives them, the hosts
  * file included, and throws when the resolver cannot find the host. The standard library's `Dns.addresses` resolves
  * by it.

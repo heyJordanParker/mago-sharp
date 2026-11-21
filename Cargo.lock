@@ -1421,6 +1421,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 name = "mago"
 version = "0.6.46"
 dependencies = [
+ "base64",
  "clap",
  "clap_complete",
  "colored 3.1.1",
@@ -1461,6 +1462,7 @@ dependencies = [
  "mimalloc",
  "notify",
  "pretty_assertions",
+ "rand 0.9.5",
  "rayon",
  "schemars",
  "self-replace",

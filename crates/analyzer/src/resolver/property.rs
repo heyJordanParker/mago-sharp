@@ -4,6 +4,7 @@ use foldhash::HashMap;
 use indexmap::IndexMap;
 use mago_allocator::Arena;
 use mago_bytes::trim_start_byte;
+use mago_codex::HASHED_CLASS;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
@@ -1384,6 +1385,20 @@ where
             }
         }
 
+        // Spec section 24: a Hashed keeps only the hash of a value, which `verify` checks a value against.
+        if context.dialect.is_sharp()
+            && class_id.as_bytes().eq_ignore_ascii_case(HASHED_CLASS)
+            && prop_name.as_bytes() == b"$value"
+        {
+            let hashed = display_sharp_type(context, &TUnion::from_atomic(written_atomic.clone()));
+            context.collector.report_with_code(
+                IssueCode::NonExistentProperty,
+                Issue::error(format!("A `{hashed}` gives no value back: check one with `verify(value)`."))
+                    .with_annotation(Annotation::primary(selector.span()).with_message("Read here")),
+            );
+
+            return None;
+        }
         report_non_existent_property(context, class_id, prop_name, selector.span(), object_expr.span(), false);
         return None;
     };

@@ -6,6 +6,7 @@ use mago_analyzer::CollectionKind;
 use mago_analyzer::artifacts::MemberCall;
 use mago_codex::defaults_trait_name;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::is_sealed_class;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::BindingValueMetadata;
@@ -995,6 +996,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
         members.extend(self.json_encoding(r#struct.name.span));
+        members.extend(self.masked_dump(r#struct.name.span));
         members.extend(self.string_conversion(r#struct.members.as_slice(), r#struct.left_brace, r#struct.right_brace));
         members.extend(
             r#struct.inheritance.as_ref().and_then(|inheritance| self.iteration(inheritance, r#struct.right_brace)),
@@ -1164,7 +1166,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(span);
         let mut statements = Vec::new();
         let taken = self.temporaries;
-        if self.types.is_text_value(word(self.class)) {
+        if is_sealed_class(self.class) {
+            let this = self.variable(span, b"this");
+            let sealed = self.global_call(line, b"Sharp\\Internal\\seal", &[this]);
+            statements.push(self.node(SHARP_AST_RETURN, 0, line, &[sealed]));
+        } else if self.types.is_text_value(word(self.class)) {
             let this = self.variable(span, b"this");
             let method = self.string(0, line, b"toString");
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
@@ -1190,7 +1196,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 if !self.types.has_property(word(self.class), field.name) {
                     continue;
                 }
-                let value = self.this_property(span, field.name);
+                let mut value = self.this_property(span, field.name);
+                if Types::holds_secret(field.r#type) {
+                    let mut path: Vec<u8> =
+                        self.class.iter().map(|&byte| if byte == b'\\' { b'.' } else { byte }).collect();
+                    path.push(b'.');
+                    path.extend_from_slice(field.name);
+                    let path = self.string(0, line, &path);
+                    value = self.global_call(line, b"Sharp\\Internal\\seal", &[value, path]);
+                }
                 let write = self.json_write(span, &json, field.key, value);
                 statements.push(if field.omits_null {
                     let held = self.this_property(span, field.name);
@@ -1216,6 +1230,31 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             span,
             span,
             b"#json",
+            &[parameters, NULL, body, NULL, NULL],
+        ))
+    }
+
+    /// The `__debugInfo` of `Sharp.Security.Secret` and `Sharp.Security.Hashed`, spec section 24, so a plain PHP dump
+    /// of one, as `var_dump` or `print_r` writes it, shows `**********`, never the value or the hash it holds. None for
+    /// any other class.
+    fn masked_dump(&mut self, span: Span) -> Option<u32> {
+        if !is_sealed_class(self.class) {
+            return None;
+        }
+        let line = self.line(span);
+        let mask = self.string(0, line, b"**********");
+        let element = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[mask, NULL]);
+        let shown = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[element]);
+        let returned = self.node(SHARP_AST_RETURN, 0, line, &[shown]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[returned]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+
+        Some(self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            span,
+            span,
+            b"__debugInfo",
             &[parameters, NULL, body, NULL, NULL],
         ))
     }

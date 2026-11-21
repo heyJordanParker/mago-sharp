@@ -63,3 +63,18 @@ pub fn defaults_trait_name(interface: &[u8]) -> Word {
 
 /// What [`defaults_trait_name`] adds to an interface's name.
 pub(crate) const DEFAULTS_TRAIT_SUFFIX: &[u8] = b"\\Defaults";
+
+/// `Sharp.Security.Secret`, spec section 24, whose encryption is bound to the field that holds one.
+pub const SECRET_CLASS: &[u8] = b"Sharp\\Security\\Secret";
+
+/// `Sharp.Security.Hashed`, spec section 24, which keeps only a value's hash.
+pub const HASHED_CLASS: &[u8] = b"Sharp\\Security\\Hashed";
+
+/// Whether the class `name` is `Sharp.Security.Secret` or `Sharp.Security.Hashed`, spec section 24.
+///
+/// The engine writes and reads their stored forms: a Secret's encrypted for the field that holds it, and a Hashed's
+/// hash.
+#[must_use]
+pub fn is_sealed_class(name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(SECRET_CLASS) || name.eq_ignore_ascii_case(HASHED_CLASS)
+}

@@ -38,6 +38,7 @@
 //! - **`cst`** ([`CstCommand`]): Display the concrete syntax tree
 //! - **`self-update`** ([`SelfUpdateCommand`]): Update Mago to the latest version
 //! - **`generate-completions`** ([`GenerateCompletionsCommand`]): Generate shell completions
+//! - **`generate-key`** ([`GenerateKeyCommand`]): Print a new key for `SHARP_KEYS`
 //!
 //! # Configuration Hierarchy
 //!
@@ -69,6 +70,7 @@ use crate::commands::extension::ExtensionCommand;
 use crate::commands::fix::FixCommand;
 use crate::commands::format::FormatCommand;
 use crate::commands::generate_completions::GenerateCompletionsCommand;
+use crate::commands::generate_key::GenerateKeyCommand;
 use crate::commands::guard::GuardCommand;
 use crate::commands::init::InitCommand;
 use crate::commands::inspect_baseline::InspectBaselineCommand;
@@ -90,6 +92,7 @@ pub mod extension;
 pub mod fix;
 pub mod format;
 pub mod generate_completions;
+pub mod generate_key;
 pub mod guard;
 pub mod init;
 pub mod inspect_baseline;
@@ -309,6 +312,12 @@ pub enum MagoCommand {
     /// **Usage**: `mago generate-completions`
     #[command(name = "generate-completions")]
     GenerateCompletions(GenerateCompletionsCommand),
+
+    /// Print a new key for the key ring `SHARP_KEYS`, which encrypts each `Secret`'s stored form
+    ///
+    /// **Usage**: `mago generate-key`
+    #[command(name = "generate-key")]
+    GenerateKey(GenerateKeyCommand),
 
     /// Display Mago's version.
     ///

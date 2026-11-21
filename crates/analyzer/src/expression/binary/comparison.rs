@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
+use mago_codex::HASHED_CLASS;
 use mago_codex::context::ScopeContext;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
@@ -75,6 +76,7 @@ use crate::utils::misc::unwrap_expression;
 use crate::utils::names::article;
 use crate::utils::names::display_bool;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::quoted_source;
@@ -113,8 +115,28 @@ where
     let lhs_type = &Rc::clone(artifacts.get_rc_expression_type(&binary.lhs).unwrap_or(&fallback_type));
     let rhs_type = &Rc::clone(artifacts.get_rc_expression_type(&binary.rhs).unwrap_or(&fallback_type));
 
+    // Spec section 24: each Hashed holds its own salt, so two never compare, and `verify` checks a value against one.
+    let salted = context.dialect.is_sharp()
+        && matches!(
+            binary.operator,
+            BinaryOperator::Equal(_)
+                | BinaryOperator::NotEqual(_)
+                | BinaryOperator::Identical(_)
+                | BinaryOperator::NotIdentical(_)
+        )
+        && [lhs_type, rhs_type].iter().all(|side| holds_hashed(side));
+    if salted {
+        let hashed = display_sharp_type(context, lhs_type);
+        context.collector.report_with_code(
+            IssueCode::InvalidOperand,
+            Issue::error(format!(
+                "Two `{hashed}` never compare, since each has its own salt: check one with `verify(value)`."
+            ))
+            .with_annotation(Annotation::primary(binary.span()).with_message("Compared here")),
+        );
+    }
     // PHP# `==` and `!=` run as `===` and `!==`, so only an `Any?` operand keeps a check of its own.
-    let refusal = if context.dialect.is_sharp() {
+    let refusal = if context.dialect.is_sharp() && !salted {
         sharp_refusal(&binary.operator, lhs_type, rhs_type, context.codebase)
     } else {
         None
@@ -122,7 +144,7 @@ where
     if let Some(refusal) = refusal {
         report_sharp_refusal(context, binary, refusal, lhs_type, rhs_type);
     }
-    let refused = refusal.is_some();
+    let refused = refusal.is_some() || salted;
     if !refused {
         report_compile_time_selection(context, artifacts, binary, lhs_type, rhs_type);
     }
@@ -2368,4 +2390,13 @@ fn report_redundant_comparison<'arena, A>(
             "Consider simplifying or removing this comparison as it always evaluates to {result_value_str}."
         )),
     );
+}
+
+/// Whether every value of `type` is a `Sharp.Security.Hashed`.
+fn holds_hashed(r#type: &TUnion) -> bool {
+    !r#type.types.is_empty()
+        && r#type.types.iter().all(|atomic| {
+            matches!(atomic, TAtomic::Object(TObject::Named(object))
+                if object.name.as_bytes().eq_ignore_ascii_case(HASHED_CLASS))
+        })
 }

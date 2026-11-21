@@ -1,5 +1,6 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::is_sealed_class;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::ttype::SharpType;
@@ -516,7 +517,7 @@ where
             })
             .or_else(|| unwritable_json(context, key, visiting))
             .or_else(|| unwritable_json(context, value, visiting)),
-        SharpType::Class(name, _) if !visiting.contains(&name) => {
+        SharpType::Class(name, _) if !visiting.contains(&name) && !is_sealed_class(name.as_bytes()) => {
             let class = codebase.get_class_like(name).filter(|class| class.flags.is_sharp())?;
             let written: Vec<&ClassLikeMetadata> = if class.tag_key().is_some() {
                 codebase.variants(class).into_iter().map(|(_, variant)| variant).collect()

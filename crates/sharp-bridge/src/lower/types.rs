@@ -10,6 +10,7 @@ use mago_analyzer::collection_member;
 use mago_analyzer::collection_member_kind;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::is_collection_member;
+use mago_codex::SECRET_CLASS;
 use mago_codex::defaults_trait_name;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
@@ -2044,6 +2045,15 @@ impl<'analysis> Types<'analysis> {
     /// and `Json.encode` writes as its `toString()`, as the codex gives it.
     pub(crate) fn is_text_value(&self, class: Word) -> bool {
         self.codebase.is_text_value(class)
+    }
+
+    /// Whether a value of `type` may hold a `Secret` at any depth, as a `List<Secret<string>>` does, so the field that
+    /// holds it is written through `\Sharp\Internal\seal`, which encrypts each for that field.
+    pub(crate) fn holds_secret(r#type: &TUnion) -> bool {
+        r#type.get_all_child_nodes().into_iter().any(|node| {
+            matches!(node, TypeRef::Atomic(TAtomic::Object(TObject::Named(object)))
+                if object.name.as_bytes().eq_ignore_ascii_case(SECRET_CLASS))
+        })
     }
 
     /// Whether the class `class` declares or inherits the property `name`, written without `$`.
