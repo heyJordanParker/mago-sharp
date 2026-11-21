@@ -6028,6 +6028,52 @@ fn a_list_type_is_the_array_type_and_a_map_type_its_class() {
 }
 
 /// ```php
+/// public function packed(\Sharp\Bytes|string $data): \Sharp\Bytes|string|null { return null; }
+/// ```
+///
+/// A `Bytes` is a `\Sharp\Bytes`, and a parameter takes plain PHP's string too, spec section 18, so its type is the
+/// union `\Sharp\Bytes|string`, and the parameter list ends with the type text a call from plain PHP checks it
+/// against. A result gives plain PHP its string, so its type is that union too, as a `Map` result's is
+/// `\Sharp\Map|array`, and `[1]`, `ZEND_SHARP_RESULT_CROSSES`, makes each return give it.
+#[test]
+fn a_bytes_parameter_and_result_take_the_php_string_too() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Packer\n{\n    public Bytes? packed(Bytes data) { return null; }\n}\n",
+    );
+    let method = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_METHOD).expect("a method");
+
+    assert_eq!(
+        lowered.render(lowered.child(method as u32, 0)),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM
+                TYPE_UNION
+                  ZVAL "Sharp\\Bytes"
+                  ZVAL [1] "string"
+                ZVAL "data"
+                null
+                null
+                null
+                null
+              SHARP_TYPE_ARGS
+                null
+                ZVAL "Sharp.Bytes"
+        "#}
+    );
+    assert_eq!(
+        lowered.render(lowered.child(method as u32, 3)),
+        indoc! {r#"
+            SHARP_TYPE_ARGS [1]
+              TYPE_UNION
+                ZVAL "Sharp\\Bytes"
+                ZVAL [1] "string"
+                ZVAL [1] "null"
+              ZVAL "Function<Sharp.Bytes?(Sharp.Bytes)>"
+        "#}
+    );
+}
+
+/// ```php
 /// public function run(\Sharp\Set|int|array $tags, \Sharp\Map|int|array $sizes, array|int $counts): int { return 1; }
 /// ```
 ///

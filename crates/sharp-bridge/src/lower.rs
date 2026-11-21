@@ -19,6 +19,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::crosses_outward;
@@ -26,6 +27,7 @@ use mago_codex::ttype::get_crossing_array;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_php_array_form;
 use mago_codex::ttype::get_php_declared_type;
+use mago_codex::ttype::get_php_plain_form;
 use mago_codex::ttype::holds_bytes;
 use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::may_hold_collection;
@@ -5142,9 +5144,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.result_hint(hint, false)
     }
 
-    /// [`Self::hint`] of a function's result `hint`, with `array` beside the `\Sharp\Map` or `\Sharp\Set` it names when
-    /// a plain PHP caller gets the result's PHP array, `crossing`, so a plain PHP class that implements or overrides the
-    /// method declares `array`, as a parameter that takes a `Map` takes a PHP array.
+    /// [`Self::hint`] of a function's result `hint`, with the plain PHP form beside each object it names that a plain
+    /// PHP caller gets in that form, `crossing`, as [`PhpType::plain_form`] gives it: `array` beside a `\Sharp\Map` or a
+    /// `\Sharp\Set`, and `string` beside a `\Sharp\Bytes`. So a plain PHP class that implements or overrides the method
+    /// declares the form, as a parameter that takes a `Map` takes a PHP array.
     fn result_hint(&mut self, hint: &Hint, crossing: bool) -> u32 {
         // Spec section 13: the checker keeps a readonly value read only, so the engine runs its type.
         let hint = without_readonly(hint);
@@ -5157,9 +5160,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let mut members: Vec<(PhpType, u32)> =
             union_members(union).into_iter().map(|member| (self.erase(member), self.line(member))).collect();
-        let table = members.iter().find(|(php_type, _)| php_type.is_table());
-        if crossing && let Some(&(_, line)) = table {
-            members.push((PhpType::Keyword(IS_ARRAY), line));
+        if crossing {
+            let plain_forms: Vec<(PhpType, u32)> =
+                members.iter().filter_map(|(php_type, line)| Some((php_type.plain_form()?, *line))).collect();
+            members.extend(plain_forms);
         }
         let null_line = question_mark.map(|question_mark| self.line(question_mark));
 
@@ -5169,8 +5173,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The PHP return type of the method `method`, which returns `hint`, or none where PHP's would be `mixed`, as for
     /// `Any`, `Any?` and a type parameter without a bound, so a plain PHP implementation without a return type fits
     /// it. PHP# checks the result itself. An override of a plain PHP method that declares a return type keeps `mixed`,
-    /// which PHP requires of it, and one whose result PHP would declare `\Sharp\Map|array` keeps that method's type, as
-    /// [`Types::plain_result`] says. A result plain PHP gets the PHP array of, `crossing`, is [`Self::result_hint`]'s.
+    /// which PHP requires of it, and one whose result PHP would declare `\Sharp\Map|array` or `\Sharp\Bytes|string`
+    /// keeps that method's type, as [`Types::plain_result`] says. A result plain PHP gets in a plain PHP form,
+    /// `crossing`, is [`Self::result_hint`]'s.
     fn return_hint(&mut self, method: Word, hint: &Hint, crossing: bool) -> u32 {
         if let Some(plain) = self.types.plain_result(word(self.class), method) {
             return self.declared_type(plain, self.line(hint));
@@ -5387,11 +5392,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_RETURN, 0, line, &[value])
     }
 
-    /// `value` as the method being lowered returns it: crossed into its declared result, or stored as the PHP array of
-    /// the plain PHP result it keeps, as [`Types::plain_result`] says, spec section 12.
+    /// `value` as the method being lowered returns it: crossed into its declared result, or stored in the plain PHP form
+    /// of the plain PHP result it keeps, as [`Types::plain_result`] says, spec section 12. A `Bytes` is its string only
+    /// where that result takes a string, and the object under any other, as under `object`.
     fn returned(&mut self, value: &Expression) -> u32 {
         let line = self.line(value);
         if let Some(stored) = self.plain_result.clone() {
+            if takes_bytes(self.types.expression_type(value)) && !stored.has_string() && !stored.has_mixed() {
+                return self.arriving(value, Arrival::Plain);
+            }
+
             return self.received_value(line, value, takes_array(&stored), None);
         }
         let returns = self.returns.clone();
@@ -5935,7 +5945,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// takes it.
     fn plain_read_check(&self, expression: &Expression, read: &TUnion) -> Option<(String, String)> {
         let read = with_written_keys(read);
-        if !is_written_in_sharp(&read) || self.crossing_array(&read).is_none() {
+        if !is_written_in_sharp(&read) || (self.crossing_array(&read).is_none() && !takes_bytes(&read)) {
             return None;
         }
 
@@ -8304,8 +8314,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_STATIC_CALL, 0, line, &[name, method, arguments])
     }
 
-    /// Whether plain PHP gets a value of `r#type` with each `Map` and `Set` in it as its PHP array, as the codex's
-    /// [`crosses_outward`] says, which the analyzer types plain PHP's code by too.
+    /// Whether plain PHP gets a value of `r#type` with each `Map` and `Set` in it as its PHP array, and each `Bytes` as
+    /// its string, as the codex's [`crosses_outward`] says, which the analyzer types plain PHP's code by too.
     fn crosses_outward(&self, r#type: &TUnion) -> bool {
         crosses_outward(r#type, self.types.codebase())
     }
@@ -10401,11 +10411,20 @@ impl PhpType {
         }
     }
 
-    /// Whether this type is the engine's `\Sharp\Map` or `\Sharp\Set` alone, which a plain PHP caller may get the PHP
-    /// array of.
-    fn is_table(&self) -> bool {
-        matches!(self, PhpType::Classes(classes) if matches!(classes.as_slice(), [class]
-            if [b"Sharp\\Map".as_slice(), b"Sharp\\Set"].iter().any(|table| class.as_bytes().eq_ignore_ascii_case(table))))
+    /// The PHP type a plain PHP caller may get a value of this type as, which is one class alone: `array` of the
+    /// engine's `\Sharp\Map` or `\Sharp\Set`, and `string` of a `\Sharp\Bytes`, as the codex's [`get_php_plain_form`]
+    /// gives it. None for any other type.
+    fn plain_form(&self) -> Option<PhpType> {
+        let PhpType::Classes(classes) = self else {
+            return None;
+        };
+        let [class] = classes.as_slice() else {
+            return None;
+        };
+
+        let form = get_php_plain_form(&TAtomic::Object(TObject::Named(TNamedObject::new(*class))))?;
+
+        form.types.first().map(PhpType::of)
     }
 
     /// Whether every value of `other` is a value of this type, so a union that holds this type needs no `other`. Names

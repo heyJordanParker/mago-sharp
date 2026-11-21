@@ -14,7 +14,7 @@ use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
-use mago_codex::ttype::declares_table_or_array;
+use mago_codex::ttype::declares_plain_form;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
@@ -22,6 +22,7 @@ use mago_codex::ttype::get_crossing_array;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_mixed_keyed_array;
 use mago_codex::ttype::get_php_declared_type;
+use mago_codex::ttype::get_php_plain_form;
 use mago_codex::ttype::get_sharp_received_type;
 use mago_codex::ttype::get_string;
 use mago_codex::ttype::takes_bytes;
@@ -639,20 +640,16 @@ fn as_declared(method: &FunctionLikeMetadata) -> FunctionLikeMetadata {
 ///
 /// Each parameter is typed as the codex's `get_php_declared_type` erases its type, with `array` beside the `Sharp\Map`
 /// or `Sharp\Set` it takes, as the bridge declares a parameter that takes the PHP array plain PHP passes. The result
-/// is typed the same way, with `array` where a plain PHP caller gets the PHP array, or untyped where it erases to
-/// `mixed`, as for `Any`, `Any?` and a type parameter without a bound, unless the method overrides a plain PHP method
-/// that declares a return type, which PHP requires it to keep. A result plain PHP gets the PHP array of, under such a
-/// method, is typed as that method declares it.
+/// is typed the same way, with the plain PHP form of each object a plain PHP caller gets in that form beside it, as
+/// `get_php_plain_form` gives it, or untyped where it erases to `mixed`, as for `Any`, `Any?` and a type parameter
+/// without a bound, unless the method overrides a plain PHP method that declares a return type, which PHP requires it
+/// to keep. A result plain PHP gets in a plain PHP form, under such a method, is typed as that method declares it.
 fn as_lowered(codebase: &CodebaseMetadata, class: Word, method: &FunctionLikeMetadata) -> FunctionLikeMetadata {
     let method = codebase.get_method(class, method.name).unwrap_or(method);
-    let with_array = |mut erased: TUnion, takes_array: bool| {
-        if takes_array {
-            erased = TUnion::from_vec(
-                erased.types.iter().cloned().chain(get_mixed_keyed_array().types.into_owned()).collect(),
-            );
-        }
+    let with_plain_forms = |erased: TUnion| {
+        let plain_forms = erased.types.iter().filter_map(get_php_plain_form).flat_map(|form| form.types.into_owned());
 
-        erased
+        TUnion::from_vec(erased.types.iter().cloned().chain(plain_forms).collect())
     };
     let mut lowered = method.clone();
     for parameter in lowered.get_parameters_mut() {
@@ -671,12 +668,13 @@ fn as_lowered(codebase: &CodebaseMetadata, class: Word, method: &FunctionLikeMet
             if erased.types.iter().any(TAtomic::is_mixed) && overridden.is_none() {
                 return None;
             }
-            let crosses = declares_table_or_array(&declared.type_union, codebase);
-            // An override of a plain PHP method keeps that method's PHP result, which holds the PHP array, spec
+            let crosses = declares_plain_form(&declared.type_union, codebase);
+            // An override of a plain PHP method keeps that method's PHP result, which holds the plain PHP form, spec
             // section 12.
             declared.type_union = match overridden {
                 Some(overridden) if crosses => overridden.type_union.clone(),
-                _ => with_array(erased, crosses),
+                _ if crosses => with_plain_forms(erased),
+                _ => erased,
             };
 
             Some(declared)

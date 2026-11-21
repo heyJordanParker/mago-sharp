@@ -4264,6 +4264,30 @@ fn a_plain_php_subclass_of_a_sharp_override_meets_the_type_the_override_writes()
     }
 }
 
+/// A plain PHP subclass of a PHP# method that returns a `Bytes` meets `\Sharp\Bytes|string`, the type its PHP
+/// declaration writes, since a plain PHP caller gets PHP's string of the bytes, spec section 18. So `string` links, as
+/// the engine links it, and `int` doesn't.
+#[test]
+fn a_plain_php_subclass_of_a_method_that_returns_bytes_may_return_a_string() {
+    let digest = "namespace Demo;\n\nimport Sharp.Encoding.Hex;\n\npublic class Digest\n{\n    public virtual Bytes raw() => Hex.decode(\"ff00\");\n}\n";
+    let short = |result: &str| -> &'static str {
+        let value = if result == "string" { "\"\\x01\"" } else { "1" };
+
+        String::leak(format!(
+            "<?php\n\nnamespace Demo;\n\nclass Short extends Digest\n{{\n    #[\\Override]\n    public function raw(): {result}\n    {{\n        return {value};\n    }}\n}}\n"
+        ))
+    };
+
+    assert_eq!(
+        issues(("src/Demo/Short.php", short("string")), &[("src/Demo/Digest.sharp", digest)]),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        issues(("src/Demo/Short.php", short("int")), &[("src/Demo/Digest.sharp", digest)]),
+        ["8:21 incompatible-return-type"]
+    );
+}
+
 /// Spec section 12: a PHP# override of a plain PHP method returns that method's PHP array, so a `Map` result whose keys
 /// no PHP array holds, as a unit enum's cases, is refused at the override, as a result outside the plain PHP method's
 /// type, before the engine could refuse the class where it links it. A `Map` keyed by `string` returns as the plain

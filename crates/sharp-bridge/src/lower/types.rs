@@ -44,11 +44,12 @@ use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
-use mago_codex::ttype::declares_table_or_array;
+use mago_codex::ttype::declares_plain_form;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_collection_object;
 use mago_codex::ttype::get_int_or_string;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_plain_form;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_void;
 use mago_codex::ttype::is_written_in_sharp;
@@ -797,13 +798,13 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The PHP result the PHP# method `method` of `class` keeps, spec section 12: the type a plain PHP method it
-    /// overrides declares, where PHP would declare its own result `\Sharp\Map|array`, as
-    /// [`declares_table_or_array`] says, which PHP refuses under that method. The method then returns the PHP array to
-    /// every caller, as the plain PHP method does. None for any other method.
+    /// overrides declares, where PHP would declare its own result `\Sharp\Map|array` or `\Sharp\Bytes|string`, as
+    /// [`declares_plain_form`] says, which PHP refuses under that method. The method then returns the PHP array or the
+    /// PHP string to every caller, as the plain PHP method does. None for any other method.
     pub(crate) fn plain_result(&self, class: Word, method: Word) -> Option<&'analysis TUnion> {
         let own = &self.codebase.get_method(class, method)?.return_type_declaration_metadata.as_ref()?.type_union;
 
-        declares_table_or_array(own, self.codebase).then(|| self.overridden_php_result(class, method)).flatten()
+        declares_plain_form(own, self.codebase).then(|| self.overridden_php_result(class, method)).flatten()
     }
 
     /// Whether the call `call` runs a PHP# method that returns plain PHP's array, as [`Self::plain_result`] says, which
@@ -3097,10 +3098,12 @@ fn returned_types(crossing: String, checked: String) -> String {
 
 /// Whether the PHP type a PHP# result of `r#type` declares says all `r#type` says, so PHP checks a plain PHP override's
 /// result whole: each member is null, a scalar, an enum, `Object` or a class with no type arguments. A collection,
-/// a class's type arguments, a type parameter, a function type and `Any`, which PHP writes `mixed`, say more.
+/// a class's type arguments, a type parameter, a function type and `Any`, which PHP writes `mixed`, say more, and a
+/// `Bytes` says less, since PHP declares it beside the plain PHP form a plain PHP override may return, as
+/// [`get_php_plain_form`] gives it.
 fn php_checks_whole(r#type: &TUnion) -> bool {
     r#type.types.iter().all(|atomic| match get_sharp_type(atomic) {
-        Some(SharpType::Class(_, arguments)) => arguments.is_empty(),
+        Some(SharpType::Class(_, arguments)) => arguments.is_empty() && get_php_plain_form(atomic).is_none(),
         Some(
             SharpType::Int
             | SharpType::Float

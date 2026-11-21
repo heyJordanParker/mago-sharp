@@ -1711,17 +1711,34 @@ pub fn crosses_outward(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool {
     keys_hold_in_array(r#type, codebase) && (may_hold_collection(r#type, codebase) || holds_bytes(r#type, codebase))
 }
 
-/// Whether PHP declares a PHP# result of `r#type` as `\Sharp\Map|array` or `\Sharp\Set|array`, spec section 22.
+/// Whether PHP declares a PHP# result of `r#type` with the plain PHP form of its object beside it, spec section 22:
+/// `\Sharp\Map|array`, `\Sharp\Set|array` or `\Sharp\Bytes|string`.
 ///
-/// It does when the result's PHP type names a `Map` or a `Set`, and plain PHP gets the value's PHP array, as
-/// [`crosses_outward`] says.
+/// It does when the result's PHP type names an object [`get_php_plain_form`] gives a form of, and plain PHP gets the
+/// value in that form, as [`crosses_outward`] says.
 #[must_use]
-pub fn declares_table_or_array(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool {
+pub fn declares_plain_form(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool {
     crosses_outward(r#type, codebase)
-        && get_php_declared_type(r#type, codebase).types.iter().any(|atomic| {
-            matches!(atomic, TAtomic::Object(TObject::Named(object))
-                if [b"Sharp\\Map".as_slice(), b"Sharp\\Set"].iter().any(|table| object.name.as_bytes().eq_ignore_ascii_case(table)))
-        })
+        && get_php_declared_type(r#type, codebase).types.iter().any(|atomic| get_php_plain_form(atomic).is_some())
+}
+
+/// The PHP type plain PHP gets a value of `atomic`, a member of a PHP declared type, as, where it crosses outward.
+///
+/// It is a PHP array of the engine's `\Sharp\Map` or `\Sharp\Set`, spec section 12, and PHP's string of a
+/// `\Sharp\Bytes`, spec section 18. None for any other type, which plain PHP gets as it is.
+#[must_use]
+pub fn get_php_plain_form(atomic: &TAtomic) -> Option<TUnion> {
+    match atomic {
+        TAtomic::Object(TObject::Named(object))
+            if [b"Sharp\\Map".as_slice(), b"Sharp\\Set"]
+                .iter()
+                .any(|table| object.name.as_bytes().eq_ignore_ascii_case(table)) =>
+        {
+            Some(get_mixed_keyed_array())
+        }
+        atomic if is_bytes(atomic) => Some(get_string()),
+        _ => None,
+    }
 }
 
 /// Whether a value of `r#type` can hold a `Map` or a `Set` at any depth, when the code runs.
