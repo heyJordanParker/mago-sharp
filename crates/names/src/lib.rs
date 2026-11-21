@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use foldhash::HashMap;
 use mago_span::Span;
 
@@ -126,10 +128,20 @@ pub fn default_root_classes() -> impl Iterator<Item = &'static str> {
     STANDARD_ROOT_CLASSES.into_iter().filter(|class| !class.contains('\\'))
 }
 
+/// Each [default class-like](default_classes) by its short name, the first of them for a name two share.
+static DEFAULT_CLASSES: LazyLock<HashMap<&'static [u8], &'static [u8]>> = LazyLock::new(|| {
+    let mut classes = HashMap::default();
+    for class in default_classes() {
+        classes.entry(default_short_name(class)).or_insert(class.as_bytes());
+    }
+
+    classes
+});
+
 /// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Math` for `Math`, and
 /// `ValueError` for `ValueError`. A lowercase `int` is the built-in type, so the name is compared exactly.
 pub(crate) fn default_class(name: &[u8]) -> Option<&'static [u8]> {
-    default_classes().find(|class| default_short_name(class) == name).map(str::as_bytes)
+    DEFAULT_CLASSES.get(name).copied()
 }
 
 /// The standard effect whose short name is `name`, which a bare name in a `uses` of a `.sharp` file names by default:
