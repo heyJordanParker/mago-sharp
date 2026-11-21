@@ -11,8 +11,8 @@ pub struct MachineMetadata {
     pub cases: Vec<MachineCase>,
     /// Each static method of the machine that gives a case: a value of the machine starts as a case one gives.
     pub entry_points: Vec<MachineMove>,
-    /// Each method that gives a case: one in a case's block moves from that case, and one in the machine's body from
-    /// each case that isn't `final`.
+    /// Each method that gives a case: one in a case's block moves from that case and is a member of that case's class
+    /// alone, and one in the machine's body moves from each case that isn't `final`.
     pub moves: Vec<MachineMove>,
 }
 

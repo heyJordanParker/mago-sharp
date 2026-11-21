@@ -718,7 +718,6 @@ fn a_case_is_never_too_wide() {
             ("src/App/Web/Reader.sharp", reader),
         ]),
         [
-            "src/App/Shop/Status.sharp 7:30 `Status.close` is public, and nothing outside `Status` and its subclasses uses it. | Declare it `protected`.",
             "src/App/Shop/Status.sharp 12:31 `Status.open` is public, and nothing outside `Status` uses it. | Declare it `private`.",
             "src/App/Shop/Size.sharp 8:19 `Size.label` is public, and nothing outside `Size` uses it. | Declare it `private`.",
         ]
@@ -36765,17 +36764,17 @@ const ORDER_STATUS: (&str, &str) = (
 fn a_machine_property_changes_only_by_a_move_of_its_own() {
     let order = (
         "src/Shop/Order.sharp",
-        "namespace Shop;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n\n    public OrderStatus status { get; private set; } = OrderStatus.open();\n    public OrderStatus copied { get; set; } = OrderStatus.open();\n    public OrderStatus started { get; private set; } = OrderStatus.Shipped;\n\n    public void pay(int cents) { this.status = this.status.pay(cents); }\n    public void copy(Order o) { this.status = o.status; }\n    public void force() { this.status = OrderStatus.Paid(5); }\n    public void restart() { this.status = OrderStatus.open(); }\n}\n",
+        "namespace Shop;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n\n    public OrderStatus status { get; private set; } = OrderStatus.open();\n    public OrderStatus copied { get; set; } = OrderStatus.open();\n    public OrderStatus started { get; private set; } = OrderStatus.Shipped;\n\n    public bool pay(int cents)\n    {\n        if (this.status is OrderStatus.Draft draft) {\n            this.status = draft.pay(cents);\n            return true;\n        }\n\n        return false;\n    }\n\n    public void copy(Order o) { this.status = o.status; }\n    public void force() { this.status = OrderStatus.Paid(5); }\n    public void restart() { this.status = OrderStatus.open(); }\n}\n",
     );
 
     assert_eq!(refusals(ORDER_STATUS, &[order]), Vec::<String>::new());
     assert_eq!(
         refusals(order, &[ORDER_STATUS]),
         [
-            "12:47 invalid-machine `this.status` holds the machine `OrderStatus`, so it changes only by a move of its own, as `this.status = this.status.pay(…)`. | Call a move of `this.status`.",
-            "13:41 invalid-machine Only the entry points and moves of `OrderStatus` build its case `OrderStatus.Paid`. | Call an entry point, as `OrderStatus.open()`, or a move of a value of `OrderStatus`.",
-            "14:43 invalid-machine `this.status` holds the machine `OrderStatus`, so it changes only by a move of its own, as `this.status = this.status.pay(…)`. | Call a move of `this.status`.",
-            "8:24 invalid-machine `Order.copied` holds the machine `OrderStatus`, so its `set` is `private`. | Write `{ get; private set; }`, and change it only by a move, as `this.copied = this.copied.pay(…)`.",
+            "21:47 invalid-machine `this.status` holds the machine `OrderStatus`, so it changes only by a move of its own, as `if (this.status is OrderStatus.Draft draft) { this.status = draft.pay(…); }`. | Call a move of the case `this.status` holds.",
+            "22:41 invalid-machine Only the entry points and moves of `OrderStatus` build its case `OrderStatus.Paid`. | Call an entry point, as `OrderStatus.open()`, or a move of a value of `OrderStatus`.",
+            "23:43 invalid-machine `this.status` holds the machine `OrderStatus`, so it changes only by a move of its own, as `if (this.status is OrderStatus.Draft draft) { this.status = draft.pay(…); }`. | Call a move of the case `this.status` holds.",
+            "8:24 invalid-machine `Order.copied` holds the machine `OrderStatus`, so its `set` is `private`. | Write `{ get; private set; }`, and change it only by a move: `if (this.copied is OrderStatus.Draft draft) { this.copied = draft.pay(…); }`.",
             "9:56 invalid-machine `Order.started` holds the machine `OrderStatus`, so its initial value is an entry point of `OrderStatus`, as `OrderStatus.open()`. | Start it with an entry point.",
         ]
     );
@@ -36791,7 +36790,7 @@ fn an_interface_property_that_holds_a_machine_is_read_only() {
     );
     let order = (
         "src/Shop/Order.sharp",
-        "namespace Shop;\n\npublic class Order : Payable\n{\n    public OrderStatus status { get; private set; } = OrderStatus.open();\n\n    public void pay(int cents) => this.status = this.status.pay(cents);\n}\n",
+        "namespace Shop;\n\npublic class Order : Payable\n{\n    public OrderStatus status { get; private set; } = OrderStatus.open();\n\n    public void ship()\n    {\n        if (this.status is OrderStatus.Paid paid) {\n            this.status = paid.ship();\n        }\n    }\n}\n",
     );
 
     assert_eq!(refusals(payable, &[ORDER_STATUS, order]), Vec::<String>::new());
@@ -36816,6 +36815,65 @@ fn a_constructor_starts_a_machine_property_with_an_entry_point() {
         refusals(taken, &[ORDER_STATUS]),
         [
             "5:37 invalid-machine `Order.status` holds the machine `OrderStatus`, so its initial value is an entry point of `OrderStatus`, as `OrderStatus.open()`. | Start it with an entry point."
+        ]
+    );
+}
+
+/// Spec section 20.2: a move belongs to the case it moves from, so a call of `pay` through the machine's type is refused
+/// with the test to write, and a holder changes its machine by a move of the case a type pattern bound from it, after
+/// `is`, after an `is not` that leaves, and in a `match` arm. A name bound from another place is no move of its own.
+#[test]
+fn a_move_is_called_on_the_case_it_moves_from() {
+    let order = (
+        "src/Shop/Order.sharp",
+        "namespace Shop;\n\npublic class Order\n{\n    public OrderStatus status { get; private set; } = OrderStatus.open();\n\n    public void rush(int cents) { this.status = this.status.pay(cents); }\n\n    public bool pay(int cents)\n    {\n        if (this.status is OrderStatus.Draft draft) {\n            this.status = draft.pay(cents);\n            return true;\n        }\n\n        return false;\n    }\n\n    public bool settle(int cents)\n    {\n        if (this.status is not OrderStatus.Draft draft) {\n            return false;\n        }\n\n        this.status = draft.pay(cents);\n        return true;\n    }\n\n    public void ship()\n    {\n        match (this.status) {\n            OrderStatus.Paid paid => { this.status = paid.ship(); },\n            OrderStatus.Draft or OrderStatus.Shipped or OrderStatus.Cancelled => {},\n        }\n    }\n\n    public void take(Order other)\n    {\n        if (other.status is OrderStatus.Draft draft) {\n            this.status = draft.pay(5);\n        }\n    }\n\n    public OrderStatus.Cancelled either(OrderStatus.Draft|OrderStatus.Paid held) => held.cancel();\n}\n",
+    );
+
+    assert_eq!(
+        refusals(order, &[ORDER_STATUS]),
+        [
+            "7:61 invalid-machine `pay` moves from `OrderStatus.Draft`, and `this.status` may be `Paid`, `Shipped` or `Cancelled`: test it first, as in `if (this.status is OrderStatus.Draft draft)`. | Call `pay` on the name the test binds, as `draft.pay(…)`.",
+            "40:27 invalid-machine `this.status` holds the machine `OrderStatus`, so it changes only by a move of its own, as `if (this.status is OrderStatus.Draft draft) { this.status = draft.pay(…); }`. | Call a move of the case `this.status` holds.",
+            "44:90 invalid-machine `cancel` moves from `OrderStatus.Draft`, and `held` may be `Paid`: test it first, as in `if (held is OrderStatus.Draft draft)`. | Call `cancel` on the name the test binds, as `draft.cancel(…)`.",
+        ]
+    );
+}
+
+/// Spec section 20.2: a `late` machine property takes its first value from an entry point in any method of its class,
+/// and every later write is a move. A property that isn't `late` takes an entry point only in its constructor.
+#[test]
+fn a_late_machine_property_starts_at_an_entry_point_in_any_method() {
+    let run = (
+        "src/Shop/Run.sharp",
+        "namespace Shop;\n\npublic class Run\n{\n    public late OrderStatus status { get; private set; }\n\n    public void open() { this.status = OrderStatus.open(); }\n}\n",
+    );
+    let order = (
+        "src/Shop/Order.sharp",
+        "namespace Shop;\n\npublic class Order\n{\n    public OrderStatus status { get; private set; } = OrderStatus.open();\n\n    public void open() { this.status = OrderStatus.open(); }\n}\n",
+    );
+
+    assert_eq!(refusals(run, &[ORDER_STATUS]), Vec::<String>::new());
+    assert_eq!(
+        refusals(order, &[ORDER_STATUS]),
+        [
+            "7:40 invalid-machine `this.status` holds the machine `OrderStatus`, so it changes only by a move of its own, as `if (this.status is OrderStatus.Draft draft) { this.status = draft.pay(…); }`. | Call a move of the case `this.status` holds."
+        ]
+    );
+}
+
+/// Spec section 20.2: a struct holds a machine as `{ get; init; }`, and a `with` that sets it takes a move of the
+/// original's value, bound from the original's property, as a write takes one.
+#[test]
+fn a_struct_holds_a_machine_that_with_moves() {
+    let line = (
+        "src/Shop/Line.sharp",
+        "namespace Shop;\n\npublic struct Line\n{\n    public OrderStatus status { get; init; } = OrderStatus.open();\n\n    public static Line paid(Line line) => line.status is OrderStatus.Draft draft ? line with { status: draft.pay(5) } : line;\n\n    public static Line reset(Line line) => line with { status: OrderStatus.open() };\n}\n",
+    );
+
+    assert_eq!(
+        refusals(line, &[ORDER_STATUS]),
+        [
+            "9:64 invalid-machine `line.status` holds the machine `OrderStatus`, so it changes only by a move of its own, as `if (line.status is OrderStatus.Draft draft) { line.status = draft.pay(…); }`. | Call a move of the case `line.status` holds."
         ]
     );
 }

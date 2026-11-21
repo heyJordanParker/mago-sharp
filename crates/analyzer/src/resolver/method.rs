@@ -85,6 +85,7 @@ use crate::resolver::property::resolve_declared_property;
 use crate::resolver::property::resolve_tuple_element;
 use crate::resolver::selector::resolve_member_selector;
 use crate::statement::class_like::law::uncallable_law;
+use crate::statement::class_like::machine::check_move_call;
 use crate::utils::expression::analyze_member_object;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::expression::is_this;
@@ -273,6 +274,17 @@ where
         && name.value == b"toString"
         && let Some(object_type) = artifacts.get_expression_type(object).cloned()
         && refuse_mixed_text(context, &object_type, access_span)
+    {
+        result.has_invalid_target = true;
+
+        return Ok(result);
+    }
+
+    // Spec section 20.2: a move is called on a value of a case it moves from.
+    if context.dialect.is_sharp()
+        && let ClassLikeMemberSelector::Identifier(name) = selector
+        && let Some(object_type) = artifacts.get_expression_type(object).cloned()
+        && check_move_call(context, object, &object_type, word(name.value), selector.span())
     {
         result.has_invalid_target = true;
 

@@ -32,6 +32,7 @@ use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::get_written_literal_type;
 use crate::expression::is_refused_type;
 use crate::resolver::method::get_declared_type;
+use crate::resolver::property::is_created_object;
 use crate::resolver::property::resolve_instance_properties;
 use crate::statement::class_like::machine;
 use crate::utils::expression::expression_is_nullsafe;
@@ -142,7 +143,17 @@ where
     if let Some(declared_type) = &declared_type {
         if let Some(assigned_value) = assigned_value {
             check_sharp_literal_kind(context, Some(block_context), artifacts, assigned_value, declared_type);
-            machine::check_machine_write(context, block_context, &target, declared_type, assigned_value);
+            // `new`'s and `with`'s initializer checks the write with the object it creates.
+            if !is_created_object(property_access.object) {
+                let late = resolution_result.properties.iter().any(|property| {
+                    property
+                        .declaring_class_id
+                        .and_then(|class| context.codebase.get_property(class, property.property_name))
+                        .is_some_and(|property| property.flags.is_late())
+                });
+                let place = quoted_source(context, target.span());
+                machine::check_machine_write(context, block_context, &place, declared_type, assigned_value, late);
+            }
         }
         literal_type = get_written_literal_type(
             context,

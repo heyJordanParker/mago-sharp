@@ -88,6 +88,9 @@ where
     /// Each PHP# `?:` whose test reads a property and whose other branch reads it again, by its span, with the error
     /// an error at the `?:` gives instead: the read is not narrowed, and the bound name the test can give it.
     pub(super) unnarrowed_branches: HashMap<Span, String>,
+    /// The value each PHP# type test tests, by the span of the test, the `is` or the pattern of a `match` arm, which
+    /// a name the test binds records as its declaration, spec section 21.
+    pub(crate) pattern_tests: HashMap<Span, Span>,
 }
 
 impl<'ctx, 'arena, A> Context<'ctx, 'arena, A>
@@ -129,6 +132,7 @@ where
             class_initializers: WordMap::default(),
             unnarrowed_reads: HashMap::default(),
             unnarrowed_branches: HashMap::default(),
+            pattern_tests: HashMap::default(),
         }
     }
 

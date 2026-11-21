@@ -36617,22 +36617,34 @@ const ORDER_STATUS: &str = "namespace Shop;\n\npublic machine OrderStatus : stri
 /// final class OrderStatus\Draft extends \Shop\OrderStatus implements \Sharp\Struct
 /// {
 ///     public function pay(int $cents): \Shop\OrderStatus\Paid { … }
-///     public function ship() { throw new \Sharp\StateError('OrderStatus is Draft, and ship moves from Paid.'); }
+///     public function cancel(): \Shop\OrderStatus\Cancelled { … }
 /// }
 /// final class OrderStatus\Paid extends \Shop\OrderStatus implements \Sharp\Struct
 /// {
+///     public function ship(): \Shop\OrderStatus\Shipped { … }
 ///     public function '#invariants'() { $paid = $this; if (!($paid->cents > 0)) { throw new \ValueError('OrderStatus.Paid breaks paidIsPositive.'); } }
 /// }
 /// ```
 ///
 /// Spec section 20.2: a machine runs as the classes an enum whose cases carry data runs as, and the class of each case
-/// holds the moves of its block. Each move of the machine that doesn't move from a case is a method of the case's
-/// class that throws `Sharp\StateError`, naming the machine, the case and the cases the move moves from. The class of a
-/// case with fields evaluates each invariant, a law whose one parameter is the case, in its `#invariants`, which the
-/// engine calls on each case it reads.
+/// declares the moves of its block and no other, since the checker refuses a move called on a case it doesn't move
+/// from. The class of a case with fields evaluates each invariant, a law whose one parameter is the case, in its
+/// `#invariants`, which the engine calls on each case it reads.
 #[test]
-fn a_machine_case_holds_its_moves_and_throws_a_state_error_for_each_move_it_lacks() {
+fn a_machine_case_declares_only_its_own_moves() {
     let lowered = [Lowered::new(ORDER_STATUS)];
+    let methods = |class_name: &str| {
+        let (lowered, class) = class_in(&lowered, class_name);
+        let members = lowered.child(class, 2);
+
+        (0..lowered.nodes()[members as usize].child_count)
+            .map(|index| &lowered.nodes()[lowered.child(members, index) as usize])
+            .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD)
+            .map(|node| lowered.text(node.text))
+            .filter(|name| name.as_str() != "__construct" && name.as_str() != "instance")
+            .filter(|name| !name.starts_with('#') || name == "#invariants")
+            .collect::<Vec<_>>()
+    };
     let method = |class_name: &str, name: &str| {
         let (lowered, class) = class_in(&lowered, class_name);
         let members = lowered.child(class, 2);
@@ -36647,45 +36659,10 @@ fn a_machine_case_holds_its_moves_and_throws_a_state_error_for_each_move_it_lack
         lowered.render(method)
     };
 
-    assert_eq!(
-        method("OrderStatus\\Draft", "ship"),
-        indoc! {r#"
-            METHOD [1] "ship" @5-5
-              PARAM_LIST
-              null
-              STMT_LIST
-                THROW
-                  NEW
-                    ZVAL "Sharp\\StateError"
-                    ARG_LIST
-                      ZVAL "OrderStatus is Draft, and ship moves from Paid."
-              null
-              null
-        "#}
-    );
-    assert_eq!(
-        method("OrderStatus\\Shipped", "pay"),
-        indoc! {r#"
-            METHOD [1] "pay" @23-23
-              PARAM_LIST
-                PARAM
-                  null
-                  ZVAL "cents"
-                  null
-                  null
-                  null
-                  null
-              null
-              STMT_LIST
-                THROW
-                  NEW
-                    ZVAL "Sharp\\StateError"
-                    ARG_LIST
-                      ZVAL "OrderStatus is Shipped, and pay moves from Draft."
-              null
-              null
-        "#}
-    );
+    assert_eq!(methods("OrderStatus\\Draft"), ["pay", "cancel"]);
+    assert_eq!(methods("OrderStatus\\Paid"), ["ship", "#invariants"]);
+    assert_eq!(methods("OrderStatus\\Shipped"), Vec::<String>::new());
+    assert!(!lowered[0].tree().contains("StateError"));
     assert_eq!(
         method("OrderStatus\\Draft", "cancel"),
         indoc! {r#"

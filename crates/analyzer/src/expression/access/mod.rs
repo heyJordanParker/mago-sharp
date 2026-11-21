@@ -552,6 +552,14 @@ where
         let declares_method = codebase.get_declaring_method(class, word(name.value)).is_some()
             || (name.value == b"toString"
                 && codebase.get_class_like(class).is_some_and(|class| plain_text_method(codebase, class).is_some()));
+        // A class with no member of the name has no kind of it: the call or the read refused it already.
+        if !declares_method
+            && !declares_property
+            && !codebase.method_exists(class, word("__call"))
+            && !codebase.method_exists(class, word("__get"))
+        {
+            continue;
+        }
         let is_method = if is_call {
             declares_method || (!declares_property && codebase.method_exists(class, word("__call")))
         } else {

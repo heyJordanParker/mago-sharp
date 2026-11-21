@@ -1321,8 +1321,8 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// `call` on a value of `r#type`, a union of the machine `machine`'s cases, spec section 20.2, as the case it holds
     /// runs it: a `match` on the value whose arm for each case of the union calls the method the case's class declares
-    /// or inherits. A move that doesn't move from the case throws once its arguments ran, as the method the engine
-    /// gives the case throws `Sharp\StateError`. No other case reaches the call, so its arm is the default.
+    /// or inherits. The checker refuses a move called on a union that holds a case it doesn't move from, so each case
+    /// of the union has the method. No other case reaches the call, so its arm is the default.
     fn case_call(
         &mut self,
         expression: &Expression,
@@ -1338,38 +1338,26 @@ impl<'body, 'program> Body<'body, 'program> {
         self.reads(r#enum);
         let held = self.sealed(call.object.span(), r#enum).map(|(_, constructor)| constructor);
         let lean = names::full_name(&self.reached_name(r#enum));
-        let moves: Vec<_> = machine.moves.iter().filter(|r#move| r#move.name.as_bytes() == method).collect();
         let mut alternatives = Vec::new();
         for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
             let TAtomic::Object(TObject::Named(named)) = atomic else {
                 unreachable!("a union of a machine's cases names each case's class, not {}", atomic.get_id());
             };
             let case = names::short_name(named.name.as_bytes());
-            let refused = !moves.is_empty()
-                && !moves.iter().any(|r#move| r#move.from.iter().any(|from| from.as_bytes() == case.as_bytes()));
-            let branch = if refused {
-                let (mut lines, _) = self.nested(|body| {
-                    body.arguments(&call.argument_list, None);
-                    String::new()
-                });
-                lines.push("throw Throwable.Thrown".to_owned());
-                lines
-            } else {
-                let declaring = self.checked.types().member_declaration(named.name, word(method));
-                if !matches!(declaring.kind, DeclarationKind::Method { .. }) {
-                    return self.unmodeled(expression.span(), "a call of a function value".to_owned(), issues::LAMBDA);
-                }
-                self.nested_lines(|body| {
-                    body.call(
-                        expression,
-                        declaring.class.as_bytes(),
-                        named.name.as_bytes(),
-                        method,
-                        Some(receiver.clone()),
-                        Some(&call.argument_list),
-                    )
-                })
-            };
+            let declaring = self.checked.types().member_declaration(named.name, word(method));
+            if !matches!(declaring.kind, DeclarationKind::Method { .. }) {
+                return self.unmodeled(expression.span(), "a call of a function value".to_owned(), issues::LAMBDA);
+            }
+            let branch = self.nested_lines(|body| {
+                body.call(
+                    expression,
+                    declaring.class.as_bytes(),
+                    named.name.as_bytes(),
+                    method,
+                    Some(receiver.clone()),
+                    Some(&call.argument_list),
+                )
+            });
             let pattern = format!("({} ..)", names::member(&lean, case.as_bytes()));
             let pattern = held.as_ref().map_or_else(|| pattern.clone(), |held| format!("({held} {pattern})"));
             alternatives.push((pattern, Choice::Branch(branch)));

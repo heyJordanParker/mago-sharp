@@ -2416,7 +2416,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             };
             self.class = class;
             members.extend(self.enum_members(case.members()));
-            members.extend(self.refused_moves(r#enum, case));
             members.extend(self.invariants(r#enum, case));
             self.class = enum_name;
             // A case of a generic enum passes its type arguments to the enum, as `Ok<T, TError>` to `Result<T, TError>`.
@@ -2515,90 +2514,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 ClassLikeMember::EnumCase(_) | ClassLikeMember::Law(_) => continue,
                 _ => unreachable!("check_slice refuses the enum member `{member}`"),
             });
-        }
-
-        members
-    }
-
-    /// A method of the class of the case `case` of the machine `machine`, spec section 20.2, for each move of the
-    /// machine that doesn't move from the case, which throws `Sharp\StateError`:
-    /// `public function pay($cents) { throw new \Sharp\StateError('OrderStatus is Shipped, and pay moves from Draft.'); }`.
-    /// It takes the move's parameters by name, so a call that names its arguments throws too.
-    fn refused_moves(&mut self, machine: &Enum, case: &EnumCase) -> Vec<u32> {
-        let Some(metadata) = self.types.machine(word(self.names.get(&machine.name))) else {
-            return Vec::new();
-        };
-        let case_name = case.item.name();
-        let line = self.line(case_name.span);
-        let mut names: Vec<Word> = Vec::new();
-        for r#move in &metadata.moves {
-            if !names.contains(&r#move.name) {
-                names.push(r#move.name);
-            }
-        }
-
-        let mut members = Vec::new();
-        for name in names {
-            let from: Vec<&[u8]> = metadata
-                .moves
-                .iter()
-                .filter(|r#move| r#move.name == name)
-                .flat_map(|r#move| r#move.from.iter().map(Word::as_bytes))
-                .collect();
-            if from.is_empty() || from.contains(&case_name.value) {
-                continue;
-            }
-            let Some(declared) = machine
-                .members
-                .iter()
-                .flat_map(|member| match member {
-                    ClassLikeMember::EnumCase(case) => case.members(),
-                    member => std::slice::from_ref(member),
-                })
-                .find_map(|member| match member {
-                    ClassLikeMember::Method(method) if method.name.value == name.as_bytes() => Some(method),
-                    _ => None,
-                })
-            else {
-                continue;
-            };
-
-            let parameters: Vec<u32> = declared
-                .parameter_list
-                .parameters
-                .iter()
-                .map(|parameter| {
-                    let parameter = self.local_name(0, line, parameter.variable.name);
-
-                    self.node(SHARP_AST_PARAM, 0, line, &[NULL, parameter, NULL, NULL, NULL, NULL])
-                })
-                .collect();
-            let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
-            let message = [
-                machine.name.value,
-                b" is ",
-                case_name.value,
-                b", and ",
-                name.as_bytes(),
-                b" moves from ",
-                &listed(&from),
-                b".",
-            ]
-            .concat();
-            let exception = self.string(ZEND_NAME_FQ, line, b"Sharp\\StateError");
-            let message = self.string(0, line, &message);
-            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[message]);
-            let created = self.node(SHARP_AST_NEW, 0, line, &[exception, arguments]);
-            let thrown = self.node(SHARP_AST_THROW, 0, line, &[created]);
-            let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[thrown]);
-            members.push(self.declaration(
-                SHARP_AST_METHOD,
-                ZEND_ACC_PUBLIC,
-                case_name.span,
-                case_name.span,
-                name.as_bytes(),
-                &[parameters, NULL, body, NULL, NULL],
-            ));
         }
 
         members
@@ -10479,19 +10394,6 @@ fn declares_equality(members: &Sequence<ClassLikeMember>) -> bool {
     members.iter().any(|member| {
         matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
     })
-}
-
-/// `names` as one text, the last after "or", as `Draft, Open or Paid`.
-fn listed(names: &[&[u8]]) -> Vec<u8> {
-    let mut text = Vec::new();
-    for (index, name) in names.iter().enumerate() {
-        if index > 0 {
-            text.extend_from_slice(if index + 1 == names.len() { b" or " } else { b", " });
-        }
-        text.extend_from_slice(name);
-    }
-
-    text
 }
 
 /// The static constructor among `members`, spec section 6, if any.

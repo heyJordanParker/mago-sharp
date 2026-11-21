@@ -254,6 +254,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
                 self.span(),
                 &resulting_type,
                 initializer,
+                None,
                 "an object initializer",
             )?,
             None => artifacts.set_expression_type(self, resulting_type),

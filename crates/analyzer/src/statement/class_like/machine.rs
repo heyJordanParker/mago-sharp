@@ -2,9 +2,13 @@ use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::machine::MachineMetadata;
+use mago_codex::metadata::machine::MachineMove;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::union::TUnion;
+use mago_names::binding::Binding;
+use mago_names::binding::Local;
+use mago_names::binding::LocalKind;
 use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -98,9 +102,10 @@ fn reachable(graph: &MachineMetadata, start: impl IntoIterator<Item = Word>) -> 
 }
 
 /// Checks each property of `class` that holds a PHP# machine, spec section 20.2: its `set` is `private`, and its
-/// initial value, when it has one, calls an entry point of the machine. A property its constructor takes has the
-/// caller's value, which no entry point gave, so it is refused there. An interface's property has no storage and no
-/// `set`, so nothing writes it, and each implementer's own property is checked instead.
+/// initial value, when it has one, calls an entry point of the machine. A struct's property is `{ get; init; }`, and
+/// a `with` that sets it is checked as a write. A property its constructor takes has the caller's value, which no
+/// entry point gave, so it is refused there. An interface's property has no storage and no `set`, so nothing writes
+/// it, and each implementer's own property is checked instead.
 pub(crate) fn check_machine_properties<A>(
     context: &mut Context<'_, '_, A>,
     class: &ClassLikeMetadata,
@@ -127,15 +132,15 @@ pub(crate) fn check_machine_properties<A>(
         let machine_name = display_class_like_name(context, machine.original_name);
         let property_name = property.name.0.as_bytes().strip_prefix(b"$").unwrap_or(property.name.0.as_bytes());
         let shown = display_member(context, class.original_name, BytesDisplay(property_name));
-        let r#move = example_move(graph);
-        if !property.write_visibility.is_private() || property.flags.is_readonly() {
-            let property_name = BytesDisplay(property_name);
+        if !class.flags.is_struct() && (!property.write_visibility.is_private() || property.flags.is_readonly()) {
+            let place = format!("this.{}", BytesDisplay(property_name));
             report(
                 context,
                 name_span,
                 format!("`{shown}` holds the machine `{machine_name}`, so its `set` is `private`."),
                 format!(
-                    "Write `{{ get; private set; }}`, and change it only by a move, as `this.{property_name} = this.{property_name}.{move}(…)`."
+                    "Write `{{ get; private set; }}`, and change it only by a move: `{}`.",
+                    move_example(machine_name, graph, &place)
                 ),
             );
         }
@@ -165,14 +170,17 @@ pub(crate) fn check_machine_properties<A>(
     }
 }
 
-/// Checks `target = value` where `target` holds a PHP# machine, spec section 20.2: it changes only by a move of its
-/// own, as `this.status = this.status.pay(5)`, and a constructor may start it with an entry point of the machine.
+/// Checks `place = value`, where `place`, as the file writes it, holds a PHP# machine, spec section 20.2: it changes
+/// only by a move of the value it holds, called on `place` itself or on a name a type pattern bound from `place`, as
+/// `this.status = draft.pay(5)` after `this.status is OrderStatus.Draft draft`. A constructor may start it with an
+/// entry point of the machine, and so may any write `starts` names: one to a `late` property, and `new`'s initializer.
 pub(crate) fn check_machine_write<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
-    target: &Expression<'_>,
+    place: &str,
     declared: &TUnion,
     value: &Expression<'_>,
+    starts: bool,
 ) where
     A: Arena,
 {
@@ -183,11 +191,10 @@ pub(crate) fn check_machine_write<A>(
         return;
     };
 
-    let target_source = quoted_source(context, target.span());
     if let Expression::Call(Call::Method(call)) = value.unparenthesized()
         && let ClassLikeMemberSelector::Identifier(name) = &call.method
         && graph.moves.iter().any(|r#move| r#move.name.as_bytes() == name.value)
-        && quoted_source(context, call.object.span()) == target_source
+        && holds_value_of(context, call.object, place)
     {
         return;
     }
@@ -204,7 +211,7 @@ pub(crate) fn check_machine_write<A>(
         .get_function_like()
         .and_then(|function_like| function_like.method_metadata.as_ref())
         .is_some_and(|method| method.is_constructor);
-    if in_constructor && calls_entry_point(context, machine, value) {
+    if (starts || in_constructor) && calls_entry_point(context, machine, value) {
         return;
     }
 
@@ -213,11 +220,138 @@ pub(crate) fn check_machine_write<A>(
         context,
         value.span(),
         format!(
-            "`{target_source}` holds the machine `{machine_name}`, so it changes only by a move of its own, as `{target_source} = {target_source}.{}(…)`.",
-            example_move(graph)
+            "`{place}` holds the machine `{machine_name}`, so it changes only by a move of its own, as `{}`.",
+            move_example(machine_name, graph, place)
         ),
-        format!("Call a move of `{target_source}`."),
+        format!("Call a move of the case `{place}` holds."),
     );
+}
+
+/// Whether `receiver` holds the value of `place`, as the file writes both: it is `place`, or a name a type pattern
+/// bound from `place` that nothing writes after, spec section 21.
+fn holds_value_of<A>(context: &Context<'_, '_, A>, receiver: &Expression<'_>, place: &str) -> bool
+where
+    A: Arena,
+{
+    let receiver = receiver.unparenthesized();
+    if quoted_source(context, receiver.span()) == place {
+        return true;
+    }
+    let Expression::ConstantAccess(name) = receiver else {
+        return false;
+    };
+    let Some(Binding::Local(local @ Local { kind: LocalKind::Pattern { test, .. }, .. })) =
+        context.resolved_names.binding(&name.name)
+    else {
+        return false;
+    };
+
+    !context.resolved_names.is_written(&local)
+        && context.pattern_tests.get(&test).is_some_and(|tested| quoted_source(context, *tested) == place)
+}
+
+/// Spec section 20.2: a move belongs to the case it moves from. A move of a case's block is a member of that case's
+/// class alone, and one of the machine's body of every case that isn't `final`, so a call of `name` at `span` on
+/// `object`, whose type `receiver` is the machine or a union of its cases, is refused when a case the value may be
+/// lacks the move, with the test that narrows it to a case that has it. Returns whether it refused the call.
+pub(crate) fn check_move_call<A>(
+    context: &mut Context<'_, '_, A>,
+    object: &Expression<'_>,
+    receiver: &TUnion,
+    name: Word,
+    span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    let mut machine: Option<&ClassLikeMetadata> = None;
+    let mut held: Vec<Word> = Vec::new();
+    for atomic in receiver.types.iter().filter(|atomic| !atomic.is_null()) {
+        let TAtomic::Object(TObject::Named(object)) = atomic else {
+            return false;
+        };
+        let Some(class) = context.codebase.get_class_like(object.name) else {
+            return false;
+        };
+        let (of, cases) = match &class.machine {
+            Some(graph) => (class, graph.cases.iter().map(|case| case.name).collect()),
+            None => {
+                let Some(parent) = class
+                    .direct_parent_class
+                    .and_then(|parent| context.codebase.get_class_like(parent))
+                    .filter(|parent| class.flags.is_enum_case_class() && parent.machine.is_some())
+                else {
+                    return false;
+                };
+                let short = class.original_name.as_bytes().rsplit(|byte| *byte == b'\\').next().unwrap_or_default();
+
+                (parent, vec![word(short)])
+            }
+        };
+        if machine.is_some_and(|machine| machine.name != of.name) {
+            return false;
+        }
+        machine = Some(of);
+        held.extend(cases);
+    }
+    let Some(machine) = machine else {
+        return false;
+    };
+    let Some(graph) = &machine.machine else {
+        return false;
+    };
+    let moves: Vec<&MachineMove> = graph.moves.iter().filter(|r#move| r#move.name == name).collect();
+    if moves.is_empty() {
+        return false;
+    }
+
+    let cases = graph.cases.iter().map(|case| case.name);
+    let from: Vec<Word> = cases.clone().filter(|case| moves.iter().any(|r#move| r#move.from.contains(case))).collect();
+    let lacking: Vec<Word> = cases.filter(|case| held.contains(case) && !from.contains(case)).collect();
+    let Some(first) = from.first() else {
+        return false;
+    };
+    if lacking.is_empty() {
+        return false;
+    }
+
+    let machine_name = display_class_like_name(context, machine.original_name);
+    let receiver = quoted_source(context, object.span());
+    let bound = bound_name(first.as_bytes());
+    let from = listed(from.iter().map(|case| format!("`{machine_name}.{}`", BytesDisplay(case.as_bytes()))).collect());
+    let lacking = listed(lacking.iter().map(|case| format!("`{}`", BytesDisplay(case.as_bytes()))).collect());
+    let name = BytesDisplay(name.as_bytes());
+    report(
+        context,
+        span,
+        format!(
+            "`{name}` moves from {from}, and `{receiver}` may be {lacking}: test it first, as in `if ({receiver} is {machine_name}.{} {bound})`.",
+            BytesDisplay(first.as_bytes())
+        ),
+        format!("Call `{name}` on the name the test binds, as `{bound}.{name}(…)`."),
+    );
+
+    true
+}
+
+/// `items` joined as a sentence lists them: `a`, `a or b`, `a, b or c`.
+fn listed(mut items: Vec<String>) -> String {
+    let Some(last) = items.pop() else {
+        return String::new();
+    };
+    if items.is_empty() {
+        return last;
+    }
+
+    format!("{} or {last}", items.join(", "))
+}
+
+/// The name a message binds a case to, as `draft` for `Draft`.
+fn bound_name(case: &[u8]) -> String {
+    let case = String::from_utf8_lossy(case);
+    let mut letters = case.chars();
+
+    letters.next().map(|first| first.to_lowercase().chain(letters).collect()).unwrap_or_default()
 }
 
 /// Refuses a case of a PHP# machine built outside the machine, spec section 20.2: only its entry points and moves
@@ -318,9 +452,19 @@ where
     })
 }
 
-/// The name of the machine's first move, which a message shows as the way to change a value of it.
-fn example_move(graph: &MachineMetadata) -> BytesDisplay<'_> {
-    BytesDisplay(graph.moves.first().map_or(b"move".as_slice(), |r#move| r#move.name.as_bytes()))
+/// The write a message shows as the way to change `place`, a value of the machine `machine_name` with the graph
+/// `graph`: a test of the case its first move moves from, and that move called on the name the test binds.
+fn move_example(machine_name: Word, graph: &MachineMetadata, place: &str) -> String {
+    let (name, from) = graph.moves.first().map_or((b"move".as_slice(), b"Case".as_slice()), |r#move| {
+        (r#move.name.as_bytes(), r#move.from.first().map_or(b"Case".as_slice(), Word::as_bytes))
+    });
+    let bound = bound_name(from);
+
+    format!(
+        "if ({place} is {machine_name}.{} {bound}) {{ {place} = {bound}.{}(…); }}",
+        BytesDisplay(from),
+        BytesDisplay(name)
+    )
 }
 
 /// The name of the machine's first entry point, which a message shows as the way to start a value of it.

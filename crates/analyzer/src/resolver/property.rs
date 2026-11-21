@@ -1053,7 +1053,7 @@ pub(crate) fn resolve_property_for_external_access<'ctx>(
 
 /// Whether `object_expr` is the object `new` with an object initializer or `with` creates, spec section 16, which
 /// they set properties of while it is created.
-fn is_created_object(object_expr: &Expression) -> bool {
+pub(crate) fn is_created_object(object_expr: &Expression) -> bool {
     matches!(object_expr, Expression::Variable(Variable::Direct(variable))
         if variable.name.starts_with(CREATED_OBJECT_PREFIX))
 }

@@ -105,8 +105,6 @@ use crate::ttype::atomic::reference::TReference;
 use crate::ttype::atomic::scalar::TScalar;
 use crate::ttype::builder;
 use crate::ttype::builder::get_template_atomic;
-use crate::ttype::combine_union_types;
-use crate::ttype::combiner::CombinerOptions;
 use crate::ttype::get_bool;
 use crate::ttype::get_int;
 use crate::ttype::get_keyed_array;
@@ -474,9 +472,8 @@ pub(super) fn case_class_key(enum_name: Word, case_name: &[u8]) -> Word {
 
 /// Records the graph of the PHP# machine `machine`, spec section 20.2, once its members are scanned: its cases, its
 /// entry points, the static methods that give a case, and its moves, the other methods that give a case. A method of
-/// a case's block moves from that case, and one of the machine's body from each case that isn't `final`. Each move a
-/// case's block holds is also a method of the machine, so a value of the machine calls it: it takes the parameters
-/// of the first case that holds it, and gives each case a move of its name gives.
+/// a case's block moves from that case, and one of the machine's body from each case that isn't `final`. A move a
+/// case's block holds is a method of that case's class alone, so only a value of the case calls it.
 pub fn register_machine(codebase: &mut CodebaseMetadata, r#enum: &Enum<'_>, machine: Word) {
     let Some(mut machine_metadata) = codebase.class_likes.remove(&machine) else {
         return;
@@ -542,7 +539,6 @@ pub fn register_machine(codebase: &mut CodebaseMetadata, r#enum: &Enum<'_>, mach
         }
     }
 
-    let mut machine_methods: Vec<(Word, FunctionLikeMetadata)> = vec![];
     for member in &r#enum.members {
         let ClassLikeMember::EnumCase(case) = member else {
             continue;
@@ -561,37 +557,9 @@ pub fn register_machine(codebase: &mut CodebaseMetadata, r#enum: &Enum<'_>, mach
                 continue;
             }
             moves.push(MachineMove::new(name, method.name.span, vec![word(case.item.name().value)], to));
-            if machine_metadata.methods.contains(&machine_metadata.method_key(name)) {
-                continue;
-            }
-            match machine_methods.iter_mut().find(|(declared, _)| *declared == name) {
-                Some((_, declared)) => {
-                    for (declared, returned) in [
-                        (&mut declared.return_type_metadata, &metadata.return_type_metadata),
-                        (&mut declared.return_type_declaration_metadata, &metadata.return_type_declaration_metadata),
-                    ] {
-                        if let (Some(declared), Some(returned)) = (declared, returned) {
-                            declared.type_union = combine_union_types(
-                                &declared.type_union,
-                                &returned.type_union,
-                                codebase,
-                                CombinerOptions::default(),
-                            );
-                        }
-                    }
-                }
-                None => machine_methods.push((name, (**metadata).clone())),
-            }
         }
     }
 
-    // Each case that holds the move replaces the machine's.
-    for (name, mut method) in machine_methods {
-        if let Some(method_metadata) = &mut method.method_metadata {
-            method_metadata.is_final = false;
-        }
-        add_method(codebase, name.as_bytes(), &mut machine_metadata, method);
-    }
     machine_metadata.machine = Some(MachineMetadata { cases, entry_points, moves });
     codebase.class_likes.insert(machine, machine_metadata);
 }

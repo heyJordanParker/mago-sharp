@@ -11,6 +11,7 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Expression;
 use mago_syntax::cst::ObjectInitializer;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::With;
@@ -26,8 +27,10 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
+use crate::statement::class_like::machine;
 use crate::statement::is_event_class;
 use crate::utils::names::display_class_like_name;
+use crate::utils::quoted_source;
 
 /// `point with { y: 9 }` is a copy of `point` with the values it names set, spec section 16, so it has the type of
 /// `point`, and each value is written to the copy as a property write. It copies a struct or a class, so an enum or an
@@ -66,6 +69,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for With<'arena> {
             self.span(),
             &object_type,
             &self.initializer,
+            Some(self.object),
             "`with`",
         )
     }
@@ -100,7 +104,9 @@ pub(crate) const CREATED_OBJECT_PREFIX: &[u8] = b"$-created-";
 /// Analyzes each value `initializer` names as a write to the property of its name on the object `new` or `with`
 /// creates at `span`, whose type is `object_type`, spec section 16. The object is being created, so an `init` or a
 /// `set` property takes the value, at its accessor's access level. A get-only property takes none, and `creator`, as
-/// "`with`", names what tried. The creation at `span` has the type `object_type`.
+/// "`with`", names what tried. A property that holds a machine takes a move of the value `copied`, the object `with`
+/// copies, holds there, or an entry point from `new`, spec section 20.2. The creation at `span` has the type
+/// `object_type`.
 pub(crate) fn analyze_object_initializer<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -108,6 +114,7 @@ pub(crate) fn analyze_object_initializer<'ctx, 'arena, A>(
     span: Span,
     object_type: &TUnion,
     initializer: &ObjectInitializer<'arena>,
+    copied: Option<&Expression<'arena>>,
     creator: &str,
 ) -> Result<(), AnalysisError>
 where
@@ -145,6 +152,17 @@ where
             continue;
         }
 
+        if context.dialect.is_sharp()
+            && let Some(declared) = declared_type(context, object_type, name)
+        {
+            let property = String::from_utf8_lossy(name);
+            let place = match copied {
+                Some(copied) => format!("{}.{property}", quoted_source(context, copied.span())),
+                None => property.into_owned(),
+            };
+            machine::check_machine_write(context, block_context, &place, &declared, value.value, copied.is_none());
+        }
+
         let value_type = artifacts.get_expression_type(value.value).cloned().unwrap_or_else(get_mixed);
         let access = PropertyAccess {
             object,
@@ -168,6 +186,23 @@ where
     artifacts.set_expression_type(&span, object_type.clone());
 
     Ok(())
+}
+
+/// The type the property `name` of the first class of `object_type` that declares it is declared with.
+fn declared_type<A>(context: &Context<'_, '_, A>, object_type: &TUnion, name: &[u8]) -> Option<TUnion>
+where
+    A: Arena,
+{
+    let property_name = concat_word!(b"$", name);
+
+    object_type.types.iter().find_map(|atomic| {
+        let TAtomic::Object(TObject::Named(object)) = atomic else {
+            return None;
+        };
+        let property = context.codebase.get_declaring_property(object.name, property_name)?;
+
+        property.type_metadata.as_ref().map(|metadata| metadata.type_union.clone())
+    })
 }
 
 /// Whether a class of `object_type` has a get-only property named `name`, with no `init` or `set`: a PHP# `{ get; }`

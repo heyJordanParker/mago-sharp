@@ -4651,25 +4651,19 @@ fn a_law_reasons_about_a_union_of_one_machine_s_cases() {
 }
 
 /// Spec sections 20.2 and 28: a value typed as a union of one machine's cases is a value of the machine, so a law calls
-/// a move on it, as the case it holds runs the move, and tests which case it is. A move called on a case it doesn't
-/// move from throws, and a law holds wherever its code throws. A law that is false in the case the moves give is not
-/// proven.
+/// a move every case of the union moves from on it, as the case it holds runs the move, and tests which case it is. A
+/// law that is false in the case the moves give is not proven.
 #[test]
 fn a_law_follows_a_value_typed_as_a_union_of_one_machine_s_cases() {
     let step = |law: &str| {
         format!(
-            "namespace App;\n\ninternal machine Step\n{{\n    case A {{ internal Step.B|Step.C go(bool done) => done ? Step.C : Step.B; }}\n    case B {{ internal Step.B|Step.C go(bool done) => done ? Step.C : Step.B; }}\n    final case C;\n    internal static Step.A enter() => Step.A;\n    {law}\n}}\n"
+            "namespace App;\n\ninternal machine Step\n{{\n    case A {{ internal Step.A|Step.B go(bool done) => done ? Step.B : Step.A; }}\n    case B {{ internal Step.B|Step.C go(bool done) => done ? Step.C : Step.B; }}\n    final case C;\n    internal static Step.A enter() => Step.A;\n    {law}\n}}\n"
         )
     };
     let gate = "namespace App;\n\ninternal machine Gate\n{\n    case Open { internal Gate.Shut|Gate.Gone close(bool forever) => forever ? Gate.Gone : Gate.Shut; }\n    case Shut { internal Gate.Open open() => Gate.Open; }\n    final case Gone;\n    internal static Gate.Open enter() => Gate.Open;\n    law shutReopens() => Gate.enter().close(false) is Gate.Shut s ? s.open() is Gate.Open : false;\n}\n";
 
     let directory = lawful_project(&[
-        (
-            "app/Step.sharp",
-            &step(
-                "law twoMovesReachC() => Step.enter().go(false).go(true) is Step.C;\n    law doneThrowsOnGo() => Step.enter().go(true).go(true) is Step.B;",
-            ),
-        ),
+        ("app/Step.sharp", &step("law twoMovesReachC() => Step.enter().go(true).go(true) is Step.C;")),
         ("app/Gate.sharp", gate),
     ]);
 

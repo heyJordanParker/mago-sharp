@@ -603,6 +603,22 @@ where
         )),
         _ => None,
     };
+    // Spec section 21: a name a test binds holds the value the test tests, which a machine's write reads, spec section
+    // 20.2, as `this.status = draft.pay(5)` after `this.status is OrderStatus.Draft draft`.
+    match node {
+        Node::Expression(Expression::Is(is)) => {
+            context.pattern_tests.insert(is.span(), is.value.span());
+        }
+        Node::Expression(Expression::PatternMatch(pattern_match))
+        | Node::Statement(Statement::PatternMatch(pattern_match)) => {
+            for arm in &pattern_match.arms {
+                if let PatternMatchArm::Pattern(arm) = arm {
+                    context.pattern_tests.insert(arm.pattern.span(), pattern_match.expression.span());
+                }
+            }
+        }
+        _ => {}
+    }
     // Spec section 21: the name `x is T name` binds is a `T` where its test holds. Its PHP assigns the name first, as
     // `($name = x) instanceof T`, so the analysis types the name by the pattern's type where that test narrows it.
     for (variable, hint) in node.filter_map(|node| match node {
