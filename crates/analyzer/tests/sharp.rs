@@ -36001,7 +36001,7 @@ fn a_call_of_a_tuple_element_runs_the_function_it_holds() {
             "missing non-existent-property `[Function<int(int)> twice, string name]` has no element named `missing`: its elements are `twice` and `name`.",
         ]
     );
-    let helps: Vec<&str> = issues.iter().flat_map(|issue| issue.help.as_deref()).collect();
+    let helps: Vec<&str> = issues.iter().filter_map(|issue| issue.help.as_deref()).collect();
     assert_eq!(helps, ["Change the argument value to match `int`, or update the parameter's type declaration."]);
 }
 
