@@ -148,6 +148,9 @@ where
     if !refused {
         report_compile_time_selection(context, artifacts, binary, lhs_type, rhs_type);
     }
+    if !refused && context.dialect.is_sharp() && binary.operator.is_equality() {
+        reference_element_equality(context.codebase, artifacts, &block_context.scope, lhs_type, rhs_type);
+    }
 
     // A PHP# comparison of instances runs the operator their class declares, which returns the `bool` it decides.
     if !refused
@@ -864,6 +867,34 @@ where
             "`==` compares a `List`, a `Map` or a `Set`, and `{}` may be another type",
             display_operand(context, part)
         )
+    }
+}
+
+/// Records under `scope` the `op_Equality` that `==` on two collections of `lhs_type` and `rhs_type` runs on their
+/// elements, spec section 19, through any depth of nested collections, as a call of it is recorded: the running code
+/// calls it, so a law that compares the collections reaches it, and an edit to it analyzes the comparison again.
+fn reference_element_equality(
+    codebase: &CodebaseMetadata,
+    artifacts: &mut AnalysisArtifacts,
+    scope: &ScopeContext<'_>,
+    lhs_type: &TUnion,
+    rhs_type: &TUnion,
+) {
+    let (Some((_, lhs_value)), Some((_, rhs_value))) =
+        (collection_parts(lhs_type, codebase), collection_parts(rhs_type, codebase))
+    else {
+        return;
+    };
+    let (lhs_value, rhs_value) = (lhs_value.to_non_nullable(), rhs_value.to_non_nullable());
+    if compares_collections(&lhs_value, &rhs_value, codebase) {
+        return reference_element_equality(codebase, artifacts, scope, &lhs_value, &rhs_value);
+    }
+
+    let equality = BinaryOperator::Equal(Span::zero());
+    if let Some((method, _)) =
+        get_comparison_method(&equality, &lhs_value, &rhs_value, codebase).and_then(|method| method.chosen())
+    {
+        artifacts.symbol_references.add_reference_for_method_call(codebase, scope, &method);
     }
 }
 

@@ -3453,6 +3453,30 @@ fn compile_refuses_a_law_an_edit_of_an_operator_it_applies_breaks() {
     assert!(!compiled(root, "app/Shared/Till.sharp").exists());
 }
 
+/// Spec sections 19 and 28: `==` on two Lists runs the elements' `operator ==`, so a law reaches it as it reaches an
+/// operator it applies, and an edit of that operator's body proves again a law in a file that only compares Lists.
+#[test]
+fn compile_refuses_a_law_an_edit_of_the_operator_its_lists_compare_by_breaks() {
+    let shape = "namespace App.Shared;\n\npublic final class Shape\n{\n    public Shape(public int amount { get; }) { }\n\n    public static bool operator ==(Shape a, Shape b) => a.amount == b.amount;\n\n    public int hash() => this.amount;\n}\n";
+    let till = "namespace App.Shared;\n\npublic final class Till\n{\n    law sameListSameAmount(Shape a, Shape b) => !([a] == [b]) || a.amount == b.amount;\n}\n";
+    let directory = lawful_project(&[("app/Shared/Shape.sharp", shape), ("app/Shared/Till.sharp", till)]);
+    let root = directory.path();
+    compile_succeeds(root);
+    assert!(compiled(root, "app/Shared/Till.sharp").exists());
+
+    write(root, "app/Shared/Shape.sharp", &shape.replace("=> a.amount == b.amount;", "=> true;"));
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output)
+            .contains("app/Shared/Till.sharp:5:5: error[law-unproven]: law sameListSameAmount is not proven\n"),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Shared/Till.sharp").exists());
+}
+
 /// Spec section 10: a struct states a law as a class does. Mago proves it, and refuses it once a changed method breaks
 /// it.
 #[test]
@@ -4816,14 +4840,20 @@ fn compile_proves_a_law_whose_calls_leave_out_defaulted_arguments() {
     }
 }
 
-/// Spec section 19: a struct with a field whose `==` a law can't read, as a `List` of a class's values, keeps the class
-/// operator refusal for the `==` it gets with no code.
+/// Spec sections 19 and 28: the `==` a struct gets with no code compares a field that is a `List` of a class's values
+/// element by element, by the class's own `==`, so a law that a struct equals itself proves.
 #[test]
-fn a_law_comparing_structs_whose_field_has_no_equality_a_law_reads_is_refused() {
-    assert_unmodeled(
+fn a_law_comparing_structs_whose_field_is_a_list_of_a_class_s_values_proves() {
+    let directory = library_project(&[(
+        "app/Shared/Shape.sharp",
         "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic struct Shape\n{\n    public Shape(public List<Instant> closedAt { get; }) { }\n\n    law same(Shape shape) => shape == shape;\n}\n",
-        "Law same reaches the class operator `==` in Shape.operator ==. Compare the values the objects hold, such as their properties.",
-    );
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Shape.sharp").exists());
 }
 
 /// Spec section 28: `==` and `!=` with a nullable value of a class run as spec section 19 lifts them: null equals only
@@ -5775,14 +5805,39 @@ fn a_law_testing_the_identity_of_objects_is_refused() {
     );
 }
 
-/// `==` on two Lists runs the elements' class operator `==` on each pair, as the bridge lowers it, so a law over it is
-/// refused: Lean's own `==` on Lists would compare every value the objects hold and prove this law, which is false
-/// when two amounts match and the currencies differ.
+/// Spec section 19: `==` on two Lists runs the elements' class operator `==` on each pair, as the bridge lowers it, so
+/// a law that two equal lists hold equal amounts proves, and one that they hold equal currencies is not proven, since
+/// two amounts match when the currencies differ. Lean's own `==` on Lists would compare every value the objects hold.
 #[test]
-fn a_law_comparing_lists_of_objects_a_class_operator_compares_is_refused() {
-    assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int amount { get; }, public string currency { get; }) { }\n    public static bool operator ==(Shape a, Shape b) => a.amount == b.amount;\n    public int hash() => this.amount;\n\n    law sameListSameCurrency(Shape a, Shape b) => !([a] == [b]) || a.currency == b.currency;\n}\n",
-        "Law sameListSameCurrency reaches the class operator `==` in Shape.sameListSameCurrency. Compare the values the objects hold, such as their properties.",
+fn a_law_comparing_lists_of_objects_runs_the_class_operator_on_each_pair() {
+    let shape = |law: &str| {
+        format!(
+            "namespace App.Shared;\n\npublic class Shape\n{{\n    public Shape(public int amount {{ get; }}, public string currency {{ get; }}) {{ }}\n    public static bool operator ==(Shape a, Shape b) => a.amount == b.amount;\n    public int hash() => this.amount;\n\n    {law}\n}}\n"
+        )
+    };
+    let directory = library_project(&[(
+        "app/Shared/Shape.sharp",
+        &shape("law sameListSameAmount(Shape a, Shape b) => !([a] == [b]) || a.amount == b.amount;"),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Shape.sharp").exists());
+
+    let directory = library_project(&[(
+        "app/Shared/Shape.sharp",
+        &shape("law sameListSameCurrency(Shape a, Shape b) => !([a] == [b]) || a.currency == b.currency;"),
+    )]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law sameListSameCurrency is not proven\n"),
+        "{}",
+        printed(&output)
     );
 }
 
@@ -5816,7 +5871,7 @@ fn a_law_reaching_a_member_lean_reserves_is_refused() {
 fn a_law_reading_a_map_member_it_has_no_model_of_is_refused_naming_the_members_it_reads() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(Map<string, int> items) => items.toList().count() == items.count();\n}\n",
-        "Law sized reaches the Map method toList in Shape.sized. Read a Map with `count()`, `isEmpty()`, `get`, `has`, `keys()`, `values()`, an index or a loop over its entries.",
+        "Law sized reaches the Map method toList in Shape.sized. Read a Map with `count()`, `isEmpty()`, `isNotEmpty()`, `get`, `has`, `keys()`, `values()`, an index or a loop over its entries.",
     );
 }
 
@@ -5889,17 +5944,24 @@ const MARK: &str = "namespace App.Runs;\n\npublic struct Mark\n{\n    public Mar
 /// `App.Runs.Cursor`, a struct that holds a `Map` beside an `int?` and a `List<Mark>`.
 const CURSOR: &str = "namespace App.Runs;\n\npublic struct Cursor\n{\n    public Cursor(public int? step { get; }, public Map<string, int> arguments { get; }, public List<Mark> marks { get; }) { }\n}\n";
 
-/// `App.Runs.RunStatus`, whose cases hold a `Cursor`, with laws that build one with `[:]`, take one as a parameter and
-/// read its other properties, and ask its `Map` `isEmpty()`.
-const RUN_STATUS: &str = "namespace App.Runs;\n\npublic machine RunStatus\n{\n    case Running(Cursor cursor, int position)\n    {\n        public RunStatus.Waiting wait() => RunStatus.Waiting(this.cursor, this.position);\n\n        public RunStatus.Running restart(int step) => RunStatus.Running(new Cursor(step, [:], this.cursor.marks), this.position);\n    }\n\n    final case Waiting(Cursor cursor, int position);\n\n    public static RunStatus.Running start() => RunStatus.Running(new Cursor(null, [:], []), 0);\n\n    law waitingKeepsThePosition() => RunStatus.start().wait().position == 0;\n    law aFreshCursorHasNoArguments() => new Cursor(null, [:], []).arguments.isEmpty();\n    law aStepIsItsOwn(Cursor cursor) => cursor.step is int s ? s == s : cursor.marks.count() >= 0;\n    law restartingKeepsThePosition(RunStatus.Running r, int step) => r.restart(step).position == r.position;\n    law restartingSetsTheStep(RunStatus.Running r, int step) => r.restart(step).cursor.step == step;\n}\n";
+/// `App.Runs.Trail`, a struct whose one field is a `List<Mark>`, so its `==` compares the lists.
+const TRAIL: &str = "namespace App.Runs;\n\npublic struct Trail\n{\n    public Trail(public List<Mark> marks { get; }) { }\n}\n";
 
-/// Spec sections 12 and 28: a value that holds a `Map`, built with `[:]` or taken as a parameter, translates to the
-/// model, so a law reads its other properties, and its `Map`'s `isEmpty()`.
+/// `App.Runs.RunStatus`, whose cases hold a `Cursor`, with laws that build one with `[:]`, take one as a parameter and
+/// read its other properties, ask its `Map` `isEmpty()` and `isNotEmpty()`, and compare a `List<Mark>`, and a `Trail`
+/// that holds one, with `==`.
+const RUN_STATUS: &str = "namespace App.Runs;\n\npublic machine RunStatus\n{\n    case Running(Cursor cursor, int position)\n    {\n        public RunStatus.Waiting wait() => RunStatus.Waiting(this.cursor, this.position);\n\n        public RunStatus.Running restart(int step) => RunStatus.Running(new Cursor(step, [:], this.cursor.marks), this.position);\n    }\n\n    final case Waiting(Cursor cursor, int position);\n\n    public static RunStatus.Running start() => RunStatus.Running(new Cursor(null, [:], []), 0);\n\n    law waitingKeepsThePosition() => RunStatus.start().wait().position == 0;\n    law aFreshCursorHasNoArguments() => new Cursor(null, [:], []).arguments.isEmpty();\n    law aStepGivesNoArguments(int step) => !new Cursor(step, [:], []).arguments.isNotEmpty();\n    law marksCompare(List<Mark> marks) => marks == marks;\n    law trailsCompare(Trail trail) => trail == trail;\n    law aStepIsItsOwn(Cursor cursor) => cursor.step is int s ? s == s : cursor.marks.count() >= 0;\n    law restartingKeepsThePosition(RunStatus.Running r, int step) => r.restart(step).position == r.position;\n    law restartingSetsTheStep(RunStatus.Running r, int step) => r.restart(step).cursor.step == step;\n}\n";
+
+/// Spec sections 12, 19 and 28: a value that holds a `Map`, built with `[:]` or taken as a parameter, translates to the
+/// model, so a law reads its other properties, and its `Map`'s `isEmpty()` and `isNotEmpty()`. Two `List`s are `==`
+/// when they hold as many elements and each pair is, by the element's own `==`, and so are two structs whose field is
+/// a `List`.
 #[test]
 fn a_law_builds_takes_and_reads_a_struct_that_holds_a_map() {
     let directory = library_project(&[
         ("app/Runs/Mark.sharp", MARK),
         ("app/Runs/Cursor.sharp", CURSOR),
+        ("app/Runs/Trail.sharp", TRAIL),
         ("app/Runs/RunStatus.sharp", RUN_STATUS),
     ]);
     let root = directory.path();

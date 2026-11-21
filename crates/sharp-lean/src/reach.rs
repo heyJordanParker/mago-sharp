@@ -12,6 +12,8 @@ use mago_codex::reference::SymbolReferences;
 use mago_codex::symbol::SymbolIdentifier;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::union::TUnion;
 use mago_database::file::FileId;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
@@ -300,9 +302,10 @@ impl Reach {
     }
 }
 
-/// The `==` of each class a field of a struct holds when `equality` is the `==` the struct gets for declaring none,
-/// spec section 19, which compares each field with that field's own `==`. It has no source, so no reference records
-/// the `==` it runs.
+/// The `==` of each class a field of a struct holds, or holds the elements of in a collection at any depth, when
+/// `equality` is the `==` the struct gets for declaring none, spec section 19, which compares each field with that
+/// field's own `==`, and two collections element by element. It has no source, so no reference records the `==` it
+/// runs.
 fn field_equalities(codebase: &CodebaseMetadata, equality: SymbolIdentifier) -> Vec<SymbolIdentifier> {
     let generated = codebase
         .get_method(equality.0, equality.1)
@@ -316,12 +319,23 @@ fn field_equalities(codebase: &CodebaseMetadata, equality: SymbolIdentifier) -> 
         .properties
         .keys()
         .filter_map(|property| codebase.get_declaring_property(equality.0, *property)?.type_metadata.as_ref())
-        .flat_map(|r#type| r#type.type_union.types.iter())
-        .filter_map(|atomic| match atomic {
-            TAtomic::Object(TObject::Named(named)) => Some(keyed(codebase, (named.name, word("op_Equality")))),
-            _ => None,
-        })
+        .flat_map(|r#type| compared_classes(codebase, &r#type.type_union))
+        .map(|class| keyed(codebase, (class, word("op_Equality"))))
         .filter(|(class, method)| codebase.get_method(*class, *method).is_some())
+        .collect()
+}
+
+/// Each class whose `==` compares two values of `union`: a class it names, and a class the elements of a collection it
+/// holds name, at any depth, spec section 19.
+fn compared_classes(codebase: &CodebaseMetadata, union: &TUnion) -> Vec<Word> {
+    union
+        .types
+        .iter()
+        .flat_map(|atomic| match atomic {
+            TAtomic::Object(TObject::Named(named)) => vec![named.name],
+            TAtomic::Array(array) => compared_classes(codebase, &get_array_parameters(array, codebase).1),
+            _ => Vec::new(),
+        })
         .collect()
 }
 

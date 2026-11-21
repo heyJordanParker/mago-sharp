@@ -3,8 +3,8 @@ import Sharp.Lean.Int
 /-!
 PHP# `Map<TKey, TValue>` (spec section 12): its entries in the order their keys were first set, each key once.
 
-A law reads a `Map` with `get`, `has`, `keys()`, `values()`, `count()`, `isEmpty()`, a read `map[key]` and a loop over
-its entries.
+A law reads a `Map` with `get`, `has`, `keys()`, `values()`, `count()`, `isEmpty()`, `isNotEmpty()`, a read `map[key]`
+and a loop over its entries.
 Each is a function of the entries, which the automatic steps rewrite to Lean's own list functions.
 -/
 
@@ -82,6 +82,9 @@ def count (map : Map κ ν) : int := int.count map.entries
 /-- `isEmpty()`: whether the map holds no entry. -/
 def isEmpty (map : Map κ ν) : Bool := map.entries.isEmpty
 
+/-- `isNotEmpty()`: whether the map holds an entry. -/
+def isNotEmpty (map : Map κ ν) : Bool := !map.entries.isEmpty
+
 instance [DecidableEq ν] : DecidableEq (Map κ ν) := fun a b =>
   if h : a.entries = b.entries then
     isTrue (by cases a; cases b; simp_all)
@@ -91,7 +94,7 @@ instance [DecidableEq ν] : DecidableEq (Map κ ν) := fun a b =>
 /-! The automatic steps read each member as the list function of the entries it is, and a map a law writes out as
 its entries. -/
 
-attribute [simp] get has keys values count isEmpty set ofList empty setIn
+attribute [simp] get has keys values count isEmpty isNotEmpty set ofList empty setIn
 
 end Map
 

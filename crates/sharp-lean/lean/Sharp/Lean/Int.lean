@@ -217,6 +217,29 @@ range. A law's automatic steps read each as `max` and `min` of the `Int`s, which
 
 end int
 
+/-- `==` on two `List`s, spec section 19: both hold as many elements, and each element of `a` equals the one at its
+index in `b` by `equal`, the elements' own `==`, which runs on each pair in order until one is not equal, as the engine
+compares them. -/
+def elementsEqual {α : Type} (equal : α → α → M Bool) (a b : List α) : M Bool :=
+  if a.length = b.length then pairs a b else pure false
+where
+  pairs : List α → List α → M Bool
+    | x :: xs, y :: ys => do if (← equal x y) then pairs xs ys else pure false
+    | _, _ => pure true
+
+/-- A list equals itself pair by pair when each element equals itself, as `x == x` holds of every value of a type
+whose `==` is its values' own. -/
+@[simp] theorem elementsEqual.pairs_self {α : Type} {equal : α → α → M Bool} (h : ∀ x, equal x x = pure true)
+    (l : List α) : elementsEqual.pairs equal l l = pure true := by
+  induction l with
+  | nil => rfl
+  | cons x xs ih => simp [elementsEqual.pairs, h, ih]
+
+/-! The automatic steps read `==` on two lists a law writes out pair by pair, and on a list and itself as `true` where
+each element equals itself. -/
+
+attribute [simp] elementsEqual elementsEqual.pairs
+
 /-- Proves a recursive call's argument smaller than the value it replaces, in the measure `termination_by` names: an
 `int` one step towards a bound that a condition on the call's path tested, or the rest of a list pattern. -/
 macro "smaller_value" : tactic => `(tactic| (
