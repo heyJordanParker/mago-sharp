@@ -36631,6 +36631,23 @@ fn a_machine_property_changes_only_by_a_move_of_its_own() {
     );
 }
 
+/// Spec section 20.2: an interface property that holds a machine is `{ get; }`, since an interface property has no
+/// storage and no `set`, and the implementer's own property carries the `private set` the rule checks.
+#[test]
+fn an_interface_property_that_holds_a_machine_is_read_only() {
+    let payable = (
+        "src/Shop/Payable.sharp",
+        "namespace Shop;\n\npublic interface Payable\n{\n    OrderStatus status { get; }\n}\n",
+    );
+    let order = (
+        "src/Shop/Order.sharp",
+        "namespace Shop;\n\npublic class Order : Payable\n{\n    public OrderStatus status { get; private set; } = OrderStatus.open();\n\n    public void pay(int cents) => this.status = this.status.pay(cents);\n}\n",
+    );
+
+    assert_eq!(refusals(payable, &[ORDER_STATUS, order]), Vec::<String>::new());
+    assert_eq!(refusals(order, &[ORDER_STATUS, payable]), Vec::<String>::new());
+}
+
 /// Spec section 20.2: a constructor starts a machine property with an entry point, and a property the constructor
 /// takes is refused, since its caller's value came from no entry point.
 #[test]

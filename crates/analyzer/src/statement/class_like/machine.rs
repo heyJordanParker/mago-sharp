@@ -99,7 +99,8 @@ fn reachable(graph: &MachineMetadata, start: impl IntoIterator<Item = Word>) -> 
 
 /// Checks each property of `class` that holds a PHP# machine, spec section 20.2: its `set` is `private`, and its
 /// initial value, when it has one, calls an entry point of the machine. A property its constructor takes has the
-/// caller's value, which no entry point gave, so it is refused there.
+/// caller's value, which no entry point gave, so it is refused there. An interface's property has no storage and no
+/// `set`, so nothing writes it, and each implementer's own property is checked instead.
 pub(crate) fn check_machine_properties<A>(
     context: &mut Context<'_, '_, A>,
     class: &ClassLikeMetadata,
@@ -107,6 +108,9 @@ pub(crate) fn check_machine_properties<A>(
 ) where
     A: Arena,
 {
+    if class.kind.is_interface() {
+        return;
+    }
     let mut properties: Vec<_> = class.properties.values().collect();
     properties.sort_by_key(|property| property.name_span.map(|span| span.start.offset));
     for property in properties {
