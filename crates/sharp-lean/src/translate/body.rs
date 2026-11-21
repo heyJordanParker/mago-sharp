@@ -11,6 +11,7 @@ use foldhash::HashSet;
 use mago_analyzer::smaller::Path;
 use mago_analyzer::smaller::Smaller;
 use mago_analyzer::smaller::Step;
+use mago_codex::metadata::machine::MachineMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
@@ -1292,6 +1293,13 @@ impl<'body, 'program> Body<'body, 'program> {
                 Some(&call.argument_list),
             );
         }
+        let checked = self.checked;
+        let receiver = checked.types().expression_type(call.object);
+        if let Some(r#enum) = self.joined_enum(receiver)
+            && let Some(machine) = checked.types().machine(word(r#enum))
+        {
+            return self.case_call(expression, call, r#enum, machine, receiver);
+        }
         let Some(class) = self.receiver_class(call.object) else {
             return "default".to_owned();
         };
@@ -1309,6 +1317,68 @@ impl<'body, 'program> Body<'body, 'program> {
         };
         let receiver = self.value(call.object);
         self.call(expression, target.class.as_bytes(), class, method, Some(receiver), Some(&call.argument_list))
+    }
+
+    /// `call` on a value of `r#type`, a union of the machine `machine`'s cases, spec section 20.2, as the case it holds
+    /// runs it: a `match` on the value whose arm for each case of the union calls the method the case's class declares
+    /// or inherits. A move that doesn't move from the case throws once its arguments ran, as the method the engine
+    /// gives the case throws `Sharp\StateError`. No other case reaches the call, so its arm is the default.
+    fn case_call(
+        &mut self,
+        expression: &Expression,
+        call: &MethodCall,
+        r#enum: &[u8],
+        machine: &MachineMetadata,
+        r#type: &TUnion,
+    ) -> String {
+        let Some(method) = self.method_name(&call.method) else {
+            return "default".to_owned();
+        };
+        let receiver = self.value(call.object);
+        self.reads(r#enum);
+        let held = self.sealed(call.object.span(), r#enum).map(|(_, constructor)| constructor);
+        let lean = names::full_name(&self.reached_name(r#enum));
+        let moves: Vec<_> = machine.moves.iter().filter(|r#move| r#move.name.as_bytes() == method).collect();
+        let mut alternatives = Vec::new();
+        for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
+            let TAtomic::Object(TObject::Named(named)) = atomic else {
+                unreachable!("a union of a machine's cases names each case's class, not {}", atomic.get_id());
+            };
+            let case = names::short_name(named.name.as_bytes());
+            let refused = !moves.is_empty()
+                && !moves.iter().any(|r#move| r#move.from.iter().any(|from| from.as_bytes() == case.as_bytes()));
+            let branch = if refused {
+                let (mut lines, _) = self.nested(|body| {
+                    body.arguments(&call.argument_list, None);
+                    String::new()
+                });
+                lines.push("throw Throwable.Thrown".to_owned());
+                lines
+            } else {
+                let declaring = self.checked.types().member_declaration(named.name, word(method));
+                if !matches!(declaring.kind, DeclarationKind::Method { .. }) {
+                    return self.unmodeled(expression.span(), "a call of a function value".to_owned(), issues::LAMBDA);
+                }
+                self.nested_lines(|body| {
+                    body.call(
+                        expression,
+                        declaring.class.as_bytes(),
+                        named.name.as_bytes(),
+                        method,
+                        Some(receiver.clone()),
+                        Some(&call.argument_list),
+                    )
+                })
+            };
+            let pattern = format!("({} ..)", names::member(&lean, case.as_bytes()));
+            let pattern = held.as_ref().map_or_else(|| pattern.clone(), |held| format!("({held} {pattern})"));
+            alternatives.push((pattern, Choice::Branch(branch)));
+        }
+        if alternatives.len() < machine.cases.len() {
+            alternatives.push(("_".to_owned(), Choice::Branch(vec!["pure default".to_owned()])));
+        }
+
+        self.choose(&Choice::Match(receiver, alternatives))
     }
 
     /// Whether `expression`'s value is a `List`, null aside.
@@ -1925,6 +1995,26 @@ impl<'body, 'program> Body<'body, 'program> {
             Hint::Identifier(identifier) => self.case_enum(self.checked.names().get(identifier)),
             _ => None,
         }
+    }
+
+    /// The enum whose cases the union `r#type` joins, null aside, spec section 20.2, as a value's type
+    /// `Counter.Counting|Counter.Done` joins `Counter`'s, whose Lean type holds each of them. `None` for a type of one
+    /// class, and for a union that joins anything else.
+    pub(super) fn joined_enum<'joined>(&self, r#type: &'joined TUnion) -> Option<&'joined [u8]> {
+        let mut enums = r#type.types.iter().filter(|atomic| !atomic.is_null()).map(|atomic| match atomic {
+            TAtomic::Object(TObject::Named(named)) => self.case_enum(named.name.as_bytes()),
+            _ => None,
+        });
+        let first = enums.next()??;
+        let mut joined = false;
+        for r#enum in enums {
+            if !r#enum.is_some_and(|r#enum| self.reach.same_class(r#enum, first)) {
+                return None;
+            }
+            joined = true;
+        }
+
+        joined.then_some(first)
     }
 
     /// The Lean type the class-like `class` declares itself, which the constructor of a sealed interface it implements

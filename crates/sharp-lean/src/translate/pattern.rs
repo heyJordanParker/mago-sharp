@@ -3,6 +3,7 @@
 
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_syntax::cst::Hint;
@@ -82,13 +83,18 @@ impl Body<'_, '_> {
 
     /// A type pattern holds for a value of the type it names, a case's for a value of that case, whose fields match the
     /// patterns the case's pattern gives them, and an implementer's of a sealed interface for the interface's value its
-    /// constructor holds, or a case of an enum that implements it. Lean knows nothing else about a value's type while
-    /// the code runs.
+    /// constructor holds, or a case of an enum that implements it. A value of a union of one enum's cases is a value of
+    /// the enum, spec section 20.2. Lean knows nothing else about a value's type while the code runs.
     fn type_test(&mut self, subject: &str, r#type: &TUnion, pattern: &TypePattern) -> Option<Test> {
         let atomics: Vec<&TAtomic> = r#type.types.iter().filter(|atomic| !atomic.is_null()).collect();
-        let [atomic] = atomics.as_slice() else {
-            self.unmodeled(pattern.span(), "a type test".to_owned(), issues::TYPE_TEST);
-            return None;
+        let joined = self.joined_enum(r#type).map(|r#enum| TAtomic::Object(TObject::new_named(word(r#enum))));
+        let atomic = match (&joined, atomics.as_slice()) {
+            (Some(r#enum), _) => r#enum,
+            (None, [atomic]) => *atomic,
+            (None, _) => {
+                self.unmodeled(pattern.span(), "a type test".to_owned(), issues::TYPE_TEST);
+                return None;
+            }
         };
 
         let name = pattern.variable.map(|variable| names::identifier(variable.value));

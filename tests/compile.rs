@@ -4526,6 +4526,50 @@ fn a_law_reasons_about_a_union_of_one_machine_s_cases() {
     assert!(printed(&output).contains("error[law-unproven]: law oneCounts is not proven\n"), "{}", printed(&output));
 }
 
+/// Spec sections 20.2 and 28: a value typed as a union of one machine's cases is a value of the machine, so a law calls
+/// a move on it, as the case it holds runs the move, and tests which case it is. A move called on a case it doesn't
+/// move from throws, and a law holds wherever its code throws. A law that is false in the case the moves give is not
+/// proven.
+#[test]
+fn a_law_follows_a_value_typed_as_a_union_of_one_machine_s_cases() {
+    let step = |law: &str| {
+        format!(
+            "namespace App;\n\ninternal machine Step\n{{\n    case A {{ internal Step.B|Step.C go(bool done) => done ? Step.C : Step.B; }}\n    case B {{ internal Step.B|Step.C go(bool done) => done ? Step.C : Step.B; }}\n    final case C;\n    internal static Step.A enter() => Step.A;\n    {law}\n}}\n"
+        )
+    };
+    let gate = "namespace App;\n\ninternal machine Gate\n{\n    case Open { internal Gate.Shut|Gate.Gone close(bool forever) => forever ? Gate.Gone : Gate.Shut; }\n    case Shut { internal Gate.Open open() => Gate.Open; }\n    final case Gone;\n    internal static Gate.Open enter() => Gate.Open;\n    law shutReopens() => Gate.enter().close(false) is Gate.Shut s ? s.open() is Gate.Open : false;\n}\n";
+
+    let directory = lawful_project(&[
+        (
+            "app/Step.sharp",
+            &step(
+                "law twoMovesReachC() => Step.enter().go(false).go(true) is Step.C;\n    law doneThrowsOnGo() => Step.enter().go(true).go(true) is Step.B;",
+            ),
+        ),
+        ("app/Gate.sharp", gate),
+    ]);
+
+    let output = compile(directory.path());
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(directory.path(), "app/Step.sharp").exists());
+    assert!(compiled(directory.path(), "app/Gate.sharp").exists());
+
+    let directory = lawful_project(&[(
+        "app/Step.sharp",
+        &step("law twoWaitsReachC() => Step.enter().go(false).go(false) is Step.C;"),
+    )]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law twoWaitsReachC is not proven\n"),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// Spec section 28: `<` on two values of a class runs the class's own `<=>`, so a law that compares two `Instant`s
 /// proves through `Instant`'s, which compares their seconds, then their nanoseconds. A false order is not proven.
 #[test]
