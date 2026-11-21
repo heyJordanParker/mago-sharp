@@ -144,6 +144,7 @@ mod tests {
             minimum_level: None,
             filter_fixable: false,
             editor_url: None,
+            tool_version: "1.2.3",
         }
     }
 

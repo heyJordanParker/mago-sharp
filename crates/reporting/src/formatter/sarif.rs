@@ -55,7 +55,7 @@ fn build_sarif_log(
         .driver(
             ToolComponent::builder()
                 .name("mago")
-                .version(env!("CARGO_PKG_VERSION"))
+                .version(config.tool_version)
                 .information_uri("https://github.com/heyJordanParker/php-sharp")
                 .build(),
         )

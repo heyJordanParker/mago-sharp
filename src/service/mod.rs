@@ -90,6 +90,7 @@ use mago_text_edit::TextEditor;
 use crate::baseline;
 use crate::baseline::unserialize_baseline;
 use crate::consts::ISSUE_URL;
+use crate::consts::VERSION;
 use crate::error::Error;
 use crate::utils;
 
@@ -475,6 +476,7 @@ impl IssueProcessor {
             sort: self.sort,
             minimum_report_level: self.minimum_report_level,
             editor_url: self.editor_url.clone(),
+            tool_version: VERSION,
         };
 
         let reporter = Reporter::new(read_database, reporter_configuration);

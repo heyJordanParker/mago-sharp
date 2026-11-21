@@ -61,6 +61,9 @@ pub struct ReporterConfig {
     /// Supported placeholders: `%file%` (absolute path), `%rel_file%` (workspace-relative path), `%line%`, `%column%`.
     /// Example: `"phpstorm://open?file=%file%&line=%line%"`
     pub editor_url: Option<String>,
+
+    /// The version of the tool that reports, which a SARIF report names.
+    pub tool_version: &'static str,
 }
 
 /// Status information returned after reporting issues.
@@ -195,6 +198,7 @@ impl Reporter {
             minimum_level: self.config.minimum_report_level,
             filter_fixable: self.config.filter_fixable,
             editor_url: self.config.editor_url.clone(),
+            tool_version: self.config.tool_version,
         };
 
         // Dispatch to the appropriate formatter
@@ -239,6 +243,7 @@ mod tests {
                 sort: false,
                 minimum_report_level: None,
                 editor_url: None,
+                tool_version: "1.2.3",
             },
         )
     }
@@ -363,6 +368,18 @@ mod tests {
 
         assert_eq!(value["version"], "2.1.0");
         assert!(value["runs"][0]["results"].as_array().is_some_and(Vec::is_empty));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn sarif_names_the_version_of_the_tool_that_reports() {
+        let output = report_empty(ReportingFormat::Sarif);
+
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output) else {
+            panic!("empty SARIF report should be valid JSON");
+        };
+
+        assert_eq!(value["runs"][0]["tool"]["driver"]["version"], "1.2.3");
     }
 
     #[cfg(feature = "serde")]

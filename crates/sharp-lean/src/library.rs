@@ -672,7 +672,7 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
 fn unpack(url: &str, archive: &Archive, staging: &Path) -> io::Result<()> {
     let failed = |error: &dyn std::fmt::Display| io::Error::other(format!("downloading {url} failed: {error}"));
     let body = ureq::get(url)
-        .header("User-Agent", concat!("mago/", env!("CARGO_PKG_VERSION")))
+        .header("User-Agent", "mago")
         .call()
         .map_err(|error| failed(&error))?
         .into_body()

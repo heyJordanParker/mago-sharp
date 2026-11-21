@@ -17,7 +17,7 @@ autotests = false
 package.edition = "2024"
 package.authors = ["Seifeddine Gmati <azjezz@carthage.software>"]
 package.license = "MIT OR Apache-2.0"
-package.version = "0.6.42"
+package.version = "0.0.0"
 package.homepage = "https://github.com/heyJordanParker/php-sharp"
 package.repository = "https://github.com/heyJordanParker/php-sharp"
 package.rust-version = "1.97.0"
@@ -163,38 +163,38 @@ semicolon_inside_block = "allow"
 inline_modules = "allow"
 
 [workspace.dependencies]
-mago-syntax-core = { path = "crates/syntax-core", version = "0.6.42" }
-mago-syntax = { path = "crates/syntax", version = "0.6.42" }
-mago-phpdoc-syntax = { path = "crates/phpdoc-syntax", version = "0.6.42" }
-mago-casing = { path = "crates/casing", version = "0.6.42" }
-mago-composer = { path = "crates/composer", version = "0.6.42" }
-mago-text-edit = { path = "crates/text-edit", version = "0.6.42" }
-mago-formatter = { path = "crates/formatter", version = "0.6.42" }
-mago-fingerprint = { path = "crates/fingerprint", version = "0.6.42" }
-mago-word = { path = "crates/word", version = "0.6.42" }
-mago-bytes = { path = "crates/bytes", version = "0.6.42" }
-mago-linter = { path = "crates/linter", version = "0.6.42" }
-mago-names = { path = "crates/names", version = "0.6.42" }
-mago-reporting = { path = "crates/reporting", version = "0.6.42", default-features = false }
-mago-span = { path = "crates/span", version = "0.6.42" }
-mago-php-version = { path = "crates/php-version", version = "0.6.42" }
-mago-analyzer = { path = "crates/analyzer", version = "0.6.42" }
-mago-algebra = { path = "crates/algebra", version = "0.6.42" }
-mago-allocator = { path = "crates/allocator", version = "0.6.42" }
-mago-codex = { path = "crates/codex", version = "0.6.42" }
-mago-prelude = { path = "crates/prelude", version = "0.6.42" }
-mago-semantics = { path = "crates/semantics", version = "0.6.42" }
-mago-collector = { path = "crates/collector", version = "0.6.42" }
-mago-database = { path = "crates/database", version = "0.6.42", default-features = false }
-mago-guard = { path = "crates/guard", version = "0.6.42" }
-mago-orchestrator = { path = "crates/orchestrator", version = "0.6.42" }
-mago-server = { path = "crates/server", version = "0.6.42" }
-mago-extension = { path = "crates/extension", version = "0.6.42" }
-mago-sharp-bridge = { path = "crates/sharp-bridge", version = "0.6.42" }
-mago-converter = { path = "crates/converter", version = "0.6.42" }
-mago-sharp-lean = { path = "crates/sharp-lean", version = "0.6.42" }
-mago-build-id = { path = "crates/build-id", version = "0.6.42" }
-mago-engine = { path = "crates/engine", version = "0.6.42" }
+mago-syntax-core = { path = "crates/syntax-core" }
+mago-syntax = { path = "crates/syntax" }
+mago-phpdoc-syntax = { path = "crates/phpdoc-syntax" }
+mago-casing = { path = "crates/casing" }
+mago-composer = { path = "crates/composer" }
+mago-text-edit = { path = "crates/text-edit" }
+mago-formatter = { path = "crates/formatter" }
+mago-fingerprint = { path = "crates/fingerprint" }
+mago-word = { path = "crates/word" }
+mago-bytes = { path = "crates/bytes" }
+mago-linter = { path = "crates/linter" }
+mago-names = { path = "crates/names" }
+mago-reporting = { path = "crates/reporting", default-features = false }
+mago-span = { path = "crates/span" }
+mago-php-version = { path = "crates/php-version" }
+mago-analyzer = { path = "crates/analyzer" }
+mago-algebra = { path = "crates/algebra" }
+mago-allocator = { path = "crates/allocator" }
+mago-codex = { path = "crates/codex" }
+mago-prelude = { path = "crates/prelude" }
+mago-semantics = { path = "crates/semantics" }
+mago-collector = { path = "crates/collector" }
+mago-database = { path = "crates/database", default-features = false }
+mago-guard = { path = "crates/guard" }
+mago-orchestrator = { path = "crates/orchestrator" }
+mago-server = { path = "crates/server" }
+mago-extension = { path = "crates/extension" }
+mago-sharp-bridge = { path = "crates/sharp-bridge" }
+mago-converter = { path = "crates/converter" }
+mago-sharp-lean = { path = "crates/sharp-lean" }
+mago-build-id = { path = "crates/build-id" }
+mago-engine = { path = "crates/engine" }
 sharp = { path = "../../ext/sharp" }
 tracing = { version = "0.1.40" }
 foldhash = "0.2"

@@ -22,6 +22,7 @@ use function preg_replace;
 use function rtrim;
 use function sprintf;
 use function str_replace;
+use function substr_count;
 use function trim;
 
 use const STDERR;
@@ -49,21 +50,6 @@ const VERSIONED_DOCUMENTATION_FILES = [
     'scripts/install.sh',
     'src/commands/self_update.rs',
     'src/config/mod.rs',
-];
-
-// The fuzz crate is a workspace of its own, so its lock holds the Mago crates it builds as well.
-const LOCK_FILES = [
-    'Cargo.lock',
-    'crates/syntax/fuzz/Cargo.lock',
-];
-
-const MANIFEST_VERSION_DECLARATIONS = [
-    'package' => ['package', '/^version = "[^"]+"$/'],
-    'workspace' => ['workspace', '/^package\.version = "[^"]+"$/'],
-    'workspace.dependencies' => [
-        'dependency',
-        '/^mago-[a-z0-9-]+ = \{[^}]*path = "[^"]+"[^}]*version = "[^"]+"[^}]*}$/',
-    ],
 ];
 
 function set_version(mixed $newVersion, int $argumentCount): int
@@ -134,15 +120,20 @@ function minor_version(string $version): string
     return $major . '.' . $minor;
 }
 
-/** @return array<string, string> */
+/**
+ * The release version is the root package's alone: the `mago` binary, PHP#'s engine and the Composer packages take it
+ * from there. Every workspace crate keeps version 0.0.0, which a release never bumps, so a bump rebuilds only what
+ * reads the release version.
+ *
+ * @return array<string, string>
+ */
 function prepare_updates(string $root, string $manifest, string $currentVersion, string $newVersion): array
 {
-    $updates = [$root . '/Cargo.toml' => namespace\update_manifest($manifest, $newVersion)];
-
-    foreach (LOCK_FILES as $relativePath) {
-        $path = $root . '/' . $relativePath;
-        $updates[$path] = namespace\update_lock($path, namespace\read_file($path), $currentVersion, $newVersion);
-    }
+    $lockPath = $root . '/Cargo.lock';
+    $updates = [
+        $root . '/Cargo.toml' => namespace\update_manifest($manifest, $newVersion),
+        $lockPath => namespace\update_lock($lockPath, namespace\read_file($lockPath), $currentVersion, $newVersion),
+    ];
 
     return $updates + namespace\prepare_documentation_updates($root, $currentVersion, $newVersion);
 }
@@ -234,9 +225,7 @@ function read_package_version(string $manifest): string
 function update_manifest(string $manifest, string $newVersion): string
 {
     $section = null;
-    $packageUpdates = 0;
-    $workspaceUpdates = 0;
-    $dependencyUpdates = 0;
+    $updated = false;
     $lines = explode("\n", $manifest);
 
     foreach ($lines as &$line) {
@@ -248,30 +237,16 @@ function update_manifest(string $manifest, string $newVersion): string
             continue;
         }
 
-        $updateKind = namespace\get_manifest_update_kind($section, $normalized);
-        if (null === $updateKind) {
-            continue;
+        if (!$updated && 'package' === $section && 1 === preg_match('/^version = "[^"]+"$/', $normalized)) {
+            $line = namespace\update_manifest_line($line, $newVersion);
+            $updated = true;
         }
-
-        $line = namespace\update_manifest_line($line, $newVersion);
-
-        if ('package' === $updateKind) {
-            ++$packageUpdates;
-
-            continue;
-        }
-
-        if ('workspace' === $updateKind) {
-            ++$workspaceUpdates;
-
-            continue;
-        }
-
-        ++$dependencyUpdates;
     }
     unset($line);
 
-    namespace\validate_manifest_updates($packageUpdates, $workspaceUpdates, $dependencyUpdates);
+    if (!$updated) {
+        throw new RuntimeException('Unable to find the root package version in Cargo.toml.');
+    }
 
     return implode("\n", $lines);
 }
@@ -286,25 +261,6 @@ function read_manifest_section(string $line): ?string
     return $matches[1] ?? throw new RuntimeException('Unable to read a Cargo.toml section name.');
 }
 
-function get_manifest_update_kind(?string $section, string $line): ?string
-{
-    if (null === $section) {
-        return null;
-    }
-
-    $declaration = MANIFEST_VERSION_DECLARATIONS[$section] ?? null;
-    if (null === $declaration) {
-        return null;
-    }
-
-    [$kind, $pattern] = $declaration;
-    if (1 !== preg_match($pattern, $line)) {
-        return null;
-    }
-
-    return $kind;
-}
-
 function update_manifest_line(string $line, string $newVersion): string
 {
     $updated = preg_replace('/version = "[^"]+"/', sprintf('version = "%s"', $newVersion), $line, 1);
@@ -315,61 +271,17 @@ function update_manifest_line(string $line, string $newVersion): string
     return $updated;
 }
 
-function validate_manifest_updates(int $packageUpdates, int $workspaceUpdates, int $dependencyUpdates): void
-{
-    if (1 !== $packageUpdates) {
-        throw new RuntimeException('Cargo.toml does not contain the expected Mago version declarations.');
-    }
-
-    if (1 !== $workspaceUpdates) {
-        throw new RuntimeException('Cargo.toml does not contain the expected Mago version declarations.');
-    }
-
-    if (0 === $dependencyUpdates) {
-        throw new RuntimeException('Cargo.toml does not contain the expected Mago version declarations.');
-    }
-}
-
 /**
- * Moves each Mago package the lock holds at the current version to the new one. A crate with a version of its own, as
- * the fuzz crate's 0.0.0, keeps it.
+ * Moves the root package, mago, from the current version to the new one.
  */
 function update_lock(string $path, string $lock, string $currentVersion, string $newVersion): string
 {
-    $currentDeclaration = sprintf('version = "%s"', $currentVersion);
-    $insideMagoPackage = false;
-    $replacements = 0;
-    $lines = explode("\n", $lock);
-
-    foreach ($lines as &$line) {
-        $normalized = rtrim($line, "\r");
-        if ('[[package]]' === $normalized) {
-            $insideMagoPackage = false;
-
-            continue;
-        }
-
-        if (1 === preg_match('/^name = "mago(?:-[^"]+)?"$/', $normalized)) {
-            $insideMagoPackage = true;
-
-            continue;
-        }
-
-        if (!$insideMagoPackage || $currentDeclaration !== $normalized) {
-            continue;
-        }
-
-        $line = str_replace($normalized, sprintf('version = "%s"', $newVersion), $line);
-        $insideMagoPackage = false;
-        ++$replacements;
-    }
-    unset($line);
-
-    if (0 === $replacements) {
-        throw new RuntimeException(sprintf('%s holds no Mago package at version %s.', $path, $currentVersion));
+    $current = sprintf("\nname = \"mago\"\nversion = \"%s\"\n", $currentVersion);
+    if (1 !== substr_count($lock, $current)) {
+        throw new RuntimeException(sprintf('%s holds no mago package at version %s.', $path, $currentVersion));
     }
 
-    return implode("\n", $lines);
+    return str_replace($current, sprintf("\nname = \"mago\"\nversion = \"%s\"\n", $newVersion), $lock);
 }
 
 try {

@@ -859,6 +859,7 @@ fn write_hosts(
             sort: false,
             minimum_report_level: None,
             editor_url: None,
+            tool_version: VERSION,
         },
     )
     .report(refused, None)?;
@@ -1581,6 +1582,7 @@ impl Outcome {
                     sort: false,
                     minimum_report_level: None,
                     editor_url: configuration.editor_url.clone(),
+                    tool_version: VERSION,
                 },
             );
             reporter.report(self.issues, None)?;
