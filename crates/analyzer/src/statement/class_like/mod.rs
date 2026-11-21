@@ -5579,6 +5579,14 @@ fn check_class_like_properties<'ctx, A>(
                 && !parent_property.write_visibility.is_private();
             if sharp_parent && parent_property.flags.is_final() && !parent_property.write_visibility.is_private() {
                 let parent_class = display_class_like_name(context, parent_class_name);
+                // Spec section 9: a parameter takes no `virtual`, so a promoted property opens only in the class body.
+                let help = if parent_property.flags.is_promoted_property() {
+                    format!(
+                        "Declare `{property}` in `{parent_class}`'s body as `virtual` to let a subclass override it."
+                    )
+                } else {
+                    format!("Declare `{property}` `virtual` in `{parent_class}` to let a subclass override it.")
+                };
 
                 context.collector.report_with_code(
                     IssueCode::OverrideFinalProperty,
@@ -5587,7 +5595,7 @@ fn check_class_like_properties<'ctx, A>(
                     ))
                     .with_annotation(Annotation::primary(property_span).with_message("Overridden here."))
                     .with_annotation(Annotation::secondary(parent_property_span).with_message("Declared closed here."))
-                    .with_help(format!("Declare `{property}` `virtual` in `{parent_class}` to let a subclass override it.")),
+                    .with_help(help),
                 );
             } else if !open_to_php
                 && (parent_property.flags.is_final()

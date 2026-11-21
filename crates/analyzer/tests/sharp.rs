@@ -3830,6 +3830,30 @@ fn a_property_overrides_a_sharp_property_only_when_it_is_open() {
     );
 }
 
+/// Spec sections 6.1 and 9: a property a constructor promotes is closed, as one in the class body is, and a parameter
+/// takes no `virtual`, so the help on an override of a promoted property names the class body as the one place that
+/// opens it.
+#[test]
+fn the_help_on_an_override_of_a_closed_property_names_where_virtual_goes() {
+    let notice = (
+        "src/Demo/Notice.sharp",
+        "namespace Demo;\n\npublic abstract class Notice\n{\n    public string key { get; set; } = \"\";\n\n    public Notice(public string message { get; set; }) { }\n}\n",
+    );
+    let alert = "namespace Demo;\n\npublic class Alert : Notice\n{\n    public override string key { get; set; } = \"\";\n\n    public override string message { get; set; } = \"\";\n\n    public Alert() : super(\"saved\") { }\n}\n";
+
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Alert.sharp", alert), &[notice])
+            .into_iter()
+            .filter(|issue| issue.code.as_deref() == Some("override-final-property"))
+            .map(|issue| issue.help.unwrap_or_default())
+            .collect::<Vec<_>>(),
+        [
+            "Declare `key` `virtual` in `Notice` to let a subclass override it.",
+            "Declare `message` in `Notice`'s body as `virtual` to let a subclass override it.",
+        ]
+    );
+}
+
 /// Spec section 6.1: a plain PHP parent's own code writes its property at any time, so an override of it has `set`,
 /// never `init`, and its `set` is at the parent's level or wider.
 #[test]
