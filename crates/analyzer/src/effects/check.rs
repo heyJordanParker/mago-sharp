@@ -97,6 +97,7 @@ use crate::utils::names::sharp_code_class_name;
 use crate::utils::names::sharp_effect_name;
 use crate::utils::names::sharp_missing_imports;
 use crate::utils::quoted_source;
+use crate::visibility::namespace_of;
 
 /// Spec section 6.1: a `get` body may have any effect, and a read carries it, but it never writes `this`: neither a
 /// write of a field of `this` nor a call of a method that writes one. Unlike a method marked `readonly` (section 13),
@@ -1098,11 +1099,51 @@ pub(crate) fn check_uses<A>(
             continue;
         }
 
+        let namespace = context.scope.namespace_name().unwrap_or_default();
+        // A class the name reaches hides the standard library's effect of its short name, as a class of the current
+        // namespace hides an imported one in C#.
+        let hidden = context.codebase.get_class_like(word(effect)).and_then(|class| {
+            let short = short_name(class.original_name);
+            context
+                .codebase
+                .class_likes
+                .values()
+                .find(|effect| {
+                    effect.flags.is_foreign()
+                        && is_sharp_namespace(effect.original_name.as_bytes())
+                        && short_name(effect.original_name).eq_ignore_ascii_case(&short)
+                })
+                .map(|effect| (class, effect))
+        });
+        if let Some((class, effect)) = hidden {
+            let dotted = |name: Word| String::from_utf8_lossy(name.as_bytes()).replace('\\', ".");
+            let reach = if namespace_of(class.original_name.as_bytes()).eq_ignore_ascii_case(namespace) {
+                "a class of this namespace"
+            } else {
+                "an imported class"
+            };
+            let alias = format!("{}Effect", short_name(effect.original_name));
+            context.collector.report_with_code(
+                IssueCode::InvalidEffect,
+                Issue::error(format!(
+                    "`{}` here is `{}`, {reach}, which hides the effect `{}`.",
+                    String::from_utf8_lossy(name.value),
+                    dotted(class.original_name),
+                    dotted(effect.original_name),
+                ))
+                .with_annotation(Annotation::primary(name.span).with_message("Written here."))
+                .with_help(format!(
+                    "Import the effect under another name, as `import {} as {alias};`, and write `uses {alias}`.",
+                    dotted(effect.original_name),
+                )),
+            );
+            continue;
+        }
+
         // The message names the `foreign` classes the file can name without another import: the standard library's,
         // in any of its namespaces (spec section 29), its namespace's and its imports'. The file depends on each class
         // it could name, so the message follows a class that becomes `foreign` or stops being one, as a compile from
         // scratch gives it.
-        let namespace = context.scope.namespace_name().unwrap_or_default();
         let nameable: Vec<_> = context
             .codebase
             .class_likes

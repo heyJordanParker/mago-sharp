@@ -29189,6 +29189,32 @@ fn a_uses_that_names_no_effect_lists_the_effects_its_file_can_name() {
     );
 }
 
+/// Spec section 29: a class of the file's namespace hides the standard library's effect of its short name, as a class
+/// of the current namespace hides an imported one in C#, and so does an imported class. So `uses` that names one is
+/// refused with the class it names and the effect it hides, and the effect imported under another name reaches it.
+#[test]
+fn a_class_with_an_effects_name_hides_the_effect_in_uses() {
+    let files = ("app/Probe/Files.sharp", "namespace Probe;\n\npublic static class Files\n{\n}\n");
+    let http = ("app/Vendor/Http.sharp", "namespace Vendor;\n\npublic static class Http\n{\n}\n");
+    let reader = (
+        "app/Probe/Reader.sharp",
+        "namespace Probe;\n\nimport Vendor.Http;\n\npublic interface Reader\n{\n    void read(Function<void() uses Files> read);\n\n    void fetch(Function<void() uses Http> fetch);\n}\n",
+    );
+    let aliased = (
+        "app/Probe/Aliased.sharp",
+        "namespace Probe;\n\nimport Sharp.IO.Files as FileSystem;\n\npublic interface Aliased\n{\n    void read(Function<void() uses FileSystem> read);\n}\n",
+    );
+
+    assert_eq!(
+        worded(reader, &[files, http]),
+        [
+            "7:36 invalid-effect `Files` here is `Probe.Files`, a class of this namespace, which hides the effect `Sharp.IO.Files`. | Written here. | Import the effect under another name, as `import Sharp.IO.Files as FilesEffect;`, and write `uses FilesEffect`.",
+            "9:37 invalid-effect `Http` here is `Vendor.Http`, an imported class, which hides the effect `Sharp.Net.Http`. | Written here. | Import the effect under another name, as `import Sharp.Net.Http as HttpEffect;`, and write `uses HttpEffect`.",
+        ]
+    );
+    assert_eq!(worded(aliased, &[files]), Vec::<String>::new());
+}
+
 /// An `extern event` gives the plain PHP class it marks the effects its `uses` lists, spec section 15, as an `extern`
 /// of the class does, so creating the event has them.
 #[test]
