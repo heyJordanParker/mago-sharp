@@ -706,6 +706,20 @@ impl CodebaseMetadata {
         self.get_class_like(name).filter(|metadata| metadata.kind.is_enum())
     }
 
+    /// Whether a value of `class` never changes, spec section 13: an enum, an enum whose cases carry data, a case of
+    /// one, or a struct. Such a value is readonly wherever `readonly` is asked for, so `readonly` before it changes
+    /// nothing.
+    #[must_use]
+    pub fn never_changes(&self, class: &ClassLikeMetadata) -> bool {
+        class.kind.is_enum()
+            || class.flags.is_struct()
+            || class.flags.is_enum_case_class()
+            || class.permitted_inheritors.iter().flatten().any(|case| {
+                self.get_class_like(*case)
+                    .is_some_and(|case| case.flags.is_enum_case_class() && case.direct_parent_class == Some(class.name))
+            })
+    }
+
     /// Retrieves metadata for any class-like structure, by [`Self::class_key`]: a PHP# one only by its exact name, and
     /// a plain PHP one in any case.
     #[inline]

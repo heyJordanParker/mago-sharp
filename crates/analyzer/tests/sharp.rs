@@ -35941,6 +35941,26 @@ fn a_function_value_keeps_the_readonly_values_its_type_passes() {
     );
 }
 
+/// Spec section 13: a value of a type that never changes, as a struct, is readonly wherever `readonly` is asked for, so
+/// a function value takes one as its type is written, with no `readonly` to declare, which would change nothing. A
+/// type that can change still needs its `readonly` there.
+#[test]
+fn a_type_that_never_changes_is_readonly_where_readonly_is_asked_for() {
+    let item = "namespace Repro;\n\ninternal struct ReproItem\n{\n    internal ReproItem(internal string key { get; }) {}\n\n    internal string label() => this.key;\n}\n";
+    let shelf = "namespace Repro;\n\ninternal class Shelf\n{\n    internal string key { get; set; } = \"\";\n}\n";
+    let repro = "namespace Repro;\n\ninternal final class ReadonlyRepro\n{\n    internal ReadonlyRepro(internal List<ReproItem> items { get; }, internal List<Shelf> shelves { get; }) {}\n    public int hash() => this.items.count();\n    public static bool operator ==(ReadonlyRepro a, ReadonlyRepro b)\n        => a.items.map((ReproItem item) => item.key) == b.items.map((ReproItem item) => item.label())\n            && a.shelves.map((Shelf shelf) => shelf.key) == b.shelves.map((readonly Shelf shelf) => shelf.key);\n}\n";
+
+    assert_eq!(
+        messages(
+            ("src/Repro/ReadonlyRepro.sharp", repro),
+            &[("src/Repro/ReproItem.sharp", item), ("src/Repro/Shelf.sharp", shelf)]
+        ),
+        [
+            "operator == cannot pass (Shelf shelf) => shelf.key to List<readonly Shelf>.map: it takes a writable `Shelf` where a readonly one is passed. Declare its parameter `readonly Shelf`."
+        ]
+    );
+}
+
 /// Spec section 13: a method's own type parameter takes a readonly value only where its parameter is written
 /// `readonly`, and `readonly T` stays readonly where it is passed, stored, returned or narrowed.
 #[test]

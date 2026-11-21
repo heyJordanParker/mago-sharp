@@ -11,7 +11,6 @@ use mago_word::word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
-use crate::statement::class_like::r#struct::value_properties;
 use crate::utils::names::sentence_article;
 use crate::utils::quoted_source;
 
@@ -81,7 +80,7 @@ where
             plain.push(name);
         }
 
-        class.map(|class| !class.kind.is_enum() && value_properties(context.codebase, class).is_none())
+        class.map(|class| !context.codebase.never_changes(class))
     };
 
     match hint {

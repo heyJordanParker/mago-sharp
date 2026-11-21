@@ -421,14 +421,23 @@ impl TUnion {
     /// Whether a value of `input` placed where this declared type goes would lose its readonly, spec section 13: a
     /// readonly value where this type takes a writable object, a type parameter not written `readonly`, or any value,
     /// a collection or a type argument of readonly values where this type's takes writable ones, and a function value
-    /// that [`TCallableSignature::drops_readonly_of`] refuses where this type is a function type. A class's type
-    /// arguments meet those of the class of its key, spec section 24, so the PHP# `Box` never meets its twin `BOX`.
+    /// that [`TCallableSignature::drops_readonly_of`] refuses where this type is a function type. A value of a class
+    /// that [never changes](CodebaseMetadata::never_changes) is readonly wherever it goes, so it loses nothing while
+    /// its type arguments hold no readonly object. A
+    /// class's type arguments meet those of the class of its key, spec section 24, so the PHP# `Box` never meets its
+    /// twin `BOX`.
     #[must_use]
     pub fn drops_readonly_of(&self, codebase: &CodebaseMetadata, input: &TUnion) -> bool {
         input.types.iter().any(|atomic| match atomic {
             TAtomic::Callable(TCallable::Signature(given)) => self.types.iter().any(|declared| {
                 matches!(declared, TAtomic::Callable(TCallable::Signature(declared)) if declared.drops_readonly_of(codebase, given).is_some())
             }),
+            TAtomic::Object(TObject::Named(named))
+                if codebase.get_class_like(named.name).is_some_and(|class| codebase.never_changes(class))
+                    && readonly_reach(atomic).into_iter().all(|reached| !reached.holds_readonly_object()) =>
+            {
+                false
+            }
             atomic if atomic.is_readonly_value() => self.types.iter().any(|declared| match declared {
                 TAtomic::Object(TObject::Named(_)) | TAtomic::GenericParameter(_) => !declared.is_readonly_value(),
                 TAtomic::Object(_) | TAtomic::Mixed(_) => true,
