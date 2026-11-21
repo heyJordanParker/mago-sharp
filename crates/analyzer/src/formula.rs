@@ -211,7 +211,7 @@ where
 /// `clauses` with each clause on a name or the local it holds, of `named`, on both: the name and the local hold one
 /// value, so a clause on either holds of each. The negation of a test that names its value then narrows the local as
 /// the negation of the plain test does, where `p is not C or s is not C` would narrow neither.
-fn with_named_locals(mut clauses: Vec<Clause>, named: &[(Word, Word)]) -> Vec<Clause> {
+pub(crate) fn with_named_locals(mut clauses: Vec<Clause>, named: &[(Word, Word)]) -> Vec<Clause> {
     for &(name, local) in named {
         clauses = clauses
             .into_iter()

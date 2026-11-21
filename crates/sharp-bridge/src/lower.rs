@@ -10099,13 +10099,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// Whether `value` can be a PHP array PHP# types as a `Map` or a `Set`: what plain PHP gives, a call of it or a
     /// property it declares, and what a local declared without a type holds. A literal, a `new`, any other call of
     /// PHP#, which reads plain PHP's result as `Self::returned_call` says, a property PHP# declares, a parameter and a
-    /// typed local hold the object, as does an element of any of them. `??`, `? :` and a `match` give one of their
-    /// sides, so they may be a PHP array where a side may be one. An arm with a block body may be one. A call of plain
-    /// PHP on a side [`Self::bind_sides`] bound for a place's type is the object, where [`Self::returned_call`] reads
-    /// it as that type.
+    /// typed local hold the object, as does an element of any of them. So do an `as` and a local a pattern binds and no
+    /// code writes, which their type test gave the value as the type holds it. `??`, `? :` and a `match` give one of
+    /// their sides, so they may be a PHP array where a side may be one. An arm with a block body may be one. A call of
+    /// plain PHP on a side [`Self::bind_sides`] bound for a place's type is the object, where [`Self::returned_call`]
+    /// reads it as that type.
     fn may_be_php_array(&self, value: &Expression) -> bool {
         ensure_sufficient_stack(|| match value.unparenthesized() {
-            Expression::Array(_) | Expression::Instantiation(_) | Expression::Literal(_) => false,
+            Expression::Array(_) | Expression::Instantiation(_) | Expression::Literal(_) | Expression::As(_) => false,
             Expression::ArrayAccess(access) => self.may_be_php_array(access.array),
             Expression::Binary(binary) if binary.operator.is_null_coalesce() => {
                 self.may_be_php_array(binary.lhs) || self.may_be_php_array(binary.rhs)
@@ -10121,7 +10122,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::Call(_) => self.plain_value(value) && !self.read_as_bound(value),
             Expression::Access(Access::Property(_)) => self.plain_value(value),
             Expression::ConstantAccess(access) => match self.names.binding(&access.name) {
-                Some(Binding::Local(local)) => local.kind != LocalKind::Parameter && self.typed_local(value).is_none(),
+                Some(Binding::Local(local)) => match local.kind {
+                    LocalKind::Parameter => false,
+                    LocalKind::Pattern { .. } => self.names.is_written(&local),
+                    LocalKind::Let | LocalKind::Const => self.typed_local(value).is_none(),
+                },
                 _ => true,
             },
             _ => true,

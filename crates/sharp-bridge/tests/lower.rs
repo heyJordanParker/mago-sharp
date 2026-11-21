@@ -15674,7 +15674,7 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_read_them_while_the_code_runs
     assert_eq!(lowered.body_of("kept"), test("#0"));
     assert_eq!(
         lowered.body_of("cast"),
-        "STMT_LIST\n  RETURN\n    CONDITIONAL\n      SHARP_IS_TYPE\n        VAR\n          ZVAL \"value\"\n        ZVAL \"#0\"\n      VAR\n        ZVAL \"value\"\n      ZVAL null\n"
+        "STMT_LIST\n  RETURN\n    CONDITIONAL\n      SHARP_IS_TYPE\n        ASSIGN\n          VAR\n            ZVAL \"as#1\"\n          VAR\n            ZVAL \"value\"\n        ZVAL \"#0\"\n      VAR\n        ZVAL \"as#1\"\n      ZVAL null\n"
     );
     assert_eq!(
         lowered.body_of("arm"),
@@ -29622,12 +29622,12 @@ fn is_before_a_question_mark_is_the_condition_of_a_conditional() {
 }
 
 /// ```php
-/// $calc = $extra instanceof \Lib\Calc ? $extra : null;
+/// $calc = (${'as#1'} = $extra) instanceof \Lib\Calc ? ${'as#1'} : null;
 /// $made = (${'as#1'} = \Lib\Calc::make()) instanceof \Lib\Calc ? ${'as#1'} : null;
 /// ```
 ///
-/// `as` reads a local or a parameter twice. Any other value is assigned to a variable PHP# cannot name, so it runs
-/// once.
+/// `as` tests a copy of its value in a variable PHP# cannot name, so the value runs once and a local it reads keeps
+/// its own value.
 #[test]
 fn as_is_a_conditional_that_gives_the_value_or_null() {
     assert_eq!(
@@ -29646,11 +29646,14 @@ fn as_is_a_conditional_that_gives_the_value_or_null() {
                   ZVAL "calc"
                 CONDITIONAL
                   INSTANCEOF
-                    VAR
-                      ZVAL "extra"
+                    ASSIGN
+                      VAR
+                        ZVAL "as#1"
+                      VAR
+                        ZVAL "extra"
                     ZVAL "Lib\\Calc"
                   VAR
-                    ZVAL "extra"
+                    ZVAL "as#1"
                   ZVAL null
               ASSIGN
                 VAR
@@ -29752,7 +29755,7 @@ fn is_and_as_that_give_a_plain_php_class_type_arguments_are_refused_before_lower
 
 /// ```php
 /// $present = <is Any>($extra);
-/// $either = <is int|string>($extra) ? $extra : null;
+/// $either = <is int|string>(${'as#1'} = $extra) ? ${'as#1'} : null;
 /// ```
 ///
 /// `is` and `as` of `Any` and of a union are the engine's test of the type, as a collection's are.
@@ -29778,18 +29781,21 @@ fn is_and_as_of_any_or_a_union_are_the_engine_test_of_its_type() {
                   ZVAL "either"
                 CONDITIONAL
                   SHARP_IS_TYPE
-                    VAR
-                      ZVAL "extra"
+                    ASSIGN
+                      VAR
+                        ZVAL "as#1"
+                      VAR
+                        ZVAL "extra"
                     ZVAL "int|string"
                   VAR
-                    ZVAL "extra"
+                    ZVAL "as#1"
                   ZVAL null
         "#}
     );
 }
 
 /// ```php
-/// $pair = <is [int, string]>($extra) ? $extra : null;
+/// $pair = <is [int, string]>(${'as#1'} = $extra) ? ${'as#1'} : null;
 /// $type = <is Class<App.Tenant.Report>>($extra);
 /// $object = <is Object|int>($extra);
 /// $boxed = <is Class<App.Tenant.Box<int>>>($extra);
@@ -29814,11 +29820,14 @@ fn is_and_as_of_a_tuple_a_class_value_or_object_are_the_engine_test_of_its_type(
                   ZVAL "pair"
                 CONDITIONAL
                   SHARP_IS_TYPE
-                    VAR
-                      ZVAL "extra"
+                    ASSIGN
+                      VAR
+                        ZVAL "as#1"
+                      VAR
+                        ZVAL "extra"
                     ZVAL "[int, string]"
                   VAR
-                    ZVAL "extra"
+                    ZVAL "as#1"
                   ZVAL null
               ASSIGN
                 VAR
@@ -29854,13 +29863,13 @@ fn is_and_as_of_a_tuple_a_class_value_or_object_are_the_engine_test_of_its_type(
 
 /// ```php
 /// $numbers = <is List<int>>($extra);
-/// $kept = \is_array($crossing#1 = <is Map<string, int>>($extra) ? $extra : null) ? new \Sharp\Map<string, int>(…) : $crossing#1;
+/// $kept = <is Map<string, int>>(${'as#1'} = $extra) ? ${'as#1'} : null;
 /// $tags = <is Set<string>>($extra);
 /// ```
 ///
 /// `is` and `as` of a `List`, a `Map` or a `Set` are the engine's test of the type, as a generic class's are, which
-/// walks every element. The test passes a PHP array whose elements fit, so the local `as` gives it to becomes the `Map`
-/// first, as a typed local does.
+/// walks every element. The test passes a PHP array whose elements fit, and gives the copy an `as` tests as the `Map`,
+/// so the local the `as` gives it to takes no other crossing.
 #[test]
 fn is_and_as_of_a_collection_are_the_engine_test_of_its_type() {
     assert_eq!(
@@ -29882,71 +29891,16 @@ fn is_and_as_of_a_collection_are_the_engine_test_of_its_type() {
                 VAR
                   ZVAL "kept"
                 CONDITIONAL
-                  CALL
-                    ZVAL "is_array"
-                    ARG_LIST
-                      ASSIGN
-                        VAR
-                          ZVAL "crossing#1"
-                        CONDITIONAL
-                          SHARP_IS_TYPE
-                            VAR
-                              ZVAL "extra"
-                            ZVAL "Map<string, int>"
-                          VAR
-                            ZVAL "extra"
-                          ZVAL null
-                  SHARP_TYPE_ARGS
-                    NEW
-                      ZVAL "Sharp\\Map"
-                      ARG_LIST
-                        CALL
-                          ZVAL "array_merge"
-                          ARG_LIST
-                            ARRAY [3]
-                            UNPACK
-                              CALL
-                                ZVAL "array_map"
-                                ARG_LIST
-                                  ARROW_FUNC "" @10-10
-                                    PARAM_LIST
-                                      PARAM
-                                        null
-                                        ZVAL "key#2"
-                                        null
-                                        null
-                                        null
-                                        null
-                                      PARAM
-                                        null
-                                        ZVAL "value#3"
-                                        null
-                                        null
-                                        null
-                                        null
-                                    null
-                                    ARRAY [3]
-                                      ARRAY_ELEM
-                                        CAST [6]
-                                          VAR
-                                            ZVAL "key#2"
-                                        null
-                                      ARRAY_ELEM
-                                        VAR
-                                          ZVAL "value#3"
-                                        null
-                                    null
-                                    null
-                                  CALL
-                                    ZVAL "array_keys"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "crossing#1"
-                                  VAR
-                                    ZVAL "crossing#1"
-                    ZVAL "string, int"
+                  SHARP_IS_TYPE
+                    ASSIGN
+                      VAR
+                        ZVAL "as#1"
+                      VAR
+                        ZVAL "extra"
+                    ZVAL "Map<string, int>"
                   VAR
-                    ZVAL "crossing#1"
+                    ZVAL "as#1"
+                  ZVAL null
               ASSIGN
                 VAR
                   ZVAL "tags"

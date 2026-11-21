@@ -97,6 +97,7 @@ use crate::expression::instantiation::analyze_anonymous_class_constructor;
 use crate::external::Listing;
 use crate::formula::get_formula;
 use crate::formula::negate_or_synthesize;
+use crate::formula::with_named_locals;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::reconciler::reconcile_keyed_types;
@@ -584,26 +585,23 @@ where
     // A `match` that tests a value that is not a local assigns the hidden variable that holds it first.
     let first_hidden = hidden.first().map(|(name, _)| word(name));
     context.hidden_variables.extend(hidden);
-    // Spec section 21: only `is` narrows, and `as` converts. The PHP of `n as T` tests the local `n` itself, and the
-    // branches of its test merge back into a union of the narrowed and the unnarrowed type, `T|Event` for a type
-    // parameter `T`, so the local keeps the type it had before the `as`.
-    let converted_local = match node {
-        Node::Expression(Expression::As(r#as)) => context
-            .get_assertion_context_from_block(block_context)
-            .get_expression_id(r#as.value)
-            .and_then(|id| block_context.locals.get(&id).cloned().map(|local| (id, local))),
+    // The clauses that hold where an `as` runs, which may say its value is never of its type, as `x is not Paid` does,
+    // with the hidden copy its PHP tests and the value it copies, which hold one value.
+    let known_clauses = match node {
+        Node::Expression(Expression::As(r#as)) => Some((
+            block_context.clauses.clone(),
+            first_hidden
+                .zip(context.get_assertion_context_from_block(block_context).get_expression_id(r#as.value))
+                .into_iter()
+                .collect::<Vec<_>>(),
+        )),
         _ => None,
     };
-    // The clauses that hold where an `as` runs, which may say its value is never of its type, as `x is not Paid` does.
-    let known_clauses = matches!(node, Node::Expression(Expression::As(_))).then(|| block_context.clauses.clone());
     let (result, issues) = context.record(|context| match php {
         Node::Expression(expression) => expression.analyze(context, block_context, artifacts),
         Node::Statement(statement) => statement.analyze(context, block_context, artifacts),
         _ => Ok(()),
     });
-    if let Some((id, local)) = converted_local {
-        block_context.locals.insert(id, local);
-    }
     context.patterns.truncate(patterns);
     for (left_bracket, tuple) in tuples {
         artifacts.record_list_pattern_tuple(&left_bracket, Some(tuple));
@@ -705,11 +703,11 @@ where
     // Spec section 21: an `as` whose value is never of its type here always gives null, whether the value's type or a
     // test before it says so, and that is the error, at the cast. Its PHP's test and branches say nothing more.
     let always_null = match (node, &known_clauses) {
-        (Node::Expression(Expression::As(r#as)), Some(known_clauses)) if !tested_refused => tests
+        (Node::Expression(Expression::As(r#as)), Some((known_clauses, copied))) if !tested_refused => tests
             .iter()
             .any(|(_, test)| {
                 artifacts.get_rc_expression_type(*test).is_some_and(|test| test.is_false())
-                    || is_contradicted(test, known_clauses, context, block_context, artifacts)
+                    || is_contradicted(test, copied, known_clauses, context, block_context, artifacts)
             })
             .then_some(r#as),
         _ => None,
@@ -1944,9 +1942,10 @@ where
 }
 
 /// Whether `known_clauses`, the clauses that hold where `test` runs, make it always false, as `x is not Paid` makes the
-/// test of `x as Paid`: one of them is a clause of its negation.
+/// test of `x as Paid`: one of them is a clause of its negation, on a name or the value it copies, of `copied`.
 fn is_contradicted<'ctx, 'arena, A>(
     test: &Expression<'arena>,
+    copied: &[(Word, Word)],
     known_clauses: &[Rc<Clause>],
     context: &Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
@@ -1969,17 +1968,19 @@ where
         return false;
     };
 
-    negate_or_synthesize(
+    let negated = negate_or_synthesize(
         formula,
         test,
         context.get_assertion_context_from_block(block_context),
         artifacts,
         &thresholds,
         size,
-    )
-    .iter()
-    .filter(|negated| negated.reconcilable && !negated.wedge)
-    .any(|negated| known_clauses.iter().any(|known| known.hash == negated.hash))
+    );
+
+    with_named_locals(negated, copied)
+        .iter()
+        .filter(|negated| negated.reconcilable && !negated.wedge)
+        .any(|negated| known_clauses.iter().any(|known| known.hash == negated.hash))
 }
 
 /// The type of `tested`, the value a pattern at `pattern` tests, when it holds only `Map`s, maybe null, and the pattern

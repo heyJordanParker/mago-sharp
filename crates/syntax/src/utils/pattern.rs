@@ -13,14 +13,14 @@
 //!   `($p = x) instanceof Paid && $p->total > 0`.
 //! - `x is [Line first, ...List<Line> rest]` is `\is_array(x) && \count(x) >= 1 && ($first = x[0]) instanceof Line &&
 //!   \is_array($rest = \array_slice(x, 1))`, and `x is []` is `\is_array(x) && \count(x) === 0`.
-//! - `x as Calc` is `x instanceof Calc ? x : null`.
+//! - `x as Calc` is `($as#N = x) instanceof Calc ? $as#N : null`, so the test takes a copy and leaves `x` as it is.
 //! - A `match` that gives a value is `match (true)` with one condition per arm, its pattern's test `and` its `when`
 //!   condition. A `match` that starts a statement is `if`, then `else if` per arm, and `else` for `default`.
 //! - A tested index reads a missing key as null, as `??` does, so `x[k] is int n` is `is_int($n = x[k] ?? null)`.
 //!   Spec section 12 handles a `Map` read with `is`, `as` and `match`, where a bare read throws on a missing key.
 //!
-//! A tested value that is not a local or a parameter goes into a hidden variable, `$match#N` or `$as#N`, which no
-//! PHP# source can name. Its first test assigns it, so it is evaluated once, and the analyzer narrows the hidden
+//! A tested value that is not a local or a parameter goes into a hidden variable, `$match#N`, and the value an `as`
+//! tests always does, `$as#N`, which no PHP# source can name. Its first test assigns it, so it is evaluated once, and the analyzer narrows the hidden
 //! variable instead of a property, which spec section 21 never narrows. The `#` marks it as hidden, so the analyzer
 //! reports no issue on its assignment. A value one named type pattern tests needs none, because the name holds it.
 //!
@@ -286,8 +286,11 @@ where
         Some(test)
     }
 
+    /// `($as#N = x) instanceof T ? $as#N : null`, whose hidden copy takes the value as the type holds it, so the test
+    /// gives the converted copy and leaves a local `x` as it is.
     fn r#as(&mut self, r#as: &As<'arena>) -> Option<&'arena Expression<'arena>> {
-        let mut subject = self.subject_named(r#as.value, "as");
+        let tested = self.tested(r#as.value);
+        let mut subject = self.hidden(tested, "as");
         let tested = self.read(&mut subject, r#as.value.span());
         let condition = self.type_test(r#as.hint, tested)?;
         self.tests.push((r#as.hint.span(), condition));
