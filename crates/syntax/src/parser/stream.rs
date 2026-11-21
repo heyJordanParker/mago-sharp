@@ -268,10 +268,10 @@ where
 
     /// Peeks past the `<` that starts `from` tokens after the head of the stream to the `>` that closes it, and returns
     /// the kind of the token after that `>`. It returns `None` when a token that cannot be part of a PHP# type comes
-    /// first, or the file ends. The
-    /// lexer reads `Self` and `Class` as the keywords `self` and `class`, which are part of a type, and `From` and `Enum`
-    /// as the keywords `from` and `enum`, which the type parser reads as class names. A `>>` closes two lists. It reads
-    /// ahead with a copy of the lexer, so it consumes nothing.
+    /// first, or the file ends. A tuple type's `[` and `]` are part of a type. The lexer reads `Self` and `Class` as the
+    /// keywords `self` and `class`, which are part of a type, and `From` and `Enum` as the keywords `from` and `enum`,
+    /// which the type parser reads as class names. A `>>` closes two lists. It reads ahead with a copy of the lexer, so
+    /// it consumes nothing.
     ///
     /// # Errors
     ///
@@ -296,7 +296,9 @@ where
                     | "|"
                     | "&"
                     | "("
-                    | ")"] => depth,
+                    | ")"
+                    | "["
+                    | "]"] => depth,
                 kind if kind.is_cast() => depth,
                 _ => return Ok(None),
             };

@@ -1758,6 +1758,31 @@ fn a_less_than_after_a_member_is_a_comparison_unless_type_arguments_and_a_call_f
     assert_eq!(source(CODE, &call.argument_list), "(e)");
 }
 
+/// A tuple type's `[` and `]` are tokens of a type, so a tuple type is a call's type argument, as every type a type hint
+/// takes is, and `a < b > (c)` on bare names stays two comparisons, as before the scan took them.
+#[test]
+fn a_call_type_argument_can_be_a_tuple_type() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        const pairs = numbers.map<[int number, string label]>(pair);\n        const both = a < b > (c);\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Expression::Call(Call::Method(map)) = statement_expression(program, 0) else {
+        panic!("expected `numbers.map<…>(pair)`, got {:#?}", statement_expression(program, 0));
+    };
+    assert_eq!(type_arguments(CODE, map.type_arguments.as_ref()), ["[int number, string label]"]);
+    assert_eq!(source(CODE, &map.argument_list), "(pair)");
+
+    let Expression::Binary(Binary {
+        operator: BinaryOperator::LessThan(_),
+        rhs: Expression::Binary(Binary { operator: BinaryOperator::GreaterThan(_), .. }),
+        ..
+    }) = statement_expression(program, 1)
+    else {
+        panic!("expected `a < (b > (c))`, got {:#?}", statement_expression(program, 1));
+    };
+}
+
 /// A `>>` that closes more lists than are open ends the lookahead, so the `<` before it stays a comparison. The lexer
 /// reads `(string)` as a cast, which is still a function type's parentheses, so it does not end the lookahead.
 #[test]

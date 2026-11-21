@@ -35967,6 +35967,15 @@ fn a_function_value_keeps_the_readonly_values_its_type_passes() {
     );
 }
 
+/// Spec section 14: a tuple type is a call's type argument, as every type a type hint takes is, so a lambda's literal
+/// lands in the tuple type the call names, and the next lambda takes it as that tuple.
+#[test]
+fn a_lambda_gives_the_tuple_type_its_call_names() {
+    let numbers = "namespace App;\n\npublic class Numbers\n{\n    public static List<int> numbers() => [1, 2].map<[int number, string label]>((int item) => [item, `${item}`]).map(([int number, string label] pair) => pair.number);\n}\n";
+
+    assert_eq!(messages(("src/App/Numbers.sharp", numbers), &[]), Vec::<String>::new());
+}
+
 /// Spec section 13: a value of a type that never changes, as a struct, is readonly wherever `readonly` is asked for, so
 /// a function value takes one as its type is written, with no `readonly` to declare, which would change nothing. A
 /// type that can change still needs its `readonly` there.
