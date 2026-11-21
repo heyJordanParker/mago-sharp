@@ -4079,6 +4079,43 @@ fn a_move_that_breaks_a_machine_s_invariant_is_refused_with_the_moves_that_break
     );
 }
 
+/// Spec sections 20.2 and 28: an invariant is about the values entry points and moves reach, so each move keeps it from
+/// a value it holds on, and a value no entry point and no move reaches never breaks it. An invariant a reachable move
+/// breaks is still refused with the moves that break it.
+#[test]
+fn a_machine_s_invariant_holds_on_the_case_each_move_starts_from() {
+    let counter = |law: &str| {
+        format!(
+            "namespace App;\n\npublic machine Counter\n{{\n    case Idle {{ public Counter.Counting start() => Counter.Counting(1); }}\n    case Counting(int n) {{ public Counter step() => this.n >= 2 ? Counter.Done : Counter.Counting(this.n + 1); }}\n    final case Done;\n    public static Counter.Idle idle() => Counter.Idle;\n    {law}\n}}\n"
+        )
+    };
+    let directory = lawful_project(&[(
+        "app/Counter.sharp",
+        &counter("law aCountIsOneOrTwo(Counter.Counting counting) => counting.n >= 1 && counting.n <= 2;"),
+    )]);
+
+    let output = compile(directory.path());
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(directory.path(), "app/Counter.sharp").exists());
+
+    let directory = lawful_project(&[(
+        "app/Counter.sharp",
+        &counter("law aCountIsOne(Counter.Counting counting) => counting.n == 1;"),
+    )]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: `aCountIsOne` breaks after `idle() → Idle`, `start() → Counting(n: 1)`, `step() → Counting(n: 2)`\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// Spec section 20.2: a move that breaks an invariant only on a value no small value of its parameters is, as
 /// `pay(7)`, is refused by its name and the names of its parameters.
 #[test]

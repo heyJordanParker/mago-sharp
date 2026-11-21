@@ -161,8 +161,9 @@ private def unfoldOnce (definition : Name) : TacticM Unit := do
 
 /-- The automatic steps that close a goal: `simp_all` with `definitions` and every fact in scope, then `omega` or `grind`
 on what is left, or `decide`, or the same steps on each case of each `if` and `match` left in the goal, as a `match` on
-the case of a value an `if` chose. A case hypothesis keeps its `¬ x ≤ y` and its `¬ x < y`, so it still decides the
-`if` the definition tests. -/
+the case of a value an `if` chose. The goal's binders become facts before the split, so a `match` on a value a step
+computes, as the case a move's `? :` gives, splits too. A case hypothesis keeps its `¬ x ≤ y` and its `¬ x < y`, so it
+still decides the `if` the definition tests. -/
 private def auto (definitions : Array Name) : TacticM Unit := do
   let kept : Array SimpItem := #[⟨(← `(Lean.Parser.Tactic.simpErase| -Int64.not_le)).raw⟩,
     ⟨(← `(Lean.Parser.Tactic.simpErase| -Int.not_le)).raw⟩,
@@ -174,6 +175,7 @@ private def auto (definitions : Array Name) : TacticM Unit := do
        first | done | omega | grind)
     | decide
     | ((try simp_all [$items,*])
+       intros
        (repeat' split) <;> (try simp_all [$items,*]) <;> first | done | omega | grind)))
 
 /-- Runs `steps`, the steps of one case, within half of its theorem's time budget, counted from where the case starts, so
