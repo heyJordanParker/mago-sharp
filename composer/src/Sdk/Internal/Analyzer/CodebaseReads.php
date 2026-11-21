@@ -5,8 +5,12 @@ declare(strict_types=1);
 namespace Mago\Sdk\Internal\Analyzer;
 
 use function array_fill_keys;
-use function hash;
-use function serialize;
+use function array_keys;
+use function explode;
+use function hash_final;
+use function hash_init;
+use function hash_update;
+use function implode;
 
 /**
  * The codebase reads one file's hooks and providers made, so Mago runs them again when what they
@@ -19,12 +23,12 @@ use function serialize;
  */
 final class CodebaseReads
 {
-    /** @var array<int, array<int, array<array-key, true>>> each read's name, by its operation and argument */
+    /** @var array<string, array<array-key, true>> each read's name, by its `"{operation}:{argument}"` */
     private array $reads = [];
 
     public function record(int $operation, int $argument, string $name): void
     {
-        $this->reads[$operation][$argument][$name] = true;
+        $this->reads["{$operation}:{$argument}"][$name] = true;
     }
 
     /**
@@ -34,8 +38,9 @@ final class CodebaseReads
      */
     public function recordAll(int $operation, int $argument, array $names): void
     {
-        $this->reads[$operation][$argument] =
-            ($this->reads[$operation][$argument] ?? []) + array_fill_keys($names, true);
+        $read = array_fill_keys($names, true);
+        $held = $this->reads["{$operation}:{$argument}"] ?? null;
+        $this->reads["{$operation}:{$argument}"] = $held === null ? $read : $held + $read;
     }
 
     /**
@@ -44,7 +49,12 @@ final class CodebaseReads
      */
     public function key(): string
     {
-        return hash('xxh128', serialize($this->reads), true);
+        $hash = hash_init('xxh128');
+        foreach ($this->reads as $query => $names) {
+            hash_update($hash, "\1{$query}\1" . implode("\0", array_keys($names)));
+        }
+
+        return hash_final($hash, true);
     }
 
     /**
@@ -53,11 +63,10 @@ final class CodebaseReads
     public function reads(): array
     {
         $reads = [];
-        foreach ($this->reads as $operation => $arguments) {
-            foreach ($arguments as $argument => $names) {
-                foreach ($names as $name => $_) {
-                    $reads[] = [$operation, $argument, (string) $name];
-                }
+        foreach ($this->reads as $query => $names) {
+            [$operation, $argument] = explode(':', $query);
+            foreach ($names as $name => $_) {
+                $reads[] = [(int) $operation, (int) $argument, (string) $name];
             }
         }
 
