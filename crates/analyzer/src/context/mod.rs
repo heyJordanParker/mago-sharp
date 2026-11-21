@@ -85,6 +85,9 @@ where
     /// and a local's because a lambda assigns it, with the note and the help an error at the read adds, as Kotlin names
     /// why a smart cast is impossible.
     pub(super) unnarrowed_reads: HashMap<Span, (String, String)>,
+    /// Each PHP# `?:` whose test reads a property and whose other branch reads it again, by its span, with the error
+    /// an error at the `?:` gives instead: the read is not narrowed, and the bound name the test can give it.
+    pub(super) unnarrowed_branches: HashMap<Span, String>,
 }
 
 impl<'ctx, 'arena, A> Context<'ctx, 'arena, A>
@@ -125,6 +128,7 @@ where
             hidden_variables: HashMap::default(),
             class_initializers: WordMap::default(),
             unnarrowed_reads: HashMap::default(),
+            unnarrowed_branches: HashMap::default(),
         }
     }
 
@@ -291,23 +295,42 @@ where
     /// [`crate::artifacts::AnalysisArtifacts`] for its caller after analysis completes.
     pub fn finish_collector(self, analysis_result: &mut AnalysisResult) {
         let issues = self.collector.finish();
-        analysis_result.issues.extend(explain_unnarrowed_reads(issues, &self.unnarrowed_reads));
+        analysis_result.issues.extend(explain_unnarrowed_reads(
+            issues,
+            &self.unnarrowed_reads,
+            &self.unnarrowed_branches,
+        ));
     }
 }
 
 /// `issues`, where each error whose primary annotation is a read in `reads` says why the read is not narrowed and how
-/// to keep the tested value, with its note and help. Every rule that reports at a value reports there, so one pass
-/// covers a method call, a property read, an argument and an operand alike.
-fn explain_unnarrowed_reads(issues: IssueCollection, reads: &HashMap<Span, (String, String)>) -> IssueCollection {
-    if reads.is_empty() {
+/// to keep the tested value, with its note and help, and each error at a `?:` of `branches` is that `?:`'s error.
+/// Every rule that reports at a value reports there, so one pass covers a method call, a property read, an argument,
+/// an operand and a returned value alike.
+fn explain_unnarrowed_reads(
+    issues: IssueCollection,
+    reads: &HashMap<Span, (String, String)>,
+    branches: &HashMap<Span, String>,
+) -> IssueCollection {
+    if reads.is_empty() && branches.is_empty() {
         return issues;
     }
 
     issues
         .into_iter()
-        .map(|issue| match issue.primary_span().and_then(|span| reads.get(&span)) {
-            Some((note, help)) if issue.level == Level::Error => issue.with_note(note.clone()).with_help(help.clone()),
-            _ => issue,
+        .map(|mut issue| {
+            let span = issue.primary_span();
+            if issue.level != Level::Error {
+                return issue;
+            }
+            if let Some(message) = span.and_then(|span| branches.get(&span)) {
+                issue.message.clone_from(message);
+                return issue;
+            }
+            match span.and_then(|span| reads.get(&span)) {
+                Some((note, help)) => issue.with_note(note.clone()).with_help(help.clone()),
+                None => issue,
+            }
         })
         .collect()
 }

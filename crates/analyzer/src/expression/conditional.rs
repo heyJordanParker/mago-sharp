@@ -8,15 +8,23 @@ use mago_algebra::clause::Clause;
 use mago_algebra::find_satisfying_assignments;
 use mago_algebra::saturate_clauses;
 use mago_codex::assertion::Assertion;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::combine_optional_union_types;
 use mago_codex::ttype::combine_union_types;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Is;
+use mago_syntax::cst::NotPattern;
+use mago_syntax::cst::Pattern;
+use mago_syntax::cst::TypePattern;
 use mago_text_edit::Safety;
 use mago_text_edit::TextEdit;
 use mago_word::WordSet;
@@ -35,10 +43,13 @@ use crate::formula::negate_or_synthesize;
 use crate::reconciler::assertion_reconciler;
 use crate::reconciler::reconcile_keyed_types;
 use crate::statement::function_like::expect_type;
+use crate::statement::get_type_from_hint;
 use crate::utils::conditional;
 use crate::utils::expression::is_derived_access_path;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_truth;
 use crate::utils::names::display_type;
+use crate::utils::quoted_source;
 use crate::utils::symbol_existence::extract_function_constant_existence;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Conditional<'arena> {
@@ -51,8 +62,80 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Conditional<'arena> {
     where
         A: Arena,
     {
-        analyze_conditional(context, block_context, artifacts, self.condition, self.then, self.r#else, self.span())
+        analyze_conditional(context, block_context, artifacts, self.condition, self.then, self.r#else, self.span())?;
+        if context.dialect.is_sharp() {
+            record_unnarrowed_branch(context, block_context, artifacts, self);
+        }
+
+        Ok(())
     }
+}
+
+/// Spec section 21: a property never narrows, because each read may give another value, so the branch of
+/// `conditional` that reads again the property its `is` or `is not` tests reads it at its declared type. When the
+/// declared type left once the test fails is one type, an error at the `?:` says so and names the form that binds the
+/// value the test reads: `this.part is Leaf leaf ? leaf : fallback`, which replaces the error's type mismatch.
+fn record_unnarrowed_branch<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    conditional: &Conditional<'_>,
+) where
+    A: Arena,
+{
+    let Expression::Is(Is { value, pattern, .. }) = conditional.condition.unparenthesized() else {
+        return;
+    };
+    let (pattern, negated) = match pattern {
+        Pattern::Not(NotPattern { pattern, .. }) => (*pattern, true),
+        pattern => (*pattern, false),
+    };
+    let (Expression::Access(Access::Property(_)), Pattern::Type(TypePattern { hint, .. })) =
+        (value.unparenthesized(), pattern)
+    else {
+        return;
+    };
+    let Some(then) = conditional.then else {
+        return;
+    };
+    let (reread, other) = if negated { (then, conditional.r#else) } else { (conditional.r#else, then) };
+    let read = quoted_source(context, value.span());
+    if quoted_source(context, reread.unparenthesized().span()) != read {
+        return;
+    }
+    let tested = get_type_from_hint(context, block_context, artifacts, hint);
+    let Some(declared) = artifacts.get_expression_type(reread) else {
+        return;
+    };
+    let codebase = context.codebase;
+    let is_tested = |atomic: &TAtomic| {
+        tested.types.iter().any(|tested| match (atomic, tested) {
+            (TAtomic::Object(TObject::Named(atomic)), TAtomic::Object(TObject::Named(tested))) => {
+                codebase.is_instance_of(atomic.name, tested.name)
+            }
+            (atomic, tested) => atomic == tested,
+        })
+    };
+    let [left] = declared.types.iter().filter(|atomic| !is_tested(atomic)).collect::<Vec<_>>()[..] else {
+        return;
+    };
+
+    let left_type = display_sharp_type(context, &TUnion::from_atomic(left.clone()));
+    let name = match left {
+        TAtomic::Object(TObject::Named(_)) => {
+            let short = left_type.rsplit('.').next().unwrap_or(&left_type);
+            let mut letters = short.chars();
+            letters.next().map(|first| first.to_lowercase().chain(letters).collect::<String>()).unwrap_or_default()
+        }
+        _ => read.rsplit('.').next().unwrap_or(&read).to_owned(),
+    };
+    let other = quoted_source(context, other.span());
+    context.unnarrowed_branches.insert(
+        conditional.span(),
+        format!(
+            "`{read}` is a property, which never narrows: bind the value the test reads, as in `{read} is {left_type} {name} ? {name} : {other}`."
+        ),
+    );
 }
 
 pub(super) fn analyze_conditional<'ctx, 'ast, 'arena, A>(

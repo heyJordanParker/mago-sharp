@@ -9444,11 +9444,12 @@ fn a_match_without_default_that_handles_every_enum_case_reports_nothing() {
 
 /// Spec section 21: a union of classes holds a value of one of its members, so a `match` whose type arms name each
 /// member, or a supertype of each, handles every value, on a property as on a local, and a local an `is` fails for is a
-/// member the test leaves. `null` is one more member of a nullable union, and a `match` that leaves out a member names
-/// it.
+/// member the test leaves. A property never narrows, so a `?:` that reads it again after its `is` or `is not` is
+/// refused with the form that binds the value the test reads. `null` is one more member of a nullable union, and a
+/// `match` that leaves out a member names it.
 #[test]
 fn a_type_test_on_a_union_of_classes_covers_the_members_it_names() {
-    let tree = "namespace Repro;\n\npublic final class Tree\n{\n    public Tree(public Twig|Leaf part { get; }) {}\n\n    public string kind() => match (this.part) {\n        Leaf leaf => \"leaf\",\n        Twig twig => \"twig\",\n    };\n\n    public static Leaf left(Twig|Leaf part, Leaf fallback) => part is Twig twig ? fallback : part;\n\n    public static string named((Twig|Leaf)? part) => match (part) {\n        Twig twig => \"twig\",\n        Leaf leaf => \"leaf\",\n        null => \"none\",\n    };\n\n    public static string whole(Twig|Leaf part) => match (part) {\n        Part whole => \"part\",\n    };\n\n    public static string twig((Twig|Leaf)? part) => match (part) {\n        Twig twig => \"twig\",\n    };\n}\n";
+    let tree = "namespace Repro;\n\npublic final class Tree\n{\n    public Tree(public Twig|Leaf part { get; }) {}\n\n    public string kind() => match (this.part) {\n        Leaf leaf => \"leaf\",\n        Twig twig => \"twig\",\n    };\n\n    public static Leaf left(Twig|Leaf part, Leaf fallback) => part is Twig twig ? fallback : part;\n\n    public Leaf leaf(Leaf fallback) => this.part is Twig twig ? fallback : this.part;\n\n    public Leaf plain(Leaf fallback) => this.part is Twig ? fallback : this.part;\n\n    public Leaf negated(Leaf fallback) => this.part is not Twig twig ? this.part : fallback;\n\n    public static string named((Twig|Leaf)? part) => match (part) {\n        Twig twig => \"twig\",\n        Leaf leaf => \"leaf\",\n        null => \"none\",\n    };\n\n    public static string whole(Twig|Leaf part) => match (part) {\n        Part whole => \"part\",\n    };\n\n    public static string twig((Twig|Leaf)? part) => match (part) {\n        Twig twig => \"twig\",\n    };\n}\n";
     let part = "namespace Repro;\n\npublic interface Part {}\n";
     let twig = "namespace Repro;\n\npublic final class Twig : Part {}\n";
     let leaf = "namespace Repro;\n\npublic final class Leaf : Part {}\n";
@@ -9460,7 +9461,15 @@ fn a_type_test_on_a_union_of_classes_covers_the_members_it_names() {
         &[("src/Repro/Part.sharp", part), ("src/Repro/Twig.sharp", twig), ("src/Repro/Leaf.sharp", leaf)],
     );
 
-    assert_eq!(written_errors(tree, &issues), ["match match-not-exhaustive This `match` misses `Leaf` and `null`."]);
+    assert_eq!(
+        written_errors(tree, &issues),
+        [
+            "this.part is Twig twig ? fallback : this.part invalid-return-statement `this.part` is a property, which never narrows: bind the value the test reads, as in `this.part is Leaf leaf ? leaf : fallback`.",
+            "this.part is Twig ? fallback : this.part invalid-return-statement `this.part` is a property, which never narrows: bind the value the test reads, as in `this.part is Leaf leaf ? leaf : fallback`.",
+            "this.part is not Twig twig ? this.part : fallback invalid-return-statement `this.part` is a property, which never narrows: bind the value the test reads, as in `this.part is Leaf leaf ? leaf : fallback`.",
+            "match match-not-exhaustive This `match` misses `Leaf` and `null`.",
+        ]
+    );
 }
 
 /// Spec section 21: an enum that implements a sealed interface is the set of its cases, so arms for each case cover it

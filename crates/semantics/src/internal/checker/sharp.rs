@@ -4945,11 +4945,11 @@ fn body_without_braces(statement: &Statement, context: &Context<'_, '_, '_>) -> 
 }
 
 /// Checks the arms of a `match`, and returns whether its children can be checked. Spec section 21 needs a `default`
-/// arm on a value that is not an enum, a sealed interface or a `List`, and lets a `match` on one leave it out when its
-/// arms cover every case or length. Only the analyzer knows the value's type, so a `match` whose arms all name cases,
-/// as `Class.y` values, classes, `null` and lists, may leave out `default`, and the analyzer reports the cases it
-/// misses. A `match` without arms covers no case, so it needs `default`. A block arm is only in a `match` statement.
-/// The engine takes one `default` arm, as PHP's `match` does.
+/// arm on a value that is not an enum, a sealed interface, a union of classes or a `List`, and lets a `match` on one
+/// leave it out when its arms cover every case, member or length. Only the analyzer knows the value's type, so a
+/// `match` whose arms all name cases, as `Class.y` values, classes, `null` and lists, may leave out `default`, and the
+/// analyzer reports the cases it misses. A `match` without arms covers no case, so it needs `default`. A block arm is
+/// only in a `match` statement. The engine takes one `default` arm, as PHP's `match` does.
 fn check_pattern_match(pattern_match: &PatternMatch, is_expression: bool, context: &mut Context<'_, '_, '_>) -> bool {
     let mut defaults = pattern_match.arms.iter().filter(|arm| arm.is_default());
     match defaults.next() {
@@ -4959,7 +4959,7 @@ fn check_pattern_match(pattern_match: &PatternMatch, is_expression: bool, contex
                     .with_annotation(
                         Annotation::primary(pattern_match.r#match.span).with_message("This `match` has none."),
                     )
-                    .with_note("A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, or every value of a `List`.")
+                    .with_note("A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, every member of a union of classes, or every value of a `List`.")
                     .with_help("Add `default => …` as the last arm."),
             );
 
