@@ -237,7 +237,8 @@ impl Engine {
 
     /// Calls the PHP function `function`, such as `name` or `Class::method`, with `arguments` in the calling thread's
     /// interpreter, and returns what it returns. While it runs, `answer` answers each `\Mago\Engine\ask()` it makes. A
-    /// call that runs past `deadline` is interrupted.
+    /// thread that runs no interpreter starts one before the call, outside `deadline`. A call that runs past `deadline`
+    /// is interrupted.
     ///
     /// # Errors
     ///
@@ -265,12 +266,17 @@ impl Engine {
                 drop(thread.interpreter.take());
             }
 
+            let globals = match &thread.interpreter {
+                Some(interpreter) => interpreter.globals,
+                None => thread.interpreter.insert(self.start()?).globals,
+            };
+
             let deadlines = Deadlines::get();
-            deadlines.watch(deadline, thread.interpreter.as_ref().map(|interpreter| interpreter.globals));
-            let result = self.run(thread, function, arguments, answer);
-            let fired = deadlines.finish(thread.interpreter.as_ref().map(|interpreter| interpreter.globals));
+            deadlines.watch(deadline, globals);
+            let result = self.run(function, arguments, answer);
+            let fired = deadlines.finish(globals);
             match result {
-                Err(EngineError::Failed(_) | EngineError::Script { .. }) if fired => {
+                Err(EngineError::Failed(_)) if fired => {
                     drop(thread.interpreter.take());
                     Err(EngineError::Deadline(deadline))
                 }
@@ -298,15 +304,10 @@ impl Engine {
     )]
     fn run(
         &self,
-        thread: &mut Thread,
         function: &str,
         arguments: &[Value],
         answer: &mut dyn FnMut(Vec<Value>) -> Answer,
     ) -> Result<Value, EngineError> {
-        if thread.interpreter.is_none() {
-            thread.interpreter = Some(self.start()?);
-        }
-
         let mut slots: Vec<Zval> = arguments.iter().map(|_| Zval::new()).collect();
         let mut result = Zval::new();
         // SAFETY: the thread runs an interpreter, each slot is empty when written, `answer` outlives the call it is
@@ -372,7 +373,6 @@ impl Engine {
                 globals: engine_executor_globals(),
                 variables,
             };
-            Deadlines::get().arm(interpreter.globals);
             for (name, value) in &self.settings {
                 let (name, value) = (name.as_bytes(), value.as_bytes());
                 if engine_set(name.as_ptr().cast(), name.len(), value.as_ptr().cast(), value.len()) != 0 {
@@ -509,7 +509,7 @@ struct Slot {
 struct Deadline {
     at: Instant,
     after: Duration,
-    globals: Option<usize>,
+    globals: usize,
     fired: bool,
 }
 
@@ -553,28 +553,13 @@ impl Deadlines {
     }
 
     /// Starts the deadline of the call the calling thread starts, `after` from now, which interrupts `globals`, the
-    /// thread's interpreter, once [`Self::arm`] names it, when the call has none yet.
-    fn watch(&self, after: Duration, globals: Option<*mut c_void>) {
+    /// thread's interpreter.
+    fn watch(&self, after: Duration, globals: *mut c_void) {
         let at = Instant::now() + after;
         SLOT.with(|slot| {
-            *lock(&slot.call) =
-                Some(Deadline { at, after, globals: globals.map(|globals| globals as usize), fired: false });
+            *lock(&slot.call) = Some(Deadline { at, after, globals: globals as usize, fired: false });
         });
         self.wake_by(at);
-    }
-
-    /// Names the interpreter the calling thread's call interrupts, once the call has one.
-    fn arm(&self, globals: *mut c_void) {
-        let at = SLOT.with(|slot| {
-            let mut call = lock(&slot.call);
-            call.as_mut().map(|deadline| {
-                deadline.globals = Some(globals as usize);
-                deadline.at
-            })
-        });
-        if let Some(at) = at {
-            self.wake_by(at);
-        }
     }
 
     /// Moves the deadline of the calling thread's call to its `after` from now, unless it already passed.
@@ -588,9 +573,9 @@ impl Deadlines {
 
     /// Ends the deadline of the calling thread's call and returns whether it passed, clearing an interrupt of
     /// `globals` that came after the call ended.
-    fn finish(&self, globals: Option<*mut c_void>) -> bool {
+    fn finish(&self, globals: *mut c_void) -> bool {
         let fired = SLOT.with(|slot| lock(&slot.call).take().is_some_and(|deadline| deadline.fired));
-        if let (true, Some(globals)) = (fired, globals) {
+        if fired {
             // SAFETY: the interpreter still runs on this thread, and no call runs on it now.
             unsafe { engine_clear_interrupt(globals) };
         }
@@ -610,8 +595,7 @@ impl Deadlines {
         u64::try_from(at.saturating_duration_since(self.epoch).as_nanos()).unwrap_or(u64::MAX - 1)
     }
 
-    /// Interrupts each armed interpreter whose deadline passed, and sleeps until the next deadline. A deadline that
-    /// passed before its call named an interpreter waits for [`Self::arm`], which wakes the thread.
+    /// Interrupts each interpreter whose deadline passed, and sleeps until the next deadline.
     fn enforce(&self) -> ! {
         let mut sleeping = lock(&self.sleeping);
         loop {
@@ -623,15 +607,13 @@ impl Deadlines {
                     return false;
                 };
                 if let Some(deadline) = lock(&slot.call).as_mut().filter(|deadline| !deadline.fired) {
-                    match deadline.globals {
-                        Some(globals) if deadline.at <= now => {
-                            // SAFETY: an armed deadline's interpreter runs until its call finishes the deadline, which
-                            // takes the slot's lock first, and setting its flags is what the engine's own timer does.
-                            unsafe { engine_interrupt(globals as *mut c_void) };
-                            deadline.fired = true;
-                        }
-                        _ if deadline.at > now => next = Some(next.map_or(deadline.at, |next| next.min(deadline.at))),
-                        _ => {}
+                    if deadline.at <= now {
+                        // SAFETY: a deadline's interpreter runs until its call finishes the deadline, which takes the
+                        // slot's lock first, and setting its flags is what the engine's own timer does.
+                        unsafe { engine_interrupt(deadline.globals as *mut c_void) };
+                        deadline.fired = true;
+                    } else {
+                        next = Some(next.map_or(deadline.at, |next| next.min(deadline.at)));
                     }
                 }
 

@@ -214,6 +214,15 @@ fn a_call_past_its_deadline_stops_while_another_threads_calls_end_in_time() {
 }
 
 #[test]
+fn a_calls_deadline_times_the_function_it_calls_and_never_the_interpreters_start() {
+    let engine = Engine::new(vec![fixture("slow_start.php")], Vec::new(), Vec::new()).expect("the engine starts");
+
+    let changed = engine.call("chdir", &[Value::String(b"/".to_vec())], Duration::from_secs(1), &mut no_questions);
+
+    assert_eq!(changed, Ok(Value::Bool(true)));
+}
+
+#[test]
 fn a_call_that_ends_before_its_deadline_leaves_the_next_call_alone() {
     let engine = engine();
     for _ in 0..50 {
