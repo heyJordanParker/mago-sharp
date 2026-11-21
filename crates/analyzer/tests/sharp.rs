@@ -9003,7 +9003,7 @@ fn a_match_on_a_list_names_the_lengths_it_misses() {
         .into_iter()
         .flat_map(|issue| issue.notes)
         .collect();
-    let note = "A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, or every value of a `List`.";
+    let note = "A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, every member of a union of classes, or every value of a `List`.";
     assert_eq!(notes, [note; 4]);
 }
 
@@ -9440,6 +9440,27 @@ fn a_match_without_default_that_handles_every_enum_case_reports_nothing() {
         .collect();
 
     assert_eq!(reported, Vec::<&str>::new());
+}
+
+/// Spec section 21: a union of classes holds a value of one of its members, so a `match` whose type arms name each
+/// member, or a supertype of each, handles every value, on a property as on a local, and a local an `is` fails for is a
+/// member the test leaves. `null` is one more member of a nullable union, and a `match` that leaves out a member names
+/// it.
+#[test]
+fn a_type_test_on_a_union_of_classes_covers_the_members_it_names() {
+    let tree = "namespace Repro;\n\npublic final class Tree\n{\n    public Tree(public Twig|Leaf part { get; }) {}\n\n    public string kind() => match (this.part) {\n        Leaf leaf => \"leaf\",\n        Twig twig => \"twig\",\n    };\n\n    public static Leaf left(Twig|Leaf part, Leaf fallback) => part is Twig twig ? fallback : part;\n\n    public static string named((Twig|Leaf)? part) => match (part) {\n        Twig twig => \"twig\",\n        Leaf leaf => \"leaf\",\n        null => \"none\",\n    };\n\n    public static string whole(Twig|Leaf part) => match (part) {\n        Part whole => \"part\",\n    };\n\n    public static string twig((Twig|Leaf)? part) => match (part) {\n        Twig twig => \"twig\",\n    };\n}\n";
+    let part = "namespace Repro;\n\npublic interface Part {}\n";
+    let twig = "namespace Repro;\n\npublic final class Twig : Part {}\n";
+    let leaf = "namespace Repro;\n\npublic final class Leaf : Part {}\n";
+
+    let issues = analyze(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Repro/Tree.sharp", tree),
+        &[("src/Repro/Part.sharp", part), ("src/Repro/Twig.sharp", twig), ("src/Repro/Leaf.sharp", leaf)],
+    );
+
+    assert_eq!(written_errors(tree, &issues), ["match match-not-exhaustive This `match` misses `Leaf` and `null`."]);
 }
 
 /// An enum declared in PHP# has its cases counted as a PHP enum's, inside its own methods too, where an arm with `when`
