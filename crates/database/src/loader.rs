@@ -79,7 +79,8 @@ impl<'config> DatabaseLoader<'config> {
         self.memory_sources.push((name.as_bytes(), contents.as_bytes(), file_type));
     }
 
-    /// Loads files from disk into the database.
+    /// Loads files from disk into the database: the files [`Self::list`] finds, read as [`Self::load_listed`] reads
+    /// them.
     ///
     /// # Errors
     ///
@@ -88,29 +89,56 @@ impl<'config> DatabaseLoader<'config> {
     /// - File system operations fail (reading directories, files)
     /// - A file exceeds the maximum supported size
     #[inline]
-    pub fn load(mut self) -> Result<Database<'config>, DatabaseError> {
+    pub fn load(self) -> Result<Database<'config>, DatabaseError> {
+        let listing = self.list()?;
+
+        self.load_listed(&listing)
+    }
+
+    /// Walks the configured roots and lists every file [`Self::load`] reads, each with its metadata, taken before any
+    /// file is read, and reads none of them. A caller that keeps a record of each file's status, as `mago compile`
+    /// does, reads it from the listing, so the walk that finds the files is the one the load reads them from.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DatabaseError`] if an `excludes` or a `paths` glob pattern is invalid.
+    pub fn list(&self) -> Result<Listing, DatabaseError> {
+        let extensions_set: HashSet<OsString> =
+            self.configuration.extensions.iter().map(|s| bytes_to_os_str(s.as_ref()).into_owned()).collect();
+        let glob_excludes = self.glob_excludes()?;
+        let excluded_folders = ExcludedFolders::from_configuration(&self.configuration)?;
+        let list =
+            |roots, file_type| self.list_paths(roots, file_type, &extensions_set, &glob_excludes, &excluded_folders);
+        let (host, (vendored, patch)) = rayon::join(
+            || list(&self.configuration.paths, FileType::Host),
+            || {
+                rayon::join(
+                    || list(&self.configuration.includes, FileType::Vendored),
+                    || list(&self.configuration.patches, FileType::Patch),
+                )
+            },
+        );
+        let mut files = host?;
+        files.extend(vendored?);
+        files.extend(patch?);
+
+        Ok(Listing { workspace: excluded_folders.workspace, files })
+    }
+
+    /// Reads the files `listing` names, as [`Self::list`] gave it, into the database, with the files in memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DatabaseError`] if an `excludes` glob pattern is invalid, a listed file can't be read, or one
+    /// exceeds the maximum supported size.
+    pub fn load_listed(mut self, listing: &Listing) -> Result<Database<'config>, DatabaseError> {
         let mut db = self.database.take().unwrap_or_else(|| Database::new(self.configuration.clone()));
 
         // Update database configuration to use the loader's configuration
         // (fixes workspace path when merging with prelude database)
         db.configuration = self.configuration.clone();
 
-        let extensions_set: HashSet<OsString> =
-            self.configuration.extensions.iter().map(|s| bytes_to_os_str(s.as_ref()).into_owned()).collect();
-
-        let glob_exclude_patterns: Vec<&str> = self
-            .configuration
-            .excludes
-            .iter()
-            .filter_map(|ex| match ex {
-                Exclusion::Pattern(pat) => Some(pat.as_ref()),
-                Exclusion::Path(_) => None,
-            })
-            .collect();
-
-        let glob_excludes = build_glob_set(glob_exclude_patterns.iter().copied(), self.configuration.glob)?;
-        let excluded_folders = ExcludedFolders::from_configuration(&self.configuration)?;
-
+        let glob_excludes = self.glob_excludes()?;
         let path_excludes: HashSet<_> = self
             .configuration
             .excludes
@@ -120,43 +148,11 @@ impl<'config> DatabaseLoader<'config> {
                 Exclusion::Pattern(_) => None,
             })
             .collect();
-
-        let (host_files_with_spec, (vendored_files_with_spec, patch_files_with_spec)) = rayon::join(
-            || {
-                self.load_paths(
-                    &self.configuration.paths,
-                    FileType::Host,
-                    &extensions_set,
-                    &glob_excludes,
-                    &excluded_folders,
-                )
-            },
-            || {
-                rayon::join(
-                    || {
-                        self.load_paths(
-                            &self.configuration.includes,
-                            FileType::Vendored,
-                            &extensions_set,
-                            &glob_excludes,
-                            &excluded_folders,
-                        )
-                    },
-                    || {
-                        self.load_paths(
-                            &self.configuration.patches,
-                            FileType::Patch,
-                            &extensions_set,
-                            &glob_excludes,
-                            &excluded_folders,
-                        )
-                    },
-                )
-            },
-        );
-        let host_files_with_spec = host_files_with_spec?;
-        let vendored_files_with_spec = vendored_files_with_spec?;
-        let patch_files_with_spec = patch_files_with_spec?;
+        let read = listing
+            .files
+            .par_iter()
+            .filter_map(|listed| self.read(&listing.workspace, listed))
+            .collect::<Result<Vec<FileWithSpecificity>, DatabaseError>>()?;
 
         let mut all_files: HashMap<FileId, File> = HashMap::default();
         // Per-file maximum specificity for each tier the file matched. `None` in a slot means
@@ -164,6 +160,8 @@ impl<'config> DatabaseLoader<'config> {
         // best specificity score that tier could offer, scored by `calculate_pattern_specificity`.
         type TierSpecs = (Option<usize>, Option<usize>, Option<usize>);
         let mut tier_specs: HashMap<FileId, TierSpecs> = HashMap::default();
+        let (host_files_with_spec, other_files_with_spec): (Vec<_>, Vec<_>) =
+            read.into_iter().partition(|file_with_spec| file_with_spec.file.file_type == FileType::Host);
 
         // Process host files (from paths)
         for file_with_spec in host_files_with_spec {
@@ -211,19 +209,14 @@ impl<'config> DatabaseLoader<'config> {
             }
         }
 
-        for file_with_spec in vendored_files_with_spec {
-            let file_id = file_with_spec.file.id;
-            let vendored_specificity = file_with_spec.specificity;
-
-            all_files.entry(file_id).or_insert(file_with_spec.file);
-            bump_spec(&mut tier_specs.entry(file_id).or_insert((None, None, None)).1, vendored_specificity);
-        }
-
-        for file_with_spec in patch_files_with_spec {
+        // Process vendored files (from includes), then patch files, in the listing's order.
+        for file_with_spec in other_files_with_spec {
             let file_id = file_with_spec.file.id;
             let specificity = file_with_spec.specificity;
+            let specs = tier_specs.entry(file_id).or_insert((None, None, None));
+            let slot = if file_with_spec.file.file_type == FileType::Patch { &mut specs.2 } else { &mut specs.1 };
+            bump_spec(slot, specificity);
             all_files.entry(file_id).or_insert(file_with_spec.file);
-            bump_spec(&mut tier_specs.entry(file_id).or_insert((None, None, None)).2, specificity);
         }
 
         db.reserve(tier_specs.len() + self.memory_sources.len());
@@ -246,21 +239,47 @@ impl<'config> DatabaseLoader<'config> {
         Ok(db)
     }
 
-    /// Discovers and reads all files from a set of root paths or glob patterns in parallel.
-    ///
-    /// Supports both:
-    /// - Directory paths (e.g., "src", "tests") - recursively walks all files
-    /// - Glob patterns (e.g., "src/**/*.php", "tests/Unit/*Test.php") - matches files using glob syntax
-    ///
-    /// Returns files along with their pattern specificity for conflict resolution.
-    fn load_paths(
+    /// The set of the configuration's `excludes` glob patterns, which exclude each file they match.
+    fn glob_excludes(&self) -> Result<GlobSet, DatabaseError> {
+        let patterns = self.configuration.excludes.iter().filter_map(|exclusion| match exclusion {
+            Exclusion::Pattern(pattern) => Some(pattern.as_ref()),
+            Exclusion::Path(_) => None,
+        });
+
+        build_glob_set(patterns, self.configuration.glob)
+    }
+
+    /// The file `listed` names, read as a file of the workspace at `workspace`, or the stdin override's contents when
+    /// its name is the override's. None when the file is gone since the listing.
+    fn read(&self, workspace: &Path, listed: &Listed) -> Option<Result<FileWithSpecificity, DatabaseError>> {
+        let Listed { path, file_type, specificity, metadata, exact, .. } = listed;
+        if let Some((override_name, override_content)) = &self.stdin_override
+            && override_name.as_ref() == File::logical_name(workspace, path).as_slice()
+        {
+            let name = Cow::Owned(File::logical_name(workspace, path));
+            let file = File::new(name, *file_type, Some(path.clone()), Cow::Owned(override_content.clone()));
+
+            return Some(Ok(FileWithSpecificity { file, specificity: *specificity }));
+        }
+        let modified = if *exact { None } else { metadata.modified().ok() };
+
+        read_listed_file(workspace, path, *file_type, modified)
+            .map(|file| file.map(|file| FileWithSpecificity { file, specificity: *specificity }))
+    }
+
+    /// Lists every file under a set of root paths or glob patterns, each as a file of `file_type`, in parallel: a
+    /// root that names a file, whatever its extension, each file of one of `extensions` a root folder holds below a
+    /// folder `excluded_folders` doesn't hold, and each file a glob pattern matches. A file `glob_excludes` matches or
+    /// an `excludes` path holds is left out. Each listed file carries the specificity of its root, for conflict
+    /// resolution, and its metadata, read before any file is.
+    fn list_paths(
         &self,
         roots: &[Cow<'config, [u8]>],
         file_type: FileType,
         extensions: &HashSet<OsString>,
         glob_excludes: &GlobSet,
         excluded_folders: &ExcludedFolders,
-    ) -> Result<Vec<FileWithSpecificity>, DatabaseError> {
+    ) -> Result<Vec<Listed>, DatabaseError> {
         // Canonicalize the workspace once.  All WalkDir roots are canonicalized
         // before traversal so their paths inherit the canonical prefix without
         // any per-file syscalls.
@@ -269,8 +288,8 @@ impl<'config> DatabaseLoader<'config> {
 
         // The bool flags a path that was named exactly (a literal file on disk) rather than
         // discovered by walking a configured directory. Such paths bypass the extension filter.
-        let mut paths_to_process: Vec<(PathBuf, usize, bool)> = Vec::new();
-        let mut directory_roots: Vec<(PathBuf, usize)> = Vec::new();
+        let mut paths_to_process: Vec<(PathBuf, PathBuf, usize, bool)> = Vec::new();
+        let mut directory_roots: Vec<(PathBuf, PathBuf, usize)> = Vec::new();
 
         for root in roots {
             // Check if this is a glob pattern (contains glob metacharacters).
@@ -307,7 +326,7 @@ impl<'config> DatabaseLoader<'config> {
                                         // TempDir / glob return /var/… but canonicalize gives
                                         // /private/var/…).  Fall back to the original on error.
                                         let canonical = path.canonicalize().unwrap_or(path);
-                                        paths_to_process.push((canonical, specificity, false));
+                                        paths_to_process.push((canonical.clone(), canonical, specificity, false));
                                     }
                                 }
                                 Err(e) => {
@@ -327,7 +346,7 @@ impl<'config> DatabaseLoader<'config> {
                 // discovered by walking a directory. Honor it verbatim, bypassing the extension
                 // filter so extensionless PHP files (e.g. `bin/console`) can be loaded.
                 if canonical_root.is_file() {
-                    paths_to_process.push((canonical_root, specificity, true));
+                    paths_to_process.push((canonical_root.clone(), canonical_root, specificity, true));
                     continue;
                 }
 
@@ -338,12 +357,13 @@ impl<'config> DatabaseLoader<'config> {
                                 continue;
                             }
 
+                            let real = real_path(&entry, &[]);
                             if entry.file_type().is_dir() {
                                 if !excluded_folders.contains(entry.path()) {
-                                    directory_roots.push((entry.into_path(), specificity));
+                                    directory_roots.push((entry.into_path(), real, specificity));
                                 }
                             } else {
-                                paths_to_process.push((entry.into_path(), specificity, false));
+                                paths_to_process.push((entry.into_path(), real, specificity, false));
                             }
                         }
                         Err(err) => warn_walk_error(&err, canonical_root.as_path()),
@@ -354,7 +374,8 @@ impl<'config> DatabaseLoader<'config> {
 
         let has_path_excludes = !canonical_excludes.is_empty();
         let has_glob_excludes = !glob_excludes.is_empty();
-        let load_path = |(path, specificity, skip_ext_check): (PathBuf, usize, bool)| {
+        let list_path = |(path, real, specificity, exact): (PathBuf, PathBuf, usize, bool),
+                         metadata: Option<std::fs::Metadata>| {
             if has_glob_excludes
                 && (glob_excludes.is_match(&path)
                     || glob_excludes.is_match(workspace_relative_string(&path, canonical_workspace.as_path())))
@@ -362,11 +383,8 @@ impl<'config> DatabaseLoader<'config> {
                 return None;
             }
 
-            if !skip_ext_check {
-                let ext = path.extension()?;
-                if !extensions.contains(ext) {
-                    return None;
-                }
+            if !exact && !extensions.contains(path.extension()?) {
+                return None;
             }
 
             if has_path_excludes {
@@ -382,66 +400,110 @@ impl<'config> DatabaseLoader<'config> {
                 }
             }
 
-            let workspace = canonical_workspace.as_path();
-            #[cfg(windows)]
-            let logical_name =
-                path.strip_prefix(workspace).unwrap_or(path.as_path()).to_string_lossy().replace('\\', "/");
-            #[cfg(not(windows))]
-            let logical_name = path.strip_prefix(workspace).unwrap_or(path.as_path()).to_string_lossy().into_owned();
+            // A file gone since the walk found it is no file, as a read that finds it gone leaves it out.
+            let metadata = metadata.or_else(|| std::fs::metadata(&path).ok())?;
 
-            if let Some((override_name, override_content)) = &self.stdin_override
-                && override_name.as_ref() == logical_name.as_bytes()
-            {
-                let file = File::new(
-                    Cow::Owned(logical_name.into_bytes()),
-                    file_type,
-                    Some(path),
-                    Cow::Owned(override_content.clone()),
-                );
-
-                return Some(Ok(FileWithSpecificity { file, specificity }));
-            }
-
-            read_listed_file(workspace, &path, file_type, !skip_ext_check)
-                .map(|file| file.map(|file| FileWithSpecificity { file, specificity }))
+            Some(Listed { path, real, metadata, file_type, specificity, exact })
         };
 
         let (direct_files, directory_files) = rayon::join(
-            || paths_to_process.into_par_iter().filter_map(&load_path).collect::<Result<Vec<FileWithSpecificity>, _>>(),
+            || paths_to_process.into_par_iter().filter_map(|path| list_path(path, None)).collect::<Vec<Listed>>(),
             || {
                 directory_roots
                     .into_par_iter()
-                    .map(|(root, specificity)| {
+                    .map(|(root, real_root, specificity)| {
                         let walker = WalkDir::new(&root).follow_links(true).into_iter().filter_entry(|entry| {
                             entry.depth() == 0
                                 || !entry.file_type().is_dir()
                                 || !excluded_folders.contains(entry.path())
                         });
+                        // Each linked folder of the walk with its real path, so a file below one names its real path.
+                        let mut links: Vec<(PathBuf, PathBuf)> = Vec::new();
+                        if real_root != root {
+                            links.push((root.clone(), real_root));
+                        }
 
                         let mut files = Vec::new();
                         for entry in walker {
                             match entry {
-                                Ok(entry) if !entry.file_type().is_dir() => {
-                                    if let Some(file) = load_path((entry.into_path(), specificity, false)) {
-                                        files.push(file?);
+                                Ok(entry) if entry.file_type().is_dir() => {
+                                    if entry.depth() > 0 && entry.path_is_symlink() {
+                                        links.push((entry.path().to_path_buf(), real_path(&entry, &links)));
                                     }
                                 }
-                                Ok(_) => {}
+                                Ok(entry) => {
+                                    let real = real_path(&entry, &links);
+                                    let metadata = entry.metadata().ok();
+                                    if let Some(listed) =
+                                        list_path((entry.into_path(), real, specificity, false), metadata)
+                                    {
+                                        files.push(listed);
+                                    }
+                                }
                                 Err(err) => warn_walk_error(&err, root.as_path()),
                             }
                         }
 
-                        Ok(files)
+                        files
                     })
-                    .collect::<Result<Vec<Vec<FileWithSpecificity>>, DatabaseError>>()
+                    .collect::<Vec<Vec<Listed>>>()
             },
         );
 
-        let mut files = direct_files?;
-        files.extend(directory_files?.into_iter().flatten());
+        let mut files = direct_files;
+        files.extend(directory_files.into_iter().flatten());
 
         Ok(files)
     }
+}
+
+/// The real path of the file or folder `entry` names, from the real path of the deepest of `links`, each linked folder
+/// above it with its real path, that holds it: the entry's own target when it is a link, as the disk resolves it.
+fn real_path(entry: &walkdir::DirEntry, links: &[(PathBuf, PathBuf)]) -> PathBuf {
+    let path = entry.path();
+    if entry.path_is_symlink() {
+        return path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    }
+
+    links
+        .iter()
+        .rev()
+        .find_map(|(link, real)| path.strip_prefix(link).ok().map(|below| real.join(below)))
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// Every file a walk of a [`DatabaseConfiguration`]'s roots found, as [`DatabaseLoader::list`] gives them, which
+/// [`DatabaseLoader::load_listed`] reads.
+#[derive(Debug, Clone, Default)]
+pub struct Listing {
+    /// The canonical workspace the files are named relative to.
+    workspace: PathBuf,
+    files: Vec<Listed>,
+}
+
+impl Listing {
+    /// Each file the walk found, once for each root tier that found it.
+    #[must_use]
+    pub fn files(&self) -> &[Listed] {
+        &self.files
+    }
+}
+
+/// A file a walk found, before any file was read: the path it is named by, its real path, and its metadata, with the
+/// tier and the specificity of the root that found it.
+#[derive(Debug, Clone)]
+pub struct Listed {
+    /// The path the database names the file by: through a linked folder as the walk reached it, and its real path
+    /// for a file a glob pattern matches.
+    pub path: PathBuf,
+    /// The file's real path, with every link resolved.
+    pub real: PathBuf,
+    /// The file's metadata, its link followed, read before any file was read.
+    pub metadata: std::fs::Metadata,
+    file_type: FileType,
+    specificity: usize,
+    /// Whether a root names the file itself, which keeps no modification time.
+    exact: bool,
 }
 
 fn workspace_relative_string(path: &Path, workspace: &Path) -> String {
@@ -456,15 +518,14 @@ fn workspace_relative_string(path: &Path, workspace: &Path) -> String {
     }
 }
 
-/// Reads the file at `path`, or none when [`read_listed`] finds it gone. A file a walk `listed` under its exact name
-/// keeps the modification time taken just before the read.
+/// Reads the file at `path`, or none when [`read_listed`] finds it gone. The file keeps `modified`, the modification
+/// time its walk read before the read, which a file a root names by itself has none of.
 fn read_listed_file(
     workspace: &Path,
     path: &Path,
     file_type: FileType,
-    listed: bool,
+    modified: Option<std::time::SystemTime>,
 ) -> Option<Result<File, DatabaseError>> {
-    let modified = listed.then(|| std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok()).flatten();
     let bytes = match read_listed(path) {
         Ok(bytes) => bytes?,
         Err(error) => return Some(Err(error)),
@@ -1272,7 +1333,7 @@ mod tests {
     fn a_listed_file_that_is_gone_when_read_is_left_out() {
         let temp_dir = TempDir::new().unwrap();
         create_test_file(&temp_dir, "src/a.php", "<?php");
-        let read = |name: &str| read_listed_file(temp_dir.path(), &temp_dir.path().join(name), FileType::Host, true);
+        let read = |name: &str| read_listed_file(temp_dir.path(), &temp_dir.path().join(name), FileType::Host, None);
 
         assert!(matches!(read("src/a.php"), Some(Ok(_))));
         assert!(read("src/gone.php").is_none());

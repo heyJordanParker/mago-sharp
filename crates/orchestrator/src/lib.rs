@@ -56,6 +56,7 @@ use mago_database::exclusion::Exclusion;
 use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_database::loader::DatabaseLoader;
+use mago_database::loader::Listing;
 use mago_database::loader::read_listed;
 use mago_database::membership::WorkspaceMatcher;
 use mago_sharp_bridge::unit::COMPILED_FOLDER;
@@ -393,6 +394,37 @@ impl<'cfg> Orchestrator<'cfg> {
         }
 
         let mut result = loader.load().map_err(OrchestratorError::Database)?;
+        self.add_external_initialization_files(&mut result)?;
+
+        Ok(result)
+    }
+
+    /// Lists every file [`Self::load_database`] reads from `workspace` with the `includes` list, each with its
+    /// metadata, and reads none of them, as [`DatabaseLoader::list`] lists them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError`] when an `excludes` or a `paths` glob pattern is invalid.
+    pub fn list_database(&self, workspace: &Path) -> Result<Listing, OrchestratorError> {
+        DatabaseLoader::new(self.database_configuration(workspace, true)).list().map_err(OrchestratorError::Database)
+    }
+
+    /// Reads the files `listing` names, as [`Self::list_database`] listed them in `workspace`, into the database
+    /// [`Self::load_database`] gives with the `includes` list, so the walk that listed them is the only one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError`] when a listed file can't be read or the extension hosts fail to initialize.
+    pub fn load_listed<'borrow>(
+        &'borrow self,
+        workspace: &'cfg Path,
+        listing: &Listing,
+    ) -> Result<Database<'cfg>, OrchestratorError>
+    where
+        'borrow: 'cfg,
+    {
+        let loader = DatabaseLoader::new(self.database_configuration(workspace, true));
+        let mut result = loader.load_listed(listing).map_err(OrchestratorError::Database)?;
         self.add_external_initialization_files(&mut result)?;
 
         Ok(result)

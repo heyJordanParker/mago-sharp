@@ -27,7 +27,6 @@ use std::sync::PoisonError;
 
 use clap::ColorChoice;
 use clap::Parser;
-use rayon::iter::IntoParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use serde::Deserialize;
@@ -52,7 +51,7 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
-use mago_database::loader::ExcludedFolders;
+use mago_database::loader::Listing;
 use mago_database::loader::read_listed;
 use mago_database::membership::WorkspaceMatcher;
 use mago_orchestrator::Autoloader;
@@ -365,22 +364,16 @@ impl HostsCompile {
         self.last = None;
         let mut filesystems = Filesystems::new();
         let orchestrator = whole_workspace(&self.configuration, ColorChoice::Never, false)?;
-        let excluded = excluded_folders(&orchestrator, &self.configuration)?;
-        let mut sources = source_files(
-            &self.configuration,
-            &self.root,
-            &mut filesystems,
-            orchestrator.autoloader().as_deref(),
-            &excluded,
-        );
+        let mut listing = orchestrator.list_database(&self.configuration.source.workspace)?;
+        let mut sources = source_files(&self.root, &listing, &mut filesystems, orchestrator.autoloader().as_deref());
         if !sources.keys().any(|name| name.ends_with(".sharp")) {
             return Ok(HostsChange::Unchanged);
         }
 
-        let (lock, held, exclusive, stale) = self.lock(&mut sources, &mut filesystems, &orchestrator, &excluded)?;
+        let (lock, held, exclusive, stale) = self.lock(&mut listing, &mut sources, &mut filesystems, &orchestrator)?;
         let (configuration, root, folder) = (&self.configuration, &self.root, &self.folder);
         let compiled = if stale {
-            Some(compile_into(configuration, root, folder, &orchestrator, &sources, filesystems.clone())?)
+            Some(compile_into(configuration, root, folder, &orchestrator, &listing, &sources, filesystems.clone())?)
         } else {
             None
         };
@@ -393,6 +386,7 @@ impl HostsCompile {
                     root,
                     folder,
                     &orchestrator,
+                    &listing,
                     &sources,
                     filesystems,
                     outputs.unwrap_or_default(),
@@ -408,19 +402,20 @@ impl HostsCompile {
 
     /// Takes the lock of the folder's [`COMPILE_LOCK`] for a compile of the whole project, as
     /// [`compile_for_hosts`] says: shared while the folder holds the compile of the project whose source files are
-    /// `sources`, as [`source_files`] found them with `filesystems`, and else exclusive. A run that waited for another's
-    /// compile finds the sources again with `orchestrator` and `excluded` and checks the folder again. Gives the lock,
-    /// what this process held of the folder, whether the lock is exclusive, and whether the folder needs the compile.
+    /// `sources`, as [`source_files`] found them in `listing` with `filesystems`, and else exclusive. A run that waited
+    /// for another's compile lists the project again with `orchestrator`, finds the sources again and checks the folder
+    /// again. Gives the lock, what this process held of the folder, whether the lock is exclusive, and whether the
+    /// folder needs the compile.
     ///
     /// # Errors
     ///
-    /// Returns the error of taking the lock.
+    /// Returns the error of taking the lock or of listing the project again.
     fn lock(
         &self,
+        listing: &mut Listing,
         sources: &mut BTreeMap<String, Found>,
         filesystems: &mut Filesystems,
         orchestrator: &Orchestrator<'_>,
-        excluded: &ExcludedFolders,
     ) -> Result<(std::fs::File, Option<HeldFolder>, bool, bool), Error> {
         let Self { configuration, root, folder, .. } = self;
         let path = folder.join(COMPILE_LOCK);
@@ -441,7 +436,8 @@ impl HostsCompile {
         // for the lock is another run's compile, whose tree this run checks again and reuses when it is current.
         let reused = std::fs::read(&record_path).ok() != stale && {
             *filesystems = Filesystems::new();
-            *sources = source_files(configuration, root, filesystems, orchestrator.autoloader().as_deref(), excluded);
+            *listing = orchestrator.list_database(&configuration.source.workspace)?;
+            *sources = source_files(root, listing, filesystems, orchestrator.autoloader().as_deref());
             every_compiled_file_is_current(configuration, root, folder, sources, filesystems)
         };
 
@@ -552,15 +548,16 @@ impl HostsCompile {
     }
 }
 
-/// Compiles the project at `root`, whose source files are `sources`, as [`source_files`] found them with `orchestrator`
-/// and `filesystems`, into `folder` for its extension hosts, as [`compile_for_hosts`] says, from an analysis of its own,
-/// as [`write_hosts_folder`] writes it. Returns, when a file in `folder` changed, the files whose compiled file changed,
-/// and what the compile leaves for the next one to start from.
+/// Compiles the project at `root`, whose source files are `sources`, as [`source_files`] found them in `listing`, which
+/// `orchestrator` listed, with `filesystems`, into `folder` for its extension hosts, as [`compile_for_hosts`] says, from
+/// an analysis of its own, as [`write_hosts_folder`] writes it. Returns, when a file in `folder` changed, the files
+/// whose compiled file changed, and what the compile leaves for the next one to start from.
 fn compile_into(
     configuration: &Configuration,
     root: &Path,
     folder: &Path,
     orchestrator: &Orchestrator<'_>,
+    listing: &Listing,
     sources: &BTreeMap<String, Found>,
     filesystems: Filesystems,
 ) -> Result<(Option<Recompiled>, LastCompile), Error> {
@@ -571,7 +568,8 @@ fn compile_into(
     let _ = std::fs::remove_file(&record_path);
     let record =
         Record::start(configuration, root, sources, folder, filesystems.clone(), orchestrator.autoloader().as_deref());
-    let mut last = LastCompile::analyzed(configuration, root, folder, orchestrator, sources, filesystems, outputs)?;
+    let mut last =
+        LastCompile::analyzed(configuration, root, folder, orchestrator, listing, sources, filesystems, outputs)?;
     let compiled = write_hosts_folder(configuration, root, folder, &mut last, record)?;
 
     Ok((compiled, last))
@@ -632,19 +630,22 @@ impl LastCompile {
     }
 
     /// What a compile into `folder` for the hosts of the project at `root` starts from: the analysis of the project
-    /// without the hosts, whose source files are `sources`, as [`source_files`] found them with `orchestrator` and
-    /// `filesystems`, the record of the compiled files the folder holds, and `outputs`, the status and hash of each file
-    /// the folder's record names as written.
+    /// without the hosts, of the files `listing` names, which `orchestrator` listed, whose source files are `sources`, as
+    /// [`source_files`] found them with `filesystems`, the record of the compiled files the folder holds, and
+    /// `outputs`, the status and hash of each file the folder's record names as written.
+    #[allow(clippy::too_many_arguments)]
     fn analyzed(
         configuration: &Configuration,
         root: &Path,
         folder: &Path,
         orchestrator: &Orchestrator<'_>,
+        listing: &Listing,
         sources: &BTreeMap<String, Found>,
         filesystems: Filesystems,
         outputs: Outputs,
     ) -> Result<Self, Error> {
-        let (database, _) = project_database(orchestrator, &configuration.source.workspace)?;
+        let (database, _) =
+            with_packages(orchestrator.load_listed(&configuration.source.workspace, listing)?.into_static());
         let library = standard_library(root, &database).map_err(OrchestratorError::General)?;
         let mut server = Server::new(database.into_static(), decode_prelude, server_settings(orchestrator))
             .keeping_lowering_inputs();
@@ -1026,18 +1027,6 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
     Ok(true)
 }
 
-/// The folders the loader skips in `orchestrator`'s workspace, which `configuration` names, as it loads the project's
-/// files with its includes and patches.
-///
-/// # Errors
-///
-/// Returns the error of compiling an exclude pattern.
-fn excluded_folders(orchestrator: &Orchestrator<'_>, configuration: &Configuration) -> Result<ExcludedFolders, Error> {
-    Ok(ExcludedFolders::from_configuration(
-        &orchestrator.database_configuration(&configuration.source.workspace, true),
-    )?)
-}
-
 /// Whether the compile lowers `file`, a PHP# file of the project, which is the scope of its analysis. The compile
 /// refuses a PHP# file for the errors reported in it, and a node-analysis hook reports only in the file it inspects, so
 /// the hooks run only in these files, as they run only in the named files of `mago analyze <paths>`.
@@ -1097,12 +1086,16 @@ fn compiled(
     let mut filesystems = Filesystems::new();
     let orchestrator = whole_workspace(configuration, color_choice, true)?;
     let autoloader = orchestrator.autoloader();
-    let excluded = excluded_folders(&orchestrator, configuration)?;
-    let mut sources = source_files(configuration, &root, &mut filesystems, autoloader.as_deref(), &excluded);
+    // A warning or an error the compile doesn't print in its outcome is printed again by the next compile, which a
+    // record would skip. The walk below logs its own.
+    let warnings = logger::warnings();
+    // The one walk of the project: the record's source files come from it, and the load reads the files it lists.
+    let mut listing = orchestrator.list_database(workspace)?;
+    let mut sources = source_files(&root, &listing, &mut filesystems, autoloader.as_deref());
     // The hosts' folder, locked, while the project has a PHP# file for the hosts to load, with whether it is out of
     // date.
     let hosts = match hosts.filter(|_| sources.keys().any(|name| name.ends_with(".sharp"))) {
-        Some(hosts) => Some((hosts, hosts.lock(&mut sources, &mut filesystems, &orchestrator, &excluded)?)),
+        Some(hosts) => Some((hosts, hosts.lock(&mut listing, &mut sources, &mut filesystems, &orchestrator)?)),
         None => None,
     };
     let mut last = Record::read(&record_path);
@@ -1127,9 +1120,6 @@ fn compiled(
     let outputs = last.map(|mut record| std::mem::take(&mut record.outputs)).unwrap_or_default();
     // A record the compile can't delete is in a folder it then fails to write its compiled files to.
     let _ = std::fs::remove_file(&record_path);
-    // A warning or an error the compile doesn't print in its outcome is printed again by the next compile, which a
-    // record would skip.
-    let warnings = logger::warnings();
     // A project with no PHP# file gets no `.sharp` folder to keep a record in.
     let mut record = sources
         .keys()
@@ -1165,7 +1155,7 @@ fn compiled(
         orchestrator.set_external_analyzer_handle(external_analyzer);
     }
 
-    let database = orchestrator.load_database(workspace, true, None, None)?.into_static();
+    let database = orchestrator.load_listed(workspace, &listing)?.into_static();
     loaded(&database);
     let (database, included) = with_packages(database);
 
@@ -2004,127 +1994,27 @@ fn configuration_hash(configuration: &Configuration) -> [u8; 16] {
     unit::source_hash(format!("{php_version:?}{source:?}{extension_hosts:?}{parser:?}{analyzer:?}").as_bytes())
 }
 
-/// Each file the loader could read under the configured `paths`, `includes` and `patches` roots, by the name the
-/// database gives it, as [`Found`] holds it: a file a root names, whatever its extension, and each file of a configured
-/// extension under a root folder or under the folder a glob pattern starts with, following links as the loader does.
-/// The excludes are ignored, which only adds files, and the `.sharp` folder at `root` is left out, as the loader leaves
-/// it out, as is each file `autoloader`'s maps serve, which the record stamps when the analysis reads it.
+/// Each file the loader reads, as the walk of `listing` found it, by the name the database gives it, as [`Found`]
+/// holds it: its status, from the metadata the walk read before any file was read, and its real path's name when that
+/// differs. Each file `autoloader`'s maps serve is left out, which the record stamps when the analysis reads it.
 /// `filesystems` tells which filesystems record every write.
 fn source_files(
-    configuration: &Configuration,
     root: &Path,
+    listing: &Listing,
     filesystems: &mut Filesystems,
     autoloader: Option<&Autoloader>,
-    excluded: &ExcludedFolders,
 ) -> BTreeMap<String, Found> {
-    let source = &configuration.source;
-    let whole_workspace = [".".to_owned()];
-    let paths = if source.paths.is_empty() { &whole_workspace[..] } else { &source.paths[..] };
-    let is_glob = |text: &str| text.contains(['*', '?', '[', '{']);
-    let walk = Walk { root, extensions: &source.extensions, autoloader, excluded };
     let mut files = BTreeMap::new();
-    let mut keep = |Kept { path, real, metadata }: Kept| {
-        let name = source_name(root, &path);
-        let real = Some(source_name(root, &real)).filter(|real| *real != name);
-        files.insert(name, Found(Status::of(&path, &metadata, filesystems), real));
-    };
-    for configured in paths.iter().chain(&source.includes).chain(&source.patches) {
-        let path = root.join(configured);
-        if path.exists() {
-            let path = path.canonicalize().unwrap_or(path);
-            match std::fs::metadata(&path) {
-                Ok(metadata) if metadata.is_file() => keep(Kept { path: path.clone(), real: path, metadata }),
-                Ok(_) => walk.folder(&path, std::slice::from_ref(&path), false).into_iter().for_each(&mut keep),
-                Err(_) => {}
-            }
-        } else if is_glob(configured) {
-            let start: PathBuf =
-                path.components().take_while(|part| !is_glob(&part.as_os_str().to_string_lossy())).collect();
-            let start = start.canonicalize().unwrap_or(start);
-            walk.folder(&start, std::slice::from_ref(&start), true).into_iter().for_each(&mut keep);
+    for listed in listing.files() {
+        if autoloader.is_some_and(|autoloader| autoloader.serves(&listed.path)) {
+            continue;
         }
+        let name = source_name(root, &listed.path);
+        let real = Some(source_name(root, &listed.real)).filter(|real| *real != name);
+        files.insert(name, Found(Status::of(&listed.path, &listed.metadata, filesystems), real));
     }
 
     files
-}
-
-/// The walk of [`source_files`] under `root`, which finds each file of one of `extensions`.
-struct Walk<'walk> {
-    root: &'walk Path,
-    extensions: &'walk [String],
-    autoloader: Option<&'walk Autoloader>,
-    excluded: &'walk ExcludedFolders,
-}
-
-/// A file the walk of [`source_files`] keeps: the path it is named by, its real path, and its metadata.
-struct Kept {
-    path: PathBuf,
-    real: PathBuf,
-    metadata: std::fs::Metadata,
-}
-
-/// An entry of a folder the walk of [`source_files`] reaches: a file it keeps, or a folder below, by its path and its
-/// real path.
-enum Reached {
-    File(Kept),
-    Folder(PathBuf, PathBuf),
-}
-
-impl Walk<'_> {
-    /// The files the walk keeps under `folder`, whose real path is the last of `real`, as the real paths of the folders
-    /// above it in the walk come before it, in the order a walk of one entry after another finds them. The folders below
-    /// `folder` are walked at once. A folder whose real path `real` holds is a link back to one of them, which the walk
-    /// skips as the loader does. Each file is kept by its name, or by the name of its real path when `by_real_path` is
-    /// set, as the loader names a file a glob pattern matches.
-    fn folder(&self, folder: &Path, real: &[PathBuf], by_real_path: bool) -> Vec<Kept> {
-        let Ok(entries) = std::fs::read_dir(folder) else {
-            return Vec::new();
-        };
-        let reached: Vec<Reached> = entries
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                let kind = entry.file_type().ok()?;
-                // The listing gives each entry's kind, so only a link's target and a kept file are read from the disk.
-                let (is_folder, real_path) = if kind.is_symlink() {
-                    // A link whose target is gone is no file, as the loader skips it.
-                    let target = std::fs::metadata(&path).ok()?;
-                    (target.is_dir(), path.canonicalize().unwrap_or_else(|_| path.clone()))
-                } else {
-                    (kind.is_dir(), real.last().map_or_else(|| path.clone(), |parent| parent.join(entry.file_name())))
-                };
-                if is_folder {
-                    return (path != self.root.join(unit::COMPILED_FOLDER)
-                        && !self.excluded.contains(&path)
-                        && !real.contains(&real_path))
-                    .then_some(Reached::Folder(path, real_path));
-                }
-                if !path
-                    .extension()
-                    .is_some_and(|extension| self.extensions.iter().any(|known| extension == known.as_str()))
-                    || self.autoloader.is_some_and(|autoloader| autoloader.serves(&path))
-                {
-                    return None;
-                }
-                let metadata = std::fs::metadata(&path).ok()?;
-                let named = if by_real_path { real_path.clone() } else { path };
-
-                Some(Reached::File(Kept { path: named, real: real_path, metadata }))
-            })
-            .collect();
-
-        reached
-            .into_par_iter()
-            .flat_map_iter(|reached| match reached {
-                Reached::File(kept) => vec![kept],
-                Reached::Folder(path, real_path) => {
-                    let below: Vec<PathBuf> = real.iter().cloned().chain([real_path]).collect();
-
-                    self.folder(&path, &below, by_real_path)
-                }
-            })
-            .collect()
-    }
 }
 
 /// The name the database gives the file at `path` in the project at `root`, as [`File::logical_name`] gives it.
@@ -2615,7 +2505,7 @@ mod tests {
             HostsCompile::at(&configuration, &root, fresh.path()).compile_whole(false).unwrap();
             assert_eq!(folder_files(folder.path()), folder_files(fresh.path()), "after the change of {changed}");
             let mut filesystems = Filesystems::new();
-            let sources = source_files(&configuration, &root, &mut filesystems, None, &no_excludes(&root));
+            let sources = source_files(&root, &listing(&configuration), &mut filesystems, None);
             assert!(
                 every_compiled_file_is_current(&configuration, &root, folder.path(), &sources, &mut filesystems),
                 "the record stands for the tree after the change of {changed}"
@@ -2680,12 +2570,15 @@ mod tests {
         assert_eq!(std::fs::read(folder.path().join("app/Paced.sharpc")).unwrap(), paced);
     }
 
-    /// Writes `bytes` to the file at `path` and sets its modification time back to `modified`, as `touch -d` does.
-    /// The folders a project at `root` with no excludes skips: none.
-    fn no_excludes(root: &Path) -> ExcludedFolders {
-        ExcludedFolders::from_configuration(&DatabaseConfiguration::new(root, vec![], vec![], vec![], vec![])).unwrap()
+    /// Every file a compile of the project of `configuration` walks to, as [`compiled`] lists them.
+    fn listing(configuration: &Configuration) -> Listing {
+        whole_workspace(configuration, ColorChoice::Never, false)
+            .unwrap()
+            .list_database(&configuration.source.workspace)
+            .unwrap()
     }
 
+    /// Writes `bytes` to the file at `path` and sets its modification time back to `modified`, as `touch -d` does.
     fn rewrite(path: &Path, bytes: &[u8], modified: std::time::SystemTime) {
         std::fs::write(path, bytes).unwrap();
         std::fs::File::options().write(true).open(path).unwrap().set_modified(modified).unwrap();
@@ -2712,12 +2605,12 @@ mod tests {
         for path in [&root, folder] {
             forced.insert(std::fs::metadata(path).unwrap().dev(), false);
         }
-        let sources = source_files(&configuration, &root, &mut forced, None, &no_excludes(&root));
+        let sources = source_files(&root, &listing(&configuration), &mut forced, None);
         let mut record = Record::start(&configuration, &root, &sources, folder, forced.clone(), None).unwrap();
         record.output(&output, b"compiled");
         record.write(&folder.join(INPUTS), Outcome::default(), &ReadDatabase::empty(), []).unwrap();
         let mut current = || {
-            let sources = source_files(&configuration, &root, &mut forced, None, &no_excludes(&root));
+            let sources = source_files(&root, &listing(&configuration), &mut forced, None);
             every_compiled_file_is_current(&configuration, &root, folder, &sources, &mut forced)
         };
         assert!(current(), "each file hashes as it did");
