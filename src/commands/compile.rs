@@ -1037,17 +1037,41 @@ fn is_lowered(file: &File) -> bool {
 /// Checks every PHP# file the analyzer loads, writes the compiled file of each accepted one, and deletes every other
 /// file in the `.sharp` folder, as [`CompileCommand::execute`] says.
 fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
-    let (outcome, database) = compiled(configuration, color_choice, None, |_| {})?;
+    let (outcome, database, _) = compiled(configuration, color_choice, None, Keeping::Nothing)?;
 
     outcome.print(database, configuration, color_choice)
 }
 
+/// What a whole `mago analyze` reports from, of what its compile loaded and analyzed.
+pub(crate) enum Loaded {
+    /// Nothing, when the compile had nothing to do: the run loads the files itself.
+    Nothing,
+    /// Every file the compile loaded, as `mago analyze` loads them with no extension host started, which the analysis
+    /// with the hosts reads instead of loading them again.
+    Files(Database<'static>),
+    /// The compile's own analysis, which a project with no extension host enabled reports instead of analyzing again,
+    /// and its issues. Its database holds each package's `.sharp` file as a file of the project, which the compile
+    /// checks too, and it reports in every file but those, whose refusals the compile's outcome holds.
+    Analysis(Box<Server>, IssueCollection),
+}
+
+/// What [`compiled`] keeps for a whole `mago analyze`, as [`Loaded`] gives it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keeping {
+    /// Nothing, as `mago compile` keeps.
+    Nothing,
+    /// Every file it loads.
+    Files,
+    /// Its own analysis.
+    Analysis,
+}
+
 /// Compiles the project as `mago analyze` does before it analyzes with the hosts: into the `.sharp` folder as
 /// `mago compile --no-extensions` does, and into the hosts' folder as [`compile_for_hosts`] does while it is out of
-/// date, from one analysis without the hosts and one lowering. `loaded` gets every file the compile loads, as
-/// `mago analyze` loads them with no extension host started, so the analysis with the hosts reads the files the compile
-/// read without loading them again; it isn't called when the compile has nothing to do. Returns the project's hosts, as
-/// [`compile_for_hosts`] gives them, and the outcome of the compile into the `.sharp` folder.
+/// date, from one analysis without the hosts and one lowering. Returns the project's hosts, as [`compile_for_hosts`]
+/// gives them, the outcome of the compile into the `.sharp` folder, and what the run reports from: the compile's
+/// analysis when no host is enabled and `analysis` is set, as a run that analyzes the files as the compile reads them
+/// sets it, and the files it loaded otherwise.
 ///
 /// # Errors
 ///
@@ -1055,20 +1079,22 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
 pub(crate) fn compile_with_hosts(
     configuration: &Configuration,
     color_choice: ColorChoice,
-    loaded: impl FnOnce(&Database<'static>),
-) -> Result<(BTreeMap<String, ExtensionHostConfiguration>, Outcome), Error> {
+    analysis: bool,
+) -> Result<(BTreeMap<String, ExtensionHostConfiguration>, Outcome, Loaded), Error> {
     let hosts = HostsCompile::new(configuration)?;
     let mut without_hosts = configuration.clone();
     without_hosts.extension_hosts.clear();
-    let (outcome, _) = compiled(&without_hosts, color_choice, hosts.enabled.then_some(&hosts), loaded)?;
+    let keeping = if analysis && !hosts.enabled { Keeping::Analysis } else { Keeping::Files };
+    let (outcome, _, loaded) = compiled(&without_hosts, color_choice, hosts.enabled.then_some(&hosts), keeping)?;
 
-    Ok((hosts.extension_hosts, outcome))
+    Ok((hosts.extension_hosts, outcome, loaded))
 }
 
 /// Compiles the project with `configuration` into its `.sharp` folder, as [`compile`] does, and into the folder of
 /// `hosts`, when given, while that folder is out of date, from the same analysis and lowerings, under the folder's
-/// lock as [`compile_for_hosts`] takes it. `loaded` gets every file the analyzer loads, once they are loaded. Returns the
-/// outcome of the compile into the `.sharp` folder, with the database its issues point into.
+/// lock as [`compile_for_hosts`] takes it. Returns the outcome of the compile into the `.sharp` folder, with the
+/// database its issues point into, and what `keeping` names, nothing when the compile had nothing to do or when its
+/// analysis reports in no file of the project.
 ///
 /// # Errors
 ///
@@ -1077,8 +1103,8 @@ fn compiled(
     configuration: &Configuration,
     color_choice: ColorChoice,
     hosts: Option<&HostsCompile>,
-    loaded: impl FnOnce(&Database<'static>),
-) -> Result<(Outcome, ReadDatabase), Error> {
+    keeping: Keeping,
+) -> Result<(Outcome, ReadDatabase, Loaded), Error> {
     let workspace = configuration.source.workspace.as_path();
     let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.to_path_buf(), error))?;
     let compiled_folder = root.join(unit::COMPILED_FOLDER);
@@ -1110,7 +1136,7 @@ fn compiled(
             hosts.hold(lock, held, exclusive, None)?;
         }
 
-        return Ok((std::mem::take(&mut record.outcome), database));
+        return Ok((std::mem::take(&mut record.outcome), database, Loaded::Nothing));
     }
     let (hosts, held) = match hosts {
         Some((hosts, (lock, held, exclusive, stale))) => (stale.then_some(hosts), Some((hosts, lock, held, exclusive))),
@@ -1156,7 +1182,7 @@ fn compiled(
     }
 
     let database = orchestrator.load_listed(workspace, &listing)?.into_static();
-    loaded(&database);
+    let loaded = if keeping == Keeping::Files { Loaded::Files(database.clone()) } else { Loaded::Nothing };
     let (database, included) = with_packages(database);
 
     let mut errors = Vec::new();
@@ -1168,8 +1194,9 @@ fn compiled(
             if let Some((hosts, lock, held, exclusive)) = held {
                 hosts.hold(lock, held, exclusive, None)?;
             }
+            let (outcome, database) = finish(record, &record_path, outcome, &database, Vec::new())?;
 
-            return finish(record, &record_path, outcome, &database, Vec::new());
+            return Ok((outcome, database, loaded));
         }
     };
     let package_files: Vec<FileId> = database
@@ -1177,11 +1204,16 @@ fn compiled(
         .filter(|file| included.contains(&file.id) && package_of(&file.name).is_some())
         .map(|file| file.id)
         .collect();
-    let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator))
+    let reports = keeping == Keeping::Analysis
+        && database.files().any(|file| file.file_type == FileType::Host && !included.contains(&file.id));
+    let server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator))
         .keeping_lowering_inputs()
-        .with_package_files(package_files)
-        .scoped_to(is_lowered);
-    server.analyze()?;
+        .with_package_files(package_files);
+    // A run that reports this analysis reports in every file but the packages' `.sharp` files, as its own analysis of
+    // the files it loads would. A compile alone needs the node-analysis hooks only in the files it lowers.
+    let mut server =
+        if reports { server.scoped_to(move |file| !included.contains(&file.id)) } else { server.scoped_to(is_lowered) };
+    let issues = server.analyze()?.issues;
     // The compile hides what `mago analyze` hides: a host rule's error an `ignore` entry or the baseline targets.
     let ignored =
         CompiledIgnoreSet::compile(&configuration.analyzer.ignore, configuration.source.glob.to_database_settings());
@@ -1414,8 +1446,10 @@ fn compiled(
     if let Some((hosts, lock, held, exclusive)) = held {
         hosts.hold(lock, held, exclusive, None)?;
     }
+    let (outcome, database) = finish(record, &record_path, outcome, database, stamped.into_iter().chain(listed))?;
+    let loaded = if reports { Loaded::Analysis(Box::new(server), issues) } else { loaded };
 
-    finish(record, &record_path, outcome, database, stamped.into_iter().chain(listed))
+    Ok((outcome, database, loaded))
 }
 
 /// Keeps `record` at `path`, the record of a compile whose `outcome` it prints again while every input is as it was,

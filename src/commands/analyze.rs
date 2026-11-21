@@ -77,6 +77,7 @@ use crate::commands::args::substitution::SubstitutionArgs;
 use crate::commands::args::substitution::substitute;
 use crate::commands::compile::HostsChange;
 use crate::commands::compile::HostsCompile;
+use crate::commands::compile::Loaded;
 use crate::commands::compile::Recompiled;
 use crate::commands::compile::compile_for_hosts;
 use crate::commands::compile::compile_with_hosts;
@@ -313,69 +314,82 @@ impl AnalyzeCommand {
         let mut prelude_duration = None;
         let mut load_database_duration = None;
         // A run over the whole project compiles it too, as an agent's save needs: into the `.sharp` folder and the
-        // hosts' folder, from one analysis and one lowering, and the analysis with the hosts reads the files the
-        // compile loaded. A run on named files, staged files or standard input, or one that only scans, compiles only
-        // the hosts' folder.
-        let mut loaded = None;
-        let (extension_hosts, compiled) = if scope.is_some() || self.stdin_input || self.scan_only {
-            (compile_for_hosts(&configuration)?.0, None)
+        // hosts' folder, from one analysis and one lowering. With no host enabled, a run that reads the files as the
+        // compile reads them, without `--no-stubs` or `--substitute`, reports that analysis. Otherwise the analysis
+        // with the hosts reads the files the compile loaded. A run on named files, staged files or standard
+        // input, or one that only scans, compiles only the hosts' folder.
+        let (extension_hosts, compiled, loaded) = if scope.is_some() || self.stdin_input || self.scan_only {
+            (compile_for_hosts(&configuration)?.0, None, Loaded::Nothing)
         } else {
-            let (extension_hosts, outcome) =
-                compile_with_hosts(&configuration, color_choice, |database| loaded = Some(database.clone()))?;
-            (extension_hosts, Some(outcome.into_parts()))
+            let analysis = !self.no_stubs && substitutions.is_empty();
+            let (extension_hosts, outcome, loaded) = compile_with_hosts(&configuration, color_choice, analysis)?;
+            (extension_hosts, Some(outcome.into_parts()), loaded)
         };
-        let external_analyzer = start_external_analyzer(
-            &extension_hosts,
-            configuration.php_version,
-            &configuration.analyzer.plugins,
-            configuration.analyzer.disable_default_plugins,
-        );
-        if let Some(external_analyzer) = external_analyzer {
-            orchestrator.set_external_analyzer_handle(external_analyzer);
-        }
 
-        let (prelude_database, database) = rayon::join(
-            || {
-                let start = trace_enabled.then(Instant::now);
-                let prelude_database = self.prelude_database();
-                prelude_duration = start.map(|s| s.elapsed());
-                prelude_database
-            },
-            || {
-                let start = trace_enabled.then(Instant::now);
-                let database = match loaded {
-                    Some(mut database) => {
-                        orchestrator.add_external_initialization_files(&mut database).map(|()| database)
-                    }
-                    None => orchestrator
-                        .load_database(&configuration.source.workspace, true, None, stdin_override)
-                        .map(Database::into_static),
-                };
-                load_database_duration = start.map(|s| s.elapsed());
-                database
-            },
-        );
+        let load_inputs_duration;
+        let service_run_start;
+        let (mut server, mut issues) = match loaded {
+            Loaded::Analysis(server, issues) => {
+                load_inputs_duration = load_inputs_start.map(|s| s.elapsed());
+                service_run_start = trace_enabled.then(Instant::now);
+                (*server, issues)
+            }
+            loaded => {
+                let external_analyzer = start_external_analyzer(
+                    &extension_hosts,
+                    configuration.php_version,
+                    &configuration.analyzer.plugins,
+                    configuration.analyzer.disable_default_plugins,
+                );
+                if let Some(external_analyzer) = external_analyzer {
+                    orchestrator.set_external_analyzer_handle(external_analyzer);
+                }
 
-        let mut database = database?;
-        substitute(&substitutions, &mut database, workspace)?;
-        database.merge_base(prelude_database);
-        let load_inputs_duration = load_inputs_start.map(|s| s.elapsed());
+                let (prelude_database, database) = rayon::join(
+                    || {
+                        let start = trace_enabled.then(Instant::now);
+                        let prelude_database = self.prelude_database();
+                        prelude_duration = start.map(|s| s.elapsed());
+                        prelude_database
+                    },
+                    || {
+                        let start = trace_enabled.then(Instant::now);
+                        let database = match loaded {
+                            Loaded::Files(mut database) => {
+                                orchestrator.add_external_initialization_files(&mut database).map(|()| database)
+                            }
+                            _ => orchestrator
+                                .load_database(&configuration.source.workspace, true, None, stdin_override)
+                                .map(Database::into_static),
+                        };
+                        load_database_duration = start.map(|s| s.elapsed());
+                        database
+                    },
+                );
 
-        if !database.files().any(|f| f.file_type == FileType::Host) {
-            tracing::warn!("No files found to analyze.");
+                let mut database = database?;
+                substitute(&substitutions, &mut database, workspace)?;
+                database.merge_base(prelude_database);
+                load_inputs_duration = load_inputs_start.map(|s| s.elapsed());
 
-            return Ok(ExitCode::SUCCESS.into());
-        }
+                if !database.files().any(|f| f.file_type == FileType::Host) {
+                    tracing::warn!("No files found to analyze.");
 
-        let service_run_start = trace_enabled.then(Instant::now);
-        let mut server = Server::new(database.into_static(), self.prelude(), server_settings(&orchestrator));
-        if self.scan_only {
-            server = server.scan_only();
-        }
-        if let Some(scope) = scope {
-            server = server.scoped_to(named_by(scope));
-        }
-        let mut issues = server.analyze()?.issues;
+                    return Ok(ExitCode::SUCCESS.into());
+                }
+
+                service_run_start = trace_enabled.then(Instant::now);
+                let mut server = Server::new(database.into_static(), self.prelude(), server_settings(&orchestrator));
+                if self.scan_only {
+                    server = server.scan_only();
+                }
+                if let Some(scope) = scope {
+                    server = server.scoped_to(named_by(scope));
+                }
+                let issues = server.analyze()?.issues;
+                (server, issues)
+            }
+        };
         issues.extend(server.law_refusals()?);
         // Each issue that refused a file of the compile and that the analysis did not report, as a law left unproven.
         let refused: Vec<Issue> = match &compiled {
