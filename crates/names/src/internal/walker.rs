@@ -248,37 +248,17 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         }
     }
 
-    /// Records the write at `write` to `target` when `target` is a bare name of a local whose block is open, or an index
-    /// of one, as in `counts[key] = 1`, which changes the collection the local holds. The write's effect lasts until the
-    /// end of the write, or of the outermost loop that repeats it and not the local's declaration. A write in a lambda
-    /// that captures the local, the innermost one created after the declaration, may run at any time.
+    /// Records the write at `write` to `target`, which the code makes, so it assigns the local as well as changing it,
+    /// see [`Self::record_change`].
     fn record_write(&mut self, target: &Expression<'arena>, write: Span) {
-        let mut target = target;
-        while let Expression::ArrayAccess(access) = target {
-            target = access.array;
-        }
-
-        if self.sharp
-            && let Expression::ConstantAccess(target) = target
-            && let Some(local) = self.locals.lookup(target.name.value())
-        {
-            let declared = local.declaration.start.offset;
-            if let Some(&lambda) = self.lambdas.iter().rev().find(|&&lambda| declared < lambda) {
-                self.resolved_names.write_in_lambda(local, lambda);
-                return;
-            }
-
-            let settled = self
-                .loops
-                .iter()
-                .find(|repeating| declared < repeating.start.offset)
-                .map_or(write.end.offset, |repeating| repeating.end.offset);
-            self.resolved_names.write(local, settled);
+        if let Some(local) = self.record_change(target, write) {
+            self.resolved_names.assign(local);
         }
     }
 
-    /// Records `call`, a call of one of the [`ChangingMembers`] on `object`, as a write to it. PHP finds a method ignoring
-    /// case, so the name is compared ignoring case.
+    /// Records `call`, a call of one of the [`ChangingMembers`] on `object`, as a change of it, which assigns nothing,
+    /// since the binder takes it as a write from its name alone. PHP finds a method ignoring case, so the name is
+    /// compared ignoring case.
     fn record_changing_call(
         &mut self,
         object: &Expression<'arena>,
@@ -288,8 +268,41 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         if let ClassLikeMemberSelector::Identifier(method) = method
             && self.changing_members.contains(method.value)
         {
-            self.record_write(object, call);
+            self.record_change(object, call);
         }
+    }
+
+    /// Records the write at `write` to `target` when `target` is a bare name of a local whose block is open, or an index
+    /// of one, as in `counts[key] = 1`, which changes the collection the local holds, and returns that local. The
+    /// write's effect lasts until the end of the write, or of the outermost loop that repeats it and not the local's
+    /// declaration. A write in a lambda that captures the local, the innermost one created after the declaration, may
+    /// run at any time.
+    fn record_change(&mut self, target: &Expression<'arena>, write: Span) -> Option<Local> {
+        let mut target = target;
+        while let Expression::ArrayAccess(access) = target {
+            target = access.array;
+        }
+
+        if !self.sharp {
+            return None;
+        }
+        let Expression::ConstantAccess(target) = target else {
+            return None;
+        };
+        let local = self.locals.lookup(target.name.value())?;
+        let declared = local.declaration.start.offset;
+        if let Some(&lambda) = self.lambdas.iter().rev().find(|&&lambda| declared < lambda) {
+            self.resolved_names.write_in_lambda(local, lambda);
+        } else {
+            let settled = self
+                .loops
+                .iter()
+                .find(|repeating| declared < repeating.start.offset)
+                .map_or(write.end.offset, |repeating| repeating.end.offset);
+            self.resolved_names.write(local, settled);
+        }
+
+        Some(local)
     }
 
     fn enter_lambda(&mut self, lambda: Span) {

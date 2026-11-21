@@ -36959,6 +36959,23 @@ fn only_a_machine_case_takes_final_members_and_a_value_beside_its_data() {
     );
 }
 
+/// Spec section 20.2: a move named like a member that changes a collection, as a `List`'s `remove`, `clear` or
+/// `removeLast`, is a move, in a `match` arm as after `is`, since spec section 26 lets only a collection's extension
+/// take its receiver by `ref`, so a call on a case's value never changes the name that holds it.
+#[test]
+fn a_move_named_like_a_changing_collection_member_is_a_move() {
+    let slot = (
+        "src/Shop/Slot.sharp",
+        "namespace Shop;\n\npublic machine Slot\n{\n    case Empty { public Slot.OnFile assign(int id) => Slot.OnFile(id); }\n    case OnFile(int id)\n    {\n        public Slot.Empty remove() => Slot.Empty;\n        public Slot.Empty clear() => Slot.Empty;\n        public Slot.Empty removeLast() => Slot.Empty;\n    }\n    public static Slot.Empty start() => Slot.Empty;\n}\n",
+    );
+    let holder = (
+        "src/Shop/Holder.sharp",
+        "namespace Shop;\n\npublic final class Holder\n{\n    public Slot slot { get; private set; } = Slot.start();\n\n    public void release()\n    {\n        match (this.slot) {\n            Slot.Empty => {},\n            Slot.OnFile held => { this.slot = held.remove(); },\n        }\n    }\n\n    public void empty()\n    {\n        if (this.slot is Slot.OnFile held) {\n            this.slot = held.clear();\n        }\n    }\n\n    public void last()\n    {\n        if (this.slot is Slot.OnFile held) {\n            this.slot = held.removeLast();\n        }\n    }\n}\n",
+    );
+
+    assert_eq!(refusals(holder, &[slot]), Vec::<String>::new());
+}
+
 /// Spec section 20.2: a machine's graph is checked. Every case is reachable from an entry point, a case with no move
 /// out is `final`, a `final` case has no move out, and every case reaches a `final` one when the machine has one.
 #[test]

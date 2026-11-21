@@ -228,7 +228,9 @@ pub(crate) fn check_machine_write<A>(
 }
 
 /// Whether `receiver` holds the value of `place`, as the file writes both: it is `place`, or a name a type pattern
-/// bound from `place` that nothing writes after, spec section 21.
+/// bound from `place` that nothing assigns after, spec section 21. A call never changes the name, as `held.remove()`
+/// the binder takes as a write from its name alone, since spec section 26 lets only a collection's extension take its
+/// receiver by `ref`, and a case's value is no collection.
 fn holds_value_of<A>(context: &Context<'_, '_, A>, receiver: &Expression<'_>, place: &str) -> bool
 where
     A: Arena,
@@ -246,7 +248,7 @@ where
         return false;
     };
 
-    !context.resolved_names.is_written(&local)
+    !context.resolved_names.is_assigned(&local)
         && context.pattern_tests.get(&test).is_some_and(|tested| quoted_source(context, *tested) == place)
 }
 

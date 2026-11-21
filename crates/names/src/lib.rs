@@ -266,6 +266,11 @@ pub struct ResolvedNames<'arena> {
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "HashMap::is_empty"))]
     assigning_lambdas: HashMap<u32, u32>,
 
+    /// Declaration start offset of every PHP# local that code writes after its declaration, in a lambda or not, with a
+    /// write it makes: every write [`Self::is_written`] counts but a call the binder takes as one from its name alone.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "foldhash::HashSet::is_empty"))]
+    assigned_locals: foldhash::HashSet<u32>,
+
     /// The full name of each class-like of the file's namespace that wins over a default class-like the file names,
     /// whether the namespace holds it or not. Empty for PHP.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "foldhash::HashSet::is_empty"))]
@@ -595,6 +600,15 @@ impl<'arena> ResolvedNames<'arena> {
         self.written_locals.contains_key(&declaration) || self.assigning_lambdas.contains_key(&declaration)
     }
 
+    /// Returns whether code writes the PHP# local after its declaration with a write it makes: `=`, a compound
+    /// assignment, `++` or `--` on it or an index of it, in a lambda or not. A call of one of the
+    /// [`ChangingMembers`](crate::resolver::ChangingMembers) writes the local without assigning it, since the binder
+    /// takes it as a write from its name alone.
+    #[must_use]
+    pub fn is_assigned(&self, local: &Local) -> bool {
+        self.assigned_locals.contains(&local.declaration.start.offset)
+    }
+
     /// Returns the start offset of a lambda that captures the PHP# local and writes it, so the write may run at any
     /// time, as Kotlin's "local variable that is captured by a changing closure" is: the first such lambda in the file.
     #[must_use]
@@ -637,6 +651,11 @@ impl<'arena> ResolvedNames<'arena> {
     /// Records a write of `local` in the lambda that starts at `lambda`, which may run at any time.
     pub(crate) fn write_in_lambda(&mut self, local: Local, lambda: u32) {
         self.assigning_lambdas.entry(local.declaration.start.offset).or_insert(lambda);
+    }
+
+    /// Records that a write the code makes assigns `local`, see [`Self::is_assigned`].
+    pub(crate) fn assign(&mut self, local: Local) {
+        self.assigned_locals.insert(local.declaration.start.offset);
     }
 
     pub(crate) fn add_namespace_class(&mut self, name: &'arena [u8]) {

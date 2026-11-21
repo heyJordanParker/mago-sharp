@@ -1128,6 +1128,31 @@ fn a_local_written_after_its_declaration_is_recorded_as_written() {
     assert!(!names.is_written(&declared(CODE, "kept", 0, LocalKind::Let)));
 }
 
+/// A write the code makes assigns the local, in a lambda too, and a call the binder takes as a write from its name
+/// alone, as `add`, writes the local without assigning it, since the binder knows no types.
+#[test]
+fn a_call_named_like_a_changing_member_writes_a_local_without_assigning_it() {
+    const CODE: &str = "class Report\n{\n    public int total(int extra)\n    {\n        let count = 0;\n        let late = 0;\n        let lines = [];\n        let kept = [];\n        count += 1;\n        const later = () => { late = 1; };\n        lines.add(1);\n        const adding = () => { kept.add(1); };\n        return count + late + extra;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
+    let program = parse_file(&arena, &file);
+    let names = NameResolver::new(&arena).resolve_in(
+        program,
+        &NamespaceClasses::default(),
+        &ChangingMembers::new(["add"]),
+        &ExternNamespaces::default(),
+    );
+
+    assert!(names.is_assigned(&declared(CODE, "count", 0, LocalKind::Let)));
+    assert!(names.is_assigned(&declared(CODE, "late", 0, LocalKind::Let)));
+    assert!(!names.is_assigned(&declared(CODE, "extra", 0, LocalKind::Parameter)));
+
+    let lines = declared(CODE, "lines", 0, LocalKind::Let);
+    let kept = declared(CODE, "kept", 0, LocalKind::Let);
+    assert!(names.is_written(&lines) && !names.is_assigned(&lines));
+    assert!(names.is_written(&kept) && !names.is_assigned(&kept));
+}
+
 /// Spec section 6.1: an accessor body uses `field` for the property's storage and, in `set`, `value` for the incoming
 /// value. The `set` accessor declares `value` as its parameter, and the property declares `field`. Outside an
 /// accessor body both are bare names like any other.
