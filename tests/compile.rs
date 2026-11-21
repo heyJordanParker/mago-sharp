@@ -3552,7 +3552,8 @@ fn a_law_with_a_body_has_fixed_steps_for_each_of_its_cases() {
 
     assert!(output.status.success(), "{}", printed(&output));
     let theorems = runner_request(lake.path()).theorems;
-    for statement in ["App.Shared.Money.timesKeepsCurrency", "App.Shared.Money.sumKeepsCurrency"] {
+    for statement in ["«App».«Shared».«Money».«timesKeepsCurrency»", "«App».«Shared».«Money».«sumKeepsCurrency»"]
+    {
         let (_, text, steps) = theorems.iter().find(|(written, ..)| written == statement).expect("the law's theorem");
         assert_eq!(text.matches("sharp_close").count(), 2, "{text}");
         assert!(!steps.is_empty() && !steps.contains("sharp_close"), "{statement}: {steps}");
@@ -3603,12 +3604,12 @@ fn a_law_the_fixed_steps_leave_unproven_goes_on_to_lean_s_search() {
     let [steps, search] = [&requests[0], &requests[1]];
     assert!(!names(steps, "Sharp.Lean.Proof"), "the first runner imports only the runtime library");
     assert!(
-        names(steps, "App.Shared.Money.addKeepsCurrency.proof")
-            && names(steps, "App.Shared.Purse.addKeepsCurrency.proof")
+        names(steps, "«App».«Shared».«Money».«addKeepsCurrency».proof")
+            && names(steps, "«App».«Shared».«Purse».«addKeepsCurrency».proof")
     );
     assert!(names(search, "Sharp.Lean.Proof"), "the second runner proves with Lean's search");
-    assert!(!names(search, "App.Shared.Money.addKeepsCurrency.proof"), "the proven law is not proved again");
-    assert!(names(search, "App.Shared.Purse.addKeepsCurrency.proof"));
+    assert!(!names(search, "«App».«Shared».«Money».«addKeepsCurrency».proof"), "the proven law is not proved again");
+    assert!(names(search, "«App».«Shared».«Purse».«addKeepsCurrency».proof"));
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(
         printed(&output)
@@ -3739,6 +3740,27 @@ fn a_proof_is_not_attempted_again_while_its_law_is_unchanged() {
     assert!(compiled(root, "app/Shared/Money.sharp").exists());
 }
 
+/// `.sharp/proofs.json` keeps how Lean judged a law, and never that Lean rejected a generated module the law reaches,
+/// since an edit the law's key does not hold can fix the module: here a runner whose request opens no `Sharp` rejects
+/// every module, and the next compile, after an edit no law reaches, checks the laws again and proves them.
+#[cfg(unix)]
+#[test]
+fn a_law_whose_module_lean_rejected_is_checked_again_by_the_next_compile() {
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
+    let rejecting = cache_with_runner(lake.path(), "perl -pe 's/^open Sharp$/open Sharq/' | \"$real\" \"$@\"");
+    let refused = process::output(command(root, "never").env("XDG_CACHE_HOME", rejecting)).unwrap();
+    assert!(printed(&refused).contains("the checker translated the code it reaches wrongly"), "{}", printed(&refused));
+    let unread = "    public int pages() => 1;\n\n    law addKeepsCurrency";
+    write(root, "app/Shared/Money.sharp", &LAWFUL_MONEY.replace("    law addKeepsCurrency", unread));
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "the laws were checked again: {}", printed(&output));
+    assert!(compiled(root, "app/Shared/Money.sharp").exists());
+}
+
 #[test]
 fn compile_needs_no_lean_for_a_project_with_no_law() {
     let directory = project(ORDER, MONEY);
@@ -3842,8 +3864,11 @@ fn compile_proves_a_law_whose_calls_go_from_one_file_to_another_and_back_with_no
 
     assert!(output.status.success(), "{}", printed(&output));
     assert!(compiled(root, "app/Shared/Alpha.sharp").exists());
-    let alpha = generated_module(lake.path(), "Code.App.Shared.Alpha");
-    assert!(alpha.contains("def App.Shared.Beta.middle"), "the group's module holds Beta's declaration: {alpha}");
+    let alpha = generated_module(lake.path(), "Code.«App».«Shared».«Alpha»");
+    assert!(
+        alpha.contains("def «App».«Shared».«Beta».«middle»"),
+        "the group's module holds Beta's declaration: {alpha}"
+    );
     assert!(!alpha.contains("import Code."), "{alpha}");
 }
 
@@ -3859,8 +3884,8 @@ fn a_generated_module_derives_no_repr_since_no_proof_prints_a_value() {
     let output = process::output(command(root, "never").env("XDG_CACHE_HOME", counting_cache(lake.path()))).unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
-    let money = generated_module(lake.path(), "Code.App.Shared.Money");
-    assert!(money.contains("structure App.Shared.Money where"), "{money}");
+    let money = generated_module(lake.path(), "Code.«App».«Shared».«Money»");
+    assert!(money.contains("structure «App».«Shared».«Money» where"), "{money}");
     assert!(money.contains("  deriving DecidableEq, Inhabited\n"), "{money}");
     assert!(!money.contains("Repr"), "{money}");
 }
@@ -3886,13 +3911,13 @@ fn compile_proves_a_law_through_an_extension_member_as_the_static_call_it_runs_a
     let output = process::output(command(root, "never").env("XDG_CACHE_HOME", counting_cache(lake.path()))).unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
-    let laws = generated_module(lake.path(), "Code.App.Shared.Shape");
+    let laws: String = runner_request(lake.path()).modules.into_iter().map(|(_, text)| text).collect();
     for call in [
-        "App.Shared.ShapeMath.doubled s",
-        "App.Shared.ShapeMath.isFlat s",
-        "App.Shared.ShapeMath.twice n",
-        "App.Shared.ShapeMath.doubled (s.getD default)",
-        "App.Shared.ShapeMath.isFlat (s.getD default)",
+        "«App».«Shared».«ShapeMath».«doubled» «s»",
+        "«App».«Shared».«ShapeMath».«isFlat» «s»",
+        "«App».«Shared».«ShapeMath».«twice» «n»",
+        "«App».«Shared».«ShapeMath».«doubled» («s».getD default)",
+        "«App».«Shared».«ShapeMath».«isFlat» («s».getD default)",
     ] {
         assert!(laws.contains(call), "{call}:\n{laws}");
     }
@@ -4131,6 +4156,23 @@ fn a_move_that_breaks_a_machine_s_invariant_on_no_small_value_is_refused_by_name
         "{}",
         printed(&output)
     );
+}
+
+/// A machine whose second law names a parameter `until` and whose `Going` case holds a field `while`, two of Lean's
+/// own words.
+const SUBSCRIPTION_STATUS: &str = "namespace App.Repro;\n\nimport Sharp.Time.Instant;\n\npublic machine SubscriptionStatus\n{\n    case Waiting\n    {\n        public SubscriptionStatus.Going go(Instant at) => SubscriptionStatus.Going(at, 0);\n    }\n\n    case Going(Instant at, int @while)\n    {\n        public SubscriptionStatus.Paused pause() => SubscriptionStatus.Paused;\n        public SubscriptionStatus.Done finish() => SubscriptionStatus.Done;\n    }\n\n    case Paused\n    {\n        public SubscriptionStatus.Done end() => SubscriptionStatus.Done;\n    }\n\n    final case Done;\n\n    public static SubscriptionStatus.Waiting enter() => SubscriptionStatus.Waiting;\n\n    law goingHoldsTheTime(Instant at) => SubscriptionStatus.enter().go(at).at == at;\n    law pausingHoldsTheResume(Instant at, Instant until) => SubscriptionStatus.enter().go(at).pause() is SubscriptionStatus.Paused;\n}\n";
+
+/// A PHP# name is a name to Lean whatever it is, Lean's own words `until` and `while` too, so the laws that reach it
+/// prove.
+#[test]
+fn a_law_proves_whatever_its_parameters_and_the_fields_it_reaches_are_named() {
+    let directory = library_project(&[("app/Repro/SubscriptionStatus.sharp", SUBSCRIPTION_STATUS)]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Repro/SubscriptionStatus.sharp").exists());
 }
 
 /// `Holder`, which holds a `JsonValue?`, whose `Any?` a law cannot read, beside the law `law`.

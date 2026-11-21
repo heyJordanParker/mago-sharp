@@ -1618,7 +1618,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 }
                 None => {
                     self.reads(&below);
-                    format!("({upcast}).{field}")
+                    format!("({upcast}).{}", names::identifier(field.as_bytes()))
                 }
             };
             below = parent.as_bytes().to_vec();
@@ -1627,10 +1627,10 @@ impl<'body, 'program> Body<'body, 'program> {
         upcast
     }
 
-    /// The field of a class's structure that holds the value of its PHP# parent `parent`, as Lean names the field of
-    /// the structure a structure extends: `toParent`.
+    /// The name of the field of a class's structure that holds the value of its PHP# parent `parent`, as Lean names the
+    /// field of the structure a structure extends: `toParent`.
     pub(crate) fn parent_field(&self, parent: &[u8]) -> String {
-        names::identifier(format!("to{}", names::short_name(&self.reached_name(parent))).as_bytes())
+        format!("to{}", names::short_name(&self.reached_name(parent)))
     }
 
     /// The smaller value a call of a method of the body's own class passes, by spec section 28's smaller value rule,

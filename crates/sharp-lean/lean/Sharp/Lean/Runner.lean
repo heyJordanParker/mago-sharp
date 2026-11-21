@@ -124,19 +124,21 @@ structure Source where
   name : String
   text : String
 
-/-- The module `name` names, as an `import` of it names it: `Code.App.«match».Score` names `Code.App.match.Score`. -/
-def moduleName (name : String) : Name :=
-  (name.splitOn ".").foldl (init := .anonymous) fun module part =>
-    module.str (if part.startsWith "«" && part.endsWith "»" then String.ofList (part.toList.drop 1).dropLast else part)
+/-- The name Mago wrote as `written`, a module or a law's statement, as Lean source names it: `Code.«App».«match»` names
+`Code.App.match`. -/
+def nameOf (written : String) : Name :=
+  (written.splitOn ".").foldl (init := .anonymous) fun name part =>
+    name.str (if part.startsWith "«" && part.endsWith "»" then String.ofList (part.toList.drop 1).dropLast else part)
 
-#guard moduleName "Code.App.«match».Score" == `Code.App.match.Score
-#guard moduleName "Sharp.Lean.Proof" == `Sharp.Lean.Proof
+#guard nameOf "Code.«App».«match».«Score»" == `Code.App.match.Score
+#guard nameOf "«App».«Repro».«until»" == `App.Repro.«until»
+#guard nameOf "Sharp.Lean.Proof" == `Sharp.Lean.Proof
 
 def theorem_ : Decode Theorem := do
-  return { statement := (← string).toName, text := ← string, steps := ← string, judged := (← u8) != 0 }
+  return { statement := nameOf (← string), text := ← string, steps := ← string, judged := (← u8) != 0 }
 
 def check : Decode Check := do
-  return { modules := (← many string).map moduleName, theorems := ← many theorem_ }
+  return { modules := (← many string).map nameOf, theorems := ← many theorem_ }
 
 def source : Decode Source := do
   return { name := ← string, text := ← string }
@@ -484,7 +486,7 @@ def respond : IO Unit := do
   let mut imports : NameMap (Array Name) := {}
   for source in sources do
     let imported := (← parse source).2.2.2
-    imports := imports.insert (moduleName source.name) (imported.filter isGenerated)
+    imports := imports.insert (nameOf source.name) (imported.filter isGenerated)
     for module in imported do
       unless isGenerated module || wanted.contains module do wanted := wanted.push module
   for request in checks do
@@ -493,10 +495,10 @@ def respond : IO Unit := do
   let library ← wanted.filterM found
   let env ← importModules (library.map ({ module := · })) {} (loadExts := true)
   let shared : Shared := {
-    sources := sources.foldl (fun sources source => sources.insert (moduleName source.name) source) {}
+    sources := sources.foldl (fun sources source => sources.insert (nameOf source.name) source) {}
     library := env
     searches := library.contains `Sharp.Lean.Proof
-    stopped := stopped.foldl (fun stopped module => stopped.insert (moduleName module)) {}
+    stopped := stopped.foldl (fun stopped module => stopped.insert (nameOf module)) {}
     cyclic := cyclicModules imports
     heartbeats
     modules := ← IO.mkRef {}

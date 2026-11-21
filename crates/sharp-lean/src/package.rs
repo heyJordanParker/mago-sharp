@@ -23,6 +23,7 @@ use crate::translate::Role;
 use crate::translate::Translation;
 use crate::translate::Unmodeled;
 use crate::translate::Use;
+use crate::translate::names;
 
 /// The folder in the `.sharp` folder that holds the Lake package of the project's laws.
 pub const PACKAGE_FOLDER: &str = ".lean";
@@ -110,7 +111,11 @@ impl<'program> Program<'program> {
                         }
                         .to_owned(),
                         // A type is placed by its own name, as a member is by its class's and its own.
-                        place: if methods { place_of(key) } else { key.rsplit('.').next().unwrap_or(key).to_owned() },
+                        place: if methods {
+                            place_of(key)
+                        } else {
+                            names::unescaped(key.rsplit('.').next().unwrap_or(key))
+                        },
                         reason: if methods { issues::RECURSION } else { issues::SELF_HOLDING }.into(),
                     },
                 );
@@ -370,13 +375,14 @@ pub(crate) fn module_name(translation: &Translation) -> String {
     format!("Code.{}", translation.class.as_ref().map_or("", |(class, _)| class.as_str()))
 }
 
-/// `Money.add` of `App.Shared.Money.add`.
+/// `Money.add` of `«App».«Shared».«Money».«add»`.
 pub(crate) fn place_of(key: &str) -> String {
+    let key = names::unescaped(key);
     let mut parts = key.rsplitn(3, '.');
     match (parts.next(), parts.next()) {
         (Some(member), Some(class)) => format!("{class}.{member}"),
         (Some(name), None) => name.to_owned(),
-        _ => key.to_owned(),
+        _ => key.clone(),
     }
 }
 
@@ -479,6 +485,6 @@ mod tests {
 
     #[test]
     fn a_member_is_placed_by_its_class_and_name() {
-        assert_eq!(place_of("App.Shared.Money.add"), "Money.add");
+        assert_eq!(place_of("«App».«Shared».«Money».«add»"), "Money.add");
     }
 }

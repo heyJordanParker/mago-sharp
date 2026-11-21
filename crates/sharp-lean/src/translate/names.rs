@@ -1,80 +1,15 @@
 //! PHP# names as Lean writes them.
 
-/// Lean's keywords, and the proof steps `Sharp.Lean.Proof` declares, which are keywords wherever it is imported, as it is
-/// in each law's theorem and in the runner that elaborates the generated modules. A PHP# name that is one is written in
-/// `«»`, which keeps the name.
-const KEYWORDS: &[&str] = &[
-    "abbrev",
-    "at",
-    "attribute",
-    "axiom",
-    "break",
-    "by",
-    "calc",
-    "catch",
-    "class",
-    "continue",
-    "def",
-    "deriving",
-    "do",
-    "else",
-    "end",
-    "example",
-    "export",
-    "finally",
-    "for",
-    "from",
-    "fun",
-    "have",
-    "if",
-    "import",
-    "in",
-    "inductive",
-    "infix",
-    "instance",
-    "let",
-    "local",
-    "macro",
-    "match",
-    "mut",
-    "namespace",
-    "notation",
-    "open",
-    "partial",
-    "private",
-    "protected",
-    "return",
-    "section",
-    "set_option",
-    "sharp_close",
-    "sharp_condition",
-    "sharp_prove",
-    "sharp_trace",
-    "show",
-    "structure",
-    "suffices",
-    "syntax",
-    "then",
-    "theorem",
-    "try",
-    "unless",
-    "universe",
-    "unsafe",
-    "variable",
-    "where",
-    "with",
-];
-
 /// Names Lean declares for every structure and inductive, which `«»` does not free.
 pub(crate) const RESERVED: &[&str] = &["rec", "casesOn", "recOn", "noConfusion", "noConfusionType", "below", "brecOn"];
 
-/// One PHP# identifier as a Lean identifier.
+/// One PHP# identifier as a Lean identifier: in `«»`, which keeps the name whatever it is, so no PHP# name is one of
+/// Lean's keywords or the tokens of the notations a module imports.
 pub(crate) fn identifier(name: &[u8]) -> String {
-    let name = String::from_utf8_lossy(name);
-    if KEYWORDS.contains(&name.as_ref()) { format!("«{name}»") } else { name.into_owned() }
+    format!("«{}»", String::from_utf8_lossy(name))
 }
 
-/// A fully qualified PHP name, `App\Shared\Money`, as its Lean name, `App.Shared.Money`.
+/// A fully qualified PHP name, `App\Shared\Money`, as its Lean name, `«App».«Shared».«Money»`.
 pub(crate) fn full_name(name: &[u8]) -> String {
     let name = name.strip_prefix(b"\\").unwrap_or(name);
 
@@ -87,9 +22,15 @@ pub(crate) fn member(class: &str, member: &[u8]) -> String {
 }
 
 /// The default of the parameter at `position` of the method whose Lean name is `method`, which a call that leaves its
-/// argument out passes: `App.Shop.Order.ship.«$default1»`.
+/// argument out passes: `«App».«Shop».«Order».«ship».«$default1»`.
 pub(crate) fn default(method: &str, position: usize) -> String {
     format!("{method}.«$default{position}»")
+}
+
+/// A Lean name as Lean prints it and PHP# reads it, without the `«»` it is written in: `App.Shared.Money.add` of
+/// `«App».«Shared».«Money».«add»`.
+pub(crate) fn unescaped(name: &str) -> String {
+    name.replace(['«', '»'], "")
 }
 
 /// The last segment of a fully qualified PHP name: `Money` of `App\Shared\Money`.
@@ -109,13 +50,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_keyword_is_escaped_and_any_other_name_is_kept() {
-        assert_eq!(identifier(b"end"), "«end»");
-        assert_eq!(identifier(b"sharp_close"), "«sharp_close»");
-        assert_eq!(identifier(b"currency"), "currency");
-        assert_eq!(full_name(br"\App\Shared\Money"), "App.Shared.Money");
-        assert_eq!(full_name(br"App\match\Score"), "App.«match».Score");
-        assert_eq!(member("App.Range", b"end"), "App.Range.«end»");
+    fn every_name_is_escaped_whatever_it_is_and_reads_back_unescaped() {
+        assert_eq!(identifier(b"until"), "«until»");
+        assert_eq!(identifier(b"currency"), "«currency»");
+        assert_eq!(full_name(br"\App\Shared\Money"), "«App».«Shared».«Money»");
+        assert_eq!(member("«App».«Range»", b"end"), "«App».«Range».«end»");
+        assert_eq!(unescaped(&member("«App».«Range»", b"end")), "App.Range.end");
     }
 
     #[test]

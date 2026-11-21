@@ -18,9 +18,9 @@ const POSTFIX: u8 = 9;
 
 /// The names a goal is printed with.
 pub(crate) struct Names<'names> {
-    /// Each member PHP# calls on a value, by its Lean name, and whether it is a property.
+    /// Each member PHP# calls on a value, by its Lean name as Lean prints it, and whether it is a property.
     pub(crate) receivers: &'names HashMap<String, bool>,
-    /// The Lean name of every declaration the translation wrote, which PHP# calls on its class.
+    /// The Lean name as Lean prints it of every declaration the translation wrote, which PHP# calls on its class.
     pub(crate) declared: &'names HashSet<String>,
     /// The PHP# of each argument of the call a condition belongs to, which its goal names as `$argN`.
     pub(crate) arguments: &'names [String],

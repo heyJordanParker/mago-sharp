@@ -43,6 +43,7 @@ use crate::runner::Judgment;
 use crate::runner::Theorem;
 use crate::translate::Law;
 use crate::translate::Translation;
+use crate::translate::names;
 
 /// The steps the theorems a runner elaborates close their cases with.
 #[derive(Debug, Clone, Copy)]
@@ -173,32 +174,26 @@ impl<'laws> Laws<'laws> {
     }
 }
 
-/// How a law's proof ended, as the record keeps it: judged, or refused by a generated module Lean rejected.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-enum Outcome {
-    Judged(Judgment),
-    Rejected { module: String, line: u32 },
-}
+/// How a law's proof ended this compile: as Lean judged it, which the record keeps, or refused by the generated module
+/// of this name, which the record never keeps. A module Lean rejected can be fixed by an edit the law's key does not
+/// hold, as one of another law's names, and a module the checker's limits stopped depends on the machine's load.
+type Ended = Result<Judgment, (String, Refusal)>;
 
-/// How a law's proof ended this compile: as the record keeps it, or stopped in the generated module of this name, as
-/// the checker's limits stopped it there, which depends on the machine's load, so the record keeps none.
-type Ended = Result<Outcome, (String, Stop)>;
-
-/// [`PROOFS`]: how the proof of each law ended, by the proof's key, as [`proof_key`] gives it, written by this checker
-/// build. A law whose key is in it is never proved again.
+/// [`PROOFS`]: how Lean judged each law, by the proof's key, as [`proof_key`] gives it, written by this checker build.
+/// A law whose key is in it is never proved again.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Record {
     build: String,
     proofs: BTreeMap<String, Recorded>,
 }
 
-/// One law's proof in [`Record`].
+/// One law's judgment in [`Record`].
 #[derive(Debug, Serialize, Deserialize)]
 struct Recorded {
     /// The workspace-relative name of the file that states the law.
     file: String,
     statement: String,
-    outcome: Outcome,
+    judgment: Judgment,
 }
 
 impl Record {
@@ -248,8 +243,9 @@ impl Lean {
     /// that reaches a declaration no translation holds is refused for the errors of its file when that file is in it,
     /// and else as the checker's bug, as a lowering that panicked leaves its file untranslated.
     ///
-    /// A law's proof ends once per key, [`proof_key`]: [`PROOFS`] keeps how it ended, passed or failed, and a law whose
-    /// key it holds gets that outcome again without Lean. The rest are proved by one runner on the compile's threads,
+    /// A law is judged once per key, [`proof_key`]: [`PROOFS`] keeps how Lean judged it, proved or not, and a law whose
+    /// key it holds gets that judgment again without Lean. A law refused by a generated module is checked again by the
+    /// next compile. The rest are proved by one runner on the compile's threads,
     /// sent only the generated modules its checks reach: each law without a body with fixed steps, and each law with a
     /// body, and each one those steps leave unproven, with Lean's search. No Lean process starts when every law's key
     /// is kept. When no file states a law, `.sharp/.lean/` and [`PROOFS`] are deleted.
@@ -287,12 +283,15 @@ impl Lean {
         let mut record = Record::read(&record_path);
         let program = Program::new(&translations);
         let laws = Laws::new(&translations);
-        let receivers: HashMap<String, bool> =
-            translations.iter().flat_map(|translation| translation.receivers.iter().cloned()).collect();
+        let receivers: HashMap<String, bool> = translations
+            .iter()
+            .flat_map(|translation| &translation.receivers)
+            .map(|(member, property)| (names::unescaped(member), *property))
+            .collect();
         let declared: HashSet<String> = translations
             .iter()
             .flat_map(|translation| &translation.declarations)
-            .map(|declaration| declaration.key.clone())
+            .map(|declaration| names::unescaped(&declaration.key))
             .collect();
         let mut keys: HashMap<&str, String> = HashMap::default();
         let mut work: Vec<(&Translation, Vec<&Law>)> = Vec::new();
@@ -310,7 +309,7 @@ impl Lean {
                 let key = proof_key(law, &program, &laws);
                 match record.proofs.get(&key) {
                     Some(recorded) => {
-                        for issue in ended(law, &Ok(recorded.outcome.clone()), &receivers, &declared) {
+                        for issue in judged(law, recorded.judgment.clone(), &receivers, &declared) {
                             report(&mut issues, translation, issue);
                         }
                     }
@@ -380,17 +379,24 @@ impl Lean {
             modules: modules.iter().map(|module| (module.name.as_str(), module)).collect(),
             scripts: &scripts,
         };
-        for (translation, law, outcome) in proofs.prove(work)? {
-            for issue in ended(law, &outcome, &receivers, &declared) {
+        for (translation, law, ended) in proofs.prove(work)? {
+            let judgment = match ended {
+                Ok(judgment) => judgment,
+                Err((module, refusal)) => {
+                    report(&mut issues, translation, issues::generated_module_refused(law, &module, &refusal));
+                    continue;
+                }
+            };
+            for issue in judged(law, judgment.clone(), &receivers, &declared) {
                 report(&mut issues, translation, issue);
             }
-            if let (Ok(outcome), Some(key)) = (outcome, keys.get(law.statement.as_str())) {
+            if let Some(key) = keys.get(law.statement.as_str()) {
                 record.proofs.insert(
                     key.clone(),
                     Recorded {
                         file: String::from_utf8_lossy(&translation.name).into_owned(),
                         statement: law.statement.clone(),
-                        outcome,
+                        judgment,
                     },
                 );
             }
@@ -539,9 +545,7 @@ impl Proofs<'_> {
         } else {
             let mut unproven = Vec::new();
             for (translation, law, outcome) in self.run(work, Form::Steps, &mut stopped)? {
-                let settled =
-                    matches!(outcome, Ok(Outcome::Judged(Judgment::Proved) | Outcome::Rejected { .. }) | Err(_))
-                        || self.unproven_call(law).is_some();
+                let settled = matches!(outcome, Ok(Judgment::Proved) | Err(_)) || self.unproven_call(law).is_some();
                 if settled {
                     ended.push((translation, law, outcome));
                 } else {
@@ -588,15 +592,13 @@ impl Proofs<'_> {
                 match answer {
                     Answer::Judged(answered) => {
                         ended.extend(
-                            blocked
-                                .into_iter()
-                                .map(|(index, judgment)| (translation, laws[index], Ok(Outcome::Judged(judgment)))),
+                            blocked.into_iter().map(|(index, judgment)| (translation, laws[index], Ok(judgment))),
                         );
                         let order =
                             check.theorems.iter().filter(|theorem| theorem.judged).map(|theorem| theorem.statement);
                         for (statement, judgment) in order.zip(answered) {
                             if let Some(law) = laws.iter().find(|law| law.statement == statement) {
-                                ended.push((translation, law, Ok(Outcome::Judged(judgment))));
+                                ended.push((translation, law, Ok(judgment)));
                             }
                         }
                     }
@@ -609,11 +611,7 @@ impl Proofs<'_> {
                             refused = std::mem::take(&mut kept);
                         }
                         for law in refused {
-                            let outcome = match refusal {
-                                Refusal::Rejected(line) => Ok(Outcome::Rejected { module: module.clone(), line }),
-                                Refusal::Stopped(stop) => Err((module.clone(), stop)),
-                            };
-                            ended.push((translation, law, outcome));
+                            ended.push((translation, law, Err((module.clone(), refusal))));
                         }
                         if !kept.is_empty() {
                             left.push((translation, kept));
@@ -720,19 +718,8 @@ impl Proofs<'_> {
     }
 }
 
-/// The issues of `law` whose proof ended as `outcome`.
-fn ended(law: &Law, outcome: &Ended, receivers: &HashMap<String, bool>, declared: &HashSet<String>) -> Vec<Issue> {
-    match outcome {
-        Ok(Outcome::Judged(judgment)) => judged(law, judgment.clone(), receivers, declared),
-        Ok(Outcome::Rejected { module, line }) => {
-            vec![issues::generated_module_refused(law, module, &Refusal::Rejected(*line))]
-        }
-        Err((module, stop)) => vec![issues::generated_module_refused(law, module, &Refusal::Stopped(*stop))],
-    }
-}
-
 /// The issues of `law` the runner's `judgment` gives: one for each case and each call whose goal it left open, with
-/// the goal in PHP#, which names the members of the code as `receivers` and `declared` hold them.
+/// the goal in PHP#, which names the members of the code as `receivers` and `declared` hold them, as Lean prints them.
 fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, declared: &HashSet<String>) -> Vec<Issue> {
     match judgment {
         Judgment::Proved => Vec::new(),
@@ -971,7 +958,7 @@ mod tests {
         let recorded = |file: &str, statement: &str| Recorded {
             file: file.to_owned(),
             statement: statement.to_owned(),
-            outcome: Outcome::Judged(Judgment::Proved),
+            judgment: Judgment::Proved,
         };
         let mut record = Record::default();
         record.proofs.insert("kept".to_owned(), recorded("app/Money.sharp", "App.Money.kept"));

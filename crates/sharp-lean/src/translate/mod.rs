@@ -470,7 +470,7 @@ impl Translator<'_, '_> {
                 parent,
                 initializer.map(|initializer| &initializer.argument_list),
             );
-            values.push(format!("{} := {built}", body.parent_field(parent)));
+            values.push(format!("{} := {built}", names::identifier(body.parent_field(parent).as_bytes())));
         }
         for (field, r#type) in fields.iter().zip(types) {
             let value = match field.value {
