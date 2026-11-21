@@ -5670,10 +5670,13 @@ fn collection_element<'hint, 'arena>(generic: &'hint GenericHint<'arena>) -> Opt
 }
 
 /// Decides a node and every node inside it at a place, as the checking walk does, for a node whose parent's check
-/// decides it and so keeps the walk out of it.
+/// decides it and so keeps the walk out of it. Each place it enters stands on the walk's places while its children
+/// are decided, as the walk keeps them, so an attribute's argument inside, as a case field's, reads as one.
 fn enter_tree(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) {
     if let Some(inner) = enter(node, place, context) {
+        context.slice_places.push(Some(inner));
         ensure_sufficient_stack(|| node.visit_children(|child| enter_tree(child, inner, context)));
+        context.slice_places.pop();
     }
 }
 

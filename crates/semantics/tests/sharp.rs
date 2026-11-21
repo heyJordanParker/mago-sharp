@@ -4474,6 +4474,17 @@ fn a_call_in_a_constant_value_is_an_error_that_names_the_call() {
     );
 }
 
+/// An attribute's arguments follow one rule wherever the attribute stands, so an attribute on a case's field takes an
+/// object, as one on a constructor's parameter does, though the case's value is a constant's.
+#[test]
+fn an_attribute_on_a_cases_field_takes_an_object_as_on_a_parameter() {
+    let r#enum = "namespace App;\n\npublic enum Link\n{\n    case Forward([Field(label: \"Destination\", config: new FieldConfig(disabled: \"lockTarget == true\"))] string? redirectUrl);\n}\n";
+    let class = "namespace App;\n\npublic class Link\n{\n    public Link([Field(label: \"Destination\", config: new FieldConfig(disabled: \"lockTarget == true\"))] string? redirectUrl) { }\n}\n";
+
+    assert_eq!(issues(r#enum), Vec::<String>::new());
+    assert_eq!(issues(class), Vec::<String>::new());
+}
+
 /// Spec section 2: a lambda in a constant value captures nothing, so one that captures a local of the code around it, or
 /// names `this`, is an error that names what it captures.
 #[test]
