@@ -6271,6 +6271,39 @@ fn compile_proves_a_law_over_a_counting_loop_under_an_if() {
 /// proven by recursion on a list's rest, and one under a `when` condition.
 const SPECIMEN_MONEY: &str = "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n    public Money add(Money other) => new Money(this.amount + other.amount, this.currency);\n    public Money times(int n) => n <= 0 ? new Money(0, this.currency) : this.add(this.times(n - 1));\n\n    law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;\n    law timesKeepsCurrency(Money m, int n) => m.times(n).currency == m.currency\n    {\n        if (n <= 0) {\n            return;\n        }\n        Money.timesKeepsCurrency(m, n - 1);\n        Money.addKeepsCurrency(m, m.times(n - 1));\n    }\n\n    public static Money sum(Money total, List<Money> items) => match (items) {\n        [] => total,\n        [Money first, ...List<Money> rest] => Money.sum(total.add(first), rest),\n    };\n\n    law sumKeepsCurrency(Money total, List<Money> items) => Money.sum(total, items).currency == total.currency\n    {\n        match (items) {\n            [] => { return; },\n            [Money first, ...List<Money> rest] => {\n                Money.sumKeepsCurrency(total.add(first), rest);\n                Money.addKeepsCurrency(total, first);\n            },\n        }\n    }\n\n    public static int refundable(int paid, int refunded) => Math.max(paid - refunded, 0);\n\n    law neverAbovePaid(int paid, int refunded) when paid >= 0 && refunded >= 0\n        => Money.refundable(paid, refunded) <= paid;\n}\n";
 
+/// Spec section 23: a call only `__call` or `__callStatic` answers, instance or static, is a missing method in a library
+/// and in a project alike, where 0.6.45 compiled it.
+#[test]
+fn a_call_only_a_magic_method_answers_is_refused_in_a_library_and_a_project() {
+    let bag = "<?php\n\nnamespace Lib;\n\nfinal class Bag\n{\n    /** @param list<mixed> $arguments */\n    public function __call(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n\n    /** @param list<mixed> $arguments */\n    public static function __callStatic(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n}\n";
+    let uses = "namespace App;\n\nimport Lib.Bag;\n\nextern Bag uses none;\n\npublic class Uses\n{\n    public static void magic(Bag b)\n    {\n        b.anything(1);\n        Bag.anything(1);\n    }\n}\n";
+    for kind in ["library", "project"] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\", \"src\"]\n");
+        write(
+            root,
+            "composer.json",
+            &format!(
+                "{{\"type\": \"{kind}\", \"autoload\": {{\"psr-4\": {{\"App\\\\\": \"app/\", \"Lib\\\\\": \"src/Lib/\"}}}}}}\n"
+            ),
+        );
+        write(root, "composer.lock", "{}\n");
+        write(root, "src/Lib/Bag.php", bag);
+        write(root, "app/Uses.sharp", uses);
+
+        let output = compile(root);
+
+        assert_eq!(output.status.code(), Some(1), "{kind}: {}", printed(&output));
+        assert_eq!(
+            printed(&output).matches("Method `Bag.anything` does not exist.").count(),
+            2,
+            "{kind}: {}",
+            printed(&output)
+        );
+    }
+}
+
 /// A project that installs the whole standard library, as every project does, holding `files`.
 fn library_project(files: &[(&str, &str)]) -> tempfile::TempDir {
     let directory = lawful_project(files);

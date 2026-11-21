@@ -1127,6 +1127,19 @@ where
             &invocation,
         ) {
             Some(return_type) => return_type,
+            // Spec section 23: PHP# calls only a method a class declares, by its PHP declaration or its PHPDoc's
+            // `@method` or `@mixin`, so a call only `__call` or `__callStatic` answers is a missing method.
+            None if context.dialect.is_sharp() && !signature_handled => {
+                report_non_existent_method(
+                    context,
+                    undocumented_method.target_span,
+                    undocumented_method.selector_span,
+                    undocumented_method.classname,
+                    undocumented_method.method_name,
+                );
+
+                TUnion::from_atomic(TAtomic::Error)
+            }
             None => {
                 if !signature_handled {
                     report_non_documented_method(

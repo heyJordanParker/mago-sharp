@@ -1712,7 +1712,7 @@ fn a_null_safe_receiver_is_not_null_in_the_rest_of_its_chain() {
             "17:56 possible-method-access-on-null",
             "18:65 possible-method-access-on-null",
             "19:65 possible-method-access-on-null",
-            "21:46 non-documented-method",
+            "21:46 non-existent-method",
             "26:16 invalid-class-string-expression",
             "26:28 invalid-class-string-expression",
             "36:61 redundant-nullsafe-operator",
@@ -35883,6 +35883,24 @@ fn plain_php_reads_a_readonly_value_as_any_value() {
     assert_eq!(issues(("src/App/Billing/pay.php", caller), &[("src/Order.sharp", order)]), Vec::<String>::new());
 }
 
+/// Spec section 23: PHP# calls a method a plain PHP class declares, by its PHP declaration or its PHPDoc's `@method` and
+/// `@mixin`, so a call only `__call` or `__callStatic` answers, instance or static, is the error every undeclared
+/// method gets. A declared method stays typed, and a wrong argument to one is refused.
+#[test]
+fn a_call_only_a_magic_method_answers_is_a_missing_method() {
+    let bag = "<?php\n\nnamespace Lib;\n\n/**\n * @mixin Shelf\n * @method static int counted(int $limit)\n */\nfinal class Bag\n{\n    public function size(): int\n    {\n        return 0;\n    }\n\n    /** @param list<mixed> $arguments */\n    public function __call(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n\n    /** @param list<mixed> $arguments */\n    public static function __callStatic(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n}\n\nfinal class Shelf\n{\n    public function shelved(string $label): string\n    {\n        return $label;\n    }\n}\n";
+    let uses = "namespace App;\n\nimport Lib.Bag;\n\npublic class Uses\n{\n    public static void magic(Bag b)\n    {\n        b.anything(1);\n        Bag.anything(1);\n    }\n\n    public static int size(Bag b) => b.size();\n\n    public static string shelved(Bag b) => b.shelved(\"x\");\n\n    public static int counted() => Bag.counted(3);\n\n    public static string wrong(Bag b) => b.shelved(1);\n}\n";
+
+    assert_eq!(
+        refusals(("src/App/Uses.sharp", uses), &[("src/Lib/Bag.php", bag)]),
+        [
+            "9:11 non-existent-method Method `Bag.anything` does not exist. | Ensure the method `Bag.anything` is defined.",
+            "10:13 non-existent-method Method `Bag.anything` does not exist. | Ensure the method `Bag.anything` is defined.",
+            "19:52 invalid-argument Invalid argument type for argument #1 of `Shelf.shelved`: expected `string`, but found `int`. | Change the argument value to match `string`, or update the parameter's type declaration.",
+        ]
+    );
+}
+
 /// Spec section 13: PHP# does not check a plain PHP method, so a call of one through a readonly value is an error: a
 /// declared method, one a `@method` tag declares, and one the class's `__call` runs.
 #[test]
@@ -35897,7 +35915,7 @@ fn a_readonly_value_calls_no_plain_php_method() {
             "7:15 missing-readonly-marker render cannot call order.save: order is readonly. | save is a plain PHP method of Model, which PHP# does not check.",
             "8:15 missing-readonly-marker render cannot call order.touch: order is readonly. | touch is a plain PHP method of Model, which PHP# does not check.",
             "9:15 missing-readonly-marker render cannot call order.publish: order is readonly. | publish is a plain PHP method of Model, which PHP# does not check.",
-            "9:15 non-documented-method Ambiguous method call to `publish` on class `Order`. | This method is not explicitly defined | On an object of type `Order` | While this call might be handled by `__call()` or `__callStatic()`, the checker cannot verify its arguments or return type without a corresponding `@method` docblock tag. | To enable full analysis, add a `@method` tag to the docblock of the `Order` class. For example: `/** @method returnType publish(argType $argName) */`",
+            "9:15 non-existent-method Method `Order.publish` does not exist. | This method selection is invalid | This expression has type `Order` | Ensure the method `Order.publish` is defined.",
         ]
     );
 }
