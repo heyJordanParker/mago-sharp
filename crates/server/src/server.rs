@@ -18,6 +18,7 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_orchestrator::error::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
+use mago_orchestrator::service::incremental_analysis::Scans;
 use mago_orchestrator::service::incremental_analysis::compile::Compiled;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::ExternAttributes;
@@ -86,6 +87,27 @@ impl Server {
     #[must_use]
     pub fn keeping_lowering_inputs(mut self) -> Self {
         self.service = self.service.keeping_lowering_inputs();
+        self
+    }
+
+    /// Keep, from each analysis from scratch, the first scan of each file, which [`Server::take_scans`] hands to the
+    /// next analysis of the same files in the run, so that one parses and scans only the files that differ.
+    #[must_use]
+    pub fn keeping_scans(mut self) -> Self {
+        self.service = self.service.keeping_scans();
+        self
+    }
+
+    /// The scans the last analysis from scratch kept, which the server no longer holds.
+    pub fn take_scans(&mut self) -> Scans {
+        self.service.take_scans()
+    }
+
+    /// Give the first analysis `scans`, another analysis's of the same run, which it takes for each file whose
+    /// contents and type are unchanged instead of scanning the file again.
+    #[must_use]
+    pub fn with_scans(mut self, scans: Scans) -> Self {
+        self.service = self.service.with_scans(scans);
         self
     }
 

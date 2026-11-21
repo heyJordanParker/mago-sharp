@@ -57,6 +57,7 @@ use mago_database::membership::WorkspaceMatcher;
 use mago_orchestrator::Autoloader;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::OrchestratorError;
+use mago_orchestrator::service::incremental_analysis::Scans;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::Compiled;
 use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
@@ -1093,8 +1094,9 @@ pub(crate) enum Loaded {
     /// Nothing, when the compile had nothing to do: the run loads the files itself.
     Nothing,
     /// Every file the compile loaded, as `mago analyze` loads them with no extension host started, which the analysis
-    /// with the hosts reads instead of loading them again.
-    Files(Database<'static>),
+    /// with the hosts reads instead of loading them again, and the first scan of each file the compile's analysis
+    /// scanned, which it takes for each file it holds as that analysis did instead of scanning it again.
+    Files(Box<Database<'static>>, Scans),
     /// The compile's own analysis, which a project with no extension host enabled reports instead of analyzing again,
     /// and its issues. Its database holds each package's `.sharp` file as a file of the project, which the compile
     /// checks too, and it reports in every file but those, whose refusals the compile's outcome holds.
@@ -1237,7 +1239,7 @@ fn compiled(
     }
 
     let database = orchestrator.load_listed(workspace, &listing)?.into_static();
-    let loaded = if keeping == Keeping::Files { Loaded::Files(database.clone()) } else { Loaded::Nothing };
+    let loaded_files = (keeping == Keeping::Files).then(|| database.clone());
     let (database, included) = with_packages(database);
 
     let mut errors = Vec::new();
@@ -1252,7 +1254,11 @@ fn compiled(
                 hosts.hold(lock, held, exclusive, None)?;
             }
 
-            return Ok((outcome, database, loaded));
+            return Ok((
+                outcome,
+                database,
+                loaded_files.map_or(Loaded::Nothing, |files| Loaded::Files(Box::new(files), Scans::default())),
+            ));
         }
     };
     let package_files: Vec<FileId> = database
@@ -1265,11 +1271,14 @@ fn compiled(
     let server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator))
         .keeping_lowering_inputs()
         .with_package_files(package_files);
+    // The analysis with the hosts that reads the files this compile loaded takes this analysis's scan of each.
+    let server = if loaded_files.is_some() { server.keeping_scans() } else { server };
     // A run that reports this analysis reports in every file but the packages' `.sharp` files, as its own analysis of
     // the files it loads would. A compile alone needs the node-analysis hooks only in the files it lowers.
     let mut server =
         if reports { server.scoped_to(move |file| !included.contains(&file.id)) } else { server.scoped_to(is_lowered) };
     let issues = server.analyze()?.issues;
+    let scans = server.take_scans();
     // The compile hides what `mago analyze` hides: a host rule's error an `ignore` entry or the baseline targets.
     let ignored =
         CompiledIgnoreSet::compile(&configuration.analyzer.ignore, configuration.source.glob.to_database_settings());
@@ -1507,7 +1516,11 @@ fn compiled(
     if let Some((hosts, lock, held, exclusive)) = held {
         hosts.hold(lock, held, exclusive, None)?;
     }
-    let loaded = if reports { Loaded::Analysis(Box::new(server), issues) } else { loaded };
+    let loaded = match loaded_files {
+        _ if reports => Loaded::Analysis(Box::new(server), issues),
+        Some(files) => Loaded::Files(Box::new(files), scans),
+        None => Loaded::Nothing,
+    };
 
     Ok((outcome, database, loaded))
 }

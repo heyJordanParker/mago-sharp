@@ -62,6 +62,7 @@ use mago_database::watcher::DatabaseWatcher;
 use mago_database::watcher::WatchOptions;
 use mago_database::watcher::start_watcher;
 use mago_orchestrator::Orchestrator;
+use mago_orchestrator::service::incremental_analysis::Scans;
 use mago_prelude::Prelude;
 use mago_reporting::CompiledIgnoreSet;
 use mago_reporting::Issue;
@@ -335,6 +336,10 @@ impl AnalyzeCommand {
                 (*server, issues)
             }
             loaded => {
+                let (files, scans) = match loaded {
+                    Loaded::Files(files, scans) => (Some(*files), scans),
+                    _ => (None, Scans::default()),
+                };
                 let external_analyzer = start_external_analyzer(
                     &extension_hosts,
                     configuration.php_version,
@@ -354,11 +359,11 @@ impl AnalyzeCommand {
                     },
                     || {
                         let start = trace_enabled.then(Instant::now);
-                        let database = match loaded {
-                            Loaded::Files(mut database) => {
+                        let database = match files {
+                            Some(mut database) => {
                                 orchestrator.add_external_initialization_files(&mut database).map(|()| database)
                             }
-                            _ => orchestrator
+                            None => orchestrator
                                 .load_database(&configuration.source.workspace, true, None, stdin_override)
                                 .map(Database::into_static),
                         };
@@ -379,7 +384,8 @@ impl AnalyzeCommand {
                 }
 
                 service_run_start = trace_enabled.then(Instant::now);
-                let mut server = Server::new(database.into_static(), self.prelude(), server_settings(&orchestrator));
+                let mut server = Server::new(database.into_static(), self.prelude(), server_settings(&orchestrator))
+                    .with_scans(scans);
                 if self.scan_only {
                     server = server.scan_only();
                 }
