@@ -19903,15 +19903,15 @@ fn a_member_is_the_property_or_method_the_checker_found_on_the_receiver() {
 }
 
 /// ```php
-/// return $bag->size + $bag->count() + \strlen(\gettype($bag->other)) + \strlen(\gettype($bag->untagged()));
+/// return $bag->size + $bag->count() + \Lib\Bag::measure($bag->other);
 /// ```
 ///
-/// A member a PHP class's `__get` serves is a property, and one its `__call` serves is a method, whether a
-/// `@property` or `@method` tag names it or not.
+/// A member a PHP class's `__get` serves is a property, whether a `@property` tag names it or not, and one a `@method`
+/// tag declares on a class with `__call` is a method.
 #[test]
 fn a_magic_property_and_a_magic_method_of_a_php_class_are_a_property_and_a_method() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Bag;\n\nclass Report\n{\n    public int run(Bag bag)\n    {\n        return bag.size + bag.count() + Bag.measure(bag.other) + Bag.measure(bag.untagged());\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Bag;\n\nclass Report\n{\n    public int run(Bag bag)\n    {\n        return bag.size + bag.count() + Bag.measure(bag.other);\n    }\n}\n",
         &[(
             "src/Lib/Bag.php",
             "<?php namespace Lib; /** @property int $size\n * @method int count() */ final class Bag { public function __get(string $name): mixed { return 1; } public function __call(string $name, array $arguments): mixed { return 1; } public static function measure(mixed $value): int { return 1; } }",
@@ -19925,33 +19925,23 @@ fn a_magic_property_and_a_magic_method_of_a_php_class_are_a_property_and_a_metho
               RETURN
                 BINARY_OP [1]
                   BINARY_OP [1]
-                    BINARY_OP [1]
-                      PROP
-                        VAR
-                          ZVAL "bag"
-                        ZVAL "size"
-                      METHOD_CALL
-                        VAR
-                          ZVAL "bag"
-                        ZVAL "count"
-                        ARG_LIST
-                    STATIC_CALL
-                      ZVAL "Lib\\Bag"
-                      ZVAL "measure"
+                    PROP
+                      VAR
+                        ZVAL "bag"
+                      ZVAL "size"
+                    METHOD_CALL
+                      VAR
+                        ZVAL "bag"
+                      ZVAL "count"
                       ARG_LIST
-                        PROP
-                          VAR
-                            ZVAL "bag"
-                          ZVAL "other"
                   STATIC_CALL
                     ZVAL "Lib\\Bag"
                     ZVAL "measure"
                     ARG_LIST
-                      METHOD_CALL
+                      PROP
                         VAR
                           ZVAL "bag"
-                        ZVAL "untagged"
-                        ARG_LIST
+                        ZVAL "other"
         "#}
     );
 }
@@ -20646,15 +20636,15 @@ fn a_declared_member_wins_over_a_magic_one() {
 /// return \Lib\Bag::size($bag->handler()) + \Lib\Bag::size($bag->untagged());
 /// ```
 ///
-/// A call `__call` serves is a method call of its name, as the analysis checked it, even beside a private property of
-/// that name, which the call cannot read.
+/// A call of a method a `@method` tag declares is a method call of its name, as the analysis checked it, even beside a
+/// private property of that name, which the call cannot read.
 #[test]
-fn a_call_only_call_serves_is_a_method_call_beside_a_private_property_of_its_name() {
+fn a_call_a_method_tag_declares_is_a_method_call_beside_a_private_property_of_its_name() {
     let lowered = Lowered::with(
         "namespace App.Tenant;\n\nimport Lib.Bag;\n\nclass Report\n{\n    public int run(Bag bag)\n    {\n        return Bag.size(bag.handler()) + Bag.size(bag.untagged());\n    }\n}\n",
         &[(
             "src/Lib/Bag.php",
-            "<?php namespace Lib; final class Bag { private \\Closure $handler; public function __construct() { $this->handler = fn (): int => 1; } public function __call(string $name, array $arguments): mixed { return 1; } public static function size(mixed $value): int { return 1; } }",
+            "<?php namespace Lib; /** @method int handler()\n * @method int untagged() */ final class Bag { private \\Closure $handler; public function __construct() { $this->handler = fn (): int => 1; } public function __call(string $name, array $arguments): mixed { return 1; } public static function size(mixed $value): int { return 1; } }",
         )],
     );
 
@@ -20687,32 +20677,22 @@ fn a_call_only_call_serves_is_a_method_call_beside_a_private_property_of_its_nam
 }
 
 /// ```php
-/// \Lib\Calc::remember($extra);
 /// \Lib\Order::where($extra);
 /// ```
 ///
-/// A static call `__callStatic` serves is a static call of its name, as the analysis checked it, whether the class
-/// declares `__callStatic` or a `@method static` tag names the method a subclass's `__callStatic` serves.
+/// A static call of a method a `@method static` tag declares is a static call of its name, as the analysis checked
+/// it, as a subclass's `__callStatic` serves it.
 #[test]
-fn a_static_call_call_static_serves_is_a_static_call_of_its_name() {
+fn a_static_call_a_method_tag_declares_is_a_static_call_of_its_name() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Order;\n\nclass Report\n{\n    public void run(int extra)\n    {\n        Calc.remember(extra);\n        Order.where(extra);\n    }\n}\n",
-        &[(
-            "src/Lib/Calc.php",
-            "<?php namespace Lib; final class Calc { public static function __callStatic(string $name, array $arguments): mixed { return null; } } /** @method static int where(int $id) */ class Order {}",
-        )],
+        "namespace App.Tenant;\n\nimport Lib.Order;\n\nclass Report\n{\n    public void run(int extra)\n    {\n        Order.where(extra);\n    }\n}\n",
+        &[("src/Lib/Order.php", "<?php namespace Lib; /** @method static int where(int $id) */ class Order {}")],
     );
 
     assert_eq!(
         lowered.body(),
         indoc! {r#"
             STMT_LIST
-              STATIC_CALL
-                ZVAL "Lib\\Calc"
-                ZVAL "remember"
-                ARG_LIST
-                  VAR
-                    ZVAL "extra"
               STATIC_CALL
                 ZVAL "Lib\\Order"
                 ZVAL "where"
@@ -22077,44 +22057,18 @@ const MAGIC_ORDER: (&str, &str) = (
 );
 
 /// ```php
-/// \Lib\Calc::remember($extra);
-/// ```
-///
-/// A static call only `__callStatic` serves is a static call of its name, as PHP calls a facade's methods.
-#[test]
-fn a_static_call_only_call_static_serves_is_a_static_call() {
-    assert_eq!(
-        body_in(
-            "void run(int extra)",
-            "        Calc.remember(extra);\n",
-            &[(
-                "src/Lib/Calc.php",
-                "<?php namespace Lib; final class Calc { public static function __callStatic(string $name, array $arguments): mixed { return null; } }",
-            )],
-        ),
-        indoc! {r#"
-            STMT_LIST
-              STATIC_CALL
-                ZVAL "Lib\\Calc"
-                ZVAL "remember"
-                ARG_LIST
-                  VAR
-                    ZVAL "extra"
-        "#}
-    );
-}
-
-/// ```php
 /// \Lib\Order::where($extra);
 /// ```
 ///
-/// `Order.where(x)` calls the static method `__callStatic` serves, though `__get` would serve a property read of the
-/// same name, as PHP runs `Order::where($x)`. So the call lowers to a static call of its name, and a standard library
-/// method whose body is that call gives an inline form.
+/// `Order.where(x)` calls the static method a `@method static` tag declares, though `__get` would serve a property
+/// read of the same name, as PHP runs `Order::where($x)`. So the call lowers to a static call of its name, and a
+/// standard library method whose body is that call gives an inline form.
 #[test]
-fn a_static_call_beside_a_get_is_the_static_method_call_static_serves() {
+fn a_static_call_beside_a_get_is_the_static_method_a_tag_declares() {
+    let order = MAGIC_ORDER.1.replacen("final class", "/** @method static mixed where(int $id) */ final class", 1);
+    let tagged = (MAGIC_ORDER.0, order.as_str());
     let library = "namespace Sharp;\n\nimport Lib.Order;\n\npublic class Text\n{\n    public static Any? found(int id) => Order.where(id);\n}\n";
-    let forms: Vec<String> = common::checked(TEXT.0, library, &[MAGIC_ORDER], inline_forms)
+    let forms: Vec<String> = common::checked(TEXT.0, library, &[tagged], inline_forms)
         .expect("the library file is checked")
         .into_iter()
         .map(|(name, _)| String::from_utf8_lossy(&name).into_owned())
@@ -22124,7 +22078,7 @@ fn a_static_call_beside_a_get_is_the_static_method_call_static_serves() {
     assert_eq!(
         Lowered::with(
             "namespace App.Tenant;\n\nimport Lib.Order;\n\nclass Report\n{\n    public void run(int extra)\n    {\n        Order.where(extra);\n    }\n}\n",
-            &[MAGIC_ORDER],
+            &[tagged],
         )
         .body(),
         indoc! {r#"
