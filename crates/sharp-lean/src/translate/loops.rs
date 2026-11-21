@@ -1,5 +1,5 @@
-//! The loops a law reaches: a `for … of` loop over a `List` that only counts or sums, as the Lean list function it
-//! is.
+//! The loops a law reaches: a `for … of` loop over a `List`, or over a `Map`'s entries, that only counts or sums, as
+//! the Lean list function it is.
 
 use mago_analyzer::smaller::literal;
 use mago_names::binding::Binding;
@@ -29,7 +29,7 @@ struct Addition<'expression, 'arena> {
 }
 
 impl Body<'_, '_> {
-    /// A `for … of` loop over a `List` whose body only adds to int locals, each addition optionally under an `if` on
+    /// A `for … of` loop over a `List`, or over a `Map`'s entries, whose body only adds to int locals, each addition optionally under an `if` on
     /// the element, as each local's new value: the `List.countP` of the elements it counts, or the `List.sum` of the
     /// values it adds. That sum throws only when it leaves the `int` range, and the loop PHP runs throws there or on an
     /// earlier partial sum, where a law holds, so a law proven of the sum holds of the loop. Any other loop is refused.
@@ -37,11 +37,18 @@ impl Body<'_, '_> {
         let refuse = |body: &mut Self| {
             body.unmodeled(for_of.span(), "a loop that does more than count or sum".to_owned(), issues::LOOP);
         };
-        let ForOfTarget::Value(element) = &for_of.target else {
-            return refuse(self);
+        let element = match &for_of.target {
+            ForOfTarget::Value(element) if self.is_list(for_of.expression) => names::identifier(element.name.value),
+            // Spec sections 12 and 17: a loop over a `Map` takes each entry as its key and its value.
+            ForOfTarget::Unpack(entry) if self.is_map(for_of.expression) => format!(
+                "({}, {})",
+                names::identifier(entry.first.name.value),
+                names::identifier(entry.second.name.value)
+            ),
+            _ => return refuse(self),
         };
         let mut additions = Vec::new();
-        if !self.is_list(for_of.expression) || !additions_of(for_of.body, &mut Vec::new(), &mut additions) {
+        if !additions_of(for_of.body, &mut Vec::new(), &mut additions) {
             return refuse(self);
         }
         let mut accumulators: Vec<u32> = Vec::new();
@@ -65,7 +72,10 @@ impl Body<'_, '_> {
         }
 
         let list = self.value(for_of.expression);
-        let element = names::identifier(element.name.value);
+        let list = match for_of.target {
+            ForOfTarget::Unpack(_) => format!("(Sharp.Map.entries {list})"),
+            ForOfTarget::Value(_) => list,
+        };
         let outer = std::mem::replace(&mut self.accumulators, accumulators);
         let mut sums: Vec<(String, Vec<String>)> = Vec::new();
         for (addition, local) in additions.iter().zip(locals) {

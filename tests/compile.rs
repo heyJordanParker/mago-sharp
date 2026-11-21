@@ -5810,12 +5810,77 @@ fn a_law_reaching_a_member_lean_reserves_is_refused() {
     );
 }
 
+/// Spec section 28: a law reads a `Map` with the members whose model the checker has, and a member it has none of is
+/// refused with those members named.
 #[test]
-fn a_law_reaching_a_map_is_refused() {
+fn a_law_reading_a_map_member_it_has_no_model_of_is_refused_naming_the_members_it_reads() {
     assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(Map<string, int> items) => true;\n}\n",
-        "Law sized reaches a collection in Shape.sized. Hold the values in a List, and read it with `count()`, an index, `map`, `filter`, a list pattern or a spread.",
+        "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(Map<string, int> items) => items.isEmpty() || items.count() > 0;\n}\n",
+        "Law sized reaches the Map method isEmpty in Shape.sized. Read a Map with `count()`, `get`, `has`, `keys()`, `values()`, an index or a loop over its entries.",
     );
+}
+
+/// `App.Billing.Limit`, the limits a plan bounds.
+const LIMIT: &str = "namespace App.Billing;\n\npublic enum Limit\n{\n    case Seats;\n    case Projects;\n}\n";
+
+/// `App.Billing.Plan`, whose `limits()` gives each plan's `Map<Limit, int>`, `free` the free plan's entries, with laws
+/// that read it with `get`, `has`, an index, `count()`, `keys()`, `values()` and a loop over its entries.
+fn plan(free: &str) -> String {
+    format!(
+        "namespace App.Billing;\n\npublic enum Plan\n{{\n    case Free;\n    case Pro;\n\n    public Map<Limit, int> limits() => match (this) {{\n        Plan.Free => [{free}],\n        Plan.Pro => [Limit.Seats: 10, Limit.Projects: 100],\n    }};\n\n    public int total()\n    {{\n        let sum = 0;\n        for (const [limit, bound] of this.limits()) {{\n            sum += bound;\n        }}\n        return sum;\n    }}\n\n    law everyPlanBoundsEveryLimit(Plan plan, Limit limit) => (plan.limits().get(limit) ?? 0) >= 1;\n    law everyPlanNamesEveryLimit(Plan plan) => plan.limits().has(Limit.Seats) && (plan.limits()[Limit.Projects] ?? 0) >= 3 && plan.limits().count() == 2;\n    law everyLimitHasOneBound(Plan plan) => plan.limits().keys().count() == plan.limits().values().count();\n    law everyPlanAllowsSome(Plan plan) => plan.total() >= 2;\n}}\n"
+    )
+}
+
+/// `App.Billing.Quota`, which reads a `Map<string, int>` a literal and a spread build.
+const QUOTA: &str = "namespace App.Billing;\n\npublic class Quota\n{\n    public static int limit(Map<string, int> limits) => limits[\"orders\"] ?? 0;\n\n    public static Map<string, int> defaults() => [\"orders\": 3, \"seats\": 1];\n\n    law limited(int unused) => Quota.limit(Quota.defaults()) == 3 && Quota.limit([...Quota.defaults(), \"orders\": 5]) == 5;\n}\n";
+
+/// Spec sections 12 and 28: a law reads a `Map`'s lookups, keys, values, entries and count, so it proves an invariant
+/// over keyed data, as every plan bounding every limit, and a literal's later key replaces an earlier one's value. A
+/// plan whose limit is 0 breaks the invariant, which is not proven.
+#[test]
+fn a_law_reads_a_map_s_lookups_keys_values_entries_and_count() {
+    let directory = library_project(&[
+        ("app/Billing/Limit.sharp", LIMIT),
+        ("app/Billing/Plan.sharp", &plan("Limit.Seats: 1, Limit.Projects: 3")),
+        ("app/Billing/Quota.sharp", QUOTA),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Billing/Plan.sharp").exists());
+    assert!(compiled(root, "app/Billing/Quota.sharp").exists());
+
+    let directory = library_project(&[
+        ("app/Billing/Limit.sharp", LIMIT),
+        ("app/Billing/Plan.sharp", &plan("Limit.Seats: 1, Limit.Projects: 0")),
+    ]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law everyPlanBoundsEveryLimit is not proven\n"),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// Spec section 20.2: a law about a machine whose case holds a `Map` proves, as one whose entry point builds the case
+/// with `[:]` and whose move carries the `Map` on.
+#[test]
+fn a_law_proves_over_a_machine_whose_case_holds_a_map() {
+    let directory = library_project(&[(
+        "app/Run.sharp",
+        "namespace App;\n\npublic machine Run\n{\n    case Running(Map<string, string> args, int position)\n    {\n        public Run.Running step() => Run.Running(this.args, this.position + 1);\n    }\n\n    public static Run.Running start() => Run.Running([:], 0);\n\n    law stepping(Run.Running r) => r.step().position == r.position + 1;\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Run.sharp").exists());
 }
 
 /// A `List` is Lean's `List`, and its `map`, `filter` and `count` are Lean's `List.map`, `List.filter` and
@@ -5853,9 +5918,9 @@ fn compile_proves_a_law_over_a_list_index_read() {
 }
 
 /// A law an index read breaks, as a ramp of delays that shrinks from 30 to 20, is not proven, and the goal still to show
-/// names the reads, and a `Map` read by its key is still refused.
+/// names the reads.
 #[test]
-fn a_false_law_over_a_list_index_read_is_not_proven_and_a_map_key_read_is_refused() {
+fn a_false_law_over_a_list_index_read_is_not_proven() {
     let shrinking = retry(
         "law rampNeverShrinks(int index) => index < 0 || index + 1 >= Retry.ExponentialRamp.backoff().count() || Retry.ExponentialRamp.backoff()[index] <= Retry.ExponentialRamp.backoff()[index + 1];",
     )
@@ -5871,11 +5936,6 @@ fn a_false_law_over_a_list_index_read_is_not_proven_and_a_map_key_read_is_refuse
         ),
         "{}",
         printed(&output)
-    );
-
-    assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Shape\n{\n    public static int limit(Map<string, int> limits) => limits[\"orders\"] ?? 0;\n\n    law limited(int unused) => Shape.limit([\"orders\": 3]) == 3;\n}\n",
-        "Law limited reaches a collection in Shape.limit.",
     );
 }
 
@@ -6718,7 +6778,7 @@ fn each_refusal_a_law_reaches_says_what_to_write_instead() {
     let printed = printed(&output);
     assert_eq!(output.status.code(), Some(1), "{printed}");
     for message in [
-        "Law l1 reaches the type `int|string` in Shape.union. Give it a type a law reasons about: int, bool, string, a List, or a PHP# class, enum or interface, with or without `?`.",
+        "Law l1 reaches the type `int|string` in Shape.union. Give it a type a law reasons about: int, bool, string, a List, a Map, or a PHP# class, enum or interface, with or without `?`.",
         "Law l2 reaches the operator `**` here in Shape.power. Write it with the operators a law reaches: `+ - * / %` on ints, `+` on strings, `< <= > >=` on ints, on strings and on two values of a class that declares `<=>`, `<=>` on ints and on those values, `== !=`, `! && ||` and `??`.",
         "Law l3 reaches the operator `~` in Shape.complement. Write it with the operators a law reaches: `+ - * / %` on ints, `+` on strings, `< <= > >=` on ints, on strings and on two values of a class that declares `<=>`, `<=>` on ints and on those values, `== !=`, `! && ||` and `??`.",
         "Law l4 reaches a string template in Shape.template. Join the strings with `+`.",
@@ -6762,7 +6822,7 @@ fn each_refusal_of_code_a_law_cannot_read_says_what_to_write_instead() {
     for message in [
         "Law l1 reaches the plain PHP class Clock in Shape.hour. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
         "Law l2 reaches the plain PHP function `Lib.measure` in Shape.length. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
-        "Law l3 reaches the type parameter T in Shape.kept. Give it a type a law reasons about: int, bool, string, a List, or a PHP# class, enum or interface, with or without `?`.",
+        "Law l3 reaches the type parameter T in Shape.kept. Give it a type a law reasons about: int, bool, string, a List, a Map, or a PHP# class, enum or interface, with or without `?`.",
         "Law l4 reaches the accessor of Shape.doubled in Shape.l4. Compute the value in a method, and give the property no accessor body.",
     ] {
         assert!(printed.contains(&format!("error - unmodeled-construct: {message}")), "{message}\n{printed}");

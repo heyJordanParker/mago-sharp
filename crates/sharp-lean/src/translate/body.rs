@@ -31,6 +31,7 @@ use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::Array;
 use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Assignment;
 use mago_syntax::cst::AssignmentOperator;
@@ -208,11 +209,16 @@ impl<'body, 'program> Body<'body, 'program> {
             Hint::Generic(generic) => {
                 // The name resolver leaves the built-in collections' names as written.
                 let name = self.checked.names().resolve(&generic.name).unwrap_or(generic.name.value);
-                // A `List` is Lean's `List`, which `map`, `filter` and `count` read as Lean's own functions.
+                // A `List` is Lean's `List`, which `map`, `filter` and `count` read as Lean's own functions, and a `Map`
+                // is `Sharp.Map`, whose members are functions of its entries.
                 if names::short_name(name) == "List"
                     && let Some(element) = generic.type_arguments.arguments.first()
                 {
                     format!("(List {})", self.r#type(element))
+                } else if names::short_name(name) == "Map"
+                    && let [key, value] = generic.type_arguments.arguments.as_slice()
+                {
+                    format!("(Sharp.Map {} {})", self.r#type(key), self.r#type(value))
                 } else if is_collection(name) {
                     self.unmodeled(hint.span(), "a collection".to_owned(), issues::COLLECTION)
                 } else {
@@ -455,6 +461,9 @@ impl<'body, 'program> Body<'body, 'program> {
             Expression::Instantiation(instantiation) => self.instantiation(instantiation),
             Expression::Access(Access::Property(access)) => self.property(expression, access),
             Expression::Access(Access::NullSafeProperty(access)) => self.null_safe_property(expression, access),
+            // Spec section 12: a `Map` literal sets each entry in order, so a later key replaces an earlier one's value,
+            // and a spread sets each entry of its `Map`. `[:]` is the empty `Map`.
+            Expression::Array(array) if array.colon.is_some() || self.is_map(expression) => self.map_literal(array),
             // A spread is Lean's `++`: `[x, ...rest]` is `[x] ++ rest`. `[]` types as no array in particular, and Lean
             // reads it as the empty List the code around it expects.
             Expression::Array(array) if array.elements.is_empty() || self.is_list(expression) => {
@@ -492,6 +501,13 @@ impl<'body, 'program> Body<'body, 'program> {
                 let index = self.value(access.index);
 
                 self.bind(format!("int.read {list} {index}"))
+            }
+            // Spec section 12: a `Map` read gives the value of an equal key, or null.
+            Expression::ArrayAccess(access) if self.is_map(access.array) => {
+                let map = self.value(access.array);
+                let key = self.value(access.index);
+
+                self.map_get(access.array, &map, &key)
             }
             Expression::Array(_)
             | Expression::LegacyArray(_)
@@ -1277,6 +1293,9 @@ impl<'body, 'program> Body<'body, 'program> {
         if self.is_list(call.object) {
             return self.list_call(expression, call);
         }
+        if self.is_map(call.object) {
+            return self.map_call(expression, call);
+        }
         if let Some(extension) = self.checked.types().extension(expression) {
             if !self.is_translated_class(expression.span(), extension.class.as_bytes()) {
                 return "default".to_owned();
@@ -1408,6 +1427,94 @@ impl<'body, 'program> Body<'body, 'program> {
                 self.unmodeled(expression.span(), what, issues::COLLECTION)
             }
         }
+    }
+
+    /// Whether `expression`'s value is a `Map`, null aside.
+    pub(super) fn is_map(&self, expression: &Expression) -> bool {
+        let r#type = self.checked.types().expression_type(expression);
+        let mut types = r#type.types.iter().filter(|atomic| !atomic.is_null()).peekable();
+
+        types.peek().is_some() && types.all(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
+    }
+
+    /// A `Map` literal, spec section 12, as `Sharp.Map.ofList` of its entries, each spread's entries in its place.
+    fn map_literal(&mut self, array: &Array) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut entries: Vec<String> = Vec::new();
+        for element in &array.elements {
+            match element {
+                ArrayElement::KeyValue(entry) => {
+                    let key = self.value(entry.key);
+                    let value = self.value(entry.value);
+                    entries.push(format!("({key}, {value})"));
+                }
+                ArrayElement::Variadic(spread) => {
+                    if !entries.is_empty() {
+                        parts.push(format!("[{}]", entries.join(", ")));
+                        entries.clear();
+                    }
+                    parts.push(format!("(Sharp.Map.entries {})", self.value(spread.value)));
+                }
+                element => unreachable!(
+                    "the checker accepts a Map literal of entries and spreads of Maps, not {:?}",
+                    element.span()
+                ),
+            }
+        }
+        if !entries.is_empty() || parts.is_empty() {
+            parts.push(format!("[{}]", entries.join(", ")));
+        }
+
+        format!("(Sharp.Map.ofList ({}))", parts.join(" ++ "))
+    }
+
+    /// A `Map` member a law reads, spec section 28, as the function of `Sharp/Lean/Map.lean` of its name, one of
+    /// [`MAP_MEMBERS`]: `count()` in a body that computes exactly is the entries' length checked into the int range.
+    /// Every other member is refused, naming those.
+    fn map_call(&mut self, expression: &Expression, call: &MethodCall) -> String {
+        let Some(method) = self.method_name(&call.method) else {
+            return "default".to_owned();
+        };
+        let name = String::from_utf8_lossy(method).into_owned();
+        if !MAP_MEMBERS.contains(&(name.as_str(), call.argument_list.arguments.len())) {
+            let what = format!("the Map method {name}");
+            return self.unmodeled(expression.span(), what, issues::map_members(&MAP_MEMBERS));
+        }
+        let map = self.value(call.object);
+        let Some(arguments) = self.arguments(&call.argument_list, None) else {
+            return "default".to_owned();
+        };
+
+        match (name.as_str(), arguments.as_slice()) {
+            ("count", []) if self.exact => {
+                self.bind(format!("int.ofInt (List.length (Sharp.Map.entries {map}) : Int)"))
+            }
+            ("get", [key]) => self.map_get(call.object, &map, key),
+            _ => {
+                let mut parts = vec![format!("Sharp.Map.{name}"), map];
+                parts.extend(arguments);
+
+                format!("({})", parts.join(" "))
+            }
+        }
+    }
+
+    /// The value of `key` in `map`, the value of `object`, or null. A `Map` of nullable values reads a missing key and a
+    /// stored null alike, as its `TValue?` does.
+    fn map_get(&self, object: &Expression, map: &str, key: &str) -> String {
+        let get = format!("(Sharp.Map.get {map} {key})");
+        let nullable = self.checked.types().expression_type(object).types.iter().any(|atomic| match atomic {
+            TAtomic::Array(TArray::Keyed(keyed)) => {
+                keyed.parameters.as_ref().is_some_and(|(_, value)| value.is_nullable())
+                    || keyed
+                        .known_items
+                        .as_ref()
+                        .is_some_and(|items| items.values().any(|(_, value)| value.is_nullable()))
+            }
+            _ => false,
+        });
+
+        if nullable { format!("(Option.join {get})") } else { get }
     }
 
     /// A call of a standard library method marked `LeanFunction`, as `Math.max(…)` is Lean's `max` on `int`, as the Lean
@@ -2276,6 +2383,10 @@ fn names_values(pattern: &Pattern) -> bool {
 pub(crate) fn indented(lines: &[String], by: usize) -> impl Iterator<Item = String> + '_ {
     lines.iter().map(move |line| format!("{}{line}", " ".repeat(by)))
 }
+
+/// The `Map` members a law reads, each by its name and the arguments it takes, spec section 28: each is the function of
+/// `Sharp/Lean/Map.lean` of its name. The refusal of any other member names them.
+const MAP_MEMBERS: [(&str, usize); 5] = [("count", 0), ("get", 1), ("has", 1), ("keys", 0), ("values", 0)];
 
 /// Whether `class` names a PHP# collection.
 fn is_collection(class: &[u8]) -> bool {

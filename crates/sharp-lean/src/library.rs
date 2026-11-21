@@ -29,12 +29,13 @@ use sha2::Sha256;
 pub(crate) const TOOLCHAIN: &str = include_str!("../lean/lean-toolchain");
 
 /// The library's Lake package, as `crates/sharp-lean/lean/` holds it.
-const PACKAGE: [(&str, &str); 8] = [
+const PACKAGE: [(&str, &str); 9] = [
     ("lakefile.toml", include_str!("../lean/lakefile.toml")),
     ("lean-toolchain", TOOLCHAIN),
     ("Sharp/Lean/Int.lean", include_str!("../lean/Sharp/Lean/Int.lean")),
     ("Sharp/Lean/Interface.lean", include_str!("../lean/Sharp/Lean/Interface.lean")),
     ("Sharp/Lean/Law.lean", include_str!("../lean/Sharp/Lean/Law.lean")),
+    ("Sharp/Lean/Map.lean", include_str!("../lean/Sharp/Lean/Map.lean")),
     ("Sharp/Lean/Proof.lean", include_str!("../lean/Sharp/Lean/Proof.lean")),
     ("Sharp/Lean/String.lean", include_str!("../lean/Sharp/Lean/String.lean")),
     ("Sharp/Lean/Runner.lean", include_str!("../lean/Sharp/Lean/Runner.lean")),
@@ -899,7 +900,7 @@ mod tests {
 
         for (index, &(path, source)) in PACKAGE.iter().enumerate() {
             let edited = format!("{source}\n");
-            let mut package: [(&str, &str); 8] = PACKAGE;
+            let mut package = PACKAGE;
             package[index] = (path, edited.as_str());
             assert_ne!(base, key(&package, &[]), "{path}");
         }

@@ -38,7 +38,7 @@ pub(crate) const LAMBDA: &str = "Pass a lambda only to a List's `map` or `filter
 pub(crate) const INTERFACE_METHOD: &str = "Call the method on a value of a class that implements the interface, since a law cannot know which implementation runs.";
 pub(crate) const ACCESSOR: &str = "Compute the value in a method, and give the property no accessor body.";
 pub(crate) const CONSTRUCTOR_BODY: &str = "Write the constructor with promoted properties and no body, and compute the values in a static method that calls `new`.";
-pub(crate) const TYPE: &str = "Give it a type a law reasons about: int, bool, string, a List, or a PHP# class, enum or interface, with or without `?`.";
+pub(crate) const TYPE: &str = "Give it a type a law reasons about: int, bool, string, a List, a Map, or a PHP# class, enum or interface, with or without `?`.";
 pub(crate) const MISSING_TYPE: &str = "Write its type.";
 pub(crate) const TUPLE: &str = "Hold the values in a class with one property for each, in place of a tuple.";
 pub(crate) const STATEMENT: &str = "Write the method with the statements a law reaches: `let` and `const`, assignments to locals, `if`, `match`, `return`, and loops that only count or sum.";
@@ -71,6 +71,17 @@ pub(crate) const SELF_HOLDING: &str =
 /// are open.
 pub(crate) fn open_interface(interface: &str) -> String {
     format!("A law tells apart only the implementers of a sealed interface. Declare `{interface}` sealed.")
+}
+
+/// Why a law cannot read a `Map` member outside `members`, the members it reads, each by its name and the arguments it
+/// takes.
+pub(crate) fn map_members(members: &[(&str, usize)]) -> String {
+    let named: Vec<String> = members
+        .iter()
+        .map(|(name, arguments)| if *arguments == 0 { format!("`{name}()`") } else { format!("`{name}`") })
+        .collect();
+
+    format!("Read a Map with {}, an index or a loop over its entries.", named.join(", "))
 }
 
 /// Why a law cannot take a value of a class that is a state of the sealed interfaces `first` and `second`: in a law, a
