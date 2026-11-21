@@ -374,32 +374,30 @@ impl<'config> DatabaseLoader<'config> {
 
         let has_path_excludes = !canonical_excludes.is_empty();
         let has_glob_excludes = !glob_excludes.is_empty();
-        let list_path = |(path, real, specificity, exact): (PathBuf, PathBuf, usize, bool),
-                         metadata: Option<std::fs::Metadata>| {
+        // Whether the file at `path` is listed, by its path alone, so a file the listing leaves out costs no metadata
+        // read: one of `extensions`, or one a root names exactly, that no exclude leaves out.
+        let is_listed = |path: &Path, exact: bool| {
             if has_glob_excludes
-                && (glob_excludes.is_match(&path)
-                    || glob_excludes.is_match(workspace_relative_string(&path, canonical_workspace.as_path())))
+                && (glob_excludes.is_match(path)
+                    || glob_excludes.is_match(workspace_relative_string(path, canonical_workspace.as_path())))
             {
-                return None;
+                return false;
             }
 
-            if !exact && !extensions.contains(path.extension()?) {
-                return None;
+            if !exact && !path.extension().is_some_and(|extension| extensions.contains(extension)) {
+                return false;
             }
 
-            if has_path_excludes {
-                let excluded = path.to_str().is_some_and(|s| {
+            !has_path_excludes
+                || !path.to_str().is_some_and(|s| {
                     canonical_excludes.iter().any(|excl| {
                         s.starts_with(excl.as_str())
                             && matches!(s.as_bytes().get(excl.len()), None | Some(&b'/' | &b'\\'))
                     })
-                });
-
-                if excluded {
-                    return None;
-                }
-            }
-
+                })
+        };
+        let list_path = |(path, real, specificity, exact): (PathBuf, PathBuf, usize, bool),
+                         metadata: Option<std::fs::Metadata>| {
             // A file gone since the walk found it is no file, as a read that finds it gone leaves it out.
             let metadata = metadata.or_else(|| std::fs::metadata(&path).ok())?;
 
@@ -407,7 +405,13 @@ impl<'config> DatabaseLoader<'config> {
         };
 
         let (direct_files, directory_files) = rayon::join(
-            || paths_to_process.into_par_iter().filter_map(|path| list_path(path, None)).collect::<Vec<Listed>>(),
+            || {
+                paths_to_process
+                    .into_par_iter()
+                    .filter(|(path, _, _, exact)| is_listed(path, *exact))
+                    .filter_map(|path| list_path(path, None))
+                    .collect::<Vec<Listed>>()
+            },
             || {
                 directory_roots
                     .into_par_iter()
@@ -431,7 +435,7 @@ impl<'config> DatabaseLoader<'config> {
                                         links.push((entry.path().to_path_buf(), real_path(&entry, &links)));
                                     }
                                 }
-                                Ok(entry) => {
+                                Ok(entry) if is_listed(entry.path(), false) => {
                                     let real = real_path(&entry, &links);
                                     let metadata = entry.metadata().ok();
                                     if let Some(listed) =
@@ -440,6 +444,7 @@ impl<'config> DatabaseLoader<'config> {
                                         files.push(listed);
                                     }
                                 }
+                                Ok(_) => {}
                                 Err(err) => warn_walk_error(&err, root.as_path()),
                             }
                         }
