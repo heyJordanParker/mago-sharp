@@ -36616,7 +36616,6 @@ fn a_machine_case_declares_only_its_own_moves() {
     assert_eq!(methods("OrderStatus\\Draft"), ["pay", "cancel"]);
     assert_eq!(methods("OrderStatus\\Paid"), ["ship", "#invariants"]);
     assert_eq!(methods("OrderStatus\\Shipped"), Vec::<String>::new());
-    assert!(!lowered[0].tree().contains("StateError"));
     assert_eq!(
         method("OrderStatus\\Draft", "cancel"),
         indoc! {r#"
