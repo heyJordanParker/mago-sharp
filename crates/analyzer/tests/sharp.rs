@@ -9463,6 +9463,26 @@ fn a_type_test_on_a_union_of_classes_covers_the_members_it_names() {
     assert_eq!(written_errors(tree, &issues), ["match match-not-exhaustive This `match` misses `Leaf` and `null`."]);
 }
 
+/// Spec section 21: an enum that implements a sealed interface is the set of its cases, so arms for each case cover it
+/// as an arm for the enum does, and an arm left out names its case.
+#[test]
+fn a_match_over_a_sealed_interface_covers_an_enum_implementer_by_its_cases() {
+    let status = "namespace Shop;\n\npublic sealed interface Status { }\n";
+    let open = "namespace Shop;\n\npublic enum Open : Status\n{\n    case Fresh;\n    case Reopened(int times);\n}\n";
+    let closed =
+        "namespace Shop;\n\npublic class Closed : Status\n{\n    public Closed(public int at { get; }) { }\n}\n";
+    let report = "namespace Shop;\n\npublic class Report\n{\n    public static int every(Status status) => match (status) {\n        Open.Fresh => 0,\n        Open.Reopened(int times) => times,\n        Closed closed => closed.at,\n    };\n\n    public static int whole(Status status) => match (status) {\n        Open open => 0,\n        Closed closed => closed.at,\n    };\n\n    public static int fresh(Status status) => match (status) {\n        Open.Fresh => 0,\n        Closed closed => closed.at,\n    };\n}\n";
+
+    let issues = analyze(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Shop/Report.sharp", report),
+        &[("src/Shop/Status.sharp", status), ("src/Shop/Open.sharp", open), ("src/Shop/Closed.sharp", closed)],
+    );
+
+    assert_eq!(written_errors(report, &issues), ["match match-not-exhaustive This `match` misses `Open.Reopened`."]);
+}
+
 /// An enum declared in PHP# has its cases counted as a PHP enum's, inside its own methods too, where an arm with `when`
 /// handles no case of `this`.
 #[test]
