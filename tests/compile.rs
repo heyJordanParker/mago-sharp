@@ -5815,8 +5815,8 @@ fn a_law_reaching_a_member_lean_reserves_is_refused() {
 #[test]
 fn a_law_reading_a_map_member_it_has_no_model_of_is_refused_naming_the_members_it_reads() {
     assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(Map<string, int> items) => items.isEmpty() || items.count() > 0;\n}\n",
-        "Law sized reaches the Map method isEmpty in Shape.sized. Read a Map with `count()`, `get`, `has`, `keys()`, `values()`, an index or a loop over its entries.",
+        "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(Map<string, int> items) => items.toList().count() == items.count();\n}\n",
+        "Law sized reaches the Map method toList in Shape.sized. Read a Map with `count()`, `isEmpty()`, `get`, `has`, `keys()`, `values()`, an index or a loop over its entries.",
     );
 }
 
@@ -5881,6 +5881,33 @@ fn a_law_proves_over_a_machine_whose_case_holds_a_map() {
 
     assert!(output.status.success(), "{}", printed(&output));
     assert!(compiled(root, "app/Run.sharp").exists());
+}
+
+/// `App.Runs.Mark`, a struct of one int.
+const MARK: &str = "namespace App.Runs;\n\npublic struct Mark\n{\n    public Mark(public int at { get; }) { }\n}\n";
+
+/// `App.Runs.Cursor`, a struct that holds a `Map` beside an `int?` and a `List<Mark>`.
+const CURSOR: &str = "namespace App.Runs;\n\npublic struct Cursor\n{\n    public Cursor(public int? step { get; }, public Map<string, int> arguments { get; }, public List<Mark> marks { get; }) { }\n}\n";
+
+/// `App.Runs.RunStatus`, whose cases hold a `Cursor`, with laws that build one with `[:]`, take one as a parameter and
+/// read its other properties, and ask its `Map` `isEmpty()`.
+const RUN_STATUS: &str = "namespace App.Runs;\n\npublic machine RunStatus\n{\n    case Running(Cursor cursor, int position)\n    {\n        public RunStatus.Waiting wait() => RunStatus.Waiting(this.cursor, this.position);\n\n        public RunStatus.Running restart(int step) => RunStatus.Running(new Cursor(step, [:], this.cursor.marks), this.position);\n    }\n\n    final case Waiting(Cursor cursor, int position);\n\n    public static RunStatus.Running start() => RunStatus.Running(new Cursor(null, [:], []), 0);\n\n    law waitingKeepsThePosition() => RunStatus.start().wait().position == 0;\n    law aFreshCursorHasNoArguments() => new Cursor(null, [:], []).arguments.isEmpty();\n    law aStepIsItsOwn(Cursor cursor) => cursor.step is int s ? s == s : cursor.marks.count() >= 0;\n    law restartingKeepsThePosition(RunStatus.Running r, int step) => r.restart(step).position == r.position;\n    law restartingSetsTheStep(RunStatus.Running r, int step) => r.restart(step).cursor.step == step;\n}\n";
+
+/// Spec sections 12 and 28: a value that holds a `Map`, built with `[:]` or taken as a parameter, translates to the
+/// model, so a law reads its other properties, and its `Map`'s `isEmpty()`.
+#[test]
+fn a_law_builds_takes_and_reads_a_struct_that_holds_a_map() {
+    let directory = library_project(&[
+        ("app/Runs/Mark.sharp", MARK),
+        ("app/Runs/Cursor.sharp", CURSOR),
+        ("app/Runs/RunStatus.sharp", RUN_STATUS),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Runs/RunStatus.sharp").exists());
 }
 
 /// A `List` is Lean's `List`, and its `map`, `filter` and `count` are Lean's `List.map`, `List.filter` and

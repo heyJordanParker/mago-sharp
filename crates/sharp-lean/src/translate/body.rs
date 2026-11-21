@@ -2386,7 +2386,8 @@ pub(crate) fn indented(lines: &[String], by: usize) -> impl Iterator<Item = Stri
 
 /// The `Map` members a law reads, each by its name and the arguments it takes, spec section 28: each is the function of
 /// `Sharp/Lean/Map.lean` of its name. The refusal of any other member names them.
-const MAP_MEMBERS: [(&str, usize); 5] = [("count", 0), ("get", 1), ("has", 1), ("keys", 0), ("values", 0)];
+const MAP_MEMBERS: [(&str, usize); 6] =
+    [("count", 0), ("isEmpty", 0), ("get", 1), ("has", 1), ("keys", 0), ("values", 0)];
 
 /// Whether `class` names a PHP# collection.
 fn is_collection(class: &[u8]) -> bool {
