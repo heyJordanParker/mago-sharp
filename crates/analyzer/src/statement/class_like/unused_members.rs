@@ -43,6 +43,7 @@ use mago_word::word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::statement::class_like::r#struct::data_cases;
 use crate::utils::names::display_property_name;
 use crate::utils::names::sharp_class_like_name;
 use crate::visibility::is_within_namespace;
@@ -884,6 +885,10 @@ fn public_members(
     class: &ClassLikeMetadata,
 ) -> Vec<(Word, Word, Span, bool)> {
     let mut members = Vec::new();
+    // The codex gives each case of a machine or of an enum whose case carries data a constant, or a factory method
+    // when the case carries data, with the case's span. A case takes no access modifier, spec section 20, since its
+    // reach is its type's.
+    let case_spans: Vec<Span> = data_cases(codebase, class).iter().map(|case| case.span).collect();
 
     for (name, property) in &class.properties {
         if !class.flags.is_event()
@@ -907,6 +912,7 @@ fn public_members(
         // PHP calls an `[Export]` method through the global function it declares, spec section 23, which the checker
         // never sees.
         if method.span != class.span
+            && !case_spans.contains(&method.span)
             && class.declaring_method_ids.get(name).is_none_or(|declaring| declaring.get_class_name() == class_name)
             && let Some(metadata) = method.method_metadata.as_ref()
             && metadata.visibility.is_public()
@@ -925,6 +931,7 @@ fn public_members(
     for (name, constant) in &class.constants {
         if constant.span.file_id == class.span.file_id
             && class.span.contains(&constant.span)
+            && !case_spans.contains(&constant.span)
             && constant.visibility.is_public()
             && !is_dynamically_accessed(codebase, &constant.attributes)
             && !constant.flags.is_internal_reach()

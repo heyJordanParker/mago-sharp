@@ -700,6 +700,31 @@ fn an_event_s_parameters_are_never_too_wide() {
     );
 }
 
+/// Spec section 20: a case takes no access modifier, since its reach is its type's, so no use makes a machine's case or
+/// an enum's case too wide, whether code outside names it by `is` or not at all. The machine and the enum are still
+/// checked as types, and a public method only their own type calls is still too wide.
+#[test]
+fn a_case_is_never_too_wide() {
+    let status = "namespace App.Shop;\n\npublic machine Status\n{\n    case Open\n    {\n        public Status.Closed close() => Status.Closed;\n    }\n\n    final case Closed;\n\n    public static Status.Open open() => Status.Open;\n}\n";
+    let size = "namespace App.Shop;\n\npublic enum Size\n{\n    case Small;\n    case Large;\n\n    public string label() => this.name;\n\n    public string shown() => this.label();\n}\n";
+    let reading = "namespace App.Shop;\n\npublic enum Reading\n{\n    case Value(int amount);\n    case Missing;\n}\n";
+    let reader = "namespace App.Web;\n\nimport App.Shop.Reading;\nimport App.Shop.Size;\nimport App.Shop.Status;\n\ninternal class Reader\n{\n    internal static bool isOpen(Status status) => status is Status.Open;\n\n    internal static string shown(Size size) => size.shown();\n\n    internal static bool isMissing(Reading reading) => reading is Reading.Missing;\n}\n";
+
+    assert_eq!(
+        too_wide(&[
+            ("src/App/Shop/Status.sharp", status),
+            ("src/App/Shop/Size.sharp", size),
+            ("src/App/Shop/Reading.sharp", reading),
+            ("src/App/Web/Reader.sharp", reader),
+        ]),
+        [
+            "src/App/Shop/Status.sharp 7:30 `Status.close` is public, and nothing outside `Status` and its subclasses uses it. | Declare it `protected`.",
+            "src/App/Shop/Status.sharp 12:31 `Status.open` is public, and nothing outside `Status` uses it. | Declare it `private`.",
+            "src/App/Shop/Size.sharp 8:19 `Size.label` is public, and nothing outside `Size` uses it. | Declare it `private`.",
+        ]
+    );
+}
+
 /// Spec sections 5 and 10: `Json.encode` writes a struct by the fields its `parse` reads, and `parse` and `Json.decode`
 /// read them, so each uses every field of the struct from the namespace of the code that encodes or parses it, inside a
 /// `List` too. `Row`, encoded, `Line`, parsed, and `Item`, decoded as a `List`, report nothing for their fields. A
