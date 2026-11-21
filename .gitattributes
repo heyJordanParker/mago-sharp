@@ -10,11 +10,15 @@ stubs/** linguist-vendored
 .github/ export-ignore
 Justfile export-ignore
 build.rs export-ignore
+Cargo.toml export-ignore
+Cargo.lock export-ignore
 corpus/ export-ignore
+crates/ export-ignore
 docs/ export-ignore
 flake.nix export-ignore
 flake.lock export-ignore
 mago.toml export-ignore
 scripts/ export-ignore
 /cases/ export-ignore
+/src/ export-ignore
 /tests/ export-ignore
