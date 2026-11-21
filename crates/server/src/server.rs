@@ -103,8 +103,8 @@ impl Server {
         self.service.take_scans()
     }
 
-    /// Give the first analysis `scans`, another analysis's of the same run, which it takes for each file whose
-    /// contents and type are unchanged instead of scanning the file again.
+    /// Give the first analysis `scans`, another analysis's, which it takes for each file it holds unchanged and scans
+    /// with the same settings, instead of scanning the file again.
     #[must_use]
     pub fn with_scans(mut self, scans: Scans) -> Self {
         self.service = self.service.with_scans(scans);

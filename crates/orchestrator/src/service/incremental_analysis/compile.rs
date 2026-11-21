@@ -4627,6 +4627,71 @@ mod tests {
         }
     }
 
+    /// Spec section 23: an analysis given another's scans compiles as a clean analysis of its own files. A host's stub
+    /// that declares the plain PHP `App\Random`, which only the second analysis holds, wins over the default
+    /// `Sharp.Random` that `Shape`'s bare `Random` names in the first, so the second refuses `Shape` for the stub's
+    /// class, which no `extern` line declares. A file edited between the two analyses compiles as edited: `Counter`'s
+    /// new `two` calls its new `three`, which the first analysis's scan of `Counter` doesn't declare.
+    #[test]
+    fn an_analysis_given_another_analysis_scans_compiles_as_a_clean_analysis_of_its_own_files() {
+        const STUB: &str = "<?php\n\nnamespace App;\n\nclass Random\n{\n    public static function size(): int\n    {\n        return 1;\n    }\n}\n";
+        const COUNTER: &str = "namespace App;\n\npublic class Counter\n{\n    public int one() => 1;\n}\n";
+        const EDITED_COUNTER: &str = "namespace App;\n\npublic class Counter\n{\n    public int one() => 1;\n\n    public int two() => this.three();\n\n    public int three() => 3;\n}\n";
+        let shape = [("app/App/Shape.sharp", SHAPE)];
+        let mut with_stub = project(&shape);
+        with_stub.add(File::new(
+            Cow::Borrowed(b"stubs/Random.php"),
+            FileType::External,
+            None,
+            Cow::Borrowed(STUB.as_bytes()),
+        ));
+
+        for (name, checked, first, first_refusal, second, second_refusal) in [
+            (
+                "a host's stub declares App\\Random",
+                "app/App/Shape.sharp",
+                project(&shape),
+                vec![
+                    "Cannot find type `Sharp.Random`.",
+                    "`Random` names no class, and no namespace this file imports.",
+                ],
+                with_stub,
+                vec!["`Random` has no `extern` line."],
+            ),
+            (
+                "Counter edited",
+                "app/App/Counter.sharp",
+                project(&[("app/App/Counter.sharp", COUNTER)]),
+                vec![],
+                project(&[("app/App/Counter.sharp", EDITED_COUNTER)]),
+                vec![],
+            ),
+        ] {
+            let refusal = |compiled: &BTreeMap<String, Compilation>| {
+                outcomes(compiled)[checked].clone().err().unwrap_or_default()
+            };
+            let service = |database: &Database<'static>| {
+                IncrementalAnalysisService::new(
+                    database.read_only(),
+                    prelude,
+                    Settings::default(),
+                    ParserSettings::default(),
+                    Arc::clone(&PLUGIN_REGISTRY),
+                )
+            };
+            let mut first = service(&first).keeping_scans();
+            first.analyze().expect("the first analysis runs");
+            let mut given = service(&second).with_scans(first.take_scans());
+            given.analyze().expect("the analysis given the first one's scans runs");
+
+            assert_eq!(refusal(&compile(&mut first, empty_stamp)), first_refusal, "{name}: the first analysis");
+            let given_compiled = compile(&mut given, empty_stamp);
+            let clean_compiled = compile(&mut analyzed(&second), empty_stamp);
+            assert_eq!(refusal(&clean_compiled), second_refusal, "{name}: a clean analysis of the second's files");
+            assert_eq!(outcomes(&given_compiled), outcomes(&clean_compiled), "{name}");
+        }
+    }
+
     /// Spec section 26: an extension of the file's namespace shadows the standard library's of the same name that fits
     /// the same receiver, so the unchanged `Report`, whose `name.shout()` ran `Sharp.Text.Words`'s and returned its
     /// `string`, is refused once `app/App/Loud.sharp` declares `App.Loud`'s `int` one on `string`, and compiles again

@@ -382,8 +382,8 @@ impl IncrementalAnalysisService {
         std::mem::take(&mut self.scans)
     }
 
-    /// Gives the next analysis from scratch `scans`, another analysis's of the same run, which it takes for each file
-    /// whose contents and type are unchanged instead of scanning the file again.
+    /// Gives the next analysis from scratch `scans`, another analysis's, which it takes for each file it holds unchanged
+    /// and scans with the same settings, instead of scanning the file again.
     #[must_use]
     pub fn with_scans(mut self, scans: Scans) -> Self {
         self.scans = scans;
@@ -742,10 +742,12 @@ impl IncrementalAnalysisService {
         let autoloader = self.autoloader.clone();
         let compiling_bar =
             self.use_progress_bars.then(|| create_progress_bar(0, "📚 Compiling", ProgressBarTheme::Blue));
-        let reach = autoloader.is_some();
-        // Another analysis's first scan of a file stands for this one's while the file's contents and type are the
-        // same, and the scans this analysis makes stay for the next when it keeps them.
-        let given = Mutex::new(self.take_scans().0);
+        let settings = ScanSettings { parser: parser_settings, php_version, reach: autoloader.is_some() };
+        let reach = settings.reach;
+        // Another analysis's first scan of a file stands for this one's when it scanned the same file with the same
+        // settings, and the scans this analysis makes stay for the next when it keeps them.
+        let given = self.take_scans();
+        let given = Mutex::new(if given.settings == Some(settings) { given.files } else { HashMap::default() });
         let keeping = self.keeps_scans;
         let kept = Mutex::new(HashMap::default());
         let scan_files = |files: Vec<Arc<File>>| {
@@ -762,40 +764,36 @@ impl IncrementalAnalysisService {
                 .zip(taken)
                 .map_init(LocalArena::new, |arena, (file, taken)| {
                     let content_hash = xxhash_rust::xxh3::xxh3_64(file.contents.as_ref());
-                    let taken = taken.filter(|scan| {
-                        scan.content_hash == content_hash && scan.file_type == file.file_type && scan.reach == reach
-                    });
-                    let (metadata, codebase_scan, namespace_classes, reached) = match taken {
-                        Some(Scan { metadata, namespace_classes, reached, .. }) => {
-                            let codebase_scan = codebase_scan_plan
-                                .as_deref()
-                                .map(|plan| plan.capture(&file, &metadata))
-                                .transpose()?
-                                .flatten();
+                    let (metadata, codebase_scan, namespace_classes, reached) =
+                        match taken.filter(|scan| scan.file == file) {
+                            Some(Scan { metadata, namespace_classes, reached, .. }) => {
+                                let codebase_scan = codebase_scan_plan
+                                    .as_deref()
+                                    .map(|plan| plan.capture(&file, &metadata))
+                                    .transpose()?
+                                    .flatten();
 
-                            (metadata, codebase_scan, namespace_classes, reached)
-                        }
-                        None => {
-                            let scanned = scan_file(
-                                arena,
-                                &file,
-                                parser_settings,
-                                php_version,
-                                codebase_scan_plan.as_deref(),
-                                &NamespaceClasses::default(),
-                                &ExternNamespaces::default(),
-                                reach,
-                            )?;
-                            arena.reset();
+                                (metadata, codebase_scan, namespace_classes, reached)
+                            }
+                            None => {
+                                let scanned = scan_file(
+                                    arena,
+                                    &file,
+                                    parser_settings,
+                                    php_version,
+                                    codebase_scan_plan.as_deref(),
+                                    &NamespaceClasses::default(),
+                                    &ExternNamespaces::default(),
+                                    reach,
+                                )?;
+                                arena.reset();
 
-                            scanned
-                        }
-                    };
+                                scanned
+                            }
+                        };
                     if keeping {
                         let scan = Scan {
-                            content_hash,
-                            file_type: file.file_type,
-                            reach,
+                            file: Arc::clone(&file),
                             metadata: metadata.clone(),
                             namespace_classes: namespace_classes.clone(),
                             reached: reached.clone(),
@@ -825,7 +823,8 @@ impl IncrementalAnalysisService {
         // A scan another analysis gave for a file this one doesn't hold, or holds otherwise, stands for nothing.
         drop(given);
         if keeping {
-            self.scans = Scans(kept.into_inner().unwrap_or_else(PoisonError::into_inner));
+            self.scans =
+                Scans { settings: Some(settings), files: kept.into_inner().unwrap_or_else(PoisonError::into_inner) };
         }
 
         // A class-like's name never depends on how names resolve, so the first scan finds every class-like that wins
@@ -2604,29 +2603,38 @@ fn names_a_refused_bound_type(codebase: &CodebaseMetadata, declared: &WordSet) -
 /// it, and each class-like of its namespace that would win over a default class-like it names.
 type FileScan = (Arc<File>, u64, CodebaseMetadata, Option<CodebaseScanFile>, Vec<Word>);
 
-/// The first scan of each file an analysis from scratch scanned.
+/// The first scan of each file an analysis from scratch scanned, and the settings it scanned them with.
 ///
-/// The next analysis from scratch in the same run takes it for each file whose contents and type are unchanged, instead
-/// of parsing and scanning the file again. A scan depends on no extension host: a host's codebase scan plan only
-/// captures what a scan found, and its refinements apply to the codebase after every file is scanned. So an analysis
-/// with hosts takes the scans of one without them, and captures its plan from each.
+/// The next analysis from scratch takes a file's scan when it scans with the same settings and holds the same file: its
+/// name, path, type, flags and contents, everything a scan reads. A first scan resolves names against no class-like of
+/// another file, so each analysis still scans again, against its own files, each file that names a class-like of them
+/// that wins over a default class-like, as a host's stub may declare. A scan depends on no extension host: a host's
+/// codebase scan plan only captures what a scan found, and its refinements apply to the codebase after every file is
+/// scanned. So an analysis with hosts takes the scans of one without them, and captures its plan from each.
 #[derive(Default)]
-pub struct Scans(HashMap<FileId, Scan>);
+pub struct Scans {
+    settings: Option<ScanSettings>,
+    files: HashMap<FileId, Scan>,
+}
 
 impl std::fmt::Debug for Scans {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Scans").field(&self.0.len()).finish()
+        f.debug_tuple("Scans").field(&self.files.len()).finish()
     }
 }
 
-/// A file's first scan, with what decides whether it stands for the file in another analysis.
-///
-/// That is the hash of the contents it scanned, the file's type and whether the scan collected the class-likes the file
-/// reaches.
-struct Scan {
-    content_hash: u64,
-    file_type: FileType,
+/// What a scan reads besides its file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ScanSettings {
+    parser: ParserSettings,
+    php_version: PHPVersion,
+    /// Whether the scan collects the class-likes the file reaches.
     reach: bool,
+}
+
+/// A file's first scan, and the file it scanned.
+struct Scan {
+    file: Arc<File>,
     metadata: CodebaseMetadata,
     namespace_classes: Vec<Word>,
     reached: WordSet,

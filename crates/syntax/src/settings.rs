@@ -1,5 +1,5 @@
 /// Settings for the lexer.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LexerSettings {
     /// Whether to enable short open tags (`<?`).
     ///
@@ -11,7 +11,7 @@ pub struct LexerSettings {
 }
 
 /// Settings for the parser.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ParserSettings {
     /// Settings for the lexer.
     pub lexer: LexerSettings,
