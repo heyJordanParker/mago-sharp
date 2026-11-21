@@ -11189,6 +11189,29 @@ fn a_typed_extern_that_misfits_the_native_types_is_refused_at_its_line() {
     );
 }
 
+/// Spec sections 18 and 23: plain PHP's `string` is bytes, so an `extern` line may state a native `string` parameter or
+/// result as `Bytes`, and a `Bytes` stated where the library takes no string is refused at the line. A `Bytes` reaches
+/// plain PHP as PHP's string of its bytes, so a `Bytes` argument is checked as a `string`: a plain PHP parameter that
+/// takes `mixed` takes it, and one that takes `object` refuses it as it refuses a `string`.
+#[test]
+fn a_bytes_crosses_into_plain_php_as_a_string() {
+    let stream = "<?php\n\nnamespace Lib;\n\nfinal class Stream\n{\n    public function read(int $length): string\n    {\n        return '';\n    }\n\n    public function write(string $data): int\n    {\n        return 0;\n    }\n\n    public function seek(int $offset): void\n    {\n    }\n\n    public function wrap(object $value): void\n    {\n    }\n\n    public function store(mixed $value): void\n    {\n    }\n}\n";
+    let stubs = "namespace Stubs;\n\nimport Lib.Stream;\n\nextern Bytes Stream.read(int length) uses none;\nextern int Stream.write(Bytes data) uses none;\nextern void Stream.seek(Bytes offset) uses none;\n";
+    let copier = "namespace Shop;\n\nimport Lib.Stream;\n\npublic class Copier\n{\n    public int copy(Stream from, Stream to)\n    {\n        Bytes data = from.read(10);\n        to.store(data);\n        to.wrap(data);\n        return to.write(data);\n    }\n}\n";
+
+    assert_eq!(
+        package_errors(&[
+            ("src/Lib/Stream.php", stream),
+            ("src/Stubs/Library.sharp", stubs),
+            ("src/Shop/Copier.sharp", copier),
+        ]),
+        [
+            "`Bytes offset` does not cross to `Stream.seek`'s `offset`, which the library declares `int`.",
+            "Invalid argument type for argument #1 of `Stream.wrap`: expected `Object`, but found `string`.",
+        ]
+    );
+}
+
 /// Spec sections 7 and 23: an `extern` line's `callable` parameter takes any function value, a method value and a
 /// value of a function type alike, over a native `callable` or `\Closure`, and a string, which names a function only to
 /// plain PHP, never. A call may leave out a parameter the line gives a default, and a default the parameter's type does

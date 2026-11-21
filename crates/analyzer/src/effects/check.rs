@@ -23,6 +23,9 @@ use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
+use mago_codex::ttype::get_string;
+use mago_codex::ttype::is_bytes;
+use mago_codex::ttype::takes_bytes;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_names::binding::MethodParts;
@@ -738,8 +741,9 @@ where
 }
 
 /// Spec section 23: the signature an `extern` line states fits the library's native types, never its docblock. Each
-/// parameter's type crosses to the declared one, a backed case as its value, each declared parameter after the stated
-/// ones has a default, and the return type takes the declared one, a `List` or a `Map` the array the library declares.
+/// parameter's type crosses to the declared one, a backed case as its value and a `Bytes` as its string, each declared
+/// parameter after the stated ones has a default, and the return type takes the declared one, a `List` or a `Map` the
+/// array the library declares and a `Bytes` the string.
 /// A generic class's type parameters are written as the class declares them. An untyped declaration takes any type.
 fn check_extern_signature<A>(
     context: &mut Context<'_, '_, A>,
@@ -873,7 +877,7 @@ fn check_extern_signature<A>(
         };
         let native_type = expanded(&native_type.type_union);
         // Spec section 7: a function value crosses as the closure it runs as, so a stated `callable` takes a native
-        // `\Closure` too.
+        // `\Closure` too. Spec section 18: a `Bytes` crosses as PHP's string of its bytes.
         let closure = TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(TCallableSignature::mixed(true))));
         let crosses = expanded(&stated_type.type_union).types.iter().all(|atomic| {
             let backing = match atomic {
@@ -885,6 +889,7 @@ fn check_extern_signature<A>(
             fits(&TUnion::from_atomic(atomic.clone()), &native_type)
                 || backing.is_some_and(|backing| fits(&TUnion::from_atomic(backing), &native_type))
                 || (atomic.is_callable() && fits(&closure, &native_type))
+                || (is_bytes(atomic) && fits(&get_string(), &native_type))
         });
         if !crosses {
             context.collector.report_with_code(
@@ -923,11 +928,12 @@ fn check_extern_signature<A>(
     ) {
         let (native, stated) = (expanded(&native.type_union), expanded(&stated.type_union));
         // A function plain PHP gives has no PHP# type (spec section 21), so a stated function type states it, as a
-        // stated `List` states the elements of an `array`.
+        // stated `List` states the elements of an `array`, and a stated `Bytes` the bytes of a `string`, spec section 18.
         let takes = native.types.iter().all(|atomic| {
             fits(&TUnion::from_atomic(atomic.clone()), &stated)
                 || (atomic.is_array() && stated.types.iter().any(TAtomic::is_array))
                 || (atomic.is_callable() && stated.types.iter().any(TAtomic::is_callable))
+                || (atomic.is_string() && takes_bytes(&stated))
         });
         if !takes {
             context.collector.report_with_code(

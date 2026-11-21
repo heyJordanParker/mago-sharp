@@ -1672,16 +1672,35 @@ pub fn get_php_declared_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TU
     TUnion::from_vec(combiner::combine(erased.collect(), codebase, combiner::CombinerOptions::default()))
 }
 
+/// Whether `atomic` is the standard library's `Bytes`, spec section 18.
+#[must_use]
+pub fn is_bytes(atomic: &TAtomic) -> bool {
+    matches!(atomic, TAtomic::Object(TObject::Named(object)) if object.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Bytes"))
+}
+
 /// Whether `r#type` holds the standard library's `Bytes`, spec section 18, which a parameter takes as the PHP string
-/// plain PHP passes, as the engine wraps it.
+/// plain PHP passes, as the engine wraps it, and which plain PHP receives as that string.
 #[must_use]
 pub fn takes_bytes(r#type: &TUnion) -> bool {
-    r#type.types.iter().any(|atomic| {
-        matches!(atomic, TAtomic::Object(TObject::Named(object)) if object.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Bytes"))
+    r#type.types.iter().any(is_bytes)
+}
+
+/// Whether a value of `r#type` holds a `Bytes` at any depth, spec section 18.
+///
+/// It does as the `Bytes` itself, and as an element of a collection, an `Iterable` or a type parameter's bound that holds
+/// one. Plain PHP receives each as PHP's string of its bytes.
+#[must_use]
+pub fn holds_bytes(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    r#type.types.iter().any(|atomic| match atomic {
+        TAtomic::Array(array) => holds_bytes(&get_array_parameters(array, codebase).1, codebase),
+        TAtomic::Iterable(iterable) => holds_bytes(iterable.get_value_type(), codebase),
+        TAtomic::GenericParameter(parameter) => holds_bytes(&parameter.constraint, codebase),
+        atomic => is_bytes(atomic),
     })
 }
 
-/// Whether plain PHP gets a value of `r#type` with each `Map` and `Set` in it as its PHP array, spec section 12.
+/// Whether plain PHP gets a value of `r#type` with each `Map` and `Set` in it as its PHP array, spec section 12, and
+/// each `Bytes` in it as PHP's string of its bytes, spec section 18.
 ///
 /// It does for a value that holds one at any depth, or can when it runs, as `Any`, an unbounded type parameter and an
 /// `Iterable` of them can, where a PHP array holds each key of every `Map` the type names. Any other `Map` reaches
@@ -1689,7 +1708,7 @@ pub fn takes_bytes(r#type: &TUnion) -> bool {
 /// types it by it.
 #[must_use]
 pub fn crosses_outward(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool {
-    keys_hold_in_array(r#type, codebase) && may_hold_collection(r#type, codebase)
+    keys_hold_in_array(r#type, codebase) && (may_hold_collection(r#type, codebase) || holds_bytes(r#type, codebase))
 }
 
 /// Whether PHP declares a PHP# result of `r#type` as `\Sharp\Map|array` or `\Sharp\Set|array`, spec section 22.
@@ -1957,7 +1976,7 @@ fn get_received_array_form(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUni
         TAtomic::Array(TArray::Set(element_type)) => {
             TAtomic::Array(TArray::List(TList::new(Arc::new(form(element_type)))))
         }
-        atomic => get_php_signature_form(atomic, codebase, Crossing::Received),
+        atomic => get_php_atomic_form(atomic, codebase, Crossing::Received),
     });
 
     r#type.clone_with_types(types.collect())
@@ -1973,7 +1992,7 @@ enum Crossing {
 }
 
 /// `r#type` with each `Map` and `Set` in it, at any depth, as the `Sharp\Map` or `Sharp\Set` object it runs as, and
-/// each function type as [`get_php_signature_form`] says of it, crossing as `crossing`.
+/// each other part as [`get_php_atomic_form`] says of it, crossing as `crossing`.
 fn get_php_object_form(r#type: &TUnion, codebase: &CodebaseMetadata, crossing: Crossing) -> TUnion {
     let form = |inner: &TUnion| get_php_object_form(inner, codebase, crossing);
     let types = r#type.types.iter().map(|atomic| match atomic {
@@ -1999,10 +2018,19 @@ fn get_php_object_form(r#type: &TUnion, codebase: &CodebaseMetadata, crossing: C
 
             get_collection_object(&array, codebase).unwrap_or(TAtomic::Array(array))
         }
-        atomic => get_php_signature_form(atomic, codebase, crossing),
+        atomic => get_php_atomic_form(atomic, codebase, crossing),
     });
 
     r#type.clone_with_types(types.collect())
+}
+
+/// `atomic`, a part of a type that is no collection, crossing as `crossing`: a `Bytes` plain PHP receives is PHP's
+/// `string` of its bytes, spec section 18, and a function type is as [`get_php_signature_form`] says.
+fn get_php_atomic_form(atomic: &TAtomic, codebase: &CodebaseMetadata, crossing: Crossing) -> TAtomic {
+    match crossing {
+        Crossing::Received if is_bytes(atomic) => STRING_ATOMIC.clone(),
+        _ => get_php_signature_form(atomic, codebase, crossing),
+    }
 }
 
 /// `atomic`, a function type that crosses as `crossing`, with each of its parameters and its return crossing on its

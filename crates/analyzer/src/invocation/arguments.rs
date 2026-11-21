@@ -29,6 +29,8 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_php_array_form;
 use mago_codex::ttype::get_php_array_key_type;
+use mago_codex::ttype::holds_bytes;
+use mago_codex::ttype::is_bytes;
 use mago_codex::ttype::takes_array;
 use mago_codex::ttype::takes_bytes;
 use mago_codex::ttype::template::TemplateResult;
@@ -104,9 +106,11 @@ fn shareable_part(union: &TUnion, is_sharp: bool) -> Option<Cow<'_, TUnion>> {
 /// where PHP# passes it a value of `passed`, spec section 12, or None where it receives the value as it is.
 ///
 /// It is the PHP array the codex's [`get_php_array_form`] gives, as the bridge passes it, where the parameter takes
-/// one, as the codex's [`takes_array`] says, or declares no type, which the call's analysis reads as `mixed`. It is
-/// recorded in the call's entry of [`AnalysisArtifacts::get_received_argument_types`], for the call's providers, hooks
-/// and external requests, and a later read of the same argument in the same check of the call reads it from there.
+/// one, as the codex's [`takes_array`] says, or declares no type, which the call's analysis reads as `mixed`. A
+/// parameter type that names a `Bytes`, which plain PHP never declares, is one an `extern` line states in PHP#, spec
+/// section 23, and takes the value as PHP# holds it. It is recorded in the call's entry of
+/// [`AnalysisArtifacts::get_received_argument_types`], for the call's providers, hooks and external requests, and a
+/// later read of the same argument in the same check of the call reads it from there.
 pub(super) fn record_received_argument_type(
     artifacts: &mut AnalysisArtifacts,
     call: Span,
@@ -119,7 +123,9 @@ pub(super) fn record_received_argument_type(
     if let Some(recorded) = artifacts.get_received_argument_types(call).and_then(|received| received.get(&argument)) {
         return Some((**recorded).clone());
     }
-    let received = takes_array(parameter_type).then(|| get_php_array_form(passed, codebase)).flatten()?;
+    let received = (takes_array(parameter_type) && !holds_bytes(parameter_type, codebase))
+        .then(|| get_php_array_form(passed, codebase))
+        .flatten()?;
     artifacts
         .received_argument_types
         .entry(get_expression_range(&call))
@@ -629,6 +635,23 @@ where
         .filter(|declared_type| is_declared_set(declared_type))
         .and_then(|_| get_list_accepting_set_type(parameter_type));
 
+    // Spec section 18: plain PHP receives a `Bytes` as PHP's string of its bytes, which the bridge passes, so a plain
+    // PHP parameter that names no `Bytes` checks each `Bytes` an argument may be as a `string`.
+    let received_type = (context.dialect.is_sharp()
+        && takes_bytes(input_type)
+        && !takes_bytes(parameter_type)
+        && invocation_target.get_function_like_metadata().is_some_and(|function| !function.flags.is_sharp()))
+    .then(|| {
+        input_type.clone_with_types(
+            input_type
+                .types
+                .iter()
+                .map(|atomic| if is_bytes(atomic) { TAtomic::Scalar(TScalar::string()) } else { atomic.clone() })
+                .collect(),
+        )
+    });
+    let input_type = received_type.as_ref().unwrap_or(input_type);
+
     let mut union_comparison_result = ComparisonResult::for_dialect(context.dialect);
     let type_match_found = is_contained_by(
         context.codebase,
@@ -641,17 +664,6 @@ where
     );
 
     if type_match_found {
-        return true;
-    }
-
-    // Spec section 18: plain PHP takes `Bytes` as the PHP string it holds, which the bridge passes, so a plain PHP
-    // parameter that takes a `string` takes `Bytes`.
-    if context.dialect.is_sharp()
-        && parameter_type.has_string()
-        && invocation_target.get_function_like_metadata().is_some_and(|function| !function.flags.is_sharp())
-        && input_type.types.iter().all(|atomic| atomic.is_null() || takes_bytes(&TUnion::from_atomic(atomic.clone())))
-        && takes_bytes(input_type)
-    {
         return true;
     }
 

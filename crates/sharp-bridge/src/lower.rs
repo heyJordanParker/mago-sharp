@@ -26,6 +26,7 @@ use mago_codex::ttype::get_crossing_array;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_php_array_form;
 use mago_codex::ttype::get_php_declared_type;
+use mago_codex::ttype::holds_bytes;
 use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::may_hold_collection;
 use mago_codex::ttype::resolution::TypeResolutionContext;
@@ -1545,9 +1546,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let promoted =
                         || method.parameter_list.parameters.iter().filter(|parameter| parameter.is_promoted_property());
                     // A superglobal's name runs hidden as a parameter, and stays its own as the property. PHP gives a
-                    // promoted parameter's attributes to both, so a target, as `[param: Trimmed]`, needs both apart.
+                    // promoted parameter's attributes to both, so a target, as `[param: Trimmed]`, needs both apart,
+                    // and so does the `#[\Sharp\Crossing]` of a property that holds a `Bytes`, which no parameter takes.
                     self.promoted_beside = promoted().any(|parameter| {
                         self.crossing_type(parameter).is_some()
+                            || parameter
+                                .hint
+                                .as_ref()
+                                .is_some_and(|hint| holds_bytes(self.types.declared_type(hint), self.types.codebase()))
                             || runs_its_accessors(parameter)
                             || SUPERGLOBALS.contains(&parameter.variable.name)
                             || parameter.attribute_lists.iter().any(|list| list.target.is_some())
@@ -9778,7 +9784,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.arriving(value, Arrival::Plain)
                 }
                 (false, _) if let Some(backing) = self.backing_value(line, value, parameter) => backing,
-                (false, _) if let Some(data) = self.bytes_data(line, value, parameter) => data,
                 _ => self.received_value(line, value, takes_array, receiver),
             };
             arguments.push(match argument {
@@ -9876,29 +9881,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         Some(self.node(read, 0, line, &[case, backing]))
     }
 
-    /// The lowered `value->data` on line `line`, `?->` for a nullable one, when `value` is a `Bytes` and plain PHP's
-    /// `parameter` natively declares only scalars, as `string $data`, which take the PHP string it holds, spec section
-    /// 18. None otherwise, for a parameter that may take the `Bytes` itself.
-    fn bytes_data(&mut self, line: u32, value: &Expression, parameter: Option<PlainParameter>) -> Option<u32> {
-        let Some(PlainParameter::Declared(parameter, _)) = parameter else {
-            return None;
-        };
-        let native = &parameter.type_declaration_metadata.as_ref()?.type_union;
-        let r#type = self.types.expression_type(value);
-        if !takes_bytes(&r#type.to_non_nullable())
-            || !native.types.iter().all(|atomic| atomic.is_some_scalar() || atomic.is_null())
-        {
-            return None;
-        }
-        let read = if r#type.has_null() { SHARP_AST_NULLSAFE_PROP } else { SHARP_AST_PROP };
-        let bytes = self.arriving(value, Arrival::Plain);
-        let data = self.string(0, line, b"data");
-
-        Some(self.node(read, 0, line, &[bytes, data]))
-    }
-
     /// The lowered `value` as plain PHP receives it on line `line`, in a parameter or a place it declares, which
-    /// `takes_array` says takes a PHP array: each `Map` and `Set` in it as [`Self::array_of`] gives it, where
+    /// `takes_array` says takes a PHP array: each `Map`, `Set` and `Bytes` in it as [`Self::array_of`] gives it, where
     /// [`Self::received_as_array`] says it crosses, and the value as it is otherwise. Through a function value,
     /// `receiver` is the hidden variable that holds the closure.
     fn received_value(
@@ -9917,14 +9901,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.array_of(line, collection, receiver)
     }
 
-    /// Whether `value` crosses into plain PHP as its PHP array: where it goes takes an array, as `takes_array` says,
-    /// plain PHP did not itself give the value, through a member it declares or one its `__get` or `__call` serves, and
-    /// it crosses from code outside the standard library as [`Self::passes_as_array`] says of its type.
+    /// Whether `value` crosses into plain PHP through [`Self::array_of`]. A `Bytes` does wherever it goes, as PHP's
+    /// string of its bytes, spec section 18. Any other value crosses as its PHP array where it goes takes an array, as
+    /// `takes_array` says, plain PHP did not itself give the value, through a member it declares or one its `__get` or
+    /// `__call` serves, and it crosses from code outside the standard library as [`Self::passes_as_array`] says of its
+    /// type.
     fn received_as_array(&self, value: &Expression, takes_array: bool) -> bool {
-        takes_array
-            && !self.plain_value(value)
-            && !self.types.plain_magic_member(value)
-            && self.passes_as_array(value.span(), self.types.expression_type(value))
+        let r#type = self.types.expression_type(value);
+
+        takes_bytes(r#type)
+            || (takes_array
+                && !self.plain_value(value)
+                && !self.types.plain_magic_member(value)
+                && self.passes_as_array(value.span(), r#type))
     }
 
     /// Whether plain PHP takes a value of `r#type` that code at `span` passes as its PHP array where it takes an
@@ -9933,11 +9922,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// collection it holds its PHP array by what it is when it runs. The standard library's own code passes as an
     /// array only a value whose type names a `Map` or a `Set` itself, as the codex's [`get_php_array_form`] says, and
     /// every other value as it is, so its members hand PHP's functions their own `List<T>`, as `count()` and
-    /// `array_slice()`, and `serialize()` a `Map` held as `Any?` as itself.
+    /// `array_slice()`, and `serialize()` a `Map` held as `Any?` as itself. Its value whose type names a `Bytes` passes
+    /// each as its string, as [`holds_bytes`] says.
     fn passes_as_array(&self, span: Span, r#type: &TUnion) -> bool {
         let codebase = self.types.codebase();
         if codebase.is_standard_library_file(span.file_id) {
-            return get_php_array_form(r#type, codebase).is_some();
+            return get_php_array_form(r#type, codebase).is_some() || holds_bytes(r#type, codebase);
         }
 
         self.crosses_outward(r#type)
