@@ -19,7 +19,8 @@ set -uo pipefail
 root="$(cd "$(dirname "$0")/../../../../.." && pwd)"
 build="$root/sharp/build/$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
 engine="$build/sapi/cli/php"
-mago=("$build/mago/debug/mago" --no-version-check --colors never)
+# The mago sharp/bin/test runs the suite with, whose profile the build chose, or the dev build's when this runs alone.
+mago=("${TEST_MAGO_EXECUTABLE:-$build/mago/debug/mago}" --no-version-check --colors never)
 project="$1"
 converted=(src/Box.php src/Spec.php src/Shop/Coupon.php src/Shop/Crate.php src/Shop/Label.php src/Shop/Note.php src/Shop/Order.php
     src/Shop/Shelf.php src/Shop/Source.php src/Shop/Stock.php src/Shop/Tagged.php src/Shop/Tally.php)
