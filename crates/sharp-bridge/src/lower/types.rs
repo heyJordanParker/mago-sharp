@@ -1272,21 +1272,28 @@ impl<'analysis> Types<'analysis> {
         } else {
             r#type.clone()
         };
-        if r#type.is_void()
-            || r#type.is_never()
-            || (r#type.is_mixed() && r#type.can_be_null())
-            || (!self.scanned(class).checks_results_at_call(member) && php_checks_whole(&r#type))
-        {
+        if !self.scanned(class).checks_results_at_call(member) && php_checks_whole(&r#type) {
             return None;
         }
-        // The check reads each collection alone, so it takes a time that doesn't grow with the result.
-        let checked = if needs_result_check(&r#type) { r#type.clone() } else { collections_alone(&r#type) };
+
+        self.crossing_check(&r#type, format!("{}.{}()", class_text(class, self.codebase), member.original_name))
+    }
+
+    /// The type text and the name `\Sharp\Internal\returned` takes for a plain PHP result of the type `r#type` that
+    /// crosses into PHP#, named `name`: the whole type, whose each `Map` and `Set` the result crosses into and which its
+    /// error names, and the type it is checked against. The check reads each collection alone, so it takes a time that
+    /// doesn't grow with the result. None for a result of any value, `Any?`, `void` or `never`.
+    fn crossing_check(&self, r#type: &TUnion, name: String) -> Option<(String, String)> {
+        if r#type.is_void() || r#type.is_never() || (r#type.is_mixed() && r#type.can_be_null()) {
+            return None;
+        }
+        let checked = if needs_result_check(r#type) { r#type.clone() } else { collections_alone(r#type) };
         let types = returned_types(
-            text(&r#type, self.codebase, Parameter::Index),
+            text(r#type, self.codebase, Parameter::Index),
             text(&checked, self.codebase, Parameter::Index),
         );
 
-        Some((types, format!("{}.{}()", class_text(class, self.codebase), member.original_name)))
+        Some((types, name))
     }
 
     /// The check a PHP# call of `method`, a method of `class`, takes on its result of the type `r#type`, and the method
@@ -1309,9 +1316,10 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The PHP function the `[Import]` method `method` of `class` runs, spec section 23, and the check its result takes
-    /// as a plain PHP value crossing into the method's result type, as [`Self::returned_check`] builds one, the target
-    /// the function, as `levenshtein()`. None for a method without the attribute, and no check for a `void` result or
-    /// one of any value.
+    /// as a plain PHP value crossing into the method's result type, as [`Self::crossing_check`] builds one for
+    /// [`Self::returned_check`] too, the target the function, as `levenshtein()`. None for a method without the
+    /// attribute, and no check for a `void` result, one of any value, or a function type, alone or nullable, which takes
+    /// the native closure as it is, since PHP never declares a closure's types, as an `extern` result of a built-in does.
     #[must_use]
     pub(crate) fn import(&self, class: Word, method: Word) -> Option<(Word, Option<(String, String)>)> {
         let metadata = self.codebase.get_method(class, method)?;
@@ -1322,18 +1330,12 @@ impl<'analysis> Types<'analysis> {
         else {
             unreachable!("the checker refuses an `[Import]` whose argument is no literal string: {mark:?}");
         };
-        let check = metadata.return_type_metadata.as_ref().map(|declared| &declared.type_union).and_then(|r#type| {
-            if r#type.is_void() || r#type.is_never() || (r#type.is_mixed() && r#type.can_be_null()) {
-                return None;
-            }
-            let checked = if needs_result_check(r#type) { r#type.clone() } else { collections_alone(r#type) };
-            let types = returned_types(
-                text(r#type, self.codebase, Parameter::Index),
-                text(&checked, self.codebase, Parameter::Index),
-            );
-
-            Some((types, format!("{function}()")))
-        });
+        let check = metadata
+            .return_type_metadata
+            .as_ref()
+            .map(|declared| &declared.type_union)
+            .filter(|r#type| !is_function_type(r#type))
+            .and_then(|r#type| self.crossing_check(r#type, format!("{function}()")));
 
         Some((*function, check))
     }
@@ -3137,6 +3139,12 @@ fn called_method(target: &CallTarget) -> Option<(Word, Word)> {
 /// type it is checked against, left out where it is the first.
 fn returned_types(crossing: String, checked: String) -> String {
     if checked == crossing { crossing } else { format!("{crossing}, {checked}") }
+}
+
+/// Whether `r#type` is a function type, alone or with `null`.
+fn is_function_type(r#type: &TUnion) -> bool {
+    r#type.types.iter().any(|atomic| matches!(atomic, TAtomic::Callable(_)))
+        && r#type.types.iter().all(|atomic| atomic.is_null() || matches!(atomic, TAtomic::Callable(_)))
 }
 
 /// Whether the PHP type a PHP# result of `r#type` declares says all `r#type` says, so PHP checks a plain PHP override's

@@ -26622,11 +26622,12 @@ const IMPORT_LIBRARY: (&str, &str) = (
 
 /// Spec section 23: an `[Import]` method's body is the call of the PHP function it names. A `Map` argument passes as
 /// the PHP array plain PHP receives, a variadic one spreads, the result is checked as a plain PHP value crossing into
-/// the declared type, and a `void` or `Any?` result needs no check.
+/// the declared type, and a `void` or `Any?` result needs no check. A function type takes the native closure as it is,
+/// since PHP never declares a closure's types, as an `extern` result of a built-in does.
 #[test]
 fn an_imported_method_s_body_calls_the_php_function_it_names() {
     let words = Lowered::with(
-        "namespace App.Tenant;\n\nimport Sharp.Interop.Import;\n\npublic static class Words\n{\n    [Import(\"array_keys\")]\n    public static List<string> keys(Map<string, int> counts);\n\n    [Import(\"max\")]\n    public static int largest(int ...values);\n\n    [Import(\"json_decode\")]\n    public static Any? decoded(string json);\n\n    [Import(\"usleep\")]\n    public static void pause(int microseconds);\n}\n",
+        "namespace App.Tenant;\n\nimport Sharp.Interop.Import;\n\npublic static class Words\n{\n    [Import(\"array_keys\")]\n    public static List<string> keys(Map<string, int> counts);\n\n    [Import(\"max\")]\n    public static int largest(int ...values);\n\n    [Import(\"json_decode\")]\n    public static Any? decoded(string json);\n\n    [Import(\"usleep\")]\n    public static void pause(int microseconds);\n\n    [Import(\"set_error_handler\")]\n    public static Function<bool?(int, string, string, int)>? swap(Function<bool?(int, string, string, int)>? handler) uses PhpGlobals;\n}\n",
         &[IMPORT_LIBRARY],
     );
 
@@ -26696,6 +26697,17 @@ fn an_imported_method_s_body_calls_the_php_function_it_names() {
               ARG_LIST
                 VAR
                   ZVAL "microseconds"
+        "#}
+    );
+    assert_eq!(
+        call("swap"),
+        indoc! {r#"
+            RETURN
+              CALL
+                ZVAL "set_error_handler"
+                ARG_LIST
+                  VAR
+                    ZVAL "handler"
         "#}
     );
 }
