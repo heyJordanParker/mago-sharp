@@ -946,6 +946,14 @@ impl<'body, 'program> Body<'body, 'program> {
                 format!("(!{operand})")
             }
             UnaryPrefixOperator::Plus(_) => self.value(unary.operand),
+            // `(string)` of an int is its decimal digits, as `Sharp/Lean/String.lean`'s `int.text` writes them.
+            UnaryPrefixOperator::StringCast(..)
+                if self.kind(self.checked.types().expression_type(unary.operand)) == Kind::Int
+                    && !self.checked.types().expression_type(unary.operand).is_nullable() =>
+            {
+                let operand = self.value(unary.operand);
+                format!("(int.text {operand})")
+            }
             operator => {
                 let what = format!("the operator `{}`", self.source(operator.span()));
                 self.unmodeled(unary.span(), what, issues::OPERATOR)

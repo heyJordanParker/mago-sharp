@@ -1,3 +1,5 @@
+import Sharp.Lean.Int
+
 /-!
 PHP# `string`: the bytes it holds.
 
@@ -9,5 +11,11 @@ namespace Sharp
 
 /-- PHP# `string`. -/
 abbrev string := List UInt8
+
+/-- `(string)` of an `int`: its decimal digits, after `-` when it is negative, as PHP writes it. -/
+def int.text (n : int) : string := (toString n.toInt).toUTF8.toList
+
+#guard int.text 7 = [55]
+#guard int.text (-42) = [45, 52, 50]
 
 end Sharp

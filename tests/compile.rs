@@ -4759,6 +4759,26 @@ const DEADLINE: &str = "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\np
 /// `App.Shared.SetupStatus`, a machine whose install expires 15 minutes after it starts, through `Instant.plus`.
 const SETUP_STATUS: &str = "namespace App.Shared;\n\nimport Sharp.Time.Duration;\nimport Sharp.Time.Instant;\n\npublic machine SetupStatus\n{\n    case Installing(Instant startedAt)\n    {\n        public SetupStatus.Ready finish() => SetupStatus.Ready;\n    }\n\n    final case Ready;\n\n    public static SetupStatus.Installing start(Instant at) => SetupStatus.Installing(at);\n\n    public Instant? expiresAt() => this is SetupStatus.Installing i ? i.startedAt.plus(Duration.ofMinutes(15)) : null;\n\n    law anInstallExpiresAfterItsWindow(Instant at) => SetupStatus.Installing(at).expiresAt() == at.plus(Duration.ofMinutes(15));\n}\n";
 
+/// Spec section 28: `Instant.toString()` writes its UTC text in PHP#, with no plain PHP and no zone's rules, so a law
+/// reaches the text it gives and is refused only as not proven, never as reaching state or plain PHP.
+#[test]
+fn a_law_formats_an_instant_as_its_utc_text() {
+    let directory = library_project(&[(
+        "app/Shared/Stamp.sharp",
+        "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic final class Stamp\n{\n    law formats(int s, int n) => new Instant(s, n).toString() != \"\";\n}\n",
+    )]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("app/Shared/Stamp.sharp:7:5: error[law-unproven]: law formats is not proven\n"),
+        "{}",
+        printed(&output)
+    );
+    assert!(printed(&output).contains("error: found 1 issues"), "{}", printed(&output));
+}
+
 /// Spec section 28: a constructor whose body only checks its arguments and throws is a precondition of the value it
 /// builds, so a law builds an `Instant`, relies on its nanosecond's range, orders two, and moves one with `plus`.
 #[test]
