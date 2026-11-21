@@ -7756,7 +7756,7 @@ fn an_extern_property_states_the_type_of_what_a_plain_php_get_gives() {
 #[test]
 fn a_property_a_plain_php_parent_stores_is_reached_through_an_extern_property() {
     let model = "<?php\n\nnamespace Lib;\n\n/** @property-read int $id */\nabstract class Model\n{\n    /** @var array<string, mixed> */\n    private array $attributes = [];\n\n    public function __get(string $key): mixed\n    {\n        return $this->attributes[$key] ?? null;\n    }\n\n    public function __set(string $key, mixed $value): void\n    {\n        $this->attributes[$key] = $value;\n    }\n}\n";
-    let order = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public extern string email { get; set; }\n\n    [Key(\"total_cents\")]\n    public extern int totalCents { get; private set; }\n\n    public string name { get; set; } = \"\";\n\n    private int cached = 0;\n\n    public void fill()\n    {\n        this.email = 5;\n        this.emial = \"x\";\n        this.email = \"a@b.co\";\n        this.totalCents = this.id + this.cached;\n    }\n}\n";
+    let order = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public extern string email { get; set; }\n\n    [Key(\"total_cents\")]\n    public extern int totalCents { get; private set; }\n\n    public string name { get; set; } = \"\";\n\n    private int cached = 0;\n\n    public void fill()\n    {\n        this.email = 5;\n        this.emailAddress = \"x\";\n        this.email = \"a@b.co\";\n        this.totalCents = this.id + this.cached;\n    }\n}\n";
     let report = "namespace Demo;\n\npublic class Report\n{\n    public static string read(Order order) => order.email;\n\n    public static Any? anything(Order order) => order.anything;\n\n    public static void price(Order order) { order.totalCents = 3; }\n}\n";
     let library = [("src/Lib/Model.php", model)];
 
@@ -7765,7 +7765,7 @@ fn a_property_a_plain_php_parent_stores_is_reached_through_an_extern_property() 
         [
             "12:19 incompatible-property-visibility `Order`'s parent `Model` stores properties through `__get` and `__set`, so a public `name` would never be saved. | Write `public extern string name { get; set; }`, or make it private to keep it in memory.",
             "18:22 invalid-property-assignment-value Invalid type for property `Order.email`: expected `string`, but got `int`. | Change the assigned value to match the property's type, or update the property's type declaration.",
-            "19:14 non-existent-property `Order` has no property `emial`. Declare it: `public extern string emial { get; set; }`. | ",
+            "19:14 non-existent-property `Order` has no property `emailAddress`. Declare it: `public extern string emailAddress { get; set; }`. | ",
         ]
     );
     assert_eq!(
