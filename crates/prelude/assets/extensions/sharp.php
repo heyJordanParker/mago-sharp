@@ -327,6 +327,12 @@ function parseVariant(string $family, mixed $value, bool $throws = true): ?objec
 function withTag(string $family, string $tag): ?string {}
 
 /**
+ * The name the family of the class `$variant` stores for it, its `[Key]` or its value as a backed machine's case, or
+ * null for a class that is no variant of a family. The standard library's `Class<T>.tag` reads by it.
+ */
+function tag(string $variant): ?string {}
+
+/**
  * Each address the system resolver gives for `$host`, as text and once, in the order getaddrinfo gives them, the hosts
  * file included, and throws when the resolver cannot find the host. The standard library's `Dns.addresses` resolves
  * by it.

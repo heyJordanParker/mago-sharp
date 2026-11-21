@@ -2958,6 +2958,25 @@ fn compile_lists_the_effects_each_extern_line_declares_for_a_class_and_a_method(
     );
 }
 
+/// Spec sections 20.2 and 25: a machine that stores as its case's value is listed with the families, under no key,
+/// each case under its value, so `withTag` and `tag()` read its cases as they read a `[Tag]` family's variants.
+#[test]
+fn compile_lists_a_machine_that_stores_as_its_value_with_each_case_under_its_value() {
+    let status = "namespace App.Shop;\n\npublic machine JourneyStatus : string\n{\n    case Open = \"open\" { public JourneyStatus.Completed complete() => JourneyStatus.Completed; }\n    final case Completed = \"completed\";\n    public static JourneyStatus.Open enter() => JourneyStatus.Open;\n}\n";
+    let directory = lawful_project(&[("app/Shop/JourneyStatus.sharp", status)]);
+    let root = directory.path();
+
+    compile_succeeds(root);
+
+    assert!(
+        read(root, ".sharp/listeners.php").ends_with(
+            "    'tags' => [\n        'App\\\\Shop\\\\JourneyStatus' => ['', ['completed' => 'App\\\\Shop\\\\JourneyStatus\\\\Completed', 'open' => 'App\\\\Shop\\\\JourneyStatus\\\\Open']],\n    ],\n];\n"
+        ),
+        "{}",
+        read(root, ".sharp/listeners.php")
+    );
+}
+
 /// Spec section 29: a parameter an `extern` line states keeps the effects its function type lists, so a `Map` a loop
 /// fills with closures that have those effects passes to the plain PHP constructor, and the `Map` local keeps the value
 /// type it is declared with. A closure with an effect the type leaves out is refused at the call, naming the effect.

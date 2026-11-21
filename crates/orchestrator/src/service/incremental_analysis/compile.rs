@@ -337,15 +337,19 @@ pub struct ExternEffects {
 
 /// A family, spec section 10: a sealed interface, abstract class or enum marked `[Tag]`, whose `parse` and `withTag`
 /// the engine answers by finding the variant its input names.
+///
+/// A machine that stores as its case's value, spec section 20.2, is one too, whose `withTag` and `tag()` read its cases
+/// by their values.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Family {
     /// The file that declares it.
     pub file_id: FileId,
     /// The fully qualified name of the family.
     pub class: Word,
-    /// The key its `[Tag]` names, whose value is a variant's name.
+    /// The key its `[Tag]` names, whose value is a variant's name, and empty for a machine that stores as its value.
     pub key: Word,
-    /// Each variant's name, as its `[Key]` gives it, with the fully qualified name of its class, in the order of names.
+    /// Each variant's name, as its `[Key]` or its case's value gives it, with the fully qualified name of its class, in
+    /// the order of names.
     pub variants: Vec<(Word, Word)>,
 }
 
@@ -473,8 +477,9 @@ impl IncrementalAnalysisService {
         listeners.into_iter().map(|(_, _, listener)| listener).collect()
     }
 
-    /// Every PHP# family of the last analysis, spec section 10, by its full name, with each variant that gives its
-    /// name, which the analyzer requires of every variant.
+    /// Every PHP# family of the last analysis, spec section 10, and every machine that stores as its case's value,
+    /// spec section 20.2, by its full name, with each variant that gives its name, which the analyzer requires of
+    /// every variant.
     #[must_use]
     pub fn families(&self) -> Vec<Family> {
         let mut families: Vec<Family> = self
@@ -483,7 +488,8 @@ impl IncrementalAnalysisService {
             .values()
             .filter(|class| class.flags.is_sharp())
             .filter_map(|family| {
-                let key = word(family.tag_key()?);
+                let key =
+                    word(family.tag_key().or_else(|| self.codebase.stores_as_value(family.name).then_some(&b""[..]))?);
                 let variants = self
                     .codebase
                     .variants(family)
