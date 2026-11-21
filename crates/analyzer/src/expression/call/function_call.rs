@@ -383,7 +383,7 @@ where
     let span = expression.unparenthesized().span();
     artifacts.call_targets.get(&(span.start.offset, span.end.offset))?.iter().find_map(|target| match target {
         CallTarget::FunctionLike { callee, .. } => Some(display_function_like_identifier(context, callee)),
-        CallTarget::MagicMethod { .. } | CallTarget::Property { .. } => None,
+        CallTarget::MagicMethod { .. } | CallTarget::Property { .. } | CallTarget::Element { .. } => None,
     })
 }
 

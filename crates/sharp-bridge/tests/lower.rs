@@ -20766,6 +20766,34 @@ fn a_call_of_a_property_holding_a_function_calls_the_function() {
 }
 
 /// ```php
+/// return ($entry[0])(2);
+/// ```
+///
+/// Spec section 30: a call of a tuple's named element calls the function the element holds, read by its position, as
+/// a call of a property holding a function calls what the property holds.
+#[test]
+fn a_call_of_a_tuple_element_calls_the_function_at_its_position() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic static class Entries\n{\n    public static int direct([Function<int(int)> twice, string name] entry) => entry.twice(2);\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body_of("direct"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  DIM
+                    VAR
+                      ZVAL "entry"
+                    ZVAL 0
+                  ARG_LIST
+                    ZVAL 2
+        "#}
+    );
+}
+
+/// ```php
 /// return (\App\Tenant\Report::$round)($extra);
 /// ```
 ///

@@ -11,6 +11,7 @@ use mago_codex::metadata::r#extern::ExternMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::object::TObject;
@@ -1041,6 +1042,7 @@ where
                     self.method_call(magic_class, magic_method, served_class, span, receiver, arguments);
                 }
                 CallTarget::Property { class, property } => self.property_call(class, property, span),
+                CallTarget::Element { position } => self.element_call(receiver, position, span),
                 CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Closure(_), .. }
                 | CallTarget::MagicMethod { .. } => {}
             }
@@ -1133,6 +1135,36 @@ where
             .unwrap_or_default();
         for effect in effects {
             self.summary.effects.push((Effect::Foreign(effect), span, cause));
+        }
+    }
+
+    /// Records a call at `span` of the function the element at `position` holds of the tuple `receiver` is, spec section
+    /// 30, which has the effects the element's function type lists, as a function a local holds does.
+    fn element_call(&mut self, receiver: Option<&'ast Expression<'arena>>, position: usize, span: Span) {
+        let Some(receiver) = receiver else {
+            return;
+        };
+        let codebase = self.codebase();
+        let elements: Vec<(TUnion, Word)> = self
+            .artifacts
+            .get_expression_type(receiver)
+            .into_iter()
+            .flat_map(|receiver_type| receiver_type.types.iter())
+            .filter_map(|atomic| match atomic {
+                TAtomic::Array(TArray::List(list)) => {
+                    let (element, name) = *list.tuple_elements()?.get(position)?;
+
+                    Some((element.clone(), name?))
+                }
+                _ => None,
+            })
+            .collect();
+        for (element, name) in elements {
+            let called = format!("{}.{name}", self.text(receiver.span()));
+            let cause = (empty_word(), word(called.as_bytes()));
+            for effect in declared_effects(codebase, &element) {
+                self.summary.effects.push((Effect::Foreign(effect), span, cause));
+            }
         }
     }
 

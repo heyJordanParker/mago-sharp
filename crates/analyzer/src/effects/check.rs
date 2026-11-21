@@ -1615,8 +1615,8 @@ where
 
     /// Who may keep `argument`, given at `position` to `target`, with the type the parameter states: none when the
     /// parameter is a PHP# one that takes on effects or a plain PHP `callable` or `Closure`, and the callee for any
-    /// other. A function a property holds, a magic method and a closure declare no parameter the checker reads, so each
-    /// may keep it.
+    /// other. A function a property or a tuple's element holds, a magic method and a closure declare no parameter the
+    /// checker reads, so each may keep it.
     fn keeper(
         &self,
         target: &CallTarget,
@@ -1644,7 +1644,10 @@ where
             CallTarget::Property { class, property } | CallTarget::MagicMethod { class, method: property, .. } => {
                 return Some((Some(display_member(self.context, *class, property)), None));
             }
-            CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Closure(_), .. } => return Some((None, None)),
+            CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Closure(_), .. }
+            | CallTarget::Element { .. } => {
+                return Some((None, None));
+            }
         };
         // An extension's member takes its receiver as its first parameter, so the call's arguments fill those after it.
         let parameter = metadata.and_then(|metadata| {

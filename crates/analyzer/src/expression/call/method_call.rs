@@ -417,6 +417,7 @@ where
         && method_resolution.resolved_methods.is_empty()
         && method_resolution.unresolved_methods.is_empty()
         && method_resolution.called_properties.is_empty()
+        && method_resolution.called_elements.is_empty()
         && method_resolution.undocumented_methods.is_empty()
     {
         let copy = if changes { check_changed_collection(context, block_context, artifacts, object) } else { Ok(None) };
@@ -548,6 +549,19 @@ where
         object.span().join(selector.span()),
         &mut invocation_targets,
     );
+    // Spec section 30: a call of a tuple's named element runs the function the element holds, as a property's.
+    for (position, element) in std::mem::take(&mut method_resolution.called_elements) {
+        artifacts.record_call_target(span, CallTarget::Element { position });
+        let (targets, has_invalid_target) = resolve_callable_targets(
+            context,
+            &element,
+            object.span().join(selector.span()),
+            Given::Property,
+            &mut method_resolution.template_result,
+        );
+        invocation_targets.extend(targets);
+        method_resolution.has_invalid_target |= has_invalid_target;
+    }
 
     let has_resolved_methods = !invocation_targets.is_empty();
 

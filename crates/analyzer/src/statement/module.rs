@@ -817,7 +817,7 @@ pub(crate) fn report_bound_from_plain_php<A>(
         CallTarget::FunctionLike { callee, .. } | CallTarget::MagicMethod { callee, .. } => {
             codebase.get_function_like(callee).is_some_and(|function| !function.flags.is_sharp())
         }
-        CallTarget::Property { .. } => false,
+        CallTarget::Property { .. } | CallTarget::Element { .. } => false,
     });
     if !context.dialect.is_sharp() || !is_plain_php {
         return;

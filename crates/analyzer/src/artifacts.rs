@@ -83,6 +83,9 @@ pub enum CallTarget {
     MagicMethod { callee: FunctionLikeIdentifier, class: Word, method: Word },
     /// The function the property `property`, named with its `$`, holds, which `class` declares.
     Property { class: Word, property: Word },
+    /// The function the element at `position` holds of the tuple the call's receiver is, which the call names, spec
+    /// section 30.
+    Element { position: usize },
 }
 
 #[derive(Debug, Clone)]

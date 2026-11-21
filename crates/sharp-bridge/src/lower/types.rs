@@ -1161,7 +1161,7 @@ impl<'analysis> Types<'analysis> {
                 .get_function_like(callee)
                 .filter(|metadata| !metadata.flags.is_sharp())
                 .map(|metadata| (callee, metadata)),
-            CallTarget::Property { .. } => None,
+            CallTarget::Property { .. } | CallTarget::Element { .. } => None,
         })?;
         let name = match callee {
             FunctionLikeIdentifier::Method(class, _) => {
@@ -1387,8 +1387,8 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The name of the function value the call `call` runs, as the file writes it: the local of `f(2)` and `f?.(2)`,
-    /// the expression of `steps[0](2)` and `this.make()?.(2)`, or the property of `holder.onTotal(2)`. None for a call
-    /// of a function or a method.
+    /// the expression of `steps[0](2)` and `this.make()?.(2)`, the property of `holder.onTotal(2)`, or the tuple element
+    /// of `entry.twice(2)`. None for a call of a function or a method.
     fn function_value_name(&self, call: &Expression) -> Option<String> {
         match call {
             Expression::Call(
@@ -1412,6 +1412,13 @@ impl<'analysis> Types<'analysis> {
 
                     Some(String::from_utf8_lossy(property.strip_prefix(b"$").unwrap_or(property)).into_owned())
                 }
+                CallTarget::Element { .. } => match call {
+                    Expression::Call(Call::Method(MethodCall {
+                        method: ClassLikeMemberSelector::Identifier(name),
+                        ..
+                    })) => Some(String::from_utf8_lossy(name.value).into_owned()),
+                    _ => None,
+                },
                 _ => None,
             }),
         }
@@ -1679,6 +1686,15 @@ impl<'analysis> Types<'analysis> {
         agreed_kind(declarations.iter().map(|declaration| declaration.kind));
 
         declaration
+    }
+
+    /// The position of the tuple element whose function the method call `call` runs, spec section 30, as `entry.twice(2)`
+    /// runs the element `twice` of a `[Function<int(int)> twice, string name]`. None for any other call.
+    pub(crate) fn element_call(&self, call: &Expression) -> Option<usize> {
+        self.artifacts.get_callees(call).find_map(|target| match target {
+            CallTarget::Element { position } => Some(*position),
+            _ => None,
+        })
     }
 
     /// The extension member, spec section 26, that the method call or property read `access` runs, as the analysis

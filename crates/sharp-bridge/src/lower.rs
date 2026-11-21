@@ -8815,6 +8815,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if self.names.is_current_position(call) {
             return self.position(call.object.span());
         }
+        // Spec section 30: `entry.twice(2)` runs the function the tuple's element holds, `($entry[0])(2)`.
+        if let Some(position) = self.types.element_call(expression) {
+            let line = self.line(call);
+
+            return self.call(Some(call.span()), &call.argument_list, None, None, None, |this, arguments| {
+                let tuple = this.expression(call.object);
+                let index = this.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = position as i64);
+                let element = this.node(SHARP_AST_DIM, 0, line, &[tuple, index]);
+
+                this.node(SHARP_AST_CALL, 0, line, &[element, arguments])
+            });
+        }
         if let Some(extension) = self.types.extension(expression) {
             return self.extension_access(expression, &extension, call.object, Some(&call.argument_list));
         }

@@ -35985,6 +35985,26 @@ fn a_lambda_gives_the_tuple_type_its_call_names() {
     assert_eq!(messages(("src/App/Numbers.sharp", numbers), &[]), Vec::<String>::new());
 }
 
+/// Spec section 30: a call of a tuple's named element runs the function the element holds, as a call of a property
+/// that holds one does, checked by the element's function type. A name the tuple does not write is refused as its read
+/// is, with the names the tuple writes and none of `List`'s members.
+#[test]
+fn a_call_of_a_tuple_element_runs_the_function_it_holds() {
+    let entries = "namespace Probe;\n\npublic static class Entries\n{\n    public static int direct([Function<int(int)> twice, string name] entry) => entry.twice(2);\n\n    public static int text([Function<int(int)> twice, string name] entry) => entry.twice(\"two\");\n\n    public static int missing([Function<int(int)> twice, string name] entry) => entry.missing(2);\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Probe/Entries.sharp", entries), &[]);
+
+    assert_eq!(
+        written_errors(entries, &issues),
+        [
+            "\"two\" invalid-argument Invalid argument type for argument #1 of `entry.twice`: expected `int`, but found `string`.",
+            "missing non-existent-property `[Function<int(int)> twice, string name]` has no element named `missing`: its elements are `twice` and `name`.",
+        ]
+    );
+    let helps: Vec<&str> = issues.iter().flat_map(|issue| issue.help.as_deref()).collect();
+    assert_eq!(helps, ["Change the argument value to match `int`, or update the parameter's type declaration."]);
+}
+
 /// Spec section 13: a value of a type that never changes, as a struct, is readonly wherever `readonly` is asked for, so
 /// a function value takes one as its type is written, with no `readonly` to declare, which would change nothing. A
 /// type that can change still needs its `readonly` there.

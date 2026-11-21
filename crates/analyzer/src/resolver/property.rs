@@ -2148,7 +2148,7 @@ fn report_access_on_non_object<A>(
 /// The type of the element of the tuple `tuple`, whose `elements` it has, that `name` names, spec section 30, which reads
 /// a named element as C# does. A name the tuple does not write, and a write, which a tuple never takes, are errors, and
 /// give `None`.
-fn resolve_tuple_element<'tuple, A>(
+pub(crate) fn resolve_tuple_element<'tuple, A>(
     context: &mut Context<'_, '_, A>,
     tuple: &TAtomic,
     elements: &[(&'tuple TUnion, Option<Word>)],
