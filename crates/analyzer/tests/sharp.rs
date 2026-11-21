@@ -10219,7 +10219,8 @@ fn super_arguments_are_checked_against_the_base_class_constructor() {
 }
 
 /// `: super(…)` is the call of the base class's constructor the readonly check tracks, so a promoted get-only
-/// property the base class's constructor also sets is set twice, as with PHP's `parent::__construct(…)`.
+/// property the base class's constructor also sets is set twice, as with PHP's `parent::__construct(…)`. The base
+/// class's promoted property is closed, as one in its body is, so declaring it again is refused too.
 #[test]
 fn super_is_the_base_class_constructor_call_the_readonly_check_tracks() {
     let entity = (
@@ -10230,7 +10231,10 @@ fn super_is_the_base_class_constructor_call_the_readonly_check_tracks() {
     let row = ("src/Lib/Row.php", ROW);
 
     assert_eq!(issues(entity, &[row]), Vec::<String>::new());
-    assert_eq!(issues(("src/Demo/Order.sharp", order), &[entity, row]), ["7:29 invalid-property-write"]);
+    assert_eq!(
+        issues(("src/Demo/Order.sharp", order), &[entity, row]),
+        ["7:29 override-final-property", "7:29 invalid-property-write"]
+    );
 }
 
 /// A base class without a constructor takes `: super()`, which does nothing, and no arguments, as C#'s `object()`. A

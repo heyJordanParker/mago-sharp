@@ -27541,7 +27541,7 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
                   null
                   null
                   null
-                  ZVAL "\n$total virtual: int\n$count set private: int\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\n__construct: Function<Any?(int)>\nrun: Function<void(int)>"
+                  ZVAL "\n$total: int\n$count set private: int\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\n__construct: Function<Any?(int)>\nrun: Function<void(int)>"
               ATTRIBUTE_LIST
                 ATTRIBUTE_GROUP
                   ATTRIBUTE

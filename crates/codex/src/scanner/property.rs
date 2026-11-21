@@ -61,21 +61,8 @@ where
         flags |= MetadataFlags::HAS_DEFAULT;
     }
 
-    let is_sharp = context.program.dialect.is_sharp();
-    if parameter.modifiers.contains_readonly()
-        || (is_sharp && parameter.hooks.as_ref().is_some_and(|accessors| is_sharp_get_only(accessors, context)))
-    {
+    if parameter.modifiers.contains_readonly() {
         flags |= MetadataFlags::READONLY;
-    }
-
-    if is_sharp && parameter.hooks.as_ref().is_some_and(is_sharp_init) {
-        flags |= MetadataFlags::INIT;
-    }
-
-    if is_sharp {
-        flags |= sharp_internal_flags(&parameter.modifiers, parameter.hooks.as_ref());
-        // Spec section 9: a member a parameter declares without accessors is a field.
-        flags.set(MetadataFlags::FIELD, parameter.hooks.is_none());
     }
 
     if parameter.modifiers.contains_abstract() {
@@ -87,6 +74,13 @@ where
     }
 
     let default_type_metadata = parameter_metadata.get_default_type().cloned();
+
+    let is_sharp = context.program.dialect.is_sharp();
+    if is_sharp {
+        // Spec section 9: a member a parameter declares without accessors is a field.
+        let accessors = parameter.hooks.as_ref();
+        flags |= sharp_flags(&parameter.modifiers, accessors, accessors.is_none(), class_like_metadata, context);
+    }
 
     let read_visibility = context.member_visibility(&parameter.modifiers, class_like_metadata);
 
@@ -215,8 +209,10 @@ where
                     let is_required = is_sharp && is_required(&plain_property.modifiers);
 
                     let mut item_flags = flags;
-                    // Spec section 6: a PHP# property without accessors is a field.
-                    item_flags.set(MetadataFlags::FIELD, is_sharp);
+                    if is_sharp {
+                        // Spec section 6: a PHP# property without accessors is a field.
+                        item_flags |= sharp_flags(&plain_property.modifiers, None, true, class_like_metadata, context);
+                    }
 
                     if is_required {
                         item_flags |= MetadataFlags::REQUIRED;
@@ -241,8 +237,6 @@ where
                     if plain_property.modifiers.contains_final() {
                         item_flags |= MetadataFlags::FINAL;
                     }
-
-                    item_flags.set(MetadataFlags::LATE, is_sharp && plain_property.modifiers.contains_late());
 
                     let read_visibility = context.member_visibility(&plain_property.modifiers, class_like_metadata);
 
@@ -309,7 +303,6 @@ where
                     type_metadata
                 });
             }
-            let is_abstract = hooked_property.modifiers.contains_abstract();
             if is_sharp && is_required(&hooked_property.modifiers) {
                 flags |= MetadataFlags::REQUIRED;
             }
@@ -327,19 +320,8 @@ where
             }
 
             if is_sharp {
-                flags |= sharp_internal_flags(&hooked_property.modifiers, Some(&hooked_property.hook_list));
-            }
-
-            if is_sharp && !is_abstract && is_sharp_get_only(&hooked_property.hook_list, context) {
-                flags |= MetadataFlags::READONLY;
-            }
-
-            if is_sharp && is_sharp_closed(&hooked_property.modifiers, read_visibility, class_like_metadata) {
-                flags |= MetadataFlags::FINAL;
-            }
-
-            if is_sharp && is_sharp_init(&hooked_property.hook_list) {
-                flags |= MetadataFlags::INIT;
+                let accessors = Some(&hooked_property.hook_list);
+                flags |= sharp_flags(&hooked_property.modifiers, accessors, false, class_like_metadata, context);
             }
 
             if hooked_property.modifiers.contains_static() {
@@ -353,8 +335,6 @@ where
             if hooked_property.modifiers.contains_final() {
                 flags |= MetadataFlags::FINAL;
             }
-
-            flags.set(MetadataFlags::LATE, is_sharp && hooked_property.modifiers.contains_late());
 
             let mut metadata = PropertyMetadata::new(name, flags);
 
@@ -405,12 +385,8 @@ where
         Property::Computed(computed_property) => {
             let read_visibility = context.member_visibility(&computed_property.modifiers, class_like_metadata);
 
-            if is_sharp && is_sharp_closed(&computed_property.modifiers, read_visibility, class_like_metadata) {
-                flags |= MetadataFlags::FINAL;
-            }
-
             if is_sharp {
-                flags |= sharp_internal_flags(&computed_property.modifiers, None);
+                flags |= sharp_flags(&computed_property.modifiers, None, false, class_like_metadata, context);
             }
 
             if computed_property.modifiers.contains_static() {
@@ -470,26 +446,53 @@ where
     }
 }
 
-/// The flags of a PHP# member's `internal` reach, spec section 5: `INTERNAL` when the member is `internal`, and
-/// `INTERNAL_SET` when its `set` or `init` is. A `set` reaches its namespace at most, spec section 6.1, so a `set` with
-/// no access modifier of a `public` or `protected` property is `internal` too, unless it overrides a plain PHP parent's,
-/// which the populator reads, and an `init` keeps the property's level. The member runs as PHP's `public`, so its
-/// visibility is `public`.
-fn sharp_internal_flags(
+/// The flags a PHP# property takes from its modifiers and its `accessors`, whichever form declares it: a field, a
+/// property in the class body, a computed one, or one a constructor promotes. A field and a computed property have no
+/// accessors.
+///
+/// A property is closed unless it is `virtual`, `abstract` or `override`, spec sections 6.1 and 22, as a method is, so
+/// the analyzer reads a closed one as final. A private property is never inherited, an interface's is always open, and
+/// a field has no `virtual`, so it is always open. The engine still runs every property as an open PHP property.
+///
+/// A get-only property with storage is set once, in the constructor, as `readonly` is, and one without storage is
+/// computed on each read. An `init` property is written only while its object is created.
+///
+/// `INTERNAL_REACH` when the property is `internal`, and `INTERNAL_SET` when its `set` or `init` is, spec section 5. A
+/// `set` reaches its namespace at most, spec section 6.1, so a `set` with no access modifier of a `public` or
+/// `protected` property is `internal` too, unless it overrides a plain PHP parent's, which the populator reads, and an
+/// `init` keeps the property's level. The property runs as PHP's `public`, so its visibility is `public`.
+fn sharp_flags<A>(
     modifiers: &Sequence<'_, Modifier<'_>>,
     accessors: Option<&PropertyHookList<'_>>,
-) -> MetadataFlags {
-    let mut flags = MetadataFlags::empty();
-    if modifiers.contains_internal() {
-        flags |= MetadataFlags::INTERNAL_REACH;
-    }
-    let is_internal_set = |setter: &PropertyHook<'_>| {
+    is_field: bool,
+    class_like_metadata: &ClassLikeMetadata,
+    context: &Context<'_, '_, A>,
+) -> MetadataFlags
+where
+    A: Arena,
+{
+    let is_open = is_field
+        || class_like_metadata.kind.is_interface()
+        || context.member_visibility(modifiers, class_like_metadata) == Visibility::Private
+        || modifiers
+            .iter()
+            .any(|modifier| matches!(modifier, Modifier::Abstract(_) | Modifier::Virtual(_) | Modifier::Override(_)));
+    let is_get_only = !modifiers.contains_abstract()
+        && accessors.is_some_and(|accessors| accessors.is_get_only() && context.resolved_names.has_storage(accessors));
+    let setter = accessors.and_then(PropertyHookList::setter);
+    let is_internal_set = setter.is_some_and(|setter| {
         setter.modifiers.contains_internal()
             || (setter.name.value == b"set" && setter.modifiers.is_empty() && !modifiers.contains_private())
-    };
-    if accessors.and_then(PropertyHookList::setter).is_some_and(is_internal_set) {
-        flags |= MetadataFlags::INTERNAL_SET;
-    }
+    });
+
+    let mut flags = MetadataFlags::empty();
+    flags.set(MetadataFlags::FIELD, is_field);
+    flags.set(MetadataFlags::FINAL, !is_open);
+    flags.set(MetadataFlags::READONLY, is_get_only);
+    flags.set(MetadataFlags::INIT, setter.is_some_and(|setter| setter.name.value == b"init"));
+    flags.set(MetadataFlags::LATE, modifiers.contains_late());
+    flags.set(MetadataFlags::INTERNAL_REACH, modifiers.contains_internal());
+    flags.set(MetadataFlags::INTERNAL_SET, is_internal_set);
 
     flags
 }
@@ -506,27 +509,6 @@ fn sharp_write_visibility(accessors: &PropertyHookList, read_visibility: Visibil
         None if read_visibility == Visibility::Public => Visibility::Protected,
         None => read_visibility,
     }
-}
-
-/// Whether a PHP# property is closed: spec sections 6.1 and 22 open a property only with `virtual`, `abstract` or
-/// `override`, as a method is opened, so the analyzer reads a closed one as final. A private property is never
-/// inherited, and an interface's is always open. A field is open, line 289 of section 6.1. The engine still runs every
-/// property as an open PHP property.
-fn is_sharp_closed(
-    modifiers: &Sequence<'_, Modifier<'_>>,
-    read_visibility: Visibility,
-    class_like_metadata: &ClassLikeMetadata,
-) -> bool {
-    !class_like_metadata.kind.is_interface()
-        && read_visibility != Visibility::Private
-        && !modifiers
-            .iter()
-            .any(|modifier| matches!(modifier, Modifier::Abstract(_) | Modifier::Virtual(_) | Modifier::Override(_)))
-}
-
-/// Whether a PHP# property is written by an `init` accessor, which sets it only while the object is created.
-fn is_sharp_init(accessors: &PropertyHookList) -> bool {
-    accessors.setter().is_some_and(|setter| setter.name.value == b"init")
 }
 
 /// Scans a property's hooks and whether it is virtual. A PHP# auto accessor is storage, as an auto-property's is, so
@@ -572,15 +554,6 @@ fn scan_hooks<'arena, A>(
         !hooks_reference_backing_store(&hook_list.hooks, prop_name)
     };
     property.set_is_virtual(is_virtual);
-}
-
-/// Whether a PHP# property is get-only with storage, which is set once, in the constructor, as `readonly` is. A
-/// get-only property without storage is computed on each read.
-fn is_sharp_get_only<A>(accessors: &PropertyHookList<'_>, context: &Context<'_, '_, A>) -> bool
-where
-    A: Arena,
-{
-    accessors.is_get_only() && context.resolved_names.has_storage(accessors)
 }
 
 /// Whether a PHP# property is written `required`, spec section 6.1: each creation of its object sets it, so it takes
