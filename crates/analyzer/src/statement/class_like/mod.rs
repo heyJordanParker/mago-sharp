@@ -1672,6 +1672,10 @@ where
                 })
         });
 
+    if context.dialect.is_sharp() && class_like_metadata.kind.is_class() {
+        property::check_property_a_magic_parent_stores(context, class_like_metadata);
+    }
+
     for member in members {
         match member {
             ClassLikeMember::Constant(class_like_constant) => {

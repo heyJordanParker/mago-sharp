@@ -540,8 +540,11 @@ where
         }
 
         // Keep resolving the access so the resolver can independently report a
-        // missing `__set()` implementation when applicable.
-        return true;
+        // missing `__set()` implementation when applicable. A PHP# `extern` property with `set` is written at its
+        // `set`'s access, spec section 14.3, as any property is.
+        if property_metadata.flags.is_readonly() || !declaring_class_metadata.flags.is_sharp() {
+            return true;
+        }
     }
 
     if !property_metadata.hooks.is_empty()

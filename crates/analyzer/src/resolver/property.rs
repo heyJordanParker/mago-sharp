@@ -98,6 +98,7 @@ use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_enum_case;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::readonly_writer;
 use crate::utils::quoted_source;
@@ -157,7 +158,8 @@ pub struct PropertyResolutionResult {
     pub class_value: bool,
 }
 
-/// Resolves all possible instance properties from an object expression and a member selector.
+/// Resolves all possible instance properties from an object expression and a member selector, for a read, or for a
+/// write of a value of the type `written`.
 pub fn resolve_instance_properties<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -166,11 +168,12 @@ pub fn resolve_instance_properties<'ctx, 'ast, 'arena, A>(
     property_selector: &'ast ClassLikeMemberSelector<'arena>,
     operator_span: Span,
     is_null_safe: bool,
-    for_assignment: bool,
+    written: Option<&TUnion>,
 ) -> Result<PropertyResolutionResult, AnalysisError>
 where
     A: Arena,
 {
+    let for_assignment = written.is_some();
     let mut result = PropertyResolutionResult::default();
 
     analyze_member_object(context, block_context, artifacts, object_expression, is_null_safe)?;
@@ -563,7 +566,7 @@ where
                     object,
                     written_atomic,
                     operator_span,
-                    for_assignment,
+                    written,
                     &mut result,
                     magic_method.is_some(),
                 ),
@@ -1094,13 +1097,14 @@ fn find_property_in_class<'ctx, 'ast, 'arena, A>(
     object: &TObject,
     written_atomic: &TAtomic,
     access_span: Span,
-    for_assignment: bool,
+    written: Option<&TUnion>,
     result: &mut PropertyResolutionResult,
     has_magic_method: bool,
 ) -> Option<ResolvedProperty>
 where
     A: Arena,
 {
+    let for_assignment = written.is_some();
     let Some(class_metadata) = context.codebase.get_class_like(class_id) else {
         report_non_existent_class_like(context, object_expr.span(), class_id);
 
@@ -1134,11 +1138,11 @@ where
         resolution = None;
     }
     // Spec section 14.3: a class whose plain PHP code defines `__get`, itself or a parent, has the properties it reads,
-    // `Any?` where no `@property` line types one. Only plain PHP defines `__get`.
+    // `Any?` where no `@property` line types one. Only plain PHP defines `__get`, and a PHP# class's `extern` property
+    // is one it gives, so a read the code takes as a function may give the method of its name instead.
     let property_type = match &resolution {
-        Some(declared) => {
-            (!declared.declaring_class.flags.is_sharp()).then(|| declared.declared_type(context.codebase))
-        }
+        Some(declared) => (!declared.declaring_class.flags.is_sharp() || declared.is_magic())
+            .then(|| declared.declared_type(context.codebase)),
         None => has_magic_method.then(get_mixed),
     };
     let reads_method = !for_assignment
@@ -1304,6 +1308,15 @@ where
                 is_magic: true,
                 read_type: None,
             });
+        }
+
+        // Spec section 14.3: a PHP# class reaches a property its plain PHP parent's `__get` or `__set` serves only
+        // through an `extern` property or a line of the library that declares it.
+        if has_magic_method && context.dialect.is_sharp() && class_metadata.flags.is_sharp() {
+            report_undeclared_stored_property(context, class_metadata, prop_name, written, selector.span());
+            result.has_error_path = true;
+
+            return None;
         }
 
         if has_magic_method {
@@ -2661,6 +2674,41 @@ fn report_non_existent_property<A>(
             format!("The {class_kind_str} `{classname}` does not define the property `{prop_name}`.")
         })
         .with_help("Define the property in the class or check for its existence before accessing it."),
+    );
+}
+
+/// Reports `class.name`, read, or written with a value of the type `written`, at `span`, where `class` is a PHP# class
+/// whose plain PHP parent's `__get` or `__set` would serve it, spec section 14.3, with the `extern` property that
+/// declares it: of the written value's type, and `set` where the class inherits `__set`.
+fn report_undeclared_stored_property<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    name: Word,
+    written: Option<&TUnion>,
+    span: Span,
+) where
+    A: Arena,
+{
+    let class_name = display_class_like_name(context, class.original_name);
+    let property = display_property_name(context, name);
+    let declared = written.map_or_else(
+        || "…".to_owned(),
+        |written| {
+            let mut written = written.clone();
+            written.widen_literals();
+
+            display_sharp_type(context, &written)
+        },
+    );
+    let accessors = if context.codebase.method_exists(class.name, word("__set")) { "get; set;" } else { "get;" };
+
+    context.collector.report_with_code(
+        IssueCode::NonExistentProperty,
+        Issue::error(format!(
+            "`{class_name}` has no property `{property}`. Declare it: `public extern {declared} {property} {{ {accessors} }}`."
+        ))
+        .with_annotation(Annotation::primary(span).with_message(if written.is_some() { "Written here." } else { "Read here." }))
+        .with_note("A plain PHP `__get` and `__set` take any name, so PHP# reaches only the properties a class declares."),
     );
 }
 

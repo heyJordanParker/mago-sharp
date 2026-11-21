@@ -35,6 +35,7 @@ use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
+use mago_syntax::cst::Property;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
@@ -2155,10 +2156,11 @@ where
                 let properties =
                     scan_properties(property, &mut class_like_metadata, name, &type_context, context, scope);
                 let is_extern = property.modifiers().iter().any(|modifier| matches!(modifier, Modifier::Extern(_)));
+                let writes = matches!(property, Property::Hooked(hooked) if hooked.hook_list.setter().is_some());
 
                 for property_metadata in properties {
                     if is_extern {
-                        add_extern_property(&mut class_like_metadata, property_metadata);
+                        add_extern_property(&mut class_like_metadata, property_metadata, writes);
                     } else {
                         class_like_metadata.add_property_metadata(property_metadata);
                     }
@@ -2229,13 +2231,18 @@ fn add_instance_method(
     add_method(codebase, name.as_bytes(), class_like_metadata, method);
 }
 
-/// Adds `scanned`, a property written `extern`, as the property plain PHP's `__get` gives, spec section 14.3: a
-/// get-only magic property of the type it declares, as a `@property-read` line declares one, which the class declares no
-/// storage for, so the engine's read reaches `__get`.
-fn add_extern_property(class_like: &mut ClassLikeMetadata, scanned: PropertyMetadata) {
-    let mut property = PropertyMetadata::new(scanned.name, MetadataFlags::READONLY);
+/// Adds `scanned`, a property written `extern`, as the property plain PHP's `__get` gives and `__set` stores, spec
+/// section 14.3: a magic property of the type it declares, as a `@property` line declares one, get-only without `set`
+/// and written at its `set`'s access with one, which the class declares no storage for, so the engine's read reaches
+/// `__get` and its write `__set`. It keeps its attributes, whose `[Key]` names the key they receive.
+fn add_extern_property(class_like: &mut ClassLikeMetadata, scanned: PropertyMetadata, writes: bool) {
+    let reach = scanned.flags & (MetadataFlags::INTERNAL_SET | MetadataFlags::INTERNAL_REACH);
+    let mut property =
+        PropertyMetadata::new(scanned.name, if writes { reach } else { reach | MetadataFlags::READONLY });
     property.read_visibility = scanned.read_visibility;
+    property.write_visibility = if writes { scanned.write_visibility } else { scanned.read_visibility };
     property.type_metadata = scanned.type_metadata.or(scanned.type_declaration_metadata);
+    property.attributes = scanned.attributes;
     property.set_span(scanned.span);
     property.set_name_span(scanned.name_span);
 

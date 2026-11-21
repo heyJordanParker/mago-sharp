@@ -105,7 +105,7 @@ where
         &property_access.property,
         property_access.arrow.span(),
         is_null_safe,
-        true, // `for_assignment`
+        Some(assigned_value_type),
     )?;
     block_context.flags.set_inside_assignment(was_inside_assignment);
 

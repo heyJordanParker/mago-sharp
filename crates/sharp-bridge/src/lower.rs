@@ -5759,9 +5759,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let read = match arrival {
             Arrival::Map(map) => Some(map),
             Arrival::Read => bound.as_ref(),
-            Arrival::Plain => None,
+            Arrival::Plain | Arrival::Written => None,
         };
-        if !(matches!(arrival, Arrival::Plain) && self.plain_value(expression))
+        if !(matches!(arrival, Arrival::Plain | Arrival::Written) && self.plain_value(expression))
             && let Some(returned) = self.returned_call(line, expression, read)
         {
             return returned;
@@ -5776,6 +5776,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             Arrival::Map(map) if arrives_as_list => (lowered, self.types.call_check_as(expression, map, in_static)),
             Arrival::Plain if arrives_as_list => (lowered, None),
+            Arrival::Written => (lowered, None),
             _ => (lowered, self.types.call_check(expression, in_static)),
         };
         match check {
@@ -6430,7 +6431,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 None => {
                     let is_method = self.is_method_value(expression, access.object, &access.property);
                     let object = self.expression(access.object);
-                    let member = self.member(&access.property);
+                    let member = self.property_key(expression, &access.property);
 
                     if is_method {
                         self.method_value(expression, SHARP_AST_METHOD_CALL, object, member)
@@ -6493,7 +6494,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 let is_method = tested && self.is_method_value(expression, access.object, &access.property);
                 let object = if tested { self.expression(access.object) } else { self.null_safe_object(access.object) };
-                let member = self.member(&access.property);
+                let member = self.property_key(expression, &access.property);
 
                 if is_method {
                     self.method_value(expression, SHARP_AST_METHOD_CALL, object, member)
@@ -7340,13 +7341,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.temporaries += 1;
                 let name = format!("receiver#{}", self.temporaries).into_bytes();
                 let variable = self.variable(access.object.span(), &name);
-                let member = self.member(&access.property);
+                let member = self.property_key(assignment.lhs, &access.property);
                 let target = self.node(SHARP_AST_PROP, 0, line, &[variable, member]);
 
                 let variable = self.variable(access.object.span(), &name);
                 let object = self.expression(access.object);
                 let object = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, object]);
-                let member = self.member(&access.property);
+                let member = self.property_key(assignment.lhs, &access.property);
                 let read = self.node(SHARP_AST_PROP, 0, line, &[object, member]);
 
                 (target, read)
@@ -8598,10 +8599,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.static_property(target, class, &classes, word(name.value), property, line, place_use)
                 }
                 // A plain PHP property the checker reads as a `List` is written as itself.
-                None => self.arriving(target, Arrival::Plain),
+                None => self.arriving(target, Arrival::Written),
             },
             // `object?.name`, whose conditional tests `object`, spec section 14.4, written as `object.name`.
-            Expression::Access(Access::NullSafeProperty(_)) => self.arriving(target, Arrival::Plain),
+            Expression::Access(Access::NullSafeProperty(_)) => self.arriving(target, Arrival::Written),
             Expression::ArrayAccess(access) => {
                 let value = self.target(access.array, place_use);
                 let key = self.expression(access.index);
@@ -9503,6 +9504,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.function.extend(self.class.iter().map(|&byte| if byte == b'\\' { b'.' } else { byte }));
         self.function.push(b'.');
         self.function.extend_from_slice(name);
+    }
+
+    /// The name the read or write `access` of `object.member` reaches: the key an `extern` property's `[Key("…")]` gives,
+    /// which plain PHP's `__get` and `__set` receive, spec section 14.3, or the member's own name.
+    fn property_key(&mut self, access: &Expression, member: &ClassLikeMemberSelector) -> u32 {
+        match self.types.extern_property_key(access) {
+            Some(key) => self.string(0, self.line(member), key),
+            None => self.member(member),
+        }
     }
 
     fn member(&mut self, member: &ClassLikeMemberSelector) -> u32 {
@@ -10576,8 +10586,11 @@ enum Arrival<'place> {
     Read,
     /// It enters a place that declares this `Map`, which makes a `Map` of its keys, and is checked as that `Map`.
     Map(&'place TUnion),
-    /// It stays as plain PHP gave it: an argument of plain PHP, or the property a write sets.
+    /// It stays as plain PHP gave it: an argument of plain PHP.
     Plain,
+    /// It is the property a write sets, as plain PHP gave it, which gives no value to check, as a read of an `extern`
+    /// property through `__get` would, spec section 14.3.
+    Written,
 }
 
 /// Whether a value of `r#type` is a `Set`, true, or a `Map`, false, where it may be one.

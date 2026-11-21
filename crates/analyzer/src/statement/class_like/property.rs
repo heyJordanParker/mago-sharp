@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use mago_bytes::BytesDisplay;
 use mago_codex::context::ScopeContext;
+use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
@@ -17,6 +18,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
+use mago_codex::visibility::Visibility;
 use mago_names::PROPERTY_BEHAVIOR;
 use mago_names::binding::php_variable_name;
 use mago_names::display_sharp_member;
@@ -79,8 +81,9 @@ use crate::utils::with_function_fit_message;
 use crate::visibility::is_visible_from_scope;
 use crate::visibility::reaches_internal;
 
-/// Refuses `property`, a property of `class` written `extern`, where the class inherits no `__get`, spec section 14.3:
-/// an `extern` property is the one a plain PHP ancestor's `__get` gives, as Eloquent's `Model` gives a loaded relation.
+/// Refuses `property`, a property of `class` written `extern`, where the class inherits no `__get`, or no `__set` for a
+/// `set`, spec section 14.3: an `extern` property is the one a plain PHP ancestor's `__get` gives and `__set` stores, as
+/// Eloquent's `Model` gives and stores a column.
 pub(crate) fn check_extern_property<A>(
     context: &mut Context<'_, '_, A>,
     class: &ClassLikeMetadata,
@@ -88,21 +91,93 @@ pub(crate) fn check_extern_property<A>(
 ) where
     A: Arena,
 {
-    if context.codebase.method_exists(class.name, word("__get")) {
-        return;
-    }
-
     let class_name = display_class_like_name(context, class.original_name);
     let variable = property.first_variable();
     let member = display_sharp_member(class_name, BytesDisplay(variable.name));
-    context.collector.report_with_code(
-        IssueCode::MissingMagicMethod,
-        Issue::error(format!(
-            "`{member}` is `extern`, the property a plain PHP `__get` gives, and `{class_name}` inherits no `__get`."
-        ))
-        .with_annotation(Annotation::primary(variable.span).with_message("Declared `extern` here."))
-        .with_help("Extend the plain PHP class whose `__get` gives it, as Eloquent's `Model`, or declare the property without `extern`."),
-    );
+    if !context.codebase.method_exists(class.name, word("__get")) {
+        context.collector.report_with_code(
+            IssueCode::MissingMagicMethod,
+            Issue::error(format!(
+                "`{member}` is `extern`, the property a plain PHP `__get` gives, and `{class_name}` inherits no `__get`."
+            ))
+            .with_annotation(Annotation::primary(variable.span).with_message("Declared `extern` here."))
+            .with_help("Extend the plain PHP class whose `__get` gives it, as Eloquent's `Model`, or declare the property without `extern`."),
+        );
+
+        return;
+    }
+
+    let Property::Hooked(hooked) = property else {
+        return;
+    };
+    if let Some(set) = hooked.hook_list.setter()
+        && !context.codebase.method_exists(class.name, word("__set"))
+    {
+        context.collector.report_with_code(
+            IssueCode::MissingMagicMethod,
+            Issue::error(format!(
+                "`{member}` has `set`, which a plain PHP `__set` stores, and `{class_name}` inherits no `__set`."
+            ))
+            .with_annotation(Annotation::primary(set.span()).with_message("Declared here."))
+            .with_help("Make it `{ get; }`, or extend the plain PHP class whose `__set` stores it."),
+        );
+    }
+}
+
+/// Refuses each property `class` declares with storage that code outside it reaches, where a plain PHP parent defines
+/// `__get` and `__set`, spec section 14.3: the parent stores every other property through them, as Eloquent's `Model`
+/// saves a column, so this one would stay in memory and never be saved. A private one is the class's own, and one the
+/// parent declares, as Eloquent's `table`, is the parent's.
+pub(crate) fn check_property_a_magic_parent_stores<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    let declaring = |method: &str| {
+        let method = context.codebase.get_declaring_method_identifier(&MethodIdentifier::new(class.name, word(method)));
+
+        context.codebase.get_class_like(method.get_class_name()).filter(|parent| {
+            parent.name != class.name && context.codebase.method_exists(class.name, method.get_method_name())
+        })
+    };
+    let Some(parent) = declaring("__get").filter(|parent| !parent.flags.is_sharp()) else {
+        return;
+    };
+    if declaring("__set").is_none() {
+        return;
+    }
+    let parent_class = class.direct_parent_class;
+
+    for (name, property) in &class.properties {
+        if property.flags.is_static()
+            || property.flags.is_virtual_property()
+            || property.read_visibility == Visibility::Private
+            || parent_class.is_some_and(|parent_class| context.codebase.property_exists(parent_class, *name))
+        {
+            continue;
+        }
+
+        let class_name = display_class_like_name(context, class.original_name);
+        let parent_name = display_class_like_name(context, parent.original_name);
+        let property_name = display_property_name(context, *name);
+        let declared = property
+            .type_declaration_metadata
+            .as_ref()
+            .map_or_else(|| "Any?".to_owned(), |declared| display_sharp_type(context, &declared.type_union));
+        context.collector.report_with_code(
+            IssueCode::IncompatiblePropertyVisibility,
+            Issue::error(format!(
+                "`{class_name}`'s parent `{parent_name}` stores properties through `__get` and `__set`, so a {} `{property_name}` would never be saved.",
+                property.read_visibility
+            ))
+            .with_annotation(
+                Annotation::primary(property.name_span.or(property.span).unwrap_or(class.span))
+                    .with_message("Declared here."),
+            )
+            .with_help(format!(
+                "Write `public extern {declared} {property_name} {{ get; set; }}`, or make it private to keep it in memory."
+            )),
+        );
+    }
 }
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Property<'arena> {

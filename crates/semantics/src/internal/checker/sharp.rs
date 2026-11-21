@@ -1411,7 +1411,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::PropertyConcreteItem(_)
             | Node::DirectVariable(_)
             // `is_slice_property` refuses `override`, `virtual` and `abstract` on a field, `required` on a member
-            // without `init` or `set`, and `extern` on a member that is not get-only.
+            // without `init` or `set`, and `extern` on a member that is not `{ get; }` or `{ get; set; }`.
             | Node::Modifier(
                 Modifier::Public(_)
                 | Modifier::Protected(_)
@@ -3743,20 +3743,30 @@ fn report_optional_before_required(parameters: &FunctionLikeParameterList, conte
     }
 }
 
-/// Whether `property` has the one form spec section 14.3 gives an `extern` property, as in `public extern
-/// Collection<int, Product> products { get; }`: a `get` without a body and nothing else, with no initial value and no
-/// behavior, and no modifier but its access and `extern`.
+/// Whether `property` has a form spec section 14.3 gives an `extern` property, as in `public extern
+/// Collection<int, Product> products { get; }` or `public extern string email { get; private set; }`: a `get`, and a
+/// `set` that may narrow its access, without bodies, with no initial value and no behavior, and no modifier but its
+/// access and `extern`.
 fn is_extern_property(property: &Property) -> bool {
     let Property::Hooked(hooked) = property else {
         return false;
+    };
+    let is_accessor = |hook: &PropertyHook, name: &[u8], narrows: bool| {
+        hook.name.value == name
+            && matches!(hook.body, PropertyHookBody::Abstract(_))
+            && hook.modifiers.iter().all(|modifier| {
+                narrows && matches!(modifier, Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))
+            })
     };
 
     hooked.initial_value.is_none()
         && hooked.behaviors.is_none()
         && matches!(hooked.item, PropertyItem::Abstract(_))
-        && matches!(hooked.hook_list.hooks.as_slice(), [get] if get.name.value == b"get"
-            && get.modifiers.is_empty()
-            && matches!(get.body, PropertyHookBody::Abstract(_)))
+        && match hooked.hook_list.hooks.as_slice() {
+            [get] => is_accessor(get, b"get", false),
+            [get, set] => is_accessor(get, b"get", false) && is_accessor(set, b"set", true),
+            _ => false,
+        }
         && hooked.modifiers.iter().all(|modifier| {
             matches!(
                 modifier,
@@ -3810,14 +3820,14 @@ fn is_slice_property(property: &Property) -> Result<(), Box<Issue>> {
 
     let name = BytesDisplay(property.first_variable().name);
     let modifier = |found: fn(&Modifier) -> bool| property.modifiers().iter().find(|modifier| found(modifier));
-    // Spec section 14.3: an `extern` property is the one plain PHP's `__get` gives, so it reads only, holds no storage
-    // and takes no other modifier but its access.
+    // Spec section 14.3: an `extern` property is the one plain PHP's `__get` gives and `__set` stores, so it holds no
+    // storage and takes no other modifier but its access.
     if let Some(r#extern) = modifier(|modifier| matches!(modifier, Modifier::Extern(_)))
         && !is_extern_property(property)
     {
         return Err(Box::new(
             Issue::error(
-                "An `extern` property is the one plain PHP's `__get` gives, so it is get-only, as in `public extern Collection<int, Product> products { get; }`.",
+                "An `extern` property is the one plain PHP's `__get` gives and `__set` stores, so it has `get`, and `set` where it is written, as in `public extern string email { get; set; }`.",
             )
             .with_annotation(Annotation::primary(r#extern.span()).with_message("Written here."))
             .with_note("It takes no initial value, no behavior and no modifier but its access."),

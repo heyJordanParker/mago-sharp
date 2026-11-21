@@ -28356,14 +28356,14 @@ fn a_plain_php_method_of_a_property_s_name_read_as_a_function_is_a_first_class_c
 /// $relation = $this->owner(...);
 /// ```
 ///
-/// A PHP# class whose plain PHP parent defines `__get`, as a PHP# Eloquent model is, has the properties `__get` reads,
-/// spec section 14.3, so a read of its own method's name reads the property, and takes the method where the code takes
-/// a function.
+/// A PHP# class whose plain PHP parent defines `__get`, as a PHP# Eloquent model is, has the properties the parent's
+/// `@property` lines declare, spec section 14.3, so a read of its own method's name reads such a property, and takes
+/// the method where the code takes a function.
 #[test]
-fn a_read_of_a_sharp_class_whose_plain_php_parent_defines_get_reads_the_property() {
+fn a_read_of_a_property_a_plain_php_parent_declares_reads_the_property() {
     let model = (
         "src/Lib/Model.php",
-        "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return $name;\n    }\n\n    public static function measure(string $text): int\n    {\n        return strlen($text);\n    }\n}\n",
+        "<?php\n\nnamespace Lib;\n\n/** @property-read mixed $owner */\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return $name;\n    }\n\n    public static function measure(string $text): int\n    {\n        return strlen($text);\n    }\n}\n",
     );
     let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Row : Model\n{\n    public Row() : super() { }\n\n    public string owner() => \"relation\";\n\n    public int run()\n    {\n        const owner = this.owner;\n        Function<string()> relation = this.owner;\n        return Model.measure(relation()) + (owner is string ? 1 : 0);\n    }\n}\n";
     let lowered = Lowered::with(code, &[model]);
@@ -28406,6 +28406,56 @@ fn a_read_of_a_sharp_class_whose_plain_php_parent_defines_get_reads_the_property
                           ZVAL "owner"
                     ZVAL 1
                     ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
+/// $this->total_cents = 5;
+/// $this->email = 'a@b.co';
+/// ```
+///
+/// An `extern` property with `set` writes what plain PHP's `__set` stores, spec section 14.3, and reads what `__get`
+/// gives, under the key `[Key("…")]` names, so `totalCents` reaches the column `total_cents`.
+#[test]
+fn an_extern_property_reaches_get_and_set_under_its_key() {
+    let model = (
+        "src/Lib/Model.php",
+        "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    /** @var array<string, mixed> */\n    private array $attributes = [];\n\n    public function __get(string $key): mixed\n    {\n        return $this->attributes[$key] ?? null;\n    }\n\n    public function __set(string $key, mixed $value): void\n    {\n        $this->attributes[$key] = $value;\n    }\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Row : Model\n{\n    [Key(\"total_cents\")]\n    public extern int totalCents { get; set; }\n\n    public extern string email { get; set; }\n\n    public Row() : super() { }\n\n    public void run()\n    {\n        this.totalCents = 5;\n        this.email = \"a@b.co\";\n    }\n\n    public int total() => this.totalCents;\n}\n";
+    let lowered = Lowered::with(code, &[model]);
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "total_cents"
+                ZVAL 5
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "email"
+                ZVAL "a@b.co"
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("total"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                VERIFY_TYPE_ARGS
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "total_cents"
+                  ZVAL "int"
+                  ZVAL "App.Tenant.Row.totalCents"
         "#}
     );
 }

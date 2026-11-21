@@ -135,7 +135,7 @@ where
         property_selector,
         arrow_span,
         is_null_safe,
-        false, // `for_assignment`
+        None,
     )?;
     // The receiver's parts that declare no member of the name read the extension's computed property, spec section 26,
     // whose type joins the other parts' below.

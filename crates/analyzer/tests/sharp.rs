@@ -7686,13 +7686,13 @@ fn a_get_read_is_any_after_a_write_and_over_a_property_the_reader_cannot_see() {
 }
 
 /// Spec section 14.3: a PHP# class whose plain PHP parent defines `__get`, as a PHP# Eloquent model is, has the
-/// properties `__get` reads too, typed by its parents' `@property-read` lines and `Any?` otherwise, ahead of its own
-/// method of a property's name.
+/// properties its parents' `@property-read` lines declare, ahead of its own method of a property's name, and a read
+/// a function type takes gives the method.
 #[test]
-fn a_sharp_class_whose_plain_php_parent_defines_get_has_the_properties_it_reads() {
+fn a_sharp_class_whose_plain_php_parent_defines_get_has_the_properties_its_library_declares() {
     let model = "<?php\n\nnamespace Lib;\n\n/** @property-read Contact $contact */\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return new Contact($name);\n    }\n}\n";
     let contact = "<?php\n\nnamespace Lib;\n\nfinal class Contact\n{\n    public function __construct(public string $name)\n    {\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Contact;\nimport Lib.Model;\nimport Lib.Words;\n\npublic class Row : Model\n{\n    public Row() : super() { }\n\n    public Contact contact() => new Contact(\"relation\");\n\n    public Contact owner() => new Contact(\"relation\");\n\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        const owner = this.owner;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        const loaded = owner as Contact;\n        return Words.length(contact.name + relation().name + called.name + (loaded?.name ?? \"\"));\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Contact;\nimport Lib.Model;\nimport Lib.Words;\n\npublic class Row : Model\n{\n    public Row() : super() { }\n\n    public Contact contact() => new Contact(\"relation\");\n\n    public Contact owner() => new Contact(\"relation\");\n\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        return Words.length(contact.name + relation().name + called.name);\n    }\n}\n";
 
     let (issues, artifacts) = analyze_with_artifacts(
         &PLUGIN_REGISTRY,
@@ -7707,7 +7707,6 @@ fn a_sharp_class_whose_plain_php_parent_defines_get_has_the_properties_it_reads(
 
     assert_eq!(issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(), Vec::<String>::new());
     assert_eq!(type_at("const contact = row.contact;", "row.contact").as_deref(), Some("Lib\\Contact"));
-    assert_eq!(type_at("const owner = this.owner;", "this.owner").as_deref(), Some("mixed"));
     assert_eq!(type_at("relation = row.owner;", "row.owner").as_deref(), Some("(closure(): Lib\\Contact)"));
     assert_eq!(type_at("const called = row.owner();", "row.owner()").as_deref(), Some("Lib\\Contact"));
 }
@@ -7715,7 +7714,7 @@ fn a_sharp_class_whose_plain_php_parent_defines_get_has_the_properties_it_reads(
 /// Spec section 14.3: an `extern` property of a PHP# class whose plain PHP parent defines `__get` states the type of
 /// the property `__get` gives, as a `@property-read` line does, beside a method of its name, as Eloquent's relation
 /// `products()` beside the relation `products` its `__get` loads. A class that inherits no `__get` has no such
-/// property, and an `extern` property is get-only.
+/// property, and one that inherits no `__set` has none it writes.
 #[test]
 fn an_extern_property_states_the_type_of_what_a_plain_php_get_gives() {
     let model = "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return new Collection([new Product()]);\n    }\n}\n";
@@ -7745,7 +7744,44 @@ fn an_extern_property_states_the_type_of_what_a_plain_php_get_gives() {
     assert_eq!(
         refusals(("src/Demo/Stock.sharp", stock), &library),
         [
-            "9:12 semantics An `extern` property is the one plain PHP's `__get` gives, so it is get-only, as in `public extern Collection<int, Product> products { get; }`. | "
+            "9:60 missing-magic-method `Stock.products` has `set`, which a plain PHP `__set` stores, and `Stock` inherits no `__set`. | Make it `{ get; }`, or extend the plain PHP class whose `__set` stores it."
+        ]
+    );
+}
+
+/// Spec section 14.3: a PHP# class reaches a property its plain PHP parent's `__get` and `__set` serve only through an
+/// `extern` property, which states its type and, with `set`, takes writes `__set` stores. A name no `extern` property
+/// and no line of the library declares is refused, read or written, and so is a property the class would keep in
+/// memory where the parent stores every other one, unless it is private.
+#[test]
+fn a_property_a_plain_php_parent_stores_is_reached_through_an_extern_property() {
+    let model = "<?php\n\nnamespace Lib;\n\n/** @property-read int $id */\nabstract class Model\n{\n    /** @var array<string, mixed> */\n    private array $attributes = [];\n\n    public function __get(string $key): mixed\n    {\n        return $this->attributes[$key] ?? null;\n    }\n\n    public function __set(string $key, mixed $value): void\n    {\n        $this->attributes[$key] = $value;\n    }\n}\n";
+    let order = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public extern string email { get; set; }\n\n    [Key(\"total_cents\")]\n    public extern int totalCents { get; private set; }\n\n    public string name { get; set; } = \"\";\n\n    private int cached = 0;\n\n    public void fill()\n    {\n        this.email = 5;\n        this.emial = \"x\";\n        this.email = \"a@b.co\";\n        this.totalCents = this.id + this.cached;\n    }\n}\n";
+    let report = "namespace Demo;\n\npublic class Report\n{\n    public static string read(Order order) => order.email;\n\n    public static Any? anything(Order order) => order.anything;\n\n    public static void price(Order order) { order.totalCents = 3; }\n}\n";
+    let library = [("src/Lib/Model.php", model)];
+
+    assert_eq!(
+        refusals(("src/Demo/Order.sharp", order), &library),
+        [
+            "12:19 incompatible-property-visibility `Order`'s parent `Model` stores properties through `__get` and `__set`, so a public `name` would never be saved. | Write `public extern string name { get; set; }`, or make it private to keep it in memory.",
+            "18:22 invalid-property-assignment-value Invalid type for property `Order.email`: expected `string`, but got `int`. | Change the assigned value to match the property's type, or update the property's type declaration.",
+            "19:14 non-existent-property `Order` has no property `emial`. Declare it: `public extern string emial { get; set; }`. | ",
+        ]
+    );
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", report), &[("src/Demo/Order.sharp", order), library[0]]),
+        [
+            "7:55 non-existent-property `Order` has no property `anything`. Declare it: `public extern … anything { get; set; }`. | ",
+            "9:51 invalid-property-write Cannot write to private property `Order.totalCents`. | Make the property `Order.totalCents` writable (e.g., `public` or `public(set)`), or add a public setter method.",
+        ]
+    );
+
+    let catalogue = "<?php\n\nnamespace Lib;\n\nabstract class Catalogue\n{\n    public function __get(string $key): mixed\n    {\n        return null;\n    }\n}\n";
+    let auction = "namespace Demo;\n\nimport Lib.Catalogue;\n\npublic class Auction : Catalogue\n{\n    public extern string buyer { get; set; }\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Auction.sharp", auction), &[("src/Lib/Catalogue.php", catalogue)]),
+        [
+            "7:39 missing-magic-method `Auction.buyer` has `set`, which a plain PHP `__set` stores, and `Auction` inherits no `__set`. | Make it `{ get; }`, or extend the plain PHP class whose `__set` stores it.",
         ]
     );
 }
