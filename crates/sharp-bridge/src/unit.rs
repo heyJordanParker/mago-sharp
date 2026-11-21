@@ -615,7 +615,16 @@ pub fn compiled_path(root: &Path, source: &Path) -> Result<Option<PathBuf>, Data
         Err(error) => return Err(DatabaseError::io(IOAction::ResolvePath, source, error)),
     };
 
-    Ok(real.strip_prefix(root).ok().map(|relative| root.join(COMPILED_FOLDER).join(relative).with_extension("sharpc")))
+    Ok(compiled_path_of_real(root, &real))
+}
+
+/// Where the compiled file of the source whose real path is `real` lives, or none when `real` is outside `root`.
+///
+/// It is where [`compiled_path`] places it. A run that resolved each source's real path when it found the file, as the
+/// walk of its load does, takes the compiled file's path from that real path.
+#[must_use]
+pub fn compiled_path_of_real(root: &Path, real: &Path) -> Option<PathBuf> {
+    real.strip_prefix(root).ok().map(|relative| root.join(COMPILED_FOLDER).join(relative).with_extension("sharpc"))
 }
 
 /// Returns `true` when the compiled file `bytes` cannot stand for the code whose key is `key` any more: it is no compiled
