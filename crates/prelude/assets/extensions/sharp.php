@@ -333,6 +333,12 @@ function withTag(string $family, string $tag): ?string {}
 function tag(string $variant): ?string {}
 
 /**
+ * The text of the warning the last silenced built-in call of this request raised, as "preg_match(): No ending
+ * matching delimiter ')' found", or null. The standard library's `Regex.parse` names a pattern's compile error by it.
+ */
+function silencedWarning(): ?string {}
+
+/**
  * Each address the system resolver gives for `$host`, as text and once, in the order getaddrinfo gives them, the hosts
  * file included, and throws when the resolver cannot find the host. The standard library's `Dns.addresses` resolves
  * by it.
