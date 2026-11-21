@@ -6085,9 +6085,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                     return self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
                 }
-                // A test of a type parameter or of a class with type arguments reads them while the code runs.
+                // A test of a type parameter or of a class with type arguments reads them while the code runs. One of a
+                // variable that names nothing, a local or the `$` variable a pattern form reads a `match`'s local
+                // through, is `($x = $x) instanceof T`, which the engine binds as it binds a name, so a match makes the
+                // variable the value as the type holds it, and a failure leaves it as it was.
                 if let Some(tested) = self.types.tested_type(class) {
                     let tested = self.type_text(line, &tested);
+                    let bound = match lhs.unparenthesized() {
+                        Expression::ConstantAccess(name)
+                            if matches!(self.names.binding(&name.name), Some(Binding::Local(_))) =>
+                        {
+                            Some(self.variable(name.span(), name.name.value()))
+                        }
+                        Expression::Variable(Variable::Direct(variable)) => Some(
+                            self.variable(variable.span, variable.name.strip_prefix(b"$").unwrap_or(variable.name)),
+                        ),
+                        _ => None,
+                    };
+                    let value = bound.map_or(value, |bound| self.node(SHARP_AST_ASSIGN, 0, line, &[bound, value]));
 
                     return self.node(SHARP_AST_SHARP_IS_TYPE, 0, line, &[value, tested]);
                 }

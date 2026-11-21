@@ -4964,8 +4964,11 @@ fn a_named_constructor_of_a_generic_class_takes_the_class_type_arguments_as_its_
                         VAR
                           ZVAL "held"
                         SHARP_IS_TYPE
-                          VAR
-                            ZVAL "item"
+                          ASSIGN
+                            VAR
+                              ZVAL "item"
+                            VAR
+                              ZVAL "item"
                           ZVAL "$0"
                     null
                     null
@@ -5078,8 +5081,11 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
                     ZVAL "item"
               RETURN
                 SHARP_IS_TYPE
-                  VAR
-                    ZVAL "item"
+                  ASSIGN
+                    VAR
+                      ZVAL "item"
+                    VAR
+                      ZVAL "item"
                   ZVAL "#0"
         "##}
     );
@@ -5278,7 +5284,7 @@ fn new_of_self_with_a_named_constructor_calls_it_on_the_class_the_code_is_called
 }
 
 /// ```php
-/// return /* $value is "App.Billable & App.Shippable" */;
+/// return /* ($value = $value) is "App.Billable & App.Shippable" */;
 /// ```
 ///
 /// Spec section 24: a pattern of an intersection tests every type it joins, which the engine reads from the type text,
@@ -5299,8 +5305,11 @@ fn a_pattern_of_an_intersection_tests_every_type_it_joins() {
             STMT_LIST
               RETURN
                 SHARP_IS_TYPE
-                  VAR
-                    ZVAL "value"
+                  ASSIGN
+                    VAR
+                      ZVAL "value"
+                    VAR
+                      ZVAL "value"
                   ZVAL "App.Billable & App.Shippable"
         "#}
     );
@@ -15676,9 +15685,9 @@ fn a_generic_call_on_a_value_of_a_type_parameter_carries_its_type_arguments() {
 }
 
 /// A test of a class with type arguments or of a type parameter, in `is`, `as` and a `match` arm, and `typeof` of a type
-/// parameter, read the type arguments while the code runs: a `SHARP_IS_TYPE` of the value and the type text, and a
-/// `SHARP_TYPE_OF` of the type text, written as `new` writes its type arguments. None runs as `instanceof` a class named
-/// for a type parameter, which no value is.
+/// parameter, read the type arguments while the code runs: a `SHARP_IS_TYPE` of the value and the type text, which binds
+/// a tested local to itself, and a `SHARP_TYPE_OF` of the type text, written as `new` writes its type arguments. None
+/// runs as `instanceof` a class named for a type parameter, which no value is.
 #[test]
 fn a_test_and_typeof_of_a_type_with_type_arguments_read_them_while_the_code_runs() {
     let entities = (
@@ -15711,7 +15720,9 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_read_them_while_the_code_runs
     );
 
     let test = |text: &str| {
-        format!("STMT_LIST\n  RETURN\n    SHARP_IS_TYPE\n      VAR\n        ZVAL \"value\"\n      ZVAL \"{text}\"\n")
+        format!(
+            "STMT_LIST\n  RETURN\n    SHARP_IS_TYPE\n      ASSIGN\n        VAR\n          ZVAL \"value\"\n        VAR\n          ZVAL \"value\"\n      ZVAL \"{text}\"\n"
+        )
     };
 
     assert_eq!(lowered.diagnostics(), Vec::<String>::new());
@@ -15724,7 +15735,7 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_read_them_while_the_code_runs
     );
     assert_eq!(
         lowered.body_of("arm"),
-        "STMT_LIST\n  RETURN\n    MATCH\n      ZVAL true\n      MATCH_ARM_LIST\n        MATCH_ARM\n          EXPR_LIST\n            SHARP_IS_TYPE\n              VAR\n                ZVAL \"value\"\n              ZVAL \"#0\"\n          ZVAL 1\n        MATCH_ARM\n          null\n          ZVAL 0\n"
+        "STMT_LIST\n  RETURN\n    MATCH\n      ZVAL true\n      MATCH_ARM_LIST\n        MATCH_ARM\n          EXPR_LIST\n            SHARP_IS_TYPE\n              ASSIGN\n                VAR\n                  ZVAL \"value\"\n                VAR\n                  ZVAL \"value\"\n              ZVAL \"#0\"\n          ZVAL 1\n        MATCH_ARM\n          null\n          ZVAL 0\n"
     );
     assert_eq!(lowered.body_of("kind"), "STMT_LIST\n  RETURN\n    SHARP_TYPE_OF\n      ZVAL \"#0\"\n");
 }
@@ -16419,8 +16430,11 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
               STMT_LIST
                 RETURN
                   SHARP_IS_TYPE
-                    VAR
-                      ZVAL "other"
+                    ASSIGN
+                      VAR
+                        ZVAL "other"
+                      VAR
+                        ZVAL "other"
                     ZVAL "Lib.HasLabel"
               SHARP_TYPE_ARGS
                 ZVAL [1] "bool"
@@ -29786,8 +29800,11 @@ fn a_test_of_a_function_type_is_the_engine_test_of_its_type_text() {
             STMT_LIST
               RETURN
                 SHARP_IS_TYPE
-                  VAR
-                    ZVAL "extra"
+                  ASSIGN
+                    VAR
+                      ZVAL "extra"
+                    VAR
+                      ZVAL "extra"
                   ZVAL "Function<int(int) uses Sharp.Net.Http>"
         "#}
     );
@@ -29801,8 +29818,11 @@ fn a_test_of_a_function_type_that_uses_none_is_the_engine_test_of_the_pure_type_
             STMT_LIST
               RETURN
                 SHARP_IS_TYPE
-                  VAR
-                    ZVAL "extra"
+                  ASSIGN
+                    VAR
+                      ZVAL "extra"
+                    VAR
+                      ZVAL "extra"
                   ZVAL "Function<int(int)>"
         "#}
     );
@@ -29844,7 +29864,7 @@ fn is_and_as_that_give_a_plain_php_class_type_arguments_are_refused_before_lower
 }
 
 /// ```php
-/// $present = <is Any>($extra);
+/// $present = <is Any>($extra = $extra);
 /// $either = <is int|string>(${'as#1'} = $extra) ? ${'as#1'} : null;
 /// ```
 ///
@@ -29863,8 +29883,11 @@ fn is_and_as_of_any_or_a_union_are_the_engine_test_of_its_type() {
                 VAR
                   ZVAL "present"
                 SHARP_IS_TYPE
-                  VAR
-                    ZVAL "extra"
+                  ASSIGN
+                    VAR
+                      ZVAL "extra"
+                    VAR
+                      ZVAL "extra"
                   ZVAL "Any"
               ASSIGN
                 VAR
@@ -29886,10 +29909,10 @@ fn is_and_as_of_any_or_a_union_are_the_engine_test_of_its_type() {
 
 /// ```php
 /// $pair = <is [int, string]>(${'as#1'} = $extra) ? ${'as#1'} : null;
-/// $type = <is Class<App.Tenant.Report>>($extra);
-/// $object = <is Object|int>($extra);
-/// $boxed = <is Class<App.Tenant.Box<int>>>($extra);
-/// $box = <is Class<App.Tenant.Box>>($extra);
+/// $type = <is Class<App.Tenant.Report>>($extra = $extra);
+/// $object = <is Object|int>($extra = $extra);
+/// $boxed = <is Class<App.Tenant.Box<int>>>($extra = $extra);
+/// $box = <is Class<App.Tenant.Box>>($extra = $extra);
 /// ```
 ///
 /// `is` and `as` of a tuple, of a class value and of `Object` are the engine's test of the type, as a collection's are,
@@ -29923,43 +29946,56 @@ fn is_and_as_of_a_tuple_a_class_value_or_object_are_the_engine_test_of_its_type(
                 VAR
                   ZVAL "type"
                 SHARP_IS_TYPE
-                  VAR
-                    ZVAL "extra"
+                  ASSIGN
+                    VAR
+                      ZVAL "extra"
+                    VAR
+                      ZVAL "extra"
                   ZVAL "Class<App.Tenant.Report>"
               ASSIGN
                 VAR
                   ZVAL "object"
                 SHARP_IS_TYPE
-                  VAR
-                    ZVAL "extra"
+                  ASSIGN
+                    VAR
+                      ZVAL "extra"
+                    VAR
+                      ZVAL "extra"
                   ZVAL "Object|int"
               ASSIGN
                 VAR
                   ZVAL "boxed"
                 SHARP_IS_TYPE
-                  VAR
-                    ZVAL "extra"
+                  ASSIGN
+                    VAR
+                      ZVAL "extra"
+                    VAR
+                      ZVAL "extra"
                   ZVAL "Class<App.Tenant.Box<int>>"
               ASSIGN
                 VAR
                   ZVAL "box"
                 SHARP_IS_TYPE
-                  VAR
-                    ZVAL "extra"
+                  ASSIGN
+                    VAR
+                      ZVAL "extra"
+                    VAR
+                      ZVAL "extra"
                   ZVAL "Class<App.Tenant.Box>"
         "#}
     );
 }
 
 /// ```php
-/// $numbers = <is List<int>>($extra);
+/// $numbers = <is List<int>>($extra = $extra);
 /// $kept = <is Map<string, int>>(${'as#1'} = $extra) ? ${'as#1'} : null;
-/// $tags = <is Set<string>>($extra);
+/// $tags = <is Set<string>>($extra = $extra);
 /// ```
 ///
 /// `is` and `as` of a `List`, a `Map` or a `Set` are the engine's test of the type, as a generic class's are, which
-/// walks every element. The test passes a PHP array whose elements fit, and gives the copy an `as` tests as the `Map`,
-/// so the local the `as` gives it to takes no other crossing.
+/// walks every element. The test passes a PHP array whose elements fit. An `is` that names nothing binds the local it
+/// tests, so a match makes that local the `Map` or the `Set`, and the `as` binds its copy, so the local the `as` gives
+/// it to takes no other crossing.
 #[test]
 fn is_and_as_of_a_collection_are_the_engine_test_of_its_type() {
     assert_eq!(
@@ -29974,8 +30010,11 @@ fn is_and_as_of_a_collection_are_the_engine_test_of_its_type() {
                 VAR
                   ZVAL "numbers"
                 SHARP_IS_TYPE
-                  VAR
-                    ZVAL "extra"
+                  ASSIGN
+                    VAR
+                      ZVAL "extra"
+                    VAR
+                      ZVAL "extra"
                   ZVAL "List<int>"
               ASSIGN
                 VAR
@@ -29995,8 +30034,11 @@ fn is_and_as_of_a_collection_are_the_engine_test_of_its_type() {
                 VAR
                   ZVAL "tags"
                 SHARP_IS_TYPE
-                  VAR
-                    ZVAL "extra"
+                  ASSIGN
+                    VAR
+                      ZVAL "extra"
+                    VAR
+                      ZVAL "extra"
                   ZVAL "Set<string>"
         "#}
     );
@@ -30562,7 +30604,7 @@ fn a_match_on_a_list_whose_arms_handle_every_length_lowers_with_no_default() {
 }
 
 /// ```php
-/// $a = $value is List<Any?> && \count($value) === 1 && \is_int($one = $value[0]);
+/// $a = ($value = $value) is List<Any?> && \count($value) === 1 && \is_int($one = $value[0]);
 /// ```
 ///
 /// A value that may be a list or anything else is tested with the engine's test of `List<Any?>` first, where a `List`
@@ -30579,8 +30621,11 @@ fn a_list_pattern_on_any_value_tests_it_is_a_list_first() {
                 AND
                   AND
                     SHARP_IS_TYPE
-                      VAR
-                        ZVAL "value"
+                      ASSIGN
+                        VAR
+                          ZVAL "value"
+                        VAR
+                          ZVAL "value"
                       ZVAL "List<Any?>"
                     BINARY_OP [16]
                       CALL
