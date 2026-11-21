@@ -31,10 +31,12 @@ use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCaseItem;
+use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extension;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Law as LawNode;
@@ -428,8 +430,9 @@ impl Translator<'_, '_> {
     }
 
     /// `Class.__construct`, a `@[simp]` definition that builds the structure: the PHP# `parent`'s value from the
-    /// constructor `: super(…)` calls, each promoted parameter, and each other property's initial value. A constructor
-    /// with a body of its own is not modeled.
+    /// constructor `: super(…)` calls, each promoted parameter, and each other property's initial value. A body that
+    /// only checks the arguments and throws runs first, so its checks are a precondition of the value, spec section 28,
+    /// and any other body is not modeled.
     #[allow(clippy::too_many_arguments)]
     fn constructor(
         &mut self,
@@ -451,14 +454,16 @@ impl Translator<'_, '_> {
                 let name = parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name);
                 parameters.push(format!("({} : {type})", names::identifier(name)));
             }
-            if let MethodBody::Concrete(block) = &constructor.body
-                && !block.statements.is_empty()
-            {
-                body.unmodeled(
-                    block.span(),
-                    format!("the body of the constructor of {short}"),
-                    issues::CONSTRUCTOR_BODY,
-                );
+            if let MethodBody::Concrete(block) = &constructor.body {
+                if block.statements.iter().all(checks_and_throws) {
+                    body.statements(&block.statements);
+                } else {
+                    body.unmodeled(
+                        block.span(),
+                        format!("the body of the constructor of {short}"),
+                        issues::CONSTRUCTOR_BODY,
+                    );
+                }
             }
         }
 
@@ -1125,4 +1130,26 @@ fn binder(body: &mut Body<'_, '_>, parameter: &FunctionLikeParameter) -> String 
 /// `parameter`'s name as Lean writes it.
 fn parameter_name(parameter: &FunctionLikeParameter) -> String {
     names::identifier(parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name))
+}
+
+/// Whether `statement` only checks a condition and throws, as `if (nanosecond < 0) { throw new ValueError(…); }` does,
+/// so a constructor body of such statements is a precondition of the value it builds, spec section 28.
+fn checks_and_throws(statement: &Statement) -> bool {
+    let Statement::If(r#if) = statement else {
+        return false;
+    };
+    let IfBody::Statement(body) = &r#if.body else {
+        return false;
+    };
+
+    body.else_if_clauses.is_empty() && body.else_clause.is_none() && throws(body.statement)
+}
+
+/// Whether `statement` is a `throw`, alone or as the one statement of a block.
+fn throws(statement: &Statement) -> bool {
+    match statement {
+        Statement::Expression(statement) => matches!(statement.expression, Expression::Throw(_)),
+        Statement::Block(block) => matches!(block.statements.as_slice(), [statement] if throws(statement)),
+        _ => false,
+    }
 }

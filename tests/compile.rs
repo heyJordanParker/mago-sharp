@@ -4749,6 +4749,35 @@ fn compile_proves_a_law_that_orders_two_instants_through_their_own_comparison() 
     );
 }
 
+/// `App.Shared.Stamp`, whose laws build an `Instant`: one reads what it built, and one holds only because the
+/// constructor throws for a nanosecond outside its range.
+const STAMP: &str = "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic final class Stamp\n{\n    law builds(int unused) => new Instant(1, 0).epochSeconds == 1;\n    law aBuiltNanosecondIsInRange(int s, int n) => new Instant(s, n).nanosecond <= 999_999_999;\n}\n";
+
+/// `App.Shared.Deadline`, a machine whose law orders two `Instant`s, one of them a parameter named `until`.
+const DEADLINE: &str = "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic machine Deadline\n{\n    case Open(Instant until)\n    {\n        public Deadline.Closed close() => Deadline.Closed;\n    }\n\n    final case Closed;\n\n    public static Deadline.Open open(Instant until) => Deadline.Open(until);\n\n    law laterIsLater(Instant until, Instant now) when now >= until => !(now < until);\n}\n";
+
+/// `App.Shared.SetupStatus`, a machine whose install expires 15 minutes after it starts, through `Instant.plus`.
+const SETUP_STATUS: &str = "namespace App.Shared;\n\nimport Sharp.Time.Duration;\nimport Sharp.Time.Instant;\n\npublic machine SetupStatus\n{\n    case Installing(Instant startedAt)\n    {\n        public SetupStatus.Ready finish() => SetupStatus.Ready;\n    }\n\n    final case Ready;\n\n    public static SetupStatus.Installing start(Instant at) => SetupStatus.Installing(at);\n\n    public Instant? expiresAt() => this is SetupStatus.Installing i ? i.startedAt.plus(Duration.ofMinutes(15)) : null;\n\n    law anInstallExpiresAfterItsWindow(Instant at) => SetupStatus.Installing(at).expiresAt() == at.plus(Duration.ofMinutes(15));\n}\n";
+
+/// Spec section 28: a constructor whose body only checks its arguments and throws is a precondition of the value it
+/// builds, so a law builds an `Instant`, relies on its nanosecond's range, orders two, and moves one with `plus`.
+#[test]
+fn a_law_builds_orders_and_moves_an_instant_through_its_constructor_s_checks() {
+    let directory = library_project(&[
+        ("app/Shared/Stamp.sharp", STAMP),
+        ("app/Shared/Deadline.sharp", DEADLINE),
+        ("app/Shared/SetupStatus.sharp", SETUP_STATUS),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    for file in ["app/Shared/Stamp.sharp", "app/Shared/Deadline.sharp", "app/Shared/SetupStatus.sharp"] {
+        assert!(compiled(root, file).exists(), "{file}");
+    }
+}
+
 /// Spec section 19: `<` on two values of a class that declares no `<=>` runs the one the sealed interface it implements
 /// declares, as the checker chose it. A false order is not proven.
 #[test]
@@ -7080,7 +7109,17 @@ fn a_law_reading_what_a_plain_php_parent_declares_is_refused_where_it_reads_it()
 fn a_law_reaching_a_named_constructor_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n    public Shape.triangle() : this(3) { }\n\n    law threeSides(int unused) => new Shape.triangle().sides == 3;\n}\n",
-        "Law threeSides reaches the named constructor Shape.triangle in Shape.threeSides. Write the constructor with promoted properties and no body, and compute the values in a static method that calls `new`.",
+        "Law threeSides reaches the named constructor Shape.triangle in Shape.threeSides. Write the constructor with promoted properties and a body that only checks its arguments and throws, and compute the values in a static method that calls `new`.",
+    );
+}
+
+/// Spec section 28: a constructor body that does more than check its arguments and throw is refused, as one that
+/// declares a local before its check.
+#[test]
+fn a_law_reaching_a_constructor_body_that_does_more_than_check_and_throw_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\nimport ValueError;\n\npublic class Shape\n{\n    public Shape(public int sides { get; })\n    {\n        const least = 3;\n        if (sides < least) {\n            throw new ValueError(\"A shape has 3 sides or more.\");\n        }\n    }\n\n    law threeSides(int unused) => new Shape(3).sides == 3;\n}\n",
+        "Law threeSides reaches the body of the constructor of Shape in new Shape. Write the constructor with promoted properties and a body that only checks its arguments and throws, and compute the values in a static method that calls `new`.",
     );
 }
 

@@ -287,7 +287,7 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// `statements` in order. The statements after an `if` whose block returns run where its condition does not hold.
-    fn statements(&mut self, statements: &Sequence<'_, Statement<'_>>) {
+    pub(super) fn statements(&mut self, statements: &Sequence<'_, Statement<'_>>) {
         let outer = self.path.clone();
         for statement in statements {
             self.statement(statement);
@@ -434,15 +434,15 @@ impl<'body, 'program> Body<'body, 'program> {
                         let Some(test) = self.is_test(is) else {
                             return "default".to_owned();
                         };
-                        let then = self.under(holds, |body| body.branch(then));
-                        let otherwise = self.branch(conditional.r#else);
+                        let then = self.under(holds, |body| body.branch_of(then, expression));
+                        let otherwise = self.branch_of(conditional.r#else, expression);
 
                         return self.choose(&choice(vec![(test, then)], otherwise));
                     }
                     let condition = self.value(conditional.condition);
-                    let then = self.under(holds, |body| body.branch(then));
+                    let then = self.under(holds, |body| body.branch_of(then, expression));
                     let fails = self.path.branch(conditional.condition, false);
-                    let otherwise = self.under(fails, |body| body.branch(conditional.r#else));
+                    let otherwise = self.under(fails, |body| body.branch_of(conditional.r#else, expression));
 
                     self.choose(&Choice::If(
                         condition,
@@ -452,7 +452,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 }
                 None => unreachable!("PHP# parses no `?:` with two operands, as {:?}", expression.span()),
             },
-            Expression::PatternMatch(r#match) => self.pattern_match(r#match),
+            Expression::PatternMatch(r#match) => self.pattern_match(expression, r#match),
             Expression::Call(Call::Method(call)) => self.method_call(expression, call),
             Expression::Call(Call::NullSafeMethod(call)) => self.null_safe_call(expression, call),
             Expression::Call(Call::Function(call)) => {
@@ -864,7 +864,7 @@ impl<'body, 'program> Body<'body, 'program> {
             Expression::Parenthesized(parenthesized) => self.exact_int(parenthesized.expression),
             Expression::Literal(Literal::Integer(integer)) => {
                 match integer.value.and_then(|value| i64::try_from(value).ok()) {
-                    Some(value) => format!("({value} : Int)"),
+                    Some(value) => format!("({value} : _root_.Int)"),
                     None => format!("{}.toInt", self.value(expression)),
                 }
             }
@@ -953,10 +953,10 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
-    /// A `match` in an expression gives the value of the first arm whose pattern and guard hold, and throws when none
-    /// does.
-    fn pattern_match(&mut self, r#match: &PatternMatch) -> String {
-        let Some((arms, otherwise)) = self.arms(r#match, Self::arm_value) else {
+    /// A `match` in an expression, `expression`, gives the value of the first arm whose pattern and guard hold, and
+    /// throws when none does.
+    fn pattern_match(&mut self, expression: &Expression, r#match: &PatternMatch) -> String {
+        let Some((arms, otherwise)) = self.arms(r#match, |body, arm| body.arm_value(arm, expression)) else {
             return "default".to_owned();
         };
 
@@ -996,10 +996,10 @@ impl<'body, 'program> Body<'body, 'program> {
         Some((arms, otherwise))
     }
 
-    /// The branch of an arm of a `match` in an expression, which ends in the arm's value.
-    fn arm_value(&mut self, body: &PatternMatchArmBody) -> Branch {
+    /// The branch of an arm of `whole`, a `match` in an expression, which ends in the arm's value.
+    fn arm_value(&mut self, body: &PatternMatchArmBody, whole: &Expression) -> Branch {
         match body {
-            PatternMatchArmBody::Expression(expression) => self.branch(expression),
+            PatternMatchArmBody::Expression(expression) => self.branch_of(expression, whole),
             PatternMatchArmBody::Block(block) => {
                 unreachable!("the checker accepts a block arm only in a match statement, not {:?}", block.span())
             }
@@ -1444,7 +1444,7 @@ impl<'body, 'program> Body<'body, 'program> {
             (b"count", 0) => {
                 let list = self.value(call.object);
                 if self.exact {
-                    return self.bind(format!("int.ofInt (List.length {list} : Int)"));
+                    return self.bind(format!("int.ofInt (List.length {list} : _root_.Int)"));
                 }
 
                 format!("(int.count {list})")
@@ -1523,7 +1523,7 @@ impl<'body, 'program> Body<'body, 'program> {
 
         match (name.as_str(), arguments.as_slice()) {
             ("count", []) if self.exact => {
-                self.bind(format!("int.ofInt (List.length (Sharp.Map.entries {map}) : Int)"))
+                self.bind(format!("int.ofInt (List.length (Sharp.Map.entries {map}) : _root_.Int)"))
             }
             ("get", [key]) => self.map_get(call.object, &map, key),
             _ => {
@@ -2299,6 +2299,19 @@ impl<'body, 'program> Body<'body, 'program> {
     /// The statements of a branch whose value is `expression`'s.
     fn branch(&mut self, expression: &Expression) -> Branch {
         self.nested_lines(|body| body.value(expression))
+    }
+
+    /// The statements of a branch whose value is `expression`'s, as a value of `whole`, the `?:` or `match` it is a
+    /// branch of: where `whole` may be null and `expression` never is, its value is `some` of it, so each branch gives
+    /// `whole`'s Lean type, which a branch that gives `none` needs.
+    fn branch_of(&mut self, expression: &Expression, whole: &Expression) -> Branch {
+        let types = self.checked.types();
+        let lifted = types.expression_type(whole).is_nullable() && !types.expression_type(expression).can_be_null();
+
+        self.nested_lines(|body| {
+            let value = body.value(expression);
+            if lifted { format!("(some {value})") } else { value }
+        })
     }
 
     /// The statements `statement` translates to on its own, which a branch of an `if` holds.

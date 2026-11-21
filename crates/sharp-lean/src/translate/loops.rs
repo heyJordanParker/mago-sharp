@@ -114,8 +114,8 @@ impl Body<'_, '_> {
 
         let Some(amount) = addition.amount else {
             return Some(match conditions.as_slice() {
-                [] => format!("(List.length {list} : Int)"),
-                _ => format!("(List.countP (fun {element} => {}) {list} : Int)", conditions.join(" && ")),
+                [] => format!("(List.length {list} : _root_.Int)"),
+                _ => format!("(List.countP (fun {element} => {}) {list} : _root_.Int)", conditions.join(" && ")),
             });
         };
         if self.kind(self.checked.types().expression_type(amount)) != Kind::Int {

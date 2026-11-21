@@ -65,7 +65,8 @@ const PROOF_STEPS: &str = "Sharp.Lean.Proof";
 const LAW_STATEMENT: &str = "Sharp.Lean.Law";
 
 /// The lemmas the fixed steps of a case rewrite with, beside the definitions the law uses: an `if` on a condition that
-/// decides, the monad's steps, a law's claim, the int operations and comparisons, and an int literal's value.
+/// decides, the monad's steps, a law's claim, the int operations and comparisons, an int literal's value, and a value
+/// a nullable side holds.
 const STEP_LEMMAS: &[&str] = &[
     "↓reduceIte",
     "bind_assoc",
@@ -80,6 +81,21 @@ const STEP_LEMMAS: &[&str] = &[
     "beq_self_eq_true",
     "decide_eq_true_eq",
     "Bool.and_eq_true",
+    "Int64.le_iff_toInt_le",
+    "Int64.lt_iff_toInt_lt",
+    "Int64.toInt_zero",
+    "Int64.reduceToInt",
+    "Option.isSome_some",
+    "Option.getD_some",
+];
+
+/// The lemmas of [`STEP_LEMMAS`] that read an int step as facts about the `Int` it gives. The fixed steps first rewrite
+/// without them, so two steps that compute from the same values stay one term, which `simp_all` reads as one value, as
+/// a law that runs a method twice needs, as `at.plus(d)` in a claim and in a method it calls.
+const VALUE_LEMMAS: &[&str] = &[
+    "int.add_eq_pure",
+    "int.sub_eq_pure",
+    "int.toInt_max",
     "Int64.le_iff_toInt_le",
     "Int64.lt_iff_toInt_lt",
     "Int64.toInt_zero",
@@ -466,14 +482,19 @@ fn scripted(law: &Law, program: &Program<'_>) -> Option<String> {
     Some(law.proof.closes.iter().fold(law.proof.text.clone(), |text, close| text.replace(close.as_str(), &closed)))
 }
 
-/// The fixed steps that close a case: `simp_all` with `lemmas` and the definitions `plain` as rewrites, then `omega`
-/// or `decide` on each goal it leaves. With `recursive` definitions, the steps first unfold each of them once, as a
-/// recursion on a value the case does not know needs, and else rewrite with them too, until each recursion ends, as
-/// one on values the law writes out needs.
+/// The fixed steps that close a case: `simp_all` with `lemmas` and the definitions `plain` as rewrites, first without
+/// [`VALUE_LEMMAS`] and then with them, then `omega` or `decide` on each goal it leaves. With `recursive` definitions,
+/// the steps first unfold each of them once, as a recursion on a value the case does not know needs, and else rewrite
+/// with them too, until each recursion ends, as one on values the law writes out needs.
 fn steps(lemmas: &[&str], plain: &[&str], recursive: &[&str]) -> String {
     let simp = |definitions: &[&[&str]]| {
-        let lemmas: Vec<&str> = lemmas.iter().chain(definitions.iter().copied().flatten()).copied().collect();
-        format!("simp_all (config := {{ decide := true }}) only [{}]", lemmas.join(", "))
+        let pass = |lemmas: Vec<&str>| {
+            let lemmas: Vec<&str> = lemmas.into_iter().chain(definitions.iter().copied().flatten().copied()).collect();
+            format!("(try simp_all (config := {{ decide := true }}) only [{}])", lemmas.join(", "))
+        };
+        let merging = lemmas.iter().copied().filter(|lemma| !VALUE_LEMMAS.contains(lemma)).collect();
+
+        format!("{}; {}", pass(merging), pass(lemmas.to_vec()))
     };
     let close = "all_goals (intros; subst_vars; first | rfl | omega | decide)";
     let rewritten = format!("({}; {close}; done)", simp(&[plain, recursive]));
