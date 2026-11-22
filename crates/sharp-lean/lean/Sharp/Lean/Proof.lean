@@ -114,13 +114,19 @@ methods, each giving an `M` of its result, never are. -/
 private def isLaw (env : Environment) (name : Name) : Bool :=
   isCode env name && (env.find? name).any fun info => info.isDefinition && info.type.getForallBody.isProp
 
-/-- Each definition of the project's code that `e` names, apart from a structure's fields and a law's statement. -/
+/-- Whether `name` reads a field of a case, which its constructor's equation `name.«$held»`, a `simp` and `grind`
+lemma, reads in its place. -/
+private def isCaseField (env : Environment) (name : Name) : Bool :=
+  env.contains (name.str "$held")
+
+/-- Each definition of the project's code that `e` names, apart from a structure's fields, a case's fields and a law's
+statement. -/
 private def definitionsIn (e : Expr) : MetaM (Array Name) := do
   let env ← getEnv
   let mut found := #[]
   for name in e.getUsedConstants do
     if isCode env name && (env.find? name).any (·.isDefinition) && !env.isProjectionFn name &&
-        !isLaw env name && !found.contains name then
+        !isCaseField env name && !isLaw env name && !found.contains name then
       found := found.push name
   return found
 
@@ -177,7 +183,9 @@ private def unfoldOnce (definition : Name) : TacticM Unit := do
 on what is left, or `decide`, or the same steps on each case of each `if` and `match` left in the goal, as a `match` on
 the case of a value an `if` chose. The goal's binders become facts before the split, so a `match` on a value a step
 computes, as the case a move's `? :` gives, splits too. A case hypothesis keeps its `¬ x ≤ y` and its `¬ x < y`, so it
-still decides the `if` the definition tests. -/
+still decides the `if` the definition tests. `simp_all` reads a value of a type with one constructor, as a machine of
+one case translates, as it reads any other, and never as that constructor of its kernel projections, which `grind`
+can't relate to the case that built the value. -/
 private def auto (definitions : Array Name) : TacticM Unit := do
   let kept : Array SimpItem := #[⟨(← `(Lean.Parser.Tactic.simpErase| -Int64.not_le)).raw⟩,
     ⟨(← `(Lean.Parser.Tactic.simpErase| -Int.not_le)).raw⟩,
@@ -185,12 +193,13 @@ private def auto (definitions : Array Name) : TacticM Unit := do
     ⟨(← `(Lean.Parser.Tactic.simpErase| -Int.not_lt)).raw⟩]
   let items := (← definitions.mapM lemma) ++ kept
   evalTactic (← `(tactic| first
-    | ((try simp_all [$items,*])
+    | ((try simp_all (config := { etaStruct := .none }) [$items,*])
        first | done | omega | grind)
     | decide
-    | ((try simp_all [$items,*])
+    | ((try simp_all (config := { etaStruct := .none }) [$items,*])
        intros
-       (repeat' split) <;> (try simp_all [$items,*]) <;> first | done | omega | grind)))
+       (repeat' split) <;> (try simp_all (config := { etaStruct := .none }) [$items,*]) <;>
+         first | done | omega | grind)))
 
 /-- Runs `steps`, the steps of one case, within half of its theorem's time budget, counted from where the case starts, so
 a case whose steps run out of it leaves the cases after it the rest of the theorem's. -/

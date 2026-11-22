@@ -559,20 +559,32 @@ impl Translator<'_, '_> {
 
         // Spec section 20: a field of a case that carries data reads as the constructor's field, where a test named the
         // case. Any other case gives the field's default, which no such read sees. The value of an enum that implements
-        // a sealed interface is the interface's, spec section 20.1.
+        // a sealed interface is the interface's, spec section 20.1. A proof reads the field through `«$held»`, the
+        // constructor's equation, rather than unfolding the read, which for a machine of one case is a projection the
+        // automatic steps can't relate to the case that built the value.
         for (case, field, place, count, r#type) in fields {
             let key = names::member(&names::member(&lean, case), field);
             let mut binders = vec!["_"; count];
             binders[place] = "held";
+            let values: Vec<String> = (0..count).map(|value| format!("«${value}»")).collect();
             let mut body =
                 Body::new(self.checked, self.reach, full, format!("{short}.{}", String::from_utf8_lossy(case)));
             let domain = body.class_type(r#enum.name.span, full);
             let pattern =
                 body.held(r#enum.name.span, full, format!("(.{} {})", names::identifier(case), binders.join(" ")));
+            let built =
+                body.held(r#enum.name.span, full, format!("(.{} {})", names::identifier(case), values.join(" ")));
             let lines = [
                 format!("def {key} : {domain} → {type}"),
                 format!("  | {pattern} => held"),
                 "  | _ => default".to_owned(),
+                String::new(),
+                format!(
+                    "@[simp, grind =] theorem {key}.«$held» : ∀ {}, {key} {built} = {} := fun {} => rfl",
+                    values.join(" "),
+                    values[place],
+                    vec!["_"; count].join(" ")
+                ),
             ];
             self.translation.receivers.push((key.clone(), true));
             self.declare(body, key, r#enum.name.span, lines.join("\n"), Role::Definition);

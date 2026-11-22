@@ -4441,6 +4441,28 @@ fn a_law_reads_a_nullable_int_with_coalesce_and_equality_as_the_integer_it_holds
     assert!(compiled(directory.path(), "app/Seats.sharp").exists());
 }
 
+/// A law reads a field of a machine with one case as it reads a field of a machine with more, so the laws that prove
+/// for a machine with two cases prove for the same machine with one.
+#[test]
+fn a_law_reads_the_fields_of_a_machine_with_one_case() {
+    let directory = lawful_project(&[
+        (
+            "app/Seats.sharp",
+            "namespace App;\n\npublic machine Seats\n{\n    final case Open(int? left);\n\n    public static Seats.Open of(int n) => n > 0 ? Seats.Open(n - 1) : Seats.Open(null);\n\n    law leftIsNeverNegative(Seats.Open open) => (open.left ?? 0) >= 0;\n\n    law ofLeavesOneLess(int n) => n <= 0 || Seats.of(n).left == n - 1;\n}\n",
+        ),
+        (
+            "app/Spaces.sharp",
+            "namespace App;\n\npublic machine Spaces\n{\n    final case Open(int? left);\n\n    public static Spaces of(int n) => n >= 0 ? Spaces.Open(n) : Spaces.Open(null);\n\n    law leftIsNeverNegative(Spaces.Open open) => open.left is int left ? left >= 0 : true;\n\n    law ofLeavesNoneNegative(int n) => Spaces.of(n) is Spaces.Open open ? (open.left is int left ? left >= 0 : true) : true;\n}\n",
+        ),
+    ]);
+
+    let output = compile(directory.path());
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(directory.path(), "app/Seats.sharp").exists());
+    assert!(compiled(directory.path(), "app/Spaces.sharp").exists());
+}
+
 /// A machine whose second law names a parameter `until` and whose `Going` case holds a field `while`, two of Lean's
 /// own words.
 const SUBSCRIPTION_STATUS: &str = "namespace App.Repro;\n\nimport Sharp.Time.Instant;\n\npublic machine SubscriptionStatus\n{\n    case Waiting\n    {\n        public SubscriptionStatus.Going go(Instant at) => SubscriptionStatus.Going(at, 0);\n    }\n\n    case Going(Instant at, int @while)\n    {\n        public SubscriptionStatus.Paused pause() => SubscriptionStatus.Paused;\n        public SubscriptionStatus.Done finish() => SubscriptionStatus.Done;\n    }\n\n    case Paused\n    {\n        public SubscriptionStatus.Done end() => SubscriptionStatus.Done;\n    }\n\n    final case Done;\n\n    public static SubscriptionStatus.Waiting enter() => SubscriptionStatus.Waiting;\n\n    law goingHoldsTheTime(Instant at) => SubscriptionStatus.enter().go(at).at == at;\n    law pausingHoldsTheResume(Instant at, Instant until) => SubscriptionStatus.enter().go(at).pause() is SubscriptionStatus.Paused;\n}\n";
