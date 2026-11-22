@@ -477,6 +477,12 @@ fn key(package: &[(&str, &str)], checker: &[u8]) -> String {
     sha256_hex(&hasher.finalize())[..32].to_owned()
 }
 
+/// The hash of each file of the library's package, its `lean-toolchain` among them: all of the library a law's proof
+/// reads, and so all a law's key needs of it.
+pub(crate) fn sources() -> String {
+    key(&PACKAGE, &[])
+}
+
 /// What `output`'s process wrote to its standard output and its standard error.
 fn printed(output: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
@@ -891,7 +897,7 @@ mod tests {
     /// Lean or of other sources is never used, and nothing else, such as Mago's own Rust code, names another build.
     #[test]
     fn the_library_build_is_named_by_each_file_of_its_package_and_so_by_its_lean_version() {
-        let base = key(&PACKAGE, &[]);
+        let base = sources();
         assert_eq!(base, key(&PACKAGE, &[]));
         assert_eq!(base.len(), 32);
         let other_lean = PACKAGE

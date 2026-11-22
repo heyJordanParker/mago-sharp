@@ -11,7 +11,6 @@ use std::path::PathBuf;
 
 use foldhash::HashMap;
 use foldhash::HashSet;
-use mago_build_id::BUILD_ID;
 use mago_codex::graph::strongly_connected_parts;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
@@ -195,11 +194,10 @@ impl<'laws> Laws<'laws> {
 /// hold, as one of another law's names, and a module the checker's limits stopped depends on the machine's load.
 type Ended = Result<Judgment, (String, Refusal)>;
 
-/// [`PROOFS`]: how Lean judged each law, by the proof's key, as [`proof_key`] gives it, written by this checker build.
-/// A law whose key is in it is never proved again.
+/// [`PROOFS`]: how Lean judged each law, by the proof's key, as [`proof_key`] gives it. A law whose key is in it is never
+/// proved again, whichever build of Mago wrote it.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Record {
-    build: String,
     proofs: BTreeMap<String, Recorded>,
 }
 
@@ -213,13 +211,9 @@ struct Recorded {
 }
 
 impl Record {
-    /// The record at `path`, or an empty one when none is there or another checker build wrote it.
+    /// The record at `path`, or an empty one when none is there.
     fn read(path: &Path) -> Self {
-        fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
-            .filter(|record| record.build == build())
-            .unwrap_or_default()
+        fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok()).unwrap_or_default()
     }
 
     /// Keeps each proof of a law that a file of `law_files` states and whose key `keys` doesn't replace, as it holds
@@ -232,18 +226,12 @@ impl Record {
     }
 
     /// Writes the record to `path`, unless it holds the same bytes.
-    fn write(mut self, path: &Path) -> io::Result<()> {
-        self.build = build();
+    fn write(self, path: &Path) -> io::Result<()> {
         let bytes = serde_json::to_vec(&self).map_err(io::Error::other)?;
         write_if_changed(path, &bytes)?;
 
         Ok(())
     }
-}
-
-/// This checker build's ID, as [`Record`] names the build that wrote it.
-fn build() -> String {
-    format!("{BUILD_ID:032x}")
 }
 
 impl Lean {
@@ -299,6 +287,12 @@ impl Lean {
         let mut record = Record::read(&record_path);
         let program = Program::new(&translations);
         let laws = Laws::new(&translations);
+        let scripts: HashMap<&str, String> = laws
+            .ordered
+            .iter()
+            .filter_map(|(_, law)| Some((law.statement.as_str(), scripted(law, &program)?)))
+            .collect();
+        let settings = settings(&library::sources(), HEARTBEATS);
         let receivers: HashMap<String, bool> = translations
             .iter()
             .flat_map(|translation| &translation.receivers)
@@ -325,7 +319,7 @@ impl Lean {
                     continue;
                 }
 
-                let key = proof_key(law, &program, &laws);
+                let key = proof_key(law, &program, &laws, &scripts, &settings);
                 match record.proofs.get(&key) {
                     Some(recorded) => {
                         for issue in judged(law, recorded.judgment.clone(), &names) {
@@ -385,11 +379,6 @@ impl Lean {
             .chain(proving().flat_map(|law| &law.breaking).flat_map(|breaking| program.reached(breaking)))
             .collect();
         let modules = program.modules(&proved, &reached);
-        let scripts: HashMap<&str, String> = laws
-            .ordered
-            .iter()
-            .filter_map(|(_, law)| Some((law.statement.as_str(), scripted(law, &program)?)))
-            .collect();
         let proofs = Proofs {
             library: &library,
             threads: self.threads,
@@ -426,18 +415,30 @@ impl Lean {
     }
 }
 
-/// The key a law's proof ends once for: the hash of this checker build, the Lean version, and the statement and
-/// theorem of the law and of each law it calls, transitively, with the text of every declaration their statements and
-/// the law's search for the small values that break it reach, as [`Program::reached`] gives them, each in the order of
-/// its name. An edit of a declaration a law reaches changes it, and nothing else does.
-fn proof_key(law: &Law, program: &Program<'_>, laws: &Laws<'_>) -> String {
+/// What a law's proof runs on beside the texts its key hashes: the library's `sources`, which pin its Lean version, and
+/// the `heartbeats` each theorem may use.
+fn settings(sources: &str, heartbeats: u32) -> String {
+    format!("{sources}\0{heartbeats}")
+}
+
+/// The key a law's proof ends once for: the hash of the `settings`, and the statement, theorem and fixed steps of the
+/// law and of each law it calls, transitively, as `scripts` holds them, with the text of every declaration their
+/// statements and the law's search for the small values that break it reach, as [`Program::reached`] gives them, each
+/// in the order of its name. An edit of a declaration a law reaches changes it, and so does a release that changes
+/// the library, the heartbeats or the fixed steps, and nothing else does.
+fn proof_key(
+    law: &Law,
+    program: &Program<'_>,
+    laws: &Laws<'_>,
+    scripts: &HashMap<&str, String>,
+    settings: &str,
+) -> String {
     let mut hasher = Sha256::new();
     let mut part = |bytes: &[u8]| {
         hasher.update(format!("{}\0", bytes.len()));
         hasher.update(bytes);
     };
-    part(BUILD_ID.to_string().as_bytes());
-    part(library::TOOLCHAIN.as_bytes());
+    part(settings.as_bytes());
 
     let called: BTreeMap<&str, &str> = laws
         .closure(law)
@@ -450,6 +451,7 @@ fn proof_key(law: &Law, program: &Program<'_>, laws: &Laws<'_>) -> String {
     for (statement, theorem) in called {
         part(statement.as_bytes());
         part(theorem.as_bytes());
+        part(scripts.get(statement).map_or("", String::as_str).as_bytes());
     }
     for declaration in declarations {
         part(declaration.as_bytes());
@@ -1002,5 +1004,35 @@ mod tests {
         record.keep(&law_files, &keys);
 
         assert_eq!(record.proofs.keys().collect::<Vec<_>>(), ["kept"]);
+    }
+
+    /// A law's key names the library's sources, the heartbeats each theorem may use and the law's fixed steps beside its
+    /// texts: a change to any of them proves the law again, and a release that changes none of them, as one that
+    /// changes only Mago's version, keeps its outcome.
+    #[test]
+    fn a_law_s_key_changes_with_the_library_the_heartbeats_and_the_fixed_steps_alone() {
+        let translations = [Translation {
+            file: FileId::new(b"app/Shared/Money.sharp"),
+            name: b"app/Shared/Money.sharp".to_vec(),
+            class: None,
+            laws: vec![law()],
+            declarations: Vec::new(),
+            receivers: Vec::new(),
+        }];
+        let (program, laws) = (Program::new(&translations), Laws::new(&translations));
+        let key = |sources: &str, heartbeats: u32, steps: &str| {
+            let scripts = HashMap::from_iter([("App.Shared.Money.addKeepsCurrency", steps.to_owned())]);
+
+            proof_key(&translations[0].laws[0], &program, &laws, &scripts, &settings(sources, heartbeats))
+        };
+        let sources = library::sources();
+        let edited = format!("{sources}0");
+
+        let base = key(&sources, HEARTBEATS, "simp");
+
+        assert_eq!(base, key(&sources, HEARTBEATS, "simp"));
+        assert_ne!(base, key(&edited, HEARTBEATS, "simp"), "a change to the library");
+        assert_ne!(base, key(&sources, HEARTBEATS + 1, "simp"), "a change to the heartbeats");
+        assert_ne!(base, key(&sources, HEARTBEATS, "omega"), "a change to the fixed steps");
     }
 }

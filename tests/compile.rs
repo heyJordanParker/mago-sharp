@@ -4419,6 +4419,45 @@ fn a_proof_is_not_attempted_again_while_its_law_is_unchanged() {
     assert!(compiled(root, "app/Shared/Money.sharp").exists());
 }
 
+/// A law's outcome depends on its texts, the law checker's library, its Lean version and the prover's settings, and
+/// on nothing else of Mago's build: `.sharp/proofs.json` names no build, so a compile by another build of Mago, as a
+/// release that changes only its version, proves no law again and needs no Lean. The project has no `vendor` folder,
+/// whose warning keeps the compile from recording its inputs, so the next compile checks every law again.
+#[test]
+fn a_compile_by_another_build_of_mago_proves_no_law_again() {
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let root = directory.path();
+    compile_succeeds(root);
+    let proofs: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join(".sharp/proofs.json")).unwrap()).unwrap();
+    assert_eq!(proofs.as_object().unwrap().keys().collect::<Vec<_>>(), ["proofs"]);
+
+    let output = compile_without_lean(root);
+
+    assert!(output.status.success(), "a law was proved again: {}", printed(&output));
+}
+
+/// An edit of a declaration one law reaches proves that law again, and no other: the other file's law is not checked.
+#[test]
+fn an_edit_of_a_declaration_one_law_reaches_proves_that_law_alone() {
+    let label = "namespace App.Shared;\n\npublic class Label\n{\n    public Label(public string text { get; }) { }\n    public Label same() => new Label(this.text);\n\n    law sameKeepsText(Label l) => l.same().text == l.text;\n}\n";
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Shared/Label.sharp", label)]);
+    let root = directory.path();
+    compile_succeeds(root);
+    let swapped = "new Money(other.amount + this.amount, this.currency)";
+    write(
+        root,
+        "app/Shared/Money.sharp",
+        &LAWFUL_MONEY.replace("new Money(this.amount + other.amount, this.currency)", swapped),
+    );
+
+    let output = process::output(command(root, "never").env("MAGO_LOG", "debug")).unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let counted = "0 laws keep the outcome of their proof, and 1 laws are proved.";
+    assert!(printed(&output).contains(counted), "{}", printed(&output));
+}
+
 /// `.sharp/proofs.json` keeps how Lean judged a law, and never that Lean rejected a generated module the law reaches,
 /// since an edit the law's key does not hold can fix the module: here a runner whose request opens no `Sharp` rejects
 /// every module, and the next compile, after an edit no law reaches, checks the laws again and proves them.
