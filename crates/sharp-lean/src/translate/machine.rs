@@ -180,7 +180,7 @@ impl Translator<'_, '_> {
             arms.extend(others.iter().map(|other| format!("| {other} => false")));
             let broken = format!("(fun «$given» => match «$given» with {})", arms.join(" "));
             let trace_text = format!(
-                "def {trace} : Option (List String) :=\n  Sharp.Machine.search {moves} {shown} {broken} {DEPTH}\n    (Sharp.Machine.next {shown} [] ({}))",
+                "protected def {trace} : Option (List String) :=\n  Sharp.Machine.search {moves} {shown} {broken} {DEPTH}\n    (Sharp.Machine.next {shown} [] ({}))",
                 self.entry_steps(&machine, &mut uses)
             );
             let trace_uses = [
@@ -200,7 +200,7 @@ impl Translator<'_, '_> {
             });
             uses.push(self.own_use(&trace, place.clone()));
 
-            let text = format!("def {key} : Prop :=\n  {}", parts.join(" ∧\n  "));
+            let text = format!("protected def {key} : Prop :=\n  {}", parts.join(" ∧\n  "));
             let (_, body_uses, unmodeled) = body.finish();
             uses.extend(body_uses);
             let source = &self.checked.file().contents;
@@ -263,7 +263,7 @@ impl Translator<'_, '_> {
         let key = format!("{}.«$shown»", machine.lean);
         let mut body = Body::new(self.checked, self.reach, machine.full, format!("{}.shown", machine.short));
         let domain = body.class_type(machine.r#enum.name.span, machine.full);
-        let mut lines = vec![format!("def {key} : {domain} → String")];
+        let mut lines = vec![format!("protected def {key} : {domain} → String")];
         for case in machine.cases() {
             let name = String::from_utf8_lossy(case.item.name().value);
             let fields = case_fields(case);
@@ -305,7 +305,7 @@ impl Translator<'_, '_> {
         let mut body = Body::new(self.checked, self.reach, machine.full, format!("{}.moves", machine.short));
         let domain = body.class_type(machine.r#enum.name.span, machine.full);
         let mut lines = vec![
-            format!("def {key} (this : {domain}) : List (String × M {domain}) :="),
+            format!("protected def {key} (this : {domain}) : List (String × M {domain}) :="),
             "  match this with".to_owned(),
         ];
         let mut uses = Vec::new();

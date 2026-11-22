@@ -5235,6 +5235,118 @@ fn a_law_s_call_shows_that_each_instant_it_passes_keeps_instant_s_checks() {
     assert!(compiled(root, "app/Shared/Calls.sharp").exists());
 }
 
+/// `App.Repro.OptionalCaseFieldRepro`, a machine whose `Held` case holds an id, with a static `none()` that gives its
+/// `Empty` case, a method that returns a bound case's id or `null` with an `if`, one that does with `? :`, and `laws`.
+fn optional_case_field(laws: &str) -> String {
+    format!(
+        "namespace App.Repro;\n\npublic machine OptionalCaseFieldRepro\n{{\n    case Held(int id)\n    {{\n        public OptionalCaseFieldRepro.Empty drop() => OptionalCaseFieldRepro.Empty;\n    }}\n\n    final case Empty;\n\n    public static OptionalCaseFieldRepro.Empty none() => OptionalCaseFieldRepro.Empty;\n\n    public static OptionalCaseFieldRepro.Held hold(int id) => OptionalCaseFieldRepro.Held(id);\n\n    public int? heldId()\n    {{\n        if (this is OptionalCaseFieldRepro.Held held) {{\n            return held.id;\n        }}\n\n        return null;\n    }}\n\n    public int? heldIdOrNull() => this is OptionalCaseFieldRepro.Held held ? held.id : null;\n\n    {laws}\n}}\n"
+    )
+}
+
+/// A member's name never hides a name the law checker writes: beside a static `none()`, `null` is still `null`, so a
+/// law reads a method that returns a bound case's field or `null`, written with an `if` or with `? :`.
+#[test]
+fn a_law_reads_a_case_s_field_or_null_beside_a_member_named_none() {
+    let directory = lawful_project(&[(
+        "app/Repro/OptionalCaseFieldRepro.sharp",
+        &optional_case_field(
+            "law noneHoldsNoId(int unused) => OptionalCaseFieldRepro.none().heldId() == null;\n    law noneHoldsNoIdOrNull(int unused) => OptionalCaseFieldRepro.none().heldIdOrNull() == null;\n    law heldHoldsItsId(int id) => OptionalCaseFieldRepro.Held(id).heldId() == id;",
+        ),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Repro/OptionalCaseFieldRepro.sharp").exists());
+}
+
+/// A false law over a case's field or `null` beside a static `none()` is refused as not proven, with its claim still
+/// to show, and never as a law the checker translated wrongly.
+#[test]
+fn a_false_law_over_a_case_s_field_or_null_is_not_proven() {
+    let directory = lawful_project(&[(
+        "app/Repro/OptionalCaseFieldRepro.sharp",
+        &optional_case_field("law noneHoldsOne(int unused) => OptionalCaseFieldRepro.none().heldId() == 1;"),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law noneHoldsOne is not proven\n = still to show: "),
+        "{}",
+        printed(&output)
+    );
+    assert!(!printed(&output).contains("translated the code it reaches wrongly"), "{}", printed(&output));
+}
+
+/// Lean opens a definition's namespace in its body, so a member of a class is in scope in each of the class's own
+/// definitions. Each declaration a generated module writes, and each field and case of a type, is `protected`, so no
+/// member of a class, a struct, an enum, an interface or a machine, whatever its name, hides a name the law checker
+/// writes, such as `none`, `pure` or `Int`.
+#[cfg(unix)]
+#[test]
+fn each_declaration_a_generated_module_writes_is_protected() {
+    let directory = library_project(&[
+        (
+            "app/Delivery/DeliveryStatus.sharp",
+            "namespace App.Delivery;\n\npublic sealed interface DeliveryStatus\n{\n}\n",
+        ),
+        (
+            "app/Delivery/Pending.sharp",
+            "namespace App.Delivery;\n\nimport Sharp.Time.Instant;\n\npublic final class Pending : DeliveryStatus\n{\n    public Pending(public string? error { get; } = null) { }\n\n    public static Pending failed(string error = \"timeout\") => new Pending(error);\n\n    public Done deliver(Instant at) => new Done(at);\n\n    law deliveredAt(Instant at) => new Pending().deliver(at).doneAt == at;\n    law failedTimesOut(int unused) => Pending.failed().error == \"timeout\";\n}\n",
+        ),
+        (
+            "app/Delivery/Done.sharp",
+            "namespace App.Delivery;\n\nimport Sharp.Time.Instant;\n\npublic final class Done : DeliveryStatus\n{\n    internal Done(public Instant doneAt { get; }) { }\n}\n",
+        ),
+        ("app/Runs/Phase.sharp", PHASE),
+        ("app/Runs/Slot.sharp", SLOT),
+        (
+            "app/Runs/Worker.sharp",
+            &worker(
+                "law advancingMovesOn(Slot slot, int position) when position >= 0 && position < 100 => Worker.Running(slot, position).advance().position == position + 1;",
+            ),
+        ),
+        (
+            "app/Shared/Clock.sharp",
+            "namespace App.Shared;\n\nimport Sharp.Time.Duration;\nimport Sharp.Time.Instant;\n\npublic machine Clock\n{\n    case Ticking(Instant start, Instant now)\n    {\n        public Clock.Ticking tick() => Clock.Ticking(this.start, this.now.plus(Duration.ofSeconds(1)));\n    }\n\n    public static Clock.Ticking begin(Instant at) => Clock.Ticking(at, at);\n\n    law nowNeverBeforeStart(Clock.Ticking clock) => clock.now >= clock.start;\n}\n",
+        ),
+        (
+            "app/Repro/OptionalCaseFieldRepro.sharp",
+            &optional_case_field("law noneHoldsNoId(int unused) => OptionalCaseFieldRepro.none().heldId() == null;"),
+        ),
+    ]);
+    let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
+
+    let output = process::output(command(root, "never").env("XDG_CACHE_HOME", counting_cache(lake.path()))).unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let keywords = ["def ", "theorem ", "abbrev ", "instance ", "structure ", "inductive ", "opaque "];
+    let mut open = Vec::new();
+    for (module, text) in runner_request(lake.path()).modules {
+        let mut cases = false;
+        for line in text.lines() {
+            let declared =
+                line.strip_prefix("@[").and_then(|line| line.split_once("] ")).map_or(line, |(_, rest)| rest);
+            let field = line.starts_with("  «") && line.contains(" : ");
+            let case = cases && line.starts_with("  | ") && !line.starts_with("  | protected ");
+            if keywords.iter().any(|keyword| declared.starts_with(keyword)) || field || case {
+                open.push(format!("{module}: {line}"));
+            }
+            if declared.starts_with("protected inductive ") {
+                cases = true;
+            } else if !line.starts_with("  ") {
+                cases = false;
+            }
+        }
+    }
+    assert_eq!(open, Vec::<String>::new());
+}
+
 /// `App.Shared.Stamp`, whose laws build an `Instant`: one reads what it built, and one holds only because the
 /// constructor throws for a nanosecond outside its range.
 const STAMP: &str = "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic final class Stamp\n{\n    law builds(int unused) => new Instant(1, 0).epochSeconds == 1;\n    law aBuiltNanosecondIsInRange(int s, int n) => new Instant(s, n).nanosecond <= 999_999_999;\n}\n";

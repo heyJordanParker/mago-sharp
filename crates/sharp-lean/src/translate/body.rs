@@ -914,7 +914,7 @@ impl<'body, 'program> Body<'body, 'program> {
             }
             Expression::Literal(Literal::Integer(integer)) => {
                 match integer.value.and_then(|value| i64::try_from(value).ok()) {
-                    Some(value) => format!("({value} : _root_.Int)"),
+                    Some(value) => format!("({value} : Int)"),
                     None => format!("{}.toInt", self.value(expression)),
                 }
             }
@@ -1571,7 +1571,7 @@ impl<'body, 'program> Body<'body, 'program> {
             (b"count", 0) => {
                 let list = self.value(call.object);
                 if self.exact {
-                    return self.bind(format!("int.ofInt (List.length {list} : _root_.Int)"));
+                    return self.bind(format!("int.ofInt (List.length {list} : Int)"));
                 }
 
                 format!("(int.count {list})")
@@ -1650,7 +1650,7 @@ impl<'body, 'program> Body<'body, 'program> {
 
         match (name.as_str(), arguments.as_slice()) {
             ("count", []) if self.exact => {
-                self.bind(format!("int.ofInt (List.length (Sharp.Map.entries {map}) : _root_.Int)"))
+                self.bind(format!("int.ofInt (List.length (Sharp.Map.entries {map}) : Int)"))
             }
             ("get", [key]) => self.map_get(call.object, &map, key),
             _ => {

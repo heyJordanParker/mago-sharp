@@ -340,7 +340,7 @@ impl Translator<'_, '_> {
 
         let parent_field = parent.map(|parent| (body.parent_field(parent), body.own_type(name.span, parent)));
         let extends = parent_field.as_ref().map(|(_, r#type)| format!(" extends {type}")).unwrap_or_default();
-        let mut lines = vec![format!("structure {lean}{extends} where")];
+        let mut lines = vec![format!("protected structure {lean}{extends} where")];
         if fields.iter().any(|field| field.name == b"mk") {
             lines.push("  make ::".to_owned());
         }
@@ -354,7 +354,7 @@ impl Translator<'_, '_> {
                     issues::RESERVED_NAME,
                 );
             }
-            lines.push(format!("  {} : {type}", names::identifier(field.name)));
+            lines.push(format!("  protected {} : {type}", names::identifier(field.name)));
             types.push(r#type);
         }
         lines.push(DERIVED.to_owned());
@@ -375,7 +375,7 @@ impl Translator<'_, '_> {
             let key = names::member(&constructor, field.as_bytes());
             body.reads(full);
             let mut lines = vec![
-                format!("def {key} : {interface} → {type}"),
+                format!("protected def {key} : {interface} → {type}"),
                 format!("  | {constructor} held => held.{}", names::identifier(field.as_bytes())),
             ];
             lines.extend(default_arms(&body, full, &body.values(full, Some(&constructor))));
@@ -494,7 +494,7 @@ impl Translator<'_, '_> {
         let (mut lines, uses, unmodeled) = body.finish();
         lines.push(format!("return {{ {} }}", values.join(", ")));
         let text = format!(
-            "@[simp] def {key} {} : M {lean} := do\n{}",
+            "@[simp] protected def {key} {} : M {lean} := do\n{}",
             parameters.join(" "),
             indented(&lines, 2).collect::<Vec<_>>().join("\n")
         );
@@ -557,7 +557,7 @@ impl Translator<'_, '_> {
         if parts.is_empty() {
             parts.push("True".to_owned());
         }
-        let text = format!("@[simp] def {key} (value : {lean}) : Prop :=\n  {}", parts.join(" ∧\n  "));
+        let text = format!("@[simp] protected def {key} (value : {lean}) : Prop :=\n  {}", parts.join(" ∧\n  "));
         let (_, body_uses, unmodeled) = body.finish();
         uses.extend(body_uses);
         self.translation.declarations.push(Declaration {
@@ -582,7 +582,7 @@ impl Translator<'_, '_> {
         let lean = names::full_name(full);
         let short = names::short_name(full);
         let mut body = Body::new(self.checked, self.reach, full, short.clone());
-        let mut lines = vec![format!("inductive {lean} where")];
+        let mut lines = vec![format!("protected inductive {lean} where")];
         let mut values = Vec::new();
         let mut cases = Vec::new();
         let mut fields = Vec::new();
@@ -602,7 +602,7 @@ impl Translator<'_, '_> {
             match &case.item {
                 // Spec section 20: a case that carries data is a constructor of its fields.
                 EnumCaseItem::Data(item) => {
-                    let mut constructor = vec![format!("  | {}", names::identifier(name.value))];
+                    let mut constructor = vec![format!("  | protected {}", names::identifier(name.value))];
                     let count = item.parameter_list.parameters.len();
                     for (place, field) in item.parameter_list.parameters.iter().enumerate() {
                         let r#type = field.hint.as_ref().map_or_else(|| "Unit".to_owned(), |hint| body.r#type(hint));
@@ -612,10 +612,10 @@ impl Translator<'_, '_> {
                     lines.push(constructor.join(" "));
                 }
                 EnumCaseItem::Backed(item) => {
-                    lines.push(format!("  | {}", names::identifier(name.value)));
+                    lines.push(format!("  | protected {}", names::identifier(name.value)));
                     values.push((names::identifier(name.value), body.value(item.value)));
                 }
-                EnumCaseItem::Unit(_) => lines.push(format!("  | {}", names::identifier(name.value))),
+                EnumCaseItem::Unit(_) => lines.push(format!("  | protected {}", names::identifier(name.value))),
             }
         }
         lines.push(DERIVED.to_owned());
@@ -640,12 +640,12 @@ impl Translator<'_, '_> {
             let built =
                 body.held(r#enum.name.span, full, format!("(.{} {})", names::identifier(case), values.join(" ")));
             let covers = body.held(r#enum.name.span, full, format!("({} ..)", names::member(&lean, case)));
-            let mut lines = vec![format!("def {key} : {domain} → {type}"), format!("  | {pattern} => held")];
+            let mut lines = vec![format!("protected def {key} : {domain} → {type}"), format!("  | {pattern} => held")];
             lines.extend(default_arms(&body, full, &[covers]));
             lines.extend([
                 String::new(),
                 format!(
-                    "@[simp, grind =] theorem {key}.«$held» : ∀ {}, {key} {built} = {} := fun {} => rfl",
+                    "@[simp, grind =] protected theorem {key}.«$held» : ∀ {}, {key} {built} = {} := fun {} => rfl",
                     values.join(" "),
                     values[place],
                     vec!["_"; count].join(" ")
@@ -660,7 +660,7 @@ impl Translator<'_, '_> {
             let key = names::member(&lean, b"$valid");
             let mut body = Body::new(self.checked, self.reach, full, format!("{short}.valid"));
             let domain = body.class_type(r#enum.name.span, full);
-            let mut lines = vec![format!("@[simp] def {key} : {domain} → Prop")];
+            let mut lines = vec![format!("@[simp] protected def {key} : {domain} → Prop")];
             let mut covers = Vec::new();
             for member in &r#enum.members {
                 let ClassLikeMember::EnumCase(case) = member else {
@@ -692,7 +692,7 @@ impl Translator<'_, '_> {
             let mut body = Body::new(self.checked, self.reach, full, format!("{short}.value"));
             let r#type = body.r#type(&backing.hint);
             let domain = body.class_type(r#enum.name.span, full);
-            let mut lines = vec![format!("def {} : {domain} → {type}", names::member(&lean, b"value"))];
+            let mut lines = vec![format!("protected def {} : {domain} → {type}", names::member(&lean, b"value"))];
             let mut covers = Vec::new();
             for (case, value) in &values {
                 lines.push(format!("  | {} => {value}", body.held(r#enum.name.span, full, format!(".{case}"))));
@@ -788,13 +788,13 @@ impl Translator<'_, '_> {
         let mut body = Body::new(self.checked, self.reach, full, short.clone());
         let implementers = self.reach.implementers(full).unwrap_or_default();
         let lines = if implementers.is_empty() {
-            vec![format!("abbrev {lean} : Type := Interface \"{lean}\"")]
+            vec![format!("protected abbrev {lean} : Type := Interface \"{lean}\"")]
         } else {
-            let mut constructors = vec![format!("inductive {lean} where")];
+            let mut constructors = vec![format!("protected inductive {lean} where")];
             for implementer in implementers {
                 let held = body.own_type(interface.name.span, implementer.as_bytes());
                 let constructor = names::identifier(names::short_name(implementer.as_bytes()).as_bytes());
-                constructors.push(format!("  | {constructor} (value : {held})"));
+                constructors.push(format!("  | protected {constructor} (value : {held})"));
             }
             constructors.push(DERIVED.to_owned());
             constructors
@@ -840,7 +840,10 @@ impl Translator<'_, '_> {
             }
 
             let interface = body.class_type(span, parent);
-            coercions.push(format!("instance {lean}.«$coe{}» : Coe {lean} {interface} := ⟨upcast⟩", coerced.len()));
+            coercions.push(format!(
+                "protected instance {lean}.«$coe{}» : Coe {lean} {interface} := ⟨upcast⟩",
+                coerced.len()
+            ));
             coerced.push(parent);
         }
 
@@ -895,8 +898,8 @@ impl Translator<'_, '_> {
                         let r#type = constant.hint.as_ref().map(|hint| body.r#type(hint));
                         let value = body.pure_value(item.value);
                         let text = match r#type {
-                            Some(r#type) => format!("def {key} : {type} := {value}"),
-                            None => format!("def {key} := {value}"),
+                            Some(r#type) => format!("protected def {key} : {type} := {value}"),
+                            None => format!("protected def {key} := {value}"),
                         };
                         self.declare(body, key, item.name.span, text, Role::Definition);
                     }
@@ -928,7 +931,7 @@ impl Translator<'_, '_> {
         let receiver = body.class_type(variable.span, full);
         let r#type = body.declared_type(property.hint(), variable.span);
         self.translation.receivers.push((key.clone(), true));
-        let text = format!("opaque {key} : {receiver} → {type}");
+        let text = format!("protected opaque {key} : {receiver} → {type}");
         self.declare(body, key, variable.span, text, Role::Definition);
     }
 
@@ -1007,7 +1010,7 @@ impl Translator<'_, '_> {
                 body,
                 key.clone(),
                 parameter.span(),
-                format!("def {key} : {type} := {value}"),
+                format!("protected def {key} : {type} := {value}"),
                 Role::Definition,
             );
         }
@@ -1078,7 +1081,7 @@ impl Translator<'_, '_> {
         self.define(names::member(lean, name), property.variable.span, &[parameter], &returns, translated, None);
     }
 
-    /// `def Class.m (parameters) : M returns := do …`, a definition a law unfolds, from its translated body.
+    /// `protected def Class.m (parameters) : M returns := do …`, a definition a law unfolds, from its translated body.
     fn define(
         &mut self,
         key: String,
@@ -1089,7 +1092,7 @@ impl Translator<'_, '_> {
         measure: Option<Measure>,
     ) {
         let text = format!(
-            "def {key} {} : M {returns} := do\n{}",
+            "protected def {key} {} : M {returns} := do\n{}",
             parameters.join(" "),
             indented(&lines, 2).collect::<Vec<_>>().join("\n")
         );
@@ -1105,10 +1108,10 @@ impl Translator<'_, '_> {
         });
     }
 
-    /// `def Class.law (a : A) : Prop := [condition = pure true →] [A.«$valid» a →] holds do …`: the law holds for every
-    /// value of its parameters that meets its `when` condition and keeps its class-like's precondition, as each value
-    /// of it does, unless its claim finishes with `false`. The condition and the claim compute ints exactly, as
-    /// [`Body::computes_exactly`] says. Its theorem, which its body proves, comes from [`Prover`].
+    /// `protected def Class.law (a : A) : Prop := [condition = pure true →] [A.«$valid» a →] holds do …`: the law holds
+    /// for every value of its parameters that meets its `when` condition and keeps its class-like's precondition, as
+    /// each value of it does, unless its claim finishes with `false`. The condition and the claim compute ints exactly,
+    /// as [`Body::computes_exactly`] says. Its theorem, which its body proves, comes from [`Prover`].
     fn law(&mut self, full: &[u8], lean: &str, short: &str, law: &LawNode) {
         let name = String::from_utf8_lossy(law.name.value).into_owned();
         let key = names::member(lean, law.name.value);
@@ -1119,7 +1122,7 @@ impl Translator<'_, '_> {
         let parameters: Vec<String> =
             law.parameter_list.parameters.iter().map(|parameter| parameter_name(parameter)).collect();
 
-        let mut text = format!("def {key} {} : Prop :=\n", binders.join(" "));
+        let mut text = format!("protected def {key} {} : Prop :=\n", binders.join(" "));
         let (mut uses, mut unmodeled) = (Vec::new(), Vec::new());
         if let Some(condition) = &law.condition {
             let mut computed = Body::for_law(self.checked, self.reach, full, place.clone(), law);
@@ -1199,7 +1202,7 @@ impl Translator<'_, '_> {
         coercions: Vec<String>,
     ) {
         let (_, uses, unmodeled) = body.finish();
-        let opaque = std::iter::once(format!("abbrev {key} : Type := Interface \"{key}\""))
+        let opaque = std::iter::once(format!("protected abbrev {key} : Type := Interface \"{key}\""))
             .chain(coercions.iter().cloned())
             .collect::<Vec<_>>()
             .join("\n");
