@@ -341,15 +341,7 @@ impl AnalyzeCommand {
             orchestrator.set_external_analyzer_handle(external_analyzer);
         }
         // The run reports from the compile's analysis, which the hosts take over with the stubs they declare.
-        let loaded = match loaded {
-            Loaded::Hosted { mut server, requests } => {
-                orchestrator.add_external_initialization_files(server.database_mut())?;
-                let issues = server.analyze_with_hosts(orchestrator.get_analyzer_plugin_registry(), &requests)?.issues;
-                Loaded::Analysis(server, issues)
-            }
-            loaded => loaded,
-        };
-        let (mut server, mut issues) = match loaded {
+        let (mut server, mut issues) = match loaded.taken_over(&orchestrator)? {
             Loaded::Analysis(server, issues) => {
                 load_inputs_duration = load_inputs_start.map(|s| s.elapsed());
                 service_run_start = trace_enabled.then(Instant::now);

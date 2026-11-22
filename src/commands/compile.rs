@@ -1166,8 +1166,8 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
 
 /// The issues the extension hosts `started` report in the PHP# files a compile lowers, the project's own, never a
 /// Composer package's, with the database they point into, as the compile's own analysis with the hosts reported them:
-/// the compile's analysis that `loaded` holds, which the hosts take over with the return-type requests it recorded, or
-/// else, when the compile had nothing to do, an analysis of the project with the hosts.
+/// the compile's analysis that `loaded` holds, scoped to those files, which the hosts take over as a whole `mago analyze`
+/// does, [`Loaded::taken_over`], or else, when the compile had nothing to do, an analysis of the project with the hosts.
 ///
 /// # Errors
 ///
@@ -1182,15 +1182,15 @@ fn hosted(
     if let Some(started) = started {
         orchestrator.set_external_analyzer_handle(started);
     }
-    let (server, issues) = match loaded {
+    let loaded = match loaded {
         Loaded::Hosted { server, requests } => {
-            let mut server = server.scoped_to(is_lowered);
-            orchestrator.add_external_initialization_files(server.database_mut())?;
-            let issues = server.analyze_with_hosts(orchestrator.get_analyzer_plugin_registry(), &requests)?.issues;
-
-            (server, issues)
+            Loaded::Hosted { server: Box::new(server.scoped_to(is_lowered)), requests }
         }
-        Loaded::Nothing | Loaded::Files(..) | Loaded::Analysis(..) => {
+        loaded => loaded,
+    };
+    let (server, issues) = match loaded.taken_over(&orchestrator)? {
+        Loaded::Analysis(server, issues) => (*server, issues),
+        Loaded::Nothing | Loaded::Files(..) | Loaded::Hosted { .. } => {
             let (database, included) = project_database(&orchestrator, &configuration.source.workspace)?;
             let package_files = package_files(&database, &included);
             let mut server = Server::new(database, decode_prelude, server_settings(&orchestrator))
@@ -1258,6 +1258,25 @@ pub(crate) enum Loaded {
     /// The compile's own analysis of a project with an enabled host, with the return-type requests it recorded, which
     /// the run takes over with the hosts.
     Hosted { server: Box<Server>, requests: ReturnTypeRequests },
+}
+
+impl Loaded {
+    /// This, with the compile's own analysis taken over by the extension hosts of `orchestrator`, as a whole
+    /// `mago compile` and a whole `mago analyze` report it: [`Loaded::Hosted`] becomes the [`Loaded::Analysis`] of the
+    /// hosts, from the stubs they declare and the return-type requests the compile recorded. Anything else stays.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading the stubs the hosts declare, or of the analysis with them.
+    pub(crate) fn taken_over(self, orchestrator: &Orchestrator<'_>) -> Result<Self, Error> {
+        let Loaded::Hosted { mut server, requests } = self else {
+            return Ok(self);
+        };
+        orchestrator.add_external_initialization_files(server.database_mut())?;
+        let issues = server.analyze_with_hosts(orchestrator.get_analyzer_plugin_registry(), &requests)?.issues;
+
+        Ok(Loaded::Analysis(server, issues))
+    }
 }
 
 /// What [`compiled`] keeps for a whole `mago analyze`, as [`Loaded`] gives it.
