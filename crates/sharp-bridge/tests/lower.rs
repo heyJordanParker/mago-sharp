@@ -1129,7 +1129,8 @@ fn the_standard_library_module_binds_its_services_for_the_root_namespace() {
 /// Spec section 32: a test file's module applies while a test of the class the file declares runs, so the file hands
 /// its bindings to the container for its class, as `\Sharp\Internal\testModule('App\Shop\CheckoutTest', [...])`, and
 /// returns nothing. A file declares one type, spec section 27, so a second class beside the module is refused, and a
-/// file whose type is no class has no test, so it calls nothing.
+/// file whose type is no test class, as an interface, holds no test, so its module is refused and the file calls
+/// nothing.
 #[test]
 fn a_test_module_hands_its_bindings_to_the_container_for_the_class_its_file_declares() {
     let library = [
@@ -1140,22 +1141,26 @@ fn a_test_module_hands_its_bindings_to_the_container_for_the_class_its_file_decl
             "app/Shop/Module.sharp",
             "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule\n{\n    singleton Mailer = SmtpMailer;\n}\n",
         ),
+        (
+            "vendor/phpunit/phpunit/src/Framework/TestCase.php",
+            "<?php namespace PHPUnit\\Framework; abstract class TestCase {}",
+        ),
     ];
     let file = |types: &str| {
         format!(
-            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.FakeMailer;\n\nmodule : App.Shop\n{{\n    singleton Mailer = FakeMailer;\n}}\n\n{types}"
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.FakeMailer;\nimport PHPUnit.Framework.TestCase;\n\nmodule : App.Shop\n{{\n    singleton Mailer = FakeMailer;\n}}\n\n{types}"
         )
     };
 
     let two = Lowered(common::checked(
         "tests/Shop/CheckoutTest.sharp",
-        &file("public class CheckoutTest\n{\n}\n\npublic class RefundTest\n{\n}\n"),
+        &file("public class CheckoutTest : TestCase\n{\n}\n\npublic class RefundTest : TestCase\n{\n}\n"),
         &library,
         lower,
     ));
     assert_eq!(
         two.diagnostics(),
-        ["15:14 compile error: A `.sharp` file declares one type: move `RefundTest` to `RefundTest.sharp`."]
+        ["16:14 compile error: A `.sharp` file declares one type: move `RefundTest` to `RefundTest.sharp`."]
     );
 
     // Each call of `\Sharp\Internal\testModule` the file makes.
@@ -1169,12 +1174,15 @@ fn a_test_module_hands_its_bindings_to_the_container_for_the_class_its_file_decl
     };
     let interface =
         Lowered(common::checked("tests/Shop/Step.sharp", &file("public interface Step\n{\n}\n"), &library, lower));
-    assert_eq!(interface.diagnostics(), Vec::<String>::new());
+    assert_eq!(
+        interface.diagnostics(),
+        ["7:1 compile error: `tests/Shop/Step.sharp` holds no test, so its test module would never run."]
+    );
     assert_eq!(calls(&interface), Vec::<u32>::new());
 
     let lowered = Lowered(common::checked(
         "tests/Shop/CheckoutTest.sharp",
-        &file("public class CheckoutTest\n{\n}\n"),
+        &file("public class CheckoutTest : TestCase\n{\n}\n"),
         &library,
         lower,
     ));
@@ -1201,10 +1209,14 @@ fn a_test_files_class_starts_each_test_with_the_test_module_and_ends_it_after() 
     let library = [
         ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n"),
         ("app/Mail/FakeMailer.sharp", "namespace App.Mail;\n\npublic class FakeMailer : Mailer\n{\n}\n"),
+        (
+            "vendor/phpunit/phpunit/src/Framework/TestCase.php",
+            "<?php namespace PHPUnit\\Framework; abstract class TestCase {}",
+        ),
     ];
     let file = |members: &str| {
         format!(
-            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.FakeMailer;\n\nmodule : App.Shop\n{{\n{members}}}\n\npublic class CheckoutTest\n{{\n}}\n"
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.FakeMailer;\nimport PHPUnit.Framework.TestCase;\n\nmodule : App.Shop\n{{\n{members}}}\n\npublic class CheckoutTest : TestCase\n{{\n}}\n"
         )
     };
     let hook = |name: &str, function: &str, argument: &str, attribute: &str, priority: i64| {
@@ -1222,7 +1234,7 @@ fn a_test_files_class_starts_each_test_with_the_test_module_and_ends_it_after() 
     let end = hook("__sharpEndTest", "Sharp\\Internal\\endTest", "", "PHPUnit\\Framework\\Attributes\\After", i64::MIN);
 
     for (members, line, table) in
-        [("    singleton Mailer = FakeMailer;\n", 11, "ARRAY [3]\n  ARRAY_ELEM\n"), ("", 10, "ARRAY [3]\n")]
+        [("    singleton Mailer = FakeMailer;\n", 12, "ARRAY [3]\n  ARRAY_ELEM\n"), ("", 11, "ARRAY [3]\n")]
     {
         let lowered = Lowered(common::checked("tests/Shop/CheckoutTest.sharp", &file(members), &library, lower));
         let at = |hook: &str| hook.replace("{line}", &line.to_string()).replace("{end}", &(line + 2).to_string());
