@@ -25,6 +25,7 @@ use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
+use mago_database::file::FileId;
 use mago_names::EQUATABLE;
 use mago_names::ResolvedNames;
 use mago_names::STANDARD_ROOT_CLASSES;
@@ -123,19 +124,26 @@ where
         return None;
     }
 
-    sharp_missing_imports(context.codebase, &context.imported_names, &context.scope, class_names)
+    sharp_missing_imports(
+        context.codebase,
+        context.source_file.id,
+        &context.imported_names,
+        &context.scope,
+        class_names,
+    )
 }
 
-/// Returns the sentence that names the `import` lines a `.sharp` file, with the `imported_names` and `scope` of its
-/// imports and namespace, needs before code that names `class_names` as [`sharp_code_class_name`] writes them
+/// Returns the sentence that names the `import` lines the `.sharp` file `file`, with the `imported_names` and `scope`
+/// of its imports and namespace, needs before code that names `class_names` as [`sharp_code_class_name`] writes them
 /// compiles, as `Add `import Sharp.Text.Regex;` to the file.`: one line for each class-like the file doesn't
 /// [bind](binds_class_like), once each, in the order given, under its [alias](sharp_import_alias) when the file binds
 /// its short name to another class-like, as in `import Vendor.Clock as VendorClock;`. A line the `imports` line of
-/// the file's namespace refuses (spec section 32) is left out. When it leaves out every line, the sentence names the
-/// class-likes outside the list and the file of that `imports` line instead. Returns `None` when the file binds them
-/// all.
+/// the file's namespace refuses (spec section 32) is left out, and a test file's lines never are. When it leaves out
+/// every line, the sentence names the class-likes outside the list and the file of that `imports` line instead.
+/// Returns `None` when the file binds them all.
 pub(crate) fn sharp_missing_imports(
     codebase: &CodebaseMetadata,
+    file: FileId,
     imported_names: &WordMap<Word>,
     scope: &NamespaceScope,
     class_names: impl IntoIterator<Item = Word>,
@@ -151,7 +159,7 @@ pub(crate) fn sharp_missing_imports(
 
         let php_name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
         let full_name = String::from_utf8_lossy(php_name).replace('\\', ".");
-        if let Some(list) = list_refusing(codebase, namespace, php_name) {
+        if let Some(list) = list_refusing(codebase, file, namespace, php_name) {
             let full_name = word(&full_name);
             match unlisted.iter_mut().find(|(other, _)| std::ptr::eq(*other, list)) {
                 Some((_, names)) if !names.contains(&full_name) => names.push(full_name),

@@ -9,10 +9,12 @@ use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::visibility::Visibility;
+use mago_database::file::FileId;
 use mago_php_version::PHPVersion;
 use mago_php_version::feature::Feature;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
+use mago_span::Position;
 use mago_span::Span;
 
 use crate::code::IssueCode;
@@ -73,17 +75,19 @@ pub(crate) fn namespace_of(class: &[u8]) -> &[u8] {
     class.iter().rposition(|&byte| byte == b'\\').map_or(&b""[..], |end| &class[..end])
 }
 
-/// Spec section 32: the folder's module whose `imports` line leaves `name` out of what PHP# code in `namespace`
-/// imports, as PHP writes both, or none when every list that covers `namespace` lets it import `name`. A list covers
-/// its namespace and every namespace below it, and lets its code import from `Sharp`, from its own namespace and the
-/// namespaces below it, and from each namespace it lists and the namespaces below that one. Of two lists that leave
-/// `name` out, the one nearer `namespace` refuses it.
+/// Spec section 32: the folder's module whose `imports` line leaves `name` out of what PHP# code in `namespace`, in
+/// the file `file`, imports, as PHP writes both, or none when every list that covers `namespace` lets it import
+/// `name`. A list covers its namespace and every namespace below it, and lets its code import from `Sharp`, from its
+/// own namespace and the namespaces below it, and from each namespace it lists and the namespaces below that one. Of
+/// two lists that leave `name` out, the one nearer `namespace` refuses it. A list limits production files, so it
+/// refuses nothing in a test file.
 pub(crate) fn list_refusing<'codebase>(
     codebase: &'codebase CodebaseMetadata,
+    file: FileId,
     namespace: &[u8],
     name: &[u8],
 ) -> Option<&'codebase ModuleMetadata> {
-    if is_within_namespace(name, b"Sharp") {
+    if codebase.is_test_file(file) || is_within_namespace(name, b"Sharp") {
         return None;
     }
 
@@ -198,6 +202,43 @@ where
     );
 
     false
+}
+
+/// Refuses, at the name, each name of the analyzed PHP# file that names a class-like a test file declares, when the
+/// file is production code, spec section 32: production code can't use a test file's class, by an import or by a
+/// name of its own namespace that needs none, as `new FakeOwners()` or the type `FakeOwners`. A test file is one of
+/// a folder `composer.json` lists under `autoload-dev`.
+pub(crate) fn check_test_file_classes<A>(context: &mut Context<'_, '_, A>)
+where
+    A: Arena,
+{
+    let file = context.source_file.id;
+    if context.codebase.is_test_file(file) {
+        return;
+    }
+
+    let mut names: Vec<(u32, u32, &[u8])> =
+        context.resolved_names.iter().map(|(start, end, name, _)| (start, end, name)).collect();
+    names.sort_unstable_by_key(|(start, ..)| *start);
+    for (start, end, name) in names {
+        let Some(class) = context.codebase.get_class_like(word(name)) else {
+            continue;
+        };
+        if !context.codebase.is_test_file(class.span.file_id) {
+            continue;
+        }
+
+        let class_name = display_class_like_name(context, class.original_name);
+        context.collector.report_with_code(
+            IssueCode::ProductionUsesTestCode,
+            Issue::error(format!("Production code can't use `{class_name}`, a test file's class."))
+                .with_annotation(
+                    Annotation::primary(Span::new(file, Position::new(start), Position::new(end)))
+                        .with_message("Used here."),
+                )
+                .with_help(format!("Declare `{class_name}` in production code, or use it only in a test.")),
+        );
+    }
 }
 
 /// Checks if a method is visible from the current scope and reports a detailed

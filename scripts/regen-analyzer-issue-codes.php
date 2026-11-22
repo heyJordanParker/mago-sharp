@@ -363,6 +363,7 @@ final class AnalyzerCodeModuleGenerator
         'class-namespace-import',
         'unlisted-import',
         'import-cycle',
+        'production-uses-test-code',
         'duplicate-extern',
         'extern-on-sharp',
         'getter-writes-this',

@@ -1098,7 +1098,13 @@ where
         return false;
     }
 
-    let Some(import) = sharp_missing_imports(context.codebase, &context.imported_names, &context.scope, [class]) else {
+    let Some(import) = sharp_missing_imports(
+        context.codebase,
+        context.source_file.id,
+        &context.imported_names,
+        &context.scope,
+        [class],
+    ) else {
         return false;
     };
 

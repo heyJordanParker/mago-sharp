@@ -247,6 +247,7 @@ where
             statement::class_like::enum_case::report_defaults_trait_names(program, &mut context);
             effects::check::check_uses(&mut context, &block_context, &mut artifacts, program);
             readonly_types::check_readonly_types(&mut context, program);
+            visibility::check_test_file_classes(&mut context);
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(start) = statements_start {

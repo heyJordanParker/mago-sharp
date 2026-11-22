@@ -35990,6 +35990,86 @@ fn namespaces_that_import_each_other_are_refused_at_each_import() {
     assert_eq!(compile_errors(child, &[parent_alone]), Vec::<String>::new());
 }
 
+/// Spec section 23: a test file's imports are no edges of the namespace graph. So `tests/A/ThingTest.sharp`, which
+/// declares `App.A` to test it, imports `App.B.User` while `App.B` imports `App.A`, and neither file is refused. The
+/// same import in a production file of `App.A` still closes the cycle.
+#[test]
+fn a_test_file_s_imports_close_no_import_cycle() {
+    let account = ("app/A/Account.sharp", "namespace App.A;\n\npublic class Account\n{\n}\n");
+    let user = (
+        "app/B/User.sharp",
+        "namespace App.B;\n\nimport App.A.Account;\n\npublic class User\n{\n    public static int of(Account account) => 1;\n}\n",
+    );
+    let thing_test = (
+        "tests/A/ThingTest.sharp",
+        "namespace App.A;\n\nimport App.B.User;\n\npublic class ThingTest\n{\n    public int testIt() => User.of(new Account());\n}\n",
+    );
+    assert_eq!(compile_errors(thing_test, &[account, user]), Vec::<String>::new());
+    assert_eq!(compile_errors(user, &[account, thing_test]), Vec::<String>::new());
+
+    let thing = (
+        "app/A/Thing.sharp",
+        "namespace App.A;\n\nimport App.B.User;\n\npublic class Thing\n{\n    public int run() => User.of(new Account());\n}\n",
+    );
+    assert_eq!(
+        compile_errors(user, &[account, thing]),
+        [
+            "`App.B` and `App.A` import each other (Thing.sharp imports User). Move the code, or declare an interface in one namespace that the other implements."
+        ]
+    );
+}
+
+/// Spec section 32: a module's `imports` line limits its namespaces' production files, so a test file that declares
+/// `App.Shared.Entitlements` imports `Tests.Lib.TenantTestCase`, which the namespace's list leaves out.
+#[test]
+fn a_test_file_imports_past_the_list_of_the_namespace_it_declares() {
+    let module = (
+        "app/Shared/Entitlements/Module.sharp",
+        "namespace App.Shared.Entitlements;\n\nmodule\n{\n    imports App.Shared.Ledger;\n}\n",
+    );
+    let test_case = ("tests/Lib/TenantTestCase.sharp", "namespace Tests.Lib;\n\npublic class TenantTestCase\n{\n}\n");
+    let owners_test = (
+        "tests/Feature/Entitlements/InheritedActionOwnersTest.sharp",
+        "namespace App.Shared.Entitlements;\n\nimport Tests.Lib.TenantTestCase;\n\npublic class InheritedActionOwnersTest : TenantTestCase\n{\n}\n",
+    );
+
+    assert_eq!(compile_errors(owners_test, &[module, test_case, LISTED_CLASSES[2]]), Vec::<String>::new());
+}
+
+/// Spec section 32: production code can't use a class a test file declares, by an import or by a name of its own
+/// namespace that needs none, as `new FakeOwners()` or the type `FakeOwners`. Each name is refused where it is written.
+#[test]
+fn production_code_can_t_use_a_test_file_s_class() {
+    let fake = (
+        "tests/A/FakeOwners.sharp",
+        "namespace App.A;\n\ninternal class FakeOwners\n{\n    public int count() => 2;\n}\n",
+    );
+    let billing = (
+        "app/A/Billing.sharp",
+        "namespace App.A;\n\npublic class Billing\n{\n    public int total() => new FakeOwners().count();\n\n    public int counted(FakeOwners owners) => owners.count();\n}\n",
+    );
+    let test_case = ("tests/Lib/TenantTestCase.sharp", "namespace Tests.Lib;\n\npublic class TenantTestCase\n{\n}\n");
+    let invoice = (
+        "app/Shared/Billing/Invoice.sharp",
+        "namespace App.Shared.Billing;\n\nimport Tests.Lib.TenantTestCase;\n\npublic class Invoice : TenantTestCase\n{\n}\n",
+    );
+
+    assert_eq!(
+        refusals(billing, &[fake]),
+        [
+            "5:31 production-uses-test-code Production code can't use `FakeOwners`, a test file's class. | Declare `FakeOwners` in production code, or use it only in a test.",
+            "7:24 production-uses-test-code Production code can't use `FakeOwners`, a test file's class. | Declare `FakeOwners` in production code, or use it only in a test.",
+        ]
+    );
+    assert_eq!(
+        refusals(invoice, &[test_case]),
+        [
+            "3:8 production-uses-test-code Production code can't use `TenantTestCase`, a test file's class. | Declare `TenantTestCase` in production code, or use it only in a test.",
+            "5:24 production-uses-test-code Production code can't use `TenantTestCase`, a test file's class. | Declare `TenantTestCase` in production code, or use it only in a test.",
+        ]
+    );
+}
+
 /// Spec section 32: a listed name that names no namespace of the project or its libraries is the ordinary error of an
 /// import that names nothing.
 #[test]

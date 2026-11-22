@@ -792,7 +792,9 @@ where
         if !codebase.namespace_exists(*import) && !holds_function_or_constant(codebase, namespace) && !given(namespace)
         {
             report_non_existent_import(context, *span, namespace, "namespace");
-        } else if let Some(parent) = list_refusing(context.codebase, metadata.namespace.as_bytes(), namespace) {
+        } else if let Some(parent) =
+            list_refusing(context.codebase, context.source_file.id, metadata.namespace.as_bytes(), namespace)
+        {
             let parent = display_namespace(context.codebase, parent);
             context.collector.report_with_code(
                 IssueCode::UnlistedImport,
@@ -923,12 +925,13 @@ pub(crate) fn enclosing_binding(codebase: &CodebaseMetadata, span: Span) -> Opti
 
 /// Spec section 32: whether the PHP# code of the analyzed file imports `name`, the full name of a class-like, of a
 /// namespace, or of a namespace's function or constant, past each list that covers its namespace. Reports at `span`,
-/// and returns false, when a [list refuses](list_refusing) it.
+/// and returns false, when a [list refuses](list_refusing) it. No list refuses an import of a test file.
 pub(crate) fn check_listed_import<A>(context: &mut Context<'_, '_, A>, name: &[u8], span: Span) -> bool
 where
     A: Arena,
 {
-    let Some(module) = list_refusing(context.codebase, context.scope.namespace_name().unwrap_or_default(), name) else {
+    let namespace = context.scope.namespace_name().unwrap_or_default();
+    let Some(module) = list_refusing(context.codebase, context.source_file.id, namespace, name) else {
         return true;
     };
 

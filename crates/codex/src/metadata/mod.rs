@@ -8,6 +8,7 @@ use foldhash::HashSet;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_database::file::FolderNamespace;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
@@ -188,6 +189,11 @@ pub struct CodebaseMetadata {
     /// through `global`, spec section 23.
     #[cfg_attr(feature = "serde", serde(default))]
     standard_library_files: HashSet<FileId>,
+    /// The test files, those of a folder `composer.json` lists under `autoload-dev`, spec section 5: their imports are
+    /// no edges of the namespace graph, a module's `imports` line doesn't limit them, and production code can't use a
+    /// class one declares, spec sections 23 and 32.
+    #[cfg_attr(feature = "serde", serde(default))]
+    test_files: HashSet<FileId>,
     /// Each user-defined class-like population filled, as its scan gave it, by its key. Population fills such a
     /// class-like again from it, as a full analysis does, so nothing an earlier fill derived stays.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -935,14 +941,17 @@ impl CodebaseMetadata {
         self.get_constant(name).map(|meta| meta.span)
     }
 
-    /// Records the name of the scanned file `file`, when it is a host or a vendored file, and whether the standard
-    /// library holds it.
+    /// Records the name of the scanned file `file`, when it is a host or a vendored file, whether the standard library
+    /// holds it, and whether it is a test file.
     pub(crate) fn add_file(&mut self, file: &File) {
         if matches!(file.file_type, FileType::Host | FileType::Vendored) {
             self.file_names.insert(file.id, word(&file.name));
         }
         if file.is_standard_library {
             self.standard_library_files.insert(file.id);
+        }
+        if file.folder_namespace == Some(FolderNamespace::Test) {
+            self.test_files.insert(file.id);
         }
     }
 
@@ -968,6 +977,13 @@ impl CodebaseMetadata {
     #[must_use]
     pub fn is_standard_library_file(&self, file_id: FileId) -> bool {
         self.standard_library_files.contains(&file_id)
+    }
+
+    /// Whether the file `file_id` is a test file, one of a folder `composer.json` lists under `autoload-dev`.
+    #[inline]
+    #[must_use]
+    pub fn is_test_file(&self, file_id: FileId) -> bool {
+        self.test_files.contains(&file_id)
     }
 
     /// The folder whose classes, functions and constants of PHP's root namespace `declaration` gives its namespace, spec
@@ -1940,6 +1956,7 @@ impl CodebaseMetadata {
 
         self.file_signatures.extend(other.file_signatures);
         self.standard_library_files.extend(other.standard_library_files);
+        self.test_files.extend(other.test_files);
         self.safe_symbols.extend(other.safe_symbols);
         self.safe_symbol_members.extend(other.safe_symbol_members);
         self.infer_types_from_usage |= other.infer_types_from_usage;
@@ -2046,6 +2063,7 @@ impl CodebaseMetadata {
             self.file_signatures.insert(*k, v.clone());
         }
         self.standard_library_files.extend(other.standard_library_files.iter().copied());
+        self.test_files.extend(other.test_files.iter().copied());
         self.safe_symbols.extend(other.safe_symbols.iter().copied());
         self.safe_symbol_members.extend(other.safe_symbol_members.iter().copied());
         self.infer_types_from_usage |= other.infer_types_from_usage;
@@ -2398,6 +2416,7 @@ impl CodebaseMetadata {
             self.file_signatures.remove(k);
             self.file_names.remove(k);
             self.standard_library_files.remove(k);
+            self.test_files.remove(k);
         }
 
         // Drop any patch entry that originated from a file signature we just removed; a patch

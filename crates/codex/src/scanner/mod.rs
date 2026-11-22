@@ -3,6 +3,7 @@ use std::sync::Arc;
 use mago_allocator::Arena;
 
 use mago_database::file::File;
+use mago_database::file::FolderNamespace;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
 use mago_names::binding::MethodParts;
@@ -191,9 +192,14 @@ where
 /// Spec section 23: each name a PHP# file of the project imports from another namespace, an edge of the graph in which
 /// no two namespaces import each other. Code writes no full name, which the analyzer refuses, so imports are the only
 /// edges. A library's files and the standard library's never reach the project's code, so they add no edge, and
-/// neither does a name of the standard library, which reaches no other code.
+/// neither does a name of the standard library, which reaches no other code. Production code never reaches a test
+/// file, so a test file's imports add no edge either.
 fn namespace_imports(file: &File, program: &Program<'_>) -> Vec<NamespaceImportMetadata> {
-    if !program.dialect.is_sharp() || file.is_standard_library || file.file_type.is_vendored() {
+    if !program.dialect.is_sharp()
+        || file.is_standard_library
+        || file.file_type.is_vendored()
+        || file.folder_namespace == Some(FolderNamespace::Test)
+    {
         return Vec::new();
     }
     let Some(namespace) = program.statements.iter().find_map(|statement| match statement {

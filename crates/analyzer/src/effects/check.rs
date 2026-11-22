@@ -258,7 +258,8 @@ pub(crate) fn laws_must_be_pure(effects: &Effects, codebase: &CodebaseMetadata) 
             let class_name = |class| sharp_class_like_name(codebase, imports, class);
             let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
-            let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
+            let file = impurity.span.file_id;
+            let missing_import = |class| sharp_missing_imports(codebase, file, imports, scope, [class]);
 
             // A change has no effect, so its law is refused for the change, spec section 28.
             let holds = if impurity.effect.is_some() { "pure code" } else { "code that changes nothing" };
@@ -290,7 +291,7 @@ pub(crate) fn function_values_must_fit_their_types(effects: &Effects, codebase: 
             let class_name = |class| sharp_class_like_name(codebase, imports, class);
             let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
-            let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
+            let missing_import = |class| sharp_missing_imports(codebase, value.span.file_id, imports, scope, [class]);
             // A plain PHP function's value has no class, spec section 14.3.
             let method = || {
                 if name.0.is_empty() {
@@ -344,7 +345,8 @@ pub(crate) fn implementations_must_fit_their_declarations(
             let class_name = |class| sharp_class_like_name(codebase, imports, class);
             let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
-            let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
+            let file = impurity.span.file_id;
+            let missing_import = |class| sharp_missing_imports(codebase, file, imports, scope, [class]);
             let ancestor = codebase.get_class_like(ancestor).map_or(ancestor, |ancestor| ancestor.original_name);
             let declared = display_sharp_member(class_name(ancestor), declaration.original_name);
             let uses: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
@@ -520,7 +522,7 @@ pub(crate) fn plain_php_has_extern_lines(effects: &Effects, codebase: &CodebaseM
         .map(|(span, (class, function), imports, scope)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, class);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
-            let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
+            let missing_import = |class| sharp_missing_imports(codebase, span.file_id, imports, scope, [class]);
             let (shown, target, import) = if class.is_empty() {
                 let (target, namespace) = written_function(function, &code_class_name);
 
