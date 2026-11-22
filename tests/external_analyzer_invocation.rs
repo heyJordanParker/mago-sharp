@@ -891,6 +891,44 @@ fn node_hooks_read_a_built_in_bound_as_the_compile_resolves_it() -> Result<(), B
     Ok(())
 }
 
+/// A dotted name of a machine's case names the case's class, spec section 20, wherever the checker reads it as the case:
+/// a type pattern, its `not` form, a return type and `typeof`. A hook reads `Demo\JourneyStatus\Open` at each, where
+/// 0.6.51 gave the machine in a pattern. A value pattern's expression has the case's type, where 0.6.51 gave it none.
+#[test]
+fn node_hooks_read_a_case_s_dotted_name_and_value_as_the_case() -> Result<(), Box<dyn std::error::Error>> {
+    if !php_sdk_is_available() {
+        return Ok(());
+    }
+
+    const STATUS: (&str, &str) = (
+        "src/JourneyStatus.sharp",
+        "namespace Demo;\n\npublic machine JourneyStatus : string\n{\n    case Open = \"open\" { public JourneyStatus.Completed complete() => JourneyStatus.Completed; }\n    final case Completed = \"completed\";\n    public static JourneyStatus.Open enter() => JourneyStatus.Open;\n}\n",
+    );
+    const PROBE: (&str, &str) = (
+        "src/Probe.sharp",
+        "namespace Demo;\n\npublic class Probe\n{\n    public static bool open(JourneyStatus status) => status is JourneyStatus.Open;\n\n    public static bool closed(JourneyStatus status) => status is not JourneyStatus.Open open ? true : open.complete() is JourneyStatus.Completed;\n\n    public static bool completes(JourneyStatus status) => status is JourneyStatus.Open open ? open.complete() is JourneyStatus.Completed : false;\n\n    public static Class<JourneyStatus.Open> kind() => typeof(JourneyStatus.Open);\n}\n",
+    );
+
+    let cases = analyze_files_with_fixture(&[STATUS, PROBE], &["MAGO_INVOCATION_CASE_NAMES"])?;
+    assert_eq!(cases.issues, []);
+    assert_eq!(
+        cases.invocations,
+        [
+            "name-JourneyStatus.Completed-Demo\\JourneyStatus\\Completed",
+            "name-JourneyStatus.Open-Demo\\JourneyStatus\\Open",
+            "value-JourneyStatus.Open-Demo\\JourneyStatus\\Open",
+            "name-JourneyStatus.Open-Demo\\JourneyStatus\\Open",
+            "value-JourneyStatus.Completed-Demo\\JourneyStatus\\Completed",
+            "name-JourneyStatus.Open-Demo\\JourneyStatus\\Open",
+            "value-JourneyStatus.Completed-Demo\\JourneyStatus\\Completed",
+            "name-JourneyStatus.Open-Demo\\JourneyStatus\\Open",
+            "name-JourneyStatus.Open-Demo\\JourneyStatus\\Open",
+        ]
+    );
+
+    Ok(())
+}
+
 /// A method search names each attribute as the hook writes it, and the host keys it as the codebase does, spec section
 /// 24: the PHP# `Marked` by its exact name, and the plain PHP `Tagged` in any case. So a search for either finds the
 /// method that carries it.

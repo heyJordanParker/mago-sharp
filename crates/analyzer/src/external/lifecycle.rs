@@ -31,7 +31,6 @@ use mago_span::Position;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::ConstantAccess;
-use mago_syntax::cst::Hint;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NodeKind;
 use mago_syntax::cst::Program;
@@ -308,10 +307,9 @@ fn build_node_analysis_plan<'ast, 'arena>(
 ///   the member, as `abort()` does, spec section 23.
 /// - `PaymentResult.Declined(reason: "expired")` builds the case `Declined` of the enum `PaymentResult`, spec section
 ///   20, so it names the class the case runs as at `Declined`, as `new PaymentResult\Declined(…)` does.
-/// - The pattern `PaymentResult.Paid(string id)` names the enum `PaymentResult` at `PaymentResult`, as the value
-///   pattern `Plan.Starter` names `Plan`, and its case has no name of its own.
 ///
-/// None in a PHP file.
+/// A case's dotted name, as in the pattern `PaymentResult.Paid(string id)`, names the case's class as name resolution
+/// gives it, as it does in a declared type and in `typeof`. None in a PHP file.
 fn analyzed_names(
     program: &Program<'_>,
     resolved_names: &ResolvedNames<'_>,
@@ -324,16 +322,6 @@ fn analyzed_names(
 
     let mut stack = vec![Node::Program(program)];
     while let Some(node) = stack.pop() {
-        if let Node::TypePattern(pattern) = node
-            && let Hint::Identifier(hint) = &pattern.hint
-            && let Some(case) = data_case(codebase, word(resolved_names.get(hint)))
-            && let Some(r#enum) = case.direct_parent_class.and_then(|name| codebase.get_class_like(name))
-            && let Some(dot) = hint.value().iter().rposition(|byte| *byte == b'.')
-        {
-            let start = hint.span().start.offset;
-            names.push((start, start + dot as u32, r#enum.original_name.as_bytes().to_vec(), SNAPSHOT_CLASS_BINDING));
-        }
-
         let class_member = match node {
             Node::MethodCall(call) => resolved_names.static_call_class(call).map(|class| (class, &call.method)),
             Node::PropertyAccess(access) => {
@@ -2081,8 +2069,9 @@ mod tests {
     /// A host reads each PHP# form as the PHP that means it: `Pdf.render("x")` calls the function `Vendor\Pdf\render`
     /// and `PaymentResult.Declined(…)` builds the case, so their targets carry those kinds and reach the hooks of
     /// function calls and of `new`, while a class declaration means only itself. The snapshot names what only the
-    /// codebase tells: the namespace and its members at `Pdf.render` and `Pdf.DEFAULT_DPI`, the case's class at a
-    /// built case, and the enum at a pattern of its case. A plain PHP file names nothing more.
+    /// codebase tells: the namespace and its members at `Pdf.render` and `Pdf.DEFAULT_DPI`, and the case's class at a
+    /// built case. A pattern of a case names the case as name resolution gives it, so nothing here renames it. A plain
+    /// PHP file names nothing more.
     #[test]
     fn a_sharp_file_sends_each_form_as_the_php_that_means_it() {
         analyzed(&[PAY, PDF], |analysis| {
@@ -2130,8 +2119,6 @@ mod tests {
                 [
                     ("DEFAULT_DPI".to_owned(), "Vendor\\Pdf\\DEFAULT_DPI".to_owned(), 0),
                     ("Declined".to_owned(), "App\\PaymentResult\\Declined".to_owned(), 1),
-                    ("PaymentResult".to_owned(), "App\\PaymentResult".to_owned(), 1),
-                    ("PaymentResult".to_owned(), "App\\PaymentResult".to_owned(), 1),
                     ("Pdf".to_owned(), "Vendor\\Pdf".to_owned(), 0),
                     ("Pdf".to_owned(), "Vendor\\Pdf".to_owned(), 0),
                     ("render".to_owned(), "Vendor\\Pdf\\render".to_owned(), 0),

@@ -640,6 +640,19 @@ where
     for (left_bracket, tuple) in tuples {
         artifacts.record_list_pattern_tuple(&left_bracket, Some(tuple));
     }
+    // A value pattern's expression is a value as it is anywhere else, so it has the type it has there, as a case's
+    // `Status.Open` has the case's, though its PHP tests the case with `instanceof` and reads no expression of its own.
+    // It is typed in a copy of the block, as the tested value is, whose issues the analysis of the PHP reports.
+    for value in node.filter_map(|node| match node {
+        Node::Pattern(Pattern::Value(value)) => Some(*value),
+        _ => None,
+    }) {
+        if artifacts.get_expression_type(value).is_none() {
+            let mut typing = block_context.clone();
+            let (typed, _) = context.record(|context| value.analyze(context, &mut typing, artifacts));
+            typed?;
+        }
+    }
 
     // The PHP of a pattern calls a type test that no source the user wrote calls. Some calls are the shape of the
     // pattern, which no source the user wrote can drop, so C# reports nothing there when they always hold: a properties pattern's `is_object` and a list pattern's

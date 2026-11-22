@@ -965,6 +965,39 @@ final class InvocationBoundNamesHook implements NodeAnalysisHook
     }
 }
 
+/**
+ * Records what a rule that checks an `is` test reads of a machine's case: the name each dotted name resolves to, and the
+ * type of each value pattern's expression.
+ */
+final class InvocationCaseNamesHook implements NodeAnalysisHook
+{
+    public function getTargets(): array
+    {
+        return [NodeKind::DottedIdentifier, NodeKind::Pattern];
+    }
+
+    public function getRequirements(): array
+    {
+        return [FileAnalysisRequirement::TargetSubtree, FileAnalysisRequirement::SourceText];
+    }
+
+    public function analyze(NodeAnalysisContext $context): void
+    {
+        $source = $context->source;
+        if ($context->node->kind === NodeKind::DottedIdentifier) {
+            $name = $source->getResolvedName($context->node)->name ?? 'none';
+            InvocationAudit::record('name-' . $source->getText($context->node) . '-' . $name);
+
+            return;
+        }
+        $expression = $source->getChildren($context->node)[0] ?? null;
+        if ($expression?->kind === NodeKind::Expression) {
+            $type = $context->analysis->getExpressionType($expression);
+            InvocationAudit::record('value-' . $source->getText($expression) . '-' . ($type?->__toString() ?? 'none'));
+        }
+    }
+}
+
 final class InvocationMethodCallHook implements MethodCallAnalysisHook
 {
     public function getTargets(): array
@@ -1156,6 +1189,9 @@ if (getenv('MAGO_INVOCATION_ATTRIBUTED_METHODS') === '1') {
 }
 if (getenv('MAGO_INVOCATION_BOUND_NAMES') === '1') {
     $nodeAnalysisHooks[] = new InvocationBoundNamesHook();
+}
+if (getenv('MAGO_INVOCATION_CASE_NAMES') === '1') {
+    $nodeAnalysisHooks[] = new InvocationCaseNamesHook();
 }
 
 (new Worker(new Extension(
