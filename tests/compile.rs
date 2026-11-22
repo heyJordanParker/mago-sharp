@@ -3000,10 +3000,11 @@ fn compile_refuses_a_plain_php_class_that_changed_or_appeared_since_the_last_com
     );
 }
 
-/// A `Module.sharp` at the root, outside the configured paths, is an input of each compiled file, which the engine
-/// reads, so one that appears makes the compile write each compiled file again.
+/// Spec section 32: the engine reads a class's modules by the namespaces they serve, as the listener table records
+/// them, and a `Module.sharp` at the root, outside the configured paths, serves none, so one that appears leaves each
+/// compiled file current.
 #[test]
-fn compile_writes_each_compiled_file_again_once_a_module_file_appears_at_the_root() {
+fn a_module_file_that_appears_at_the_root_outside_the_paths_leaves_each_compiled_file_current() {
     let directory = project(ORDER, MONEY);
     let root = directory.path();
     compile_succeeds(root);
@@ -3012,7 +3013,7 @@ fn compile_writes_each_compiled_file_again_once_a_module_file_appears_at_the_roo
     write(root, "Module.sharp", "module\n{\n}\n");
     compile_succeeds(root);
 
-    assert_ne!(compiled_at(root, "app/Order.sharp"), written, "the compile ran");
+    assert_eq!(compiled_at(root, "app/Order.sharp"), written, "the compile wrote nothing");
 }
 
 /// The deprecated `perform-heuristic-checks`, which serde never writes back, changes the analysis, so a change of it
@@ -3485,6 +3486,56 @@ fn compile_records_each_module_under_the_namespace_it_serves() {
         ),
         "{table}"
     );
+}
+
+/// Spec section 32: a program's services come from the modules of its namespace and of each namespace above it,
+/// wherever its file is, so an edit to `app/Module.sharp` writes again the compiled program of `App.Testing.Lib` under
+/// `tests/lib`, and a file added beside the module writes no other compiled file again.
+#[test]
+fn an_edit_to_a_module_writes_again_each_program_of_its_namespace_wherever_its_file_is() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\", \"tests\"]\nincludes = [\"vendor\"]\n",
+    );
+    write(
+        root,
+        "composer.json",
+        "{\"type\": \"library\", \"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}, \"autoload-dev\": {\"psr-4\": {\"Tests\\\\\": \"tests/\"}}}\n",
+    );
+    write(root, "composer.lock", "{}\n");
+    let runtime = |class: &str| format!("namespace App.Shared;\n\npublic class {class} : Runtime\n{{\n}}\n");
+    let module = |class: &str| {
+        format!(
+            "namespace App;\n\nimport App.Shared.Runtime;\nimport App.Shared.{class};\n\nmodule\n{{\n    singleton Runtime = {class};\n}}\n"
+        )
+    };
+    write(root, "app/Shared/Runtime.sharp", "namespace App.Shared;\n\npublic interface Runtime\n{\n}\n");
+    write(root, "app/Shared/LiveRuntime.sharp", &runtime("LiveRuntime"));
+    write(root, "app/Shared/QuietRuntime.sharp", &runtime("QuietRuntime"));
+    write(root, "app/Module.sharp", &module("LiveRuntime"));
+    write(
+        root,
+        "tests/lib/Link.sharp",
+        "namespace App.Testing.Lib;\n\nimport App.Shared.Runtime;\n\npublic class Link\n{\n    public Link(private Runtime runtime) { }\n\n    public void main()\n    {\n    }\n}\n",
+    );
+    compile_succeeds(root);
+    let link = compiled_at(root, "tests/lib/Link.sharp");
+
+    write(root, "app/Module.sharp", &module("QuietRuntime"));
+    compile_succeeds(root);
+    assert_ne!(compiled_at(root, "tests/lib/Link.sharp"), link, "the edit of App's module wrote Link again");
+
+    let names =
+        ["tests/lib/Link.sharp", "app/Module.sharp", "app/Shared/Runtime.sharp", "app/Shared/LiveRuntime.sharp"];
+    let written: Vec<std::time::SystemTime> = names.iter().map(|name| compiled_at(root, name)).collect();
+    write(root, "app/Foo.sharp", "namespace App;\n\npublic class Foo\n{\n}\n");
+    compile_succeeds(root);
+    for (name, at) in names.iter().zip(written) {
+        assert_eq!(compiled_at(root, name), at, "adding app/Foo.sharp wrote {name} again");
+    }
 }
 
 /// Spec section 29: the listener table names, for each plain PHP class, method and function an `extern` line gives

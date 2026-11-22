@@ -972,7 +972,7 @@ fn a_compile_keys_the_listing_its_hooks_read_and_lists_none_of_its_files_among_t
         "the hook runs in the PHP# file alone"
     );
     assert_eq!(owned_reports, ["Run 1 of `app/Report.sharp`: `Invoice` is owned."]);
-    assert_eq!(inputs, ["Module.sharp", "app/Module.sharp", "app/Report.sharp", "composer.lock"]);
+    assert_eq!(inputs, ["app/Module.sharp", "app/Report.sharp", "composer.lock"]);
     assert_eq!(same_inputs, inputs);
     assert_eq!(owned_inputs, inputs);
     assert_eq!(same_key, key, "an edit that leaves the listing as it was keeps the key");
