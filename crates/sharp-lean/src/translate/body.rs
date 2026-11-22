@@ -39,8 +39,10 @@ use mago_syntax::cst::AssignmentOperator;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Block;
+use mago_syntax::cst::BracedExpressionStringPart;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::CompositeString;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
@@ -65,6 +67,7 @@ use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::StringPart;
 use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
@@ -594,9 +597,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 self.lines.push("throw Throwable.Thrown".to_owned());
                 "default".to_owned()
             }
-            Expression::CompositeString(_) => {
-                self.unmodeled(expression.span(), "a string template".to_owned(), issues::TEMPLATE)
-            }
+            Expression::CompositeString(template) => self.template(expression, template),
             Expression::Assignment(_) => self.unmodeled(
                 expression.span(),
                 "an assignment inside an expression".to_owned(),
@@ -607,6 +608,29 @@ impl<'body, 'program> Body<'body, 'program> {
                 self.unmodeled(expression.span(), what, issues::EXPRESSION)
             }
         }
+    }
+
+    /// A string template, spec section 18: the `++` of its parts, each literal as its bytes, a `string` as itself and an
+    /// `int` as the text PHP# writes for it, `int.text`. A template with a part of any other type is refused.
+    fn template(&mut self, expression: &Expression, template: &CompositeString) -> String {
+        let mut parts = Vec::new();
+        for part in template.parts() {
+            parts.push(match part {
+                StringPart::Literal(literal) => names::string(literal.value.unwrap_or_default()),
+                StringPart::Expression(value)
+                | StringPart::BracedExpression(BracedExpressionStringPart { expression: value, .. }) => {
+                    match self.kind(self.checked.types().expression_type(value)) {
+                        Kind::String => self.value(value),
+                        Kind::Int => format!("(int.text {})", self.value(value)),
+                        _ => {
+                            return self.unmodeled(expression.span(), "a string template".to_owned(), issues::TEMPLATE);
+                        }
+                    }
+                }
+            });
+        }
+
+        if parts.is_empty() { names::string(b"") } else { format!("({})", parts.join(" ++ ")) }
     }
 
     fn literal(&mut self, literal: &Literal) -> String {
@@ -1712,8 +1736,9 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// A `List` method a law reasons about, as the Lean function it is: `count()` is `int.count`, the list's length,
-    /// or that length checked into the int range in a body that computes exactly, and `map` and `filter` of a lambda
-    /// are `List.map` and `List.filter`. Every other method of a collection is refused by name.
+    /// or that length checked into the int range in a body that computes exactly, `isEmpty()` and `isNotEmpty()` are
+    /// `List.isEmpty` and its negation, and `map` and `filter` of a lambda are `List.map` and `List.filter`. Every other
+    /// method of a collection is refused by name.
     fn list_call(&mut self, expression: &Expression, call: &MethodCall) -> String {
         let Some(method) = self.method_name(&call.method) else {
             return "default".to_owned();
@@ -1728,6 +1753,8 @@ impl<'body, 'program> Body<'body, 'program> {
 
                 format!("(int.count {list})")
             }
+            (b"isEmpty", 0) => format!("(List.isEmpty {})", self.value(call.object)),
+            (b"isNotEmpty", 0) => format!("(!(List.isEmpty {}))", self.value(call.object)),
             (b"map" | b"filter", 1) => {
                 let list = self.value(call.object);
                 let Some(function) = arguments.first().and_then(|argument| self.lambda(argument.value())) else {
@@ -1784,8 +1811,8 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// A `Map` member a law reads, spec section 28, as the function of `Sharp/Lean/Map.lean` of its name, one of
-    /// [`MAP_MEMBERS`]: `count()` in a body that computes exactly is the entries' length checked into the int range.
-    /// Every other member is refused, naming those.
+    /// [`MAP_MEMBERS`]: `count()` in a body that computes exactly is the entries' length checked into the int range,
+    /// and `filter` takes a lambda, as a `List`'s does. Every other member is refused, naming those.
     fn map_call(&mut self, expression: &Expression, call: &MethodCall) -> String {
         let Some(method) = self.method_name(&call.method) else {
             return "default".to_owned();
@@ -1796,6 +1823,13 @@ impl<'body, 'program> Body<'body, 'program> {
             return self.unmodeled(expression.span(), what, issues::map_members(&MAP_MEMBERS));
         }
         let map = self.value(call.object);
+        if let ("filter", [argument]) = (name.as_str(), call.argument_list.arguments.as_slice()) {
+            let Some(predicate) = self.lambda(argument.value()) else {
+                return "default".to_owned();
+            };
+
+            return format!("(Sharp.Map.filter {predicate} {map})");
+        }
         let Some(arguments) = self.arguments(&call.argument_list, None) else {
             return "default".to_owned();
         };
@@ -2754,8 +2788,16 @@ pub(crate) fn indented(lines: &[String], by: usize) -> impl Iterator<Item = Stri
 
 /// The `Map` members a law reads, each by its name and the arguments it takes, spec section 28: each is the function of
 /// `Sharp/Lean/Map.lean` of its name. The refusal of any other member names them.
-const MAP_MEMBERS: [(&str, usize); 7] =
-    [("count", 0), ("isEmpty", 0), ("isNotEmpty", 0), ("get", 1), ("has", 1), ("keys", 0), ("values", 0)];
+const MAP_MEMBERS: [(&str, usize); 8] = [
+    ("count", 0),
+    ("isEmpty", 0),
+    ("isNotEmpty", 0),
+    ("get", 1),
+    ("has", 1),
+    ("keys", 0),
+    ("values", 0),
+    ("filter", 1),
+];
 
 /// The type of an element of a value of `list`, a `List` type: its element type joined with the type of each element
 /// it is known to hold, as a literal's are.

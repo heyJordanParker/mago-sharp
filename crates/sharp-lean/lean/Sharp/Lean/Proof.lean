@@ -38,7 +38,9 @@ private theorem eq_pure {α : Type} (x : M α) (a : α) : x = pure a ↔ x.run =
   | none => simp
   | some r => cases r <;> simp
 
-@[simp] theorem map_eq_pure {α β : Type} (f : α → β) (x : M α) (b : β) :
+/-- A step that maps what it reads, as a template of an element a list read gives, gives a value only when the read
+does. `grind` reads it too, in each case of an `if` it splits in a fact. -/
+@[simp, grind =] theorem map_eq_pure {α β : Type} (f : α → β) (x : M α) (b : β) :
     f <$> x = pure b ↔ ∃ a, x = pure a ∧ f a = b := by
   rw [← bind_pure_comp, bind_eq_pure]
   simp

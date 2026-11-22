@@ -3,8 +3,8 @@ import Sharp.Lean.Int
 /-!
 PHP# `Map<TKey, TValue>` (spec section 12): its entries in the order their keys were first set, each key once.
 
-A law reads a `Map` with `get`, `has`, `keys()`, `values()`, `count()`, `isEmpty()`, `isNotEmpty()`, a read `map[key]`
-and a loop over its entries.
+A law reads a `Map` with `get`, `has`, `keys()`, `values()`, `count()`, `isEmpty()`, `isNotEmpty()`, `filter` of a
+lambda, a read `map[key]` and a loop over its entries.
 Each is a function of the entries, which the automatic steps rewrite to Lean's own list functions.
 -/
 
@@ -85,6 +85,23 @@ def isEmpty (map : Map κ ν) : Bool := map.entries.isEmpty
 /-- `isNotEmpty()`: whether the map holds an entry. -/
 def isNotEmpty (map : Map κ ν) : Bool := !map.entries.isEmpty
 
+/-- `filter(predicate)`: the entries whose values `predicate` keeps, in the map's order. -/
+def filter (predicate : ν → Bool) (map : Map κ ν) : Map κ ν :=
+  ⟨map.entries.filter (predicate ·.2), map.distinct.sublist (List.filter_sublist.map Prod.fst)⟩
+
+/-- The value `get` finds is the value of an entry, so what holds of every entry, as what `filter` drops, holds of it. -/
+theorem mem_of_lookup : ∀ {entries : List (κ × ν)} {key : κ} {value : ν},
+    entries.lookup key = some value → (key, value) ∈ entries
+  | [], _, _, found => by simp [List.lookup] at found
+  | (k, v) :: rest, key, value, found => by
+    by_cases same : key = k
+    · subst same
+      simp [List.lookup] at found
+      simp [found]
+    · have other : (key == k) = false := by simp [same]
+      simp only [List.lookup, other] at found
+      exact List.mem_cons_of_mem _ (mem_of_lookup found)
+
 instance [DecidableEq ν] : DecidableEq (Map κ ν) := fun a b =>
   if h : a.entries = b.entries then
     isTrue (by cases a; cases b; simp_all)
@@ -94,7 +111,13 @@ instance [DecidableEq ν] : DecidableEq (Map κ ν) := fun a b =>
 /-! The automatic steps read each member as the list function of the entries it is, and a map a law writes out as
 its entries. -/
 
-attribute [simp] get has keys values count isEmpty isNotEmpty set ofList empty setIn
+attribute [simp] get has keys values count isEmpty isNotEmpty filter set ofList empty setIn
+
+/-! A `Map` of nullable values reads a missing key and a stored null alike, as `Option.join` of what `get` finds, which
+the automatic steps split into the two. -/
+
+attribute [simp] Option.join_eq_none_iff
+attribute [grind →] mem_of_lookup
 
 end Map
 

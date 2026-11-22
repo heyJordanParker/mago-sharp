@@ -5847,6 +5847,78 @@ fn a_law_reads_an_overridable_computed_property_as_each_implementation_gives_it(
     assert!(!printed(&output).contains("readsTheSame"), "{}", printed(&output));
 }
 
+/// `App.Setup.Settings`, whose `problem` keeps a settings map's missing values with `filter`, tests what it kept with
+/// `isNotEmpty()`, and names the first in a template with their count, and whose `active` has no problem, and `laws`.
+fn settings(laws: &str) -> String {
+    format!(
+        "namespace App.Setup;\n\npublic final class Settings\n{{\n    public static string? problem(Map<string, string?> settings)\n    {{\n        const missing = settings.filter(value => value == null);\n        if (missing.isNotEmpty()) {{\n            return `Missing setting ${{missing.keys()[0]}}, ${{missing.count()}} in all`;\n        }}\n        return null;\n    }}\n\n    public static bool active(Map<string, string?> settings) => Settings.problem(settings) == null;\n\n    {laws}\n}}\n"
+    )
+}
+
+/// A law reads a `Map`'s `filter` of a lambda, `isNotEmpty()` of what it kept, and a template of a `string` and an
+/// `int`, so a settings map with a missing value is never active.
+#[test]
+fn a_law_reads_a_filtered_map_and_a_template_that_names_what_it_kept() {
+    let directory = library_project(&[(
+        "app/Setup/Settings.sharp",
+        &settings(
+            "law aMissingValueIsNeverActive(Map<string, string?> settings, string key) when settings.has(key) && settings.get(key) == null => !Settings.active(settings);",
+        ),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Setup/Settings.sharp").exists());
+}
+
+/// A false law over a filtered map and a template is refused as not proven, with its claim still to show.
+#[test]
+fn a_false_law_over_a_filtered_map_is_not_proven() {
+    let directory = library_project(&[(
+        "app/Setup/Settings.sharp",
+        &settings("law everySettingsMapIsActive(Map<string, string?> settings) => Settings.active(settings);"),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: law everySettingsMapIsActive is not proven\n = still to show: Settings.problem(settings) == null\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// `isEmpty()` and `isNotEmpty()` of a `List` are `List.isEmpty` and its negation, so they prove what `count() == 0`
+/// and `count() > 0` of the same list prove.
+#[test]
+fn a_list_s_is_empty_proves_what_its_count_proves() {
+    let directory = library_project(&[(
+        "app/Shared/Stock.sharp",
+        "namespace App.Shared;\n\npublic final class Stock\n{\n    public static List<int> low(List<int> items) => items.filter(x => x < 5);\n\n    law emptyIsNoneCounted(List<int> items) => Stock.low(items).isEmpty() == (Stock.low(items).count() == 0);\n    law notEmptyIsSomeCounted(List<int> items) => Stock.low(items).isNotEmpty() == (Stock.low(items).count() > 0);\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Stock.sharp").exists());
+}
+
+/// A template part of a type other than `string` and `int`, as a `float`, keeps the template's refusal.
+#[test]
+fn a_law_reaching_a_template_with_a_float_part_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static string show(int n) => `${n} of ${1.5}`;\n\n    law showsTheSame(int n) => Shape.show(n) == Shape.show(n);\n}\n",
+        "Law showsTheSame reaches a string template in Shape.show. Join the strings with `+`.",
+    );
+}
+
 /// `App.Shared.Stamp`, whose laws build an `Instant`: one reads what it built, and one holds only because the
 /// constructor throws for a nanosecond outside its range.
 const STAMP: &str = "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic final class Stamp\n{\n    law builds(int unused) => new Instant(1, 0).epochSeconds == 1;\n    law aBuiltNanosecondIsInRange(int s, int n) => new Instant(s, n).nanosecond <= 999_999_999;\n}\n";
@@ -7018,7 +7090,7 @@ fn a_law_reaching_a_member_lean_reserves_is_refused() {
 fn a_law_reading_a_map_member_it_has_no_model_of_is_refused_naming_the_members_it_reads() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(Map<string, int> items) => items.toList().count() == items.count();\n}\n",
-        "Law sized reaches the Map method toList in Shape.sized. Read a Map with `count()`, `isEmpty()`, `isNotEmpty()`, `get`, `has`, `keys()`, `values()`, an index or a loop over its entries.",
+        "Law sized reaches the Map method toList in Shape.sized. Read a Map with `count()`, `isEmpty()`, `isNotEmpty()`, `get`, `has`, `keys()`, `values()`, `filter`, an index or a loop over its entries.",
     );
 }
 
@@ -8111,7 +8183,7 @@ fn a_law_reaching_a_value_pattern_on_a_list_is_refused() {
 /// the value is out of a law's reach.
 #[test]
 fn each_refusal_a_law_reaches_says_what_to_write_instead() {
-    let source = "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int value { get; }) { }\n    public static bool operator ==(Shape a, Shape b) => a.value == b.value;\n    public int hash() => this.value;\n\n    public static int union(int|string x) => 1;\n    public static int power(int a) => a ** 2;\n    public static int complement(int a) => ~a;\n    public static string template(int a) => `n ${a}`;\n    public static int guard(int a) => match (a) {\n        int m when m + 1 > 2 => 1,\n        default => 0,\n    };\n    public static int defaulted(int a = 1) => a;\n    public static int named(int a) => Shape.defaulted(a: a);\n    public static int compound(int a)\n    {\n        let x = a;\n        x **= 2;\n        return x;\n    }\n    public static int inner(int a)\n    {\n        let x = 0;\n        return (x = a) + 1;\n    }\n\n    law l1(int a) => Shape.union(a) == 1;\n    law l2(int a) => Shape.power(a) == Shape.power(a);\n    law l3(int a) => Shape.complement(a) == Shape.complement(a);\n    law l4(int a) => Shape.template(a) == Shape.template(a);\n    law l5(int a) => Shape.guard(a) == Shape.guard(a);\n    law l6(int a) => Shape.named(a) == a;\n    law l7(int a) => Shape.compound(a) == Shape.compound(a);\n    law l8(int a) => Shape.inner(a) == Shape.inner(a);\n}\n";
+    let source = "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int value { get; }) { }\n    public static bool operator ==(Shape a, Shape b) => a.value == b.value;\n    public int hash() => this.value;\n\n    public static int union(int|string x) => 1;\n    public static int power(int a) => a ** 2;\n    public static int complement(int a) => ~a;\n    public static string template(bool a) => `n ${a}`;\n    public static int guard(int a) => match (a) {\n        int m when m + 1 > 2 => 1,\n        default => 0,\n    };\n    public static int defaulted(int a = 1) => a;\n    public static int named(int a) => Shape.defaulted(a: a);\n    public static int compound(int a)\n    {\n        let x = a;\n        x **= 2;\n        return x;\n    }\n    public static int inner(int a)\n    {\n        let x = 0;\n        return (x = a) + 1;\n    }\n\n    law l1(int a) => Shape.union(a) == 1;\n    law l2(int a) => Shape.power(a) == Shape.power(a);\n    law l3(int a) => Shape.complement(a) == Shape.complement(a);\n    law l4(bool a) => Shape.template(a) == Shape.template(a);\n    law l5(int a) => Shape.guard(a) == Shape.guard(a);\n    law l6(int a) => Shape.named(a) == a;\n    law l7(int a) => Shape.compound(a) == Shape.compound(a);\n    law l8(int a) => Shape.inner(a) == Shape.inner(a);\n}\n";
     let directory = lawful_project(&[("app/Shared/Shape.sharp", source)]);
     let root = directory.path();
 

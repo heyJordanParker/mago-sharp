@@ -58,6 +58,14 @@ private theorem eq_pure {α : Type} (x : M α) (a : α) : x = pure a ↔ x.run =
 
 attribute [simp] List.countP_le_length
 
+/-! `isEmpty()` of a `List` and of a `Map` reads as the count a law's claim computes exactly, `count() == 0`, and a list
+`filter` leaves empty as one none of whose values the lambda keeps. -/
+
+@[grind =] theorem isEmpty_eq_length {α : Type} (l : List α) : l.isEmpty = decide ((l.length : Int) = 0) := by
+  cases l <;> simp <;> omega
+
+attribute [grind =] List.filter_eq_nil_iff
+
 /-!
 The search for the moves that break an invariant of a PHP# machine (spec section 20.2), which the proof of the invariant
 runs. It evaluates the machine's code on small values, so what it finds is a run of the code, and it proves nothing.
