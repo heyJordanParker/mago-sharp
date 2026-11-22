@@ -3731,70 +3731,78 @@ fn check_abstract_method_signatures<'ctx, A>(
                 continue;
             }
 
-            let error_span = if appearing_class.kind.is_trait() {
-                class_like_metadata.name_span.unwrap_or(class_like_metadata.span)
-            } else {
-                appearing_method.name_span.unwrap_or(appearing_method.span)
-            };
-
-            if report_named_constructor_clash(
+            report_method_signature(
                 context,
                 class_like_metadata,
-                appearing_method,
-                overridden_class,
-                overridden_method,
-                error_span,
-            ) {
-                continue;
-            }
-
-            let substituted_overridden_method = get_substituted_method(
-                overridden_method,
-                class_like_metadata,
-                declaring_class_name,
-                context.codebase,
-                context.dialect,
-            );
-
-            let substituted_appearing_method = get_substituted_method(
-                appearing_method,
-                class_like_metadata,
                 method_fqcn,
-                context.codebase,
-                context.dialect,
-            );
-
-            let mut issues = method_signature::validate_method_signature_compatibility(
-                context.codebase,
-                class_like_metadata.name,
-                &substituted_appearing_method,
-                declaring_class_name,
-                &substituted_overridden_method,
-                context.dialect,
-            );
-            method_signature::validate_erased_signature_compatibility(
-                context.codebase,
-                class_like_metadata,
-                overridden_class,
                 appearing_method,
-                overridden_method,
-                &mut issues,
-            );
+                |context, primary_span| {
+                    if report_named_constructor_clash(
+                        context,
+                        class_like_metadata,
+                        appearing_method,
+                        overridden_class,
+                        overridden_method,
+                        primary_span,
+                    ) {
+                        return;
+                    }
 
-            for incompatibility in issues {
-                if widens_parameter(artifacts, class_like_metadata, method_fqcn, appearing_method, &incompatibility) {
-                    continue;
-                }
-                report_signature_compatibility_issue(
-                    context,
-                    class_like_metadata,
-                    overridden_class,
-                    *method_name_atom,
-                    appearing_method,
-                    incompatibility,
-                    error_span,
-                );
-            }
+                    let substituted_overridden_method = get_substituted_method(
+                        overridden_method,
+                        class_like_metadata,
+                        declaring_class_name,
+                        context.codebase,
+                        context.dialect,
+                    );
+
+                    let substituted_appearing_method = get_substituted_method(
+                        appearing_method,
+                        class_like_metadata,
+                        method_fqcn,
+                        context.codebase,
+                        context.dialect,
+                    );
+
+                    let mut issues = method_signature::validate_method_signature_compatibility(
+                        context.codebase,
+                        class_like_metadata.name,
+                        &substituted_appearing_method,
+                        declaring_class_name,
+                        &substituted_overridden_method,
+                        context.dialect,
+                    );
+                    method_signature::validate_erased_signature_compatibility(
+                        context.codebase,
+                        class_like_metadata,
+                        overridden_class,
+                        appearing_method,
+                        overridden_method,
+                        &mut issues,
+                    );
+
+                    for incompatibility in issues {
+                        if widens_parameter(
+                            artifacts,
+                            class_like_metadata,
+                            method_fqcn,
+                            appearing_method,
+                            &incompatibility,
+                        ) {
+                            continue;
+                        }
+                        report_signature_compatibility_issue(
+                            context,
+                            class_like_metadata,
+                            overridden_class,
+                            *method_name_atom,
+                            appearing_method,
+                            incompatibility,
+                            primary_span,
+                        );
+                    }
+                },
+            );
         }
     }
 }
@@ -4468,92 +4476,114 @@ fn check_interface_method_signatures<'ctx, A>(
         }
 
         let declaring_class = context.codebase.get_class_like(interface_fqcn_str).unwrap_or(interface_metadata);
-        let method_span = class_method.name_span.unwrap_or(class_method.span);
-        // PHP links a method a plain PHP trait gives the class as the class's own, so its mismatch is the class's,
-        // reported at its name with the trait's method beside it.
-        let trait_name = context
-            .codebase
-            .get_class_like(class_fqcn_word)
-            .filter(|declarer| declarer.kind.is_trait())
-            .map(|declarer| display_class_like_name(context, declarer.original_name));
-        let primary_span = if trait_name.is_some() {
-            class_like_metadata.name_span.unwrap_or(class_like_metadata.span)
-        } else {
-            method_span
-        };
-
-        context.collector.start_recording();
-        if !report_named_constructor_clash(
+        report_method_signature(
             context,
             class_like_metadata,
+            class_fqcn_word,
             class_method,
-            declaring_class,
-            interface_method,
-            primary_span,
-        ) {
-            let substituted_interface_method = get_substituted_method(
-                interface_method,
-                class_like_metadata,
-                interface_method_id.get_class_name(),
-                context.codebase,
-                context.dialect,
-            );
-
-            let substituted_class_method = get_substituted_method(
-                class_method,
-                class_like_metadata,
-                class_method_id.get_class_name(),
-                context.codebase,
-                context.dialect,
-            );
-
-            let mut issues = method_signature::validate_method_signature_compatibility(
-                context.codebase,
-                class_like_metadata.name,
-                &substituted_class_method,
-                interface_method_id.get_class_name(),
-                &substituted_interface_method,
-                context.dialect,
-            );
-            method_signature::validate_erased_signature_compatibility(
-                context.codebase,
-                class_like_metadata,
-                declaring_class,
-                class_method,
-                interface_method,
-                &mut issues,
-            );
-
-            for incompatibility in issues {
-                if widens_parameter(
-                    artifacts,
-                    class_like_metadata,
-                    class_method_id.get_class_name(),
-                    class_method,
-                    &incompatibility,
-                ) {
-                    continue;
-                }
-                report_signature_compatibility_issue(
+            |context, primary_span| {
+                if report_named_constructor_clash(
                     context,
                     class_like_metadata,
-                    declaring_class,
-                    *method_name_atom,
                     class_method,
-                    incompatibility,
+                    declaring_class,
+                    interface_method,
                     primary_span,
-                );
-            }
-        }
+                ) {
+                    return;
+                }
 
-        let issues = context.collector.finish_recording().unwrap_or_default();
-        context.collector.extend(issues.into_iter().map(|issue| match trait_name {
-            Some(trait_name) => issue.with_annotation(
-                Annotation::secondary(method_span).with_message(format!("Declared in `{trait_name}` here.")),
-            ),
-            None => issue,
-        }));
+                let substituted_interface_method = get_substituted_method(
+                    interface_method,
+                    class_like_metadata,
+                    interface_method_id.get_class_name(),
+                    context.codebase,
+                    context.dialect,
+                );
+
+                let substituted_class_method = get_substituted_method(
+                    class_method,
+                    class_like_metadata,
+                    class_method_id.get_class_name(),
+                    context.codebase,
+                    context.dialect,
+                );
+
+                let mut issues = method_signature::validate_method_signature_compatibility(
+                    context.codebase,
+                    class_like_metadata.name,
+                    &substituted_class_method,
+                    interface_method_id.get_class_name(),
+                    &substituted_interface_method,
+                    context.dialect,
+                );
+                method_signature::validate_erased_signature_compatibility(
+                    context.codebase,
+                    class_like_metadata,
+                    declaring_class,
+                    class_method,
+                    interface_method,
+                    &mut issues,
+                );
+
+                for incompatibility in issues {
+                    if widens_parameter(
+                        artifacts,
+                        class_like_metadata,
+                        class_method_id.get_class_name(),
+                        class_method,
+                        &incompatibility,
+                    ) {
+                        continue;
+                    }
+                    report_signature_compatibility_issue(
+                        context,
+                        class_like_metadata,
+                        declaring_class,
+                        *method_name_atom,
+                        class_method,
+                        incompatibility,
+                        primary_span,
+                    );
+                }
+            },
+        );
     }
+}
+
+/// Runs `report`, the signature checks of `method`, which `method_class` gives `class_like_metadata`, with the span its
+/// reports go at, and reports what it reports. PHP links a method a plain PHP trait gives the class as the class's own,
+/// so its mismatch is the class's, reported at the class's name with the trait's method beside it, naming the trait.
+fn report_method_signature<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    method_class: Word,
+    method: &FunctionLikeMetadata,
+    report: impl FnOnce(&mut Context<'ctx, 'arena, A>, Span),
+) where
+    A: Arena,
+{
+    let method_span = method.name_span.unwrap_or(method.span);
+    let trait_name = context
+        .codebase
+        .get_class_like(method_class)
+        .filter(|declarer| declarer.kind.is_trait())
+        .map(|declarer| display_class_like_name(context, declarer.original_name));
+    let primary_span = if trait_name.is_some() {
+        class_like_metadata.name_span.unwrap_or(class_like_metadata.span)
+    } else {
+        method_span
+    };
+
+    context.collector.start_recording();
+    report(context, primary_span);
+    let issues = context.collector.finish_recording().unwrap_or_default();
+    context.collector.extend(issues.into_iter().map(|issue| match trait_name {
+        Some(trait_name) => issue.with_annotation(
+            Annotation::secondary(method_span).with_message(format!("Declared in `{trait_name}` here.")),
+        ),
+        None => issue,
+    }));
 }
 
 /// Reports a method that shares its name with a PHP# named constructor of a parent class or interface, or the reverse,
@@ -4787,6 +4817,8 @@ fn report_signature_compatibility_issue<'ctx, A>(
     let parent_name = display_class_like_name(context, parent_class.original_name);
     let child_class_span = child_class.name_span.unwrap_or(child_class.span);
     let parent_class_span = parent_class.name_span.unwrap_or(parent_class.span);
+    let in_class = (primary_span != child_class_span)
+        .then(|| Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")));
     if context.dialect.is_sharp()
         && parent_class.flags.is_sharp()
         && parent_class.flags.has_consistent_constructor()
@@ -4853,9 +4885,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                         Annotation::secondary(parent_class_span)
                             .with_message(format!("Method `{parent_display}` is declared as final")),
                     )
-                    .with_annotation(
-                        Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
-                    )
+                    .with_annotations(in_class)
                     .with_note("Final methods cannot be overridden in child classes or traits.")
                     .with_help(format!(
                         "Remove the method `{method_name}()` from `{child_name}`, or remove the final modifier from the parent method."
@@ -4895,9 +4925,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                     Annotation::secondary(parent_class_span)
                         .with_message(format!("`{parent_display}` is defined as {parent_modifier} here")),
                 )
-                .with_annotation(
-                    Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
-                )
+                .with_annotations(in_class)
                 .with_note("The static modifier must match exactly between parent and child methods.")
                 .with_help(format!("Change the method in `{child_name}` to be {parent_modifier} like the parent.")),
             );
@@ -4914,9 +4942,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                 .with_annotation(Annotation::secondary(parent_class_span).with_message(format!(
                     "Parent method `{parent_display}` is declared as {parent_visibility} here"
                 )))
-                .with_annotation(
-                    Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
-                )
+                .with_annotations(in_class)
                 .with_note("Visibility can only be widened (e.g., protected → public) not narrowed.")
                 .with_help(format!("Change the visibility to {parent_visibility} or wider.")),
             );
@@ -4933,9 +4959,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                 .with_annotation(Annotation::secondary(parent_class_span).with_message(format!(
                     "Parent method `{parent_display}` requires {parent_required_count} parameters"
                 )))
-                .with_annotation(
-                    Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
-                )
+                .with_annotations(in_class)
                 .with_note("Child methods must accept at least as many required parameters as the parent.")
                 .with_help("Add optional parameters or reduce the number of required parameters in the child method."),
             );
@@ -4959,9 +4983,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                     Annotation::secondary(parent_class_span)
                         .with_message(format!("Parent method `{parent_display}` takes any number of `{param_name}`")),
                 )
-                .with_annotation(
-                    Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
-                )
+                .with_annotations(in_class)
                 .with_note("PHP refuses an override that does not take every argument the overridden method takes.")
                 .with_help(format!("Declare `{param_name}` variadic, as in `int ...{param_name}`.")),
             );
@@ -4999,9 +5021,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                     Annotation::secondary(parent_class_span)
                         .with_message(format!("Parent method `{parent_display}` parameter defined here")),
                 )
-                .with_annotation(
-                    Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
-                )
+                .with_annotations(in_class)
                 .with_note(note)
                 .with_help("Change the parameter type to be compatible with the parent method."),
             );
@@ -5021,9 +5041,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                     Annotation::secondary(parent_class_span)
                         .with_message(format!("Parent method `{parent_display}` parameter defined here")),
                 )
-                .with_annotation(
-                    Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
-                )
+                .with_annotations(in_class)
                 .with_note("PHP refuses a parameter taken by reference where the method it implements takes it by value, when it links the class.")
                 .with_help(format!("Take `{param_name}` by value, as `{parent_display}` does.")),
             );
@@ -5197,9 +5215,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                     Annotation::secondary(parent_class_span)
                         .with_message(format!("Parent method `{parent_display}` return type defined here")),
                 )
-                .with_annotation(
-                    Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
-                )
+                .with_annotations(in_class)
                 .with_note("Return types must be covariant: child must return equal or narrower types than parent.")
                 .with_help("Change the return type to be compatible with the parent method."),
             );
@@ -5233,9 +5249,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                     Annotation::secondary(parent_class_span)
                         .with_message(format!("Parent method `{parent_display}` return type declared here")),
                 )
-                .with_annotation(
-                    Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
-                )
+                .with_annotations(in_class)
                 .with_note("PHP requires an overriding method to declare a return type when the overridden method declares one.")
                 .with_help(help),
             );
@@ -5279,9 +5293,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                 .with_annotation(Annotation::secondary(parent_class_span).with_message(format!(
                     "Parent method `{parent_display}` parameter `{parent_param_name}` defined here",
                 )))
-                .with_annotation(
-                    Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
-                )
+                .with_annotations(in_class)
                 .with_note("Parameter name changes can break code using named arguments.")
                 .with_help(help),
             );

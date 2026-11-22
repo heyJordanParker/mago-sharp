@@ -34359,7 +34359,33 @@ fn an_interface_member_a_trait_gives_too_narrowly_is_refused_at_the_class() {
     assert_eq!(
         worded(greeter, &[greets, greeting]),
         [
-            "5:14 incompatible-visibility Visibility of `Greeter.greet` must not be narrowed from public to protected | Method declared as protected but should be public or wider | Parent method `Greets.greet` is declared as public here | In class `Greeter` | Declared in `Greeting` here. | Visibility can only be widened (e.g., protected → public) not narrowed. | Change the visibility to public or wider."
+            "5:14 incompatible-visibility Visibility of `Greeter.greet` must not be narrowed from public to protected | Method declared as protected but should be public or wider | Parent method `Greets.greet` is declared as public here | Declared in `Greeting` here. | Visibility can only be widened (e.g., protected → public) not narrowed. | Change the visibility to public or wider."
+        ]
+    );
+}
+
+/// A method a plain PHP trait gives a PHP# class is the class's own when PHP links it, so one narrower than an abstract
+/// method of the class's parent, a trait's `protected function greet()` for `public abstract string greet()`, is refused
+/// at the class's name, naming the trait, as an interface member is.
+#[test]
+fn an_abstract_method_a_trait_gives_too_narrowly_is_refused_at_the_class_naming_the_trait() {
+    let greets = (
+        "app/Greets.sharp",
+        "namespace App;\n\npublic abstract class Greets\n{\n    public abstract string greet();\n}\n",
+    );
+    let greeting = (
+        "vendor/acme/tags/src/Greeting.php",
+        "<?php\n\nnamespace Acme\\Tags;\n\ntrait Greeting\n{\n    protected function greet(): string\n    {\n        return 'hi';\n    }\n}\n",
+    );
+    let greeter = (
+        "app/Greeter.sharp",
+        "namespace App;\n\nimport Acme.Tags.Greeting;\n\npublic class Greeter : Greets, Greeting\n{\n}\n",
+    );
+
+    assert_eq!(
+        worded(greeter, &[greets, greeting]),
+        [
+            "5:14 incompatible-visibility Visibility of `Greeter.greet` must not be narrowed from public to protected | Method declared as protected but should be public or wider | Parent method `Greets.greet` is declared as public here | Declared in `Greeting` here. | Visibility can only be widened (e.g., protected → public) not narrowed. | Change the visibility to public or wider."
         ]
     );
 }
