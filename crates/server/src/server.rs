@@ -9,6 +9,8 @@ use foldhash::HashSet;
 use mago_analyzer::analysis_result::AnalysisResult;
 use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::effects::Effects;
+use mago_analyzer::external::ReturnTypeRequests;
+use mago_analyzer::plugin::PluginRegistry;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::reference::SymbolReferences;
 use mago_database::Database;
@@ -194,6 +196,22 @@ impl Server {
         } else {
             self.pass(IncrementalAnalysisService::analyze)
         }
+    }
+
+    /// Analyze with the extension hosts of `plugin_registry`, which register return-type providers and nothing else,
+    /// from the last analysis, which ran without them and recorded `requests`, as
+    /// [`IncrementalAnalysisService::analyze_with_hosts`] does: only the files whose requests a provider answers are
+    /// analyzed again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] if the analysis fails. The failed pass leaves no state behind.
+    pub fn analyze_with_hosts(
+        &mut self,
+        plugin_registry: Arc<PluginRegistry>,
+        requests: &ReturnTypeRequests,
+    ) -> Result<AnalysisResult, ServerError> {
+        self.pass(|service| service.analyze_with_hosts(plugin_registry, requests))
     }
 
     /// Take in that the compiled files of `classes`, each a lowercase class name, changed: start again each extension

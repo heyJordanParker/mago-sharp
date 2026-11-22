@@ -316,19 +316,39 @@ impl AnalyzeCommand {
         let mut load_database_duration = None;
         // A run over the whole project compiles it too, as an agent's save needs: into the `.sharp` folder and the
         // hosts' folder, from one analysis and one lowering. With no host enabled, a run that reads the files as the
-        // compile reads them, without `--no-stubs` or `--substitute`, reports that analysis. Otherwise the analysis
-        // with the hosts reads the files the compile loaded. A run on named files, staged files or standard
-        // input, or one that only scans, compiles only the hosts' folder.
-        let (extension_hosts, compiled, loaded) = if scope.is_some() || self.stdin_input || self.scan_only {
-            (compile_for_hosts(&configuration)?.0, None, Loaded::Nothing)
+        // compile reads them, without `--no-stubs` or `--substitute`, reports that analysis. Otherwise the hosts start
+        // beside the compile, and the run reports that analysis too when they register return-type providers and
+        // nothing else, or an analysis with them of the files the compile loaded. A run on named files, staged files
+        // or standard input, or one that only scans, compiles only the hosts' folder.
+        let (external_analyzer, compiled, loaded) = if scope.is_some() || self.stdin_input || self.scan_only {
+            let extension_hosts = compile_for_hosts(&configuration)?.0;
+            let external_analyzer = start_external_analyzer(
+                &extension_hosts,
+                configuration.php_version,
+                &configuration.analyzer.plugins,
+                configuration.analyzer.disable_default_plugins,
+            );
+            (external_analyzer, None, Loaded::Nothing)
         } else {
             let analysis = !self.no_stubs && substitutions.is_empty();
-            let (extension_hosts, outcome, loaded) = compile_with_hosts(&configuration, color_choice, analysis)?;
-            (extension_hosts, Some(outcome.into_parts()), loaded)
+            let (external_analyzer, outcome, loaded) = compile_with_hosts(&configuration, color_choice, analysis)?;
+            (external_analyzer, Some(outcome.into_parts()), loaded)
         };
 
         let load_inputs_duration;
         let service_run_start;
+        if let Some(external_analyzer) = external_analyzer {
+            orchestrator.set_external_analyzer_handle(external_analyzer);
+        }
+        // Hosts that register return-type providers and nothing else change only the files whose requests a provider
+        // answers, so the run reports from the compile's analysis with those files analyzed again with the hosts.
+        let loaded = match loaded {
+            Loaded::Hosted { mut server, requests } => {
+                let issues = server.analyze_with_hosts(orchestrator.get_analyzer_plugin_registry(), &requests)?.issues;
+                Loaded::Analysis(server, issues)
+            }
+            loaded => loaded,
+        };
         let (mut server, mut issues) = match loaded {
             Loaded::Analysis(server, issues) => {
                 load_inputs_duration = load_inputs_start.map(|s| s.elapsed());
@@ -340,15 +360,6 @@ impl AnalyzeCommand {
                     Loaded::Files(files, scans) => (Some(*files), scans),
                     _ => (None, Scans::default()),
                 };
-                let external_analyzer = start_external_analyzer(
-                    &extension_hosts,
-                    configuration.php_version,
-                    &configuration.analyzer.plugins,
-                    configuration.analyzer.disable_default_plugins,
-                );
-                if let Some(external_analyzer) = external_analyzer {
-                    orchestrator.set_external_analyzer_handle(external_analyzer);
-                }
 
                 let (prelude_database, database) = rayon::join(
                     || {

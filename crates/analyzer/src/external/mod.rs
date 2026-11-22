@@ -68,10 +68,13 @@ mod metadata;
 pub mod protocol;
 mod reads;
 mod refinement;
+mod requests;
 mod scan;
 
 pub use refinement::DeclarationRefinement;
 pub use refinement::apply_refinements;
+pub(crate) use requests::ReturnTypeRecord;
+pub use requests::ReturnTypeRequests;
 pub use scan::CodebaseScanFile;
 pub use scan::CodebaseScanPlan;
 
@@ -1741,6 +1744,40 @@ impl<T> ExternalAnalyzer<T> {
 
         any.then(|| NodeAnalysisRequirements::new(&targets, &requirements, method_call_hooks, class_like_hooks))
     }
+
+    /// Whether the hosts register return-type providers and nothing else: no other provider, hook, codebase scan,
+    /// before-analysis plugin, entry point, stub or worker reducer, which reduces the requests its workers saw when the
+    /// hosts stop. Such hosts change only the type of a call a provider answers, so an analysis with them differs from
+    /// one without them only in the files whose return-type requests a provider answers.
+    pub(crate) fn has_only_return_type_providers(&self) -> bool {
+        let capabilities = self.capabilities();
+        let others = [
+            capabilities.function_signatures,
+            capabilities.method_signatures,
+            capabilities.function_assertions,
+            capabilities.method_assertions,
+            capabilities.property_types,
+            capabilities.property_initialization,
+            capabilities.class_initializers,
+            capabilities.call_forwarding,
+            capabilities.issue_filters,
+            capabilities.method_call_analysis,
+            capabilities.after_file_analysis,
+            capabilities.after_analysis,
+        ];
+
+        !others.contains(&true)
+            && self.initialization_stubs.is_empty()
+            && self.node_analysis_requirements().is_none()
+            && self.backends.iter().all(|backend| {
+                let registration = &backend.registration;
+                registration.codebase_scan_hooks.is_empty()
+                    && registration.before_analysis_plugins.is_empty()
+                    && registration.entry_points.is_empty()
+                    && registration.attributed_entry_points.is_empty()
+                    && !registration.has_worker_reducer
+            })
+    }
 }
 
 impl<T> ExternalAnalyzer<T>
@@ -2742,6 +2779,87 @@ where
             session,
             calling_function_like,
         )
+    }
+
+    /// Whether a provider of a host targets a call to `target` against `codebase`, so that the analysis with the hosts
+    /// sends the call's return-type request.
+    fn provides_return_type(&self, target: CallableTarget<'_>, codebase: &CodebaseMetadata) -> bool {
+        self.return_type_providers(target, codebase).next().is_some()
+    }
+
+    /// The providers of each host whose targets match a call to `target` against `codebase`, in order, as
+    /// [`Self::get_return_type`] sends the call's return-type request to them.
+    fn return_type_providers<'analyzer>(
+        &'analyzer self,
+        target: CallableTarget<'analyzer>,
+        codebase: &'analyzer CodebaseMetadata,
+    ) -> impl Iterator<Item = (&'analyzer Backend<T>, ProviderIndices)> + 'analyzer {
+        let declared = match target {
+            CallableTarget::Function(function) => codebase.get_function(word(function)).is_some(),
+            CallableTarget::Method { class, method } => {
+                codebase.get_declaring_method(word(class), word(method)).is_some()
+            }
+        };
+
+        self.backends.iter().filter_map(move |backend| {
+            let (indices, _) = match target {
+                CallableTarget::Function(function) => backend.matching_function_providers(function, declared),
+                CallableTarget::Method { class, method } => {
+                    backend.matching_method_providers(codebase, word(class), method, declared)
+                }
+            };
+
+            indices.map(|indices| (backend, indices))
+        })
+    }
+
+    /// Whether a host answers a request `requests` recorded for `file_id`, sent as [`Self::get_return_type`] sends it in
+    /// the analysis of the file against `codebase`: to the providers of each host whose targets match, in order, until
+    /// one gives a type. A request that fails, one the analysis could not make, and one whose provider asks for a type
+    /// of the call, which the record does not keep, count as answered too, so the file is analyzed with the hosts.
+    pub(crate) fn answers_return_type_requests(
+        &self,
+        requests: &ReturnTypeRequests,
+        file_id: FileId,
+        codebase: &CodebaseMetadata,
+        session: &ExternalAnalysisSession,
+    ) -> bool {
+        requests.requests_of(file_id).any(|request| {
+            let Ok(request) = request else {
+                return true;
+            };
+            let Some(invocation) = &request.invocation else {
+                return true;
+            };
+            let target = request.target();
+
+            self.return_type_providers(target, codebase).any(|(backend, indices)| {
+                let plugin_of = |index| match target {
+                    CallableTarget::Function(_) => provider_plugin(&backend.registration.function_providers, index),
+                    CallableTarget::Method { .. } => provider_plugin(&backend.registration.method_providers, index),
+                };
+                let payload =
+                    protocol::return_type_request_payload(session.generation(), indices.as_slice(), invocation.clone());
+                let typed = std::cell::Cell::new(false);
+                let response = self.exchange_provider_payload(
+                    backend,
+                    payload,
+                    &backend.provider_names("return-type", plugin_of, indices.as_slice()),
+                    codebase,
+                    session,
+                    |_| {
+                        typed.set(true);
+                        None
+                    },
+                );
+
+                let answer = response
+                    .and_then(|response| session.record_response(file_id, response))
+                    .and_then(|response| protocol::decode_return_type_response(&response, |_| None));
+
+                typed.get() || !matches!(answer, Ok(None))
+            })
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

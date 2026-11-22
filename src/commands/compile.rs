@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
 
@@ -34,6 +35,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use mago_analyzer::code::IssueCode;
+use mago_analyzer::error::AnalysisError;
+use mago_analyzer::external::ExternalAnalyzerHandle;
+use mago_analyzer::external::ReturnTypeRequests;
 use mago_build_id::BUILD_ID;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
@@ -1120,7 +1124,7 @@ fn is_lowered(file: &File) -> bool {
 /// Checks every PHP# file the analyzer loads, writes the compiled file of each accepted one, and deletes every other
 /// file in the `.sharp` folder, as [`CompileCommand::execute`] says.
 fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
-    let (outcome, database, _) = compiled(configuration, color_choice, None, Keeping::Nothing)?;
+    let (outcome, database, _) = compiled(configuration, color_choice, None, Keeping::Nothing, None)?;
 
     outcome.print(database, configuration, color_choice)
 }
@@ -1137,6 +1141,9 @@ pub(crate) enum Loaded {
     /// and its issues. Its database holds each package's `.sharp` file as a file of the project, which the compile
     /// checks too, and it reports in every file but those, whose refusals the compile's outcome holds.
     Analysis(Box<Server>, IssueCollection),
+    /// The compile's own analysis of a project whose enabled hosts register return-type providers and nothing else,
+    /// with the return-type requests it recorded, which the run reports from once the hosts answer them.
+    Hosted { server: Box<Server>, requests: ReturnTypeRequests },
 }
 
 /// What [`compiled`] keeps for a whole `mago analyze`, as [`Loaded`] gives it.
@@ -1148,14 +1155,19 @@ enum Keeping {
     Files,
     /// Its own analysis.
     Analysis,
+    /// Its own analysis with the return-type requests it records, when the hosts register return-type providers and
+    /// nothing else, and every file it loads when they register anything more.
+    Hosted,
 }
 
 /// Compiles the project as `mago analyze` does before it analyzes with the hosts: into the `.sharp` folder as
 /// `mago compile --no-extensions` does, and into the hosts' folder as [`compile_for_hosts`] does while it is out of
-/// date, from one analysis without the hosts and one lowering. Returns the project's hosts, as [`compile_for_hosts`]
-/// gives them, the outcome of the compile into the `.sharp` folder, and what the run reports from: the compile's
-/// analysis when no host is enabled and `analysis` is set, as a run that analyzes the files as the compile reads them
-/// sets it, and the files it loaded otherwise.
+/// date, from one analysis without the hosts and one lowering. The project's hosts start beside the compile, which
+/// reads what they register before it analyzes. Returns the started hosts, the outcome of the compile into the `.sharp`
+/// folder, and what the run reports from when `analysis` is set, as a run that analyzes the files as the compile reads
+/// them sets it: the compile's analysis when no host is enabled, that analysis with the return-type requests it
+/// recorded when the hosts register return-type providers and nothing else, and the files it loaded for any other
+/// hosts. With `analysis` unset, the run reports from the files it loaded.
 ///
 /// # Errors
 ///
@@ -1164,21 +1176,35 @@ pub(crate) fn compile_with_hosts(
     configuration: &Configuration,
     color_choice: ColorChoice,
     analysis: bool,
-) -> Result<(BTreeMap<String, ExtensionHostConfiguration>, Outcome, Loaded), Error> {
+) -> Result<(Option<Arc<ExternalAnalyzerHandle>>, Outcome, Loaded), Error> {
     let hosts = HostsCompile::new(configuration)?;
+    // Each host's interpreters start on the threads that send it requests, after the compile wrote the hosts' folder,
+    // so the classes they load are the ones it wrote.
+    let started = start_external_analyzer(
+        &hosts.extension_hosts,
+        configuration.php_version,
+        &configuration.analyzer.plugins,
+        configuration.analyzer.disable_default_plugins,
+    );
     let mut without_hosts = configuration.clone();
     without_hosts.extension_hosts.clear();
-    let keeping = if analysis && !hosts.enabled { Keeping::Analysis } else { Keeping::Files };
-    let (outcome, _, loaded) = compiled(&without_hosts, color_choice, hosts.enabled.then_some(&hosts), keeping)?;
+    let keeping = match (analysis, hosts.enabled) {
+        (true, false) => Keeping::Analysis,
+        (true, true) => Keeping::Hosted,
+        (false, _) => Keeping::Files,
+    };
+    let (outcome, _, loaded) =
+        compiled(&without_hosts, color_choice, hosts.enabled.then_some(&hosts), keeping, started.as_ref())?;
 
-    Ok((hosts.extension_hosts, outcome, loaded))
+    Ok((started, outcome, loaded))
 }
 
 /// Compiles the project with `configuration` into its `.sharp` folder, as [`compile`] does, and into the folder of
 /// `hosts`, when given, while that folder is out of date, from the same analysis and lowerings, under the folder's
-/// lock as [`compile_for_hosts`] takes it. Returns the outcome of the compile into the `.sharp` folder, with the
-/// database its issues point into, and what `keeping` names, nothing when the compile had nothing to do or when its
-/// analysis reports in no file of the project.
+/// lock as [`compile_for_hosts`] takes it. With `keeping` [`Keeping::Hosted`], what `started` registers decides
+/// whether the compile records the hosts' return-type requests or keeps the files it loads. Returns the outcome of the
+/// compile into the `.sharp` folder, with the database its issues point into, and what `keeping` names, nothing when
+/// the compile had nothing to do or when its analysis reports in no file of the project.
 ///
 /// # Errors
 ///
@@ -1188,6 +1214,7 @@ fn compiled(
     color_choice: ColorChoice,
     hosts: Option<&HostsCompile>,
     keeping: Keeping,
+    started: Option<&Arc<ExternalAnalyzerHandle>>,
 ) -> Result<(Outcome, ReadDatabase, Loaded), Error> {
     let workspace = configuration.source.workspace.as_path();
     let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.to_path_buf(), error))?;
@@ -1273,6 +1300,13 @@ fn compiled(
     ) {
         orchestrator.set_external_analyzer_handle(external_analyzer);
     }
+    // The run takes this analysis over with the hosts when they register return-type providers and nothing else, so
+    // the analysis records what it would ask them. For any other hosts the run analyzes again from the files loaded.
+    let records = match started.filter(|_| keeping == Keeping::Hosted) {
+        Some(started) => orchestrator.record_return_type_requests(Arc::clone(started)).map_err(AnalysisError::from)?,
+        None => false,
+    };
+    let keeping = if keeping == Keeping::Hosted && !records { Keeping::Files } else { keeping };
 
     let database = orchestrator.load_listed(workspace, &listing)?.into_static();
     let loaded_files = (keeping == Keeping::Files).then(|| database.clone());
@@ -1302,7 +1336,7 @@ fn compiled(
         .filter(|file| included.contains(&file.id) && package_of(&file.name).is_some())
         .map(|file| file.id)
         .collect();
-    let reports = keeping == Keeping::Analysis
+    let reports = matches!(keeping, Keeping::Analysis | Keeping::Hosted)
         && database.files().any(|file| file.file_type == FileType::Host && !included.contains(&file.id));
     let server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator))
         .keeping_lowering_inputs()
@@ -1314,6 +1348,8 @@ fn compiled(
     let mut server =
         if reports { server.scoped_to(move |file| !included.contains(&file.id)) } else { server.scoped_to(is_lowered) };
     let issues = server.analyze()?.issues;
+    // The requests of this analysis alone: a file the compile analyzes again to lower it makes the same ones.
+    let requests = orchestrator.get_analyzer_plugin_registry().take_return_type_requests();
     let scans = server.take_scans();
     // The compile hides what `mago analyze` hides: a host rule's error an `ignore` entry or the baseline targets.
     let ignored =
@@ -1554,6 +1590,7 @@ fn compiled(
         hosts.hold(lock, held, exclusive, None)?;
     }
     let loaded = match loaded_files {
+        _ if reports && keeping == Keeping::Hosted => Loaded::Hosted { server: Box::new(server), requests },
         _ if reports => Loaded::Analysis(Box::new(server), issues),
         Some(files) => Loaded::Files(Box::new(files), scans),
         None => Loaded::Nothing,

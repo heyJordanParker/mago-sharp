@@ -1971,6 +1971,96 @@ fn a_typing_host_loads_a_class_only_its_typing_makes_correct_on_a_fresh_tree() {
     assert!(compiled(root, "app/Greeting.sharp").exists());
 }
 
+/// An extension host whose one plugin types `App\Box::value()` as a string and declines every other method of
+/// `App\Box`, as a framework's host types the few methods it knows.
+const BOX_HOST: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\MethodReturnTypeProvider;
+use Mago\Sdk\Analyzer\MethodTarget;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Analyzer\ReturnTypeProviderContext;
+use Mago\Sdk\Analyzer\Type;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+final class Boxes implements Plugin, MethodReturnTypeProvider
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('boxes', 'Boxes', 'Types the value of a box.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerMethodReturnTypeProvider($this);
+    }
+
+    public function getTargets(): array
+    {
+        return [MethodTarget::allMethods('App\\Box')];
+    }
+
+    public function getReturnType(ReturnTypeProviderContext $context): ?Type
+    {
+        return $context->invocation->name === 'value' ? Type::string() : null;
+    }
+}
+
+(new Worker(new Extension('boxes', 'Boxes', '0.0.0', analyzerPlugins: [new Boxes()])))->run();
+"#;
+
+/// A whole `mago analyze` whose host only answers return types reports what an analysis of every file with the host
+/// reports, as `mago analyze app` gives it: the type the host gives a call reaches the file that makes it, and a file
+/// whose calls the host declines reports what it reports with no host.
+#[test]
+fn a_whole_analyze_with_a_return_type_host_reports_what_an_analysis_of_every_file_with_the_host_reports() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the return-type host analyze test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "app/Box.php",
+        "<?php\n\nnamespace App;\n\nfinal class Box\n{\n    public function value()\n    {\n        return 1;\n    }\n\n    public function label(): string\n    {\n        return 'box';\n    }\n}\n",
+    );
+    write(
+        root,
+        "app/Reader.php",
+        "<?php\n\nnamespace App;\n\nfunction read_value(Box $box): int\n{\n    return $box->value();\n}\n",
+    );
+    write(
+        root,
+        "app/Labels.php",
+        "<?php\n\nnamespace App;\n\nfunction read_label(Box $box): int\n{\n    return $box->label();\n}\n",
+    );
+    write(root, "tools/host.php", BOX_HOST);
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.boxes]\nfile = \"tools/host.php\"\n",
+    );
+
+    let whole = analyze(root, &[]);
+    let every_file = analyze(root, &["app"]);
+
+    let issues = |output: &Output| String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(issues(&whole), issues(&every_file), "{}", printed(&whole));
+    for issue in [
+        "app/Reader.php:7:12: error[invalid-return-statement]: Invalid return type for function `App\\read_value`: \
+         expected `int`, but found `string`.",
+        "app/Labels.php:7:12: error[invalid-return-statement]: Invalid return type for function `App\\read_label`: \
+         expected `int`, but found `string`.",
+    ] {
+        assert!(issues(&whole).contains(issue), "{issue}: {}", printed(&whole));
+    }
+}
+
 /// An extension host whose rule `acme/no-marker` reports an error at each `host-error-here` in a file.
 const MARKER_HOST: &str = r#"<?php
 

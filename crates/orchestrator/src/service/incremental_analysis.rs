@@ -32,6 +32,7 @@ use mago_analyzer::external::ExternalAnalyzerError;
 use mago_analyzer::external::FileAnalysisSnapshot;
 use mago_analyzer::external::FileReads;
 use mago_analyzer::external::Listing;
+use mago_analyzer::external::ReturnTypeRequests;
 use mago_analyzer::external::SessionReads;
 use mago_analyzer::external::apply_refinements;
 use mago_analyzer::is_collection_member;
@@ -471,6 +472,55 @@ impl IncrementalAnalysisService {
                 })
                 .collect(),
         ))
+    }
+
+    /// Analyzes with the extension hosts of `plugin_registry`, which register return-type providers and nothing else,
+    /// from the last analysis, which ran with none and recorded `requests`: the hosts answer each file's requests, and
+    /// the files whose requests a provider answers with a type are analyzed again with the hosts. Every other file's
+    /// analysis is the one the hosts would give, since its every request declines and nothing else of the hosts
+    /// reaches it. No method takes its return from its body, which only a host's refinement asks for, so a type a
+    /// provider gives changes no other file's code.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the external analyzer failed to start, or the analysis fails.
+    pub fn analyze_with_hosts(
+        &mut self,
+        plugin_registry: Arc<PluginRegistry>,
+        requests: &ReturnTypeRequests,
+    ) -> Result<AnalysisResult, OrchestratorError> {
+        self.plugin_registry = plugin_registry;
+        let answered = match self.plugin_registry.create_external_analysis_session(self.database.files()) {
+            Some(session) => {
+                let files: Vec<FileId> = requests.files().collect();
+                let answered = files
+                    .into_par_iter()
+                    .map(|file_id| {
+                        self.plugin_registry
+                            .replay_return_type_requests(requests, file_id, &self.codebase, &session)
+                            .map(|answered| answered.then_some(file_id))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(mago_analyzer::error::AnalysisError::from)?;
+                let SessionReads { files, class_logs, .. } = session.take_reads();
+                for (file_id, reads) in files {
+                    if let Some(state) = self.file_states.get_mut(&file_id) {
+                        state.reads.extension = reads;
+                    }
+                }
+                self.class_logs.extend(class_logs);
+
+                answered.into_iter().flatten().collect()
+            }
+            None => Vec::new(),
+        };
+        for file_id in &answered {
+            if let Some(state) = self.file_states.get_mut(file_id) {
+                state.content_hash = 0;
+            }
+        }
+
+        self.analyze_incremental(Some(&answered))
     }
 
     /// Gives each method of the populated `codebase` that takes its return from its body, unless a file of `skipped`

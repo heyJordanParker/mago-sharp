@@ -917,6 +917,81 @@ pub(super) fn encode_provider_request<'type_info>(
         ProviderRequestKind::CallableSignature => CALLABLE_SIGNATURE_REQUEST,
         ProviderRequestKind::Assertion => ASSERTION_REQUEST,
     };
+    let (invocation, mut request) = encode_provider_invocation(
+        message_kind,
+        target,
+        invocation,
+        artifacts,
+        source_file,
+        codebase,
+        trace_enabled,
+        calling_function_like,
+    )?;
+    request.payload = provider_request_payload(message_kind, generation, provider_indices, invocation);
+
+    Ok(request)
+}
+
+/// The invocation a return-type request for `target` sends, as [`encode_provider_request`] encodes it, which a request
+/// recorded without the hosts keeps and [`return_type_request_payload`] sends once they start.
+pub(super) fn encode_return_type_invocation(
+    target: ProviderTarget<'_>,
+    invocation: &Invocation<'_, '_, '_>,
+    artifacts: &AnalysisArtifacts,
+    source_file: &File,
+    codebase: &CodebaseMetadata,
+    calling_function_like: Option<FunctionLikeIdentifier>,
+) -> Result<Value, ExternalAnalyzerError> {
+    encode_provider_invocation(
+        RETURN_TYPE_REQUEST,
+        target,
+        invocation,
+        artifacts,
+        source_file,
+        codebase,
+        false,
+        calling_function_like,
+    )
+    .map(|(invocation, _)| invocation)
+}
+
+/// The payload of a return-type request of `invocation` to the providers at `provider_indices`.
+pub(super) fn return_type_request_payload(generation: u64, provider_indices: &[u16], invocation: Value) -> Vec<Value> {
+    provider_request_payload(RETURN_TYPE_REQUEST, generation, provider_indices, invocation)
+}
+
+fn provider_request_payload(
+    message_kind: u16,
+    generation: u64,
+    provider_indices: &[u16],
+    invocation: Value,
+) -> Vec<Value> {
+    let mut writer = message_writer(message_kind);
+    writer.write_value(object(
+        sdk_class!("Internal\\Analyzer\\ReturnTypeRequest"),
+        vec![
+            ("generation", Value::Int(generation.cast_signed())),
+            ("providerIndices", provider_indices_value(provider_indices)),
+            ("invocation", invocation),
+        ],
+    ));
+
+    writer.finish()
+}
+
+/// The invocation object of a provider request of `message_kind` for `target`, and the request's types and counts,
+/// with no payload yet.
+#[allow(clippy::too_many_arguments)]
+fn encode_provider_invocation<'type_info>(
+    message_kind: u16,
+    target: ProviderTarget<'_>,
+    invocation: &Invocation<'_, '_, '_>,
+    artifacts: &'type_info AnalysisArtifacts,
+    source_file: &File,
+    codebase: &CodebaseMetadata,
+    trace_enabled: bool,
+    calling_function_like: Option<FunctionLikeIdentifier>,
+) -> Result<(Value, ReturnTypeRequest<'type_info>), ExternalAnalyzerError> {
     let mut receiver_type = None;
     let (invocation_kind, class, name) = match target {
         ProviderTarget::Function(name) => (INVOCATION_FUNCTION, None, name),
@@ -935,9 +1010,8 @@ pub(super) fn encode_provider_request<'type_info>(
         }
     };
 
-    encode_return_type_request(
+    encode_invocation(
         message_kind,
-        provider_indices,
         invocation_kind,
         class,
         receiver_type.as_ref(),
@@ -946,7 +1020,6 @@ pub(super) fn encode_provider_request<'type_info>(
         artifacts,
         source_file,
         codebase,
-        generation,
         trace_enabled,
         calling_function_like,
     )
@@ -1294,9 +1367,9 @@ fn write_issue_source(
     Ok(())
 }
 
-fn encode_return_type_request<'type_info>(
+#[allow(clippy::too_many_arguments)]
+fn encode_invocation<'type_info>(
     message_kind: u16,
-    provider_indices: &[u16],
     invocation_kind: u8,
     class: Option<&[u8]>,
     receiver_type: Option<&TUnion>,
@@ -1305,10 +1378,9 @@ fn encode_return_type_request<'type_info>(
     artifacts: &'type_info AnalysisArtifacts,
     source_file: &File,
     codebase: &CodebaseMetadata,
-    generation: u64,
     trace_enabled: bool,
     calling_function_like: Option<FunctionLikeIdentifier>,
-) -> Result<ReturnTypeRequest<'type_info>, ExternalAnalyzerError> {
+) -> Result<(Value, ReturnTypeRequest<'type_info>), ExternalAnalyzerError> {
     let include_argument_types = message_kind == RETURN_TYPE_REQUEST || message_kind == ASSERTION_REQUEST;
     let mut type_snapshot_duration = Duration::ZERO;
     let (kind, declaring_class, receiver_type) = match (invocation_kind, class, receiver_type) {
@@ -1411,29 +1483,23 @@ fn encode_return_type_request<'type_info>(
             ("callingFunctionLike", calling_function_like),
         ],
     );
-    let mut writer = message_writer(message_kind);
-    writer.write_value(object(
-        sdk_class!("Internal\\Analyzer\\ReturnTypeRequest"),
-        vec![
-            ("generation", Value::Int(generation.cast_signed())),
-            ("providerIndices", provider_indices_value(provider_indices)),
-            ("invocation", invocation_object),
-        ],
-    ));
 
     let mut types = Vec::with_capacity(receiver_type_count + argument_types.len());
     types.extend(receiver_types.into_iter().map(Cow::Owned));
     types.extend(argument_types);
 
-    Ok(ReturnTypeRequest {
-        payload: writer.finish(),
-        snapshotted_types: types.len(),
-        receiver_type_count,
-        types,
-        arguments: argument_count,
-        typed_arguments,
-        type_snapshot_duration,
-    })
+    Ok((
+        invocation_object,
+        ReturnTypeRequest {
+            payload: Vec::new(),
+            snapshotted_types: types.len(),
+            receiver_type_count,
+            types,
+            arguments: argument_count,
+            typed_arguments,
+            type_snapshot_duration,
+        },
+    ))
 }
 
 fn get_method_receiver_type(method_context: &MethodTargetContext<'_>) -> Result<TUnion, ExternalAnalyzerError> {

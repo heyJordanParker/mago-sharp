@@ -10,6 +10,7 @@ use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
+use mago_database::file::FileId;
 use mago_names::ResolvedNames;
 use mago_reporting::IssueCollection;
 use mago_span::Span;
@@ -46,6 +47,8 @@ use crate::external::FileAnalysisSnapshot;
 use crate::external::ForwardedCall;
 use crate::external::NodeAnalysisRequirements;
 use crate::external::PropertyAccessKind;
+use crate::external::ReturnTypeRecord;
+use crate::external::ReturnTypeRequests;
 use crate::invocation::EffectiveCallableSignature;
 use crate::invocation::Invocation;
 use crate::plugin::PluginError;
@@ -106,6 +109,9 @@ where
 pub struct PluginRegistry {
     external_analyzer: Option<Arc<ExternalAnalyzerHandle>>,
     external_capabilities: OnceLock<ExternalAnalyzerCapabilities>,
+    /// The return-type requests the analysis records, for each call no native provider types and a host's provider
+    /// targets, which the hosts answer after the analysis.
+    return_type_record: Option<ReturnTypeRecord>,
     project_sources: Vec<String>,
     function_exact: WordMap<Vec<usize>>,
     function_prefix: Vec<(Word, usize)>,
@@ -186,6 +192,54 @@ impl PluginRegistry {
     /// codebase-scan hooks read them as they read the analyzed files.
     pub fn set_project_sources(&mut self, paths: Vec<String>) {
         self.project_sources = paths;
+    }
+
+    /// Records, from here on, the return-type request of each call that no native provider types and a provider of
+    /// `hosts` targets, as the analysis with `hosts` sends it to them, which [`Self::take_return_type_requests`] gives,
+    /// when `hosts` register return-type providers and nothing else, as [`Self::replay_return_type_requests`] needs:
+    /// then an analysis with them differs from one without them only in the files whose requests a provider answers.
+    /// Returns whether it records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a host fails to start.
+    pub fn record_return_type_requests(&mut self, hosts: Arc<ExternalAnalyzerHandle>) -> PluginResult<bool> {
+        let records = hosts.read(ExternalAnalyzer::has_only_return_type_providers).map_err(PluginError::from)?;
+        if records {
+            self.return_type_record = Some(ReturnTypeRecord::recording(hosts));
+        }
+
+        Ok(records)
+    }
+
+    /// The return-type requests recorded so far, after which none is recorded.
+    #[must_use]
+    pub fn take_return_type_requests(&self) -> ReturnTypeRequests {
+        self.return_type_record.as_ref().map(ReturnTypeRecord::take).unwrap_or_default()
+    }
+
+    /// Whether an extension host answers a return-type request `requests` recorded for `file_id` with a type, as the
+    /// analysis of the file against `codebase` in `session` would send it, so only an analysis of the file with the
+    /// hosts gives its results. A request that fails counts as answered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the external analyzer failed to start.
+    pub fn replay_return_type_requests(
+        &self,
+        requests: &ReturnTypeRequests,
+        file_id: FileId,
+        codebase: &CodebaseMetadata,
+        session: &ExternalAnalysisSession,
+    ) -> PluginResult<bool> {
+        self.external_analyzer
+            .as_deref()
+            .map(|analyzer| {
+                analyzer.read(|analyzer| analyzer.answers_return_type_requests(requests, file_id, codebase, session))
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(PluginError::from)
     }
 
     /// Completes concurrent external analyzer initialization before file analysis.
@@ -1429,6 +1483,17 @@ impl PluginRegistry {
                 )
             })
         } else {
+            if let Some(record) = &self.return_type_record {
+                record.record(
+                    None,
+                    function_name,
+                    invocation,
+                    artifacts,
+                    source_file,
+                    codebase,
+                    block_context.scope.get_function_like_identifier(),
+                );
+            }
             None
         };
 
@@ -1489,6 +1554,17 @@ impl PluginRegistry {
                 )
             })
         } else {
+            if let Some(record) = &self.return_type_record {
+                record.record(
+                    Some(class_name.as_bytes()),
+                    method_name,
+                    invocation,
+                    artifacts,
+                    source_file,
+                    codebase,
+                    block_context.scope.get_function_like_identifier(),
+                );
+            }
             None
         };
 

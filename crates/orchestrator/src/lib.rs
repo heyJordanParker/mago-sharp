@@ -44,6 +44,7 @@ use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::plugin::create_registry_with_plugins;
+use mago_analyzer::plugin::error::PluginResult;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_composer::autoload::Autoload;
 use mago_composer::autoload::vendor_folder;
@@ -334,6 +335,23 @@ impl<'cfg> Orchestrator<'cfg> {
         registry.set_project_sources(self.context_paths.clone());
         let result = self.plugin_registry.set(Arc::new(registry));
         debug_assert!(result.is_ok(), "analyzer plugin registry was initialized before external plugins were attached");
+    }
+
+    /// Records, in the analyses the registry runs, the return-type requests the analysis with `hosts` sends them, as
+    /// [`PluginRegistry::record_return_type_requests`] does, before an analysis service is created. Returns whether it
+    /// records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a host fails to start.
+    pub fn record_return_type_requests(&self, hosts: Arc<ExternalAnalyzerHandle>) -> PluginResult<bool> {
+        let mut registry =
+            create_registry_with_plugins(&self.config.analyzer_plugins, self.config.disable_default_analyzer_plugins);
+        let records = registry.record_return_type_requests(hosts)?;
+        let result = self.plugin_registry.set(Arc::new(registry));
+        debug_assert!(result.is_ok(), "analyzer plugin registry was initialized before it was told to record");
+
+        Ok(records)
     }
 
     /// Adds additional exclusion patterns to the orchestrator's configuration.
