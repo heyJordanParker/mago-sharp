@@ -8,6 +8,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
 
 use foldhash::HashMap;
 use foldhash::HashSet;
@@ -55,6 +57,17 @@ enum Form {
     /// unproven, in the same runner, which imports `Sharp/Lean/Proof.lean`: the fixed steps of a law with a body use
     /// its `sharp_call%` and its rewrites.
     StepsThenSearch,
+}
+
+impl Form {
+    /// The steps a runner of this form proves with, as the laws phase logs it.
+    fn steps(self) -> &'static str {
+        match self {
+            Form::Search => "Lean's search",
+            Form::Steps => "the fixed steps",
+            Form::StepsThenSearch => "the fixed steps, then Lean's search",
+        }
+    }
 }
 
 /// The module of the steps a law's theorem in the [`Form::Search`] form is written in.
@@ -284,6 +297,7 @@ impl Lean {
             };
         }
 
+        let keying = Instant::now();
         let mut record = Record::read(&record_path);
         let program = Program::new(&translations);
         let laws = Laws::new(&translations);
@@ -335,6 +349,7 @@ impl Lean {
             }
         }
         record.keep(&law_files, &keys);
+        tracing::debug!("Found the proof keys of {} laws in {:.2} s.", keys.len(), keying.elapsed().as_secs_f64());
         tracing::debug!(
             "{} laws keep the outcome of their proof, and {} laws are proved.",
             keys.len() - work.iter().map(|(_, laws)| laws.len()).sum::<usize>(),
@@ -346,7 +361,10 @@ impl Lean {
             return Ok(issues);
         }
 
+        let writing = Instant::now();
         package.write_toolchain()?;
+        let mut wrote = writing.elapsed();
+        let finding = Instant::now();
         let library = match library::built() {
             Some(library) => library,
             None => match library::toolchain() {
@@ -370,6 +388,8 @@ impl Lean {
                 }
             },
         };
+        tracing::debug!("The law checker's library took {:.2} s to find or build.", finding.elapsed().as_secs_f64());
+        let writing = Instant::now();
         package.remove_stale()?;
         let proved: HashSet<FileId> = work.iter().map(|(translation, _)| translation.file).collect();
         let proving = || work.iter().flat_map(|(_, proving)| proving);
@@ -379,6 +399,12 @@ impl Lean {
             .chain(proving().flat_map(|law| &law.breaking).flat_map(|breaking| program.reached(breaking)))
             .collect();
         let modules = program.modules(&proved, &reached);
+        wrote += writing.elapsed();
+        tracing::debug!(
+            "Wrote the Lean package of {} generated modules in {:.2} s.",
+            modules.len(),
+            wrote.as_secs_f64()
+        );
         let proofs = Proofs {
             library: &library,
             threads: self.threads,
@@ -552,7 +578,8 @@ impl Proofs<'_> {
     /// it unproven or it has none, as an invariant of a machine. Otherwise the runner imports only
     /// the runtime library and proves them with the fixed steps, and each law they leave unproven, apart from one a
     /// generated module refuses or one that calls a law that cannot be proven, which ends the same either way, then
-    /// proves with Lean's search in a runner after it, so its proof ends as that search ends it.
+    /// proves with Lean's search in a runner after it, so its proof ends as that search ends it. It logs how long each
+    /// law took in the runners, the slowest first.
     fn prove<'work>(&self, work: Vec<(&'work Translation, Vec<&'work Law>)>) -> io::Result<Vec<Proven<'work>>> {
         let order: HashMap<&str, usize> = work
             .iter()
@@ -566,12 +593,13 @@ impl Proofs<'_> {
             .flat_map(|law| self.laws.closure(law))
             .any(|position| self.laws.ordered[position].1.proof.opening.is_none());
         let mut stopped: Vec<(String, Stop)> = Vec::new();
+        let mut spent: HashMap<&str, Duration> = HashMap::default();
         let mut ended = Vec::new();
         if searched {
-            ended.extend(self.run(work, Form::StepsThenSearch, &mut stopped)?);
+            ended.extend(self.run(work, Form::StepsThenSearch, &mut stopped, &mut spent)?);
         } else {
             let mut unproven = Vec::new();
-            for (translation, law, outcome) in self.run(work, Form::Steps, &mut stopped)? {
+            for (translation, law, outcome) in self.run(work, Form::Steps, &mut stopped, &mut spent)? {
                 let settled = matches!(outcome, Ok(Judgment::Proved) | Err(_)) || self.unproven_call(law).is_some();
                 if settled {
                     ended.push((translation, law, outcome));
@@ -585,9 +613,14 @@ impl Proofs<'_> {
                 ended.len(),
                 unproven.len()
             );
-            ended.extend(self.run(by_file(unproven), Form::Search, &mut stopped)?);
+            ended.extend(self.run(by_file(unproven), Form::Search, &mut stopped, &mut spent)?);
         }
         ended.sort_by_key(|(_, law, _)| order[law.statement.as_str()]);
+        let mut slowest: Vec<(&str, Duration)> = spent.into_iter().collect();
+        slowest.sort_unstable_by(|(law, took), (other, other_took)| other_took.cmp(took).then_with(|| law.cmp(other)));
+        for (law, took) in slowest {
+            tracing::debug!("The law {} took {:.2} s of the provers' time.", names::unescaped(law), took.as_secs_f64());
+        }
 
         Ok(ended)
     }
@@ -596,12 +629,13 @@ impl Proofs<'_> {
     /// each law's proof ended. Each file's laws are elaborated with the theorem of each law they call, transitively,
     /// before them. A law that calls a law that cannot be proven is not proven. A generated module Lean does not
     /// elaborate refuses each law of the check that reaches it, and the next runner checks the file's other laws
-    /// without it.
+    /// without it. Each law's time in the runners joins its time in `spent`, and each runner logs how long it took.
     fn run<'work>(
         &self,
         work: Vec<(&'work Translation, Vec<&'work Law>)>,
         form: Form,
         stopped: &mut Vec<(String, Stop)>,
+        spent: &mut HashMap<&'work str, Duration>,
     ) -> io::Result<Vec<Proven<'work>>> {
         let mut ended: Vec<Proven<'work>> = Vec::new();
         let mut pending = work;
@@ -611,7 +645,14 @@ impl Proofs<'_> {
             let (blocked, checks): (Vec<_>, Vec<_>) =
                 pending.iter().map(|(translation, laws)| self.check(translation, laws, form)).unzip();
             let modules = self.reached_modules(&checks);
+            let running = Instant::now();
             let answers = runner::check(self.library, &modules, &checks, self.threads, HEARTBEATS, stopped)?;
+            tracing::debug!(
+                "A runner proved {} laws with {} in {:.2} s.",
+                checks.iter().flat_map(|check| &check.theorems).filter(|theorem| theorem.judged).count(),
+                form.steps(),
+                running.elapsed().as_secs_f64(),
+            );
             let mut left = Vec::new();
             for ((((translation, laws), check), blocked), answer) in
                 pending.into_iter().zip(&checks).zip(blocked).zip(answers)
@@ -623,8 +664,9 @@ impl Proofs<'_> {
                         );
                         let order =
                             check.theorems.iter().filter(|theorem| theorem.judged).map(|theorem| theorem.statement);
-                        for (statement, judgment) in order.zip(answered) {
-                            if let Some(law) = laws.iter().find(|law| law.statement == statement) {
+                        for (statement, (judgment, took)) in order.zip(answered) {
+                            if let Some(&law) = laws.iter().find(|law| law.statement == statement) {
+                                *spent.entry(law.statement.as_str()).or_default() += took;
                                 ended.push((translation, law, Ok(judgment)));
                             }
                         }

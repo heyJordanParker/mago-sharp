@@ -411,6 +411,41 @@ fn an_edit_of_a_declaration_one_law_reaches_proves_that_law_alone() {
     assert!(printed(&output).contains(counted), "{}", printed(&output));
 }
 
+/// With `MAGO_LOG=debug`, the laws phase of a compile logs how long each of its parts took: finding the laws' proof keys,
+/// finding or building the law checker's library, writing the Lean package, and each runner, then each law's time in the
+/// provers, the slowest first.
+#[test]
+fn a_compile_logs_each_part_of_the_laws_phase_and_each_law_s_time_slowest_first_at_the_debug_level() {
+    let label = "namespace App.Shared;\n\npublic class Label\n{\n    public Label(public string text { get; }) { }\n    public Label same() => new Label(this.text);\n\n    law sameKeepsText(Label l) => l.same().text == l.text;\n}\n";
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Shared/Label.sharp", label)]);
+
+    let output = process::output(command(directory.path(), "never").env("MAGO_LOG", "debug")).unwrap();
+
+    let printed = printed(&output);
+    assert!(output.status.success(), "{printed}");
+    let parts = [
+        "Found the proof keys of 2 laws in ",
+        "The law checker's library took ",
+        "Wrote the Lean package of ",
+        "A runner proved 2 laws with ",
+    ];
+    for part in parts {
+        assert!(printed.contains(part), "no line holds {part:?}: {printed}");
+    }
+    let laws: Vec<(&str, f64)> = printed
+        .lines()
+        .filter_map(|line| line.split_once("The law ")?.1.split_once(" s of the provers' time."))
+        .filter_map(|(law, _)| {
+            let (name, seconds) = law.split_once(" took ")?;
+            Some((name, seconds.parse().ok()?))
+        })
+        .collect();
+    let mut names: Vec<&str> = laws.iter().map(|(name, _)| *name).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["App.Shared.Label.sameKeepsText", "App.Shared.Money.addKeepsCurrency"], "{printed}");
+    assert!(laws.windows(2).all(|pair| pair[0].1 >= pair[1].1), "the laws are not slowest first: {laws:?}");
+}
+
 /// `.sharp/proofs.json` keeps how Lean judged a law, and never that Lean rejected a generated module the law reaches,
 /// since an edit the law's key does not hold can fix the module: here a runner whose request opens no `Sharp` rejects
 /// every module, and the next compile, after an edit no law reaches, checks the laws again and proves them.

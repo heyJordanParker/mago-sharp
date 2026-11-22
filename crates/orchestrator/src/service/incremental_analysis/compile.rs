@@ -722,10 +722,12 @@ impl IncrementalAnalysisService {
         let translated_only: Vec<&Arc<File>> =
             files.iter().filter(|file| rechecked.contains(&file.id) && first.kept.contains_key(&file.id)).collect();
         let refusals = (&first.errors, &first.unrefused);
+        let translation = Phase::start("translation");
         let translated =
             self.checked_all(&translated_only, &forms, refusals, &effects, session.as_ref(), |checked, _, _| {
                 translate(checked, &reach)
             })?;
+        translation.end();
         tracing::debug!(
             "Kept the compiled file of {} PHP# files, lowered {} again, and translated {} more for the laws that reach them.",
             first.kept.len(),

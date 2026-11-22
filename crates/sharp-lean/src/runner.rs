@@ -5,6 +5,7 @@
 use std::io;
 use std::path::Path;
 use std::process::Output;
+use std::time::Duration;
 
 use mago_extension::PayloadReader;
 use mago_extension::PayloadWriter;
@@ -17,7 +18,7 @@ use crate::package::Module;
 use crate::package::Refusal;
 
 const LAW_PROTOCOL_MAGIC: [u8; 4] = *b"MLAW";
-const LAW_PROTOCOL_MAJOR: u16 = 4;
+const LAW_PROTOCOL_MAJOR: u16 = 5;
 const LAW_PROTOCOL_MINOR: u16 = 0;
 const CHECK_REQUEST: u16 = 1;
 const CHECKED_RESPONSE: u16 = 2;
@@ -84,8 +85,8 @@ pub(crate) struct Check<'check> {
 /// The runner's answer to one check.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
-    /// The judgment of each judged theorem, in order.
-    Judged(Vec<Judgment>),
+    /// The judgment of each judged theorem, in order, with how long the runner took to elaborate and judge it.
+    Judged(Vec<(Judgment, Duration)>),
     /// The generated module of this name, which the check reaches, did not elaborate.
     Refused(String, Refusal),
 }
@@ -342,8 +343,8 @@ fn answer(
     Ok((index, answer))
 }
 
-/// The next `count` judgments of `reader`.
-fn judgments(reader: &mut PayloadReader<'_>, count: usize) -> Result<Vec<Judgment>, String> {
+/// The next `count` judgments of `reader`, each with the milliseconds its theorem took.
+fn judgments(reader: &mut PayloadReader<'_>, count: usize) -> Result<Vec<(Judgment, Duration)>, String> {
     let error = |error: mago_extension::PayloadError| error.to_string();
     let mut judgments = Vec::with_capacity(count);
     for _ in 0..count {
@@ -377,7 +378,8 @@ fn judgments(reader: &mut PayloadReader<'_>, count: usize) -> Result<Vec<Judgmen
             4 => Judgment::OutOfTime,
             code => return Err(format!("the runner answered with the unknown judgment {code}")),
         };
-        judgments.push(judgment);
+        let took = Duration::from_millis(u64::from(reader.read_u32("judgment milliseconds").map_err(error)?));
+        judgments.push((judgment, took));
     }
 
     Ok(judgments)
@@ -411,6 +413,18 @@ mod tests {
     /// The generated module `name` with the source `text`.
     fn module(name: &str, text: &str) -> Module {
         Module { name: name.to_owned(), host: name.to_owned(), imports: Vec::new(), text: text.to_owned() }
+    }
+
+    /// The judgments of each answer of `answers`, none for a refused one, without how long each took, which depends on
+    /// the machine.
+    fn untimed(answers: &[Answer]) -> Vec<Option<Vec<Judgment>>> {
+        answers
+            .iter()
+            .map(|answer| match answer {
+                Answer::Judged(judged) => Some(judged.iter().map(|(judgment, _)| judgment.clone()).collect()),
+                Answer::Refused(..) => None,
+            })
+            .collect()
     }
 
     /// A check of `modules` with no theorem, which only elaborates them.
@@ -533,14 +547,7 @@ mod tests {
         };
         assert_eq!(module, "Code.App.Spin");
         assert_eq!(stopped, [("Code.App.Spin".to_owned(), *stop)]);
-        assert_eq!(
-            answers,
-            [
-                Answer::Judged(vec![Judgment::Proved]),
-                Answer::Refused("Code.App.Spin".to_owned(), Refusal::Stopped(*stop)),
-                Answer::Judged(vec![Judgment::Proved]),
-            ]
-        );
+        assert_eq!(untimed(&answers), [Some(vec![Judgment::Proved]), None, Some(vec![Judgment::Proved])]);
 
         Ok(())
     }
@@ -571,9 +578,13 @@ mod tests {
         let answers = check(&library, &modules.each_ref(), &checks, THREADS, 100, &mut Vec::new())?;
 
         assert_eq!(
-            answers,
-            [Answer::Judged(vec![Judgment::OutOfTime, Judgment::Proved]), Answer::Judged(vec![Judgment::Proved]),]
+            untimed(&answers),
+            [Some(vec![Judgment::OutOfTime, Judgment::Proved]), Some(vec![Judgment::Proved])]
         );
+        let Some(Answer::Judged(judged)) = answers.first() else {
+            return Err(io::Error::other(format!("the first check was answered {answers:?}")));
+        };
+        assert!(judged[0].1 > Duration::ZERO, "the theorem that ran out of time took no time: {judged:?}");
 
         Ok(())
     }
@@ -613,9 +624,9 @@ mod tests {
             &mut Vec::new(),
         )?;
 
-        assert_eq!(searched, [Answer::Judged(vec![Judgment::Proved])]);
+        assert_eq!(untimed(&searched), [Some(vec![Judgment::Proved])]);
         assert!(
-            matches!(fixed.as_slice(), [Answer::Judged(judged)] if matches!(judged.as_slice(), [Judgment::Rejected(_)])),
+            matches!(untimed(&fixed).as_slice(), [Some(judged)] if matches!(judged.as_slice(), [Judgment::Rejected(_)])),
             "{fixed:?}"
         );
 
@@ -632,6 +643,37 @@ mod tests {
         writer.write_u16(0);
         let _ = writer.write_length(checks);
         writer
+    }
+
+    /// Each judgment of an answer ends with the milliseconds its theorem took, which the answer gives beside it.
+    #[test]
+    fn each_judgment_comes_with_the_milliseconds_its_theorem_took() {
+        let check = Check {
+            modules: vec!["Code.App.Fine".to_owned()],
+            theorems: vec![
+                Theorem { statement: "App.Fine.isOne", text: "", steps: None, judged: true },
+                Theorem { statement: "App.Fine.slow", text: "", steps: None, judged: true },
+            ],
+        };
+        let mut writer = answer_header(1);
+        writer.write_u32(0);
+        writer.write_u8(0);
+        writer.write_u32(2);
+        writer.write_u8(0);
+        writer.write_u32(12);
+        writer.write_u8(4);
+        writer.write_u32(1_500);
+
+        assert_eq!(
+            decode(&writer.finish(), &[&check], true, &[]),
+            Ok(vec![(
+                0,
+                Answer::Judged(vec![
+                    (Judgment::Proved, Duration::from_millis(12)),
+                    (Judgment::OutOfTime, Duration::from_millis(1_500)),
+                ])
+            )])
+        );
     }
 
     /// A check's last line of progress names the generated module the runner was elaborating for it when Mago stopped

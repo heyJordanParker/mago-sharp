@@ -85,7 +85,7 @@ def putString (b : ByteArray) (s : String) : ByteArray :=
 message kind, and a reserved `u16`. -/
 
 def lawMagic : ByteArray := "MLAW".toUTF8
-def major : UInt16 := 4
+def major : UInt16 := 5
 def checkRequest : UInt16 := 1
 def checkedResponse : UInt16 := 2
 
@@ -445,12 +445,14 @@ def search (env : Environment) (statement : Name) : Search :=
 its kind, its index and its goal, then what the search for the small values that break the law gave: `0` when none ran,
 `1` when it found none, or `2` and the values it found; `2` and the statement of the law not proven that it holds
 through; `3` and Lean's first error, when Lean rejected the theorem, or the axioms it rests on, when it has a gap no law
-it holds through explains; or `4` when it ran out of its heartbeats outside the steps of its proof. -/
+it holds through explains; or `4` when it ran out of its heartbeats outside the steps of its proof. Each answer ends with
+the milliseconds the theorem took, from the start of its elaboration to the end of its judgment. -/
 def answer (env : Environment) (request : Check) (b : ByteArray) (shared : Shared) : IO ByteArray := do
   let mut env := env
   let mut gaps : Array Name := #[]
   let mut b := putU32 b (request.theorems.filter (·.judged)).size.toUInt32
   for item in request.theorems do
+    let started ← IO.monoNanosNow
     let (next, elaborated) ← withTheorem env item shared
     env := next
     let name := item.statement ++ `proof
@@ -477,6 +479,7 @@ def answer (env : Environment) (request : Check) (b : ByteArray) (shared : Share
         | none => putString (putU8 b 3) s!"{name} rests on the axioms {elaborated.axioms}"
     else
       b := putU8 b 0
+    b := putU32 b (((← IO.monoNanosNow) - started) / 1000000).toUInt32
   return b
 
 /-- The answer of the check of index `index`: its index, then `0` and the judgments of its theorems, `1`, a generated
