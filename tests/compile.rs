@@ -5958,6 +5958,59 @@ fn a_law_reaching_a_template_with_a_float_part_is_refused() {
     );
 }
 
+/// `App.Setup.Requirement`, a class that declares its own `==`, by its name and whether it is met.
+const REQUIREMENT: &str = "namespace App.Setup;\n\npublic final class Requirement\n{\n    public Requirement(public string name { get; }, public bool met { get; }) { }\n\n    public static bool operator ==(Requirement a, Requirement b) => a.name == b.name && a.met == b.met;\n\n    public int hash() => 0;\n}\n";
+
+/// `App.Setup.Readiness`, which holds a `Map` of `Requirement`s that `active` keeps, and `laws`.
+fn requirements(laws: &str) -> String {
+    format!(
+        "namespace App.Setup;\n\npublic final class Readiness\n{{\n    public Readiness(public Map<string, Requirement> requirements {{ get; }}) {{ }}\n\n    public static Readiness active(Map<string, Requirement> requirements) => new Readiness(requirements);\n\n    {laws}\n}}\n"
+    )
+}
+
+/// Spec section 19: two `Map`s are `==` when they hold as many entries and each key of one is a key of the other with
+/// an equal value, by the value's own `==`, so a law reads that a map a value keeps is the map it was given.
+#[test]
+fn a_law_compares_two_maps_by_their_values_own_equality() {
+    let directory = library_project(&[
+        ("app/Setup/Requirement.sharp", REQUIREMENT),
+        (
+            "app/Setup/Readiness.sharp",
+            &requirements(
+                "law keepsItsRequirements(Map<string, Requirement> requirements) => Readiness.active(requirements).requirements == requirements;",
+            ),
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Setup/Readiness.sharp").exists());
+}
+
+/// A false law over two `Map`s' `==` is refused as not proven, with its claim still to show.
+#[test]
+fn a_false_law_over_two_maps_equality_is_not_proven() {
+    let directory = library_project(&[
+        ("app/Setup/Requirement.sharp", REQUIREMENT),
+        (
+            "app/Setup/Readiness.sharp",
+            &requirements("law anyTwoAgree(Map<string, Requirement> a, Map<string, Requirement> b) => a == b;"),
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law anyTwoAgree is not proven\n = still to show: a == b\n"),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// `App.Shared.Stamp`, whose laws build an `Instant`: one reads what it built, and one holds only because the
 /// constructor throws for a nanosecond outside its range.
 const STAMP: &str = "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic final class Stamp\n{\n    law builds(int unused) => new Instant(1, 0).epochSeconds == 1;\n    law aBuiltNanosecondIsInRange(int s, int n) => new Instant(s, n).nanosecond <= 999_999_999;\n}\n";
@@ -8142,7 +8195,7 @@ fn a_law_body_s_match_on_a_value_that_runs_code_is_refused() {
 fn a_law_reaching_another_list_method_is_refused_by_name() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static bool known(List<int> items) => items.contains(3);\n\n    law knows(List<int> items) => Shape.known(items);\n}\n",
-        "Law knows reaches the List method contains in Shape.known. Hold the values in a List, and read it with `count()`, an index, `map`, `filter`, a list pattern or a spread.",
+        "Law knows reaches the List method contains in Shape.known. Hold the values in a List, and read it with `count()`, `isEmpty()`, `isNotEmpty()`, an index, `map`, `filter`, a list pattern or a spread.",
     );
 }
 

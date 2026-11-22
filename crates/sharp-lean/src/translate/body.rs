@@ -777,9 +777,9 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// `==`, or `!=` when `negated`, of the values `lhs` and `rhs` of the types `types`, as spec section 19 compares
     /// them, the way the bridge's [`Equality`] tells: Lean's `==` on values that hold no object, the `==` a class
-    /// declares, or a struct gets with no code, as its `op_Equality` gives it, and two `List`s element by element, as
-    /// [`Body::elements_equal`] gives it. A nullable side is lifted: null equals only null, and two values run that
-    /// `==`. `span` is where a refusal stands.
+    /// declares, or a struct gets with no code, as its `op_Equality` gives it, and two `List`s element by element and two
+    /// `Map`s key by key, as [`Body::elements_equal`] gives it. A nullable side is lifted: null equals only null, and two
+    /// values run that `==`. `span` is where a refusal stands.
     pub(crate) fn equal(
         &mut self,
         span: Span,
@@ -807,7 +807,16 @@ impl<'body, 'program> Body<'body, 'program> {
             Equality::Elements => {
                 let elements = (element_type(types.0), element_type(types.1));
 
-                self.lifted(nullable, (lhs, rhs), |body, sides| body.elements_equal(span, &elements, sides))
+                self.lifted(nullable, (lhs, rhs), |body, sides| {
+                    body.elements_equal(span, "Sharp.elementsEqual", &elements, sides)
+                })
+            }
+            Equality::Tables if is_map_type(types.0) && is_map_type(types.1) => {
+                let values = (element_type(types.0), element_type(types.1));
+
+                self.lifted(nullable, (lhs, rhs), |body, sides| {
+                    body.elements_equal(span, "Sharp.Map.equalBy", &values, sides)
+                })
             }
             Equality::Numbers => return self.unmodeled(span, "a float".to_owned(), issues::FLOAT),
             Equality::Tables => return self.unmodeled(span, "a collection".to_owned(), issues::COLLECTION),
@@ -821,14 +830,22 @@ impl<'body, 'program> Body<'body, 'program> {
         if negated { format!("(!{equal})") } else { equal }
     }
 
-    /// `==` of two `List`s `lhs` and `rhs`, whose elements have the types `elements`, as spec section 19 compares them:
-    /// `Sharp.elementsEqual` of the elements' own `==`, which holds when both hold as many elements and each pair is
-    /// equal, compared in order until one is not, as the engine compares them.
-    fn elements_equal(&mut self, span: Span, elements: &(TUnion, TUnion), (lhs, rhs): (&str, &str)) -> String {
+    /// `==` of two `List`s or two `Map`s `lhs` and `rhs`, whose elements, or values, have the types `elements`, as spec
+    /// section 19 compares them, by `compare` of the elements' own `==`: `Sharp.elementsEqual`, which holds when both
+    /// lists hold as many elements and each pair is equal, or `Sharp.Map.equalBy`, which holds when both maps hold as
+    /// many entries and each key of `lhs` is a key of `rhs` with an equal value. Each compares in order until one pair is
+    /// not equal, as the engine compares them.
+    fn elements_equal(
+        &mut self,
+        span: Span,
+        compare: &str,
+        elements: &(TUnion, TUnion),
+        (lhs, rhs): (&str, &str),
+    ) -> String {
         let (a, b) = (self.fresh(), self.fresh());
         let element = self.nested_lines(|body| body.equal(span, (&elements.0, &elements.1), (&a, &b), false));
         let temporary = self.fresh();
-        self.lines.push(format!("let {temporary} ← Sharp.elementsEqual (fun {a} {b} => do"));
+        self.lines.push(format!("let {temporary} ← {compare} (fun {a} {b} => do"));
         self.lines.extend(indented(&element, 4));
         self.lines.push(format!("  ) {lhs} {rhs}"));
 
@@ -1773,10 +1790,7 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// Whether `expression`'s value is a `Map`, null aside.
     pub(super) fn is_map(&self, expression: &Expression) -> bool {
-        let r#type = self.checked.types().expression_type(expression);
-        let mut types = r#type.types.iter().filter(|atomic| !atomic.is_null()).peekable();
-
-        types.peek().is_some() && types.all(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
+        is_map_type(self.checked.types().expression_type(expression))
     }
 
     /// A `Map` literal, spec section 12, as `Sharp.Map.ofList` of its entries, each spread's entries in its place.
@@ -2799,16 +2813,24 @@ const MAP_MEMBERS: [(&str, usize); 8] = [
     ("filter", 1),
 ];
 
-/// The type of an element of a value of `list`, a `List` type: its element type joined with the type of each element
-/// it is known to hold, as a literal's are.
-fn element_type(list: &TUnion) -> TUnion {
+/// The type of an element of a value of `collection`, a `List` or a `Map` type: a list's element type, or a map's value
+/// type, joined with the type of each element or value it is known to hold, as a literal's are.
+fn element_type(collection: &TUnion) -> TUnion {
     let mut types: Vec<TAtomic> = Vec::new();
-    for atomic in list.types.iter() {
-        let TAtomic::Array(TArray::List(list)) = atomic else {
-            continue;
+    for atomic in collection.types.iter() {
+        let elements: Vec<&TUnion> = match atomic {
+            TAtomic::Array(TArray::List(list)) => std::iter::once(list.element_type.as_ref())
+                .chain(list.known_elements.iter().flat_map(|known| known.values().map(|(_, element)| element)))
+                .collect(),
+            TAtomic::Array(TArray::Keyed(map)) => map
+                .parameters
+                .iter()
+                .map(|(_, value)| value.as_ref())
+                .chain(map.known_items.iter().flat_map(|known| known.values().map(|(_, value)| value)))
+                .collect(),
+            _ => continue,
         };
-        let known = list.known_elements.iter().flat_map(|known| known.values().map(|(_, element)| element));
-        for element in std::iter::once(list.element_type.as_ref()).chain(known) {
+        for element in elements {
             for atomic in element.types.iter().filter(|atomic| !atomic.is_never()) {
                 if !types.contains(atomic) {
                     types.push(atomic.clone());
@@ -2818,6 +2840,13 @@ fn element_type(list: &TUnion) -> TUnion {
     }
 
     TUnion::from_vec(types)
+}
+
+/// Whether a value of `r#type` is a `Map`, null aside.
+fn is_map_type(r#type: &TUnion) -> bool {
+    let mut types = r#type.types.iter().filter(|atomic| !atomic.is_null()).peekable();
+
+    types.peek().is_some() && types.all(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
 }
 
 /// Whether `class` names a PHP# collection.
