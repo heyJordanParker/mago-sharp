@@ -4556,6 +4556,86 @@ fn a_law_that_calls_an_interface_method_is_refused() {
     }
 }
 
+/// `app/Integrations/IntegrationFailure.sharp`, an interface whose `value` has no storage of its own, which the backed
+/// enum `Outage` implements, and `app/Integrations/Readiness.sharp`, a machine whose cases hold a failure, stating
+/// `laws`.
+fn readiness(laws: &str) -> tempfile::TempDir {
+    lawful_project(&[
+        (
+            "app/Integrations/IntegrationFailure.sharp",
+            "namespace App.Integrations;\n\npublic interface IntegrationFailure\n{\n    string value { get; }\n}\n",
+        ),
+        (
+            "app/Integrations/Outage.sharp",
+            "namespace App.Integrations;\n\npublic enum Outage : string, IntegrationFailure\n{\n    case Timeout = \"timeout\";\n    case Refused = \"refused\";\n}\n",
+        ),
+        (
+            "app/Integrations/Readiness.sharp",
+            &format!(
+                "namespace App.Integrations;\n\npublic machine Readiness\n{{\n    final case Inactive(IntegrationFailure failure);\n    final case Waiting(IntegrationFailure? failure);\n\n    public static Readiness.Inactive inactive(IntegrationFailure failure) => Readiness.Inactive(failure);\n    public static Readiness.Waiting waiting(IntegrationFailure? failure) => Readiness.Waiting(failure);\n\n    {laws}\n}}\n"
+            ),
+        ),
+    ])
+}
+
+/// A law reads an interface's property through the interface's reader, which every implementation answers, so a law
+/// that reads the same value twice proves: through `.`, through `?.`, and in a machine's invariant.
+#[test]
+fn a_law_reads_an_interface_s_property_through_its_reader() {
+    let directory = readiness(
+        "law anInactiveIntegrationHoldsItsFailure(IntegrationFailure failure) => Readiness.inactive(failure).failure.value == failure.value;\n    law aWaitingIntegrationHoldsItsFailure(IntegrationFailure? failure) => Readiness.waiting(failure).failure?.value == failure?.value;\n    law anInactiveIntegrationReadsOneValue(Readiness.Inactive inactive) => inactive.failure.value == inactive.failure.value;",
+    );
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Integrations/Readiness.sharp").exists());
+}
+
+/// A law knows of an interface's property only what holds for every implementation, so a claim that it is one fixed
+/// value is not proven, and the goal still to show names the read.
+#[test]
+fn a_law_claiming_one_value_for_every_implementation_of_an_interface_s_property_is_not_proven() {
+    let directory = readiness("law everyFailureTimesOut(IntegrationFailure failure) => failure.value == \"timeout\";");
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: law everyFailureTimesOut is not proven\n = still to show: failure.value == "
+        ),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Integrations/Readiness.sharp").exists());
+}
+
+/// An abstract property has no storage in its class's value, so a law reads it through the class's reader, and a
+/// subclass that holds it reads its own value.
+#[test]
+fn a_law_reads_an_abstract_property_through_its_reader_and_a_subclass_s_own_value() {
+    let directory = lawful_project(&[
+        (
+            "app/Integrations/Integration.sharp",
+            "namespace App.Integrations;\n\npublic abstract class Integration\n{\n    public abstract string label { get; }\n\n    law anIntegrationReadsOneLabel(Integration integration) => integration.label == integration.label;\n}\n",
+        ),
+        (
+            "app/Integrations/Stripe.sharp",
+            "namespace App.Integrations;\n\npublic final class Stripe : Integration\n{\n    public override string label { get; init; } = \"stripe\";\n\n    law stripeIsLabeledStripe(int unused) => new Stripe().label == \"stripe\";\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Integrations/Integration.sharp").exists());
+    assert!(compiled(root, "app/Integrations/Stripe.sharp").exists());
+}
+
 /// `app/Shop/OrderStatus.sharp`, a sealed family of the states `Pending` and `Paid`, whose `Pending` states `laws`.
 fn order_states(laws: &str) -> tempfile::TempDir {
     lawful_project(&[

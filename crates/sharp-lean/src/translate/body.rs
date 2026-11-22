@@ -2020,14 +2020,14 @@ impl<'body, 'program> Body<'body, 'program> {
             );
             return self.unmodeled(expression.span(), what, issues::PLAIN_PHP);
         }
-        if !self.reach.is_stored_field(declaring, property.as_bytes()) {
-            return self.unmodeled(expression.span(), format!("the accessor of {place}"), issues::ACCESSOR);
-        }
-
         // Spec section 20.1: an implementer of a sealed interface is a value of the interface, and reads its property
         // through the interface's accessor, as a data case reads its field. A property a PHP# parent declares is a field
         // of the parent's value.
-        let read = if !self.reach.same_class(declaring, class.as_bytes()) {
+        let read = if self.reach.is_abstract_property(declaring, property.as_bytes()) {
+            self.reader(expression.span(), object, class.as_bytes(), declaration.class, property.as_bytes())
+        } else if !self.reach.is_stored_field(declaring, property.as_bytes()) {
+            return self.unmodeled(expression.span(), format!("the accessor of {place}"), issues::ACCESSOR);
+        } else if !self.reach.same_class(declaring, class.as_bytes()) {
             let parent = self.upcast(expression.span(), object, class.as_bytes(), declaring);
             format!("{parent}.{}", names::identifier(property.as_bytes()))
         } else if let Some((_, constructor)) = self.sealed(expression.span(), class.as_bytes()) {
@@ -2045,6 +2045,24 @@ impl<'body, 'program> Body<'body, 'program> {
         } else {
             read
         }
+    }
+
+    /// The read of `declaring`'s property `property`, which has no storage of its own, from `object`, a value of
+    /// `class`: a call of `declaring`'s reader, which each implementation answers. A class takes `object` as a value of
+    /// the class above it that declares the property, and an interface through the coercion each class that implements
+    /// it declares.
+    fn reader(&mut self, span: Span, object: String, class: &[u8], declaring: Word, property: &[u8]) -> String {
+        let declaring_name = self.reached_name(declaring.as_bytes());
+        let key = names::member(&names::full_name(&declaring_name), property);
+        let place = format!("{}.{}", names::short_name(&declaring_name), String::from_utf8_lossy(property));
+        self.uses(declaring.as_bytes(), &key, place);
+        let receiver = if self.checked.types().class_declaration(declaring).kind == DeclarationKind::Interface {
+            object
+        } else {
+            self.upcast(span, object, class, declaring.as_bytes())
+        };
+
+        format!("({key} {receiver})")
     }
 
     /// `object?.y`, null when `object` is.

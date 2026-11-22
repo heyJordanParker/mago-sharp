@@ -61,8 +61,11 @@ pub struct Reach {
     classes: HashMap<Word, ReachedClass>,
     methods: HashMap<SymbolIdentifier, ReachedMethod>,
     /// Each property that holds a value, by its class's key and its exact name without `$`, as PHP finds a property: it
-    /// is not static and has no accessor body.
+    /// is not static, has no accessor body, and has storage of its own.
     stored_fields: HashSet<(Word, Word)>,
+    /// Each property with no storage of its own and no accessor body, as an interface's and an abstract one are, by its
+    /// class's key and its exact name without `$`: each implementation gives its value.
+    abstract_properties: HashSet<(Word, Word)>,
     /// Each property whose declared type takes `null`, by its class's key and its exact name without `$`.
     nullable_fields: HashSet<(Word, Word)>,
     /// The files each file's laws reach, its own included.
@@ -201,7 +204,11 @@ impl Reach {
             };
             let field = (class, word(property));
             if !metadata.flags.is_static() && metadata.hooks.values().all(|hook| hook.is_abstract) {
-                self.stored_fields.insert(field);
+                if metadata.flags.is_virtual_property() {
+                    self.abstract_properties.insert(field);
+                } else {
+                    self.stored_fields.insert(field);
+                }
             }
             if metadata.type_metadata.as_ref().is_some_and(|r#type| r#type.type_union.is_nullable()) {
                 self.nullable_fields.insert(field);
@@ -294,6 +301,12 @@ impl Reach {
     /// Whether `class`'s property `property` holds a value, so its structure has a field for it.
     pub(crate) fn is_stored_field(&self, class: &[u8], property: &[u8]) -> bool {
         self.stored_fields.contains(&(self.class_key(class), word(property)))
+    }
+
+    /// Whether `class`'s property `property` has no storage of its own and no accessor body, so each implementation
+    /// gives its value and a law reads it through `class`'s reader.
+    pub(crate) fn is_abstract_property(&self, class: &[u8], property: &[u8]) -> bool {
+        self.abstract_properties.contains(&(self.class_key(class), word(property)))
     }
 
     /// Whether the declared type of `class`'s property `property` takes `null`.

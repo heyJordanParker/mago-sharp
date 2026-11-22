@@ -49,7 +49,6 @@ use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Property;
-use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::dialect::Dialect;
@@ -324,13 +323,16 @@ impl Translator<'_, '_> {
                         });
                     }
                 }
-                ClassLikeMember::Property(property) if is_stored(property) => {
+                ClassLikeMember::Property(property) => {
                     let name = property.first_variable().name;
-                    fields.push(Field {
-                        name: name.strip_prefix(b"$").unwrap_or(name),
-                        hint: property.hint(),
-                        value: property.initial_value().map_or(FieldValue::Absent, FieldValue::Initial),
-                    });
+                    let name = name.strip_prefix(b"$").unwrap_or(name);
+                    if self.reach.is_stored_field(full, name) {
+                        fields.push(Field {
+                            name,
+                            hint: property.hint(),
+                            value: property.initial_value().map_or(FieldValue::Absent, FieldValue::Initial),
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -765,11 +767,13 @@ impl Translator<'_, '_> {
             .collect()
     }
 
-    /// The reached methods, extension members and constants, and every law, of a class-like. A machine's invariant is
-    /// proved as [`Translator::invariants`] says, so it is no law here.
+    /// The reached methods, extension members and constants, the reader of each property with no storage of its own,
+    /// and every law, of a class-like. A machine's invariant is proved as [`Translator::invariants`] says, so it is no
+    /// law here.
     fn members(&mut self, full: &[u8], lean: &str, short: &str, members: &[ClassLikeMember<'_>]) {
         for member in members {
             match member {
+                ClassLikeMember::Property(property) => self.reader(full, lean, short, property),
                 ClassLikeMember::Method(method)
                     if php_method_name(method) != b"__construct" && self.reach.reaches(full, method.name.value) =>
                 {
@@ -807,6 +811,29 @@ impl Translator<'_, '_> {
                 _ => {}
             }
         }
+    }
+
+    /// The reader of `property` when it has no storage of its own, as an interface's and an abstract property have
+    /// none: `opaque Class.property : Class → T`, which each implementation answers, so a law knows of the value only
+    /// what holds for every implementation.
+    fn reader(&mut self, full: &[u8], lean: &str, short: &str, property: &Property) {
+        let variable = property.first_variable();
+        let name = variable.name.strip_prefix(b"$").unwrap_or(variable.name);
+        if !self.reach.is_abstract_property(full, name) {
+            return;
+        }
+
+        let key = names::member(lean, name);
+        let place = format!("{short}.{}", String::from_utf8_lossy(name));
+        let mut body = Body::new(self.checked, self.reach, full, place.clone());
+        if names::RESERVED.contains(&String::from_utf8_lossy(name).as_ref()) {
+            body.unmodeled(variable.span, format!("the property {place}"), issues::RESERVED_NAME);
+        }
+        let receiver = body.class_type(variable.span, full);
+        let r#type = body.declared_type(property.hint(), variable.span);
+        self.translation.receivers.push((key.clone(), true));
+        let text = format!("opaque {key} : {receiver} → {type}");
+        self.declare(body, key, variable.span, text, Role::Definition);
     }
 
     /// A method, or an extension's method, spec section 26, which runs as a static method that takes `receiver` first.
@@ -1115,21 +1142,6 @@ fn fields_equality(body: &mut Body<'_, '_>, full: &[u8], span: Span, fields: &[F
     }
 
     equal
-}
-
-/// Whether `property` holds a value: it is not static and has no accessor body.
-fn is_stored(property: &Property) -> bool {
-    if property.modifiers().iter().any(|modifier| matches!(modifier, Modifier::Static(_))) {
-        return false;
-    }
-
-    match property {
-        Property::Plain(_) => true,
-        Property::Hooked(hooked) => {
-            hooked.hook_list.hooks.iter().all(|hook| matches!(hook.body, PropertyHookBody::Abstract(_)))
-        }
-        Property::Computed(_) => false,
-    }
 }
 
 /// `parameter` as the binder `(name : Type)`, with its Lean type as `body` translates it.
