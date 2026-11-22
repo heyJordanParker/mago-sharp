@@ -4,7 +4,7 @@
 
 /// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the
 /// prelude. Sorted.
-pub(crate) const SHARP_CLASSES: [&str; 46] = [
+pub(crate) const SHARP_CLASSES: [&str; 47] = [
     "Sharp\\Behavior",
     "Sharp\\BigInteger",
     "Sharp\\Bool",
@@ -46,6 +46,7 @@ pub(crate) const SHARP_CLASSES: [&str; 46] = [
     "Sharp\\Scope",
     "Sharp\\Set",
     "Sharp\\SetMembers",
+    "Sharp\\SystemRandom",
     "Sharp\\Tag",
     "Sharp\\TupleElement",
     "Sharp\\TypeKind",
@@ -133,8 +134,8 @@ pub const STANDARD_ROOT_CLASSES: [&str; 71] = [
     "mysqli_sql_exception",
 ];
 
-/// The standard effects, spec section 29: each `effect` class of the standard library, which a bare name in `uses`
-/// names by default, as a bare name of `Sharp` names its class. Sorted.
+/// The standard effects, spec section 29: each `effect abstract` class of the standard library, which a bare name in
+/// `uses` names by default, as a bare name of `Sharp` names its class. Sorted.
 pub(crate) const STANDARD_EFFECTS: [&str; 12] = [
     "Sharp\\Data\\Cache",
     "Sharp\\Data\\Database",

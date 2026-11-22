@@ -4238,7 +4238,8 @@ mod tests {
     /// the effect class, and a law on a later line that reaches the getter adds nothing beside the refusal.
     #[test]
     fn test_a_member_named_by_an_expression_gives_a_law_no_effect() {
-        let payments = "namespace App;\n\npublic effect class Payments\n{\n    public int fee { get; } = 30;\n}\n";
+        let payments =
+            "namespace App;\n\npublic effect abstract class Payments\n{\n    public abstract int fee { get; }\n}\n";
         let checkout = "namespace App;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.{\"fee\"};\n\n    law totaled(Checkout checkout) => checkout.total > 0;\n}\n";
         let db = make_database(vec![("src/Payments.sharp", payments), ("src/Checkout.sharp", checkout)]);
         let mut service = make_watch_service(&db);

@@ -93,6 +93,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects::check::check_effect_boundary;
 use crate::effects::check::check_effect_statics;
 use crate::effects::summary::record_parse;
 use crate::error::AnalysisError;
@@ -1398,6 +1399,9 @@ where
     }
 
     if context.dialect.is_sharp() {
+        if has_complete_hierarchy {
+            check_effect_boundary(context, class_like_metadata);
+        }
         check_effect_statics(context, class_like_metadata);
     }
 

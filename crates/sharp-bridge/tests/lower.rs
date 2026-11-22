@@ -941,15 +941,15 @@ fn a_file_with_extern_declarations_lowers_to_the_nodes_it_lowers_to_without_them
 }
 
 /// `effect` tells the checker which effect a class's objects carry, spec section 29, so the engine gets the plain
-/// class, which a test fake may extend. Only the function type of each method lists the effect, as `is` tests a
-/// closure of it.
+/// abstract class, which the real implementation and a test fake extend. Only the function type of each method lists
+/// the effect, as `is` tests a closure of it.
 #[test]
 fn an_effect_class_lowers_to_the_nodes_of_the_plain_class() {
     let effect = Lowered::new(
-        "namespace App.Billing;\n\npublic effect class Payments\n{\n    public int charge(int cents) => cents;\n}\n",
+        "namespace App.Billing;\n\npublic effect abstract class Payments\n{\n    public int charge(int cents) => cents;\n}\n",
     );
     let plain = Lowered::new(
-        "namespace App.Billing;\n\npublic class Payments\n{\n    public int charge(int cents) => cents;\n}\n",
+        "namespace App.Billing;\n\npublic abstract class Payments\n{\n    public int charge(int cents) => cents;\n}\n",
     );
 
     assert_eq!(
@@ -1111,7 +1111,7 @@ fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_val
 /// names its own namespace. Each row is a module file, its code and the namespace its table names.
 #[test]
 fn the_standard_library_module_binds_its_services_for_the_root_namespace() {
-    let binding = "import Sharp.System.Environment;\n\nmodule\n{\n    singleton Environment = Environment;\n}\n";
+    let binding = "import Sharp.System.Environment;\nimport Sharp.System.SystemEnvironment;\n\nmodule\n{\n    singleton Environment = SystemEnvironment;\n}\n";
     for (path, namespace, expected) in [
         ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Module.sharp", "Sharp", "ZVAL \"\"\n"),
         ("app/Module.sharp", "App", "ZVAL \"app\"\n"),
@@ -32432,7 +32432,7 @@ fn the_unit_names_each_function_type_with_the_fingerprint_of_its_effects() {
 fn each_accessor_and_each_method_without_a_body_names_its_function_type() {
     let meter = (
         "src/App/Tenant/Meter.sharp",
-        "namespace App.Tenant;\n\npublic effect class Meter\n{\n    public int now() => 7;\n}\n",
+        "namespace App.Tenant;\n\npublic effect abstract class Meter\n{\n    public abstract int now();\n}\n",
     );
     let code = "namespace App.Tenant;\n\npublic abstract class Report\n{\n    public Report(private Meter meter) { }\n\n    public int doubled => this.meter.now() * 2;\n\n    public int total { get; set => field = value; didSet => this.meter.now(); } = 0;\n\n    public static int stock { get => field; set => field = value; } = 5;\n\n    public abstract int read() uses Meter;\n\n    public abstract string kind { get; }\n}\n";
     let lowered = Lowered::with(code, &[meter]);
@@ -32463,7 +32463,7 @@ fn each_accessor_and_each_method_without_a_body_names_its_function_type() {
 fn the_fingerprint_of_each_function_type_s_name_is_the_one_its_lowering_gave() {
     let meter = (
         "src/App/Tenant/Meter.sharp",
-        "namespace App.Tenant;\n\npublic effect class Meter\n{\n    public int now() => 7;\n}\n",
+        "namespace App.Tenant;\n\npublic effect abstract class Meter\n{\n    public abstract int now();\n}\n",
     );
     let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public Report(private Meter meter) { }\n\n    public int doubled => this.meter.now() * 2;\n\n    public int twice(int x) => x * 2;\n\n    public Function<int(int) uses Meter> scaled() => (int x) => x * this.meter.now();\n}\n";
 
@@ -35083,22 +35083,23 @@ fn a_class_parses_as_a_struct_does() {
 
 /// Spec sections 10 and 29: the `parse` and `tryParse` a class gets carry their whole type, as a declared method does,
 /// with the effects of what `parse` runs: the main constructor, the `set` accessor of a property it writes, and the
-/// `parse` of a class a field holds, here an effect class's.
+/// `parse` of a class a field holds, here a fake of an abstract effect class.
 #[test]
 fn a_generated_parse_lists_the_effects_of_what_it_runs() {
     let files = lowered_each(
         &[
             (
                 "src/App/Ledger.sharp",
-                "namespace App;\n\npublic effect class Ledger\n{\n    public static int opened() => 1;\n}\n",
+                "namespace App;\n\npublic effect abstract class Ledger\n{\n    public static int opened() => 1;\n}\n",
             ),
             (
                 "src/App/Audit.sharp",
-                "namespace App;\n\npublic effect class Audit\n{\n    public static string cleaned(string text) => text;\n}\n",
+                "namespace App;\n\npublic effect abstract class Audit\n{\n    public static string cleaned(string text) => text;\n}\n",
             ),
+            ("src/App/Lines.sharp", "namespace App;\n\npublic effect abstract class Lines\n{\n}\n"),
             (
                 "src/App/Line.sharp",
-                "namespace App;\n\npublic effect class Line\n{\n    public Line(public int count { get; }) { }\n}\n",
+                "namespace App;\n\npublic class Line : Lines\n{\n    public Line(public int count { get; }) { }\n}\n",
             ),
             (
                 "src/App/Order.sharp",
@@ -35115,11 +35116,11 @@ fn a_generated_parse_lists_the_effects_of_what_it_runs() {
         indoc! {r#"
             SHARP_TYPE_ARGS
               ZVAL "App\\Order"
-              ZVAL "Function<App.Order(Map<string, Any?>|Object) uses App.Audit, App.Ledger, App.Line>"
+              ZVAL "Function<App.Order(Map<string, Any?>|Object) uses App.Audit, App.Ledger, App.Lines>"
 
             SHARP_TYPE_ARGS
               ZVAL [256] "App\\Order"
-              ZVAL "Function<App.Order?(Map<string, Any?>|Object) uses App.Audit, App.Ledger, App.Line>"
+              ZVAL "Function<App.Order?(Map<string, Any?>|Object) uses App.Audit, App.Ledger, App.Lines>"
         "#}
     );
 }

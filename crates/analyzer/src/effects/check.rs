@@ -1109,7 +1109,7 @@ pub(crate) fn check_uses<A>(
                 .class_likes
                 .values()
                 .find(|effect| {
-                    effect.flags.is_effect_class()
+                    effect.flags.is_abstract_effect()
                         && is_sharp_namespace(effect.original_name.as_bytes())
                         && short_name(effect.original_name).eq_ignore_ascii_case(&short)
                 })
@@ -1166,7 +1166,7 @@ pub(crate) fn check_uses<A>(
         }
         let mut effects: Vec<String> = nameable
             .into_iter()
-            .filter(|class| class.flags.is_effect_class())
+            .filter(|class| class.flags.is_abstract_effect())
             .map(|class| sharp_effect_name(context.codebase, &context.imported_names, class.original_name))
             .collect();
         effects.sort_unstable();
@@ -1175,12 +1175,12 @@ pub(crate) fn check_uses<A>(
         context.collector.report_with_code(
             IssueCode::InvalidEffect,
             Issue::error(format!(
-                "`{}` is not an effect: `uses` takes {} or a class declared `effect class`.",
+                "`{}` is not an effect: `uses` takes {} or a class declared `effect abstract class`.",
                 String::from_utf8_lossy(name.value),
                 effects.join(", "),
             ))
             .with_annotation(Annotation::primary(name.span).with_message("Written here."))
-            .with_note("An effect is a class declared `effect class`, as the standard library's `Clock` is, or `Events`, the effect of `emit`."),
+            .with_note("An effect is a class declared `effect abstract class`, as the standard library's `Clock` is, or `Events`, the effect of `emit`."),
         );
     }
 }
@@ -1264,6 +1264,31 @@ impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker 
             found.names.extend(uses.names.iter());
         }
     }
+}
+
+/// Spec section 29: an `effect` class that isn't abstract extends an `effect abstract` class, the effect that declares
+/// its members and that code holds, so a test passes a fake of it where the real class would go.
+pub(crate) fn check_effect_boundary<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    if !class.flags.is_effect_class()
+        || class.flags.is_abstract()
+        || class.all_parent_classes.iter().any(|parent| {
+            context.codebase.get_class_like(*parent).is_some_and(|parent| parent.flags.is_abstract_effect())
+        })
+    {
+        return;
+    }
+
+    let name = sharp_class_like_name(context.codebase, &context.imported_names, class.original_name);
+    context.collector.report_with_code(
+        IssueCode::InvalidEffect,
+        Issue::error(format!(
+            "`{name}` is an effect class, so it extends an abstract effect class that declares its members. Declare `public effect abstract class` with its methods, and extend it."
+        ))
+        .with_annotation(Annotation::primary(class.name_span.unwrap_or(class.span))),
+    );
 }
 
 /// Spec section 29: a module binding's lifetime decides how often an effect object is created, and a static outlives

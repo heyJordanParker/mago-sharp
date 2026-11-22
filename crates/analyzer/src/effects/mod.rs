@@ -717,8 +717,10 @@ impl Effects {
         })
     }
 
-    /// Each PHP# method, or default of one, with the first method without a body it implements whose `uses` does not
-    /// list one of its effects, since a call of the declaration runs the defaults of the implementation it reaches:
+    /// Each PHP# method, or default of one, with the first method without a body it implements whose `uses`, with the
+    /// effect of the abstract effect class that declares it, does not list one of its effects, since a call of the
+    /// declaration runs the defaults of the implementation it reaches. An effect class's implementation of its
+    /// abstract effect is that effect, spec section 29, so it is held to nothing, and a fake is held to the effect:
     /// its class and member as messages name them, the declaration's class and metadata, the imports and the
     /// scope of its file, and the call that has the effect. An implementation of `Sharp\Dispatcher::dispatch` is held
     /// to nothing, spec section 15: it runs the listeners of every event, which may reach any effect.
@@ -744,7 +746,15 @@ impl Effects {
 
                 metadata.all_parent_classes.iter().chain(&metadata.all_parent_interfaces).find_map(|ancestor| {
                     let declaration = holding_declaration(codebase, *ancestor, method)?;
-                    let impurity = self.effect_outside(codebase, *body, &declaration.uses)?;
+                    let boundary = codebase
+                        .get_class_like(*ancestor)
+                        .filter(|ancestor| ancestor.flags.is_abstract_effect())
+                        .map(|ancestor| ancestor.original_name);
+                    if boundary.is_some() && metadata.flags.is_effect_class() {
+                        return None;
+                    }
+                    let allowed: Vec<Word> = declaration.uses.iter().copied().chain(boundary).collect();
+                    let impurity = self.effect_outside(codebase, *body, &allowed)?;
 
                     Some((
                         self.names[position],
@@ -833,11 +843,11 @@ pub(crate) fn holding_declaration(
     })
 }
 
-/// Whether `name`, a class name as the binder resolves it, is an effect, spec section 29: an effect class, the
+/// Whether `name`, a class name as the binder resolves it, is an effect, spec section 29: an abstract effect class, the
 /// standard library's among them, or `Events`.
 fn is_effect(codebase: &CodebaseMetadata, name: Word) -> bool {
     codebase.class_key(name) == codebase.class_key(events())
-        || codebase.get_class_like(name).is_some_and(|class| class.flags.is_effect_class())
+        || codebase.get_class_like(name).is_some_and(|class| class.flags.is_abstract_effect())
 }
 
 /// Each use of plain PHP no `extern` line declares, spec section 29, once, with the line it needs and the position of

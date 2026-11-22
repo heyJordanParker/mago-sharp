@@ -242,6 +242,14 @@ impl MetadataFlags {
         self.contains(Self::EFFECT_CLASS)
     }
 
+    /// Whether the class is an effect, spec section 29: an `effect abstract` class, which declares the members its
+    /// real implementation and each fake give, and whose name code that holds one has as its effect.
+    #[inline]
+    #[must_use]
+    pub const fn is_abstract_effect(self) -> bool {
+        self.contains(Self::EFFECT_CLASS) && self.contains(Self::ABSTRACT)
+    }
+
     #[inline]
     #[must_use]
     pub const fn is_struct(self) -> bool {

@@ -2147,11 +2147,11 @@ mod tests {
         (metadata, symbol_references)
     }
 
-    /// The standard library's `Sharp\System\Environment`, the effect class of the effect `Environment`, at the
-    /// library's path, with its `currentDirectory`.
+    /// The standard library's `Sharp\System\Environment`, the abstract effect class of the effect `Environment`, at
+    /// the library's path, with its `currentDirectory`.
     const ENVIRONMENT: (&str, &str) = (
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/Environment.sharp",
-        "namespace Sharp.System;\n\npublic effect class Environment\n{\n    public string currentDirectory() => \"/\";\n}\n",
+        "namespace Sharp.System;\n\npublic effect abstract class Environment\n{\n    public abstract string currentDirectory();\n}\n",
     );
 
     /// A project of files, each a workspace-relative name and its contents. A PHP file under `vendor/` is vendored, and
@@ -3015,7 +3015,7 @@ mod tests {
     /// the effects keeps the key.
     #[test]
     fn a_body_edit_two_calls_away_that_changes_its_effects_changes_the_callers_function_type() {
-        let meter = "namespace App;\n\npublic effect class Meter\n{\n    public int now() => 7;\n}\n";
+        let meter = "namespace App;\n\npublic effect abstract class Meter\n{\n    public abstract int now();\n}\n";
         let clerk = "namespace App;\n\npublic class Clerk\n{\n    public int count(Meter meter) => new Ledger().tally(meter);\n}\n";
         let ledger = |tally: &str| {
             format!("namespace App;\n\npublic class Ledger\n{{\n    public int tally(Meter meter) => {tally};\n}}\n")
@@ -4160,7 +4160,7 @@ mod tests {
             ("app/Shop/Status.sharp", "Status : Payable", "Status"),
             ("app/Stubs/Mail.sharp", "extern Mailer uses none;", "extern Mailer uses Http;"),
             ("app/Shop/Rates.sharp", "int rate(int id);", "int rate(int id) uses Http;"),
-            ("app/Shop/Payments.sharp", "public class Payments", "public effect class Payments"),
+            ("app/Shop/Payments.sharp", "public class Payments", "public effect abstract class Payments"),
             ("app/Shop/Base.sharp", "public abstract class Base", "public abstract effect class Base"),
         ] {
             let mut files = headers();
@@ -4334,7 +4334,7 @@ mod tests {
 
         for (edited_file, from, to) in [
             ("app/Shop/Base.sharp", "public abstract class Base", "public abstract effect class Base"),
-            ("app/Vault/Vault.sharp", "public class Vault", "public effect class Vault"),
+            ("app/Vault/Vault.sharp", "public class Vault", "public effect abstract class Vault"),
         ] {
             let mut edited_files = files();
             let (_, contents) =

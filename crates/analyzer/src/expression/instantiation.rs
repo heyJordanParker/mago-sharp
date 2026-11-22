@@ -278,6 +278,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
 
 /// Spec section 29: an effect object is created in a module binding, and nowhere else, so a `.sharp` file's `new` of
 /// an effect class, or of a class that extends one, is refused outside a binding's expression, a lambda in it included.
+/// A fake extends only an abstract effect class, and any code creates it.
 fn check_effect_object_outside_module<A>(
     context: &mut Context<'_, '_, A>,
     metadata: &ClassLikeMetadata,
@@ -292,7 +293,7 @@ fn check_effect_object_outside_module<A>(
     }
     let Some(effect) = std::iter::once(metadata)
         .chain(metadata.all_parent_classes.iter().filter_map(|parent| context.codebase.get_class_like(*parent)))
-        .find(|class| class.flags.is_effect_class())
+        .find(|class| class.flags.is_effect_class() && !class.flags.is_abstract())
     else {
         return;
     };

@@ -1,5 +1,6 @@
-//! The standard library's effect classes, spec section 29, the types their members take and return, the library
-//! classes their code calls, and the members of a `List`, spec section 12, each as the path a project reads it from in
+//! The standard library's effects, spec section 29, the class a module binds each to and its fake, the types their
+//! members take and return, the library classes their code calls, and the members of a `List`, spec section 12, each
+//! as the path a project reads it from in
 //! `vendor/` and its code from `sharp/composer/library/`. Every project holds them, so the tests that check `.sharp`
 //! files include this module and add the files to every project they build.
 
@@ -26,7 +27,7 @@ pub const SET_MEMBERS: (&str, &str) = library_file!("Sharp/SetMembers.sharp");
 /// The lazy operations of an `Iterable`, as `LIST_MEMBERS` are a `List`'s members.
 pub const ITERABLE_MEMBERS: (&str, &str) = library_file!("Sharp/IterableMembers.sharp");
 
-pub const EFFECT_CLASSES: [(&str, &str); 40] = [
+pub const EFFECT_CLASSES: [(&str, &str); 64] = [
     LIST_MEMBERS,
     MAP_MEMBERS,
     SET_MEMBERS,
@@ -67,4 +68,28 @@ pub const EFFECT_CLASSES: [(&str, &str); 40] = [
     library_file!("Sharp/Net/MailAddress.sharp"),
     library_file!("Sharp/Net/MailMessage.sharp"),
     library_file!("Sharp/Net/Url.sharp"),
+    library_file!("Sharp/System/SystemEnvironment.sharp"),
+    library_file!("Sharp/Time/SystemClock.sharp"),
+    library_file!("Sharp/SystemRandom.sharp"),
+    library_file!("Sharp/IO/SystemConsole.sharp"),
+    library_file!("Sharp/System/SystemProcess.sharp"),
+    library_file!("Sharp/IO/SystemFiles.sharp"),
+    library_file!("Sharp/Net/SystemHttp.sharp"),
+    library_file!("Sharp/Net/SystemMail.sharp"),
+    library_file!("Sharp/Net/SystemDns.sharp"),
+    library_file!("Sharp/Interop/SystemPhpGlobals.sharp"),
+    library_file!("Sharp/Data/SystemDatabase.sharp"),
+    library_file!("Sharp/Data/SystemCache.sharp"),
+    library_file!("Sharp/Testing/FakeEnvironment.sharp"),
+    library_file!("Sharp/Testing/FakeClock.sharp"),
+    library_file!("Sharp/Testing/FakeRandom.sharp"),
+    library_file!("Sharp/Testing/FakeConsole.sharp"),
+    library_file!("Sharp/Testing/FakeProcess.sharp"),
+    library_file!("Sharp/Testing/FakeFiles.sharp"),
+    library_file!("Sharp/Testing/FakeHttp.sharp"),
+    library_file!("Sharp/Testing/FakeMail.sharp"),
+    library_file!("Sharp/Testing/FakeDns.sharp"),
+    library_file!("Sharp/Testing/FakePhpGlobals.sharp"),
+    library_file!("Sharp/Testing/FakeDatabase.sharp"),
+    library_file!("Sharp/Testing/FakeCache.sharp"),
 ];

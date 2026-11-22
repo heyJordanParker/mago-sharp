@@ -6348,15 +6348,12 @@ fn the_environment_arguments_are_read_only_and_the_current_directory_is_a_method
         issues(("src/Demo/Deploy.sharp", sharp), &[]),
         ["13:35 invalid-return-statement", "18:26 invalid-property-write"]
     );
-    assert_eq!(
-        messages(("src/Demo/Deploy.sharp", sharp), &[])[1..],
-        ["Cannot initialize readonly property `Environment.arguments` from within `Deploy`."]
-    );
+    assert_eq!(messages(("src/Demo/Deploy.sharp", sharp), &[])[1..], ["`arguments` of `Environment` is get-only."]);
 
     let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\System\\Environment;\n\nclass Deploy\n{\n    public function __construct(private Environment $environment) { }\n\n    public function change(): void\n    {\n        $this->environment->arguments = ['deploy'];\n    }\n}\n";
     assert_eq!(
         messages(("src/Demo/Deploy.php", php), &[]),
-        ["Cannot initialize readonly property `Sharp\\System\\Environment::$arguments` from within `Demo\\Deploy`."]
+        ["Cannot write to read-only property `Sharp\\System\\Environment::$arguments` - property only has a get hook."]
     );
 }
 
@@ -15515,7 +15512,8 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
 #[test]
 fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() {
     let sharp = "namespace Demo;\n\nimport App.Effects.Payments as Billing;\nimport Sharp.Net.Mail as Post;\n\nclass Receipt\n{\n    public string step(Function<int(int) uses Http, Post, Billing> step) => `Step: ${step}`;\n}\n";
-    let payments = ("src/App/Effects/Payments.sharp", "namespace App.Effects;\n\npublic effect class Payments\n{\n}\n");
+    let payments =
+        ("src/App/Effects/Payments.sharp", "namespace App.Effects;\n\npublic effect abstract class Payments\n{\n}\n");
 
     assert_eq!(
         worded(("src/Demo/Receipt.sharp", sharp), &[payments]),
@@ -26193,15 +26191,15 @@ fn an_effect_name_a_file_imports_or_declares_is_that_class() {
     }
 }
 
-/// Spec section 29: a name in a `uses` resolves as a class name does, spec section 23, so an effect class of the file's
-/// namespace wins over the standard effect of its name, as `App.Math` wins over `Math`: an interface method of
-/// `App.Shop` that `uses Database` takes `App.Shop.Database`, which an implementation reading it fits, and a bare name
-/// no class of the namespace holds stays the standard effect, which the same implementation doesn't fit.
+/// Spec section 29: a name in a `uses` resolves as a class name does, spec section 23, so an abstract effect class of
+/// the file's namespace wins over the standard effect of its name, as `App.Math` wins over `Math`: an interface method
+/// of `App.Shop` that `uses Database` takes `App.Shop.Database`, which an implementation reading it fits, and a bare
+/// name no class of the namespace holds stays the standard effect, which the same implementation doesn't fit.
 #[test]
 fn a_uses_takes_the_effect_class_of_the_files_namespace_over_the_standard_effect_of_its_name() {
     let database = (
         "src/App/Shop/Database.sharp",
-        "namespace App.Shop;\n\npublic effect class Database\n{\n    public int rows() => 3;\n}\n",
+        "namespace App.Shop;\n\npublic effect abstract class Database\n{\n    public abstract int rows();\n}\n",
     );
     let counter = (
         "src/App/Shop/Counter.sharp",
@@ -28646,12 +28644,13 @@ fn an_extern_of_a_plain_php_class_is_accepted() {
     assert_eq!(issues(stub, &[STRIPE]), Vec::<String>::new());
 }
 
-/// A project declares its own effect as an effect class, spec section 29, and every `uses` takes it: an `extern`'s,
-/// a function type's, written in a file that imports the class, and an interface method's in the class's namespace. A
-/// plain class of that name is no effect.
+/// A project declares its own effect as an abstract effect class, spec section 29, and every `uses` takes it: an
+/// `extern`'s, a function type's, written in a file that imports the class, and an interface method's in the class's
+/// namespace. A plain class of that name is no effect.
 #[test]
 fn a_uses_takes_an_effect_class_and_refuses_any_other_class() {
-    let effect = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic effect class Payments\n{\n}\n");
+    let effect =
+        ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic effect abstract class Payments\n{\n}\n");
     let plain = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic class Payments\n{\n}\n");
     let extern_ = (
         "app/Stubs/Stripe.sharp",
@@ -28685,6 +28684,64 @@ fn a_parameter_a_local_and_a_property_named_effect_compile() {
     );
 
     assert_eq!(issues(potion, &[]), Vec::<String>::new());
+}
+
+/// Spec section 29: an `effect` class that isn't abstract extends an `effect abstract` class, the boundary that declares
+/// its members and that code holds, so a test can pass a fake in its place.
+#[test]
+fn an_effect_class_without_an_abstract_boundary_is_refused() {
+    let unbounded = (
+        "app/Cache/RedisStore.sharp",
+        "namespace App.Cache;\n\npublic effect class RedisStore\n{\n    public string? get(string key) => null;\n}\n",
+    );
+    let store = (
+        "app/Cache/Store.sharp",
+        "namespace App.Cache;\n\npublic effect abstract class Store\n{\n    public abstract string? get(string key);\n}\n",
+    );
+    let bounded = (
+        "app/Cache/RedisStore.sharp",
+        "namespace App.Cache;\n\npublic effect class RedisStore : Store\n{\n    public override string? get(string key) => null;\n}\n",
+    );
+
+    assert_eq!(
+        worded(unbounded, &[]),
+        [
+            "3:21 invalid-effect `RedisStore` is an effect class, so it extends an abstract effect class that declares its members. Declare `public effect abstract class` with its methods, and extend it."
+        ]
+    );
+    assert_eq!(worded(store, &[]), Vec::<String>::new());
+    assert_eq!(worded(bounded, &[store]), Vec::<String>::new());
+}
+
+/// Spec section 29: a class that extends an abstract effect class without being `effect` is a fake, which any code
+/// creates with `new`, as a test does. Code has an effect by the type it holds, so a reader of a `Store` has the
+/// effect `Store` whatever object is behind it.
+#[test]
+fn a_fake_of_an_abstract_effect_is_created_with_new() {
+    let store = (
+        "app/Cache/Store.sharp",
+        "namespace App.Cache;\n\npublic effect abstract class Store\n{\n    public abstract string? get(string key);\n}\n",
+    );
+    let fake = (
+        "app/Cache/FakeStore.sharp",
+        "namespace App.Cache;\n\npublic class FakeStore : Store\n{\n    public override string? get(string key) => \"cart\";\n}\n",
+    );
+    let reader = (
+        "app/Cache/Reader.sharp",
+        "namespace App.Cache;\n\npublic class Reader\n{\n    public Reader(private Store store) { }\n\n    public Function<string?()> lookup() => () => this.store.get(\"cart\");\n}\n",
+    );
+    let check = (
+        "app/Cache/ReaderCheck.sharp",
+        "namespace App.Cache;\n\npublic class ReaderCheck\n{\n    public string? first() => new FakeStore().get(\"cart\");\n}\n",
+    );
+
+    assert_eq!(issues(check, &[store, fake]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[store, fake, reader, check]),
+        [
+            "app/Cache/Reader.sharp:7:44 invalid-return-statement: This lambda calls `Store.get`, which has the effect `Store`, so a pure `Function<string?()>` cannot hold it."
+        ]
+    );
 }
 
 /// Spec section 29: a method takes on the effects of each function it is given, with nothing written, as Swift's
@@ -29106,7 +29163,7 @@ fn uses_none_warns_on_a_method_and_is_refused_beside_another_effect() {
                 format!("7:22 invalid-effect {beside}"),
                 format!("9:45 invalid-effect {beside}"),
                 format!("11:38 invalid-effect {beside}"),
-                "11:44 invalid-effect `Htp` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Mail, PhpGlobals, Process, Random, Events or a class declared `effect class`. | Written here. | An effect is a class declared `effect class`, as the standard library's `Clock` is, or `Events`, the effect of `emit`.".to_owned(),
+                "11:44 invalid-effect `Htp` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Mail, PhpGlobals, Process, Random, Events or a class declared `effect abstract class`. | Written here. | An effect is a class declared `effect abstract class`, as the standard library's `Clock` is, or `Events`, the effect of `emit`.".to_owned(),
             ],
             Vec::<String>::new(),
         )
@@ -29242,14 +29299,15 @@ fn a_function_or_extension_method_value_has_its_effects_where_it_runs() {
     );
 }
 
-/// A name in `uses` that is no effect is refused with the effects its file can name: each effect class of the
-/// standard library, of the file's namespace and of its imports, by name, then `Events`. An effect class the file
-/// cannot name stays out, so the message changes only with what the file reads.
+/// A name in `uses` that is no effect is refused with the effects its file can name: each abstract effect class of the
+/// standard library, of the file's namespace and of its imports, by name, then `Events`. An effect the file cannot
+/// name stays out, so the message changes only with what the file reads.
 #[test]
 fn a_uses_that_names_no_effect_lists_the_effects_its_file_can_name() {
-    let payments = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic effect class Payments\n{\n}\n");
-    let ledger = ("app/Books/Ledger.sharp", "namespace App.Books;\n\npublic effect class Ledger\n{\n}\n");
-    let audit = ("app/Audit/Trail.sharp", "namespace App.Audit;\n\npublic effect class Trail\n{\n}\n");
+    let payments =
+        ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic effect abstract class Payments\n{\n}\n");
+    let ledger = ("app/Books/Ledger.sharp", "namespace App.Books;\n\npublic effect abstract class Ledger\n{\n}\n");
+    let audit = ("app/Audit/Trail.sharp", "namespace App.Audit;\n\npublic effect abstract class Trail\n{\n}\n");
     let gateway = (
         "app/Billing/Gateway.sharp",
         "namespace App.Billing;\n\nimport App.Books.Ledger;\n\npublic interface Gateway\n{\n    int charge(int cents) uses Clok;\n\n    int keep(Ledger ledger);\n}\n",
@@ -29258,7 +29316,7 @@ fn a_uses_that_names_no_effect_lists_the_effects_its_file_can_name() {
     assert_eq!(
         worded(gateway, &[payments, ledger, audit]),
         [
-            "7:32 invalid-effect `Clok` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Ledger, Mail, Payments, PhpGlobals, Process, Random, Events or a class declared `effect class`. | Written here. | An effect is a class declared `effect class`, as the standard library's `Clock` is, or `Events`, the effect of `emit`."
+            "7:32 invalid-effect `Clok` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Ledger, Mail, Payments, PhpGlobals, Process, Random, Events or a class declared `effect abstract class`. | Written here. | An effect is a class declared `effect abstract class`, as the standard library's `Clock` is, or `Events`, the effect of `emit`."
         ]
     );
 }
@@ -31602,14 +31660,14 @@ fn environment_require_is_called_on_an_environment_object() {
     assert_eq!(issues(deploy, &[]), ["11:46 invalid-static-method-access"]);
 }
 
-/// Spec section 29: code has an effect class's effect by holding one of its objects, so a getter that calls or reads
-/// through a field or a constructor parameter of a project's effect class has it, and a law reading the getter is
-/// refused, naming the class.
+/// Spec section 29: code has an effect by the type it holds, so a getter that calls or reads through a field or a
+/// constructor parameter of a project's abstract effect class has that effect, and a law reading the getter is refused,
+/// naming the class.
 #[test]
 fn a_getter_reaching_through_an_effect_object_has_the_effect_of_its_class() {
     let payments = (
         "app/Billing/Payments.sharp",
-        "namespace App.Billing;\n\npublic effect class Payments\n{\n    public int fee { get; } = 30;\n\n    public int charge(int cents) => cents;\n}\n",
+        "namespace App.Billing;\n\npublic effect abstract class Payments\n{\n    public abstract int fee { get; }\n\n    public abstract int charge(int cents);\n}\n",
     );
     let field = (
         "app/Shop/Checkout.sharp",
@@ -31650,7 +31708,7 @@ fn a_getter_reaching_through_an_effect_object_has_the_effect_of_its_class() {
     );
     assert_eq!(reported(named, &[payments]), ["9:39 parse Unexpected `{`"]);
 
-    // A subclass of an effect class is that class's object, so it has that class's effect.
+    // A fake of an abstract effect class has the effect, as the class it extends does.
     let gateway = (
         "app/Billing/Gateway.sharp",
         "namespace App.Billing;\n\npublic abstract effect class Gateway\n{\n    public virtual int fee() => 1;\n}\n",
@@ -31671,9 +31729,9 @@ fn a_getter_reaching_through_an_effect_object_has_the_effect_of_its_class() {
     );
 }
 
-/// Spec section 29: code that reaches an effect object has its class's effect, whatever its members do, so each
-/// member of an effect class has that effect too. A pure interface method refuses an effect class's implementation, and a
-/// call through an interface or a base class has the effect of its effect class's implementation.
+/// Spec section 29: code that reaches an object of an abstract effect class has that effect, whatever its members do,
+/// so each member of its class has that effect too. A pure interface method refuses the effect's implementation, and a
+/// call through an interface or a base class has the effect of the implementation it reaches.
 #[test]
 fn an_effect_class_s_members_have_its_effect_behind_an_interface_or_a_base_class() {
     let store = |uses: &'static str| {
@@ -31685,9 +31743,13 @@ fn an_effect_class_s_members_have_its_effect_behind_an_interface_or_a_base_class
             ) as &str,
         )
     };
+    let quiet_effect = (
+        "app/Cache/Quiet.sharp",
+        "namespace App.Cache;\n\npublic effect abstract class Quiet : Store\n{\n    public abstract int size();\n}\n",
+    );
     let quiet = (
         "app/Cache/QuietStore.sharp",
-        "namespace App.Cache;\n\npublic effect class QuietStore : Store\n{\n    public int size() => 3;\n}\n",
+        "namespace App.Cache;\n\npublic effect class QuietStore : Quiet\n{\n    public override int size() => 3;\n}\n",
     );
     let quiet_reader = (
         "app/Cache/QuietReader.sharp",
@@ -31697,9 +31759,10 @@ fn an_effect_class_s_members_have_its_effect_behind_an_interface_or_a_base_class
         "app/Cache/Plain.sharp",
         "namespace App.Cache;\n\npublic abstract class Plain\n{\n    public virtual int size() => 1;\n}\n",
     );
+    let loud = ("app/Cache/Loud.sharp", "namespace App.Cache;\n\npublic effect abstract class Loud : Plain\n{\n}\n");
     let sneaky = (
         "app/Cache/Sneaky.sharp",
-        "namespace App.Cache;\n\npublic effect class Sneaky : Plain\n{\n    public override int size() => 2;\n}\n",
+        "namespace App.Cache;\n\npublic effect class Sneaky : Loud\n{\n    public override int size() => 2;\n}\n",
     );
     let plain_reader = (
         "app/Cache/PlainReader.sharp",
@@ -31707,23 +31770,23 @@ fn an_effect_class_s_members_have_its_effect_behind_an_interface_or_a_base_class
     );
 
     assert_eq!(
-        effect_issues(&[quiet, store(""), quiet_reader]),
+        effect_issues(&[quiet, quiet_effect, store(""), quiet_reader]),
         [
-            "app/Cache/QuietStore.sharp:5:26 incompatible-effects: `QuietStore.size` is a member of the effect class `QuietStore`, so the pure `Store.size` cannot accept it."
+            "app/Cache/QuietStore.sharp:5:35 incompatible-effects: `QuietStore.size` is a member of the effect class `Quiet`, so the pure `Store.size` cannot accept it."
         ]
     );
     assert_eq!(
-        effect_issues(&[quiet, store(" uses QuietStore"), quiet_reader]),
+        effect_issues(&[quiet, quiet_effect, store(" uses Quiet"), quiet_reader]),
         [
-            "app/Cache/QuietReader.sharp:11:40 impure-law: Law `counted` reaches `QuietReader.count`, which calls `Store.size` with the effect `QuietStore`. Laws hold only over pure code.",
-            "app/Cache/QuietReader.sharp:9:41 invalid-return-statement: This lambda calls `Store.size`, which has the effect `QuietStore`, so a pure `Function<int()>` cannot hold it.",
+            "app/Cache/QuietReader.sharp:11:40 impure-law: Law `counted` reaches `QuietReader.count`, which calls `Store.size` with the effect `Quiet`. Laws hold only over pure code.",
+            "app/Cache/QuietReader.sharp:9:41 invalid-return-statement: This lambda calls `Store.size`, which has the effect `Quiet`, so a pure `Function<int()>` cannot hold it.",
         ]
     );
     assert_eq!(
-        effect_issues(&[sneaky, plain, plain_reader]),
+        effect_issues(&[sneaky, loud, plain, plain_reader]),
         [
-            "app/Cache/PlainReader.sharp:11:40 impure-law: Law `counted` reaches `Sneaky.size`, a member of the effect class `Sneaky`. Laws hold only over pure code.",
-            "app/Cache/PlainReader.sharp:9:41 invalid-return-statement: This lambda reaches `Sneaky.size`, a member of the effect class `Sneaky`, so a pure `Function<int()>` cannot hold it.",
+            "app/Cache/PlainReader.sharp:11:40 impure-law: Law `counted` reaches `Sneaky.size`, a member of the effect class `Loud`. Laws hold only over pure code.",
+            "app/Cache/PlainReader.sharp:9:41 invalid-return-statement: This lambda reaches `Sneaky.size`, a member of the effect class `Loud`, so a pure `Function<int()>` cannot hold it.",
         ]
     );
 }
@@ -32558,17 +32621,17 @@ fn an_unchecked_exception_setting_names_only_its_own_class() {
     }
 }
 
-/// Spec sections 24 and 29: an effect is a class-like named by its key, so the PHP# effect classes `Disk` and `DISK`
-/// are two effects, and `uses DISK` allows no call of a `Disk`.
+/// Spec sections 24 and 29: an effect is a class-like named by its key, so the PHP# abstract effect classes `Disk` and
+/// `DISK` are two effects, and `uses DISK` allows no call of a `Disk`.
 #[test]
 fn an_effect_allows_only_its_own_class_and_not_its_twin() {
     let disk = (
         "app/Cache/Disk.sharp",
-        "namespace App.Cache;\n\npublic effect class Disk\n{\n    public int size() => 3;\n}\n",
+        "namespace App.Cache;\n\npublic effect abstract class Disk\n{\n    public abstract int size();\n}\n",
     );
     let twin = (
         "app/Cache/DISK.sharp",
-        "namespace App.Cache;\n\npublic effect class DISK\n{\n    public int size() => 4;\n}\n",
+        "namespace App.Cache;\n\npublic effect abstract class DISK\n{\n    public abstract int size();\n}\n",
     );
     let store =
         ("app/Cache/Store.sharp", "namespace App.Cache;\n\npublic interface Store\n{\n    int size() uses DISK;\n}\n");
@@ -35156,7 +35219,7 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
     );
     let library = (
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Module.sharp",
-        "namespace Sharp;\n\nimport Sharp.System.Environment;\n\nmodule\n{\n    singleton Environment = Environment;\n}\n",
+        "namespace Sharp;\n\nimport Sharp.System.Environment;\nimport Sharp.System.SystemEnvironment;\n\nmodule\n{\n    singleton Environment = SystemEnvironment;\n}\n",
     );
     let module = |path: &'static str, namespace: &str, members: &str| {
         (
@@ -35189,7 +35252,7 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
     let flags = "14:43 missing-service `MarginRule` needs a `Flags`, and no module binds one: the container can't build `MarginRule`. | Bind `Flags` in a module of `MarginRule`'s namespace or one above it, as in `transient Flags = Flags;`.";
     let rules = "14:22 missing-service `Cart` needs a `List<PriceRule>`, and no module binds one: the container can't build `Cart`. | Bind `List<PriceRule>` in a module of `Cart`'s namespace or one above it, as in `singleton List<PriceRule> = …;`.";
     let smtp = "14:22 missing-service `Mailer` needs a `SmtpMailer`, and no module binds one: the container can't build `Mailer`. | Bind `SmtpMailer` in a module of this namespace or one above it, as in `transient SmtpMailer = SmtpMailer;`.";
-    let environment = "14:26 missing-service `RedisStore` needs an `Environment`, and no module binds one: the container can't build `RedisStore`. | Bind `Environment` in a module of this namespace or one above it, as in `transient Environment = Environment;`.";
+    let environment = "14:26 missing-service `RedisStore` needs an `Environment`, and no module binds one: the container can't build `RedisStore`. | Bind `Environment` in a module of this namespace or one above it, as in `singleton Environment = …;`.";
     let url = "14:28 missing-service `RedisStore` takes a `string`, which no binding can give: the container can't build `RedisStore`. | Bind `RedisStore` to an expression that creates it, as in `transient RedisStore(…) = new RedisStore(…);`.";
     let value = "14:22 missing-service `Mailer` takes a `string`, which no binding can give: the container can't build `Mailer`. | Take a service that gives the value, such as `Environment`, and read the value from it.";
     let store =
