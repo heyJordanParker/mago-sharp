@@ -5679,6 +5679,84 @@ fn a_law_over_the_class_of_a_class_outside_any_family_is_refused() {
     );
 }
 
+/// `App.Props.Light`, the machine of a reported problem: a computed `isOn` that matches on `this`, reached through each
+/// case, and `laws`.
+fn computed_light(laws: &str) -> String {
+    format!(
+        "namespace App.Props;\n\ninternal machine Light\n{{\n    case Off\n    {{\n        internal Light.On turnOn(int level) => Light.On(level);\n    }}\n\n    final case On(int level);\n\n    private static Light.Off enter() => Light.Off;\n\n    internal bool isOn => match (this) {{\n        Light.On => true,\n        Light.Off => false,\n    }};\n\n    {laws}\n}}\n"
+    )
+}
+
+/// Spec section 6: a machine's computed property runs its body as a method of no arguments, which each case reads as
+/// the machine's, so a law reads it through a case and an invariant of a case reads it too.
+#[test]
+fn a_law_reads_a_machine_s_computed_property_through_each_case() {
+    let directory = lawful_project(&[(
+        "app/Props/Light.sharp",
+        &computed_light(
+            "law onlyALitLightIsOn(int level) => Light.enter().turnOn(level).isOn && !Light.enter().isOn;\n    law anOnLightIsOn(Light.On light) => light.isOn;",
+        ),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Props/Light.sharp").exists());
+}
+
+/// A false law over a machine's computed property is refused as not proven, with its claim still to show.
+#[test]
+fn a_false_law_over_a_machine_s_computed_property_is_not_proven() {
+    let directory =
+        lawful_project(&[("app/Props/Light.sharp", &computed_light("law offIsOn() => Light.enter().isOn;"))]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output)
+            .contains("error[law-unproven]: law offIsOn is not proven\n = still to show: Light.enter().isOn\n"),
+        "{}",
+        printed(&output)
+    );
+    assert!(!printed(&output).contains("left out"), "{}", printed(&output));
+}
+
+/// Spec section 6: a plain class's computed property, written `=>` or with a `get` body, runs its body as a method of
+/// no arguments, so a law reads it, and one that calls a method, and tells a stored `raw` from a computed `Raw`.
+#[test]
+fn a_law_reads_a_class_s_computed_property() {
+    let directory = lawful_project(&[(
+        "app/Props/Meter.sharp",
+        "namespace App.Props;\n\npublic final class Meter\n{\n    public Meter(public int raw { get; }) { }\n\n    public int doubled => this.raw * 2;\n\n    public int Raw => this.raw * 2;\n\n    public int capped\n    {\n        get {\n            if (this.raw > 10) {\n                return 10;\n            }\n            return this.raw;\n        }\n    }\n\n    public int twice => this.helper();\n\n    public int helper() => this.raw + this.raw;\n\n    law doubledIsTwiceRaw(int raw) => new Meter(raw).doubled == raw * 2;\n    law upperRawIsDoubled(Meter m) => m.Raw == m.raw * 2;\n    law cappedAtTen(int raw) => new Meter(raw).capped <= 10;\n    law twiceCallsHelper(int raw) => new Meter(raw).twice == new Meter(raw).doubled;\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Props/Meter.sharp").exists());
+}
+
+/// A subclass can override a `virtual` computed property, so a law reads it as each implementation gives it: it proves
+/// what holds for every override, and its default body proves nothing more.
+#[test]
+fn a_law_reads_an_overridable_computed_property_as_each_implementation_gives_it() {
+    let directory = lawful_project(&[(
+        "app/Props/Gauge.sharp",
+        "namespace App.Props;\n\npublic class Gauge\n{\n    public Gauge(public int raw { get; }) { }\n\n    public virtual int doubled => this.raw * 2;\n\n    law readsTheSame(Gauge g) => g.doubled == g.doubled;\n    law isTheDefault(Gauge g) => g.doubled == g.raw * 2;\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("error[law-unproven]: law isTheDefault is not proven\n"), "{}", printed(&output));
+    assert!(!printed(&output).contains("readsTheSame"), "{}", printed(&output));
+}
+
 /// `App.Shared.Stamp`, whose laws build an `Instant`: one reads what it built, and one holds only because the
 /// constructor throws for a nanosecond outside its range.
 const STAMP: &str = "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic final class Stamp\n{\n    law builds(int unused) => new Instant(1, 0).epochSeconds == 1;\n    law aBuiltNanosecondIsInRange(int s, int n) => new Instant(s, n).nanosecond <= 999_999_999;\n}\n";
@@ -7984,7 +8062,7 @@ fn each_refusal_of_code_a_law_cannot_read_says_what_to_write_instead() {
     );
     let shape = (
         "app/Shared/Shape.sharp",
-        "namespace App.Shared;\n\nimport Lib;\nimport Lib.Clock;\n\npublic class Shape\n{\n    public Shape(public int raw { get; }) { }\n    public int doubled => this.raw * 2;\n\n    public static int hour(int a) => Clock.hour();\n    public static int length(string s) => Lib.measure(s);\n    public static int kept<T>(T item) => 1;\n\n    law l1(int a) => Shape.hour(a) == Shape.hour(a);\n    law l2(string s) => Shape.length(s) == Shape.length(s);\n    law l3(int a) => Shape.kept(a) == 1;\n    law l4(Shape s) => s.doubled == s.doubled;\n}\n",
+        "namespace App.Shared;\n\nimport Lib;\nimport Lib.Clock;\n\npublic class Shape\n{\n    public Shape(public int raw { get; }) { }\n    public int scaled { get => field; set => field = value; } = 0;\n\n    public static int hour(int a) => Clock.hour();\n    public static int length(string s) => Lib.measure(s);\n    public static int kept<T>(T item) => 1;\n\n    law l1(int a) => Shape.hour(a) == Shape.hour(a);\n    law l2(string s) => Shape.length(s) == Shape.length(s);\n    law l3(int a) => Shape.kept(a) == 1;\n    law l4(Shape s) => s.scaled == s.scaled;\n}\n",
     );
     let directory = library_project(&[shape, clock, helpers, stub]);
     let root = directory.path();
@@ -7997,7 +8075,7 @@ fn each_refusal_of_code_a_law_cannot_read_says_what_to_write_instead() {
         "Law l1 reaches the plain PHP class Clock in Shape.hour. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
         "Law l2 reaches the plain PHP function `Lib.measure` in Shape.length. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
         "Law l3 reaches the type parameter T in Shape.kept. Give it a type a law reasons about: int, bool, string, a List, a Map, or a PHP# class, enum or interface, with or without `?`.",
-        "Law l4 reaches the accessor of Shape.doubled in Shape.l4. Compute the value in a method, and give the property no accessor body.",
+        "Law l4 reaches the accessor of Shape.scaled in Shape.l4. Compute the value in a method, and give the property no accessor body.",
     ] {
         assert!(printed.contains(&format!("error - unmodeled-construct: {message}")), "{message}\n{printed}");
     }
@@ -8013,13 +8091,19 @@ fn a_law_reaching_a_loop_that_reads_a_local_it_adds_to_is_refused() {
     );
 }
 
-/// PHP finds a property by its exact name, so a law knows a stored `raw` and an accessor `Raw` apart.
+/// PHP finds a property by its exact name, so a law knows a stored `raw` and a computed `Raw` apart.
 #[test]
-fn a_law_knows_a_stored_field_from_an_accessor_whose_name_differs_only_in_case() {
-    assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int raw { get; }) { }\n    public int Raw => this.raw * 2;\n\n    law doubledHolds(Shape s) => s.Raw == s.Raw;\n}\n",
-        "Law doubledHolds reaches the accessor of Shape.Raw in Shape.doubledHolds. Compute the value in a method, and give the property no accessor body.",
-    );
+fn a_law_knows_a_stored_field_from_a_computed_property_whose_name_differs_only_in_case() {
+    let directory = lawful_project(&[(
+        "app/Shared/Shape.sharp",
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int raw { get; }) { }\n    public int Raw => this.raw * 2;\n\n    law doubledHolds(Shape s) => s.Raw == s.raw * 2;\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Shape.sharp").exists());
 }
 
 #[test]

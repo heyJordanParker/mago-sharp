@@ -28,7 +28,6 @@ use mago_span::Span;
 
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::ClassLikeMember;
-use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Expression;
@@ -49,6 +48,8 @@ use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Property;
+use mago_syntax::cst::PropertyHookBody;
+use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::dialect::Dialect;
@@ -891,13 +892,16 @@ impl Translator<'_, '_> {
             .collect()
     }
 
-    /// The reached methods, extension members and constants, the reader of each property with no storage of its own,
-    /// and every law, of a class-like. A machine's invariant is proved as [`Translator::invariants`] says, so it is no
-    /// law here.
+    /// The reached methods, computed properties, extension members and constants, the reader of each property whose
+    /// value each implementation gives, and every law, of a class-like. A machine's invariant is proved as
+    /// [`Translator::invariants`] says, so it is no law here.
     fn members(&mut self, full: &[u8], lean: &str, short: &str, members: &[ClassLikeMember<'_>]) {
         for member in members {
             match member {
-                ClassLikeMember::Property(property) => self.reader(full, lean, short, property),
+                ClassLikeMember::Property(property) => {
+                    self.reader(full, lean, short, property);
+                    self.computed_property(full, lean, short, None, property);
+                }
                 ClassLikeMember::Method(method)
                     if php_method_name(method) != b"__construct" && self.reach.reaches(full, method.name.value) =>
                 {
@@ -937,9 +941,9 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// The reader of `property` when it has no storage of its own, as an interface's and an abstract property have
-    /// none: `opaque Class.property : Class → T`, which each implementation answers, so a law knows of the value only
-    /// what holds for every implementation.
+    /// The reader of `property` when each implementation gives its value, as an interface's, an abstract one and an
+    /// overridable computed one do: `opaque Class.property : Class → T`, which each implementation answers, so a law
+    /// knows of the value only what holds for every implementation.
     fn reader(&mut self, full: &[u8], lean: &str, short: &str, property: &Property) {
         let variable = property.first_variable();
         let name = variable.name.strip_prefix(b"$").unwrap_or(variable.name);
@@ -1071,39 +1075,60 @@ impl Translator<'_, '_> {
                 ClassLikeMember::Method(method) if self.reach.reaches(full, method.name.value) => {
                     self.method(full, lean, short, method, Some(receiver));
                 }
-                ClassLikeMember::Property(Property::Computed(property))
-                    if self.reach.reaches(full, property.variable.name) =>
-                {
-                    self.extension_property(full, lean, short, receiver, property);
+                ClassLikeMember::Property(property) => {
+                    self.computed_property(full, lean, short, Some(receiver), property);
                 }
                 _ => {}
             }
         }
     }
 
-    /// An extension's computed property, spec section 26, which runs as a static method that takes only `receiver`
-    /// and returns the property's expression.
-    fn extension_property(
+    /// A computed property, spec section 6, which runs its `get` body as a method of no arguments: of `this`, or, for an
+    /// extension's, spec section 26, a static method that takes only `receiver`.
+    fn computed_property(
         &mut self,
         full: &[u8],
         lean: &str,
         short: &str,
-        receiver: &FunctionLikeParameter,
-        property: &ComputedProperty,
+        receiver: Option<&FunctionLikeParameter>,
+        property: &Property,
     ) {
-        let name = property.variable.name;
+        let variable = property.first_variable();
+        let name = variable.name.strip_prefix(b"$").unwrap_or(variable.name);
+        if self.reach.method(full, name).is_none() {
+            return;
+        }
+
         let place = format!("{short}.{}", String::from_utf8_lossy(name));
         let mut body = Body::new(self.checked, self.reach, full, place.clone());
         if names::RESERVED.contains(&String::from_utf8_lossy(name).as_ref()) {
-            body.unmodeled(property.variable.span, format!("the property {place}"), issues::RESERVED_NAME);
+            body.unmodeled(variable.span, format!("the property {place}"), issues::RESERVED_NAME);
         }
-
-        body.takes([receiver]);
-        let parameter = binder(&mut body, receiver);
+        let parameter = match receiver {
+            Some(receiver) => {
+                body.takes([receiver]);
+                binder(&mut body, receiver)
+            }
+            None => format!("(this : {})", body.class_type(variable.span, full)),
+        };
         self.translation.receivers.push((names::member(lean, name), true));
-        let returns = body.declared_type(property.hint.as_ref(), property.variable.span);
-        let translated = body.expression_body(property.body.expression);
-        self.define(names::member(lean, name), property.variable.span, &[parameter], &returns, translated, None);
+        let returns = body.declared_type(property.hint(), variable.span);
+        let translated = match property {
+            Property::Computed(computed) => body.expression_body(computed.body.expression),
+            Property::Hooked(hooked) => {
+                match hooked.hook_list.hooks.iter().find(|hook| hook.name.value == b"get").map(|hook| &hook.body) {
+                    Some(PropertyHookBody::Concrete(PropertyHookConcreteBody::Block(block))) => {
+                        body.block_body(block, false)
+                    }
+                    Some(PropertyHookBody::Concrete(PropertyHookConcreteBody::Expression(get))) => {
+                        body.expression_body(get.expression)
+                    }
+                    _ => return,
+                }
+            }
+            Property::Plain(_) => return,
+        };
+        self.define(names::member(lean, name), variable.span, &[parameter], &returns, translated, None);
     }
 
     /// `protected def Class.m (parameters) : M returns := do …`, a definition a law unfolds, from its translated body.

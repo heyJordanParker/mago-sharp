@@ -2209,6 +2209,15 @@ impl<'body, 'program> Body<'body, 'program> {
     /// The read of `class`'s property `property` from `object`: a field of the object's structure, or a backed enum's
     /// `value`.
     fn field(&mut self, object: String, class: Word, property: Word, expression: &Expression) -> String {
+        let declaration = self.checked.types().member_declaration(class, property);
+        let declaring = declaration.class.as_bytes();
+        // Spec section 6: a computed property runs its `get` body as a method of no arguments, which a case of a machine
+        // reads as the machine's.
+        if matches!(declaration.kind, DeclarationKind::Property { .. })
+            && self.reach.method(declaring, property.as_bytes()).is_some()
+        {
+            return self.call(expression, declaring, class.as_bytes(), property.as_bytes(), Some(object), None);
+        }
         // Spec section 20: a case that carries data is a constructor, and a value of the case reads its field as the
         // constructor's.
         if let Some(separator) = class.as_bytes().iter().rposition(|&byte| byte == b'\\')
@@ -2230,7 +2239,6 @@ impl<'body, 'program> Body<'body, 'program> {
         let class_name = self.reached_name(class.as_bytes());
         let short = names::short_name(&class_name);
         let place = format!("{short}.{}", String::from_utf8_lossy(property.as_bytes()));
-        let declaration = self.checked.types().member_declaration(class, property);
         if matches!(self.checked.types().class_declaration(class).kind, DeclarationKind::Enum { backed: true })
             && property == word("value")
         {
@@ -2241,7 +2249,6 @@ impl<'body, 'program> Body<'body, 'program> {
         if !matches!(declaration.kind, DeclarationKind::Property { .. }) {
             return self.unmodeled(expression.span(), format!("the member {place}"), issues::MEMBER);
         }
-        let declaring = declaration.class.as_bytes();
         if !self.reach.class(declaring).is_some_and(|reached| reached.sharp) {
             let what = format!(
                 "the plain PHP property {}.{}",

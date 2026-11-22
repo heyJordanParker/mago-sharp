@@ -38,7 +38,7 @@ pub(crate) struct ReachedClass {
     pub(crate) plain_constructor: Option<Word>,
 }
 
-/// What the analysis knows about a method a law reaches, from outside its class's file.
+/// What the analysis knows about a method a law reaches, or a computed property, from outside its class's file.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ReachedMethod {
     /// The method's name as its declaration spells it.
@@ -59,12 +59,15 @@ pub struct Reach {
     declarations: HashSet<SymbolIdentifier>,
     /// Each reached class by its key, as the codebase keys it.
     classes: HashMap<Word, ReachedClass>,
+    /// Each reached method, and each computed property, spec section 6, which runs its `get` body as a method of no
+    /// arguments, by its class's key and its name as the class keys a method.
     methods: HashMap<SymbolIdentifier, ReachedMethod>,
     /// Each property that holds a value, by its class's key and its exact name without `$`, as PHP finds a property: it
     /// is not static, has no accessor body, and has storage of its own.
     stored_fields: HashSet<(Word, Word)>,
-    /// Each property with no storage of its own and no accessor body, as an interface's and an abstract one are, by its
-    /// class's key and its exact name without `$`: each implementation gives its value.
+    /// Each property with no storage of its own whose value each implementation gives, by its class's key and its exact
+    /// name without `$`: one with no accessor body, as an interface's and an abstract one are, and a computed one that a
+    /// subclass or an implementer can override.
     abstract_properties: HashSet<(Word, Word)>,
     /// Each property whose declared type takes `null`, by its class's key and its exact name without `$`.
     nullable_fields: HashSet<(Word, Word)>,
@@ -224,21 +227,36 @@ impl Reach {
     }
 
     /// Records what the analysis knows about `class`'s reached member `member`: a method's name, arity and return, or a
-    /// property's storage and type.
+    /// property's storage and type. A computed property, with a `get` body and no `set` body, is a method of no
+    /// arguments when no subclass or implementer can override it, and else a property each implementation gives.
     fn record_member(&mut self, codebase: &CodebaseMetadata, class: Word, member: Word) {
         if let Some(property) = member.as_bytes().strip_prefix(b"$") {
             let Some(metadata) = codebase.get_declaring_property(class, member) else {
                 return;
             };
             let field = (class, word(property));
-            if !metadata.flags.is_static() && metadata.hooks.values().all(|hook| hook.is_abstract) {
-                if metadata.flags.is_virtual_property() {
-                    self.abstract_properties.insert(field);
-                } else {
-                    self.stored_fields.insert(field);
+            let virtual_property = metadata.flags.is_virtual_property();
+            let has_body = |hook: &str| metadata.hooks.get(&word(hook)).is_some_and(|hook| !hook.is_abstract);
+            let nullable = metadata.type_metadata.as_ref().is_some_and(|r#type| r#type.type_union.is_nullable());
+            if !metadata.flags.is_static() {
+                if metadata.hooks.values().all(|hook| hook.is_abstract) {
+                    if virtual_property {
+                        self.abstract_properties.insert(field);
+                    } else {
+                        self.stored_fields.insert(field);
+                    }
+                } else if virtual_property && has_body("get") && !has_body("set") {
+                    if metadata.flags.is_final() {
+                        self.methods.insert(
+                            (class, codebase.method_key(class, word(property))),
+                            ReachedMethod { name: word(property), parameters: 0, returns_nullable: nullable },
+                        );
+                    } else {
+                        self.abstract_properties.insert(field);
+                    }
                 }
             }
-            if metadata.type_metadata.as_ref().is_some_and(|r#type| r#type.type_union.is_nullable()) {
+            if nullable {
                 self.nullable_fields.insert(field);
             }
         } else if !member.is_empty()
@@ -337,8 +355,8 @@ impl Reach {
         self.stored_fields.contains(&(self.class_key(class), word(property)))
     }
 
-    /// Whether `class`'s property `property` has no storage of its own and no accessor body, so each implementation
-    /// gives its value and a law reads it through `class`'s reader.
+    /// Whether `class`'s property `property` has no storage of its own and each implementation gives its value, as one
+    /// with no accessor body and an overridable computed one do, so a law reads it through `class`'s reader.
     pub(crate) fn is_abstract_property(&self, class: &[u8], property: &[u8]) -> bool {
         self.abstract_properties.contains(&(self.class_key(class), word(property)))
     }
