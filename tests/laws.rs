@@ -1603,6 +1603,54 @@ fn a_false_law_over_an_instant_its_constructor_builds_is_not_proven() {
     assert!(!compiled(root, "app/Shared/Later.sharp").exists());
 }
 
+/// A machine whose cases hold nullable `Instant`s, as an offer's availability does: `at` compares `now` with the
+/// instants an offer starts and ends at through `Instant`'s `operator <=>`, an `if` on the seconds, under the `if`s of
+/// its `is` tests.
+const OFFER_AVAILABILITY: &str = "namespace App.Offers;\n\nimport Sharp.Time.Instant;\n\npublic machine OfferAvailability : Variant\n{\n    final case Available(Instant? startsAt, Instant? endsAt, int? spotsRemaining);\n    final case Inactive;\n    final case Undeliverable;\n    final case NotStarted;\n    final case Ended(Instant endedAt);\n    final case SoldOut(Instant? startsAt, Instant? endsAt);\n    final case Purchased(Instant? startsAt, Instant? endsAt);\n\n    public static OfferAvailability of(bool active, bool deliverable, Instant? startsAt, Instant? deadline, int? maxBuyers, int claims, int? maxPerCustomer, int? customerClaims) {\n        if (!active) { return OfferAvailability.Inactive; }\n        if (!deliverable) { return OfferAvailability.Undeliverable; }\n        if (maxBuyers != null && claims >= maxBuyers) { return OfferAvailability.SoldOut(startsAt, deadline); }\n        if (maxPerCustomer != null && customerClaims != null && customerClaims >= maxPerCustomer) { return OfferAvailability.Purchased(startsAt, deadline); }\n        if (maxBuyers == null) { return OfferAvailability.Available(startsAt, deadline, null); }\n        return OfferAvailability.Available(startsAt, deadline, maxBuyers - claims);\n    }\n\n    public static OfferAvailability at(OfferAvailability status, Instant now)\n        => status is OfferAvailability.Available available\n            ? OfferAvailability.timed(available, available.startsAt, available.endsAt, now)\n            : (status is OfferAvailability.SoldOut soldOut\n                ? OfferAvailability.timed(soldOut, soldOut.startsAt, soldOut.endsAt, now)\n                : (status is OfferAvailability.Purchased purchased ? OfferAvailability.timed(purchased, purchased.startsAt, purchased.endsAt, now) : status));\n\n    private static OfferAvailability timed(OfferAvailability open, Instant? startsAt, Instant? endsAt, Instant now)\n        => startsAt is Instant starts\n            ? (now < starts ? OfferAvailability.NotStarted : OfferAvailability.ended(open, endsAt, now))\n            : OfferAvailability.ended(open, endsAt, now);\n\n    private static OfferAvailability ended(OfferAvailability open, Instant? endsAt, Instant now)\n        => endsAt is Instant ends ? (now >= ends ? OfferAvailability.Ended(ends) : open) : open;\n\n    law anOfferNotStartedComesBeforeItsEnd(Instant now, Instant starts, Instant ends, int claims)\n        when now < starts\n        => OfferAvailability.at(OfferAvailability.of(true, true, starts, ends, null, claims, null, null), now) is OfferAvailability.NotStarted;\n}\n";
+
+/// A law over a machine's `Instant`s, compared through `Instant`'s `operator <=>` under the `if`s of the machine's code,
+/// proves within its time, as it did in 0.6.49.
+#[test]
+fn a_law_over_instants_a_machine_compares_under_its_ifs_proves_in_time() {
+    let directory = library_project(&[
+        ("app/Offers/Variant.sharp", "namespace App.Offers;\n\npublic interface Variant { }\n"),
+        ("app/Offers/OfferAvailability.sharp", OFFER_AVAILABILITY),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Offers/OfferAvailability.sharp").exists());
+}
+
+/// `at`'s chain of `is` tests on `status` runs the arm of the first test that holds, so a sold-out offer with no
+/// instants stays sold out, and a law that it becomes available is refused.
+#[test]
+fn a_false_law_over_a_chain_of_tests_on_one_value_is_not_proven() {
+    let law = "law anOfferNotStartedComesBeforeItsEnd(Instant now, Instant starts, Instant ends, int claims)\n        when now < starts\n        => OfferAvailability.at(OfferAvailability.of(true, true, starts, ends, null, claims, null, null), now) is OfferAvailability.NotStarted;";
+    let offer = OFFER_AVAILABILITY.replace(
+        law,
+        "law aSoldOutOfferBecomesAvailable(Instant now) => OfferAvailability.at(OfferAvailability.SoldOut(null, null), now) is OfferAvailability.Available;",
+    );
+    assert_ne!(offer, OFFER_AVAILABILITY, "the machine states the law the test replaces");
+    let directory = library_project(&[
+        ("app/Offers/Variant.sharp", "namespace App.Offers;\n\npublic interface Variant { }\n"),
+        ("app/Offers/OfferAvailability.sharp", &offer),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law aSoldOutOfferBecomesAvailable is not proven"),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Offers/OfferAvailability.sharp").exists());
+}
+
 /// A struct's precondition holds what each value its fields hold keeps, so a law over a `Slot` reads that the
 /// `Instant` it holds has a nanosecond in range.
 #[test]

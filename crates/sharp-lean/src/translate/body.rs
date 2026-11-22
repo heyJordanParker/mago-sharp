@@ -1047,28 +1047,67 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// `c ? a : b`, `expression`, which runs only the branch `c` chooses, as the exact `Int` it computes when `exact`.
     fn conditional(&mut self, expression: &Expression, conditional: &Conditional, exact: bool) -> String {
+        if let Expression::Is(_) = conditional.condition.unparenthesized() {
+            let Some((arms, otherwise)) = self.tests(expression, conditional, exact) else {
+                return "default".to_owned();
+            };
+
+            return self.choose(&choice(arms, otherwise));
+        }
         let Some(then) = conditional.then else {
             unreachable!("PHP# parses no `?:` with two operands, as {:?}", expression.span());
         };
-        let read = |body: &mut Self, branch: &Expression| {
-            if exact { body.exact_branch(branch) } else { body.branch_of(branch, expression) }
-        };
         let holds = self.path.branch(conditional.condition, true);
-        if let Expression::Is(is) = conditional.condition.unparenthesized() {
-            let Some(test) = self.is_test(is) else {
-                return "default".to_owned();
-            };
-            let then = self.under(holds, |body| read(body, then));
-            let otherwise = read(self, conditional.r#else);
-
-            return self.choose(&choice(vec![(test, then)], otherwise));
-        }
         let condition = self.value(conditional.condition);
-        let then = self.under(holds, |body| read(body, then));
+        let then = self.under(holds, |body| body.conditional_branch(then, expression, exact));
         let fails = self.path.branch(conditional.condition, false);
-        let otherwise = self.under(fails, |body| read(body, conditional.r#else));
+        let otherwise = self.under(fails, |body| body.conditional_branch(conditional.r#else, expression, exact));
 
         self.choose(&Choice::If(condition, Box::new(Choice::Branch(then)), Box::new(Choice::Branch(otherwise))))
+    }
+
+    /// The arms of `conditional`, a `?:` of `whole` whose condition is an `is` test, and the branch that runs where no
+    /// arm's test holds, or `None` after recording why a test has none. A `?:` with an `is` test in the else branch
+    /// adds its own arms in place of that branch when its test adds no statement, as a test of a local adds none, so
+    /// `choice` joins the tests of one subject into one `match` that names each constructor once.
+    fn tests(
+        &mut self,
+        whole: &Expression,
+        conditional: &Conditional,
+        exact: bool,
+    ) -> Option<(Vec<(Test, Branch)>, Branch)> {
+        let (Expression::Is(is), Some(then)) = (conditional.condition.unparenthesized(), conditional.then) else {
+            unreachable!("a `?:` of an `is` test has three operands, as {:?}", whole.span());
+        };
+        let holds = self.path.branch(conditional.condition, true);
+        let test = self.is_test(is)?;
+        let then = self.under(holds, |body| body.conditional_branch(then, whole, exact));
+        let mut arms = vec![(test, then)];
+        let next = match conditional.r#else.unparenthesized() {
+            Expression::Conditional(next) if matches!(next.condition.unparenthesized(), Expression::Is(_)) => next,
+            _ => return Some((arms, self.conditional_branch(conditional.r#else, whole, exact))),
+        };
+
+        let outer = std::mem::take(&mut self.lines);
+        let rest = self.tests(whole, next, exact);
+        let lines = std::mem::replace(&mut self.lines, outer);
+        let (rest, otherwise) = rest?;
+        if lines.is_empty() {
+            arms.extend(rest);
+
+            return Some((arms, otherwise));
+        }
+        let otherwise = self.nested_lines(|body| {
+            body.lines = lines;
+            body.choose(&choice(rest, otherwise))
+        });
+
+        Some((arms, otherwise))
+    }
+
+    /// The statements of `branch`, a branch of `whole`, a `?:`, as the exact `Int` it computes when `exact`.
+    fn conditional_branch(&mut self, branch: &Expression, whole: &Expression, exact: bool) -> Branch {
+        if exact { self.exact_branch(branch) } else { self.branch_of(branch, whole) }
     }
 
     /// `a ?? b`, which runs `b` only when `a` is null, as the exact `Int` it computes when `exact`.
