@@ -277,6 +277,14 @@ namespace Sharp\Internal;
 function equals(mixed $value, mixed $other): bool {}
 
 /**
+ * The stored form of `$value` as a value, what `jsonEncode` writes as text: each JSON object a `Map`, each JSON array a
+ * PHP list and each scalar itself. The standard library's `Class<T>.encode` gives it, which `parseAs` reads back.
+ *
+ * @throws \JsonException
+ */
+function storedValue(mixed $value): mixed {}
+
+/**
  * The JSON text of `$value`, as `json_encode` writes it with `$flags`. An `$indent` above 0 writes each nested value on
  * its own line, `$indent` spaces deeper than its parent, as `JSON_PRETTY_PRINT` does with 4. The standard library's
  * `Json.encode` writes by it.
