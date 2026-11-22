@@ -1,4 +1,3 @@
-import Lean.Attributes
 import Sharp.Lean.Int
 
 /-!
@@ -8,13 +7,12 @@ A law holds when its expression never finishes with `false`. A throw or a loop t
 it, so it does not break the law: `a.add(b)` throws `ArithmeticError` on overflow, and `addKeepsCurrency` still holds.
 
 The law's claim and its condition compute ints exactly (decision 057).
+
+A law's statement is the one definition of the project's code whose type is a `Prop`, so this module imports nothing of
+Lean's own beyond `Init`, and a runner that checks laws imports no more of Lean than they reach.
 -/
 
 namespace Sharp
-
-/-- Marks the statement of a PHP# law. The runner finds every law by it. -/
-initialize lawAttribute : Lean.TagAttribute ←
-  Lean.registerTagAttribute `law "the statement of a PHP# law"
 
 /-- A law's expression holds unless it finishes with `false`. -/
 def holds (x : M Bool) : Prop :=

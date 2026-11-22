@@ -189,7 +189,7 @@ impl Translator<'_, '_> {
             });
             uses.push(self.own_use(&trace, place.clone()));
 
-            let text = format!("@[law] def {key} : Prop :=\n  {}", parts.join(" ∧\n  "));
+            let text = format!("def {key} : Prop :=\n  {}", parts.join(" ∧\n  "));
             let (_, body_uses, unmodeled) = body.finish();
             uses.extend(body_uses);
             let source = &self.checked.file().contents;

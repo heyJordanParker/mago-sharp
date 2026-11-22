@@ -970,7 +970,7 @@ impl Translator<'_, '_> {
         });
     }
 
-    /// `@[law] def Class.law (a : A) : Prop := [condition = pure true →] holds do …`: the law holds for every value of
+    /// `def Class.law (a : A) : Prop := [condition = pure true →] holds do …`: the law holds for every value of
     /// its parameters that meets its `when` condition, unless its claim finishes with `false`. The condition and the
     /// claim compute ints exactly, as [`Body::computes_exactly`] says. Its theorem, which its body proves, comes from
     /// [`Prover`].
@@ -984,7 +984,7 @@ impl Translator<'_, '_> {
         let parameters: Vec<String> =
             law.parameter_list.parameters.iter().map(|parameter| parameter_name(parameter)).collect();
 
-        let mut text = format!("@[law] def {key} {} : Prop :=\n", binders.join(" "));
+        let mut text = format!("def {key} {} : Prop :=\n", binders.join(" "));
         let (mut uses, mut unmodeled) = (Vec::new(), Vec::new());
         if let Some(condition) = &law.condition {
             let mut computed = Body::for_law(self.checked, self.reach, full, place.clone(), law);

@@ -109,13 +109,18 @@ initialize generated : EnvExtension NameSet ← registerEnvExtension (pure {})
 private def isCode (env : Environment) (name : Name) : Bool :=
   (generated.getState env).contains name
 
+/-- Whether `name` is a law's statement: a definition of the project's code whose type is a `Prop`, which the code's
+methods, each giving an `M` of its result, never are. -/
+private def isLaw (env : Environment) (name : Name) : Bool :=
+  isCode env name && (env.find? name).any fun info => info.isDefinition && info.type.getForallBody.isProp
+
 /-- Each definition of the project's code that `e` names, apart from a structure's fields and a law's statement. -/
 private def definitionsIn (e : Expr) : MetaM (Array Name) := do
   let env ← getEnv
   let mut found := #[]
   for name in e.getUsedConstants do
     if isCode env name && (env.find? name).any (·.isDefinition) && !env.isProjectionFn name &&
-        !lawAttribute.hasTag env name && !found.contains name then
+        !isLaw env name && !found.contains name then
       found := found.push name
   return found
 
@@ -147,7 +152,7 @@ private def lawsInScope : TacticM (Array Name) := do
     let mut found := #[]
     for declaration in ← getLCtx do
       for name in (← instantiateMVars declaration.type).getUsedConstants do
-        if lawAttribute.hasTag env name && !found.contains name then found := found.push name
+        if isLaw env name && !found.contains name then found := found.push name
     return found
 
 private abbrev SimpItem := TSyntax [`Lean.Parser.Tactic.simpErase, `Lean.Parser.Tactic.simpLemma]
