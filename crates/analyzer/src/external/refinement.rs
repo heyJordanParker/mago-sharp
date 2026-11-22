@@ -263,6 +263,12 @@ pub fn apply_refinements<'codebase>(
 }
 
 impl DeclarationRefinement {
+    /// The file that declares what this refines.
+    #[must_use]
+    pub fn file_id(&self) -> FileId {
+        self.file_id
+    }
+
     fn apply(self, codebase: &mut CodebaseMetadata) -> Result<(), ExternalAnalyzerError> {
         match self.declaration {
             Declaration::ClassLike { class, templates, inherited, required_extends, properties, methods } => {

@@ -317,9 +317,8 @@ impl AnalyzeCommand {
         // A run over the whole project compiles it too, as an agent's save needs: into the `.sharp` folder and the
         // hosts' folder, from one analysis and one lowering. With no host enabled, a run that reads the files as the
         // compile reads them, without `--no-stubs` or `--substitute`, reports that analysis. Otherwise the hosts start
-        // beside the compile, and the run reports that analysis too when they register return-type providers and
-        // nothing else, or an analysis with them of the files the compile loaded. A run on named files, staged files
-        // or standard input, or one that only scans, compiles only the hosts' folder.
+        // beside the compile, and the run reports that analysis as the hosts take it over. A run on named files, staged
+        // files or standard input, or one that only scans, compiles only the hosts' folder.
         let (external_analyzer, compiled, loaded) = if scope.is_some() || self.stdin_input || self.scan_only {
             let extension_hosts = compile_for_hosts(&configuration)?.0;
             let external_analyzer = start_external_analyzer(
@@ -340,10 +339,10 @@ impl AnalyzeCommand {
         if let Some(external_analyzer) = external_analyzer {
             orchestrator.set_external_analyzer_handle(external_analyzer);
         }
-        // Hosts that register return-type providers and nothing else change only the files whose requests a provider
-        // answers, so the run reports from the compile's analysis with those files analyzed again with the hosts.
+        // The run reports from the compile's analysis, which the hosts take over with the stubs they declare.
         let loaded = match loaded {
             Loaded::Hosted { mut server, requests } => {
+                orchestrator.add_external_initialization_files(server.database_mut())?;
                 let issues = server.analyze_with_hosts(orchestrator.get_analyzer_plugin_registry(), &requests)?.issues;
                 Loaded::Analysis(server, issues)
             }

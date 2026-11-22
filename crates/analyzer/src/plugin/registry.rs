@@ -196,20 +196,32 @@ impl PluginRegistry {
 
     /// Records, from here on, the return-type request of each call that no native provider types and a provider of
     /// `hosts` targets, as the analysis with `hosts` sends it to them, which [`Self::take_return_type_requests`] gives,
-    /// when `hosts` register return-type providers and nothing else, as [`Self::replay_return_type_requests`] needs:
-    /// then an analysis with them differs from one without them only in the files whose requests a provider answers.
-    /// Returns whether it records.
+    /// as [`Self::replay_return_type_requests`] needs, unless `hosts` reach every file, as
+    /// [`Self::external_hosts_reach_every_file`] tells. Returns whether it records.
     ///
     /// # Errors
     ///
     /// Returns an error when a host fails to start.
     pub fn record_return_type_requests(&mut self, hosts: Arc<ExternalAnalyzerHandle>) -> PluginResult<bool> {
-        let records = hosts.read(ExternalAnalyzer::has_only_return_type_providers).map_err(PluginError::from)?;
+        let records = !hosts.read(ExternalAnalyzer::reaches_every_file).map_err(PluginError::from)?;
         if records {
             self.return_type_record = Some(ReturnTypeRecord::recording(hosts));
         }
 
         Ok(records)
+    }
+
+    /// Whether the extension hosts register what an analysis without them leaves no trace of in the files it reaches,
+    /// so only an analysis of every file with them gives what they report.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a host fails to start.
+    pub fn external_hosts_reach_every_file(&self) -> PluginResult<bool> {
+        self.external_analyzer
+            .as_deref()
+            .map_or(Ok(false), |analyzer| analyzer.read(ExternalAnalyzer::reaches_every_file))
+            .map_err(PluginError::from)
     }
 
     /// The return-type requests recorded so far, after which none is recorded.

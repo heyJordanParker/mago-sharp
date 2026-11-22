@@ -1745,13 +1745,14 @@ impl<T> ExternalAnalyzer<T> {
         any.then(|| NodeAnalysisRequirements::new(&targets, &requirements, method_call_hooks, class_like_hooks))
     }
 
-    /// Whether the hosts register return-type providers and nothing else: no other provider, hook, codebase scan,
-    /// before-analysis plugin, entry point, stub or worker reducer, which reduces the requests its workers saw when the
-    /// hosts stop. Such hosts change only the type of a call a provider answers, so an analysis with them differs from
-    /// one without them only in the files whose return-type requests a provider answers.
-    pub(crate) fn has_only_return_type_providers(&self) -> bool {
+    /// Whether the hosts register what an analysis without them leaves no trace of in the files it reaches: a provider
+    /// besides a return-type one, an issue filter, an analysis hook, a before-analysis plugin, an entry point, or a
+    /// worker reducer, which reduces the requests its workers saw when the hosts stop. An analysis without such hosts
+    /// differs from one with them only in the files whose return-type requests a provider answers, the files a
+    /// codebase-scan hook selects and the files that read what it refines, and the files that read a stub.
+    pub(crate) fn reaches_every_file(&self) -> bool {
         let capabilities = self.capabilities();
-        let others = [
+        let reaching = [
             capabilities.function_signatures,
             capabilities.method_signatures,
             capabilities.function_assertions,
@@ -1766,16 +1767,14 @@ impl<T> ExternalAnalyzer<T> {
             capabilities.after_analysis,
         ];
 
-        !others.contains(&true)
-            && self.initialization_stubs.is_empty()
-            && self.node_analysis_requirements().is_none()
-            && self.backends.iter().all(|backend| {
+        reaching.contains(&true)
+            || self.node_analysis_requirements().is_some()
+            || self.backends.iter().any(|backend| {
                 let registration = &backend.registration;
-                registration.codebase_scan_hooks.is_empty()
-                    && registration.before_analysis_plugins.is_empty()
-                    && registration.entry_points.is_empty()
-                    && registration.attributed_entry_points.is_empty()
-                    && !registration.has_worker_reducer
+                !registration.before_analysis_plugins.is_empty()
+                    || !registration.entry_points.is_empty()
+                    || !registration.attributed_entry_points.is_empty()
+                    || registration.has_worker_reducer
             })
     }
 }

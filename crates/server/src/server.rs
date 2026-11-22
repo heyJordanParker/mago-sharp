@@ -198,10 +198,9 @@ impl Server {
         }
     }
 
-    /// Analyze with the extension hosts of `plugin_registry`, which register return-type providers and nothing else,
-    /// from the last analysis, which ran without them and recorded `requests`, as
-    /// [`IncrementalAnalysisService::analyze_with_hosts`] does: only the files whose requests a provider answers are
-    /// analyzed again.
+    /// Analyze the database, with the stubs the hosts declare in it, with the extension hosts of `plugin_registry`, from
+    /// the last analysis, which ran without them and recorded `requests`, as
+    /// [`IncrementalAnalysisService::analyze_with_hosts`] does.
     ///
     /// # Errors
     ///
@@ -211,6 +210,7 @@ impl Server {
         plugin_registry: Arc<PluginRegistry>,
         requests: &ReturnTypeRequests,
     ) -> Result<AnalysisResult, ServerError> {
+        self.service.update_database(self.database.read_only());
         self.pass(|service| service.analyze_with_hosts(plugin_registry, requests))
     }
 

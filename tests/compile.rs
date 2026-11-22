@@ -2061,6 +2061,80 @@ fn a_whole_analyze_with_a_return_type_host_reports_what_an_analysis_of_every_fil
     }
 }
 
+/// An extension host that declares the class `Stubbed` in a stub, whose `name()` returns a string.
+const STUB_HOST: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\InitializationContext;
+use Mago\Sdk\Analyzer\InitializationHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+final class Stubs implements Plugin, InitializationHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('stubs', 'Stubs', 'Declares a stub.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerInitializationHook($this);
+    }
+
+    public function initialize(InitializationContext $context): void
+    {
+        $context->addStub('stubbed.php', "<?php\n\nfinal class Stubbed\n{\n    public function name(): string\n    {\n        return 'stub';\n    }\n}\n");
+    }
+}
+
+(new Worker(new Extension('stubs', 'Stubs', '0.0.0', analyzerPlugins: [new Stubs()])))->run();
+"#;
+
+/// A whole `mago analyze` whose host declares a stub or reports from an after-file hook reports what an analysis of
+/// every file with the host reports, as `mago analyze app` gives it: a file that reads the stub's class reads it, and
+/// the hook reports in each file.
+#[test]
+fn a_whole_analyze_with_a_stub_host_or_a_hook_host_reports_what_an_analysis_of_every_file_with_the_host_reports() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the stub and hook host analyze test") {
+        return;
+    }
+    for (host, reported) in [
+        (
+            STUB_HOST,
+            "app/Names.php:8:12: error[invalid-return-statement]: Invalid return type for function `App\\stubbed_name`: \
+             expected `int`, but found `string`.",
+        ),
+        (MARKER_HOST, "app/Names.php:5:4: error[acme/no-marker]: The marker `host-error-here` is here."),
+    ] {
+        let directory = project(ORDER, MONEY);
+        let root = directory.path();
+        write(
+            root,
+            "app/Names.php",
+            "<?php\n\nnamespace App;\n\n// host-error-here\nfunction stubbed_name(\\Stubbed $stubbed): int\n{\n    return $stubbed->name();\n}\n",
+        );
+        write(root, "tools/host.php", host);
+        write(
+            root,
+            "mago.toml",
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.host]\nfile = \"tools/host.php\"\n",
+        );
+
+        let whole = analyze(root, &[]);
+        let every_file = analyze(root, &["app"]);
+
+        let issues = |output: &Output| String::from_utf8_lossy(&output.stdout).into_owned();
+        assert_eq!(issues(&whole), issues(&every_file), "{}", printed(&whole));
+        assert!(issues(&whole).contains(reported), "{reported}: {}", printed(&whole));
+    }
+}
+
 /// An extension host whose rule `acme/no-marker` reports an error at each `host-error-here` in a file.
 const MARKER_HOST: &str = r#"<?php
 

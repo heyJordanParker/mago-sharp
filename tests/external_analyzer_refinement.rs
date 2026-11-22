@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
+use mago_analyzer::external::ReturnTypeRequests;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
 use mago_database::Database;
@@ -239,6 +240,33 @@ fn declaration_refinements_reach_declarations_bodies_and_incremental_removal() {
 
     let fresh = codes(&service(&plain, registry(repository)).analyze().expect("fresh analysis").issues);
     assert_eq!(removed, fresh, "incremental analysis after removal matches a fresh analysis");
+}
+
+/// A run that analyzed with no host, as a compile does, then takes the hosts in reports what an analysis with them
+/// reports: a declaration a host's scan refines reaches each file that reads it, though no file changed.
+#[test]
+fn an_analysis_the_refining_hosts_take_over_reports_what_an_analysis_with_them_reports() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the hosts' takeover test") {
+        return;
+    }
+
+    let (database, _) = factory_database("special");
+    let mut taken_over = service(&database, Arc::new(PluginRegistry::with_library_providers()));
+    taken_over.analyze().expect("the analysis with no host should succeed");
+    let taken = taken_over
+        .analyze_with_hosts(registry(repository), &ReturnTypeRequests::default())
+        .expect("the hosts should take the analysis over");
+    let fresh = service(&database, registry(repository)).analyze().expect("the analysis with the hosts should succeed");
+
+    assert_eq!(codes(&taken.issues), codes(&fresh.issues));
+    assert!(
+        codes(&fresh.issues)
+            .get("invalid-return-statement")
+            .is_some_and(|messages| messages.iter().any(|message| message.contains("Consumer::unwrap"))),
+        "the consumer reads the refined return: {:#?}",
+        codes(&fresh.issues)
+    );
 }
 
 #[test]

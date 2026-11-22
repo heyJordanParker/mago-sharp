@@ -106,31 +106,7 @@ impl CodebaseScanPlan {
         file: &Arc<File>,
         metadata: &CodebaseMetadata,
     ) -> Result<Option<CodebaseScanFile>, ExternalAnalyzerError> {
-        let Ok(path) = std::str::from_utf8(&file.name) else {
-            return Ok(None);
-        };
-
-        let project_file = match file.file_type {
-            FileType::Host => true,
-            FileType::Vendored => self.project_sources.as_ref().is_some_and(|sources| sources.is_match(path)),
-            _ => false,
-        };
-        if !project_file {
-            return Ok(None);
-        }
-
-        let mut routes = Vec::new();
-        for backend in self.backends.iter() {
-            let hooks = backend
-                .hooks
-                .iter()
-                .filter_map(|hook| hook.paths.is_match(path).then_some(hook.index))
-                .collect::<Vec<_>>();
-            if !hooks.is_empty() {
-                routes.push(CodebaseScanRoute { backend: backend.backend, hooks: hooks.into_boxed_slice() });
-            }
-        }
-
+        let routes = self.routes(file);
         if routes.is_empty() {
             return Ok(None);
         }
@@ -140,9 +116,39 @@ impl CodebaseScanPlan {
         Ok(Some(CodebaseScanFile {
             file: Arc::clone(file),
             declarations: writer.finish().into(),
-            routes: routes.into_boxed_slice(),
+            routes: routes.into(),
             scan: holds_member_reads.then(|| Arc::new(metadata.clone())),
         }))
+    }
+
+    /// Whether a hook target matches the logical path of `file`, one of the project's own source files.
+    #[must_use]
+    pub fn selects(&self, file: &File) -> bool {
+        !self.routes(file).is_empty()
+    }
+
+    fn routes(&self, file: &File) -> Vec<CodebaseScanRoute> {
+        let Ok(path) = std::str::from_utf8(&file.name) else {
+            return Vec::new();
+        };
+
+        let project_file = match file.file_type {
+            FileType::Host => true,
+            FileType::Vendored => self.project_sources.as_ref().is_some_and(|sources| sources.is_match(path)),
+            _ => false,
+        };
+        if !project_file {
+            return Vec::new();
+        }
+
+        self.backends
+            .iter()
+            .filter_map(|backend| {
+                let hooks: Box<[u16]> =
+                    backend.hooks.iter().filter_map(|hook| hook.paths.is_match(path).then_some(hook.index)).collect();
+                (!hooks.is_empty()).then_some(CodebaseScanRoute { backend: backend.backend, hooks })
+            })
+            .collect()
     }
 }
 

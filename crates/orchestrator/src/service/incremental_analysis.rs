@@ -26,6 +26,7 @@ use mago_analyzer::external::AFTER_FILE_ANALYSIS_BATCH_SIZE;
 use mago_analyzer::external::ClassLogs;
 use mago_analyzer::external::CodebaseScanFile;
 use mago_analyzer::external::CodebaseScanPlan;
+use mago_analyzer::external::DeclarationRefinement;
 use mago_analyzer::external::ExtensionReads;
 use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::ExternalAnalyzerError;
@@ -196,6 +197,9 @@ pub struct IncrementalAnalysisService {
     analysis_snapshots: HashMap<FileId, Arc<FileAnalysisSnapshot>>,
     codebase_scan_plan: Option<Arc<CodebaseScanPlan>>,
     codebase_scan_files: HashMap<FileId, CodebaseScanFile>,
+    /// Each file's declaration refinements, as the last codebase scan that scanned the file gave them. A file whose
+    /// refinements change changes every declaration it holds, though its code stays as it was.
+    refinements: HashMap<FileId, Vec<DeclarationRefinement>>,
     /// The class-likes of the codebase that win over a default class-like in their namespace, which every file resolves
     /// its names against.
     namespace_classes: NamespaceClasses,
@@ -258,6 +262,7 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("analysis_snapshots", &self.analysis_snapshots.len())
             .field("codebase_scan_plan", &self.codebase_scan_plan.is_some())
             .field("codebase_scan_files", &self.codebase_scan_files.len())
+            .field("refinements", &self.refinements.len())
             .field("namespace_classes", &self.namespace_classes)
             .field("changing_members", &self.changing_members)
             .field("extern_namespaces", &self.extern_namespaces)
@@ -325,6 +330,7 @@ impl IncrementalAnalysisService {
             analysis_snapshots: HashMap::default(),
             codebase_scan_plan: None,
             codebase_scan_files: HashMap::default(),
+            refinements: HashMap::default(),
             namespace_classes: NamespaceClasses::default(),
             changing_members: ChangingMembers::default(),
             extern_namespaces: ExternNamespaces::default(),
@@ -431,6 +437,7 @@ impl IncrementalAnalysisService {
         self.analysis_snapshots.clear();
         self.codebase_scan_plan = None;
         self.codebase_scan_files.clear();
+        self.refinements.clear();
         self.namespace_classes = NamespaceClasses::default();
         self.changing_members = ChangingMembers::default();
         self.extern_namespaces = ExternNamespaces::default();
@@ -474,12 +481,13 @@ impl IncrementalAnalysisService {
         ))
     }
 
-    /// Analyzes with the extension hosts of `plugin_registry`, which register return-type providers and nothing else,
-    /// from the last analysis, which ran with none and recorded `requests`: the hosts answer each file's requests, and
-    /// the files whose requests a provider answers with a type are analyzed again with the hosts. Every other file's
-    /// analysis is the one the hosts would give, since its every request declines and nothing else of the hosts
-    /// reaches it. No method takes its return from its body, which only a host's refinement asks for, so a type a
-    /// provider gives changes no other file's code.
+    /// Analyzes with the extension hosts of `plugin_registry` from the last analysis, which ran with none and recorded
+    /// `requests`, and keeps nothing for a lowering or another analysis. Hosts that reach every file, as
+    /// [`PluginRegistry::external_hosts_reach_every_file`] tells, analyze every file from scratch, from the scans the last
+    /// analysis kept. Otherwise the hosts answer each file's return-type requests, and a file a provider answers with a
+    /// type is analyzed again. Each file a codebase-scan hook selects is scanned again with the hosts, and the
+    /// declarations a hook refines change for every file that reads them. No method takes its return from its body,
+    /// which only a refinement asks for, so a type a provider gives changes no other file's code.
     ///
     /// # Errors
     ///
@@ -490,7 +498,20 @@ impl IncrementalAnalysisService {
         requests: &ReturnTypeRequests,
     ) -> Result<AnalysisResult, OrchestratorError> {
         self.plugin_registry = plugin_registry;
-        let answered = match self.plugin_registry.create_external_analysis_session(self.database.files()) {
+        self.keeps_lowering_inputs = false;
+        self.keeps_scans = false;
+        if self.plugin_registry.external_hosts_reach_every_file().map_err(mago_analyzer::error::AnalysisError::from)? {
+            return self.analyze();
+        }
+        self.codebase_scan_plan = self
+            .plugin_registry
+            .external_codebase_scan_plan()
+            .map_err(mago_analyzer::error::AnalysisError::from)?
+            .map(Arc::new);
+        let selected = self.codebase_scan_plan.as_ref().map_or_else(Vec::new, |plan| {
+            self.database.files().filter(|file| plan.selects(file)).map(|file| file.id).collect()
+        });
+        let answered: Vec<FileId> = match self.plugin_registry.create_external_analysis_session(self.database.files()) {
             Some(session) => {
                 let files: Vec<FileId> = requests.files().collect();
                 let answered = files
@@ -514,13 +535,14 @@ impl IncrementalAnalysisService {
             }
             None => Vec::new(),
         };
-        for file_id in &answered {
+        let again: Vec<FileId> = answered.into_iter().chain(selected).collect();
+        for file_id in &again {
             if let Some(state) = self.file_states.get_mut(file_id) {
                 state.content_hash = 0;
             }
         }
 
-        self.analyze_incremental(Some(&answered))
+        self.analyze_incremental(Some(&again))
     }
 
     /// Gives each method of the populated `codebase` that takes its return from its body, unless a file of `skipped`
@@ -777,6 +799,7 @@ impl IncrementalAnalysisService {
         if source_files.is_empty() {
             tracing::info!("No source files found for analysis.");
             self.codebase_scan_files.clear();
+            self.refinements.clear();
             self.plugin_registry
                 .run_external_codebase_scan(Vec::new())
                 .map_err(mago_analyzer::error::AnalysisError::from)?;
@@ -943,6 +966,7 @@ impl IncrementalAnalysisService {
             .plugin_registry
             .run_external_codebase_scan(self.codebase_scan_files.values().cloned().collect())
             .map_err(mago_analyzer::error::AnalysisError::from)?;
+        self.refinements = by_file(&refinements);
         apply_refinements(
             refinements,
             per_file_results.iter_mut().map(|(file, _, metadata, _, _)| (file.id, metadata)),
@@ -1312,11 +1336,21 @@ impl IncrementalAnalysisService {
             scan
         })
         .map_err(mago_analyzer::error::AnalysisError::from)?;
+        self.refinements.retain(|file_id, _| current_file_ids.contains(file_id));
+        let mut refined = HashSet::default();
         if scan_state_changed || member_reads_changed {
             let refinements = self
                 .plugin_registry
                 .run_external_codebase_scan(self.codebase_scan_files.values().cloned().collect())
                 .map_err(mago_analyzer::error::AnalysisError::from)?;
+            let mut scanned = by_file(&refinements);
+            for file_id in &changed {
+                let refinements = scanned.remove(file_id).unwrap_or_default();
+                if self.refinements.get(file_id).map_or(&[][..], Vec::as_slice) != refinements.as_slice() {
+                    refined.insert(*file_id);
+                }
+                self.refinements.insert(*file_id, refinements);
+            }
             apply_refinements(refinements, new_file_scans.iter_mut().map(|(file_id, metadata)| (*file_id, metadata)))
                 .map_err(mago_analyzer::error::AnalysisError::from)?;
         }
@@ -1353,7 +1387,14 @@ impl IncrementalAnalysisService {
                     old_sigs.set_file_signature(*file_id, keyed(old_sig, &self.codebase));
                 }
                 if let Some(new_sig) = metadata.file_signatures.get(file_id) {
-                    new_sigs.set_file_signature(*file_id, keyed(new_sig, metadata));
+                    let new_sig = keyed(new_sig, metadata);
+                    if refined.contains(file_id) {
+                        diff.extend(CodebaseDiff::new().with_changed(new_sig.ast_nodes.iter().flat_map(|node| {
+                            std::iter::once((node.name, mago_word::empty_word()))
+                                .chain(node.children.iter().map(|child| (node.name, child.name)))
+                        })));
+                    }
+                    new_sigs.set_file_signature(*file_id, new_sig);
                 }
             }
 
@@ -2921,6 +2962,16 @@ pub(crate) fn resolve_member_reads<'files>(
 
     let scan = Arc::new(merged_scan());
     files.into_iter().try_fold(false, |changed, file| Ok(file.resolve_member_reads(&scan)? || changed))
+}
+
+/// The refinements of each file among `refinements`, in the order the codebase scan gave them.
+fn by_file(refinements: &[DeclarationRefinement]) -> HashMap<FileId, Vec<DeclarationRefinement>> {
+    let mut files: HashMap<FileId, Vec<DeclarationRefinement>> = HashMap::default();
+    for refinement in refinements {
+        files.entry(refinement.file_id()).or_default().push(refinement.clone());
+    }
+
+    files
 }
 
 /// The names of the extension members `metadata` declares that take their receiver by `ref`, spec section 26, and so
