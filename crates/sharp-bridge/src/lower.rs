@@ -527,8 +527,8 @@ struct Lowering<'lowering, 'arena> {
     discarded: Option<Span>,
     /// Whether the expression lowered next is one whose match narrows the reads after it, as [`Self::condition`]
     /// lowers it: the condition of an `if`, a `while`, a `? :` or a `match` arm, the left side of `&&`, and inside one of
-    /// those its parentheses, its pattern form and both sides of its `&&`. [`Self::arriving`] takes it, so no other
-    /// expression inside it sees it.
+    /// those its parentheses, its pattern form, the operand of its `!` and both sides of its `&&` and its `||`.
+    /// [`Self::arriving`] takes it, so no other expression inside it sees it.
     narrowing: bool,
     /// The nodes [`Self::picked_step`] made, which an expression statement runs as one statement for each step.
     picked_steps: HashSet<u32>,
@@ -6183,11 +6183,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     _ => Operands::Other,
                 };
 
-                // The left side of `&&` narrows its right side, and both narrow the reads after an `&&` that narrows.
+                // The left side of `&&` narrows its right side, and both sides of an `&&` or an `||` that narrows narrow
+                // the reads after it. `||` runs its right side only when its left side failed.
                 let and = matches!(binary.operator, BinaryOperator::And(_) | BinaryOperator::LowAnd(_));
-                self.narrowing = and;
+                let or = matches!(binary.operator, BinaryOperator::Or(_) | BinaryOperator::LowOr(_));
+                self.narrowing = and || (or && narrowing);
                 let lhs = self.expression(binary.lhs);
-                self.narrowing = and && narrowing;
+                self.narrowing = (and || or) && narrowing;
                 let rhs = self.expression(binary.rhs);
 
                 match (binary.operator, operands) {
@@ -6240,6 +6242,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let operand = if unary.operator.is_increment_or_decrement() {
                     self.target(unary.operand, PlaceUse::Read)
                 } else {
+                    // A `!` that narrows narrows through its operand, whose failure narrows the reads after it.
+                    self.narrowing = narrowing && matches!(unary.operator, UnaryPrefixOperator::Not(_));
                     self.expression(unary.operand)
                 };
 
