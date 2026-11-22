@@ -87,6 +87,8 @@ use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::visibility::Visibility;
 use mago_database::file::File;
+use mago_extension::RuleCalls;
+use mago_extension::RuleTimes;
 use mago_extension::Value;
 use mago_extension::ValueReader;
 use mago_extension::ValueWriter;
@@ -146,7 +148,7 @@ const METHOD_OF_SHARP_CLASS: u8 = 1;
 const METHOD_OF_EXACT_NAMES: u8 = 2;
 
 /// The values of a message before its fields: its protocol's name and its kind.
-const HEADER_LENGTH: usize = 2;
+pub(super) const HEADER_LENGTH: usize = 2;
 const INITIAL_MESSAGE_CAPACITY: usize = 16;
 const DESCRIBE_REQUEST: u16 = 1;
 const RETURN_TYPE_REQUEST: u16 = 2;
@@ -3983,19 +3985,20 @@ pub(super) fn message_reader(payload: &[Value], expected_kind: u16) -> Result<Va
     Ok(reader)
 }
 
-/// Splits the codebase reads a provider or issue filter made, with its worker's class loads, which the SDK places right
-/// after the header, from the response they came with.
-pub(super) fn take_codebase_reads(
+/// Splits the codebase reads a provider or issue filter made, with its worker's class loads, and how long each of its
+/// rules took, which the SDK places right after the header, from the response they came with.
+pub(super) fn take_reads_and_rule_times(
     mut response: Vec<Value>,
-) -> Result<(ResponseReads, Vec<Value>), ExternalAnalyzerError> {
+) -> Result<(ResponseReads, Vec<RuleCalls>, Vec<Value>), ExternalAnalyzerError> {
     let fields =
         response.get(HEADER_LENGTH..).ok_or_else(|| protocol("analyzer response is shorter than its header"))?;
     let mut reader = ValueReader::new(fields);
     let reads = ResponseReads::decode(&mut reader)?;
+    let rule_times = RuleTimes::decode(&mut reader)?;
     let end = response.len() - reader.remaining();
     response.drain(HEADER_LENGTH..end);
 
-    Ok((reads, response))
+    Ok((reads, rule_times, response))
 }
 
 pub(super) fn message_kind(payload: &[Value]) -> Result<u16, ExternalAnalyzerError> {
@@ -5169,7 +5172,7 @@ pub(super) mod testing {
     }
 
     /// The response that declines `request`, a property type or call forwarding request, after the codebase reads
-    /// the worker made for it: no issue read and no code read, sent as lists 0 and 1.
+    /// the worker made for it, no issue read and no code read, sent as lists 0 and 1, and no rule time.
     pub fn declined_response(request: &[Value]) -> Vec<Value> {
         let kind = match message_kind(request).unwrap() {
             PROPERTY_TYPE_REQUEST => PROPERTY_TYPE_RESPONSE,
@@ -5183,6 +5186,7 @@ pub(super) mod testing {
             writer.write_u32(0);
         }
         writer.write_u64(1);
+        writer.write_u32(0);
         writer.write_u32(0);
         writer.write_u32(0);
         writer.write_bool(false);

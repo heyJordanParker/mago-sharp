@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use mago_database::file::File;
 use mago_extension::Host;
+use mago_extension::RuleTimes;
 use mago_extension::Value;
 use mago_extension::WorkerError;
 use mago_names::ResolvedNames;
@@ -141,6 +142,7 @@ pub struct ExternalLinter<T = Host> {
     trace_enabled: bool,
     telemetry: ExternalLintTelemetry,
     started_at: Option<Instant>,
+    rule_times: RuleTimes,
 }
 
 impl ExternalLinter<Host> {
@@ -231,6 +233,7 @@ impl<T> ExternalLinter<T> {
                 resolved_names,
                 active_rule_indices,
                 &plan.targets,
+                self.rule_times.asked(),
                 self.trace_enabled,
             );
             if let Some(start) = encode_start {
@@ -283,13 +286,14 @@ impl<T> ExternalLinter<T> {
                 self.telemetry.response_fields.fetch_add(response.len() as u64, Ordering::Relaxed);
             }
             let decode_start = self.trace_enabled.then(Instant::now);
-            let backend_issues =
+            let (backend_issues, rule_times) =
                 protocol::decode_lint_response(&response, file, &backend.registration.rules, active_rule_indices)
                     .inspect_err(|_| {
                         if self.trace_enabled {
                             self.telemetry.errors.fetch_add(1, Ordering::Relaxed);
                         }
                     })?;
+            self.rule_times.record(rule_times, Some(&file.name));
             if let Some(start) = decode_start {
                 let elapsed = duration_nanos(start.elapsed());
                 file_decode_ns = file_decode_ns.saturating_add(elapsed);
@@ -386,6 +390,7 @@ impl<T> ExternalLinter<T> {
             trace_enabled,
             telemetry: ExternalLintTelemetry::default(),
             started_at,
+            rule_times: RuleTimes::new(),
         };
         if let Some(start) = started_at {
             tracing::trace!(

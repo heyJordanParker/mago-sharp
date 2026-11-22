@@ -428,11 +428,11 @@ final class WorkerTest extends TestCase
     private static function afterFileRequest(string $file): array
     {
         $message = self::analyzerMessage(Protocol::AFTER_FILE_ANALYSIS_BATCH_REQUEST);
+        // Mago asks for no rule times.
+        $message->writeBoolean(false);
         $message->writeU64(self::GENERATION);
         $message->writeU16(1);
         $message->writeU16(0);
-        // Mago asks for no rule times.
-        $message->writeBoolean(false);
         $message->writeLength(1);
         $message->writeBytes($file);
         // The file's size, then its expression, inferred-return, yield-key, and yield-value counts.
@@ -491,12 +491,12 @@ final class WorkerTest extends TestCase
     private static function projectRequest(int $kind): array
     {
         $message = self::analyzerMessage($kind);
+        // Mago asks for no rule times.
+        $message->writeBoolean(false);
         $message->writeU64(self::GENERATION);
         $message->writeU16(2);
         $message->writeU16(0);
         $message->writeU16(1);
-        // Mago asks for no rule times.
-        $message->writeBoolean(false);
         if ($kind === Protocol::AFTER_ANALYSIS_REQUEST) {
             $message->writeU32(0);
             // The project's reference summary.

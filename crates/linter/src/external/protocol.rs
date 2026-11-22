@@ -6,6 +6,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use mago_database::file::File;
+use mago_extension::RuleCalls;
+use mago_extension::RuleTimes;
 use mago_extension::Value;
 use mago_extension::ValueReader;
 use mago_extension::ValueWriter;
@@ -173,6 +175,7 @@ pub(super) fn encode_lint_request<'arena>(
     resolved_names: &ResolvedNames<'arena>,
     active_rules: &[u16],
     target_kinds: &[bool; NodeKind::COUNT],
+    timed: bool,
     trace_enabled: bool,
 ) -> Result<Option<LintRequest>, ExternalLintError> {
     if file.contents.len() > u32::MAX as usize {
@@ -190,6 +193,7 @@ pub(super) fn encode_lint_request<'arena>(
     let name_count = snapshot.name_count();
     let trivia_count = snapshot.trivia_count();
     let mut writer = message_writer(LINT_FILE_REQUEST);
+    writer.write_bool(timed);
     writer.write_bytes(file.name.as_ref())?;
     writer.write_bytes(file.contents.as_ref())?;
     writer.write_u16(
@@ -211,12 +215,13 @@ pub(super) fn encode_lint_request<'arena>(
     }))
 }
 
+/// The issues a lint response reports, and how long each of its rules took.
 pub(super) fn decode_lint_response(
     payload: &[Value],
     file: &File,
     rules: &[ExternalRule],
     active_rules: &[u16],
-) -> Result<IssueCollection, ExternalLintError> {
+) -> Result<(IssueCollection, Vec<RuleCalls>), ExternalLintError> {
     let mut reader = message_reader(payload, LINT_FILE_RESPONSE)?;
     let issue_count = reader.read_count("issues", MAXIMUM_ISSUES_PER_FILE)?;
     let mut issues = IssueCollection::new();
@@ -299,8 +304,9 @@ pub(super) fn decode_lint_response(
         issues.push(issue);
     }
 
+    let rule_times = RuleTimes::decode(&mut reader)?;
     reader.finish()?;
-    Ok(issues)
+    Ok((issues, rule_times))
 }
 
 fn protocol(message: impl Into<String>) -> ExternalLintError {
@@ -451,12 +457,14 @@ pub(super) mod testing {
                 }
             }
         }
+        writer.write_length(0).unwrap();
 
         writer.finish()
     }
 
     pub fn decode_lint_request(payload: &[Value]) -> Result<DecodedRequest, ExternalLintError> {
         let mut reader = message_reader(payload, LINT_FILE_REQUEST)?;
+        reader.read_bool("rule times flag")?;
         let file_name = reader.read_bytes("file name")?.to_vec();
         let source = reader.read_bytes("source")?.to_vec();
         let active_count = reader.read_u16("active rule count")? as usize;

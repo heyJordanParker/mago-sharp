@@ -54,7 +54,6 @@ use Mago\Sdk\Internal\Analyzer\Protocol as AnalyzerProtocol;
 use Mago\Sdk\Internal\Analyzer\RegisteredPlugin;
 use Mago\Sdk\Internal\Analyzer\RegisteredTargetedCallback;
 use Mago\Sdk\Internal\Analyzer\ReportedIssue;
-use Mago\Sdk\Internal\Analyzer\RuleTimes;
 use Mago\Sdk\Internal\Analyzer\SentReads;
 use Mago\Sdk\Internal\ClassLoads;
 use Mago\Sdk\Internal\HostClient;
@@ -62,6 +61,7 @@ use Mago\Sdk\Internal\Hosts;
 use Mago\Sdk\Internal\Linter\Protocol as LinterProtocol;
 use Mago\Sdk\Internal\Linter\RegisteredRule;
 use Mago\Sdk\Internal\Protocol\ValueReader;
+use Mago\Sdk\Internal\RuleTimes;
 use Mago\Sdk\Internal\Worker\Protocol as WorkerProtocol;
 use Mago\Sdk\Linter\LintContext;
 use Mago\Sdk\Syntax\NodeKind;
@@ -625,6 +625,7 @@ final class Worker
             throw new ProtocolException("Unknown linter request kind {$kind}.");
         }
 
+        $ruleTimes = $reader->readBoolean() ? new RuleTimes() : null;
         $request = LinterProtocol::readLintRequest($reader, $this->phpVersion, $this->nodeKinds);
         if ($request->activeRules !== $this->activeRuleIndices) {
             $activeRulesByNodeKind = [];
@@ -648,7 +649,9 @@ final class Worker
             $context = new LintContext($request->file, $node);
             foreach ($this->activeRulesByNodeKind[$node->kind->value] ?? [] as $registeredRule) {
                 try {
+                    $ruleTimes?->start();
                     $registeredRule->rule->lint($context);
+                    $ruleTimes?->stop($registeredRule->rule, 'lint', null);
                 } catch (Throwable $throwable) {
                     $code = $registeredRule->definition->code;
                     throw new ProtocolException(
@@ -667,7 +670,7 @@ final class Worker
             }
         }
 
-        return LinterProtocol::writeLintResponse($reportedIssues);
+        return LinterProtocol::writeLintResponse($reportedIssues, $ruleTimes);
     }
 
     /**
@@ -689,18 +692,19 @@ final class Worker
             return $this->handleCodebaseScanRequest($reader, $host);
         }
 
+        $ruleTimes = $reader->readBoolean() ? new RuleTimes() : null;
         if (
             $kind === AnalyzerProtocol::BEFORE_ANALYSIS_REQUEST
             || $kind === AnalyzerProtocol::AFTER_FILE_ANALYSIS_REQUEST
             || $kind === AnalyzerProtocol::AFTER_ANALYSIS_REQUEST
             || $kind === AnalyzerProtocol::AFTER_FILE_ANALYSIS_BATCH_REQUEST
         ) {
-            return $this->handleAnalyzerLifecycleRequest($kind, $reader, $host);
+            return $this->handleAnalyzerLifecycleRequest($kind, $reader, $host, $ruleTimes);
         }
 
         $issueReads = new CodebaseReads();
         $codeReads = new CodebaseReads();
-        $response = $this->handleProviderRequest($kind, $reader, $host, $issueReads, $codeReads);
+        $response = $this->handleProviderRequest($kind, $reader, $host, $issueReads, $codeReads, $ruleTimes);
 
         return AnalyzerProtocol::withCodebaseReads(
             $response,
@@ -711,6 +715,7 @@ final class Worker
             $issueReads,
             $codeReads,
             $this->classLoads,
+            $ruleTimes,
         );
     }
 
@@ -727,6 +732,7 @@ final class Worker
         HostClient $host,
         CodebaseReads $issueReads,
         CodebaseReads $codeReads,
+        ?RuleTimes $ruleTimes,
     ): array {
         if ($kind === AnalyzerProtocol::PROPERTY_TYPE_REQUEST) {
             $request = AnalyzerProtocol::readPropertyTypeRequest($reader);
@@ -745,9 +751,11 @@ final class Worker
                 }
 
                 try {
+                    $ruleTimes?->start();
                     $type = $registered->callback->getPropertyType(
                         new PropertyTypeProviderContext($this->phpVersion, $codebase, $request->access, $types),
                     );
+                    $ruleTimes?->stop($registered->callback, 'getPropertyType', null);
                 } catch (Throwable $throwable) {
                     throw new ProtocolException(
                         "Property type provider in `{$registered->plugin}` failed: {$throwable->getMessage()}",
@@ -788,7 +796,9 @@ final class Worker
                 }
 
                 try {
+                    $ruleTimes?->start();
                     $forwarded = $registered->callback->getForwardedCall($context);
+                    $ruleTimes?->stop($registered->callback, 'getForwardedCall', null);
                 } catch (Throwable $throwable) {
                     throw new ProtocolException(
                         "Call forwarding provider in `{$registered->plugin}` failed: {$throwable->getMessage()}",
@@ -822,6 +832,7 @@ final class Worker
                 }
 
                 try {
+                    $ruleTimes?->start();
                     $initialized = $registered->callback->isPropertyInitialized(
                         new PropertyInitializationProviderContext(
                             $this->phpVersion,
@@ -831,6 +842,7 @@ final class Worker
                             $types,
                         ),
                     );
+                    $ruleTimes?->stop($registered->callback, 'isPropertyInitialized', null);
                 } catch (Throwable $throwable) {
                     throw new ProtocolException(
                         "Property initialization provider in `{$registered->plugin}` failed: {$throwable->getMessage()}",
@@ -864,9 +876,11 @@ final class Worker
                 }
 
                 try {
+                    $ruleTimes?->start();
                     $provided = $registered->callback->getClassInitializers(
                         new ClassInitializerProviderContext($this->phpVersion, $codebase, $request->class),
                     );
+                    $ruleTimes?->stop($registered->callback, 'getClassInitializers', null);
                     foreach ($provided as $initializer) {
                         DefinitionName::assertIdentifier($initializer, 'A class initializer method name');
                         $initializers[$initializer] = $initializer;
@@ -917,7 +931,9 @@ final class Worker
                         $issue,
                     );
                     try {
+                        $ruleTimes?->start();
                         $decision = $registered->callback->filterIssue($context);
+                        $ruleTimes?->stop($registered->callback, 'filterIssue', null);
                     } catch (Throwable $throwable) {
                         throw new ProtocolException(
                             "Analyzer issue-filter hook in `{$registered->plugin}` failed: {$throwable->getMessage()}",
@@ -964,7 +980,9 @@ final class Worker
                 }
 
                 try {
+                    $ruleTimes?->start();
                     $assertions = $registered->callback->getAssertions($context);
+                    $ruleTimes?->stop($registered->callback, 'getAssertions', null);
                 } catch (Throwable $throwable) {
                     throw new ProtocolException(
                         "Analyzer assertion provider in `{$registered->plugin}` failed: {$throwable->getMessage()}",
@@ -1001,7 +1019,9 @@ final class Worker
                         );
                     }
 
+                    $ruleTimes?->start();
                     $signature = $registered->callback->getCallableSignature($context);
+                    $ruleTimes?->stop($registered->callback, 'getCallableSignature', null);
                     if ($signature !== null) {
                         return AnalyzerProtocol::writeCallableSignatureResponse($signature);
                     }
@@ -1025,7 +1045,9 @@ final class Worker
             }
 
             try {
+                $ruleTimes?->start();
                 $type = $registered->callback->getReturnType($context);
+                $ruleTimes?->stop($registered->callback, 'getReturnType', null);
             } catch (Throwable $throwable) {
                 throw new ProtocolException(
                     "Analyzer provider in `{$registered->plugin}` failed: {$throwable->getMessage()}",
@@ -1115,8 +1137,12 @@ final class Worker
     /**
      * @return list<null|bool|int|float|string|list<mixed>>
      */
-    private function handleAnalyzerLifecycleRequest(int $kind, ValueReader $reader, HostClient $host): array
-    {
+    private function handleAnalyzerLifecycleRequest(
+        int $kind,
+        ValueReader $reader,
+        HostClient $host,
+        ?RuleTimes $ruleTimes,
+    ): array {
         $request = AnalyzerProtocol::readLifecycleRequest($kind, $reader, $host, $this->phpVersion, $this->nodeKinds);
         if ($this->metadataCache === null || $this->metadataCache->generation !== $request->generation) {
             $this->metadataCache = new MetadataCache($request->generation);
@@ -1127,7 +1153,6 @@ final class Worker
         $contributedReferences = [];
         $recordedReads = [];
         $analyses = is_array($request->analysis) ? $request->analysis : [$request->analysis];
-        $ruleTimes = $request->timed ? new RuleTimes() : null;
         $projectHooks = match ($kind) {
             AnalyzerProtocol::BEFORE_ANALYSIS_REQUEST => 'before-analysis',
             AnalyzerProtocol::AFTER_ANALYSIS_REQUEST => 'after-analysis',

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Mago\Sdk\Internal\Analyzer;
+namespace Mago\Sdk\Internal;
 
 use Mago\Sdk\Internal\Protocol\ValueWriter;
 

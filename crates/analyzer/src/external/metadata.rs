@@ -1736,7 +1736,7 @@ mod tests {
             sources: foldhash::HashMap::default(),
             reads: std::sync::Mutex::default(),
             member_reads: crate::external::MemberReads::Codebase,
-            rule_times: None,
+            rule_times: mago_extension::RuleTimes::new(),
         }
     }
 

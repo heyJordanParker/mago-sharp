@@ -9,6 +9,7 @@ pub mod error;
 pub mod hosts;
 pub mod payload;
 pub mod process_group;
+pub mod rule_times;
 pub mod source;
 
 mod reduction;
@@ -25,3 +26,5 @@ pub use payload::PayloadWriter;
 pub use payload::ValueReader;
 pub use payload::ValueWriter;
 pub use process_group::ProcessGroup;
+pub use rule_times::RuleCalls;
+pub use rule_times::RuleTimes;

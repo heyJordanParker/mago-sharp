@@ -795,19 +795,140 @@ fn analyze_logs_each_host_rule_s_time_slowest_first_at_the_debug_level() {
 
     assert!(debug.status.success(), "{}", printed(&debug));
     let log = printed(&debug);
-    let rules: Vec<&str> = log.lines().filter_map(|line| line.split_once("Host rule ").map(|(_, rule)| rule)).collect();
-    let sleeping = rules.iter().position(|rule| rule.starts_with("SleepsOnEachFile::afterFileAnalysis took "));
-    let quick = rules.iter().position(|rule| rule.starts_with("ReturnsAtOnce::afterFileAnalysis took "));
-    assert!(sleeping.is_some() && sleeping < quick, "{log}");
-    let took = rules[sleeping.unwrap()].strip_prefix("SleepsOnEachFile::afterFileAnalysis took ").unwrap();
-    let (seconds, files) = took.split_once(" s over ").unwrap_or_else(|| panic!("{log}"));
-    let seconds: f64 = seconds.parse().unwrap();
-    let files: u32 = files.split_once(' ').unwrap().0.parse().unwrap();
-    assert!(files > 0 && seconds >= 0.04 * f64::from(files), "{log}");
-    let slowest_files = rules
-        .iter()
-        .filter(|rule| rule.starts_with("SleepsOnEachFile::afterFileAnalysis took ") && rule.contains(" s on "));
+    let sleeping = host_rule_took(&log, "SleepsOnEachFile::afterFileAnalysis").unwrap_or_else(|| panic!("{log}"));
+    let quick = host_rule_took(&log, "ReturnsAtOnce::afterFileAnalysis").unwrap_or_else(|| panic!("{log}"));
+    let (_, seconds, files) = sleeping;
+    assert!(sleeping.0 < quick.0 && files > 0 && seconds >= 0.04 * f64::from(files), "{log}");
+    let slowest_files = log
+        .lines()
+        .filter(|line| line.contains("Host rule SleepsOnEachFile::afterFileAnalysis took ") && line.contains(" s on "));
     assert_eq!(slowest_files.count(), files.min(5) as usize, "{log}");
+
+    let info = analyze("info");
+
+    assert!(info.status.success(), "{}", printed(&info));
+    assert!(!printed(&info).contains("Host rule"), "{}", printed(&info));
+}
+
+/// Where `rule`'s round line stands among the "Host rule" lines of `log`, how many seconds it took and over how many
+/// files, as "Host rule SleepsOnEachFile::afterFileAnalysis took 0.08 s over 2 files." gives them.
+fn host_rule_took(log: &str, rule: &str) -> Option<(usize, f64, u32)> {
+    let prefix = format!("{rule} took ");
+    log.lines().filter_map(|line| line.split_once("Host rule ").map(|(_, line)| line)).enumerate().find_map(
+        |(place, line)| {
+            let (seconds, files) = line.strip_prefix(&prefix)?.split_once(" s over ")?;
+            Some((place, seconds.parse().ok()?, files.split_once(' ')?.0.parse().ok()?))
+        },
+    )
+}
+
+/// An extension host of two return-type providers for the project's `App\measure`: `ReturnsNoType`, registered first,
+/// and `SleepsOnEachCall`, which sleeps 40 ms on each call it is asked about. Neither gives a type, so mago asks both.
+const HOST_OF_A_SLOW_PROVIDER_AND_A_QUICK_ONE: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\FunctionReturnTypeProvider;
+use Mago\Sdk\Analyzer\FunctionTarget;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Analyzer\ReturnTypeProviderContext;
+use Mago\Sdk\Analyzer\Type;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+final class ReturnsNoType implements Plugin, FunctionReturnTypeProvider
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('returns-no-type', 'Returns no type', 'Gives no type for App\\measure.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerFunctionReturnTypeProvider($this);
+    }
+
+    public function getTargets(): array
+    {
+        return [FunctionTarget::exact('App\\measure')];
+    }
+
+    public function getReturnType(ReturnTypeProviderContext $context): ?Type
+    {
+        return null;
+    }
+}
+
+final class SleepsOnEachCall implements Plugin, FunctionReturnTypeProvider
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('sleeps-on-each-call', 'Sleeps on each call', 'Sleeps 40 ms on each call.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerFunctionReturnTypeProvider($this);
+    }
+
+    public function getTargets(): array
+    {
+        return [FunctionTarget::exact('App\\measure')];
+    }
+
+    public function getReturnType(ReturnTypeProviderContext $context): ?Type
+    {
+        usleep(40_000);
+
+        return null;
+    }
+}
+
+(new Worker(new Extension('typed', 'Typed', '0.0.0', analyzerPlugins: [new ReturnsNoType(), new SleepsOnEachCall()])))->run();
+"#;
+
+/// A host's providers run in the round as its hooks do, so with `MAGO_LOG=debug` a slow return-type provider's line
+/// comes before a quick one's, and at `info` neither prints.
+#[test]
+fn analyze_logs_a_slow_host_provider_before_a_quick_one_at_the_debug_level() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the host provider times test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "app/Measures.php",
+        "<?php\n\nnamespace App;\n\nfunction measure(string $text): int\n{\n    return \\strlen($text);\n}\n\nfunction total(): int\n{\n    return measure('a') + measure('bb');\n}\n",
+    );
+    write(root, "tools/host.php", HOST_OF_A_SLOW_PROVIDER_AND_A_QUICK_ONE);
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.typed]\nfile = \"tools/host.php\"\n",
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let analyze = |level: &str| {
+        process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never", "analyze"])
+                .env("MAGO_LOG", level)
+                .env("XDG_CACHE_HOME", cache.path())
+                .current_dir(root),
+        )
+        .unwrap()
+    };
+
+    let debug = analyze("debug");
+
+    assert!(debug.status.success(), "{}", printed(&debug));
+    let log = printed(&debug);
+    let slow = host_rule_took(&log, "SleepsOnEachCall::getReturnType").unwrap_or_else(|| panic!("{log}"));
+    let quick = host_rule_took(&log, "ReturnsNoType::getReturnType").unwrap_or_else(|| panic!("{log}"));
+    assert!(slow.0 < quick.0 && slow.1 >= 0.04, "{log}");
 
     let info = analyze("info");
 
@@ -1189,6 +1310,103 @@ fn a_linter_host_sees_each_php_sharp_file_compiled_on_a_fresh_tree() {
     let log = std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
     assert!(!log.is_empty() && log.lines().all(|line| line == "first"), "{log}{}", printed(&linted));
     assert!(!root.join(".sharp").exists());
+}
+
+/// An extension host of two linter rules on each class: `LintsAtOnce`, registered first, and `SleepsOnEachClass`, which
+/// sleeps 40 ms on each class it lints.
+const LINT_HOST_OF_A_SLOW_RULE_AND_A_QUICK_ONE: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Extension;
+use Mago\Sdk\Linter\LintContext;
+use Mago\Sdk\Linter\Rule;
+use Mago\Sdk\Linter\RuleDefinition;
+use Mago\Sdk\Reporting\Level;
+use Mago\Sdk\Syntax\NodeKind;
+use Mago\Sdk\Worker;
+
+final class LintsAtOnce implements Rule
+{
+    public function getDefinition(): RuleDefinition
+    {
+        return new RuleDefinition(
+            code: 'timed/lints-at-once',
+            name: 'Lints at once',
+            description: 'Does nothing on each class.',
+            defaultLevel: Level::Warning,
+            defaultEnabled: true,
+            targets: [NodeKind::Class_],
+        );
+    }
+
+    public function lint(LintContext $context): void {}
+}
+
+final class SleepsOnEachClass implements Rule
+{
+    public function getDefinition(): RuleDefinition
+    {
+        return new RuleDefinition(
+            code: 'timed/sleeps-on-each-class',
+            name: 'Sleeps on each class',
+            description: 'Sleeps 40 ms on each class.',
+            defaultLevel: Level::Warning,
+            defaultEnabled: true,
+            targets: [NodeKind::Class_],
+        );
+    }
+
+    public function lint(LintContext $context): void
+    {
+        usleep(40_000);
+    }
+}
+
+(new Worker(new Extension('timed', 'Timed', '0.0.0', linterRules: [new LintsAtOnce(), new SleepsOnEachClass()])))->run();
+"#;
+
+/// With `MAGO_LOG=debug`, `mago lint` logs how long each host linter rule took when it ends, slowest first, as a round
+/// of `mago analyze` logs its rules, and at `info` it logs none of it.
+#[test]
+fn lint_logs_a_slow_host_linter_rule_before_a_quick_one_at_the_debug_level() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the host linter rule times test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "app/Plain.php", "<?php\n\nnamespace App;\n\nfinal class Plain {}\n");
+    write(root, "tools/host.php", LINT_HOST_OF_A_SLOW_RULE_AND_A_QUICK_ONE);
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.timed]\nfile = \"tools/host.php\"\n",
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let lint = |level: &str| {
+        process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never", "lint"])
+                .env("MAGO_LOG", level)
+                .env("XDG_CACHE_HOME", cache.path())
+                .current_dir(root),
+        )
+        .unwrap()
+    };
+
+    let debug = lint("debug");
+
+    assert!(debug.status.success(), "{}", printed(&debug));
+    let log = printed(&debug);
+    let slow = host_rule_took(&log, "SleepsOnEachClass::lint").unwrap_or_else(|| panic!("{log}"));
+    let quick = host_rule_took(&log, "LintsAtOnce::lint").unwrap_or_else(|| panic!("{log}"));
+    assert!(slow.0 < quick.0 && slow.2 > 0 && slow.1 >= 0.04 * f64::from(slow.2), "{log}");
+
+    let info = lint("info");
+
+    assert!(info.status.success(), "{}", printed(&info));
+    assert!(!printed(&info).contains("Host rule"), "{}", printed(&info));
 }
 
 /// An extension host that loads `App\Word`, the class of `app/Word.sharp`, and appends its process id and the word the

@@ -45,6 +45,7 @@ use Mago\Sdk\Internal\HostClient;
 use Mago\Sdk\Internal\Protocol\PayloadWriter;
 use Mago\Sdk\Internal\Protocol\ValueReader;
 use Mago\Sdk\Internal\Protocol\ValueWriter;
+use Mago\Sdk\Internal\RuleTimes;
 use Mago\Sdk\Internal\Syntax\SourceFileCodec;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\Reporting\Annotation;
@@ -774,7 +775,6 @@ final class Protocol
         for ($index = 0; $index < $pluginCount; ++$index) {
             $plugins[] = $reader->readU16();
         }
-        $timed = $reader->readBoolean();
 
         $analysis = match ($kind) {
             self::BEFORE_ANALYSIS_REQUEST => null,
@@ -804,7 +804,7 @@ final class Protocol
 
         $reader->finish();
 
-        return new LifecycleRequest($generation, $plugins, $timed, $analysis);
+        return new LifecycleRequest($generation, $plugins, $analysis);
     }
 
     /** @param list<null|bool|int|float|string|list<mixed>> $payload */
@@ -975,9 +975,11 @@ final class Protocol
 
     /**
      * Places the codebase reads a provider or issue filter made right after `$response`'s header, with the class loads
-     * its worker made up to now, so Mago reads them in one place whatever kind the response is.
+     * its worker made up to now, then how long each of its rules took, so Mago reads them in one place whatever kind
+     * the response is.
      *
      * @param list<null|bool|int|float|string|list<mixed>> $response
+     * @param RuleTimes|null $ruleTimes how long each rule's calls took, when mago asked
      *
      * @return list<null|bool|int|float|string|list<mixed>>
      */
@@ -988,6 +990,7 @@ final class Protocol
         CodebaseReads $issueReads,
         CodebaseReads $codeReads,
         ClassLoads $classLoads,
+        ?RuleTimes $ruleTimes,
     ): array {
         $writer = new ValueWriter(array_slice($response, 0, 2));
         self::writeCodebaseReads(
@@ -999,6 +1002,7 @@ final class Protocol
             $classLoads,
             $classLoads->end(),
         );
+        ($ruleTimes ?? new RuleTimes())->write($writer);
         $writer->writeValues(array_slice($response, 2));
 
         return $writer->finish();

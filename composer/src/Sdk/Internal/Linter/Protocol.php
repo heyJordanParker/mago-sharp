@@ -8,6 +8,7 @@ use Mago\Sdk\Exception\ProtocolException;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Internal\Protocol\ValueReader;
 use Mago\Sdk\Internal\Protocol\ValueWriter;
+use Mago\Sdk\Internal\RuleTimes;
 use Mago\Sdk\Internal\Syntax\SourceFileCodec;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\Reporting\Issue;
@@ -120,10 +121,11 @@ final class Protocol
 
     /**
      * @param list<int<0, 65535>|Issue> $reportedIssues Flat rule index and issue pairs.
+     * @param RuleTimes|null $ruleTimes how long each rule's calls took, when mago asked
      *
      * @return list<null|bool|int|float|string|list<mixed>>
      */
-    public static function writeLintResponse(array $reportedIssues): array
+    public static function writeLintResponse(array $reportedIssues, ?RuleTimes $ruleTimes): array
     {
         $valueCount = count($reportedIssues);
         $issueCount = $valueCount >> 1;
@@ -167,7 +169,10 @@ final class Protocol
             }
         }
 
-        return $values;
+        $writer = new ValueWriter($values);
+        ($ruleTimes ?? new RuleTimes())->write($writer);
+
+        return $writer->finish();
     }
 
     /**

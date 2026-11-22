@@ -63,7 +63,7 @@ use super::error::ExternalAnalyzerError;
 use super::error::protocol;
 use super::protocol;
 use super::reads::ResponseReads;
-use super::rule_times::RuleTimes;
+use mago_extension::RuleTimes;
 
 pub(super) const BEFORE_ANALYSIS_REQUEST: u16 = 5;
 pub(super) const AFTER_FILE_ANALYSIS_REQUEST: u16 = 6;
@@ -1092,15 +1092,15 @@ fn write_expression_type_records(
 }
 
 pub(super) fn encode_before_analysis_request(
-    session: &ExternalAnalysisSession,
+    generation: u64,
     plugins: &[u16],
 ) -> Result<Vec<Value>, ExternalAnalyzerError> {
-    let writer = lifecycle_writer(BEFORE_ANALYSIS_REQUEST, session, plugins)?;
+    let writer = lifecycle_writer(BEFORE_ANALYSIS_REQUEST, generation, plugins)?;
     Ok(writer.finish())
 }
 
 pub(super) fn encode_after_file_analysis_request(
-    session: &ExternalAnalysisSession,
+    generation: u64,
     plugins: &[u16],
     file: &File,
     program: &Program<'_>,
@@ -1111,7 +1111,7 @@ pub(super) fn encode_after_file_analysis_request(
     node_analysis_requirements: Option<&NodeAnalysisRequirements>,
     backend: u16,
 ) -> Result<Vec<Value>, ExternalAnalyzerError> {
-    let mut writer = lifecycle_writer(AFTER_FILE_ANALYSIS_REQUEST, session, plugins)?;
+    let mut writer = lifecycle_writer(AFTER_FILE_ANALYSIS_REQUEST, generation, plugins)?;
     let node_analysis_plan = node_analysis_requirements
         .map(|requirements| build_node_analysis_plan(program, artifacts, resolved_names, codebase, requirements));
     write_file_summary(
@@ -1136,14 +1136,15 @@ pub(super) fn encode_after_file_analysis_request(
 }
 
 pub(super) fn encode_after_file_analysis_batch_request(
-    session: &ExternalAnalysisSession,
+    generation: u64,
     plugins: &[u16],
     files: &[Arc<FileAnalysisSnapshot>],
     include_expression_types: bool,
     node_analysis_requirements: Option<&NodeAnalysisRequirements>,
+    session: &ExternalAnalysisSession,
     backend: u16,
 ) -> Result<Vec<Value>, ExternalAnalyzerError> {
-    let mut writer = lifecycle_writer(AFTER_FILE_ANALYSIS_BATCH_REQUEST, session, plugins)?;
+    let mut writer = lifecycle_writer(AFTER_FILE_ANALYSIS_BATCH_REQUEST, generation, plugins)?;
     writer.write_u32(u32::try_from(files.len()).map_err(|_| protocol("after-file batch exceeds u32::MAX files"))?);
     for file in files {
         let file_node_analysis_requirements = node_analysis_requirements.filter(|_| file.has_node_analysis_targets());
@@ -1180,12 +1181,12 @@ pub(super) fn encode_after_file_analysis_batch_request(
 }
 
 pub(super) fn encode_after_analysis_request(
-    session: &ExternalAnalysisSession,
+    generation: u64,
     plugins: &[u16],
     result: &AnalysisResult,
     files: &[Arc<FileAnalysisSnapshot>],
 ) -> Result<Vec<Value>, ExternalAnalyzerError> {
-    let mut writer = lifecycle_writer(AFTER_ANALYSIS_REQUEST, session, plugins)?;
+    let mut writer = lifecycle_writer(AFTER_ANALYSIS_REQUEST, generation, plugins)?;
     writer
         .write_u32(u32::try_from(result.issues.len()).map_err(|_| protocol("analysis has more than u32::MAX issues"))?);
     write_reference_summary(&mut writer, &result.symbol_references);
@@ -1197,21 +1198,14 @@ pub(super) fn encode_after_analysis_request(
     Ok(writer.finish())
 }
 
-/// A lifecycle request's header: the session's generation, the plugins whose hooks run, and whether the worker times
-/// each rule's calls.
-fn lifecycle_writer(
-    kind: u16,
-    session: &ExternalAnalysisSession,
-    plugins: &[u16],
-) -> Result<ValueWriter, ExternalAnalyzerError> {
+fn lifecycle_writer(kind: u16, generation: u64, plugins: &[u16]) -> Result<ValueWriter, ExternalAnalyzerError> {
     let mut writer = protocol::message_writer(kind);
-    writer.write_u64(session.generation());
+    writer.write_u64(generation);
     writer
         .write_u16(u16::try_from(plugins.len()).map_err(|_| protocol("more than u16::MAX lifecycle plugins matched"))?);
     for plugin in plugins {
         writer.write_u16(*plugin);
     }
-    writer.write_bool(session.times_rules());
 
     Ok(writer)
 }
@@ -1513,7 +1507,7 @@ pub(super) fn decode_lifecycle_response(
     for (file_id, file_reads) in reads {
         session.record_reads(file_id, file_reads)?;
     }
-    session.record_rule_times(rule_times);
+    session.record_rule_times(rule_times, None);
 
     Ok(LifecycleEffects { issues, issues_by_file, references, references_by_file })
 }
@@ -2024,7 +2018,7 @@ mod tests {
             // An after-file request with the expression types alone, then with the node-analysis targets alone.
             let after_file = [(true, None), (false, Some(&requirements))].map(|(expression_types, requirements)| {
                 encode_after_file_analysis_request(
-                    &ExternalAnalysisSession::from_files(analysis.files.iter().cloned()),
+                    1,
                     &[0],
                     analysis.file(),
                     analysis.program,
