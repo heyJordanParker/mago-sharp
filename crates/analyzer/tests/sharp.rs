@@ -570,6 +570,25 @@ fn a_class_with_an_exported_method_is_used() {
     );
 }
 
+/// Spec sections 5 and 27: PHP runs a class's `main` when it runs the class's file as its script, which the checker
+/// never sees, so a class that declares `main` is used, and neither it nor its `main` is too wide, as an `[Export]`
+/// method's class is. Its other public members are as wide as their uses.
+#[test]
+fn a_program_class_is_used_and_neither_it_nor_its_main_is_too_wide() {
+    let import = (
+        "src/App/Console/Import.sharp",
+        "namespace App.Console;\n\npublic class Import\n{\n    public int main() => 0;\n\n    public int size() => 1;\n}\n",
+    );
+
+    assert_eq!(unused_classes(&[import]), Vec::<String>::new());
+    assert_eq!(
+        too_wide(&[import]),
+        [
+            "src/App/Console/Import.sharp 7:16 `Import.size` is public, and nothing outside `Import` uses it. | Declare it `private`."
+        ]
+    );
+}
+
 /// Spec section 5: a use from plain PHP counts, and plain PHP names the class it writes, whichever class declares the
 /// member it reaches. So a PHP# class whose only use is plain PHP's, through a constructor and a static method it
 /// inherits from a plain PHP parent, is used by each form plain PHP names it in.
@@ -25758,7 +25777,7 @@ fn a_named_constructor_of_a_generic_class_takes_the_type_arguments_of_its_new() 
             "namespace Demo;\n\npublic class Plain\n{\n    public Plain(public int count { get; }) { }\n\n    public Plain.one(int count) : this(count) { }\n}\n",
         ),
     ];
-    let shop = "namespace Demo;\n\npublic class Shop\n{\n    public Any named() => new Box.of(1);\n\n    public Any main() => new Box(1);\n\n    public Box<int> numbers() => new Box<int>.of(1);\n\n    public Box<int> texts() => new Box<string>.of(\"one\");\n\n    public Any wrong() => new Box<int>.of(\"one\");\n\n    public Any plain() => new Plain<int>.one(1);\n}\n";
+    let shop = "namespace Demo;\n\npublic class Shop\n{\n    public Any named() => new Box.of(1);\n\n    public Any direct() => new Box(1);\n\n    public Box<int> numbers() => new Box<int>.of(1);\n\n    public Box<int> texts() => new Box<string>.of(\"one\");\n\n    public Any wrong() => new Box<int>.of(\"one\");\n\n    public Any plain() => new Plain<int>.one(1);\n}\n";
 
     assert_eq!(
         messages(("src/Demo/Shop.sharp", shop), &others)[2],

@@ -60,6 +60,12 @@ pub const EXPORT: &str = "Sharp\\Interop\\Export";
 /// is never too wide.
 pub const DYNAMICALLY_ACCESSED: &str = "Sharp\\DynamicallyAccessed";
 
+/// The method of a class that runs as a program, spec section 27.
+///
+/// PHP runs the `.sharp` file of a class that declares `public int main()` or `public void main()` as its script, and
+/// the engine builds the class and calls it.
+pub const PROGRAM_ENTRY: &str = "main";
+
 /// The mark of a parameter whose argument a method writes as JSON text.
 ///
 /// The standard library marks `Json.encode`'s, so the checker refuses a `Map` key JSON can't write. The checker reads

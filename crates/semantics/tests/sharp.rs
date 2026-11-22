@@ -7452,3 +7452,33 @@ fn readonly_that_cannot_matter_is_an_error() {
         ]
     );
 }
+
+/// Spec section 27: a class's `main` runs it as a program, and the engine calls it with no arguments, so it is
+/// `public int main()` or `public void main()`.
+#[test]
+fn a_class_main_is_public_and_takes_nothing_and_returns_int_or_void() {
+    let exits = "namespace App.Console;\n\nclass Import\n{\n    public int main() => 0;\n}\n";
+    let returns = "namespace App.Http;\n\nclass Boot\n{\n    public void main() { }\n}\n";
+    let code = "namespace App.Console;\n\nclass Import\n{\n    public int main(int x) => x;\n}\n";
+    let text = "namespace App.Console;\n\nclass Import\n{\n    public string main() => \"done\";\n}\n";
+    let hidden = "namespace App.Console;\n\nclass Import\n{\n    private int main() => 0;\n}\n";
+    let shared = "namespace App.Console;\n\nclass Import\n{\n    public static int main() => 0;\n}\n";
+    let refusal = "A class's `main` runs it as a program: declare it `public int main()` or `public void main()`.";
+
+    assert_eq!(issues(exits), Vec::<String>::new());
+    assert_eq!(issues(returns), Vec::<String>::new());
+    assert_eq!(issues(code), [format!("5:16 {refusal}")]);
+    assert_eq!(issues(text), [format!("5:19 {refusal}")]);
+    assert_eq!(issues(hidden), [format!("5:17 {refusal}")]);
+    assert_eq!(issues(shared), [format!("5:23 {refusal}")]);
+}
+
+/// Spec section 27: a `#!` line runs a `.sharp` file as a program from a shell, which reads only the file's first line.
+#[test]
+fn a_hash_bang_line_is_a_files_first_line_only() {
+    let first = "#!/usr/bin/env php\nnamespace App.Console;\n\nclass Import\n{\n    public int main() => 0;\n}\n";
+    let second = "namespace App.Console;\n#!/usr/bin/env php\n\nclass Import\n{\n    public int main() => 0;\n}\n";
+
+    assert_eq!(issues(first), Vec::<String>::new());
+    assert_eq!(issues(second), ["2:1 A `#!` line is a `.sharp` file's first line, where a shell reads it."]);
+}

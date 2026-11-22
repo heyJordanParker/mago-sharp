@@ -22,6 +22,7 @@ use mago_allocator::Arena;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::attribute::AttributeMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferenceKind;
 use mago_codex::reference::SymbolReferences;
@@ -29,6 +30,7 @@ use mago_codex::symbol::SymbolIdentifier;
 use mago_database::file::FileId;
 use mago_names::DYNAMICALLY_ACCESSED;
 use mago_names::EXPORT;
+use mago_names::PROGRAM_ENTRY;
 use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -599,8 +601,8 @@ enum Access {
 /// Spec section 5 calls such a member or type too wide, a compile error in an application. A type is as wide as its
 /// uses, as a member is, and each kind alike: a class, an interface, a struct, an enum and an event. A use of a type is
 /// a use of it or of a member of it, an `extends` or an `implements` included, and plain PHP reaching an `[Export]`
-/// method or a framework reading a marked attribute of a member is one from outside the namespace. A module and an
-/// enum's case are no types anyone names. The pass reads `references` of every file, so it runs once the whole project
+/// method, the engine running a program's `main` or a framework reading a marked attribute of a member is one from
+/// outside the namespace. A module and an enum's case are no types anyone names. The pass reads `references` of every file, so it runs once the whole project
 /// is analyzed, beside [`Effects::solve`](crate::effects::Effects::solve). The levels are tried as [`Access`] orders them, so a member nothing uses is `private`. A use from code outside any
 /// class or function needs `public`, because its namespace is not known here. A member must be visible to each class
 /// that overrides or implements it, so an override is a use from the class that declares it. A `virtual` or
@@ -807,9 +809,9 @@ fn namespace_types(codebase: &CodebaseMetadata, uses_on: &HashMap<(Word, Word), 
 /// A use is any reference to the class or a member of it from code outside the class and its own cases, a plain PHP
 /// file's included. Only a PHP# class-like of a project has none to find: a library's users are in the projects that
 /// install it, which the analysis never sees. A module runs no code, PHP# creates each class that declares an `on`
-/// method, plain PHP calls an `[Export]` method by the name of its global function, and the code that reads a marked
-/// attribute of a class or of one of its members reaches the class through reflection, which no use records, so none
-/// of them is refused. A class in one of `test_files`, the files of an
+/// method and each that declares `main`, which runs as a program, plain PHP calls an `[Export]` method by the name of
+/// its global function, and the code that reads a marked attribute of a class or of one of its members reaches the
+/// class through reflection, which no use records, so none of them is refused. A class in one of `test_files`, the files of an
 /// `autoload-dev` folder, runs under its test runner, as PHPUnit creates a test class, so it is never refused either.
 #[must_use]
 pub fn unused_classes(
@@ -866,14 +868,22 @@ pub fn unused_classes(
 }
 
 /// Whether plain PHP or a framework reaches `class` through one of its members, from outside any namespace: plain PHP
-/// calls an `[Export]` method through the global function it declares, spec section 23, and the code that reads a
-/// member's marked attribute reaches the member's class.
+/// calls an `[Export]` method through the global function it declares, spec section 23, PHP runs a class's `main` as
+/// its script, section 27, and the code that reads a member's marked attribute reaches the member's class.
 fn is_reached_by_its_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLikeMetadata) -> bool {
     class.properties.values().any(|property| is_dynamically_accessed(codebase, &property.attributes))
         || class.constants.values().any(|constant| is_dynamically_accessed(codebase, &constant.attributes))
         || class.methods.iter().filter_map(|name| codebase.function_likes.get(&(class_name, *name))).any(|method| {
-            method.has_attribute(codebase, word(EXPORT)) || is_dynamically_accessed(codebase, &method.attributes)
+            method.has_attribute(codebase, word(EXPORT))
+                || is_program_entry(class, method)
+                || is_dynamically_accessed(codebase, &method.attributes)
         })
+}
+
+/// Whether `method` of `class` is the entry of a program, spec section 27: a class's `main`, which the engine calls
+/// when PHP runs the class's file as its script.
+fn is_program_entry(class: &ClassLikeMetadata, method: &FunctionLikeMetadata) -> bool {
+    class.kind.is_class() && !class.flags.is_struct() && method.original_name.as_bytes() == PROGRAM_ENTRY.as_bytes()
 }
 
 /// The `public` members `class` declares that [`too_wide_members`] checks, each as its key in `references`, its name
@@ -909,8 +919,8 @@ fn public_members(
     for (name, method) in methods {
         // A method the codex gives the class, such as section 10's `parse`, spans the whole class, and nobody wrote it.
         // PHP calls a magic method itself, and `new` calls the constructor, which takes the reach of its class. Plain
-        // PHP calls an `[Export]` method through the global function it declares, spec section 23, which the checker
-        // never sees.
+        // PHP calls an `[Export]` method through the global function it declares, spec section 23, and the engine a
+        // program's `main`, section 27, which the checker never sees.
         if method.span != class.span
             && !case_spans.contains(&method.span)
             && class.declaring_method_ids.get(name).is_none_or(|declaring| declaring.get_class_name() == class_name)
@@ -918,6 +928,7 @@ fn public_members(
             && metadata.visibility.is_public()
             && !is_dynamically_accessed(codebase, &method.attributes)
             && !method.has_attribute(codebase, word(EXPORT))
+            && !is_program_entry(class, method)
             && !method.flags.is_internal_reach()
             && !name.as_bytes().starts_with(b"__")
             && !class.overridden_method_ids.contains_key(name)

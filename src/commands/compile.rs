@@ -6,7 +6,8 @@
 //! or renamed source loses its compiled file. It writes nothing outside that folder.
 //!
 //! It writes `preload.php` in the `.sharp` folder too, the script `opcache.preload` names to preload every type it
-//! accepted outside `autoload-dev` folders, spec section 27.
+//! accepted outside `autoload-dev` folders, and `autoload.php`, which requires the project's Composer autoloader for a
+//! program and for the preload script, spec section 27.
 //!
 //! A compile that warns of nothing beyond what it refused keeps a record of everything it read and wrote, and of what it
 //! printed, in the `.sharp` folder, and the next compile checks it before any analysis: when every input and output is
@@ -112,6 +113,10 @@ const LISTENERS: &str = "listeners.php";
 /// The preload script in the `.sharp` folder, spec section 27, which `opcache.preload` names to preload every type
 /// the compile accepted outside `autoload-dev` folders.
 const PRELOAD: &str = "preload.php";
+
+/// The script in the `.sharp` folder that requires the project's Composer autoloader, spec section 27, which a program
+/// loads before it builds its class, and the preload script before the types it preloads.
+const AUTOLOAD: &str = "autoload.php";
 
 /// The record of everything the last compile read and wrote, in the `.sharp` folder and in the hosts' folder, which the
 /// next compile checks before any analysis: when every input and output is as it was, the compile has nothing to do. A
@@ -1449,6 +1454,13 @@ fn compiled(
                 loaded.insert(class.span.file_id);
             }
         }
+        let autoload = compiled_folder.join(AUTOLOAD);
+        let bytes = autoload_script(&root)?;
+        write_if_changed(&autoload, &bytes)?;
+        if let Some(record) = record.as_mut() {
+            record.output(&autoload, &bytes);
+        }
+        written.insert(autoload);
         let preload = compiled_folder.join(PRELOAD);
         let bytes = preload_script(&types, &anonymous_class_types(codebase, loaded));
         write_if_changed(&preload, &bytes)?;
@@ -2331,12 +2343,36 @@ fn listener_table(
     table
 }
 
+/// The PHP source of `autoload.php`, spec section 27, which requires the Composer autoloader of the vendor folder of
+/// `root`, the one `composer.json`'s `config.vendor-dir` names, else `vendor`. A vendor folder inside the project is
+/// named from the `.sharp` folder, so the project runs wherever it is moved.
+///
+/// # Errors
+///
+/// Returns the error of reading `composer.json`.
+fn autoload_script(root: &Path) -> Result<Vec<u8>, Error> {
+    let vendor = vendor_folder(root).map_err(|error| OrchestratorError::General(error.to_string()))?;
+    let autoloader = vendor.join("autoload.php");
+    let mut script = b"<?php\n\n// mago compile writes this file, the project's Composer autoloader. It rewrites it on every compile.\n\nrequire_once ".to_vec();
+    match autoloader.strip_prefix(root) {
+        Ok(inside) => {
+            script.extend_from_slice(b"__DIR__ . ");
+            quoted(&mut script, &[b"/../", inside.as_os_str().as_encoded_bytes()].concat());
+        }
+        Err(_) => quoted(&mut script, autoloader.as_os_str().as_encoded_bytes()),
+    }
+    script.extend_from_slice(b";\n");
+
+    Ok(script)
+}
+
 /// The PHP source of the preload script, spec section 27, for `types`, the workspace-relative name of each source whose
-/// type the compile accepted, a test's left out. It requires the workspace's Composer autoloader, then each source, so
-/// a type whose parent another file declares, plain PHP or PHP#, gets its parent from the autoloader, as in a request.
-/// Then it loads each of `named`, a type an anonymous class names, through the function its kind's check takes.
+/// type the compile accepted, a test's left out. It requires the project's Composer autoloader through `autoload.php`,
+/// then each source, so a type whose parent another file declares, plain PHP or PHP#, gets its parent from the
+/// autoloader, as in a request. Then it loads each of `named`, a type an anonymous class names, through the function
+/// its kind's check takes.
 fn preload_script(types: &BTreeSet<&[u8]>, named: &BTreeSet<(&str, &[u8])>) -> Vec<u8> {
-    let mut script = b"<?php\n\n// mago compile writes this file. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/../vendor/autoload.php';\n".to_vec();
+    let mut script = b"<?php\n\n// mago compile writes this file. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/autoload.php';\n".to_vec();
     for name in types {
         script.extend_from_slice(b"require_once __DIR__ . ");
         quoted(&mut script, &[b"/../", *name].concat());

@@ -232,6 +232,16 @@ impl<'input> Lexer<'input> {
             return None;
         }
 
+        // A PHP# file's `#!` line is the token a PHP file's is, never a `#` comment, so the checker sees it and allows
+        // it on the file's first line only.
+        if self.sharp && matches!(self.mode, LexerMode::Script) && self.input.is_at(b"#!", false) {
+            let start = self.input.current_position();
+            let buffer = self.input.consume_through(b'\n');
+            let end = self.input.current_position();
+
+            return Some(Ok(self.token(TokenKind::InlineShebang, buffer, start, end)));
+        }
+
         match self.mode {
             LexerMode::Inline => {
                 let start = self.input.current_position();

@@ -111,6 +111,7 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
         files_under(&root.join(".sharp")),
         [
             Path::new("app/Order.sharpc"),
+            Path::new("autoload.php"),
             Path::new("compiled.bin"),
             Path::new("inputs.json"),
             Path::new("listeners.php"),
@@ -128,10 +129,10 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
     assert!(printed(&output).contains("Compiled 2 PHP# files into .sharp/."), "{}", printed(&output));
 }
 
-/// Spec section 27: `.sharp/preload.php`, which `opcache.preload` names, requires the workspace's Composer autoloader
-/// and then each accepted source that declares a type, the package's too, in path order. A refused source, one that
-/// declares no type, as a module's file, and a test in an `autoload-dev` folder stay out, so production never preloads
-/// a test.
+/// Spec section 27: `.sharp/preload.php`, which `opcache.preload` names, requires the workspace's Composer autoloader,
+/// through the `.sharp/autoload.php` a program loads too, and then each accepted source that declares a type, the
+/// package's too, in path order. A refused source, one that declares no type, as a module's file, and a test in an
+/// `autoload-dev` folder stay out, so production never preloads a test.
 #[test]
 fn compile_writes_a_preload_script_that_requires_the_autoloader_and_every_accepted_type() {
     let directory = project(ORDER, MONEY);
@@ -156,7 +157,11 @@ fn compile_writes_a_preload_script_that_requires_the_autoloader_and_every_accept
     assert!(compiled(root, "tests/Shop/CheckoutTest.sharp").exists());
     assert_eq!(
         read(root, ".sharp/preload.php"),
-        "<?php\n\n// mago compile writes this file. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/../vendor/autoload.php';\nrequire_once __DIR__ . '/../app/Order.sharp';\nrequire_once __DIR__ . '/../vendor/acme/money/src/Money.sharp';\n"
+        "<?php\n\n// mago compile writes this file. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/autoload.php';\nrequire_once __DIR__ . '/../app/Order.sharp';\nrequire_once __DIR__ . '/../vendor/acme/money/src/Money.sharp';\n"
+    );
+    assert_eq!(
+        read(root, ".sharp/autoload.php"),
+        "<?php\n\n// mago compile writes this file, the project's Composer autoloader. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/../vendor/autoload.php';\n"
     );
 }
 
@@ -202,7 +207,7 @@ fn compile_writes_a_preload_script_that_loads_what_the_anonymous_classes_it_load
 
     assert_eq!(
         read(root, ".sharp/preload.php"),
-        "<?php\n\n// mago compile writes this file. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/../vendor/autoload.php';\nrequire_once __DIR__ . '/../app/Order.sharp';\nrequire_once __DIR__ . '/../vendor/acme/money/src/Money.sharp';\ninterface_exists('Acme\\\\Model\\\\Contract');\ntrait_exists('Acme\\\\Model\\\\Reflects');\n"
+        "<?php\n\n// mago compile writes this file. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/autoload.php';\nrequire_once __DIR__ . '/../app/Order.sharp';\nrequire_once __DIR__ . '/../vendor/acme/money/src/Money.sharp';\ninterface_exists('Acme\\\\Model\\\\Contract');\ntrait_exists('Acme\\\\Model\\\\Reflects');\n"
     );
 }
 
@@ -2019,6 +2024,7 @@ fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
     assert_eq!(
         files_under(&root.join(".sharp")),
         [
+            Path::new("autoload.php"),
             Path::new("compiled.bin"),
             Path::new("inputs.json"),
             Path::new("listeners.php"),
@@ -2101,6 +2107,7 @@ fn compile_reports_a_link_to_a_file_outside_the_project_and_writes_no_compiled_f
         files_under(&root.join(".sharp")),
         [
             Path::new("app/Order.sharpc"),
+            Path::new("autoload.php"),
             Path::new("compiled.bin"),
             Path::new("inputs.json"),
             Path::new("listeners.php"),
@@ -3906,6 +3913,7 @@ fn compile_deletes_the_lean_package_once_no_law_remains() {
         files_under(&root.join(".sharp")),
         [
             Path::new("app/Order.sharpc"),
+            Path::new("autoload.php"),
             Path::new("compiled.bin"),
             Path::new("listeners.php"),
             Path::new("preload.php"),

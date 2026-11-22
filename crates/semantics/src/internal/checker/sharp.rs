@@ -10,6 +10,7 @@ use mago_casing::to_constant_case;
 use mago_database::file::FolderNamespace;
 use mago_names::EQUATABLE;
 use mago_names::OBJECT;
+use mago_names::PROGRAM_ENTRY;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
 use mago_names::binding::BindingError;
@@ -80,6 +81,7 @@ use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Imports;
 use mago_syntax::cst::Indexer;
 use mago_syntax::cst::Inheritance;
+use mago_syntax::cst::Inline;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::IntersectionHint;
@@ -676,6 +678,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
+        // Spec section 27: a `#!` line, as `#!/usr/bin/env php`, runs the file as a program from a shell, which reads
+        // only a file's first line for it.
+        (Node::Statement(Statement::Inline(Inline { value, span, .. })), File) if value.starts_with(b"#!") => {
+            if span.start.offset != 0 {
+                context.report(
+                    Issue::error("A `#!` line is a `.sharp` file's first line, where a shell reads it.")
+                        .with_annotation(Annotation::primary(*span).with_message("Written here."))
+                        .with_help("Move it to the first line, or remove it."),
+                );
+            }
+
+            None
+        }
         // Spec section 27: a `.sharp` file declares one type, so code at file level is never valid.
         (Node::Statement(statement), File) if runs_code(statement) => {
             let help = if matches!(statement, Statement::Noop(_)) { "Delete it." } else { "Move it into a method." };
@@ -742,8 +757,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 check_static_class(class, context);
             }
             for member in &class.members {
-                if let ClassLikeMember::NamedConstructor(constructor) = member {
-                    check_named_constructor(constructor, &class.name, class.modifiers.contains_abstract(), context);
+                match member {
+                    ClassLikeMember::NamedConstructor(constructor) => {
+                        check_named_constructor(constructor, &class.name, class.modifiers.contains_abstract(), context);
+                    }
+                    ClassLikeMember::Method(method) if method.name.value == PROGRAM_ENTRY.as_bytes() => {
+                        check_program_entry(method, context);
+                    }
+                    _ => {}
                 }
             }
             check_iterable_class(&class.name, class.inheritance.as_ref(), &class.members, context);
@@ -7484,6 +7505,28 @@ fn enclosing_iterator_method<'ast, 'arena>(program: &'ast Program<'arena>, span:
         .is_empty();
 
     (returns_iterable(method) && !in_lambda).then_some(method)
+}
+
+/// Reports a class's `main` that isn't `public int main()` or `public void main()`. Spec section 27: PHP runs the
+/// class's file as a program, the engine builds the class and calls `main` with no arguments, and an `int` it returns
+/// is the process's exit code.
+fn check_program_entry(method: &Method, context: &mut Context<'_, '_, '_>) {
+    let returns = method.return_type_hint.as_ref().map(|returned| &returned.hint);
+    if method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Public(_)))
+        && !method.modifiers.contains_static()
+        && !method.modifiers.contains_abstract()
+        && method.type_parameters.is_none()
+        && method.parameter_list.parameters.is_empty()
+        && matches!(returns, Some(Hint::Integer(_) | Hint::Void(_)))
+    {
+        return;
+    }
+
+    context.report(
+        Issue::error("A class's `main` runs it as a program: declare it `public int main()` or `public void main()`.")
+            .with_annotation(Annotation::primary(method.name.span).with_message("Declared here."))
+            .with_note("The engine calls `main` with no arguments, and exits with the `int` it returns."),
+    );
 }
 
 /// Whether a method's declared return type is `Iterable<T>`. A method that yields gives one, which is never null, so

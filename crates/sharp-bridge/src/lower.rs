@@ -37,6 +37,7 @@ use mago_codex::ttype::takes_array;
 use mago_codex::ttype::takes_bytes;
 use mago_codex::ttype::takes_int_key_as_string;
 use mago_codex::ttype::union::TUnion;
+use mago_names::PROGRAM_ENTRY;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
 use mago_names::binding::LocalKind;
@@ -383,6 +384,13 @@ pub fn lower(checked: &CheckedProgram<'_>) -> Unit {
     Lowering::new(&lines, checked.names(), checked.types()).program(checked)
 }
 
+/// Whether `class` declares `main`, so its file runs as a program, spec section 27.
+fn runs_as_program(class: &Class) -> bool {
+    class.members.iter().any(
+        |member| matches!(member, ClassLikeMember::Method(method) if method.name.value == PROGRAM_ENTRY.as_bytes()),
+    )
+}
+
 /// The offset each line starts at, counted as the Zend scanner counts: `\n`, `\r\n` and a lone `\r` each end a line.
 struct Lines(Vec<u32>);
 
@@ -526,8 +534,9 @@ struct Lowering<'lowering, 'arena> {
     /// The expression of the expression statement being lowered, whose value nothing reads.
     discarded: Option<Span>,
     /// Whether the expression lowered next is one whose match narrows the reads after it, as [`Self::condition`]
-    /// lowers it: the condition of an `if`, a `while`, a `? :` or a `match` arm, the left side of `&&`, and inside one of
-    /// those its parentheses, its pattern form, the operand of its `!` and both sides of its `&&` and its `||`.
+    /// lowers it: the condition of an `if`, a `while`, a `? :` or a `match` arm, the left side of `&&` and of `||`, and
+    /// inside one of those its parentheses, its pattern form, the operand of its `!` and both sides of its `&&` and its
+    /// `||`.
     /// [`Self::arriving`] takes it, so no other expression inside it sees it.
     narrowing: bool,
     /// The nodes [`Self::picked_step`] made, which an expression statement runs as one statement for each step.
@@ -717,7 +726,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // run time. A module's laws are checked and never run. A module's bindings are the table the file returns
             // last, in `program`.
             Statement::Extern(r#extern) => statements.extend(self.extern_attributes(r#extern)),
-            Statement::Use(_) | Statement::Module(_) => {}
+            // The checker keeps a `#!` line to the file's first line, which only a shell reads.
+            Statement::Use(_) | Statement::Module(_) | Statement::Inline(_) => {}
+            Statement::Class(class) if runs_as_program(class) => self.program_class(class, statements),
             Statement::Class(class) => statements.push(self.class(class)),
             Statement::Interface(interface) => {
                 statements.push(self.interface(interface));
@@ -729,6 +740,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Statement::Struct(r#struct) => statements.push(self.r#struct(r#struct)),
             _ => unreachable!("check_slice refuses the file statement `{statement}`"),
         }
+    }
+
+    /// Spec section 27: a class that declares `main`, whose file PHP runs as its script, as a program. The file calls
+    /// `\Sharp\Internal\startProgram()` before the class, which loads the project's Composer autoloader, so the parent
+    /// and the interfaces the class names load as PHP declares it, and `\Sharp\Internal\runProgram('App\Console\Import')`
+    /// after it, which builds the class and runs `main`. Each runs only when PHP runs the file as its script, so a file
+    /// `include` or an autoloader loads only declares its class.
+    fn program_class(&mut self, class: &Class, statements: &mut Vec<u32>) {
+        let line = self.line(class);
+        statements.push(self.global_call(line, b"Sharp\\Internal\\startProgram", &[]));
+        statements.push(self.class(class));
+        let name = self.string(0, line, self.names.get(&class.name));
+        statements.push(self.global_call(line, b"Sharp\\Internal\\runProgram", &[name]));
     }
 
     /// Spec section 32: a test file's module, the call `\Sharp\Internal\testModule('App\Shop\CheckoutTest', table)`,
@@ -6183,13 +6207,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     _ => Operands::Other,
                 };
 
-                // The left side of `&&` narrows its right side, and both sides of an `&&` or an `||` that narrows narrow
-                // the reads after it. `||` runs its right side only when its left side failed.
-                let and = matches!(binary.operator, BinaryOperator::And(_) | BinaryOperator::LowAnd(_));
-                let or = matches!(binary.operator, BinaryOperator::Or(_) | BinaryOperator::LowOr(_));
-                self.narrowing = and || (or && narrowing);
+                // The left side of `&&` and of `||` narrows its right side wherever it sits, as `||` runs its right side
+                // only when its left side failed, and both sides of one that narrows narrow the reads after it.
+                let joins = matches!(
+                    binary.operator,
+                    BinaryOperator::And(_)
+                        | BinaryOperator::LowAnd(_)
+                        | BinaryOperator::Or(_)
+                        | BinaryOperator::LowOr(_)
+                );
+                self.narrowing = joins;
                 let lhs = self.expression(binary.lhs);
-                self.narrowing = (and || or) && narrowing;
+                self.narrowing = joins && narrowing;
                 let rhs = self.expression(binary.rhs);
 
                 match (binary.operator, operands) {
