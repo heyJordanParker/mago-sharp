@@ -698,6 +698,15 @@ impl IncrementalAnalysisService {
             lowered_again.len(),
             translated_only.len(),
         );
+        // Past the laws' translation only `law_refusals` reads what the analysis gave the lowering, of each file a law
+        // reaches, until the next analysis replaces it all, so every other file's goes before the compile stamps and
+        // writes.
+        let (_, reached_by_laws) = self.law_reach(&reach);
+        for (file_id, state) in &mut self.file_states {
+            if !reached_by_laws.contains(file_id) {
+                state.lowering_input = None;
+            }
+        }
         // A file the last analysis kept no lowering input for is analyzed again against the codebase that analysis saw,
         // so it sends the provider requests that analysis sent, and every read their answers rest on is one the
         // analysis already holds.
@@ -1485,11 +1494,7 @@ impl IncrementalAnalysisService {
         }
 
         let reach = Reach::new(&self.codebase, &self.native_symbol_references);
-        let law_files: HashSet<FileId> = reach
-            .law_files()
-            .filter(|law_file| self.database.get_ref(law_file).is_ok_and(|file| file.file_type == FileType::Host))
-            .collect();
-        let reached: HashSet<FileId> = law_files.iter().flat_map(|law_file| reach.files(*law_file)).copied().collect();
+        let (law_files, reached) = self.law_reach(&reach);
         let files: Vec<Arc<File>> =
             self.database.files().filter(|file| reached.contains(&file.id) && Dialect::of(file).is_sharp()).collect();
         let reached_files: Vec<&Arc<File>> = files.iter().collect();
@@ -1508,6 +1513,18 @@ impl IncrementalAnalysisService {
         refused.retain(|file_id, _| law_files.contains(file_id));
 
         Ok(refused)
+    }
+
+    /// The workspace's own files that state a law, whose laws [`Self::law_refusals`] refuses, and each file those laws
+    /// reach, by `reach`.
+    fn law_reach(&self, reach: &Reach) -> (HashSet<FileId>, HashSet<FileId>) {
+        let law_files: HashSet<FileId> = reach
+            .law_files()
+            .filter(|law_file| self.database.get_ref(law_file).is_ok_and(|file| file.file_type == FileType::Host))
+            .collect();
+        let reached = law_files.iter().flat_map(|law_file| reach.files(*law_file)).copied().collect();
+
+        (law_files, reached)
     }
 
     /// The PHP# files [`Self::compile`] lowers, the workspace's own, in file name order.
@@ -3833,6 +3850,34 @@ mod tests {
             ),
             ("app/Order.sharp", ORDER),
         ])
+    }
+
+    /// Once the laws are translated, a compile keeps what the analysis gave the lowering only of each file a law reaches,
+    /// which [`IncrementalAnalysisService::law_refusals`] reads after it, so that analyzes none again.
+    #[test]
+    fn a_compile_keeps_the_lowering_inputs_of_the_files_a_law_reaches_alone() {
+        let database = lawful_project();
+        let mut service = analyzed_for_lowering(&database);
+
+        compile(&mut service, empty_stamp);
+        let kept: BTreeSet<String> = service
+            .file_states
+            .iter()
+            .filter(|(_, state)| state.lowering_input.is_some())
+            .map(|(file_id, _)| {
+                String::from_utf8_lossy(&service.database().get(file_id).expect("the file exists").name).into_owned()
+            })
+            .collect();
+        service.law_refusals().expect("the laws are translated");
+
+        assert_eq!(
+            kept,
+            BTreeSet::from(["app/Shared/Digits.sharp", "app/Shared/Money.sharp", "app/Shared/Rounding.sharp"])
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+        assert_eq!(analyzed_to_lower(&service), BTreeSet::new());
     }
 
     /// Spec section 28: a law is proven from its `.sharp` file alone, so its file's inputs are the sources its laws
