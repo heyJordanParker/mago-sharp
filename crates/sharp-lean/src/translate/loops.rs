@@ -8,7 +8,6 @@ use mago_syntax::cst::AssignmentOperator;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForOf;
 use mago_syntax::cst::ForOfTarget;
-use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPostfixOperator;
 use mago_syntax::cst::UnaryPrefix;
@@ -48,7 +47,7 @@ impl Body<'_, '_> {
             _ => return refuse(self),
         };
         let mut additions = Vec::new();
-        if !additions_of(for_of.body, &mut Vec::new(), &mut additions) {
+        if !self.additions_of(for_of.body, &mut Vec::new(), &mut additions) {
             return refuse(self);
         }
         let mut accumulators: Vec<u32> = Vec::new();
@@ -128,56 +127,58 @@ impl Body<'_, '_> {
 
         Some(format!("(List.map (fun {element} => {amount}.toInt) {filtered}).sum"))
     }
-}
 
-/// The additions to locals of a counting or summing loop's `body`, under `conditions`, or `false` when the body does
-/// anything else: `x += e`, `x++` and `++x`, in blocks and under an `if` with or without an `else`.
-fn additions_of<'expression, 'arena>(
-    body: &'expression Statement<'arena>,
-    conditions: &mut Vec<(&'expression Expression<'arena>, bool)>,
-    additions: &mut Vec<Addition<'expression, 'arena>>,
-) -> bool {
-    match body {
-        Statement::Block(block) => {
-            block.statements.iter().all(|statement| additions_of(statement, conditions, additions))
-        }
-        Statement::If(r#if) => {
-            let IfBody::Statement(body) = &r#if.body else {
-                return false;
-            };
-            conditions.push((r#if.condition, true));
-            let then = additions_of(body.statement, conditions, additions);
-            conditions.pop();
-            let Some(clause) = &body.else_clause else {
-                return then;
-            };
-            conditions.push((r#if.condition, false));
-            let otherwise = additions_of(clause.statement, conditions, additions);
-            conditions.pop();
+    /// The additions to locals of a counting or summing loop's body `statement`, under `conditions`, or `false` when
+    /// the body does anything else: `x += e`, `x++` and `++x`, in blocks and under an `if` with or without an `else`.
+    fn additions_of<'expression, 'arena>(
+        &mut self,
+        statement: &'expression Statement<'arena>,
+        conditions: &mut Vec<(&'expression Expression<'arena>, bool)>,
+        additions: &mut Vec<Addition<'expression, 'arena>>,
+    ) -> bool {
+        match statement {
+            Statement::Block(block) => {
+                block.statements.iter().all(|statement| self.additions_of(statement, conditions, additions))
+            }
+            Statement::If(r#if) => {
+                let Some(branches) = self.branches(r#if) else {
+                    return false;
+                };
+                conditions.push((branches.condition, true));
+                let then = self.additions_of(branches.then, conditions, additions);
+                conditions.pop();
+                let Some(otherwise) = branches.otherwise else {
+                    return then;
+                };
+                conditions.push((branches.condition, false));
+                let otherwise = self.additions_of(otherwise, conditions, additions);
+                conditions.pop();
 
-            then && otherwise
-        }
-        Statement::Expression(statement) => {
-            let (local, amount) = match statement.expression {
-                Expression::Assignment(assignment)
-                    if matches!(assignment.operator, AssignmentOperator::Addition(_)) =>
-                {
-                    (assignment.lhs, (literal(assignment.rhs) != Some(1)).then_some(assignment.rhs))
-                }
-                Expression::UnaryPostfix(postfix)
-                    if matches!(postfix.operator, UnaryPostfixOperator::PostIncrement(_)) =>
-                {
-                    (postfix.operand, None)
-                }
-                Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::PreIncrement(_), operand }) => {
-                    (*operand, None)
-                }
-                _ => return false,
-            };
-            additions.push(Addition { local, amount, conditions: conditions.clone() });
+                then && otherwise
+            }
+            Statement::Expression(statement) => {
+                let (local, amount) = match statement.expression {
+                    Expression::Assignment(assignment)
+                        if matches!(assignment.operator, AssignmentOperator::Addition(_)) =>
+                    {
+                        (assignment.lhs, (literal(assignment.rhs) != Some(1)).then_some(assignment.rhs))
+                    }
+                    Expression::UnaryPostfix(postfix)
+                        if matches!(postfix.operator, UnaryPostfixOperator::PostIncrement(_)) =>
+                    {
+                        (postfix.operand, None)
+                    }
+                    Expression::UnaryPrefix(UnaryPrefix {
+                        operator: UnaryPrefixOperator::PreIncrement(_),
+                        operand,
+                    }) => (*operand, None),
+                    _ => return false,
+                };
+                additions.push(Addition { local, amount, conditions: conditions.clone() });
 
-            true
+                true
+            }
+            _ => false,
         }
-        _ => false,
     }
 }

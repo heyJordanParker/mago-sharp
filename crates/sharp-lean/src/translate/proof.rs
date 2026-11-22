@@ -19,7 +19,6 @@ use mago_syntax::cst::Block;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Law as LawNode;
 use mago_syntax::cst::LawProof;
 use mago_syntax::cst::Pattern;
@@ -242,26 +241,28 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
                 self.statements(rest, scope, lines);
             }
             Statement::If(r#if) => {
-                let IfBody::Statement(body) = &r#if.body else {
+                let mut translation = self.body(&scope);
+                let branches = translation.branches(r#if);
+                self.proof.unmodeled.extend(translation.finish().2);
+                let Some(branches) = branches else {
                     return;
                 };
-                let condition = self.condition(&scope, r#if.condition);
-                let written = self.source(r#if.condition.span());
+                let condition = self.condition(&scope, branches.condition);
+                let written = self.source(branches.condition.span());
                 self.hypotheses += 1;
                 let hypothesis = format!("«$c{}»", self.hypotheses);
                 lines.push(format!("by_cases {hypothesis} : {condition}"));
 
                 let mut then = scope.clone();
                 then.hypotheses.push((hypothesis.clone(), written));
-                then.path = scope.path.branch(r#if.condition, true);
-                let branch: Vec<&Statement> = std::iter::once(body.statement).chain(rest.iter().copied()).collect();
+                then.path = scope.path.branch(branches.condition, true);
+                let branch: Vec<&Statement> = std::iter::once(branches.then).chain(rest.iter().copied()).collect();
                 self.branch(&branch, then, lines);
 
                 let mut otherwise = scope;
-                otherwise.hypotheses.push((hypothesis, negated(self, r#if.condition)));
-                otherwise.path = otherwise.path.branch(r#if.condition, false);
-                let branch: Vec<&Statement> =
-                    body.else_clause.iter().map(|clause| clause.statement).chain(rest.iter().copied()).collect();
+                otherwise.hypotheses.push((hypothesis, negated(self, branches.condition)));
+                otherwise.path = otherwise.path.branch(branches.condition, false);
+                let branch: Vec<&Statement> = branches.otherwise.into_iter().chain(rest.iter().copied()).collect();
                 self.branch(&branch, otherwise, lines);
             }
             Statement::PatternMatch(r#match) => self.r#match(r#match, rest, scope, lines),

@@ -45,6 +45,7 @@ use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Is;
@@ -290,16 +291,67 @@ impl<'body, 'program> Body<'body, 'program> {
     pub(super) fn statements(&mut self, statements: &Sequence<'_, Statement<'_>>) {
         let outer = self.path.clone();
         for statement in statements {
-            self.statement(statement);
-            if let Statement::If(r#if) = statement
-                && let IfBody::Statement(body) = &r#if.body
-                && body.else_clause.is_none()
-                && returns(body.statement)
+            let Statement::If(r#if) = statement else {
+                self.statement(statement);
+                continue;
+            };
+            if let Some(branches) = self.r#if(r#if)
+                && branches.otherwise.is_none()
+                && returns(branches.then)
             {
-                self.path = self.path.branch(r#if.condition, false);
+                self.path = self.path.branch(branches.condition, false);
             }
         }
         self.path = outer;
+    }
+
+    /// The branches of `r#if`, or `None` for an `if` with an else-if clause, which is refused: PHP# writes it `else
+    /// if`, and a translation that read only the other branches would drop its branch.
+    pub(crate) fn branches<'ast, 'arena>(&mut self, r#if: &'ast If<'arena>) -> Option<Branches<'ast, 'arena>> {
+        let IfBody::Statement(body) = &r#if.body else {
+            unreachable!("PHP# parses no colon-delimited if, as {:?}", r#if.span());
+        };
+        if let Some(clause) = body.else_if_clauses.first() {
+            self.unmodeled(clause.span(), "an else-if clause".to_owned(), issues::ELSE_IF);
+
+            return None;
+        }
+
+        Some(Branches {
+            condition: r#if.condition,
+            then: body.statement,
+            otherwise: body.else_clause.as_ref().map(|clause| clause.statement),
+        })
+    }
+
+    /// The statements of `r#if`, which give its branches, or `None` when it is refused.
+    fn r#if<'ast, 'arena>(&mut self, r#if: &'ast If<'arena>) -> Option<Branches<'ast, 'arena>> {
+        let branches = self.branches(r#if)?;
+        let holds = self.path.branch(branches.condition, true);
+        // `if (x is Money m)` names `m` where the test holds, so it is a `match` on `x`.
+        if let Expression::Is(is) = branches.condition.unparenthesized() {
+            let Some(test) = self.is_test(is) else {
+                return Some(branches);
+            };
+            let then = self.under(holds, |this| this.nested_statement(branches.then));
+            let otherwise = branches.otherwise.map(|otherwise| self.nested_statement(otherwise));
+            let choice = choice(vec![(test, then)], otherwise.unwrap_or_default());
+            self.lines.extend(statements(&choice));
+
+            return Some(branches);
+        }
+        let condition = self.value(branches.condition);
+        let then = self.under(holds, |this| this.nested_statement(branches.then));
+        self.lines.push(format!("if {condition} then"));
+        self.lines.extend(indented(&then, 2));
+        if let Some(otherwise) = branches.otherwise {
+            let fails = self.path.branch(branches.condition, false);
+            let otherwise = self.under(fails, |this| this.nested_statement(otherwise));
+            self.lines.push("else".to_owned());
+            self.lines.extend(indented(&otherwise, 2));
+        }
+
+        Some(branches)
     }
 
     fn statement(&mut self, statement: &Statement) {
@@ -329,36 +381,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 }
             },
             Statement::If(r#if) => {
-                let IfBody::Statement(body) = &r#if.body else {
-                    unreachable!("PHP# parses no colon-delimited if, as {:?}", r#if.span());
-                };
-                if let Some(clause) = body.else_if_clauses.first() {
-                    self.unmodeled(clause.span(), "an else-if clause".to_owned(), issues::ELSE_IF);
-
-                    return;
-                }
-                let holds = self.path.branch(r#if.condition, true);
-                // `if (x is Money m)` names `m` where the test holds, so it is a `match` on `x`.
-                if let Expression::Is(is) = r#if.condition.unparenthesized() {
-                    let Some(test) = self.is_test(is) else {
-                        return;
-                    };
-                    let then = self.under(holds, |this| this.nested_statement(body.statement));
-                    let otherwise = body.else_clause.as_ref().map(|clause| self.nested_statement(clause.statement));
-                    let choice = choice(vec![(test, then)], otherwise.unwrap_or_default());
-                    self.lines.extend(statements(&choice));
-                    return;
-                }
-                let condition = self.value(r#if.condition);
-                let then = self.under(holds, |this| this.nested_statement(body.statement));
-                self.lines.push(format!("if {condition} then"));
-                self.lines.extend(indented(&then, 2));
-                if let Some(clause) = &body.else_clause {
-                    let fails = self.path.branch(r#if.condition, false);
-                    let otherwise = self.under(fails, |this| this.nested_statement(clause.statement));
-                    self.lines.push("else".to_owned());
-                    self.lines.extend(indented(&otherwise, 2));
-                }
+                self.r#if(r#if);
             }
             Statement::ForOf(for_of) => self.counting_loop(for_of),
             Statement::For(_)
@@ -2410,6 +2433,14 @@ fn statements(choice: &Choice) -> Vec<String> {
     }
 }
 
+/// An `if` as a translation reads it: its condition, the statement that runs where the condition holds, and the
+/// statement of its `else` clause, when it has one.
+pub(crate) struct Branches<'ast, 'arena> {
+    pub(crate) condition: &'ast Expression<'arena>,
+    pub(crate) then: &'ast Statement<'arena>,
+    pub(crate) otherwise: Option<&'ast Statement<'arena>>,
+}
+
 /// Whether `statement` always returns: a `return`, or a block that ends in one.
 fn returns(statement: &Statement) -> bool {
     match statement {
@@ -2482,45 +2513,144 @@ mod tests {
     use std::borrow::Cow;
 
     use mago_allocator::LocalArena;
-    use mago_analyzer::artifacts::LoweringInput;
+    use mago_analyzer::artifacts::AnalysisArtifacts;
     use mago_analyzer::effects::Effects;
     use mago_codex::metadata::CodebaseMetadata;
+    use mago_codex::ttype::get_int;
+    use mago_codex::ttype::get_list;
     use mago_database::file::File;
     use mago_names::resolver::NameResolver;
     use mago_sharp_bridge::InlineForms;
     use mago_sharp_bridge::check;
+    use mago_span::Position;
+    use mago_syntax::cst::ClassLikeMember;
+    use mago_syntax::cst::MethodBody;
+    use mago_syntax::cst::Program;
     use mago_syntax::dialect::Dialect;
     use mago_syntax::parser::parse_file_with_dialect;
     use mago_syntax::settings::ParserSettings;
 
     use super::*;
+    use crate::translate::proof::Prover;
 
-    /// An `if` with an else-if clause, which the PHP# checker refuses in a `.sharp` file, is a construct the
-    /// translation does not model, so the branch it would drop never becomes part of a proof. Plain PHP writes the
-    /// clause, and nothing checks it before the translation here.
-    #[test]
-    fn an_if_with_an_else_if_clause_is_unmodeled() {
-        let code = "<?php\nif (true) { return 1; } elseif (false) { return 0; } else { return 2; }\n";
-        let file = File::ephemeral(Cow::Borrowed(b"src/Sign.php"), Cow::Borrowed(code.as_bytes()));
+    /// Each construct `translate` refuses in `code`, a file in `dialect` that the checks would refuse and that nothing
+    /// checks here, as what it is and why. The analysis typed only each expression of `typed`: the text it writes
+    /// where it first follows the text before it, as `values` in `("of ", "values")`, with its type.
+    fn refusals(
+        code: &'static str,
+        dialect: Dialect,
+        typed: &[(&str, &str, TUnion)],
+        translate: impl FnOnce(&Program<'_>, &CheckedProgram<'_>) -> Vec<Unmodeled>,
+    ) -> Vec<(String, String)> {
+        let file = File::ephemeral(Cow::Borrowed(b"src/Sign.sharp"), Cow::Borrowed(code.as_bytes()));
         let arena = LocalArena::new();
-        let program = parse_file_with_dialect(&arena, &file, Dialect::Php, ParserSettings::default());
-        let (input, codebase, forms) = (LoweringInput::default(), CodebaseMetadata::new(), InlineForms::default());
+        let program = parse_file_with_dialect(&arena, &file, dialect, ParserSettings::default());
+        let mut artifacts = AnalysisArtifacts::new();
+        for (before, text, r#type) in typed {
+            let Some(at) = code.find(before) else {
+                panic!("the code writes `{before}`");
+            };
+            let start = (at + before.len()) as u32;
+            let span = Span::new(file.id, Position::new(start), Position::new(start + text.len() as u32));
+            artifacts.set_expression_type(&span, r#type.clone());
+        }
+        let input = artifacts.into_lowering_input();
+        let (codebase, forms) = (CodebaseMetadata::new(), InlineForms::default());
         let effects = Effects::solve(&codebase, &[]);
         let names = NameResolver::new(&arena).resolve(program);
         let Ok(checked) = check(&file, program, names, &input, &codebase, &effects, &forms, &[]) else {
             panic!("a program that parses with no issue is accepted");
         };
-        let Some(r#if) = program.statements.iter().find(|statement| matches!(statement, Statement::If(_))) else {
-            panic!("the program holds its if");
+
+        translate(program, &checked)
+            .into_iter()
+            .map(|construct| (construct.what, construct.reason.into_owned()))
+            .collect()
+    }
+
+    /// The first member of the class `program` declares first.
+    fn first_member<'program>(program: &'program Program<'program>) -> &'program ClassLikeMember<'program> {
+        let Some(Statement::Class(class)) = program.statements.first() else {
+            panic!("the program declares a class first");
         };
-        let reach = Reach::default();
-        let mut body = Body::new(&checked, &reach, b"Sign", "Sign.of".to_owned());
+        let Some(member) = class.members.first() else {
+            panic!("the class declares a member");
+        };
 
-        body.statement(r#if);
+        member
+    }
 
-        let (_, _, unmodeled) = body.finish();
-        let refused: Vec<(&str, &str)> =
-            unmodeled.iter().map(|construct| (construct.what.as_str(), construct.reason.as_ref())).collect();
-        assert_eq!(refused, [("an else-if clause", issues::ELSE_IF)]);
+    /// An `if` with an else-if clause, which the PHP# checker refuses in a `.sharp` file, is a construct the
+    /// translation does not model, so the branch it would drop never becomes part of a proof. Plain PHP writes the
+    /// clause.
+    #[test]
+    fn an_if_with_an_else_if_clause_is_unmodeled() {
+        let code = "<?php\nif (true) { return 1; } elseif (false) { return 0; } else { return 2; }\n";
+
+        let refused = refusals(code, Dialect::Php, &[], |program, checked| {
+            let Some(r#if) = program.statements.iter().find(|statement| matches!(statement, Statement::If(_))) else {
+                panic!("the program holds its if");
+            };
+            let reach = Reach::default();
+            let mut body = Body::new(checked, &reach, b"Sign", "Sign.of".to_owned());
+            body.statement(r#if);
+
+            body.finish().2
+        });
+
+        assert_eq!(refused, [("an else-if clause".to_owned(), issues::ELSE_IF.to_owned())]);
+    }
+
+    /// A law's body proves each branch of an `if`, so an `if` with an else-if clause, whose branch the proof would
+    /// leave out, is a construct the translation does not model.
+    #[test]
+    fn a_law_body_s_if_with_an_else_if_clause_is_unmodeled() {
+        let code = "class Sign\n{\n    law holds() => true\n    {\n        if (true) {\n            return;\n        } elseif (false) {\n            return;\n        }\n    }\n}\n";
+
+        let refused = refusals(code, Dialect::Sharp, &[], |program, checked| {
+            let ClassLikeMember::Law(law) = first_member(program) else {
+                panic!("the class declares its law first");
+            };
+            let reach = Reach::default();
+            let prover = Prover::new(checked, &reach, b"Sign", "Sign.holds".to_owned(), law, "Sign.holds".to_owned());
+
+            prover.prove(&[], &[]).unmodeled
+        });
+
+        assert_eq!(refused, [("an else-if clause".to_owned(), issues::ELSE_IF.to_owned())]);
+    }
+
+    /// A counting loop is the sum of what each branch of its `if` adds, so an `if` with an else-if clause, whose
+    /// additions the sum would leave out, is a construct the translation does not model, and the loop with it.
+    #[test]
+    fn a_counting_loop_s_if_with_an_else_if_clause_is_unmodeled() {
+        let code = "class Tally\n{\n    public int count(List<int> values)\n    {\n        let total = 0;\n        for (const value of values) {\n            if (true) {\n                total += 1;\n            } elseif (false) {\n                total += 2;\n            }\n        }\n\n        return total;\n    }\n}\n";
+        let typed = [("of ", "values", get_list(get_int())), ("{\n                ", "total", get_int())];
+
+        let refused = refusals(code, Dialect::Sharp, &typed, |program, checked| {
+            let ClassLikeMember::Method(method) = first_member(program) else {
+                panic!("the class declares its method first");
+            };
+            let MethodBody::Concrete(block) = &method.body else {
+                panic!("the method has a body");
+            };
+            let Some(r#loop) = block.statements.iter().find(|statement| matches!(statement, Statement::ForOf(_)))
+            else {
+                panic!("the method holds its loop");
+            };
+            let reach = Reach::default();
+            let mut body = Body::new(checked, &reach, b"Tally", "Tally.count".to_owned());
+            body.statement(r#loop);
+
+            body.finish().2
+        });
+
+        assert_eq!(
+            refused,
+            [
+                ("an else-if clause".to_owned(), issues::ELSE_IF.to_owned()),
+                ("a loop that does more than count or sum".to_owned(), issues::LOOP.to_owned()),
+            ]
+        );
     }
 }
