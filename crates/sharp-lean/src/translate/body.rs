@@ -1198,9 +1198,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 if kind == Kind::Enum
                     && let Some(case) = self.case_constructor(value) =>
             {
-                let case = if r#type.is_nullable() { format!("some ({case} ..)") } else { format!("({case} ..)") };
-
-                Some(format!("(match {subject} with | {case} => true | _ => false)"))
+                Some(Test::case(subject, &case, r#type.is_nullable()).condition())
             }
             // A value an object is compared with is `null`: a pattern takes constants, and an object's identity is
             // nothing a law reasons about.

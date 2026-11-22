@@ -38,23 +38,70 @@ pub(super) struct Test {
 }
 
 impl Test {
+    /// The test that `subject`, of a type that takes `null` when `nullable`, is the case whose Lean constructor is
+    /// `case`, whatever fields the case holds.
+    pub(super) fn case(subject: &str, case: &str, nullable: bool) -> Test {
+        let pattern = format!("({case} ..)");
+        let destructure = Destructure::constructor(subject, None, pattern.clone(), pattern);
+
+        Test { matches: vec![if nullable { destructure.some() } else { destructure }], ..Test::default() }
+    }
+
     /// The test of a pattern that names no value as one condition: each of its matches, outermost first, false for a
     /// value its pattern leaves out, with its conditions inside.
     pub(super) fn condition(self) -> String {
         assert!(self.lets.is_empty(), "a pattern that names no value binds no local");
         let mut condition = if self.conditions.is_empty() { "true".to_owned() } else { self.conditions.join(" && ") };
-        for Destructure { term, pattern } in self.matches.into_iter().rev() {
-            condition = format!("(match {term} with | {pattern} => {condition} | _ => false)");
+        for Destructure { term, pattern, others, .. } in self.matches.into_iter().rev() {
+            let arms: Vec<String> = std::iter::once(format!("| {pattern} => {condition}"))
+                .chain(others.iter().map(|other| format!("| {other} => false")))
+                .collect();
+            condition = format!("(match {term} with {})", arms.join(" "));
         }
 
         condition
     }
 }
 
-/// One Lean `match` of a test: the term, and the pattern.
+/// One Lean `match` of a test: the term, the pattern, the pattern of the values it holds for when it tests nothing inside
+/// them, and the pattern of each value it leaves out, one for each constructor, so each branch's hypotheses name the
+/// constructor that reached it. The translation does not know the other constructors of a class-like, so `_` leaves
+/// them out.
 struct Destructure {
     term: String,
     pattern: String,
+    covers: String,
+    others: Vec<String>,
+}
+
+impl Destructure {
+    /// The match of `term` against `pattern`, a pattern of a class-like's constructor that holds for every value
+    /// `covers` does, which names the whole value `name` when a name is given.
+    fn constructor(term: &str, name: Option<&str>, pattern: String, covers: String) -> Destructure {
+        Destructure { term: term.to_owned(), pattern: named(name, pattern), covers, others: vec!["_".to_owned()] }
+    }
+
+    /// The match of `term` against `pattern`, a list pattern of `leading` elements, before a rest when `rest`. One with
+    /// a rest leaves out each shorter list, and one without leaves out each longer one too.
+    fn list(term: &str, pattern: String, leading: usize, rest: bool) -> Destructure {
+        let exactly = |count: usize| format!("[{}]", vec!["_"; count].join(", "));
+        let at_least = |count: usize| vec!["_"; count + 1].join(" :: ");
+        let mut others: Vec<String> = (0..leading).map(exactly).collect();
+        if !rest {
+            others.push(at_least(leading + 1));
+        }
+        let covers = if rest { at_least(leading) } else { exactly(leading) };
+
+        Destructure { term: term.to_owned(), pattern, covers, others }
+    }
+
+    /// This match of a value that takes `null`: `some` of its pattern, which leaves out `none` too.
+    fn some(self) -> Destructure {
+        let some = |pattern: &str| format!("some ({pattern})");
+        let others = std::iter::once("none".to_owned()).chain(self.others.iter().map(|other| some(other))).collect();
+
+        Destructure { term: self.term, pattern: some(&self.pattern), covers: some(&self.covers), others }
+    }
 }
 
 impl Body<'_, '_> {
@@ -106,17 +153,20 @@ impl Body<'_, '_> {
         } else if pattern.fields.is_none()
             && let Some(implementer) = self.implementer(&pattern.hint, atomic)
         {
-            Some(named(name.as_deref(), format!("({implementer} _)")))
+            let pattern = format!("({implementer} _)");
+            Some(Destructure::constructor(subject, name.as_deref(), pattern.clone(), pattern))
         } else if let Some((held, case)) = self.case(&pattern.hint, atomic) {
             let arguments = self.fields(pattern, &mut parts)?;
-            let case = format!("({case} {arguments})");
-            Some(named(
-                name.as_deref(),
-                match held {
-                    Some(constructor) => format!("({constructor} {case})"),
-                    None => case,
-                },
-            ))
+            let (tested, covers) = (format!("({case} {arguments})"), format!("({case} ..)"));
+            Some(match held {
+                Some(constructor) => Destructure::constructor(
+                    subject,
+                    name.as_deref(),
+                    format!("({constructor} {tested})"),
+                    format!("({constructor} {covers})"),
+                ),
+                None => Destructure::constructor(subject, name.as_deref(), tested, covers),
+            })
         } else {
             return self.untested(pattern, atomic);
         };
@@ -124,10 +174,15 @@ impl Body<'_, '_> {
         let mut test = Test::default();
         match (constructor, name) {
             (whole, name) if r#type.is_nullable() => {
-                let whole = whole.or(name).unwrap_or_else(|| "_".to_owned());
-                test.matches.push(Destructure { term: subject.to_owned(), pattern: format!("some {whole}") });
+                let whole = whole.unwrap_or_else(|| Destructure {
+                    term: subject.to_owned(),
+                    pattern: name.unwrap_or_else(|| "_".to_owned()),
+                    covers: "_".to_owned(),
+                    others: Vec::new(),
+                });
+                test.matches.push(whole.some());
             }
-            (Some(constructor), _) => test.matches.push(Destructure { term: subject.to_owned(), pattern: constructor }),
+            (Some(constructor), _) => test.matches.push(constructor),
             (None, Some(name)) => test.lets.push((name, subject.to_owned())),
             (None, None) => {}
         }
@@ -196,25 +251,27 @@ impl Body<'_, '_> {
         }
         let name = rest.and_then(|rest| rest.variable.map(|variable| names::identifier(variable.value)));
 
-        let some = |pattern: String| if r#type.is_nullable() { format!("some ({pattern})") } else { pattern };
+        let some = |destructure: Destructure| if r#type.is_nullable() { destructure.some() } else { destructure };
         let mut test = Test::default();
         if after.is_empty() {
-            let pattern = match rest {
-                None => format!("[{}]", leading.join(", ")),
+            let destructure = match rest {
+                None => Destructure::list(subject, format!("[{}]", leading.join(", ")), leading.len(), false),
                 Some(_) => {
+                    let count = leading.len();
                     leading.push(name.unwrap_or_else(|| "_".to_owned()));
-                    leading.join(" :: ")
+                    Destructure::list(subject, leading.join(" :: "), count, true)
                 }
             };
-            test.matches.push(Destructure { term: subject.to_owned(), pattern: some(pattern) });
+            test.matches.push(some(destructure));
         } else {
             // The elements after the rest are the last ones of the list after the leading ones, read by their place
             // once the list holds them all.
             let mut tail = subject.to_owned();
             if !leading.is_empty() || r#type.is_nullable() {
                 tail = self.fresh();
+                let count = leading.len();
                 leading.push(tail.clone());
-                test.matches.push(Destructure { term: subject.to_owned(), pattern: some(leading.join(" :: ")) });
+                test.matches.push(some(Destructure::list(subject, leading.join(" :: "), count, true)));
             }
             let count = after.len();
             for (place, pattern) in after.iter().enumerate() {
@@ -284,8 +341,8 @@ fn named(name: Option<&str>, pattern: String) -> String {
 }
 
 /// Which branch runs: the first arm whose test holds, else `otherwise`. An arm whose test is one Lean pattern of the
-/// same term as the arm after it joins that arm's `match`. An arm whose test fails after a pattern of it matched runs
-/// the arms after it there too.
+/// same term as the arm after it joins that arm's `match`, in place of the alternative its pattern holds for. An arm
+/// whose test fails after a pattern of it matched runs the arms after it in each alternative its pattern leaves out.
 pub(super) fn choice(arms: Vec<(Test, Branch)>, otherwise: Branch) -> Choice {
     let mut next = Choice::Branch(otherwise);
     for (test, branch) in arms.into_iter().rev() {
@@ -302,11 +359,14 @@ pub(super) fn choice(arms: Vec<(Test, Branch)>, otherwise: Branch) -> Choice {
                 && let Choice::Match(term, alternatives) = &mut next
                 && *term == destructure.term
             {
+                alternatives.retain(|(pattern, _)| *pattern != destructure.covers);
                 alternatives.insert(0, (destructure.pattern, inner));
                 inner = next.clone();
                 continue;
             }
-            inner = Choice::Match(destructure.term, vec![(destructure.pattern, inner), ("_".to_owned(), next.clone())]);
+            let mut alternatives = vec![(destructure.pattern, inner)];
+            alternatives.extend(destructure.others.into_iter().map(|other| (other, next.clone())));
+            inner = Choice::Match(destructure.term, alternatives);
         }
         next = inner;
     }

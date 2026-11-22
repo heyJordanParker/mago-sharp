@@ -6301,6 +6301,55 @@ fn a_law_builds_takes_and_reads_a_struct_that_holds_a_map() {
     assert!(compiled(root, "app/Runs/RunStatus.sharp").exists());
 }
 
+/// `App.Runs.Prepared`, whose `Running` case holds a `Cursor`, with `prepare`, which takes a `Map` and builds the cursor
+/// from it, `keep`, which takes none and copies every field, and `laws`.
+fn prepared(laws: &str) -> String {
+    format!(
+        "namespace App.Runs;\n\npublic machine Prepared\n{{\n    case Running(Cursor cursor, int position)\n    {{\n        public Prepared.Running prepare(Map<string, int> arguments) => Prepared.Running(new Cursor(this.cursor.step, arguments, this.cursor.marks), this.position);\n\n        public Prepared.Running keep() => Prepared.Running(new Cursor(this.cursor.step, this.cursor.arguments, this.cursor.marks), this.position);\n    }}\n\n    public static Prepared.Running start(Cursor cursor) => Prepared.Running(cursor, 0);\n\n    {laws}\n}}\n"
+    )
+}
+
+/// A law follows a nullable field a move copies, through `is int` and `?:`, after a move that takes a `Map` and after
+/// one that takes none, as it follows a field that takes no `null`.
+#[test]
+fn a_law_follows_a_nullable_field_a_move_copies_through_is_int() {
+    let laws = "law preparingKeepsTheStepMarksAndPosition(Cursor cursor, int position, Map<string, int> arguments) when position >= 0 => (Prepared.Running(cursor, position).prepare(arguments).cursor.step is int at ? (cursor.step is int was ? at == was : false) : cursor.step is null) && Prepared.Running(cursor, position).prepare(arguments).cursor.marks.count() == cursor.marks.count() && Prepared.Running(cursor, position).prepare(arguments).position == position;\n    law keepingKeepsTheStep(Cursor cursor, int position) => Prepared.Running(cursor, position).keep().cursor.step is int at ? (cursor.step is int was ? at == was : false) : cursor.step is null;";
+    let directory = library_project(&[
+        ("app/Runs/Mark.sharp", MARK),
+        ("app/Runs/Cursor.sharp", CURSOR),
+        ("app/Runs/Prepared.sharp", &prepared(laws)),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Runs/Prepared.sharp").exists());
+}
+
+/// A law that claims a move's copy of a nullable field grows by one is not proven, and the field's test is still to
+/// show.
+#[test]
+fn a_false_law_over_a_nullable_field_a_move_copies_is_not_proven() {
+    let law = "law preparingMovesTheStep(Cursor cursor, int position, Map<string, int> arguments) => Prepared.Running(cursor, position).prepare(arguments).cursor.step is int at ? (cursor.step is int was ? at == was + 1 : false) : cursor.step is null;";
+    let directory = library_project(&[
+        ("app/Runs/Mark.sharp", MARK),
+        ("app/Runs/Cursor.sharp", CURSOR),
+        ("app/Runs/Prepared.sharp", &prepared(law)),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law preparingMovesTheStep is not proven\n = still to show: Prepared.Running(cursor, position).prepare(arguments).cursor.step is int at ? (cursor.step is int was ? at == was + 1 : false) : cursor.step is null\n"),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Runs/Prepared.sharp").exists());
+}
+
 /// A `List` is Lean's `List`, and its `map`, `filter` and `count` are Lean's `List.map`, `List.filter` and
 /// `List.length`, so Mago proves a law over them with the proof it creates.
 #[test]
