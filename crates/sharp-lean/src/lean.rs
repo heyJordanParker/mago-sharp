@@ -309,6 +309,9 @@ impl Lean {
             .flat_map(|translation| &translation.declarations)
             .map(|declaration| names::unescaped(&declaration.key))
             .collect();
+        let sealed: HashSet<String> =
+            reach.sealed().map(|interface| names::unescaped(&names::full_name(interface.as_bytes()))).collect();
+        let names = Names { receivers: &receivers, declared: &declared, sealed: &sealed, arguments: &[] };
         let mut keys: HashMap<&str, String> = HashMap::default();
         let mut work: Vec<(&Translation, Vec<&Law>)> = Vec::new();
         for translation in translations.iter().filter(|translation| !translation.laws.is_empty()) {
@@ -325,7 +328,7 @@ impl Lean {
                 let key = proof_key(law, &program, &laws);
                 match record.proofs.get(&key) {
                     Some(recorded) => {
-                        for issue in judged(law, recorded.judgment.clone(), &receivers, &declared) {
+                        for issue in judged(law, recorded.judgment.clone(), &names) {
                             report(&mut issues, translation, issue);
                         }
                     }
@@ -403,7 +406,7 @@ impl Lean {
                     continue;
                 }
             };
-            for issue in judged(law, judgment.clone(), &receivers, &declared) {
+            for issue in judged(law, judgment.clone(), &names) {
                 report(&mut issues, translation, issue);
             }
             if let Some(key) = keys.get(law.statement.as_str()) {
@@ -740,8 +743,8 @@ impl Proofs<'_> {
 }
 
 /// The issues of `law` the runner's `judgment` gives: one for each case and each call whose goal it left open, with
-/// the goal in PHP#, which names the members of the code as `receivers` and `declared` hold them, as Lean prints them.
-fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, declared: &HashSet<String>) -> Vec<Issue> {
+/// the goal in PHP#, which names the code as `names` holds it.
+fn judged(law: &Law, judgment: Judgment, names: &Names<'_>) -> Vec<Issue> {
     match judgment {
         Judgment::Proved => Vec::new(),
         Judgment::Through(called) => vec![issues::through(law, &called)],
@@ -769,8 +772,7 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
                     .iter()
                     .filter_map(|step| Some((step, law.proof.after.get(step.index - 1)?)))
                     .map(|(step, after)| {
-                        let names = Names { receivers, declared, arguments: &[] };
-                        let (split, goal) = goal::case(&step.goal, &names);
+                        let (split, goal) = goal::case(&step.goal, names);
                         let issue = issues::unproven_invariant(law, after, &split, goal.as_deref());
 
                         if step.out_of_time { issues::out_of_time(issue) } else { issue }
@@ -786,12 +788,11 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
             for step in &steps {
                 let (issue, split) = if step.condition {
                     let call = &law.proof.calls[step.index - 1];
-                    let names = Names { receivers, declared, arguments: &call.arguments };
+                    let names = Names { arguments: &call.arguments, ..*names };
                     (issues::unshown_condition(law, call, goal::conjunction(&step.goal, &names).as_deref()), Vec::new())
                 } else {
                     let case = &law.proof.cases[step.index - 1];
-                    let names = Names { receivers, declared, arguments: &[] };
-                    let (split, goal) = goal::case(&step.goal, &names);
+                    let (split, goal) = goal::case(&step.goal, names);
                     (issues::unproven_case(law, case, &split, goal.as_deref()), split)
                 };
                 let key = (step.index, step.condition, split);
@@ -930,11 +931,11 @@ mod tests {
     /// module and quoting no Lean error.
     #[test]
     fn a_proof_or_a_module_the_checker_wrote_wrong_names_no_lean() {
+        let (receivers, declared, sealed) = (HashMap::default(), HashSet::default(), HashSet::default());
         let rejected = judged(
             &law(),
             Judgment::Rejected("unknown identifier 'Code.App.Shared.Money.add'".to_owned()),
-            &HashMap::default(),
-            &HashSet::default(),
+            &Names { receivers: &receivers, declared: &declared, sealed: &sealed, arguments: &[] },
         );
         let refused = issues::generated_module_refused(&law(), "Code.App.Shared.Money", &Refusal::Rejected(26));
 

@@ -5681,7 +5681,8 @@ fn a_law_reads_the_classes_of_a_machine_s_cases() {
     assert!(compiled(root, "app/Classes/ClassOfRepro.sharp").exists());
 }
 
-/// A false law over the classes of a machine's cases is refused as not proven, with its claim still to show.
+/// A false law over the classes of a machine's cases is refused as not proven, with its claim still to show, and with
+/// each counterexample in PHP#, as the `typeof` of the case each class is.
 #[test]
 fn a_false_law_over_the_classes_of_a_machine_s_cases_is_not_proven() {
     let directory = lawful_project(&[(
@@ -5703,36 +5704,74 @@ fn a_false_law_over_the_classes_of_a_machine_s_cases_is_not_proven() {
         printed(&output)
     );
     assert!(
-        printed(&output).contains("error[law-unproven]: law everyPairCloses is not proven\n"),
+        printed(&output).contains(
+            "error[law-unproven]: law everyPairCloses is not proven\n = when from == typeof(ClassOfRepro.Open) && to == typeof(ClassOfRepro.Open), still to show: ClassOfRepro.closes(from, to)\n"
+        ),
         "{}",
         printed(&output)
     );
     assert!(!printed(&output).contains("translated the code it reaches wrongly"), "{}", printed(&output));
 }
 
+/// `App.Classes.Status`, a sealed interface whose implementers are `App.Classes.Waiting` and `App.Classes.Served`, each
+/// file by its path.
+const STATUSES: [(&str, &str); 3] = [
+    ("app/Classes/Status.sharp", "namespace App.Classes;\n\npublic sealed interface Status\n{\n}\n"),
+    (
+        "app/Classes/Waiting.sharp",
+        "namespace App.Classes;\n\npublic final class Waiting : Status\n{\n    public Waiting(public int ticket { get; }) { }\n}\n",
+    ),
+    (
+        "app/Classes/Served.sharp",
+        "namespace App.Classes;\n\npublic final class Served : Status\n{\n    public Served(public int ticket { get; }) { }\n}\n",
+    ),
+];
+
+/// A false law over a sealed interface's values and classes names each counterexample in PHP#: a value as the
+/// implementer it is, and a class as the `typeof` of that implementer.
+#[test]
+fn a_false_law_over_a_sealed_interface_names_each_implementer_as_php_sharp_writes_it() {
+    let laws = (
+        "app/Classes/Families.sharp",
+        "namespace App.Classes;\n\npublic final class Families\n{\n    law everyStatusIsServed(Status status) => Class.of(status) == typeof(Served);\n    law everyStatusClassIsServed(Class<Status> kind) => kind == typeof(Served);\n}\n",
+    );
+    let directory = lawful_project(&[STATUSES.as_slice(), &[laws]].concat());
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: law everyStatusIsServed is not proven\n = when status is Waiting, still to show: "
+        ),
+        "{}",
+        printed(&output)
+    );
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: law everyStatusClassIsServed is not proven\n = when kind == typeof(Waiting), still to show: "
+        ),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// Spec section 25: the classes of an enum whose cases carry data are its cases, and the classes of a sealed
 /// interface are its implementers, so a law reads `Class.of` of their values as it does a machine's.
 #[test]
 fn a_law_reads_the_classes_of_a_data_enum_and_of_a_sealed_interface() {
-    let directory = lawful_project(&[
+    let families = [
         (
             "app/Classes/Shape.sharp",
             "namespace App.Classes;\n\npublic enum Shape\n{\n    case Dot;\n    case Circle(int radius);\n}\n",
-        ),
-        ("app/Classes/Status.sharp", "namespace App.Classes;\n\npublic sealed interface Status\n{\n}\n"),
-        (
-            "app/Classes/Waiting.sharp",
-            "namespace App.Classes;\n\npublic final class Waiting : Status\n{\n    public Waiting(public int ticket { get; }) { }\n}\n",
-        ),
-        (
-            "app/Classes/Served.sharp",
-            "namespace App.Classes;\n\npublic final class Served : Status\n{\n    public Served(public int ticket { get; }) { }\n}\n",
         ),
         (
             "app/Classes/Families.sharp",
             "namespace App.Classes;\n\npublic final class Families\n{\n    law aCircleIsACircle(int r) => Class.of(Shape.Circle(r)) == typeof(Shape.Circle);\n    law aDotIsNoCircle(int unused) => Class.of(Shape.Dot) != typeof(Shape.Circle);\n    law waitingIsWaiting(int t) => Class.of(new Waiting(t)) == typeof(Waiting);\n    law aStatusIsWaitingOrServed(Status status) => Class.of(status) == typeof(Waiting) || Class.of(status) == typeof(Served);\n}\n",
         ),
-    ]);
+    ];
+    let directory = lawful_project(&[STATUSES.as_slice(), families.as_slice()].concat());
     let root = directory.path();
 
     let output = compile(root);

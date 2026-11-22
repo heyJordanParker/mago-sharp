@@ -17,11 +17,15 @@ const PREFIX: u8 = 8;
 const POSTFIX: u8 = 9;
 
 /// The names a goal is printed with.
+#[derive(Clone, Copy)]
 pub(crate) struct Names<'names> {
     /// Each member PHP# calls on a value, by its Lean name as Lean prints it, and whether it is a property.
     pub(crate) receivers: &'names HashMap<String, bool>,
     /// The Lean name as Lean prints it of every declaration the translation wrote, which PHP# calls on its class.
     pub(crate) declared: &'names HashSet<String>,
+    /// The Lean name as Lean prints it of each sealed interface, spec section 20.1, whose cases are its implementers,
+    /// each a class PHP# names by itself.
+    pub(crate) sealed: &'names HashSet<String>,
     /// The PHP# of each argument of the call a condition belongs to, which its goal names as `$argN`.
     pub(crate) arguments: &'names [String],
 }
@@ -52,7 +56,9 @@ pub(crate) fn case(tree: &str, names: &Names<'_>) -> (Vec<String>, Option<String
         return (Vec::new(), None);
     };
     let (split, goal) = match tree.as_array().map(Vec::as_slice) {
-        Some([kind, Value::Array(cases), goal]) if kind == "split" => (cases.iter().map(enum_case).collect(), goal),
+        Some([kind, Value::Array(cases), goal]) if kind == "split" => {
+            (cases.iter().map(|split| enum_case(split, names)).collect(), goal)
+        }
         _ => (Some(Vec::new()), &tree),
     };
     let Some(split) = split else {
@@ -64,9 +70,10 @@ pub(crate) fn case(tree: &str, names: &Names<'_>) -> (Vec<String>, Option<String
     (split, printer.complete.then_some(goal.text))
 }
 
-/// What holds of the enum value of `[value, case]`, one case of a split: `retry is Retry.ExponentialRamp`, the case as
-/// PHP# names it on its enum, and `slow` or `!slow` for a `bool`.
-fn enum_case(split: &Value) -> Option<String> {
+/// What holds of the value of `[value, case]`, one case of a split, as PHP# writes it: `retry is Retry.ExponentialRamp`
+/// for an enum's case, `status is Waiting` for an implementer of a sealed interface, `from == typeof(Retry.Fixed)` and
+/// `from == typeof(Waiting)` for a class of a family, spec section 25, and `slow` or `!slow` for a `bool`.
+fn enum_case(split: &Value, names: &Names<'_>) -> Option<String> {
     let [value, case] = split.as_array()?.as_slice() else {
         return None;
     };
@@ -76,9 +83,18 @@ fn enum_case(split: &Value) -> Option<String> {
         "Bool.true" => value.to_owned(),
         "Bool.false" => format!("!{value}"),
         _ => {
-            let mut parts = case.rsplitn(3, '.');
-            let (name, class) = (parts.next()?, parts.next()?);
-            format!("{value} is {class}.{name}")
+            let (owner, name) = case.rsplit_once('.')?;
+            let class = |owner: &str| {
+                if names.sealed.contains(owner) {
+                    name.to_owned()
+                } else {
+                    format!("{}.{name}", owner.rsplit('.').next().unwrap_or(owner))
+                }
+            };
+            match owner.strip_suffix(".$Class") {
+                Some(family) => format!("{value} == typeof({})", class(family)),
+                None => format!("{value} is {}", class(owner)),
+            }
         }
     })
 }
@@ -310,8 +326,9 @@ mod tests {
             receivers.iter().map(|(name, property)| ((*name).to_owned(), *property)).collect();
         let declared: HashSet<String> = DECLARED.iter().map(|name| (*name).to_owned()).collect();
         let arguments: Vec<String> = arguments.iter().map(|argument| (*argument).to_owned()).collect();
+        let sealed = HashSet::default();
 
-        case(tree, &Names { receivers: &receivers, declared: &declared, arguments: &arguments }).1
+        case(tree, &Names { receivers: &receivers, declared: &declared, sealed: &sealed, arguments: &arguments }).1
     }
 
     /// The goal of `timesKeepsCurrency` without its call of `addKeepsCurrency`, as Lean leaves it once `times` is
@@ -334,12 +351,15 @@ mod tests {
     #[test]
     fn a_condition_names_the_arguments_of_its_call() {
         let condition = r#"[["app","Eq",["app","Decidable.decide",["app","LE.le",["lit","0"],["var","$arg1"]]],["app","Bool.true"]]]"#;
-        let (receivers, declared) = (HashMap::default(), HashSet::default());
+        let (receivers, declared, sealed) = (HashMap::default(), HashSet::default(), HashSet::default());
         let arguments = vec!["p".to_owned()];
 
         assert_eq!(
-            conjunction(condition, &Names { receivers: &receivers, declared: &declared, arguments: &arguments })
-                .as_deref(),
+            conjunction(
+                condition,
+                &Names { receivers: &receivers, declared: &declared, sealed: &sealed, arguments: &arguments }
+            )
+            .as_deref(),
             Some("0 <= p")
         );
     }
@@ -361,16 +381,27 @@ mod tests {
         assert_eq!(printed(goal, &[], &[]).as_deref(), Some("items[i + 1] >= 1"));
     }
 
-    /// The goal of one case of the enums a law without a body splits on names the case of each value, as PHP# writes
-    /// it: a case on its enum, and a `bool` as itself or its negation.
+    /// The goal of one case of the values a law without a body splits on names the case of each value as PHP# writes it:
+    /// a case on its enum, an implementer of a sealed interface by itself, a class of a family as the `typeof` it is, and
+    /// a `bool` as itself or its negation.
     #[test]
-    fn a_split_s_goal_names_the_case_of_each_enum_value() {
-        let goal = r#"["split",[["retry","App.Jobs.Retry.ExponentialRamp"],["slow","Bool.false"]],["app","LE.le",["var","index"],["lit","1"]]]"#;
+    fn a_split_s_goal_names_the_case_of_each_value_as_php_sharp_writes_it() {
+        let goal = r#"["split",[["retry","App.Jobs.Retry.ExponentialRamp"],["slow","Bool.false"],["status","App.Delivery.Status.Waiting"],["from","App.Doors.Door.$Class.Open"],["kind","App.Delivery.Status.$Class.Served"]],["app","LE.le",["var","index"],["lit","1"]]]"#;
         let (receivers, declared) = (HashMap::default(), HashSet::default());
+        let sealed: HashSet<String> = std::iter::once("App.Delivery.Status".to_owned()).collect();
 
         assert_eq!(
-            case(goal, &Names { receivers: &receivers, declared: &declared, arguments: &[] }),
-            (vec!["retry is Retry.ExponentialRamp".to_owned(), "!slow".to_owned()], Some("index <= 1".to_owned()))
+            case(goal, &Names { receivers: &receivers, declared: &declared, sealed: &sealed, arguments: &[] }),
+            (
+                vec![
+                    "retry is Retry.ExponentialRamp".to_owned(),
+                    "!slow".to_owned(),
+                    "status is Waiting".to_owned(),
+                    "from == typeof(Door.Open)".to_owned(),
+                    "kind == typeof(Served)".to_owned()
+                ],
+                Some("index <= 1".to_owned())
+            )
         );
     }
 

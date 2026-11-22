@@ -293,6 +293,11 @@ impl Reach {
         self.implementers.get(&self.class_key(interface)).map(Vec::as_slice)
     }
 
+    /// The full name of each reached sealed interface, spec section 20.1.
+    pub(crate) fn sealed(&self) -> impl Iterator<Item = Word> + '_ {
+        self.implementers.keys().filter_map(|interface| self.classes.get(interface).map(|reached| reached.name))
+    }
+
     /// The cases of the reached enum `r#enum`, each by its name, in the order it declares them. None for any other
     /// class-like.
     pub(crate) fn cases(&self, r#enum: &[u8]) -> &[Word] {
