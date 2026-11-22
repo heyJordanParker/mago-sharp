@@ -129,6 +129,7 @@ private theorem pure_injective {α : Type} {x y : α} (h : (pure y : M α) = pur
 
 attribute [simp] Int64.le_iff_toInt_le Int64.lt_iff_toInt_lt
 attribute [simp ←] Int64.toInt_inj
+attribute [grind] Int64.toInt_inj
 
 /-! A method that calls itself on `n - 1` where a condition has shown `n` above a bound, or on `n + 1` where one has
 shown it below, passes that step as `Int64`'s own `-` or `+`, which cannot leave the `int` range there, so Lean sees the

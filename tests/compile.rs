@@ -4419,6 +4419,28 @@ fn a_machine_s_invariant_holds_from_every_invariant_of_the_case_a_move_starts_fr
     );
 }
 
+/// A law reads a nullable `int` with `??` and `==` as the integer it holds, whichever branch built it, so a claim over
+/// a case field `int?` proves as one over an `int` does.
+#[test]
+fn a_law_reads_a_nullable_int_with_coalesce_and_equality_as_the_integer_it_holds() {
+    let directory = lawful_project(&[
+        (
+            "app/Spots.sharp",
+            "namespace App;\n\npublic machine Spots\n{\n    final case Sold;\n    final case Open(int? left);\n\n    public static Spots of(int? cap, int claims)\n        => cap != null && claims >= cap ? Spots.Sold : (cap == null ? Spots.Open(null) : Spots.Open(cap - claims));\n\n    law leftIsNeverNegative(Spots.Open open) => (open.left ?? 0) >= 0;\n\n    law openCountsItsSpots(int cap, int claims) when claims < cap && claims >= 0 => Spots.of(cap, claims) is Spots.Open open ? open.left == cap - claims : false;\n}\n",
+        ),
+        (
+            "app/Seats.sharp",
+            "namespace App;\n\npublic machine Seats\n{\n    final case Full;\n    final case Open(int? left);\n\n    public static Seats of(int n) => n > 0 ? Seats.Open(n - 1) : (n == 0 ? Seats.Open(null) : Seats.Full);\n\n    law leftIsNeverNegative(Seats.Open open) => (open.left ?? 0) >= 0;\n\n    law ofLeavesOneLess(int n) => n <= 0 || (Seats.of(n) is Seats.Open open ? open.left == n - 1 : false);\n}\n",
+        ),
+    ]);
+
+    let output = compile(directory.path());
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(directory.path(), "app/Spots.sharp").exists());
+    assert!(compiled(directory.path(), "app/Seats.sharp").exists());
+}
+
 /// A machine whose second law names a parameter `until` and whose `Going` case holds a field `while`, two of Lean's
 /// own words.
 const SUBSCRIPTION_STATUS: &str = "namespace App.Repro;\n\nimport Sharp.Time.Instant;\n\npublic machine SubscriptionStatus\n{\n    case Waiting\n    {\n        public SubscriptionStatus.Going go(Instant at) => SubscriptionStatus.Going(at, 0);\n    }\n\n    case Going(Instant at, int @while)\n    {\n        public SubscriptionStatus.Paused pause() => SubscriptionStatus.Paused;\n        public SubscriptionStatus.Done finish() => SubscriptionStatus.Done;\n    }\n\n    case Paused\n    {\n        public SubscriptionStatus.Done end() => SubscriptionStatus.Done;\n    }\n\n    final case Done;\n\n    public static SubscriptionStatus.Waiting enter() => SubscriptionStatus.Waiting;\n\n    law goingHoldsTheTime(Instant at) => SubscriptionStatus.enter().go(at).at == at;\n    law pausingHoldsTheResume(Instant at, Instant until) => SubscriptionStatus.enter().go(at).pause() is SubscriptionStatus.Paused;\n}\n";

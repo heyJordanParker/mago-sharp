@@ -41,6 +41,7 @@ use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Conditional;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameter;
@@ -455,31 +456,7 @@ impl<'body, 'program> Body<'body, 'program> {
             Expression::ConstantAccess(name) => self.name(expression, name),
             Expression::Binary(binary) => self.binary(expression, binary),
             Expression::UnaryPrefix(unary) => self.prefix(unary),
-            Expression::Conditional(conditional) => match conditional.then {
-                Some(then) => {
-                    let holds = self.path.branch(conditional.condition, true);
-                    if let Expression::Is(is) = conditional.condition.unparenthesized() {
-                        let Some(test) = self.is_test(is) else {
-                            return "default".to_owned();
-                        };
-                        let then = self.under(holds, |body| body.branch_of(then, expression));
-                        let otherwise = self.branch_of(conditional.r#else, expression);
-
-                        return self.choose(&choice(vec![(test, then)], otherwise));
-                    }
-                    let condition = self.value(conditional.condition);
-                    let then = self.under(holds, |body| body.branch_of(then, expression));
-                    let fails = self.path.branch(conditional.condition, false);
-                    let otherwise = self.under(fails, |body| body.branch_of(conditional.r#else, expression));
-
-                    self.choose(&Choice::If(
-                        condition,
-                        Box::new(Choice::Branch(then)),
-                        Box::new(Choice::Branch(otherwise)),
-                    ))
-                }
-                None => unreachable!("PHP# parses no `?:` with two operands, as {:?}", expression.span()),
-            },
+            Expression::Conditional(conditional) => self.conditional(expression, conditional, false),
             Expression::PatternMatch(r#match) => self.pattern_match(expression, r#match),
             Expression::Call(Call::Method(call)) => self.method_call(expression, call),
             Expression::Call(Call::NullSafeMethod(call)) => self.null_safe_call(expression, call),
@@ -636,7 +613,7 @@ impl<'body, 'program> Body<'body, 'program> {
         match binary.operator {
             BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => return self.short_circuit(binary, true),
             BinaryOperator::Or(_) => return self.short_circuit(binary, false),
-            BinaryOperator::NullCoalesce(_) => return self.coalesce(binary),
+            BinaryOperator::NullCoalesce(_) => return self.coalesce(binary, false),
             _ => {}
         }
         if self.exact
@@ -886,10 +863,15 @@ impl<'body, 'program> Body<'body, 'program> {
         Some(format!("({lhs} {operator} {rhs})"))
     }
 
-    /// `expression`, an int, as the exact `Int` it computes.
+    /// `expression`, an int, as the exact `Int` it computes. A `? :` and a `??` choose an exact `Int` of each branch, so
+    /// the automatic steps read the value each branch gives as they read any other `Int`.
     fn exact_int(&mut self, expression: &Expression) -> String {
         match expression {
             Expression::Parenthesized(parenthesized) => self.exact_int(parenthesized.expression),
+            Expression::Conditional(conditional) => self.conditional(expression, conditional, true),
+            Expression::Binary(binary) if matches!(binary.operator, BinaryOperator::NullCoalesce(_)) => {
+                self.coalesce(binary, true)
+            }
             Expression::Literal(Literal::Integer(integer)) => {
                 match integer.value.and_then(|value| i64::try_from(value).ok()) {
                     Some(value) => format!("({value} : _root_.Int)"),
@@ -933,12 +915,43 @@ impl<'body, 'program> Body<'body, 'program> {
         self.choose(&Choice::If(lhs, Box::new(Choice::Branch(then)), Box::new(Choice::Branch(otherwise))))
     }
 
-    /// `a ?? b`, which runs `b` only when `a` is null.
-    fn coalesce(&mut self, binary: &Binary) -> String {
+    /// `c ? a : b`, `expression`, which runs only the branch `c` chooses, as the exact `Int` it computes when `exact`.
+    fn conditional(&mut self, expression: &Expression, conditional: &Conditional, exact: bool) -> String {
+        let Some(then) = conditional.then else {
+            unreachable!("PHP# parses no `?:` with two operands, as {:?}", expression.span());
+        };
+        let read = |body: &mut Self, branch: &Expression| {
+            if exact { body.exact_branch(branch) } else { body.branch_of(branch, expression) }
+        };
+        let holds = self.path.branch(conditional.condition, true);
+        if let Expression::Is(is) = conditional.condition.unparenthesized() {
+            let Some(test) = self.is_test(is) else {
+                return "default".to_owned();
+            };
+            let then = self.under(holds, |body| read(body, then));
+            let otherwise = read(self, conditional.r#else);
+
+            return self.choose(&choice(vec![(test, then)], otherwise));
+        }
+        let condition = self.value(conditional.condition);
+        let then = self.under(holds, |body| read(body, then));
+        let fails = self.path.branch(conditional.condition, false);
+        let otherwise = self.under(fails, |body| read(body, conditional.r#else));
+
+        self.choose(&Choice::If(condition, Box::new(Choice::Branch(then)), Box::new(Choice::Branch(otherwise))))
+    }
+
+    /// `a ?? b`, which runs `b` only when `a` is null, as the exact `Int` it computes when `exact`.
+    fn coalesce(&mut self, binary: &Binary, exact: bool) -> String {
         let lhs = self.value(binary.lhs);
         let keeps_null = self.checked.types().expression_type(binary.rhs).is_nullable();
-        let rhs = self.branch(binary.rhs);
-        let present = if keeps_null { lhs.clone() } else { format!("({lhs}.getD default)") };
+        let (present, rhs) = if exact {
+            (format!("({lhs}.getD default).toInt"), self.exact_branch(binary.rhs))
+        } else if keeps_null {
+            (lhs.clone(), self.branch(binary.rhs))
+        } else {
+            (format!("({lhs}.getD default)"), self.branch(binary.rhs))
+        };
 
         self.choose(&Choice::If(
             format!("{lhs}.isSome"),
@@ -2335,6 +2348,11 @@ impl<'body, 'program> Body<'body, 'program> {
     /// The statements of a branch whose value is `expression`'s.
     fn branch(&mut self, expression: &Expression) -> Branch {
         self.nested_lines(|body| body.value(expression))
+    }
+
+    /// The statements of a branch whose value is the exact `Int` that `expression`, an int, computes.
+    fn exact_branch(&mut self, expression: &Expression) -> Branch {
+        self.nested_lines(|body| body.exact_int(expression))
     }
 
     /// The statements of a branch whose value is `expression`'s, as a value of `whole`, the `?:` or `match` it is a
