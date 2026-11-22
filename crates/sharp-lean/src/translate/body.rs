@@ -244,6 +244,47 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
+    /// The premise that `value`, of the declared type `hint`, keeps the precondition every value of its class-like
+    /// keeps, spec section 28, as the class-like's `«$valid»` states it: of the value, of each element of a `List`, and
+    /// of the value a nullable type holds. `None` for a type whose values keep none.
+    pub(crate) fn valid(&mut self, hint: Option<&Hint>, value: &str) -> Option<String> {
+        let class = match hint? {
+            Hint::Parenthesized(parenthesized) => return self.valid(Some(parenthesized.hint), value),
+            Hint::Nullable(nullable) => {
+                let held = self.fresh();
+                let valid = self.valid(Some(nullable.hint), &held)?;
+                return Some(format!("(∀ {held}, {value} = some {held} → {valid})"));
+            }
+            Hint::Generic(generic) => {
+                let name = self.checked.names().resolve(&generic.name).unwrap_or(generic.name.value);
+                let [element] = generic.type_arguments.arguments.as_slice() else {
+                    return None;
+                };
+                if names::short_name(name) != "List" {
+                    return None;
+                }
+                let held = self.fresh();
+                let valid = self.valid(Some(element), &held)?;
+                return Some(format!("(∀ {held} ∈ {value}, {valid})"));
+            }
+            hint @ Hint::Union(_) => self.union_enum(hint)?,
+            Hint::Self_(_) => self.class,
+            Hint::Identifier(identifier) if !self.checked.names().is_type_parameter(identifier) => {
+                let class = self.checked.names().get(identifier);
+                self.case_enum(class).unwrap_or(class)
+            }
+            _ => return None,
+        };
+        if !self.reach.is_valid(class) {
+            return None;
+        }
+        let class_name = self.reached_name(class);
+        let key = names::member(&names::full_name(&class_name), b"$valid");
+        self.uses(class, &key, names::short_name(&class_name));
+
+        Some(format!("({key} {value})"))
+    }
+
     /// The `do` statements of an expression body, which returns the expression's value.
     pub(crate) fn expression_body(mut self, expression: &Expression) -> (Vec<String>, Vec<Use>, Vec<Unmodeled>) {
         let value = self.value(expression);
@@ -2689,7 +2730,7 @@ mod tests {
             let reach = Reach::default();
             let prover = Prover::new(checked, &reach, b"Sign", "Sign.holds".to_owned(), law, "Sign.holds".to_owned());
 
-            prover.prove(&[], &[]).unmodeled
+            prover.prove(&[], &[], false).unmodeled
         });
 
         assert_eq!(refused, [("an else-if clause".to_owned(), issues::ELSE_IF.to_owned())]);

@@ -363,21 +363,27 @@ elab_rules : tactic
       if reaching.isEmpty then [] else [auto (definitions ++ reaching ++ laws)])
     unless outcome == .closed do report index conditions.getElems outcome
 
-/-- Proves the condition of the law the call `index` calls with the automatic steps. Each part of a condition joined by
-`&&` that stays open is reported, as one goal of the call, and admitted, and the call ran out of time when a part's
-steps ran out of the call's time budget, half of its theorem's. -/
+/-- Proves the condition of the law the call `index` calls, and the precondition each value the call passes keeps, with
+the automatic steps, and else with the same steps once each value an argument computes is written where it is used, as
+`subst_vars` writes `{ epochSeconds := s, nanosecond := 5 }` for the `«$arg1»` of `new Instant(s, 5)`. Each part of a
+condition joined by `&&` that stays open is reported, as one goal of the call, and admitted, and the call ran out of
+time when a part's steps ran out of the call's time budget, half of its theorem's. -/
 syntax "sharp_condition " num : tactic
 
 elab_rules : tactic
   | `(tactic| sharp_condition $index) => withinCaseBudget do
-    if (← attempt (do auto (← lawsInScope))) == .closed then return
+    let laws ← lawsInScope
+    let steps : List (TacticM Unit) := [auto laws, do
+      evalTactic (← `(tactic| (try simp_all (config := { etaStruct := .none })); subst_vars))
+      auto laws]
+    if (← firstClosing steps) == .closed then return
     try evalTactic (← `(tactic| simp only [pure_inj, Bool.and_eq_true])) catch _ => pure ()
     try evalTactic (← `(tactic| repeat' apply And.intro)) catch _ => pure ()
     let mut open_ := #[]
     let mut outOfTime := false
     for goal in ← getUnsolvedGoals do
       setGoals [goal]
-      let outcome ← attempt (do auto (← lawsInScope))
+      let outcome ← firstClosing steps
       if outcome == .closed then continue
       outOfTime := outOfTime || outcome == .outOfTime
       open_ := open_.push (← goal.withContext do tree (← goal.getType))
@@ -393,16 +399,28 @@ elab_rules : tactic
   | `(tactic| sharp_attempt ($tactics)) => discard <| attempt (evalTactic tactics)
 
 /-- The call `index` of a law, `proof`, the law's theorem applied to the call's arguments: the fact the law states, after
-its `when` condition is proven with `sharp_condition`. -/
+the premises it states first, its `when` condition and the precondition each value the call passes keeps, are proven
+together with `sharp_condition`. -/
 syntax "sharp_call% " num term : term
 
 elab_rules : term
   | `(sharp_call% $index $proof) => do
     let fact ← Term.elabTerm proof none
     Term.synthesizeSyntheticMVarsNoPostponing
-    let .forallE _ condition _ _ ← whnf (← inferType fact) | return fact
-    let shown ← Term.elabTerm (← `(by sharp_condition $index)) (some condition)
-    return mkApp fact shown
+    let mut premises := #[]
+    let mut stated ← whnf (← inferType fact)
+    while true do
+      let .forallE _ premise after _ := stated | break
+      unless (← isProp premise) && !after.hasLooseBVars do break
+      premises := premises.push premise
+      stated ← whnf after
+    let some last := premises.back? | return fact
+    let mut rest ← Term.elabTerm (← `(by sharp_condition $index)) (some (premises.pop.foldr mkAnd last))
+    let mut shown := #[]
+    for _ in [1:premises.size] do
+      shown := shown.push (← mkAppM ``And.left #[rest])
+      rest ← mkAppM ``And.right #[rest]
+    return mkAppN fact (shown.push rest)
 
 /-- Evaluates `search`, a `Machine.search` of the moves that break an invariant, and reports the trace it finds as the
 case `index` of the invariant's proof, `["trace", step…]`. It leaves the goals as they are. -/

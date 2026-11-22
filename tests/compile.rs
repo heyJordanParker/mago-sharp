@@ -5105,6 +5105,23 @@ fn a_machine_s_invariant_over_its_case_s_instants_holds_after_a_move_that_adds_a
     assert!(compiled(root, "app/Shared/Clock.sharp").exists());
 }
 
+/// A law's call of a law over an `Instant` shows that the `Instant` it passes keeps the checks of `Instant`'s
+/// constructor, as it shows the called law's `when` condition: an `Instant` the calling law takes keeps them, and so
+/// does one it builds, whatever nanosecond it builds it with.
+#[test]
+fn a_law_s_call_shows_that_each_instant_it_passes_keeps_instant_s_checks() {
+    let directory = library_project(&[(
+        "app/Shared/Calls.sharp",
+        "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic final class Calls\n{\n    law sameSecond(Instant at) => at.epochSeconds == at.epochSeconds;\n    law inRange(Instant at) => at.nanosecond <= 999_999_999;\n    law callsOnItsOwn(Instant at) => at.nanosecond < 1_000_000_000\n    {\n        Calls.inRange(at);\n    }\n    law callsOnBuilt(int s) => true\n    {\n        Calls.sameSecond(new Instant(s, 5));\n    }\n    law callsOnAnyBuilt(int s, int n) => true\n    {\n        Calls.sameSecond(new Instant(s, n));\n    }\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Calls.sharp").exists());
+}
+
 /// `App.Shared.Stamp`, whose laws build an `Instant`: one reads what it built, and one holds only because the
 /// constructor throws for a nanosecond outside its range.
 const STAMP: &str = "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic final class Stamp\n{\n    law builds(int unused) => new Instant(1, 0).epochSeconds == 1;\n    law aBuiltNanosecondIsInRange(int s, int n) => new Instant(s, n).nanosecond <= 999_999_999;\n}\n";

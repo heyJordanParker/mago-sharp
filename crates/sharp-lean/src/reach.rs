@@ -78,6 +78,10 @@ pub struct Reach {
     /// The interfaces each reached class names in its own header, by the class's key, each by its full name, in name
     /// order.
     interfaces: HashMap<Word, Vec<Word>>,
+    /// Each reached class-like whose every value keeps a precondition, by its key: a class whose constructor checks
+    /// its arguments, spec section 28, and a class-like that holds a value of one in a field, as [`valid_classes`]
+    /// finds them.
+    valid: HashSet<Word>,
 }
 
 impl Reach {
@@ -203,6 +207,7 @@ impl Reach {
             entry.dedup();
             reach.declarations.extend(reached);
         }
+        reach.valid = valid_classes(codebase, &reach);
 
         reach
     }
@@ -338,6 +343,11 @@ impl Reach {
         self.abstract_properties.contains(&(self.class_key(class), word(property)))
     }
 
+    /// Whether every value of the reached class-like `class` keeps a precondition, which `«$valid»` states.
+    pub(crate) fn is_valid(&self, class: &[u8]) -> bool {
+        self.valid.contains(&self.class_key(class))
+    }
+
     /// Whether the declared type of `class`'s property `property` takes `null`.
     pub(crate) fn is_nullable_field(&self, class: &[u8], property: &[u8]) -> bool {
         self.nullable_fields.contains(&(self.class_key(class), word(property)))
@@ -365,6 +375,102 @@ fn field_equalities(codebase: &CodebaseMetadata, equality: SymbolIdentifier) -> 
         .map(|class| keyed(codebase, (class, word("op_Equality"))))
         .filter(|(class, method)| codebase.get_method(*class, *method).is_some())
         .collect()
+}
+
+/// Each class-like of `reach` whose every value keeps a precondition a law reads, spec section 28, by its key: each one
+/// whose constructor checks its arguments, as [`checks_arguments`] finds it, and each one that holds a value of such a
+/// class-like in a field. A class-like that holds a value of itself keeps none, since a law reasons about no such type.
+fn valid_classes(codebase: &CodebaseMetadata, reach: &Reach) -> HashSet<Word> {
+    let held: HashMap<Word, Vec<Word>> =
+        reach.classes.keys().map(|class| (*class, held_classes(codebase, *class))).collect();
+    let candidates: Vec<Word> = held.keys().copied().filter(|class| !holds_itself(&held, *class)).collect();
+    let mut valid: HashSet<Word> =
+        candidates.iter().copied().filter(|class| checks_arguments(codebase, reach, *class)).collect();
+    loop {
+        let added: Vec<Word> = candidates
+            .iter()
+            .copied()
+            .filter(|class| !valid.contains(class) && held[class].iter().any(|value| valid.contains(value)))
+            .collect();
+        if added.is_empty() {
+            return valid;
+        }
+        valid.extend(added);
+    }
+}
+
+/// Whether every value of `class` passed its constructor's checks: a PHP# class, with no parent and no sealed
+/// interface, whose constructor throws, takes each argument as a promoted property, and leaves each stored property
+/// get-only, so no value of the class is built or changed any other way.
+fn checks_arguments(codebase: &CodebaseMetadata, reach: &Reach, class: Word) -> bool {
+    let Some(metadata) = codebase.get_class_like(class) else {
+        return false;
+    };
+    let Some(constructor) = codebase.get_method(class, metadata.method_key(word("__construct"))) else {
+        return false;
+    };
+    let get_only = metadata.properties.keys().all(|property| {
+        codebase.get_declaring_property(class, *property).is_none_or(|property| {
+            let stored = !property.flags.is_static()
+                && !property.flags.is_virtual_property()
+                && property.hooks.values().all(|hook| hook.is_abstract);
+            !stored || property.flags.is_readonly()
+        })
+    });
+
+    metadata.flags.is_sharp()
+        && !metadata.kind.is_interface()
+        && !metadata.kind.is_trait()
+        && !metadata.kind.is_enum()
+        && !metadata.flags.is_abstract()
+        && metadata.direct_parent_class.is_none()
+        && reach.sealed_interfaces(metadata.original_name.as_bytes()).is_empty()
+        && constructor.flags.has_throw()
+        && constructor.parameters.iter().all(|parameter| parameter.flags.is_promoted_property())
+        && get_only
+}
+
+/// The key of each class-like a field of `class`, or of a case of `class`, an enum whose cases run as classes, holds a
+/// value of, alone, in a collection or where it takes `null`.
+fn held_classes(codebase: &CodebaseMetadata, class: Word) -> Vec<Word> {
+    let Some(metadata) = codebase.get_class_like(class) else {
+        return Vec::new();
+    };
+    let cases = metadata
+        .permitted_inheritors
+        .iter()
+        .flatten()
+        .filter_map(|inheritor| codebase.get_class_like(*inheritor))
+        .filter(|inheritor| inheritor.flags.is_enum_case_class());
+
+    std::iter::once(metadata)
+        .chain(cases)
+        .flat_map(|holder| {
+            holder
+                .properties
+                .keys()
+                .filter_map(|property| codebase.get_declaring_property(holder.name, *property)?.type_metadata.as_ref())
+        })
+        .flat_map(|r#type| compared_classes(codebase, &r#type.type_union))
+        .map(|value| codebase.class_key(value))
+        .collect()
+}
+
+/// Whether a value of `class` holds a value of `class` itself, at any depth, through the class-likes `held` gives the
+/// fields of each one hold.
+fn holds_itself(held: &HashMap<Word, Vec<Word>>, class: Word) -> bool {
+    let mut seen: HashSet<Word> = HashSet::default();
+    let mut pending: Vec<Word> = held.get(&class).cloned().unwrap_or_default();
+    while let Some(value) = pending.pop() {
+        if value == class {
+            return true;
+        }
+        if seen.insert(value) {
+            pending.extend(held.get(&value).into_iter().flatten().copied());
+        }
+    }
+
+    false
 }
 
 /// Each class whose `==` compares two values of `union`: a class it names, and a class the elements of a collection it

@@ -178,8 +178,10 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         body
     }
 
-    /// The law's theorem: `theorem <statement>.proof (parameters) : <statement> parameters := by …`.
-    pub(crate) fn prove(mut self, binders: &[String], parameters: &[String]) -> Proof {
+    /// The law's theorem: `theorem <statement>.proof (parameters) : <statement> parameters := by …`. With
+    /// `preconditions`, the statement states after the condition that each value the law takes keeps its class-like's
+    /// precondition, and the proof takes those as facts before its body's first call, which passes them on.
+    pub(crate) fn prove(mut self, binders: &[String], parameters: &[String], preconditions: bool) -> Proof {
         let mut lines = vec![format!("unfold {}", self.statement)];
         let mut scope = Scope {
             locals: Vec::new(),
@@ -190,6 +192,9 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         if let Some(condition) = &self.law.condition {
             lines.push("intro «when»".to_owned());
             scope.hypotheses.push(("«when»".to_owned(), self.source(condition.expression.span())));
+        }
+        if preconditions {
+            lines.push("intros".to_owned());
         }
         match &self.law.proof {
             LawProof::Checker(_) => lines.push(self.close(&scope, "sharp_prove")),

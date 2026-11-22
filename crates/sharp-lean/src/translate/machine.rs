@@ -109,6 +109,7 @@ impl Translator<'_, '_> {
                 let mut premises = Vec::new();
                 for parameter in method.parameter_list.parameters.iter() {
                     let value = parameter_name(parameter);
+                    premises.extend(body.valid(parameter.hint.as_ref(), &value).map(|valid| format!("{valid} → ")));
                     let cases = self.held_cases(&machine, parameter.hint.as_ref());
                     for (held, held_case) in
                         machine.invariants.iter().filter(|(_, held_case)| cases.contains(held_case))
@@ -146,6 +147,13 @@ impl Translator<'_, '_> {
                     binders
                         .extend(method.parameter_list.parameters.iter().map(|parameter| binder(&mut body, parameter)));
                     let mut premises = Vec::new();
+                    for (field, hint) in &fields {
+                        premises.extend(body.valid(*hint, field).map(|valid| format!("{valid} → ")));
+                    }
+                    for parameter in method.parameter_list.parameters.iter() {
+                        let value = parameter_name(parameter);
+                        premises.extend(body.valid(parameter.hint.as_ref(), &value).map(|valid| format!("{valid} → ")));
+                    }
                     for (held, _) in
                         machine.invariants.iter().filter(|(_, held)| held.as_bytes() == from.item.name().value)
                     {

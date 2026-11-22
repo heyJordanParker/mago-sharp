@@ -384,6 +384,7 @@ impl Translator<'_, '_> {
         }
 
         self.constructor(full, &lean, &short, (name.span, parent), constructor, &fields, &types);
+        self.valid(full, &lean, &short, name.span, constructor, &fields);
         self.members(full, &lean, &short, members.as_slice());
         if r#struct {
             self.value_equality(full, &lean, &short, name.span, members, |body| {
@@ -509,6 +510,68 @@ impl Translator<'_, '_> {
         });
     }
 
+    /// `Class.«$valid»`, what every value of the class keeps, spec section 28, when the reach finds it keeps anything:
+    /// its constructor's checks, as the constructor returning on the value's own fields, when the body only checks, and
+    /// what each value its fields hold keeps. It is a `simp` rewrite, as the constructor is, so a law's automatic steps
+    /// read the precondition of a value a field holds as they read the value's own.
+    fn valid(
+        &mut self,
+        full: &[u8],
+        lean: &str,
+        short: &str,
+        span: Span,
+        constructor: Option<&Method>,
+        fields: &[Field],
+    ) {
+        if !self.reach.is_valid(full) {
+            return;
+        }
+        let key = names::member(lean, b"$valid");
+        let mut body = Body::new(self.checked, self.reach, full, format!("{short}.valid"));
+        let mut parts = Vec::new();
+        let mut uses = Vec::new();
+        if let Some(constructor) = constructor
+            && let MethodBody::Concrete(block) = &constructor.body
+            && !block.statements.is_empty()
+            && block.statements.iter().all(checks_and_throws)
+        {
+            let construct = names::member(lean, b"__construct");
+            let arguments: Vec<String> = constructor
+                .parameter_list
+                .parameters
+                .iter()
+                .map(|parameter| format!(" value.{}", parameter_name(parameter)))
+                .collect();
+            parts.push(format!("∃ built, {construct}{} = pure built", arguments.concat()));
+            uses.push(Use {
+                key: construct,
+                file: Some(self.translation.file),
+                place: format!("new {short}"),
+                smaller: None,
+                names_only: false,
+            });
+        }
+        for field in fields {
+            parts.extend(body.valid(field.hint, &format!("value.{}", names::identifier(field.name))));
+        }
+        if parts.is_empty() {
+            parts.push("True".to_owned());
+        }
+        let text = format!("@[simp] def {key} (value : {lean}) : Prop :=\n  {}", parts.join(" ∧\n  "));
+        let (_, body_uses, unmodeled) = body.finish();
+        uses.extend(body_uses);
+        self.translation.declarations.push(Declaration {
+            key,
+            span,
+            text,
+            uses,
+            unmodeled,
+            role: Role::Definition,
+            measure: None,
+            opaque: None,
+        });
+    }
+
     fn r#enum(&mut self, r#enum: &Enum) {
         let full = self.checked.names().get(&r#enum.name);
         self.name_module(full, r#enum.name.span);
@@ -589,6 +652,39 @@ impl Translator<'_, '_> {
                 ),
             ]);
             self.translation.receivers.push((key.clone(), true));
+            self.declare(body, key, r#enum.name.span, lines.join("\n"), Role::Definition);
+        }
+
+        // Spec section 28: a value of an enum whose cases carry data keeps what each value its case's fields hold keeps.
+        if self.reach.is_valid(full) {
+            let key = names::member(&lean, b"$valid");
+            let mut body = Body::new(self.checked, self.reach, full, format!("{short}.valid"));
+            let domain = body.class_type(r#enum.name.span, full);
+            let mut lines = vec![format!("@[simp] def {key} : {domain} → Prop")];
+            let mut covers = Vec::new();
+            for member in &r#enum.members {
+                let ClassLikeMember::EnumCase(case) = member else {
+                    continue;
+                };
+                let name = case.item.name().value;
+                let hints: Vec<Option<&Hint>> = match &case.item {
+                    EnumCaseItem::Data(item) => {
+                        item.parameter_list.parameters.iter().map(|field| field.hint.as_ref()).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                let binders: Vec<String> = (0..hints.len()).map(|place| format!("«${place}»")).collect();
+                let mut parts: Vec<String> =
+                    hints.iter().zip(&binders).filter_map(|(hint, binder)| body.valid(*hint, binder)).collect();
+                if parts.is_empty() {
+                    parts.push("True".to_owned());
+                }
+                let written = format!("(.{} {})", names::identifier(name), binders.join(" "));
+                let pattern = body.held(r#enum.name.span, full, written);
+                lines.push(format!("  | {pattern} => {}", parts.join(" ∧ ")));
+                covers.push(body.held(r#enum.name.span, full, format!("({} ..)", names::member(&lean, name))));
+            }
+            lines.extend(default_arms(&body, full, &covers));
             self.declare(body, key, r#enum.name.span, lines.join("\n"), Role::Definition);
         }
 
@@ -1009,10 +1105,10 @@ impl Translator<'_, '_> {
         });
     }
 
-    /// `def Class.law (a : A) : Prop := [condition = pure true →] holds do …`: the law holds for every value of
-    /// its parameters that meets its `when` condition, unless its claim finishes with `false`. The condition and the
-    /// claim compute ints exactly, as [`Body::computes_exactly`] says. Its theorem, which its body proves, comes from
-    /// [`Prover`].
+    /// `def Class.law (a : A) : Prop := [condition = pure true →] [A.«$valid» a →] holds do …`: the law holds for every
+    /// value of its parameters that meets its `when` condition and keeps its class-like's precondition, as each value
+    /// of it does, unless its claim finishes with `false`. The condition and the claim compute ints exactly, as
+    /// [`Body::computes_exactly`] says. Its theorem, which its body proves, comes from [`Prover`].
     fn law(&mut self, full: &[u8], lean: &str, short: &str, law: &LawNode) {
         let name = String::from_utf8_lossy(law.name.value).into_owned();
         let key = names::member(lean, law.name.value);
@@ -1037,6 +1133,14 @@ impl Translator<'_, '_> {
             uses.extend(condition_uses);
             unmodeled.extend(condition_unmodeled);
         }
+        // Spec section 28: each value the law takes keeps the precondition every value of its class-like keeps.
+        let preconditions: Vec<String> = law
+            .parameter_list
+            .parameters
+            .iter()
+            .filter_map(|parameter| body.valid(parameter.hint.as_ref(), &parameter_name(parameter)))
+            .collect();
+        text.extend(preconditions.iter().map(|valid| format!("  {valid} →\n")));
         body.computes_exactly();
         let (lines, claim_uses, claim_unmodeled) = body.expression_body(law.claim);
         text.push_str("  holds do\n");
@@ -1045,8 +1149,11 @@ impl Translator<'_, '_> {
         unmodeled.extend(claim_unmodeled);
 
         // The theorem lives beside the statement, so the generated module holds what its proof uses too.
-        let mut proof =
-            Prover::new(self.checked, self.reach, full, place, law, key.clone()).prove(&binders, &parameters);
+        let mut proof = Prover::new(self.checked, self.reach, full, place, law, key.clone()).prove(
+            &binders,
+            &parameters,
+            !preconditions.is_empty(),
+        );
         uses.append(&mut proof.uses);
         unmodeled.append(&mut proof.unmodeled);
         let span = Span::between(law.law.span(), law.name.span);

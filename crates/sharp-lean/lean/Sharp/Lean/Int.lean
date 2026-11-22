@@ -127,9 +127,53 @@ private theorem pure_injective {α : Type} {x y : α} (h : (pure y : M α) = pur
     neg x = pure z ↔ (-9223372036854775808 ≤ -x.toInt ∧ -x.toInt ≤ 9223372036854775807) ∧ z.toInt = -x.toInt := by
   simp [neg]
 
+@[simp] theorem div_eq_pure {x y z : int} :
+    div x y = pure z ↔ y.toInt ≠ 0 ∧
+      (-9223372036854775808 ≤ x.toInt.tdiv y.toInt ∧ x.toInt.tdiv y.toInt ≤ 9223372036854775807) ∧
+      z.toInt = x.toInt.tdiv y.toInt := by
+  unfold div
+  by_cases h : y = 0
+  · subst h
+    simp only [ite_true, Int64.toInt_zero, ne_eq, not_true_eq_false, false_and, iff_false]
+    exact fun e => pure_ne_throw _ _ e.symm
+  · have h' : y.toInt ≠ 0 := fun e => h (Int64.toInt_inj.mp (by simpa using e))
+    simp [h, h']
+
+@[simp] theorem mod_eq_pure {x y z : int} :
+    mod x y = pure z ↔ y.toInt ≠ 0 ∧
+      (-9223372036854775808 ≤ x.toInt.tmod y.toInt ∧ x.toInt.tmod y.toInt ≤ 9223372036854775807) ∧
+      z.toInt = x.toInt.tmod y.toInt := by
+  unfold mod
+  by_cases h : y = 0
+  · subst h
+    simp only [ite_true, Int64.toInt_zero, ne_eq, not_true_eq_false, false_and, iff_false]
+    exact fun e => pure_ne_throw _ _ e.symm
+  · have h' : y.toInt ≠ 0 := fun e => h (Int64.toInt_inj.mp (by simpa using e))
+    simp [h, h']
+
+/-! `/` and `%` truncate toward zero, as `Int.tdiv` and `Int.tmod` do, which `omega` does not read. On an operand that
+is not negative they are `Int`'s own `/` and `%`, which `omega` reads for a literal divisor, and on a negative one they
+are the same of its negation, negated, so a law's automatic steps split on the operand's sign and read each case. -/
+
+@[simp] theorem tdiv_eq_ite (a b : Int) : a.tdiv b = if a < 0 then -((-a) / b) else a / b := by
+  split
+  · rw [← Int.tdiv_eq_ediv_of_nonneg (by omega : 0 ≤ -a), Int.neg_tdiv, Int.neg_neg]
+  · exact Int.tdiv_eq_ediv_of_nonneg (by omega)
+
+@[simp] theorem tmod_eq_ite (a b : Int) : a.tmod b = if a < 0 then -((-a) % b) else a % b := by
+  split
+  · rw [← Int.tmod_eq_emod_of_nonneg (by omega : 0 ≤ -a), Int.neg_tmod, Int.neg_neg]
+  · exact Int.tmod_eq_emod_of_nonneg (by omega)
+
 attribute [simp] Int64.le_iff_toInt_le Int64.lt_iff_toInt_lt
 attribute [simp ←] Int64.toInt_inj
 attribute [grind] Int64.toInt_inj
+
+/-- The `Int` of an `int` an `if` chooses is the `Int` of the one it chooses, as a comparison the code writes on an `if`'s
+result, `a <=> b > 0`, reads it. -/
+@[simp] theorem toInt_ite {c : Prop} [Decidable c] (a b : int) :
+    (if c then a else b).toInt = if c then a.toInt else b.toInt := by
+  split <;> rfl
 
 /-! A method that calls itself on `n - 1` where a condition has shown `n` above a bound, or on `n + 1` where one has
 shown it below, passes that step as `Int64`'s own `-` or `+`, which cannot leave the `int` range there, so Lean sees the
