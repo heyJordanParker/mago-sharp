@@ -28423,12 +28423,13 @@ fn a_read_of_a_property_a_plain_php_parent_declares_reads_the_property() {
 }
 
 /// ```php
-/// $this->total_cents = 5;
-/// $this->email = 'a@b.co';
+/// $this->__set('total_cents', $value#1 = 5) ?? $value#1;
+/// $this->__set('email', $value#1 = 'a@b.co') ?? $value#1;
 /// ```
 ///
 /// An `extern` property with `set` writes what plain PHP's `__set` stores, spec section 14.3, and reads what `__get`
-/// gives, under the key `[Key("…")]` names, so `totalCents` reaches the column `total_cents`.
+/// gives, under the key `[Key("…")]` names, so `totalCents` reaches the column `total_cents`. Each is a call of
+/// `__get` or `__set`, so no member the class declares takes the write.
 #[test]
 fn an_extern_property_reaches_get_and_set_under_its_key() {
     let model = (
@@ -28442,18 +28443,32 @@ fn an_extern_property_reaches_get_and_set_under_its_key() {
         lowered.body(),
         indoc! {r#"
             STMT_LIST
-              ASSIGN
-                PROP
+              COALESCE
+                METHOD_CALL
                   VAR
                     ZVAL "this"
-                  ZVAL "total_cents"
-                ZVAL 5
-              ASSIGN
-                PROP
+                  ZVAL "__set"
+                  ARG_LIST
+                    ZVAL "total_cents"
+                    ASSIGN
+                      VAR
+                        ZVAL "value#1"
+                      ZVAL 5
+                VAR
+                  ZVAL "value#1"
+              COALESCE
+                METHOD_CALL
                   VAR
                     ZVAL "this"
-                  ZVAL "email"
-                ZVAL "a@b.co"
+                  ZVAL "__set"
+                  ARG_LIST
+                    ZVAL "email"
+                    ASSIGN
+                      VAR
+                        ZVAL "value#1"
+                      ZVAL "a@b.co"
+                VAR
+                  ZVAL "value#1"
         "#}
     );
     assert_eq!(
@@ -28462,10 +28477,12 @@ fn an_extern_property_reaches_get_and_set_under_its_key() {
             STMT_LIST
               RETURN
                 VERIFY_TYPE_ARGS
-                  PROP
+                  METHOD_CALL
                     VAR
                       ZVAL "this"
-                    ZVAL "total_cents"
+                    ZVAL "__get"
+                    ARG_LIST
+                      ZVAL "total_cents"
                   ZVAL "int"
                   ZVAL "App.Tenant.Row.totalCents"
         "#}
@@ -28473,10 +28490,12 @@ fn an_extern_property_reaches_get_and_set_under_its_key() {
 }
 
 /// An `extern` property of a PHP# class whose plain PHP parent defines `__get` is the property `__get` gives, spec
-/// section 14.3: the class declares no PHP property for it, so the read reaches `__get`, and the engine checks the value
-/// against the declared type where it enters PHP#, beside the method of its name.
+/// section 14.3: the class declares no PHP property of its name, only the hidden static `owner#extern` that holds its key
+/// and its access, beside its line `$owner extern: string`, by which reflection lists it. The read calls `__get` with
+/// the key, and the engine checks the value against the declared type where it enters PHP#, beside the method of its
+/// name.
 #[test]
-fn an_extern_property_declares_nothing_and_its_read_is_checked_where_it_enters() {
+fn an_extern_property_is_a_hidden_static_and_its_read_calls_get_checked_where_it_enters() {
     let model = (
         "src/Lib/Model.php",
         "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return $name;\n    }\n}\n",
@@ -28488,6 +28507,15 @@ fn an_extern_property_declares_nothing_and_its_read_is_checked_where_it_enters()
         member_in(std::slice::from_ref(&lowered), "Row", &[]),
         indoc! {r#"
             STMT_LIST
+              PROP_GROUP [17]
+                null
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "owner#extern"
+                    ZVAL "owner"
+                    null
+                    null
+                null
               METHOD [1] "__construct" @9-9
                 PARAM_LIST
                 null
@@ -28510,10 +28538,12 @@ fn an_extern_property_declares_nothing_and_its_read_is_checked_where_it_enters()
                 STMT_LIST
                   RETURN
                     VERIFY_TYPE_ARGS
-                      PROP
+                      METHOD_CALL
                         VAR
                           ZVAL "this"
-                        ZVAL "owner"
+                        ZVAL "__get"
+                        ARG_LIST
+                          ZVAL "owner"
                       ZVAL "string"
                       ZVAL "App.Tenant.Row.owner"
                 SHARP_TYPE_ARGS
@@ -28524,7 +28554,7 @@ fn an_extern_property_declares_nothing_and_its_read_is_checked_where_it_enters()
                 null
                 null
                 null
-                ZVAL "\ntryParse: Function<App.Tenant.Row?(Map<string, Any?>|Object)>\nowner: Function<string()>\nparse: Function<App.Tenant.Row(Map<string, Any?>|Object)>\n__construct: Function<Any?()>\nrun: Function<string()>"
+                ZVAL "\n$owner extern: string\ntryParse: Function<App.Tenant.Row?(Map<string, Any?>|Object)>\nowner: Function<string()>\nparse: Function<App.Tenant.Row(Map<string, Any?>|Object)>\n__construct: Function<Any?()>\nrun: Function<string()>"
         "#}
     );
 }

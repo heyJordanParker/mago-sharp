@@ -499,8 +499,16 @@ impl<'analysis> Types<'analysis> {
     /// each type as [`Parameter::Declared`] writes it. `constants` are the names of the constants the declaration
     /// writes, in order, which the engine reads on the class that declares them, so an inherited one has no line. A type a declaration leaves out is `Any?`, and so is a plain PHP
     /// type a member takes over that PHP# can't write. A member of an enum or a final class is never `virtual`, and a
-    /// hidden method, as `#statics`, has no line.
-    pub(crate) fn declared(&self, class: Word, overrides: &[&[u8]], constants: &[&[u8]]) -> Option<String> {
+    /// hidden method, as `#statics`, has no line. `externs` are the names of the `extern` properties the declaration
+    /// writes, spec section 14.3, in order, whose lines end their words with `extern`, as `$totalCents set private extern:
+    /// int`, since PHP declares no property of their names.
+    pub(crate) fn declared(
+        &self,
+        class: Word,
+        overrides: &[&[u8]],
+        constants: &[&[u8]],
+        externs: &[&[u8]],
+    ) -> Option<String> {
         let metadata = self.codebase.get_class_like(class).filter(|metadata| metadata.flags.is_sharp())?;
 
         let written = |r#type: Option<&TypeMetadata>| match r#type {
@@ -523,6 +531,18 @@ impl<'analysis> Types<'analysis> {
                 setter_text(property),
                 if open { " virtual" } else { "" },
                 if overridden(&property.name.0.as_bytes()[1..]) { " override" } else { "" },
+                written(property.type_metadata.as_ref())
+            ));
+        }
+        for name in externs {
+            let variable = word([b"$", *name].concat());
+            let Some(property) = metadata.magic_properties.get(&variable) else {
+                unreachable!("the codex keeps each `extern` property a PHP# class writes as its magic property");
+            };
+            lines.push(format!(
+                "{}{} extern: {}",
+                variable,
+                setter_text(property),
                 written(property.type_metadata.as_ref())
             ));
         }
@@ -1061,20 +1081,28 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The key plain PHP's `__get` and `__set` receive for the `extern` property the read or write `access` reaches,
-    /// spec section 14.3: the name its `[Key("…")]` gives. None for any other access, whose key is its name.
+    /// spec section 14.3, as [`Self::extern_key`] gives it. None for any other access.
     pub(crate) fn extern_property_key(&self, access: &Expression) -> Option<&'analysis [u8]> {
         let (class, variable) = self.accessed_property(access)?;
         let name = word(&variable);
         let declaring = *self.codebase.get_class_like(word(class))?.magic_property_ids.get(&name)?;
-        let owner = self.codebase.get_class_like(declaring).filter(|owner| owner.flags.is_sharp())?;
 
-        owner
-            .magic_properties
-            .get(&name)?
+        self.extern_key(declaring, name)
+    }
+
+    /// The key plain PHP's `__get` and `__set` receive for the `extern` property `variable`, `$` and its name, that the
+    /// PHP# class `class` declares, spec section 14.3: the name its `[Key("…")]` gives, or its own. None for any other
+    /// property.
+    pub(crate) fn extern_key(&self, class: Word, variable: Word) -> Option<&'analysis [u8]> {
+        let owner = self.codebase.get_class_like(class).filter(|owner| owner.flags.is_sharp())?;
+        let (name, property) = owner.magic_properties.get_key_value(&variable)?;
+        let named = property
             .attributes
             .iter()
-            .find(|attribute| attribute.name.as_bytes() == b"Sharp\\Key")?
-            .text_argument(0, b"name")
+            .find(|attribute| attribute.name.as_bytes() == b"Sharp\\Key")
+            .and_then(|key| key.text_argument(0, b"name"));
+
+        Some(named.unwrap_or(&name.as_bytes()[1..]))
     }
 
     /// The check a call into plain PHP takes where its result, an object of a plain PHP class that is a `Traversable`,
