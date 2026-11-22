@@ -5565,6 +5565,120 @@ fn each_declaration_a_generated_module_writes_is_protected() {
     assert_eq!(open, Vec::<String>::new());
 }
 
+/// `App.Classes.ClassOfRepro`, a machine whose `Open` case closes into its `Closed` case, with a static `closes` that
+/// answers whether a move from one of its classes to another closes it, and `laws`.
+fn class_of_repro(laws: &str) -> String {
+    format!(
+        "namespace App.Classes;\n\npublic machine ClassOfRepro\n{{\n    case Open\n    {{\n        public ClassOfRepro.Closed close() => ClassOfRepro.Closed;\n    }}\n\n    final case Closed;\n\n    public static ClassOfRepro.Open enter() => ClassOfRepro.Open;\n\n    public static bool closes(Class<ClassOfRepro> from, Class<ClassOfRepro> to) => from != to && to == typeof(ClassOfRepro.Closed);\n\n    {laws}\n}}\n"
+    )
+}
+
+/// Spec section 25: a machine's classes are its cases, so a law reads `typeof` of a case, `Class.of` of a value, and
+/// `==` on two classes, and a law over every pair of the machine's classes proves what a method taking two reads.
+#[test]
+fn a_law_reads_the_classes_of_a_machine_s_cases() {
+    let directory = lawful_project(&[(
+        "app/Classes/ClassOfRepro.sharp",
+        &class_of_repro(
+            "law closingCloses() => Class.of(ClassOfRepro.enter().close()) == typeof(ClassOfRepro.Closed);\n    law aClosedValueIsClosed(ClassOfRepro value) => value is ClassOfRepro.Closed ? Class.of(value) == typeof(ClassOfRepro.Closed) : true;\n    law closesOnlyFromOpen(Class<ClassOfRepro> from, Class<ClassOfRepro> to) => ClassOfRepro.closes(from, to) ? from == typeof(ClassOfRepro.Open) : true;",
+        ),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Classes/ClassOfRepro.sharp").exists());
+}
+
+/// A false law over the classes of a machine's cases is refused as not proven, with its claim still to show.
+#[test]
+fn a_false_law_over_the_classes_of_a_machine_s_cases_is_not_proven() {
+    let directory = lawful_project(&[(
+        "app/Classes/ClassOfRepro.sharp",
+        &class_of_repro(
+            "law openIsNotClosed() => Class.of(ClassOfRepro.enter()) == typeof(ClassOfRepro.Closed);\n    law everyPairCloses(Class<ClassOfRepro> from, Class<ClassOfRepro> to) => ClassOfRepro.closes(from, to);",
+        ),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: law openIsNotClosed is not proven\n = still to show: Class.of(ClassOfRepro.enter()) == typeof(ClassOfRepro.Closed)\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+    assert!(
+        printed(&output).contains("error[law-unproven]: law everyPairCloses is not proven\n"),
+        "{}",
+        printed(&output)
+    );
+    assert!(!printed(&output).contains("translated the code it reaches wrongly"), "{}", printed(&output));
+}
+
+/// Spec section 25: the classes of an enum whose cases carry data are its cases, and the classes of a sealed
+/// interface are its implementers, so a law reads `Class.of` of their values as it does a machine's.
+#[test]
+fn a_law_reads_the_classes_of_a_data_enum_and_of_a_sealed_interface() {
+    let directory = lawful_project(&[
+        (
+            "app/Classes/Shape.sharp",
+            "namespace App.Classes;\n\npublic enum Shape\n{\n    case Dot;\n    case Circle(int radius);\n}\n",
+        ),
+        ("app/Classes/Status.sharp", "namespace App.Classes;\n\npublic sealed interface Status\n{\n}\n"),
+        (
+            "app/Classes/Waiting.sharp",
+            "namespace App.Classes;\n\npublic final class Waiting : Status\n{\n    public Waiting(public int ticket { get; }) { }\n}\n",
+        ),
+        (
+            "app/Classes/Served.sharp",
+            "namespace App.Classes;\n\npublic final class Served : Status\n{\n    public Served(public int ticket { get; }) { }\n}\n",
+        ),
+        (
+            "app/Classes/Families.sharp",
+            "namespace App.Classes;\n\npublic final class Families\n{\n    law aCircleIsACircle(int r) => Class.of(Shape.Circle(r)) == typeof(Shape.Circle);\n    law aDotIsNoCircle(int unused) => Class.of(Shape.Dot) != typeof(Shape.Circle);\n    law waitingIsWaiting(int t) => Class.of(new Waiting(t)) == typeof(Waiting);\n    law aStatusIsWaitingOrServed(Status status) => Class.of(status) == typeof(Waiting) || Class.of(status) == typeof(Served);\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Classes/Families.sharp").exists());
+}
+
+/// A class outside any machine, enum or sealed interface has classes the running code alone tells apart, so a law that
+/// reads `Class.of` of its value keeps its refusal.
+#[test]
+fn a_law_over_the_class_of_a_class_outside_any_family_is_refused() {
+    let directory = lawful_project(&[(
+        "app/Classes/Lamp.sharp",
+        "namespace App.Classes;\n\npublic final class Lamp\n{\n    public Lamp(public int watts { get; }) { }\n\n    law aLampIsALamp(int watts) => Class.of(new Lamp(watts)) == typeof(Lamp);\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[unmodeled-construct]: Law aLampIsALamp reaches the plain PHP class Class in Lamp.aLampIsALamp."
+        ),
+        "{}",
+        printed(&output)
+    );
+    assert!(
+        printed(&output)
+            .contains("error[unmodeled-construct]: Law aLampIsALamp reaches a type test in Lamp.aLampIsALamp."),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// `App.Shared.Stamp`, whose laws build an `Instant`: one reads what it built, and one holds only because the
 /// constructor throws for a nanosecond outside its range.
 const STAMP: &str = "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic final class Stamp\n{\n    law builds(int unused) => new Instant(1, 0).epochSeconds == 1;\n    law aBuiltNanosecondIsInRange(int s, int n) => new Instant(s, n).nanosecond <= 999_999_999;\n}\n";

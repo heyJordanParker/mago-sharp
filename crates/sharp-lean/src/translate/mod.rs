@@ -621,6 +621,7 @@ impl Translator<'_, '_> {
         lines.push(DERIVED.to_owned());
         let coercions = self.coercions(&mut body, &lean, self.own_parents(full, r#enum.inheritance.as_ref()));
         self.declare_type(body, lean.clone(), r#enum.name.span, lines, coercions);
+        self.class_values(full, &lean, &short, r#enum.name.span);
 
         // Spec section 20: a field of a case that carries data reads as the constructor's field, where a test named the
         // case. Each other value gives the field's default, which no such read sees. The value of an enum that implements
@@ -812,7 +813,31 @@ impl Translator<'_, '_> {
         }
         let coercions = self.coercions(&mut body, &lean, parents);
         self.declare_type(body, lean.clone(), interface.name.span, lines, coercions);
+        self.class_values(full, &lean, &short, interface.name.span);
         self.members(full, &lean, &short, interface.members.as_slice());
+    }
+
+    /// `Class.«$Class»`, the class of each value of the class-like `full` as a law reads a `Class<T>`, spec section 25,
+    /// with one constructor for each class a value runs as, and `Class.«$classOf»`, the class a value runs as, which
+    /// `Class.of` gives, when `full` is a family of classes, as [`Body::classes`] gives them.
+    fn class_values(&mut self, full: &[u8], lean: &str, short: &str, span: Span) {
+        let body = Body::new(self.checked, self.reach, full, format!("{short}.class"));
+        let Some(classes) = body.classes(full) else {
+            return;
+        };
+        let r#type = names::member(lean, b"$Class");
+        let mut lines = vec![format!("protected inductive {type} where")];
+        lines.extend(classes.iter().map(|(constructor, _)| format!("  | protected {constructor}")));
+        lines.push(DERIVED.to_owned());
+        self.declare_type(body, r#type, span, lines, Vec::new());
+
+        let mut body = Body::new(self.checked, self.reach, full, format!("{short}.class"));
+        let domain = body.class_type(span, full);
+        let r#type = body.class_value_type(full);
+        let key = names::member(lean, b"$classOf");
+        let mut lines = vec![format!("protected def {key} : {domain} → {type}")];
+        lines.extend(classes.iter().map(|(constructor, pattern)| format!("  | {pattern} => .{constructor}")));
+        self.declare(body, key, span, lines.join("\n"), Role::Definition);
     }
 
     /// A `Coe` from the class-like `lean` to each interface of `parents` that a law reaches, once each, so a value of it

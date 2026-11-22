@@ -20,6 +20,7 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_names::binding::php_operator_name;
@@ -44,6 +45,7 @@ use mago_syntax::cst::Conditional;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameter;
+use mago_syntax::cst::GenericHint;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
@@ -63,6 +65,7 @@ use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_word::Word;
@@ -221,6 +224,9 @@ impl<'body, 'program> Body<'body, 'program> {
                     && let [key, value] = generic.type_arguments.arguments.as_slice()
                 {
                     format!("(Sharp.Map {} {})", self.r#type(key), self.r#type(value))
+                } else if let Some(family) = self.class_hint_family(name, generic) {
+                    // Spec section 25: a `Class<F>` of a family `F` of classes is one of its classes.
+                    self.class_value_type(&family)
                 } else if is_collection(name) {
                     self.unmodeled(hint.span(), "a collection".to_owned(), issues::COLLECTION)
                 } else {
@@ -579,9 +585,8 @@ impl<'body, 'program> Body<'body, 'program> {
 
                 self.choose(&choice(vec![(test, vec!["pure true".to_owned()])], vec!["pure false".to_owned()]))
             }
-            Expression::As(_) | Expression::TypeOf(_) => {
-                self.unmodeled(expression.span(), "a type test".to_owned(), issues::TYPE_TEST)
-            }
+            Expression::TypeOf(type_of) => self.type_of(expression, type_of),
+            Expression::As(_) => self.unmodeled(expression.span(), "a type test".to_owned(), issues::TYPE_TEST),
             Expression::Yield(_) => self.unmodeled(expression.span(), "a lazy sequence".to_owned(), issues::LAZY),
             // A throw ends the code there with `Throwable.Thrown`, which proves nothing about a law, as an engine error
             // does. Its value, which no code reads, is a stand-in.
@@ -758,6 +763,12 @@ impl<'body, 'program> Body<'body, 'program> {
         (lhs, rhs): (&str, &str),
         negated: bool,
     ) -> String {
+        // Spec section 25: two class values of one family's classes are equal when they are the same class.
+        if let (Some(left), Some(right)) = (self.class_value_family(types.0), self.class_value_family(types.1))
+            && self.reach.same_class(&left, &right)
+        {
+            return if negated { format!("({lhs} != {rhs})") } else { format!("({lhs} == {rhs})") };
+        }
         let nullable = (types.0.is_nullable(), types.1.is_nullable());
         let equal = match self.checked.types().equality(types.0, types.1) {
             Equality::Identical if negated => return format!("({lhs} != {rhs})"),
@@ -1245,6 +1256,139 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
+    /// Each class a value of the class-like `family` runs as, spec section 25, as the constructor of `family`'s
+    /// `«$Class»` it is and the Lean pattern of the values of that class: each case of a machine or of an enum whose
+    /// cases carry data, and each implementer of a sealed interface. `None` for any other class-like, and for a sealed
+    /// interface an enum implements, whose classes are the enum's cases, and for a family that implements a sealed
+    /// interface, whose values are the interface's.
+    pub(super) fn classes(&self, family: &[u8]) -> Option<Vec<(String, String)>> {
+        if !self.reach.sealed_interfaces(family).is_empty() {
+            return None;
+        }
+        let lean = names::full_name(&self.reached_name(family));
+        let cases = self.reach.cases(family);
+        if let Some(case) = cases.first() {
+            self.checked.types().enum_case_class(word(family), *case)?;
+
+            return Some(
+                cases
+                    .iter()
+                    .map(|case| {
+                        (names::identifier(case.as_bytes()), format!("({} ..)", names::member(&lean, case.as_bytes())))
+                    })
+                    .collect(),
+            );
+        }
+        let implementers = self.reach.implementers(family)?;
+        if implementers.iter().any(|implementer| !self.reach.cases(implementer.as_bytes()).is_empty()) {
+            return None;
+        }
+
+        Some(
+            implementers
+                .iter()
+                .map(|implementer| {
+                    let constructor = names::short_name(implementer.as_bytes());
+                    (
+                        names::identifier(constructor.as_bytes()),
+                        format!("({} _)", names::member(&lean, constructor.as_bytes())),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// The class-like whose `«$Class»` holds the class `class`, and the constructor that is `class`: the family of
+    /// [`Body::classes`] that runs a value as `class`, or `class` itself, whose class values are those of its family.
+    fn class_family(&self, class: &[u8]) -> Option<(Vec<u8>, Option<String>)> {
+        if self.classes(class).is_some() {
+            return Some((class.to_vec(), None));
+        }
+        let family = match self.case_enum(class) {
+            Some(r#enum) => r#enum.to_vec(),
+            None => match self.reach.sealed_interfaces(class).as_slice() {
+                [interface] => interface.as_bytes().to_vec(),
+                _ => return None,
+            },
+        };
+        let (constructor, _) = self
+            .classes(&family)?
+            .into_iter()
+            .find(|(constructor, _)| *constructor == names::identifier(names::short_name(class).as_bytes()))?;
+
+        Some((family, Some(constructor)))
+    }
+
+    /// The class-like whose `«$Class»` a class value of `r#type` is, spec section 25: `typeof` of one of its classes, or
+    /// `Class.of` a value of it or of one of its classes. `None` for a nullable value and for any other type.
+    pub(super) fn class_value_family(&self, r#type: &TUnion) -> Option<Vec<u8>> {
+        let [TAtomic::Scalar(TScalar::ClassLikeString(class))] = r#type.types.as_ref() else {
+            return None;
+        };
+        match class {
+            TClassLikeString::Literal { value } => self.class_family(value.as_bytes()).map(|(family, _)| family),
+            TClassLikeString::OfType { constraint, .. } => {
+                let mut families = constraint.types.iter().map(|atomic| match atomic {
+                    TAtomic::Object(TObject::Named(named)) => {
+                        self.class_family(named.name.as_bytes()).map(|(family, _)| family)
+                    }
+                    _ => None,
+                });
+                let first = families.next()??;
+                families
+                    .all(|family| family.is_some_and(|family| self.reach.same_class(&family, &first)))
+                    .then_some(first)
+            }
+            _ => None,
+        }
+    }
+
+    /// The family `F` of the hint `Class<F>`, written `name<…>` as `generic`, when `F` is a family of classes, as
+    /// [`Body::classes`] gives them.
+    fn class_hint_family(&self, name: &[u8], generic: &GenericHint) -> Option<Vec<u8>> {
+        let [Hint::Identifier(held)] = generic.type_arguments.arguments.as_slice() else {
+            return None;
+        };
+        if names::short_name(name) != "Class" || self.checked.names().is_type_parameter(held) {
+            return None;
+        }
+        let family = self.checked.names().get(held);
+
+        self.classes(family).map(|_| family.to_vec())
+    }
+
+    /// The Lean type of a class value of the class-like `family`, `family.«$Class»`, spec section 25.
+    pub(super) fn class_value_type(&mut self, family: &[u8]) -> String {
+        let class_name = self.reached_name(family);
+        let key = names::member(&names::full_name(&class_name), b"$Class");
+        self.uses(family, &key, format!("Class<{}>", names::short_name(&class_name)));
+
+        key
+    }
+
+    /// `typeof(F.C)`, the class of `F`'s values that run as `F.C`, spec section 25, as the constructor of `F.«$Class»`
+    /// it is. A class no family holds is refused as a type test.
+    fn type_of(&mut self, expression: &Expression, type_of: &TypeOf) -> String {
+        if let Hint::Identifier(identifier) = &type_of.r#type
+            && !self.checked.names().is_type_parameter(identifier)
+            && let Some((family, Some(constructor))) = self.class_family(self.checked.names().get(identifier))
+        {
+            return format!("{}.{constructor}", self.class_value_type(&family));
+        }
+
+        self.unmodeled(expression.span(), "a type test".to_owned(), issues::TYPE_TEST)
+    }
+
+    /// `Class.of(value)`, the class `value` runs as, spec section 25: `family.«$classOf»` of `value`, which the body
+    /// already holds as a value of the Lean type of `family`.
+    fn class_of(&mut self, value: &Expression, family: &[u8]) -> String {
+        let class_name = self.reached_name(family);
+        let key = names::member(&names::full_name(&class_name), b"$classOf");
+        self.uses(family, &key, format!("Class.of a {}", names::short_name(&class_name)));
+
+        format!("({key} {})", self.value(value))
+    }
+
     /// Whether `class` implements the sealed interface `interface`, spec section 20.1.
     fn implements(&self, class: &[u8], interface: &[u8]) -> bool {
         self.reach.sealed_interfaces(class).iter().any(|sealed| self.reach.same_class(sealed.as_bytes(), interface))
@@ -1381,6 +1525,14 @@ impl<'body, 'program> Body<'body, 'program> {
                 return self.unmodeled(expression.span(), what, issues::PLAIN_PHP);
             }
             let class = names.get(&class.name);
+            // Spec section 25: `Class.of(value)` is the class `value` runs as, of its family's classes.
+            if class.eq_ignore_ascii_case(br"Sharp\Class")
+                && matches!(&call.method, ClassLikeMemberSelector::Identifier(method) if method.value == b"of")
+                && let [argument] = call.argument_list.arguments.as_slice()
+                && let Some(family) = self.class_value_family(self.checked.types().expression_type(expression))
+            {
+                return self.class_of(argument.value(), &family);
+            }
             if let Some(lean) = self.checked.types().lean_function(expression) {
                 return self.folded(&String::from_utf8_lossy(lean.as_bytes()), &call.argument_list);
             }
