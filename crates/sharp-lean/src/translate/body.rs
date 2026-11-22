@@ -332,6 +332,11 @@ impl<'body, 'program> Body<'body, 'program> {
                 let IfBody::Statement(body) = &r#if.body else {
                     unreachable!("PHP# parses no colon-delimited if, as {:?}", r#if.span());
                 };
+                if let Some(clause) = body.else_if_clauses.first() {
+                    self.unmodeled(clause.span(), "an else-if clause".to_owned(), issues::ELSE_IF);
+
+                    return;
+                }
                 let holds = self.path.branch(r#if.condition, true);
                 // `if (x is Money m)` names `m` where the test holds, so it is a `match` on `x`.
                 if let Expression::Is(is) = r#if.condition.unparenthesized() {
@@ -2470,4 +2475,52 @@ fn element_type(list: &TUnion) -> TUnion {
 /// Whether `class` names a PHP# collection.
 fn is_collection(class: &[u8]) -> bool {
     matches!(names::short_name(class).as_str(), "List" | "Map" | "Set")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use mago_allocator::LocalArena;
+    use mago_analyzer::artifacts::LoweringInput;
+    use mago_analyzer::effects::Effects;
+    use mago_codex::metadata::CodebaseMetadata;
+    use mago_database::file::File;
+    use mago_names::resolver::NameResolver;
+    use mago_sharp_bridge::InlineForms;
+    use mago_sharp_bridge::check;
+    use mago_syntax::dialect::Dialect;
+    use mago_syntax::parser::parse_file_with_dialect;
+    use mago_syntax::settings::ParserSettings;
+
+    use super::*;
+
+    /// An `if` with an else-if clause, which the PHP# checker refuses in a `.sharp` file, is a construct the
+    /// translation does not model, so the branch it would drop never becomes part of a proof. Plain PHP writes the
+    /// clause, and nothing checks it before the translation here.
+    #[test]
+    fn an_if_with_an_else_if_clause_is_unmodeled() {
+        let code = "<?php\nif (true) { return 1; } elseif (false) { return 0; } else { return 2; }\n";
+        let file = File::ephemeral(Cow::Borrowed(b"src/Sign.php"), Cow::Borrowed(code.as_bytes()));
+        let arena = LocalArena::new();
+        let program = parse_file_with_dialect(&arena, &file, Dialect::Php, ParserSettings::default());
+        let (input, codebase, forms) = (LoweringInput::default(), CodebaseMetadata::new(), InlineForms::default());
+        let effects = Effects::solve(&codebase, &[]);
+        let names = NameResolver::new(&arena).resolve(program);
+        let Ok(checked) = check(&file, program, names, &input, &codebase, &effects, &forms, &[]) else {
+            panic!("a program that parses with no issue is accepted");
+        };
+        let Some(r#if) = program.statements.iter().find(|statement| matches!(statement, Statement::If(_))) else {
+            panic!("the program holds its if");
+        };
+        let reach = Reach::default();
+        let mut body = Body::new(&checked, &reach, b"Sign", "Sign.of".to_owned());
+
+        body.statement(r#if);
+
+        let (_, _, unmodeled) = body.finish();
+        let refused: Vec<(&str, &str)> =
+            unmodeled.iter().map(|construct| (construct.what.as_str(), construct.reason.as_ref())).collect();
+        assert_eq!(refused, [("an else-if clause", issues::ELSE_IF)]);
+    }
 }

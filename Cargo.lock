@@ -1967,6 +1967,7 @@ version = "0.0.0"
 dependencies = [
  "foldhash",
  "libc",
+ "mago-allocator",
  "mago-analyzer",
  "mago-build-id",
  "mago-codex",

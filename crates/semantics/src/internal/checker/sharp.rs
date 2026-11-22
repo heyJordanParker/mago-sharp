@@ -1919,6 +1919,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
+        // PHP# keeps one way to write an else-if, so PHP's `elseif` fails as a typo does, with that way as its help.
+        (Node::IfStatementBodyElseIfClause(clause), Body) => {
+            context.report(unexpected(clause.elseif.span, context).with_help("Write `else if`."));
+
+            None
+        }
         (
             Node::Expression(Expression::Construct(Construct::Exit(_)))
             | Node::Construct(Construct::Exit(_))

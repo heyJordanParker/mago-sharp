@@ -963,13 +963,16 @@ fn a_colon_delimited_body_fails_as_a_typo_does() {
     }
 }
 
+/// PHP# keeps one way to write an else-if, so PHP's `elseif` fails as a typo does, at the `elseif`, with that way as its
+/// help.
 #[test]
-fn elseif_fails_as_a_typo_does() {
+fn elseif_fails_as_a_typo_does_and_its_help_writes_else_if() {
     let code = leak(method(
         "        if (extra > 1) {\n            return 1;\n        } elseif (extra > 2) {\n            return 2;\n        }\n        return extra;\n",
     ));
 
     assert_eq!(issues(code), ["9:11 Unexpected `elseif`"]);
+    assert_eq!(check_in_type_file(code).remove(0).help.as_deref(), Some("Write `else if`."));
 }
 
 #[test]

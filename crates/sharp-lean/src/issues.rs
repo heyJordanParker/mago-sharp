@@ -41,6 +41,7 @@ pub(crate) const CONSTRUCTOR_BODY: &str = "Write the constructor with promoted p
 pub(crate) const TYPE: &str = "Give it a type a law reasons about: int, bool, string, a List, a Map, or a PHP# class, enum or interface, with or without `?`.";
 pub(crate) const MISSING_TYPE: &str = "Write its type.";
 pub(crate) const TUPLE: &str = "Hold the values in a class with one property for each, in place of a tuple.";
+pub(crate) const ELSE_IF: &str = "Write `else if`.";
 pub(crate) const STATEMENT: &str = "Write the method with the statements a law reaches: `let` and `const`, assignments to locals, `if`, `match`, `return`, and loops that only count or sum.";
 pub(crate) const LOCAL_ASSIGNMENT: &str = "Assign the value to a local declared with `let`.";
 pub(crate) const UPDATE: &str = "Update an int with `+=`, `-=`, `*=`, `/=` or `%=`, or a string with `+=`.";
