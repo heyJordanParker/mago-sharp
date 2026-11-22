@@ -79,17 +79,16 @@ pub(crate) fn analyze_bindings<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    // Only a test start turns a test module on, so one outside a test file, which an `autoload-dev` folder holds, would
-    // never run.
-    if metadata.kind == ModuleKind::Test && context.source_file.folder_namespace != Some(FolderNamespace::Test) {
+    // Only a test start turns a test module on, so one in a file that holds no test would never run.
+    if metadata.kind == ModuleKind::Test && !holds_test(context, metadata) {
         context.collector.report_with_code(
             IssueCode::InvalidBinding,
-            Issue::error("A test module belongs in the test file that uses it.")
+            Issue::error(format!("`{}` holds no test, so its test module would never run.", metadata.file))
                 .with_annotation(Annotation::primary(metadata.span).with_message("Declared here."))
-                .with_note("Only a test start turns a test module on, so outside a test file it never runs.")
-                .with_help(
-                    "Move the module into the test file of the tests it serves, in a folder `composer.json` lists under `autoload-dev`.",
-                ),
+                .with_note(
+                    "Only a test of the file's class turns a test module on: a class that isn't abstract and extends `PHPUnit.Framework.TestCase`, in a folder `composer.json` lists under `autoload-dev`.",
+                )
+                .with_help("Move the module into the test file of the tests it serves."),
         );
     }
 
@@ -1043,6 +1042,24 @@ fn single_class<'ctx>(codebase: &'ctx CodebaseMetadata, service: &TUnion) -> Opt
 /// Whether the container can build `class` through its main constructor: a class that is not abstract.
 fn is_buildable(class: &ClassLikeMetadata) -> bool {
     class.kind.is_class() && !class.flags.is_abstract()
+}
+
+/// The class every PHPUnit test extends.
+const TEST_CASE: &str = "PHPUnit\\Framework\\TestCase";
+
+/// Whether the file that declares `module`, a test module, holds a test, which alone turns a test module on, spec
+/// section 32: it is a test file, in a folder `composer.json` lists under `autoload-dev`, and its class isn't abstract
+/// and extends PHPUnit's `TestCase`, directly or through a parent, so PHPUnit runs its tests.
+fn holds_test<A>(context: &Context<'_, '_, A>, module: &ModuleMetadata) -> bool
+where
+    A: Arena,
+{
+    context.source_file.folder_namespace == Some(FolderNamespace::Test)
+        && context.codebase.class_likes.values().any(|class| {
+            class.span.file_id == module.span.file_id
+                && is_buildable(class)
+                && context.codebase.class_extends(class.name, word(TEST_CASE))
+        })
 }
 
 /// The namespace of `class`, in lowercase, as modules name theirs.

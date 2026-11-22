@@ -34660,7 +34660,10 @@ fn only_the_apps_top_module_binds_the_dispatcher() {
     let shop = module("app/Shop/Module.sharp", "App.Shop", "");
     let admin = module("admin/Module.sharp", "Admin", "");
     let production = module("app/Module.Production.sharp", "App", " : App");
-    let test = module("tests/Shop/CartTest.sharp", "App.Shop", " : App.Shop");
+    let test = (
+        "tests/Shop/CartTest.sharp",
+        "namespace App.Shop;\n\nimport App.Recorder;\nimport PHPUnit.Framework.TestCase;\nimport Sharp.Dispatcher;\n\nmodule : App.Shop\n{\n    singleton Dispatcher = Recorder;\n}\n\npublic class CartTest : TestCase\n{\n}\n",
+    );
     let package = module("vendor/acme/billing/src/Module.sharp", "Acme", "");
     let below = "8:5 invalid-binding Only `app/Module.sharp` binds `Dispatcher`: an app binds it once, in its top module. | Remove this binding. The app's dispatcher serves every `emit`, and a test module replaces it in tests.";
     let tied = |other: &str| {
@@ -34674,7 +34677,7 @@ fn only_the_apps_top_module_binds_the_dispatcher() {
         (shop, vec![top], vec![below.to_string()]),
         (shop, vec![], vec![]),
         (production, vec![top, shop], vec![]),
-        (test, vec![top], vec![]),
+        (test, vec![top, TEST_CASE], vec![]),
         (top, vec![package], vec![]),
         (top, vec![admin], vec![tied("admin/Module.sharp")]),
         (admin, vec![top], vec![tied("app/Module.sharp")]),
@@ -34749,6 +34752,12 @@ fn an_emit_without_a_dispatcher_is_refused() {
 const DISPATCHER: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Dispatcher.sharp",
     include_str!("../../../../composer/library/Sharp/Dispatcher.sharp"),
+);
+
+/// PHPUnit's `TestCase`, at its place in a project that installs PHPUnit, which a test file's class extends.
+const TEST_CASE: (&str, &str) = (
+    "vendor/phpunit/phpunit/src/Framework/TestCase.php",
+    "<?php\n\nnamespace PHPUnit\\Framework;\n\nabstract class TestCase\n{\n}\n",
 );
 
 /// Spec section 15: a dispatcher runs the listeners of every event, which may reach any effect, so an implementation
@@ -35524,12 +35533,18 @@ fn a_program_s_constructor_needs_a_binding_for_each_service_it_takes() {
     }
 }
 
-/// Spec section 32: only a test start turns a test module on, so a test module belongs in a test file, one an
-/// `autoload-dev` folder holds. In a program's file it would do nothing, and it is refused. In a test file it compiles.
+/// Spec section 32: only a test start turns a test module on, so a test module belongs in a file that holds a test: a
+/// test file, one an `autoload-dev` folder holds, whose class isn't abstract and extends PHPUnit's `TestCase`, directly
+/// or through a parent. In a program's file, under `app/` or under `tests/`, and in an abstract test base, it would do
+/// nothing, and it is refused with the file named. In a test's file it compiles.
 #[test]
 fn a_test_module_outside_a_test_file_is_refused() {
     let app = ("app/Module.sharp", "namespace App;\n\nmodule\n{\n}\n");
-    let file = |path: &'static str, class: &str| {
+    let base = (
+        "tests/ShopTestCase.sharp",
+        "namespace App;\n\nimport PHPUnit.Framework.TestCase;\n\npublic abstract class ShopTestCase : TestCase\n{\n}\n",
+    );
+    let program = |path: &'static str, class: &str| {
         (
             path,
             leak(format!(
@@ -35537,13 +35552,34 @@ fn a_test_module_outside_a_test_file_is_refused() {
             )),
         )
     };
-    let misplaced = "3:1 invalid-binding A test module belongs in the test file that uses it. | Move the module into the test file of the tests it serves, in a folder `composer.json` lists under `autoload-dev`.";
+    let test = |path: &'static str, header: &str| {
+        (
+            path,
+            leak(format!(
+                "namespace App;\n\nimport PHPUnit.Framework.TestCase;\n\nmodule : App\n{{\n}}\n\n{header}\n{{\n}}\n"
+            )),
+        )
+    };
+    let misplaced = |line: u32, file: &str| {
+        format!(
+            "{line}:1 invalid-binding `{file}` holds no test, so its test module would never run. | Move the module into the test file of the tests it serves."
+        )
+    };
 
-    for (written, expected) in
-        [(file("app/Main.sharp", "Main"), vec![misplaced]), (file("tests/MainTest.sharp", "MainTest"), vec![])]
-    {
-        let refused: Vec<String> =
-            refusals(written, &[app]).into_iter().filter(|refusal| refusal.contains("A test module")).collect();
+    for (written, expected) in [
+        (program("app/Main.sharp", "Main"), vec![misplaced(3, "app/Main.sharp")]),
+        (program("tests/MainTest.sharp", "MainTest"), vec![misplaced(3, "tests/MainTest.sharp")]),
+        (test("tests/CheckoutTest.sharp", "public class CheckoutTest : TestCase"), vec![]),
+        (
+            test("tests/BaseTest.sharp", "public abstract class BaseTest : TestCase"),
+            vec![misplaced(5, "tests/BaseTest.sharp")],
+        ),
+        (test("tests/CartTest.sharp", "public class CartTest : ShopTestCase"), vec![]),
+    ] {
+        let refused: Vec<String> = refusals(written, &[app, TEST_CASE, base])
+            .into_iter()
+            .filter(|refusal| refusal.contains("holds no test"))
+            .collect();
         assert_eq!(refused, expected, "{}", written.0);
     }
 }
@@ -35645,8 +35681,9 @@ fn a_readonly_parameter_takes_the_service_of_its_type() {
 
 /// Spec section 32: an environment or test module overrides the base modules' bindings, so the services it changes
 /// are checked with the base bindings that reach them, and a problem it causes is reported at its own binding. Each
-/// row is the overriding file, its bindings from line 10, and the refusals it gets over a base module that binds
-/// `singleton Mailer = Wrapper;`, `singleton Flags = Flags;` and `transient FlaggedMailer = FlaggedMailer;`.
+/// row is the overriding file, its bindings from line 11, and the refusals it gets over a base module that binds
+/// `singleton Mailer = Wrapper;`, `singleton Flags = Flags;` and `transient FlaggedMailer = FlaggedMailer;`. A test
+/// module's file holds its test, a class that extends PHPUnit's `TestCase`.
 #[test]
 fn an_environment_or_test_module_is_checked_with_the_base_bindings_it_changes() {
     let looping = (
@@ -35665,9 +35702,9 @@ fn an_environment_or_test_module_is_checked_with_the_base_bindings_it_changes() 
         "app/Module.sharp",
         "namespace App;\n\nimport App.Features.Flags;\nimport App.Mail.Mailer;\nimport App.Mail.Wrapper;\nimport App.Mail.FlaggedMailer;\n\nmodule\n{\n    singleton Mailer = Wrapper;\n    singleton Flags = Flags;\n    transient FlaggedMailer = FlaggedMailer;\n}\n",
     );
-    let others: Vec<_> = BOUND_SERVICES.iter().copied().chain([looping, flagged, wrapper, base]).collect();
-    let captive = "10:5 captive-service The singleton `Mailer` holds the scoped `Flags`, which would outlive the scope it belongs to. | Make `Mailer` scoped too, or make `Flags` a singleton.";
-    let cycle = "10:5 service-cycle `Mailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+    let others: Vec<_> = BOUND_SERVICES.iter().copied().chain([looping, flagged, wrapper, base, TEST_CASE]).collect();
+    let captive = "11:5 captive-service The singleton `Mailer` holds the scoped `Flags`, which would outlive the scope it belongs to. | Make `Mailer` scoped too, or make `Flags` a singleton.";
+    let cycle = "11:5 service-cycle `Mailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
 
     for (path, members, expected) in [
         ("app/Module.Production.sharp", "    singleton Flags = Flags;", vec![]),
@@ -35676,19 +35713,20 @@ fn an_environment_or_test_module_is_checked_with_the_base_bindings_it_changes() 
         ("app/Module.Production.sharp", "    transient Mailer = LoopMailer;", vec![cycle]),
         ("tests/Mail/WrapperTest.sharp", "    scoped Flags = Flags;", vec![captive]),
     ] {
+        let test = if path.starts_with("tests/") { "\npublic class WrapperTest : TestCase\n{\n}\n" } else { "" };
         let module = (
             path,
             leak(format!(
-                "namespace App;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Mail.LoopMailer;\nimport App.Features.Flags;\n\nmodule : App\n{{\n{members}\n}}\n"
+                "namespace App;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Mail.LoopMailer;\nimport App.Features.Flags;\nimport PHPUnit.Framework.TestCase;\n\nmodule : App\n{{\n{members}\n}}\n{test}"
             )),
         );
         assert_eq!(refusals(module, &others), expected, "{path}: {members}");
     }
 
-    // The container applies every `Module.<SHARP_ENV>.sharp` on a class's folders at once, so an environment is
-    // checked as one set: the base modules under all of its modules. `QueueMailer` in `App.Mail` takes a `Queue`, and
-    // `MailQueue` takes a `Mailer`. Each row is the base modules, the environment's modules, and the refusals each
-    // environment module gets.
+    // The container applies every `Module.<SHARP_ENV>.sharp` of a class's namespace and those above it at once, so an
+    // environment is checked as one set: the base modules under all of its modules. `QueueMailer` in `App.Mail` takes
+    // a `Queue`, and `MailQueue` takes a `Mailer`. Each row is the base modules, the environment's modules, and the
+    // refusals each environment module gets.
     let mail = [
         BOUND_SERVICES[0],
         BOUND_SERVICES[1],

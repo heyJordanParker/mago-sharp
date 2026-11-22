@@ -3315,7 +3315,7 @@ fn listener_table(root: &Path, inputs: &[&str], rows: &str, dispatcher: &str) ->
     let inputs: String = inputs.iter().map(|path| input_row(root, path)).collect();
 
     format!(
-        "<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n    'dispatcher' => {dispatcher},\n    'attributes' => [\n    ],\n    'effects' => [\n    ],\n    'tags' => [\n    ],\n];\n"
+        "<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n    'dispatcher' => {dispatcher},\n    'attributes' => [\n    ],\n    'effects' => [\n    ],\n    'tags' => [\n    ],\n    'modules' => [\n    ],\n];\n"
     )
 }
 
@@ -3433,9 +3433,9 @@ fn dispatcher_module(namespace: &str) -> String {
     )
 }
 
-/// Spec section 15: the dispatcher is one service for the whole app, so the listener table names the app's top module
-/// that binds it, whose binding serves every `emit`, and none when no app module binds it. A binding below the top one
-/// is refused, and the table still names the top one.
+/// Spec section 15: the dispatcher is one service for the whole app, so the listener table names the namespace of the
+/// app's top module that binds it, whose binding serves every `emit`, and none when no app module binds it. A binding
+/// below the top one is refused, and the table still names the top one.
 #[test]
 fn compile_names_the_app_module_that_binds_the_dispatcher() {
     let recorder = "namespace App;\n\nimport Sharp.Dispatcher;\n\npublic class Recorder : Dispatcher\n{\n    public void dispatch(Any emitted, List<Function<void(Any)>> listeners) { }\n}\n";
@@ -3446,24 +3446,40 @@ fn compile_names_the_app_module_that_binds_the_dispatcher() {
     let root = directory.path();
 
     compile_succeeds(root);
-    assert!(
-        read(root, ".sharp/listeners.php")
-            .contains("    'dispatcher' => ['app/Shop/Module.sharp', 'app\\\\shop'],\n    'attributes' => [\n")
-    );
+    assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => 'app\\\\shop',\n    'attributes' => [\n"));
 
     write(root, "app/Module.sharp", &dispatcher_module("App"));
     let output = compile(root);
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(printed(&output).contains("Only `app/Module.sharp` binds `Dispatcher`"), "{}", printed(&output));
-    assert!(
-        read(root, ".sharp/listeners.php")
-            .contains("    'dispatcher' => ['app/Module.sharp', 'app'],\n    'attributes' => [\n")
-    );
+    assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => 'app',\n    'attributes' => [\n"));
 
     std::fs::remove_file(root.join("app/Shop/Module.sharp")).unwrap();
     std::fs::remove_file(root.join("app/Module.sharp")).unwrap();
     compile_succeeds(root);
     assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => null,\n    'attributes' => [\n"));
+}
+
+/// Spec section 32: a class's services come from the modules of its namespace and of each namespace above it, wherever
+/// its file is, so the listener table records each base module's file under the namespace it serves, and each
+/// environment module's under that namespace and its environment's name, for the engine to read by namespace.
+#[test]
+fn compile_records_each_module_under_the_namespace_it_serves() {
+    let directory = lawful_project(&[
+        ("app/Module.sharp", "namespace App;\n\nmodule\n{\n}\n"),
+        ("app/Shop/Module.sharp", "namespace App.Shop;\n\nmodule\n{\n}\n"),
+        ("app/Shop/Module.Production.sharp", "namespace App.Shop;\n\nmodule : App.Shop\n{\n}\n"),
+    ]);
+    let root = directory.path();
+
+    compile_succeeds(root);
+    let table = read(root, ".sharp/listeners.php");
+    assert!(
+        table.ends_with(
+            "    'modules' => [\n        'app' => ['app/Module.sharp'],\n        'app\\\\shop' => ['app/Shop/Module.sharp'],\n        'app\\\\shop Production' => ['app/Shop/Module.Production.sharp'],\n    ],\n];\n"
+        ),
+        "{table}"
+    );
 }
 
 /// Spec section 29: the listener table names, for each plain PHP class, method and function an `extern` line gives
@@ -3515,7 +3531,7 @@ fn compile_lists_the_effects_each_extern_line_declares_for_a_class_and_a_method(
     compile_succeeds(root);
     assert!(
         read(root, ".sharp/listeners.php").ends_with(
-            "    'effects' => [\n        'lib\\\\mailer' => [],\n        'lib\\\\mailer::count' => null,\n        'lib\\\\mailer::send' => ['App.Mail.Smtp'],\n    ],\n    'tags' => [\n    ],\n];\n"
+            "    'effects' => [\n        'lib\\\\mailer' => [],\n        'lib\\\\mailer::count' => null,\n        'lib\\\\mailer::send' => ['App.Mail.Smtp'],\n    ],\n    'tags' => [\n    ],\n    'modules' => [\n    ],\n];\n"
         ),
         "{}",
         read(root, ".sharp/listeners.php")
@@ -3534,7 +3550,7 @@ fn compile_lists_a_machine_that_stores_as_its_value_with_each_case_under_its_val
 
     assert!(
         read(root, ".sharp/listeners.php").ends_with(
-            "    'tags' => [\n        'App\\\\Shop\\\\JourneyStatus' => ['', ['completed' => 'App\\\\Shop\\\\JourneyStatus\\\\Completed', 'open' => 'App\\\\Shop\\\\JourneyStatus\\\\Open']],\n    ],\n];\n"
+            "    'tags' => [\n        'App\\\\Shop\\\\JourneyStatus' => ['', ['completed' => 'App\\\\Shop\\\\JourneyStatus\\\\Completed', 'open' => 'App\\\\Shop\\\\JourneyStatus\\\\Open']],\n    ],\n    'modules' => [\n    ],\n];\n"
         ),
         "{}",
         read(root, ".sharp/listeners.php")

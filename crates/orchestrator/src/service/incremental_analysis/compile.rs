@@ -364,14 +364,16 @@ pub struct Family {
     pub variants: Vec<(Word, Word)>,
 }
 
-/// The app's module whose binding of the dispatcher serves the whole app, spec section 15, which `emit` reads wherever
-/// the event is emitted.
+/// A base or environment module the listener table records, spec section 32, which the engine reads for a class of its
+/// namespace or of a namespace below it, wherever the class's file is.
 #[derive(Debug, PartialEq, Eq)]
-pub struct DispatcherModule {
+pub struct RecordedModule {
+    /// The full name of the namespace it serves, in lowercase.
+    pub namespace: Word,
+    /// The environment `SHARP_ENV` picks it for, as in `Production`, or `None` for a base module.
+    pub environment: Option<Word>,
     /// The workspace-relative name of its file.
     pub file: Word,
-    /// The namespace it binds for, in lowercase.
-    pub namespace: Word,
 }
 
 /// The name the listener table gives what an `extern` line declares, as PHP looks it up: a class's fully qualified
@@ -518,25 +520,48 @@ impl IncrementalAnalysisService {
         families
     }
 
-    /// The app's module whose binding of the dispatcher serves the whole app, spec section 15: a module of the one
-    /// namespace `top_dispatcher_namespaces` gives. `None` when no app module binds it, and the standard library's
-    /// binding serves, and when two namespaces tie, which the analyzer refuses.
+    /// The namespace, in lowercase, of the app's modules whose binding of the dispatcher serves the whole app, spec
+    /// section 15: the one namespace `top_dispatcher_namespaces` gives. `None` when no app module binds it, and the
+    /// standard library's binding serves, and when two namespaces tie, which the analyzer refuses.
     #[must_use]
-    pub fn dispatcher_module(&self) -> Option<DispatcherModule> {
-        let codebase = &self.codebase;
-        let [namespace] = top_dispatcher_namespaces(&codebase.modules, codebase)[..] else {
+    pub fn dispatcher_namespace(&self) -> Option<Word> {
+        let [namespace] = top_dispatcher_namespaces(&self.codebase.modules, &self.codebase)[..] else {
             return None;
         };
 
-        codebase
+        Some(namespace)
+    }
+
+    /// Every base and environment module of the last analysis but the standard library's, which the library's
+    /// autoloader reads, by namespace, then by environment, then by file. A test module is left out: its test file
+    /// hands the container its bindings while a test of the file runs.
+    #[must_use]
+    pub fn modules(&self) -> Vec<RecordedModule> {
+        let mut modules: Vec<RecordedModule> = self
+            .codebase
             .modules
             .iter()
-            .find(|module| {
-                module.kind != ModuleKind::Test
-                    && module.namespace == namespace
-                    && module.bindings.iter().any(|binding| binding.binds_dispatcher(codebase))
+            .filter(|module| !module.namespace.as_bytes().is_empty())
+            .filter_map(|module| {
+                let environment = match module.kind {
+                    ModuleKind::Base => None,
+                    ModuleKind::Environment(environment) => Some(environment),
+                    ModuleKind::Test => return None,
+                };
+
+                Some(RecordedModule { namespace: module.namespace, environment, file: module.file })
             })
-            .map(|module| DispatcherModule { file: module.file, namespace })
+            .collect();
+        modules.sort_by(|a, b| {
+            (a.namespace.as_bytes(), a.environment.as_ref().map(Word::as_bytes), a.file.as_bytes()).cmp(&(
+                b.namespace.as_bytes(),
+                b.environment.as_ref().map(Word::as_bytes),
+                b.file.as_bytes(),
+            ))
+        });
+        modules.dedup();
+
+        modules
     }
 
     /// For each of `files`, the source files other than it whose signature edit makes the warm path re-analyze it, as

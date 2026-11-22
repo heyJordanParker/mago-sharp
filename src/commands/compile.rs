@@ -66,12 +66,12 @@ use mago_orchestrator::service::incremental_analysis::Scans;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::Compiled;
 use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
-use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::ExternAttributes;
 use mago_orchestrator::service::incremental_analysis::compile::ExternEffects;
 use mago_orchestrator::service::incremental_analysis::compile::Family;
 use mago_orchestrator::service::incremental_analysis::compile::Folder;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
+use mago_orchestrator::service::incremental_analysis::compile::RecordedModule;
 use mago_prelude::Prelude;
 use mago_reporting::CompiledIgnoreSet;
 use mago_reporting::IssueCollection;
@@ -866,8 +866,9 @@ fn write_hosts(
             listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
         let effects = server.extern_effects();
         let table = folder.join(LISTENERS);
-        let dispatcher = server.dispatcher_module();
-        let bytes = listener_table(inputs, &accepted, dispatcher.as_ref(), &externs, &effects, &families);
+        let dispatcher = server.dispatcher_namespace();
+        let modules = server.modules();
+        let bytes = listener_table(inputs, &accepted, dispatcher, &externs, &effects, &families, &modules);
         keep(&table, unit::source_hash(&bytes), write_if_changed(&table, &bytes)?);
         written.insert(table);
     }
@@ -1489,8 +1490,9 @@ fn compiled(
             listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
         let effects = server.extern_effects();
         let table = compiled_folder.join(LISTENERS);
-        let dispatcher = server.dispatcher_module();
-        let bytes = listener_table(&inputs, &accepted, dispatcher.as_ref(), &externs, &effects, &families);
+        let dispatcher = server.dispatcher_namespace();
+        let modules = server.modules();
+        let bytes = listener_table(&inputs, &accepted, dispatcher, &externs, &effects, &families, &modules);
         write_if_changed(&table, &bytes)?;
         if let Some(record) = record.as_mut() {
             record.output(&table, unit::source_hash(&bytes));
@@ -2305,22 +2307,26 @@ fn listener_inputs(
 /// its workspace-relative path, size, modification time and hash. Its `listeners` are one row per listener, in the
 /// order the engine runs them, of its class, its method, the events its `on` clause lists, and whether it takes the
 /// event. A full name holds no `'` and never ends in `\`, so each one is a single-quoted string as written. Its
-/// `dispatcher` is the app's module whose binding of the dispatcher serves the whole app, as its path and namespace,
-/// or `null`. Its `attributes` are, for each plain PHP class, method and function an `extern` line gives attributes,
+/// `dispatcher` is the namespace, in lowercase, of the app's modules whose binding of the dispatcher serves the whole
+/// app, or `null`. Its `attributes` are, for each plain PHP class, method and function an `extern` line gives attributes,
 /// the files whose lines do, which the engine compiles when reflection reads its attributes, spec section 29. A class
 /// is keyed by its full name, a method as `class::method`, and a function as `function()`, each in lowercase. Its
 /// `effects` are, keyed the same way, the effects the first `extern` line of each plain PHP class and method declares,
 /// the standard library's included, by their dotted full names, or `null` for a line that says `uses any`, which
 /// `Method.createDelegate` holds a plain PHP method to, spec section 25. Its `tags` are, for each family, spec section
 /// 10, under its full name, the key its `[Tag]` names and each variant's class under the variant's name, which a
-/// family's `parse` and `withTag` read.
+/// family's `parse` and `withTag` read. Its `modules` are the files of the base modules of each namespace, under the
+/// namespace in lowercase, and those of its environment modules, under the namespace, a space and the environment's
+/// name, which the engine reads for a class of the namespace or of a namespace below it wherever the class's file is,
+/// spec section 32.
 fn listener_table(
     inputs: &[unit::Input],
     listeners: &[&Listener],
-    dispatcher: Option<&DispatcherModule>,
+    dispatcher: Option<Word>,
     externs: &[&ExternAttributes],
     effects: &[ExternEffects],
     families: &[&Family],
+    modules: &[RecordedModule],
 ) -> Vec<u8> {
     let mut table = b"<?php\n\nreturn [\n    'inputs' => [\n".to_vec();
     for input in inputs {
@@ -2345,12 +2351,9 @@ fn listener_table(
     }
     table.extend_from_slice(b"    ],\n    'dispatcher' => ");
     match dispatcher {
-        Some(module) => {
-            table.push(b'[');
-            quoted(&mut table, module.file.as_bytes());
-            table.extend_from_slice(b", ");
-            quoted(&mut table, module.namespace.as_bytes());
-            table.extend_from_slice(b"],\n");
+        Some(namespace) => {
+            quoted(&mut table, namespace.as_bytes());
+            table.extend_from_slice(b",\n");
         }
         None => table.extend_from_slice(b"null,\n"),
     }
@@ -2408,6 +2411,31 @@ fn listener_table(
             quoted(&mut table, variant.as_bytes());
         }
         table.extend_from_slice(b"]],\n");
+    }
+    // `modules` holds each key's modules together.
+    let mut keyed: Vec<(String, Vec<Word>)> = Vec::new();
+    for module in modules {
+        let key = match module.environment {
+            Some(environment) => format!("{} {environment}", module.namespace),
+            None => module.namespace.to_string(),
+        };
+        match keyed.last_mut() {
+            Some((last, files)) if *last == key => files.push(module.file),
+            _ => keyed.push((key, vec![module.file])),
+        }
+    }
+    table.extend_from_slice(b"    ],\n    'modules' => [\n");
+    for (key, files) in keyed {
+        table.extend_from_slice(b"        ");
+        quoted(&mut table, key.as_bytes());
+        table.extend_from_slice(b" => [");
+        for (index, file) in files.iter().enumerate() {
+            if index > 0 {
+                table.extend_from_slice(b", ");
+            }
+            quoted(&mut table, file.as_bytes());
+        }
+        table.extend_from_slice(b"],\n");
     }
     table.extend_from_slice(b"    ],\n];\n");
 

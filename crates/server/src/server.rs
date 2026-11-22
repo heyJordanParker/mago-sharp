@@ -22,12 +22,12 @@ use mago_orchestrator::error::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_orchestrator::service::incremental_analysis::Scans;
 use mago_orchestrator::service::incremental_analysis::compile::Compiled;
-use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::ExternAttributes;
 use mago_orchestrator::service::incremental_analysis::compile::ExternEffects;
 use mago_orchestrator::service::incremental_analysis::compile::Family;
 use mago_orchestrator::service::incremental_analysis::compile::Folder;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
+use mago_orchestrator::service::incremental_analysis::compile::RecordedModule;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_sharp_bridge::InlineForms;
@@ -311,10 +311,17 @@ impl Server {
         self.service.families()
     }
 
-    /// The app's module whose binding of the dispatcher serves the whole app.
+    /// The namespace of the app's modules whose binding of the dispatcher serves the whole app.
     #[must_use]
-    pub fn dispatcher_module(&self) -> Option<DispatcherModule> {
-        self.service.dispatcher_module()
+    pub fn dispatcher_namespace(&self) -> Option<Word> {
+        self.service.dispatcher_namespace()
+    }
+
+    /// Every base and environment module of the last analysis but the standard library's, by namespace, then by
+    /// environment, then by file.
+    #[must_use]
+    pub fn modules(&self) -> Vec<RecordedModule> {
+        self.service.modules()
     }
 
     /// Every `extern` line of the last analysis that gives a class, a method or a function attributes, by what it
