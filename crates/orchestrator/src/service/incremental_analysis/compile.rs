@@ -1,6 +1,7 @@
 //! Compiles each `.sharp` file of the last analysis into the `.sharpc` file the engine runs.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -36,6 +37,7 @@ use mago_database::error::DatabaseError;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_names::PROGRAM_ENTRY;
 use mago_names::resolver::NameResolver;
 use mago_names::short_name;
 use mago_reporting::Annotation;
@@ -607,10 +609,10 @@ impl IncrementalAnalysisService {
     /// by that hash: a body edit to it changes no other compiled file, since the key holds what the file read of its
     /// bodies. A file that states an `extern` line or whose signature holds no declaration keeps its stamp alone.
     ///
-    /// A file that states a law also lists every source its laws reach. A file that declares a module or a listener
-    /// also lists the module files its check resolves services through, each folder's `Module.sharp` whether or not a
-    /// file is at it, as [`Self::module_inputs`] gives them. A file outside `vendor/` lists the `Module.sharp` of its
-    /// own folder and of each folder above it, whose `imports` line limits what it imports.
+    /// A file that states a law also lists every source its laws reach. A file outside `vendor/` also lists the module
+    /// files its check reads, by the namespaces they serve, whether or not a file is at each, as
+    /// [`Self::module_inputs`] gives them: the modules whose `imports` line limits what it imports, and for a file that
+    /// declares a module, a listener or a program, the modules its check resolves services through.
     ///
     /// The laws of a file are checked again when the file or a file its laws reach is lowered again, and the files they
     /// reach that keep their compiled file are translated without being lowered. `check` gets those translations,
@@ -773,13 +775,7 @@ impl IncrementalAnalysisService {
         // A method whose return comes from its body can return another such method's return, and a body has the
         // effects of each body it calls, so a file's inputs close over the files whose bodies it reads.
         dependencies.follow_bodies(&files.iter().map(|file| file.id).collect::<Vec<FileId>>(), &reads);
-        let listening: HashSet<FileId> = self
-            .codebase
-            .function_likes
-            .values()
-            .filter(|method| !method.listens.is_empty())
-            .map(|method| method.span.file_id)
-            .collect();
+        let modules = self.module_files();
         let mut folder_files: HashMap<&[u8], Vec<&[u8]>> = HashMap::default();
         for file in &files {
             folder_files.entry(folder_of(&file.name)).or_default().push(&file.name);
@@ -791,7 +787,7 @@ impl IncrementalAnalysisService {
             &lowerings,
             &reach,
             &dependencies,
-            &listening,
+            &modules,
             &folder_files,
             &read_by_every_file,
         );
@@ -803,7 +799,7 @@ impl IncrementalAnalysisService {
                 &lowerings,
                 &reach,
                 &dependencies,
-                &listening,
+                &modules,
                 &folder_files,
                 &read_by_every_file,
             )
@@ -922,9 +918,9 @@ impl IncrementalAnalysisService {
 
     /// What `target`'s folder reads once `refused`, the issues of each file whose law is not proved, refuse their
     /// files in it: the declarations hash of each of `files` it accepts, and the inputs of each it keeps or lowered from
-    /// `lowerings`. A file's inputs are each source `reach` and `dependencies` give it, the module files its check
-    /// resolves services through by `listening`, the files of its folder in `folder_files` when its code reaches an
-    /// extension, and the files in `read_by_every_file`.
+    /// `lowerings`. A file's inputs are each source `reach` and `dependencies` give it, the module files its check reads
+    /// as `modules` places them, the files of its folder in `folder_files` when its code reaches an extension, and the
+    /// files in `read_by_every_file`.
     #[allow(clippy::too_many_arguments)]
     fn inputs<'folder, Written>(
         &self,
@@ -934,7 +930,7 @@ impl IncrementalAnalysisService {
         lowerings: &[Lowering],
         reach: &Reach,
         dependencies: &Dependencies<'_>,
-        listening: &HashSet<FileId>,
+        modules: &ModuleFiles,
         folder_files: &HashMap<&[u8], Vec<&[u8]>>,
         read_by_every_file: &HashSet<FileId>,
     ) -> Inputs<'folder, Written> {
@@ -976,10 +972,6 @@ impl IncrementalAnalysisService {
                 }
             }
 
-            // Spec section 32: the `imports` line of the module of the file's folder or of a folder above it limits
-            // what the file imports.
-            let lists =
-                folders(&file.name).filter(|_| is_source(file)).map(|folder| [folder, MODULE_FILE.as_bytes()].concat());
             // Spec section 27 puts a class-like of the file's namespace in the file's folder, under its own name, so the
             // files that would declare one are inputs, stamped absent while the namespace lacks it.
             let folder = folder_of(&file.name);
@@ -1008,10 +1000,9 @@ impl IncrementalAnalysisService {
                 .filter_map(|source| self.database.get(&source).ok())
                 .filter(|source| source.id == file.id || is_source(source))
                 .map(|source| source.name.to_vec())
-                .chain(lists)
                 .chain(namespace_class_files)
                 .chain(namespace_files)
-                .chain(self.module_inputs(file, dependencies, listening))
+                .chain(self.module_inputs(file, dependencies, modules))
                 .chain(std::iter::once(COMPOSER_LOCK.to_vec()))
                 .map(|path| (path, [0; 16]))
                 .chain(imports)
@@ -1386,50 +1377,103 @@ impl IncrementalAnalysisService {
         reads
     }
 
-    /// Spec section 32: the module files the check of `file` resolves services through, whether a file is at each or
-    /// not. A module's bindings and a listener's constructor take each service from the module of the taking class's
-    /// namespace or of a namespace above it, and the container reads those from the class's folder and each folder
-    /// above it. So a file that declares a module or a listener names the `Module.sharp` of each of those folders, for
-    /// its own folder, each class its check read and each class of a test module's namespace. An environment module
-    /// also names its environment's `Module.<Environment>.sharp` of each, since its check reads them all. An edit, an
-    /// addition or a deletion of one makes the compiled file stale. `listening` holds each file that declares a
-    /// listener.
-    fn module_inputs(&self, file: &File, dependencies: &Dependencies<'_>, listening: &HashSet<FileId>) -> Vec<Vec<u8>> {
-        let modules: Vec<&ModuleMetadata> =
-            self.codebase.modules.iter().filter(|module| module.file.as_bytes() == file.name.as_ref()).collect();
-        if modules.is_empty() && !listening.contains(&file.id) {
+    /// Spec section 32: the module files the check of `file` reads, whether a file is at each or not, as `modules`
+    /// places them. The `imports` line of the module of the file's namespace or of a namespace above it limits what the
+    /// file imports. A module's bindings, a listener's constructor and a program's constructor also take each service
+    /// from the module of the taking class's namespace or of a namespace above it, so a file that declares a module, a
+    /// listener or a program also reads the modules of each namespace a module of it serves, and of each class its
+    /// check read. An environment module also reads its environment's modules. An edit, an addition or a deletion of
+    /// one makes the compiled file stale.
+    fn module_inputs(&self, file: &File, dependencies: &Dependencies<'_>, modules: &ModuleFiles) -> Vec<Vec<u8>> {
+        if !is_source(file) {
             return Vec::new();
         }
 
-        let read = dependencies.files.get(&mago_word::word(file.name.as_ref())).into_iter().flatten();
-        let read = read.filter_map(|(class, _)| self.codebase.get_class_like(*class));
-        let tested = modules.iter().filter(|module| module.kind == ModuleKind::Test).flat_map(|module| {
-            self.codebase.class_likes.values().map(|class| &**class).filter(|class| {
-                let name = class.name.as_bytes();
-                let namespace = name.iter().rposition(|byte| *byte == b'\\').map_or(&name[..0], |end| &name[..end]);
+        let mut namespaces: Vec<Vec<u8>> =
+            modules.namespaces.get(&file.id).map(|namespace| namespace.to_ascii_lowercase()).into_iter().collect();
+        let declared: Vec<&ModuleMetadata> =
+            self.codebase.modules.iter().filter(|module| module.file.as_bytes() == file.name.as_ref()).collect();
+        let mut environments = Vec::new();
+        if !declared.is_empty() || modules.built.contains(&file.id) {
+            let read = dependencies.files.get(&word(file.name.as_ref())).into_iter().flatten();
+            let read = read.filter_map(|(class, _)| self.codebase.get_class_like(*class));
+            namespaces.extend(read.map(|class| namespace_of(class.name.as_bytes()).to_ascii_lowercase()));
+            namespaces.extend(declared.iter().map(|module| module.namespace.as_bytes().to_vec()));
+            environments.extend(declared.iter().filter_map(|module| match module.kind {
+                ModuleKind::Environment(environment) => Some(environment),
+                ModuleKind::Base | ModuleKind::Test => None,
+            }));
+        }
+        namespaces.sort_unstable();
+        namespaces.dedup();
 
-                namespace == module.namespace.as_bytes()
-            })
+        namespaces.iter().flat_map(|namespace| modules.paths(namespace, &environments)).collect()
+    }
+
+    /// Where the modules of each namespace are, for [`Self::module_inputs`], once this analysis's modules are recorded.
+    fn module_files(&self) -> ModuleFiles {
+        let mut namespaces: HashMap<FileId, Vec<u8>> = HashMap::default();
+        // A machine's case classes are named under the machine, so a file's own namespace is the shortest of its
+        // class-likes'.
+        for class in self.codebase.class_likes.values() {
+            let namespace = namespace_of(class.original_name.as_bytes());
+            namespaces
+                .entry(class.span.file_id)
+                .and_modify(|held| {
+                    if namespace.len() < held.len() {
+                        *held = namespace.to_vec();
+                    }
+                })
+                .or_insert_with(|| namespace.to_vec());
+        }
+        for import in &self.codebase.namespace_imports {
+            namespaces.entry(import.span.file_id).or_insert_with(|| import.namespace.as_bytes().to_vec());
+        }
+
+        let mut folders: HashMap<Vec<u8>, BTreeSet<Vec<u8>>> = HashMap::default();
+        namespaces.retain(|file_id, namespace| {
+            let Some(file) = self.database.get(file_id).ok().filter(|file| is_source(file)) else {
+                return false;
+            };
+            if namespace.is_empty() {
+                return false;
+            }
+
+            // PSR-4 maps each folder below a namespace's folder to the namespace of the same name below it, so a
+            // folder whose last part names its namespace's last part is held in the folder of the namespace above.
+            let (mut folder, mut namespace) = (folder_of(&file.name), namespace.as_slice());
+            loop {
+                folders.entry(namespace.to_ascii_lowercase()).or_default().insert(folder.to_vec());
+                let Some(separator) = namespace.iter().rposition(|byte| *byte == b'\\') else {
+                    break;
+                };
+                let Some(inner) = folder.strip_suffix(b"/") else {
+                    break;
+                };
+                let start = inner.iter().rposition(|byte| *byte == b'/').map_or(0, |slash| slash + 1);
+                if inner[start..] != namespace[separator + 1..] {
+                    break;
+                }
+                (folder, namespace) = (&folder[..start], &namespace[..separator]);
+            }
+
+            true
         });
-        let mut names = vec![MODULE_FILE.as_bytes().to_vec()];
-        for module in &modules {
-            if let ModuleKind::Environment(environment) = module.kind {
-                names.push([b"Module.", environment.as_bytes(), b".sharp"].concat());
-            }
-        }
+        let built = self
+            .codebase
+            .function_likes
+            .iter()
+            .filter(|((class, _), method)| {
+                !method.listens.is_empty()
+                    || (method.original_name.as_bytes() == PROGRAM_ENTRY.as_bytes()
+                        && self.codebase.class_likes.get(class).is_some_and(|class| {
+                            class.flags.is_sharp() && class.kind.is_class() && !class.flags.is_struct()
+                        }))
+            })
+            .map(|(_, method)| method.span.file_id)
+            .collect();
 
-        let mut paths = Vec::new();
-        let declaring = read
-            .chain(tested)
-            .filter_map(|class| self.database.get(&class.span.file_id).ok())
-            .filter(|declaring| is_source(declaring));
-        for name in std::iter::once(file.name.to_vec()).chain(declaring.map(|declaring| declaring.name.to_vec())) {
-            for folder in folders(&name) {
-                paths.extend(names.iter().map(|module| [folder, module.as_slice()].concat()));
-            }
-        }
-
-        paths
+        ModuleFiles { recorded: self.modules(), folders, namespaces, built }
     }
 
     /// `name` and, when it names a class-like, every class, interface and trait it inherits from, since an extension
@@ -1779,11 +1823,57 @@ fn folder_of(name: &[u8]) -> &[u8] {
     &name[..name.iter().rposition(|byte| *byte == b'/').map_or(0, |slash| slash + 1)]
 }
 
-/// Each workspace-relative folder that holds the file `name`, from the root to its own, each with its trailing `/`:
-/// nothing, `app/` and `app/Orders/` of `app/Orders/Order.sharp`.
-fn folders(name: &[u8]) -> impl Iterator<Item = &[u8]> {
-    std::iter::once(&name[..0])
-        .chain(name.iter().enumerate().filter(|(_, byte)| **byte == b'/').map(|(end, _)| &name[..=end]))
+/// The namespace of the class-like named `name`, as PHP writes both, or nothing for one of the root namespace.
+fn namespace_of(name: &[u8]) -> &[u8] {
+    &name[..name.iter().rposition(|byte| *byte == b'\\').unwrap_or(0)]
+}
+
+/// Spec section 32: where the modules of each namespace are, as a compiled file names them as inputs.
+///
+/// The engine reads a class's modules from the listener table's record of each module by the namespace it serves,
+/// so a file names the file of each recorded module it reads. A module added for a namespace sits in a folder that
+/// holds a file of the namespace, or in a PSR-4 parent of one, so a file also names the `Module.sharp` of each such
+/// folder, stamped absent while no file is there. A file added beside a module, other than a module, changes no input.
+struct ModuleFiles {
+    /// Each base and environment module the listener table records.
+    recorded: Vec<RecordedModule>,
+    /// Each folder, with its trailing `/`, that holds a source file of a namespace or is a PSR-4 parent of a folder
+    /// that holds one of a namespace below it, by the namespace in lowercase, as PHP writes it.
+    folders: HashMap<Vec<u8>, BTreeSet<Vec<u8>>>,
+    /// The namespace each source file declares, as PHP writes it, for each such file of a namespace other than the
+    /// root one.
+    namespaces: HashMap<FileId, Vec<u8>>,
+    /// Each file that declares a listener or a program, whose class PHP# builds through the container, spec sections
+    /// 15 and 27.
+    built: HashSet<FileId>,
+}
+
+impl ModuleFiles {
+    /// The files of the modules that serve `namespace`, in lowercase as PHP writes it, and each namespace above it but
+    /// the root one, whose modules are the standard library's: each recorded base module of them, and each of
+    /// `environments`', and the `Module.sharp` and `Module.<Environment>.sharp` of each of their folders.
+    fn paths(&self, namespace: &[u8], environments: &[Word]) -> Vec<Vec<u8>> {
+        let names: Vec<Vec<u8>> = std::iter::once(MODULE_FILE.as_bytes().to_vec())
+            .chain(environments.iter().map(|environment| [b"Module.", environment.as_bytes(), b".sharp"].concat()))
+            .collect();
+        let mut paths = Vec::new();
+        let mut served = namespace;
+        while !served.is_empty() {
+            paths.extend(
+                self.recorded
+                    .iter()
+                    .filter(|module| module.namespace.as_bytes() == served)
+                    .filter(|module| module.environment.as_ref().is_none_or(|named| environments.contains(named)))
+                    .map(|module| module.file.as_bytes().to_vec()),
+            );
+            for folder in self.folders.get(served).into_iter().flatten() {
+                paths.extend(names.iter().map(|name| [folder.as_slice(), name.as_slice()].concat()));
+            }
+            served = namespace_of(served);
+        }
+
+        paths
+    }
 }
 
 /// The cascade's edges, indexed to walk backward from a file to the source files whose signature edit makes the warm
@@ -2558,7 +2648,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_names_its_source_its_folders_module_files_each_file_whose_edit_reanalyzes_it_and_composer_lock() {
+    fn a_file_names_its_source_its_namespaces_module_files_each_file_whose_edit_reanalyzes_it_and_composer_lock() {
         let database = shop_project(&shop(MONEY, RATE));
         let mut service = analyzed(&database);
 
@@ -2569,7 +2659,6 @@ mod tests {
         assert_eq!(
             input_paths(accepted(&compiled, "app/Order.sharp")),
             [
-                "Module.sharp",
                 "app/Cash.sharp",
                 "app/Module.sharp",
                 "app/Money.sharp",
@@ -2581,7 +2670,7 @@ mod tests {
         );
         assert_eq!(
             input_paths(accepted(&compiled, "app/Unrelated.sharp")),
-            ["Module.sharp", "app/Module.sharp", "app/Unrelated.sharp", "composer.lock"]
+            ["app/Module.sharp", "app/Unrelated.sharp", "composer.lock"]
         );
     }
 
@@ -2594,7 +2683,7 @@ mod tests {
         assert_eq!(input_paths(accepted(&compiled, TEXT_PATH)), ["composer.lock", TEXT_PATH]);
         assert_eq!(
             input_paths(accepted(&compiled, "app/Title.sharp")),
-            ["Module.sharp", "app/Module.sharp", "app/Title.sharp", "composer.lock"]
+            ["app/Module.sharp", "app/Title.sharp", "composer.lock"]
         );
     }
 
@@ -2609,7 +2698,6 @@ mod tests {
         assert_eq!(
             inputs(accepted(&compiled, "app/Order.sharp")),
             [
-                absent(b"Module.sharp"),
                 absent(b"app/Module.sharp"),
                 Input {
                     path: b"app/Order.sharp".to_vec(),
@@ -2669,11 +2757,11 @@ mod tests {
 
         assert_eq!(
             input_paths(accepted(&compiled, "app/Paced.sharp")),
-            ["Module.sharp", "app/Module.sharp", "app/Paced.sharp", "composer.lock", "lib/Rate.php", "lib/aliases.php"]
+            ["app/Module.sharp", "app/Paced.sharp", "composer.lock", "lib/Rate.php", "lib/aliases.php"]
         );
         assert_eq!(
             input_paths(accepted(&compiled, "app/Unrelated.sharp")),
-            ["Module.sharp", "app/Module.sharp", "app/Unrelated.sharp", "composer.lock"]
+            ["app/Module.sharp", "app/Unrelated.sharp", "composer.lock"]
         );
     }
 
@@ -2695,7 +2783,6 @@ mod tests {
         assert_eq!(
             input_paths(accepted(&compiled, "app/Paced.sharp")),
             [
-                "Module.sharp",
                 "app/Module.sharp",
                 "app/Paced.sharp",
                 "composer.lock",
@@ -2707,7 +2794,6 @@ mod tests {
         assert_eq!(
             input_paths(accepted(&compiled, "app/Fitted.sharp")),
             [
-                "Module.sharp",
                 "app/Fitted.sharp",
                 "app/Module.sharp",
                 "composer.lock",
@@ -2741,18 +2827,11 @@ mod tests {
 
         assert_eq!(
             input_paths(accepted(&compiled, "app/Bare.sharp")),
-            ["Module.sharp", "app/Bare.sharp", "app/Module.sharp", "composer.lock", "lib/Rate.php", "lib/aliases.php"]
+            ["app/Bare.sharp", "app/Module.sharp", "composer.lock", "lib/Rate.php", "lib/aliases.php"]
         );
         assert_eq!(
             input_paths(accepted(&compiled, "app/BareFit.sharp")),
-            [
-                "Module.sharp",
-                "app/BareFit.sharp",
-                "app/Module.sharp",
-                "composer.lock",
-                "lib/Rate.php",
-                "lib/aliases.php"
-            ]
+            ["app/BareFit.sharp", "app/Module.sharp", "composer.lock", "lib/Rate.php", "lib/aliases.php"]
         );
     }
 
@@ -2790,7 +2869,6 @@ mod tests {
         assert_eq!(
             input_paths(accepted(&compiled, "app/Prefix.sharp")),
             [
-                "Module.sharp",
                 "app/*.sharp",
                 "app/Externs.sharp",
                 "app/Module.sharp",
@@ -2865,14 +2943,7 @@ mod tests {
 
         assert_eq!(
             input_paths(accepted(&compiled, "app/Page.sharp")),
-            [
-                "Module.sharp",
-                "app/HasDesign.sharp",
-                "app/HasSlug.php",
-                "app/Module.sharp",
-                "app/Page.sharp",
-                "composer.lock"
-            ]
+            ["app/HasDesign.sharp", "app/HasSlug.php", "app/Module.sharp", "app/Page.sharp", "composer.lock"]
         );
     }
 
@@ -4013,7 +4084,7 @@ mod tests {
         assert!(reached("app/Shelf.sharp", "app/Bag.sharp"));
     }
 
-    /// Spec section 32: a file whose check resolves services through modules names the module files of every folder
+    /// Spec section 32: a file whose check resolves services through modules names the module files of every namespace
     /// it resolves through as inputs, with no file at most of them, so the engine refuses it after one is edited,
     /// added or deleted. `app/Shop/Module.sharp` binds `Panel` of `App.Shop.Admin`, whose `Mailer` comes from
     /// `app/Shop/Admin/Module.sharp`.
@@ -4039,8 +4110,12 @@ mod tests {
                 "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule : App.Shop\n{\n    singleton Mailer = SmtpMailer;\n}\n",
             ),
             (
+                "vendor/phpunit/phpunit/src/Framework/TestCase.php",
+                "<?php\n\nnamespace PHPUnit\\Framework;\n\nabstract class TestCase\n{\n}\n",
+            ),
+            (
                 "tests/Shop/PanelTest.sharp",
-                "namespace Tests.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule : App.Shop\n{\n    transient Mailer = SmtpMailer;\n}\n\npublic class PanelTest\n{\n}\n",
+                "namespace Tests.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport PHPUnit.Framework.TestCase;\n\nmodule : App.Shop\n{\n    transient Mailer = SmtpMailer;\n}\n\npublic class PanelTest : TestCase\n{\n}\n",
             ),
             ("app/Shop/OrderPaid.sharp", "namespace App.Shop;\n\npublic event OrderPaid(int orderId);\n"),
             (
@@ -4069,7 +4144,7 @@ mod tests {
 
         // A module names its folder's modules and those of each class its bindings build: `app/Mail/` for
         // `SmtpMailer` and `app/Shop/Admin/` for `Panel`.
-        let base = ["Module.sharp", "app/Mail/Module.sharp", "app/Module.sharp", "app/Shop/Admin/Module.sharp"];
+        let base = ["app/Mail/Module.sharp", "app/Module.sharp", "app/Shop/Admin/Module.sharp"];
         names_each("app/Shop/Module.sharp", &[&base[..], &["app/Shop/Module.sharp"]].concat());
         assert!(
             !modules("app/Shop/Module.sharp").iter().any(|(path, _)| path == "app/Module.Production.sharp"),
@@ -4082,7 +4157,6 @@ mod tests {
                 &base[..],
                 &[
                     "app/Shop/Module.sharp",
-                    "Module.Production.sharp",
                     "app/Mail/Module.Production.sharp",
                     "app/Module.Production.sharp",
                     "app/Shop/Admin/Module.Production.sharp",
@@ -4097,17 +4171,100 @@ mod tests {
             &[&base[..], &["app/Shop/Module.sharp", "tests/Module.sharp", "tests/Shop/Module.sharp"]].concat(),
         );
         // A listener names the modules its constructor's services come from.
-        names_each("app/Shop/Tick.sharp", &["Module.sharp", "app/Module.sharp", "app/Shop/Module.sharp"]);
+        names_each("app/Shop/Tick.sharp", &["app/Module.sharp", "app/Shop/Module.sharp"]);
         // A bound class's own check reads only the modules of its own folders, whose `imports` lines limit its imports.
         assert_eq!(
             modules("app/Shop/Admin/Panel.sharp"),
             [
-                ("Module.sharp".to_owned(), false),
                 ("app/Module.sharp".to_owned(), false),
                 ("app/Shop/Admin/Module.sharp".to_owned(), true),
                 ("app/Shop/Module.sharp".to_owned(), true),
             ]
         );
+    }
+
+    /// A project whose program `tests/lib/Link.sharp` declares `App.Testing.Lib` in a test folder, and takes the
+    /// `Runtime` `app/Module.sharp` binds, with `module` as that module's bindings.
+    fn testing_link(module: &str) -> Vec<(&'static str, String)> {
+        vec![
+            ("app/Shared/Runtime.sharp", "namespace App.Shared;\n\npublic interface Runtime\n{\n}\n".to_owned()),
+            ("app/Shared/LiveRuntime.sharp", "namespace App.Shared;\n\npublic class LiveRuntime : Runtime\n{\n}\n".to_owned()),
+            ("app/Shared/QuietRuntime.sharp", "namespace App.Shared;\n\npublic class QuietRuntime : Runtime\n{\n}\n".to_owned()),
+            (
+                "app/Module.sharp",
+                format!("namespace App;\n\nimport App.Shared.Runtime;\nimport App.Shared.LiveRuntime;\nimport App.Shared.QuietRuntime;\n\nmodule\n{{\n    {module}\n}}\n"),
+            ),
+            (
+                "tests/lib/Link.sharp",
+                "namespace App.Testing.Lib;\n\nimport App.Shared.Runtime;\n\npublic class Link\n{\n    public Link(private Runtime runtime) { }\n\n    public void main()\n    {\n    }\n}\n".to_owned(),
+            ),
+        ]
+    }
+
+    /// Spec section 32: a program's services come from the modules of its namespace and of each namespace above it,
+    /// wherever its file is, so an edit to `App`'s module makes stale the program of `App.Testing.Lib` under `tests/lib`,
+    /// and a file added beside the module makes nothing else stale.
+    #[test]
+    fn an_edit_to_a_module_makes_stale_each_program_of_its_namespace_wherever_its_file_is() {
+        let base = shop_project(&testing_link("singleton Runtime = LiveRuntime;"));
+        let mut warm = analyzed(&base);
+        let (before, last, _) =
+            compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), database_stamp(&base), |_| false);
+        let link = input_paths(accepted(&before, "tests/lib/Link.sharp"));
+        assert!(link.contains(&"app/Module.sharp".to_owned()), "{link:?}");
+
+        let edited = shop_project(&testing_link("singleton Runtime = QuietRuntime;"));
+        warm.update_database(edited.read_only());
+        warm.analyze_incremental(None).expect("the warm path runs");
+        let (after, last, _) = compile_keeping(&mut warm, &last, &before, database_stamp(&edited), |_| true);
+        assert!(!matches!(after.get("tests/lib/Link.sharp"), Some(Compilation::Kept)), "{after:?}");
+
+        let mut files = testing_link("singleton Runtime = QuietRuntime;");
+        files.push(("app/Foo.sharp", "namespace App;\n\npublic class Foo\n{\n}\n".to_owned()));
+        let added = shop_project(&files);
+        warm.update_database(added.read_only());
+        warm.analyze_incremental(None).expect("the warm path runs");
+        let previous: BTreeMap<String, Compilation> = after
+            .into_iter()
+            .map(|(name, compilation)| match compilation {
+                Compilation::Kept => {
+                    let bytes = accepted(&before, &name).to_vec();
+                    (name, Compilation::Accepted(bytes))
+                }
+                compilation => (name, compilation),
+            })
+            .collect();
+        let (grown, _, _) = compile_keeping(&mut warm, &last, &previous, database_stamp(&added), |_| true);
+        let lowered: Vec<&String> = grown
+            .iter()
+            .filter(|(name, compilation)| *name != "app/Foo.sharp" && !matches!(compilation, Compilation::Kept))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(lowered.is_empty(), "adding app/Foo.sharp made stale {lowered:?}");
+    }
+
+    /// Spec section 32: a module added for a namespace sits in a folder that holds a file of the namespace, or in a
+    /// PSR-4 parent of one, so a program names the `Module.sharp` of each such folder of its namespace and of each
+    /// namespace above it, stamped absent while no file is there. `app/` holds no file of `App`, and is `App`'s
+    /// folder as the parent of `app/Shared/`, which holds `App.Shared`.
+    #[test]
+    fn a_program_names_the_module_file_each_folder_of_its_namespaces_would_hold() {
+        let database = project(&[
+            ("app/Shared/Runtime.sharp", "namespace App.Shared;\n\npublic interface Runtime\n{\n}\n"),
+            (
+                "tests/lib/Link.sharp",
+                "namespace App.Testing.Lib;\n\npublic class Link\n{\n    public void main()\n    {\n    }\n}\n",
+            ),
+        ]);
+
+        let compiled = compile(&mut analyzed(&database), database_stamp(&database));
+
+        let modules: Vec<(String, bool)> = inputs(accepted(&compiled, "tests/lib/Link.sharp"))
+            .into_iter()
+            .filter(|input| input.path.ends_with(b"Module.sharp"))
+            .map(|input| (String::from_utf8_lossy(&input.path).into_owned(), input.hash != [0; 16]))
+            .collect();
+        assert_eq!(modules, [("app/Module.sharp".to_owned(), false), ("tests/lib/Module.sharp".to_owned(), false)]);
     }
 
     #[test]
@@ -4351,7 +4508,6 @@ mod tests {
         assert_eq!(
             input_paths(accepted(&compiled, "app/Shop/Report.sharp")),
             [
-                "Module.sharp",
                 "app/Module.sharp",
                 "app/Shop/Module.sharp",
                 "app/Shop/Report.sharp",
@@ -4935,16 +5091,14 @@ mod tests {
         assert_eq!(
             inputs.iter().map(|input| String::from_utf8_lossy(&input.path)).collect::<Vec<_>>(),
             [
-                "Module.sharp",
                 "app/App/Here.sharp",
                 "app/App/Module.sharp",
                 "app/App/Position.php",
                 "app/App/Position.sharp",
-                "app/Module.sharp",
                 "composer.lock"
             ]
         );
-        for input in &inputs[3..5] {
+        for input in &inputs[2..4] {
             assert_eq!((input.size, input.mtime_ns, input.hash), (0, 0, [0; 16]), "{input:?} is stamped absent");
         }
     }
@@ -4981,23 +5135,21 @@ mod tests {
         assert_eq!(
             input_paths(accepted(&compiled, "app/App/Report.sharp")),
             [
-                "Module.sharp",
                 "app/App/*.sharp",
                 "app/App/Listed.sharp",
                 "app/App/Module.sharp",
                 "app/App/Plain.sharp",
                 "app/App/Report.sharp",
-                "app/Module.sharp",
                 "composer.lock"
             ]
         );
         assert_eq!(
             input_paths(accepted(&compiled, "app/App/Plain.sharp")),
-            ["Module.sharp", "app/App/Module.sharp", "app/App/Plain.sharp", "app/Module.sharp", "composer.lock"]
+            ["app/App/Module.sharp", "app/App/Plain.sharp", "composer.lock"]
         );
         assert_eq!(
             input_paths(accepted(&compiled, "app/App/Listed.sharp")),
-            ["Module.sharp", "app/App/Listed.sharp", "app/App/Module.sharp", "app/Module.sharp", "composer.lock"]
+            ["app/App/Listed.sharp", "app/App/Module.sharp", "composer.lock"]
         );
         assert_eq!(input_paths(accepted(&compiled, packaged)), ["composer.lock", packaged]);
     }
