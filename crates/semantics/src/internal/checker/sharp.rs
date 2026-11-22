@@ -1129,6 +1129,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         ) => Some(Attribute),
 
         (Node::ClassLikeMember(ClassLikeMember::Method(_) | ClassLikeMember::Law(_)), Class | Enum) => Some(place),
+        (Node::ClassLikeMember(ClassLikeMember::Law(_)), Interface) => Some(Interface),
         (Node::ClassLikeMember(ClassLikeMember::Extension(extension)), Class | Interface | Enum) => {
             if place == Class && enclosing_class(context.program, extension.span()).is_some_and(|class| class.is_static) {
                 check_extension(extension, context);
@@ -1174,7 +1175,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ClassLikeMember(_), Place::Extension) => None,
         // A law's parameters are checked as a method's, and its `when` condition, claim and body as a method body.
         // `check_members` refuses a default and a variadic parameter.
-        (Node::Law(law), Class | Enum | Place::Module) => {
+        (Node::Law(law), Class | Interface | Enum | Place::Module) => {
             enter_tree(Node::FunctionLikeParameterList(&law.parameter_list), Method, context);
             for expression in law.condition.iter().map(|condition| condition.expression).chain([law.claim]) {
                 enter_tree(Node::Expression(expression), Body, context);
@@ -6355,11 +6356,6 @@ fn broken_rule(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>) 
             "A method can't declare a type inside it: declare `{}` in its own file.",
             BytesDisplay(name.value)
         )),
-        (Node::ClassLikeMember(ClassLikeMember::Law(law)), Place::Interface) => error(format!(
-            "An interface has no laws: state `{}` in a class or an enum, whose values it is about.",
-            BytesDisplay(law.name.value)
-        ))
-        .with_note(supported(place)),
         (Node::ClassLikeMember(ClassLikeMember::EnumCase(case)), Place::Class | Place::Interface) => {
             let owner = if place == Place::Class { "A class" } else { "An interface" };
 
@@ -6392,7 +6388,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters as in `<out TItem : DatabaseEntity>`, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators, laws and, in a static class, extensions, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
-            "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, constants, methods, properties as in `int orderId { get; }` and `string label => …;`, and operators as in `static int operator <=>(Priced a, Priced b)`, with no other modifiers or `extends`."
+            "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, constants, methods, properties as in `int orderId { get; }` and `string label => …;`, operators as in `static int operator <=>(Priced a, Priced b)`, and laws, which each PHP# class that implements it proves, with no other modifiers or `extends`."
         }
         Place::Signature => {
             "A PHP# interface method has attributes, no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, or classes and interfaces joined with `&`, as in `Shippable & Billable`, and no body or a default body."

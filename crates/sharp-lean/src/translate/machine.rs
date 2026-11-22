@@ -217,6 +217,7 @@ impl Translator<'_, '_> {
                 span,
                 proof: Proof::invariant(&key, &trace, after, claim_text),
                 breaking: None,
+                broken: None,
             });
             self.translation.declarations.push(Declaration {
                 key,

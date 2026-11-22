@@ -121,6 +121,9 @@ pub(crate) struct Body<'body, 'program> {
     pub(super) accumulators: Vec<u32>,
     /// Whether the body computes ints exactly, as [`Body::computes_exactly`] says.
     exact: bool,
+    /// The interface whose values the body reads as values of one PHP# implementer, and that implementer, each by its
+    /// full name, as [`Body::reads_as`] says.
+    reading: Option<(Word, Word)>,
 }
 
 impl<'body, 'program> Body<'body, 'program> {
@@ -143,6 +146,40 @@ impl<'body, 'program> Body<'body, 'program> {
             path: Path::new(checked.names(), []),
             accumulators: Vec::new(),
             exact: false,
+            reading: None,
+        }
+    }
+
+    /// Reads each value of `interface` as a value of its PHP# implementer `implementer`, as the implementer's proof of
+    /// the interface's laws does, spec sections 22 and 28: the interface's type is the implementer's, and a call of the
+    /// interface's method or a read of its property runs the implementer's, which calls the implementer's own methods
+    /// as this body reads them.
+    pub(crate) fn reads_as(&mut self, interface: Word, implementer: Word) {
+        self.reading = Some((interface, implementer));
+    }
+
+    /// The class a value of `class` is read as: the implementer the body reads `class` as, or `class`.
+    fn read_as(&self, class: Word) -> Word {
+        match self.reading {
+            Some((interface, implementer)) if self.reach.same_class(class.as_bytes(), interface.as_bytes()) => {
+                implementer
+            }
+            _ => class,
+        }
+    }
+
+    /// The name of the method `method` of the class `declaring` that a call runs: the method as the body reads it,
+    /// `credit$Ledger`, when `declaring` is the implementer the body reads its interface as and the interface declares
+    /// the method, and else its own.
+    pub(crate) fn read_method(&self, declaring: &[u8], method: &str) -> String {
+        match self.reading {
+            Some((interface, implementer))
+                if self.reach.same_class(declaring, implementer.as_bytes())
+                    && self.reach.method(interface.as_bytes(), method.as_bytes()).is_some() =>
+            {
+                format!("{method}${}", names::short_name(interface.as_bytes()))
+            }
+            _ => method.to_owned(),
         }
     }
 
@@ -284,12 +321,13 @@ impl<'body, 'program> Body<'body, 'program> {
             }
             _ => return None,
         };
-        if !self.reach.is_valid(class) {
+        let read = self.read_as(word(class));
+        if !self.reach.is_valid(read.as_bytes()) {
             return None;
         }
-        let class_name = self.reached_name(class);
+        let class_name = self.reached_name(read.as_bytes());
         let key = names::member(&names::full_name(&class_name), b"$valid");
-        self.uses(class, &key, names::short_name(&class_name));
+        self.uses(read.as_bytes(), &key, names::short_name(&class_name));
 
         Some(format!("({key} {value})"))
     }
@@ -1683,8 +1721,28 @@ impl<'body, 'program> Body<'body, 'program> {
             return "default".to_owned();
         };
         let target = self.checked.types().call_target(expression);
+        let read = self.read_as(word(class));
         match target.kind {
             DeclarationKind::Method { overridable: false } => {}
+            // Spec sections 22 and 28: a body that reads an interface as one implementer runs that implementer's
+            // method, and any other body knows of an interface's method only what the interface's laws say, so it calls
+            // it only on an interface that states laws.
+            DeclarationKind::Method { overridable: true } if read != word(class) => {
+                let Some(method) = self.method_name(&call.method) else {
+                    return "default".to_owned();
+                };
+                let declaring = self.checked.types().member_declaration(read, word(method)).class;
+                let receiver = self.value(call.object);
+                return self.call(
+                    expression,
+                    declaring.as_bytes(),
+                    read.as_bytes(),
+                    method,
+                    Some(receiver),
+                    Some(&call.argument_list),
+                );
+            }
+            DeclarationKind::Method { overridable: true } if !self.reach.interface_laws(class).is_empty() => {}
             DeclarationKind::Method { overridable: true } => {
                 return self.overridable(expression, word(class), target.name.as_bytes());
             }
@@ -2027,7 +2085,9 @@ impl<'body, 'program> Body<'body, 'program> {
         };
 
         let class_name = self.reached_name(declaring);
-        let key = names::member(&names::full_name(&class_name), facts.name.as_bytes());
+        let own = names::member(&names::full_name(&class_name), facts.name.as_bytes());
+        let read = self.read_method(declaring, &String::from_utf8_lossy(facts.name.as_bytes()));
+        let key = names::member(&names::full_name(&class_name), read.as_bytes());
         let mut parts = vec![key.clone()];
         parts.extend(receiver.map(|receiver| self.upcast(expression.span(), receiver, class, declaring)));
         let smaller =
@@ -2037,7 +2097,7 @@ impl<'body, 'program> Body<'body, 'program> {
             return "default".to_owned();
         };
         let place = format!("{}.{}", names::short_name(&class_name), facts.name);
-        let defaults = self.defaults(declaring, &key, &place, arguments.len()..facts.parameters);
+        let defaults = self.defaults(declaring, &own, &place, arguments.len()..facts.parameters);
         parts.extend(arguments);
         parts.extend(defaults);
         self.use_of(declaring, &key, place, smaller.map(|(smaller, _)| smaller));
@@ -2272,6 +2332,7 @@ impl<'body, 'program> Body<'body, 'program> {
     /// The read of `class`'s property `property` from `object`: a field of the object's structure, or a backed enum's
     /// `value`.
     fn field(&mut self, object: String, class: Word, property: Word, expression: &Expression) -> String {
+        let class = self.read_as(class);
         let declaration = self.checked.types().member_declaration(class, property);
         let declaring = declaration.class.as_bytes();
         // Spec section 6: a computed property runs its `get` body as a method of no arguments, which a case of a machine
@@ -2462,6 +2523,10 @@ impl<'body, 'program> Body<'body, 'program> {
     /// The Lean type of the class `class` a hint names: the sealed interface it implements, spec section 20.1, as a
     /// data case's is its enum, and else its own.
     pub(crate) fn class_type(&mut self, span: Span, class: &[u8]) -> String {
+        let read = self.read_as(word(class));
+        if read != word(class) {
+            return self.class_type(span, read.as_bytes());
+        }
         if let Some(r#enum) = self.case_enum(class) {
             return self.class_type(span, r#enum);
         }

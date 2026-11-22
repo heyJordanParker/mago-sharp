@@ -54,6 +54,7 @@ use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::dialect::Dialect;
+use mago_word::Word;
 use mago_word::word;
 
 use crate::issues;
@@ -61,6 +62,7 @@ use crate::reach::Reach;
 use crate::translate::body::Body;
 use crate::translate::body::indented;
 use crate::translate::machine::case_class;
+use crate::translate::proof::Fact;
 use crate::translate::proof::Proof;
 use crate::translate::proof::Prover;
 
@@ -93,6 +95,22 @@ pub(crate) struct Law {
     /// The Lean name of the search for the small values that break it, spec section 28, `<statement>.«$breaking»`,
     /// which the runner runs when its proof stays open. None for a law with no search.
     pub(crate) breaking: Option<String>,
+    /// For a PHP# implementer's proof of an interface's law, spec sections 22 and 28, what an open proof reports on the
+    /// implementer: "`MemoryLedger.credit` breaks `Ledger.creditAdds`.". None for any other law.
+    pub(crate) broken: Option<String>,
+}
+
+/// A law's statement and what its proof needs of it.
+struct LawStatement {
+    text: String,
+    uses: Vec<Use>,
+    unmodeled: Vec<Unmodeled>,
+    /// Each parameter as the binder `(name : Type)`.
+    binders: Vec<String>,
+    /// Each parameter's name.
+    parameters: Vec<String>,
+    /// Whether it states that each value it takes keeps its class-like's precondition.
+    preconditions: bool,
 }
 
 /// One Lean declaration: a structure, an inductive, a definition or a law's statement.
@@ -909,7 +927,12 @@ impl Translator<'_, '_> {
                 ClassLikeMember::Method(method)
                     if php_method_name(method) != b"__construct" && self.reach.reaches(full, method.name.value) =>
                 {
-                    self.method(full, lean, short, method, None);
+                    self.method(full, lean, short, method, None, None);
+                    for interface in self.reach.law_interfaces(full) {
+                        if self.reach.method(interface.as_bytes(), method.name.value).is_some() {
+                            self.method(full, lean, short, method, None, Some(interface));
+                        }
+                    }
                 }
                 ClassLikeMember::Operator(operator) => {
                     if let Some(name) = php_operator_name(&operator.symbol, operator.parameter_list.parameters.len())
@@ -969,6 +992,9 @@ impl Translator<'_, '_> {
     }
 
     /// A method, or an extension's method, spec section 26, which runs as a static method that takes `receiver` first.
+    /// With `reading`, the method as the proof that its class keeps that interface's laws reads it, spec sections 22 and
+    /// 28: each value of the interface is one of the class, under the name [`Body::read_method`] gives it. An
+    /// interface's method is a value Lean knows nothing about but what the interface's laws say.
     fn method(
         &mut self,
         full: &[u8],
@@ -976,10 +1002,21 @@ impl Translator<'_, '_> {
         short: &str,
         method: &Method,
         receiver: Option<&FunctionLikeParameter>,
+        reading: Option<Word>,
     ) {
         let place = format!("{short}.{}", String::from_utf8_lossy(method.name.value));
-        self.defaults(full, &names::member(lean, method.name.value), &place, &method.parameter_list);
         let mut body = Body::new(self.checked, self.reach, full, place.clone());
+        let key = match reading {
+            Some(interface) => {
+                body.reads_as(interface, word(full));
+                let read = body.read_method(full, &String::from_utf8_lossy(method.name.value));
+                names::member(lean, read.as_bytes())
+            }
+            None => {
+                self.defaults(full, &names::member(lean, method.name.value), &place, &method.parameter_list);
+                names::member(lean, method.name.value)
+            }
+        };
         if names::RESERVED.contains(&String::from_utf8_lossy(method.name.value).as_ref()) {
             body.unmodeled(method.name.span, format!("the method {place}"), issues::RESERVED_NAME);
         }
@@ -992,7 +1029,7 @@ impl Translator<'_, '_> {
             parameters.push(format!("(this : {})", body.class_type(method.name.span, full)));
         }
         if receiver.is_some() || !method.is_static() {
-            self.translation.receivers.push((names::member(lean, method.name.value), false));
+            self.translation.receivers.push((key.clone(), false));
         }
         body.takes(receiver.into_iter().chain(method.parameter_list.parameters.iter()));
         for parameter in receiver.into_iter().chain(method.parameter_list.parameters.iter()) {
@@ -1009,6 +1046,13 @@ impl Translator<'_, '_> {
         let translated = match &method.body {
             MethodBody::Concrete(block) => body.block_body(block, void),
             MethodBody::Expression(expression) => body.expression_body(expression.expression),
+            MethodBody::Abstract(_)
+                if self.checked.types().class_declaration(word(full)).kind == DeclarationKind::Interface =>
+            {
+                let text = format!("protected opaque {key} {} : M {returns}", parameters.join(" "));
+                self.declare(body, key, method.name.span, text, Role::Definition);
+                return;
+            }
             MethodBody::Abstract(abstract_body) => {
                 body.unmodeled(abstract_body.span(), format!("the abstract method {place}"), issues::OVERRIDABLE);
                 body.finish()
@@ -1016,14 +1060,7 @@ impl Translator<'_, '_> {
         };
         let names: Vec<String> = method.parameter_list.parameters.iter().map(parameter_name).collect();
         let measure = receiver.is_none().then(|| Measure::of(&translated.1, &names)).flatten();
-        self.define(
-            names::member(lean, method.name.value),
-            method.name.span,
-            &parameters,
-            &returns,
-            translated,
-            measure,
-        );
+        self.define(key, method.name.span, &parameters, &returns, translated, measure);
     }
 
     /// Each parameter default of the method `key`, spec section 7, as the constant [`names::default`] names, which a
@@ -1077,7 +1114,7 @@ impl Translator<'_, '_> {
         for member in &extension.members {
             match member {
                 ClassLikeMember::Method(method) if self.reach.reaches(full, method.name.value) => {
-                    self.method(full, lean, short, method, Some(receiver));
+                    self.method(full, lean, short, method, Some(receiver), None);
                 }
                 ClassLikeMember::Property(property) => {
                     self.computed_property(full, lean, short, Some(receiver), property);
@@ -1162,15 +1199,145 @@ impl Translator<'_, '_> {
         });
     }
 
-    /// `protected def Class.law (a : A) : Prop := [condition = pure true →] [A.«$valid» a →] holds do …`: the law holds
-    /// for every value of its parameters that meets its `when` condition and keeps its class-like's precondition, as
-    /// each value of it does, unless its claim finishes with `false`. The condition and the claim compute ints exactly,
-    /// as [`Body::computes_exactly`] says. Its theorem, which its body proves, comes from [`Prover`].
+    /// A law of the class-like `full`: its statement, as [`Translator::law_statement`] gives it, which assumes each law of
+    /// an interface a parameter's type names, as [`Translator::facts`] gives them, and its theorem, which its body
+    /// proves, from [`Prover`]. An interface's law has no theorem: each PHP# implementer proves it, as
+    /// [`Translator::obligation`] says.
     fn law(&mut self, full: &[u8], lean: &str, short: &str, law: &LawNode) {
         let name = String::from_utf8_lossy(law.name.value).into_owned();
         let key = names::member(lean, law.name.value);
         let place = format!("{short}.{name}");
-        let mut body = Body::for_law(self.checked, self.reach, full, place.clone(), law);
+        let span = Span::between(law.law.span(), law.name.span);
+        // Spec sections 22 and 28: an interface's law states what each PHP# implementer proves, and has no proof of
+        // its own.
+        if self.checked.types().class_declaration(word(full)).kind == DeclarationKind::Interface {
+            let statement = self.law_statement(full, &key, &place, law, None, &[]);
+            self.push_statement(key, span, statement);
+            for implementer in self.reach.law_implementers(full).to_vec() {
+                self.obligation(full, short, law, &name, implementer);
+            }
+            return;
+        }
+
+        let facts = self.facts(law);
+        let mut statement = self.law_statement(full, &key, &place, law, None, &facts);
+        // The theorem lives beside the statement, so the generated module holds what its proof uses too.
+        let mut proof = Prover::new(self.checked, self.reach, full, place, law, key.clone()).assuming(facts).prove(
+            &statement.binders,
+            &statement.parameters,
+            statement.preconditions,
+        );
+        statement.uses.append(&mut proof.uses);
+        statement.unmodeled.append(&mut proof.unmodeled);
+        let breaking = self.breaking(full, lean, short, law);
+        self.translation.laws.push(Law { name, statement: key.clone(), span, proof, breaking, broken: None });
+        self.push_statement(key, span, statement);
+    }
+
+    /// The proof that the PHP# class `implementer` keeps `law`, a law of the interface `full`, spec sections 22 and 28:
+    /// `law`'s statement with each value of the interface read as one of `implementer`, as [`Body::reads_as`] says,
+    /// named `<implementer>.«creditAdds$Ledger»` and reported on `implementer`'s name.
+    fn obligation(&mut self, full: &[u8], short: &str, law: &LawNode, name: &str, implementer: Word) {
+        let Some(reached) = self.reach.class(implementer.as_bytes()) else {
+            return;
+        };
+        let implementer_short = names::short_name(reached.name.as_bytes());
+        let key = names::member(&names::full_name(reached.name.as_bytes()), format!("{name}${short}").as_bytes());
+        let place = format!("{implementer_short}.{name}");
+        let reading = (word(full), reached.name);
+        let mut statement = self.law_statement(full, &key, &place, law, Some(reading), &[]);
+        let mut proof = Prover::new(self.checked, self.reach, full, place, law, key.clone())
+            .reading(reading.0, reading.1)
+            .prove(&statement.binders, &statement.parameters, statement.preconditions);
+        statement.uses.append(&mut proof.uses);
+        statement.unmodeled.append(&mut proof.unmodeled);
+
+        let read = format!("${short}»");
+        let mut methods: Vec<String> = Vec::new();
+        for used in statement.uses.iter().filter(|used| used.key.ends_with(&read)) {
+            let method = format!("`{}`", used.place);
+            if !methods.contains(&method) {
+                methods.push(method);
+            }
+        }
+        let broken = match methods.as_slice() {
+            [] => format!("`{implementer_short}` breaks `{short}.{name}`."),
+            [method] => format!("{method} breaks `{short}.{name}`."),
+            [rest @ .., last] => format!("{} and {last} break `{short}.{name}`.", rest.join(", ")),
+        };
+        self.translation.laws.push(Law {
+            name: name.to_owned(),
+            statement: key.clone(),
+            span: reached.span,
+            proof,
+            breaking: None,
+            broken: Some(broken),
+        });
+        self.push_statement(key, reached.span, statement);
+    }
+
+    /// The laws a law over a value of an interface takes as facts, spec section 28: each law of the interface a
+    /// parameter's type names, which each PHP# implementer proves.
+    fn facts(&self, law: &LawNode) -> Vec<Fact> {
+        let mut facts: Vec<Fact> = Vec::new();
+        for parameter in &law.parameter_list.parameters {
+            let Some(Hint::Identifier(identifier)) = &parameter.hint else {
+                continue;
+            };
+            let interface = self.checked.names().get(identifier);
+            let Some(reached) = self.reach.class(interface) else {
+                continue;
+            };
+            for (law_name, arity) in self.reach.interface_laws(interface) {
+                let statement = names::member(&names::full_name(reached.name.as_bytes()), law_name.as_bytes());
+                if facts.iter().any(|fact| fact.statement == statement) {
+                    continue;
+                }
+                let arguments: Vec<String> = (1..=*arity).map(|place| format!("«$a{place}»")).collect();
+                let premise = if arguments.is_empty() {
+                    statement.clone()
+                } else {
+                    format!("(∀ {}, {statement} {})", arguments.join(" "), arguments.join(" "))
+                };
+                facts.push(Fact {
+                    name: format!("«$h{}»", facts.len() + 1),
+                    statement,
+                    premise,
+                    file: Some(reached.file),
+                    place: format!(
+                        "{}.{}",
+                        names::short_name(reached.name.as_bytes()),
+                        String::from_utf8_lossy(law_name.as_bytes())
+                    ),
+                });
+            }
+        }
+
+        facts
+    }
+
+    /// The statement `protected def <key> (a : A) : Prop := [fact →] [condition = pure true →] [A.«$valid» a →] holds
+    /// do …` of `law`, a law of `full`: the law holds for every value of its parameters that meets its `when` condition
+    /// and keeps its class-like's precondition, as each value of it does, given each of `facts`, unless its claim
+    /// finishes with `false`. The condition and the claim compute ints exactly, as [`Body::computes_exactly`] says.
+    /// With `reading`, each value of an interface is read as one of an implementer, as [`Body::reads_as`] says.
+    fn law_statement(
+        &self,
+        full: &[u8],
+        key: &str,
+        place: &str,
+        law: &LawNode,
+        reading: Option<(Word, Word)>,
+        facts: &[Fact],
+    ) -> LawStatement {
+        let body_of = || {
+            let mut body = Body::for_law(self.checked, self.reach, full, place.to_owned(), law);
+            if let Some((interface, implementer)) = reading {
+                body.reads_as(interface, implementer);
+            }
+            body
+        };
+        let mut body = body_of();
         let binders: Vec<String> =
             law.parameter_list.parameters.iter().map(|parameter| binder(&mut body, parameter)).collect();
         let parameters: Vec<String> =
@@ -1178,8 +1345,20 @@ impl Translator<'_, '_> {
 
         let mut text = format!("protected def {key} {} : Prop :=\n", binders.join(" "));
         let (mut uses, mut unmodeled) = (Vec::new(), Vec::new());
+        for fact in facts {
+            text.push_str("  ");
+            text.push_str(&fact.premise);
+            text.push_str(" →\n");
+            uses.push(Use {
+                key: fact.statement.clone(),
+                file: fact.file,
+                place: fact.place.clone(),
+                smaller: None,
+                names_only: false,
+            });
+        }
         if let Some(condition) = &law.condition {
-            let mut computed = Body::for_law(self.checked, self.reach, full, place.clone(), law);
+            let mut computed = body_of();
             computed.computes_exactly();
             let (lines, terms, condition_uses, condition_unmodeled) = computed.terms(&[], &[condition.expression]);
             text.push_str("  ((do\n");
@@ -1205,23 +1384,17 @@ impl Translator<'_, '_> {
         uses.extend(claim_uses);
         unmodeled.extend(claim_unmodeled);
 
-        // The theorem lives beside the statement, so the generated module holds what its proof uses too.
-        let mut proof = Prover::new(self.checked, self.reach, full, place, law, key.clone()).prove(
-            &binders,
-            &parameters,
-            !preconditions.is_empty(),
-        );
-        uses.append(&mut proof.uses);
-        unmodeled.append(&mut proof.unmodeled);
-        let span = Span::between(law.law.span(), law.name.span);
-        let breaking = self.breaking(full, lean, short, law);
-        self.translation.laws.push(Law { name, statement: key.clone(), span, proof, breaking });
+        LawStatement { text, uses, unmodeled, binders, parameters, preconditions: !preconditions.is_empty() }
+    }
+
+    /// Declares the law statement `statement` under `key`.
+    fn push_statement(&mut self, key: String, span: Span, statement: LawStatement) {
         self.translation.declarations.push(Declaration {
             key,
             span,
-            text,
-            uses,
-            unmodeled,
+            text: statement.text,
+            uses: statement.uses,
+            unmodeled: statement.unmodeled,
             role: Role::Definition,
             measure: None,
             opaque: None,

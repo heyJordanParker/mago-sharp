@@ -250,19 +250,17 @@ fn a_case_in_an_interface_is_refused_once_with_the_enum_it_goes_in() {
     assert_eq!(issues(interface), ["5:5 An interface has no cases: declare `Open` in an enum."]);
 }
 
-/// Spec section 28: a law states a fact about the values of a class or an enum, and an interface has no values.
+/// Spec sections 22 and 28: a law states a fact about the values of a class, an enum or an interface, whose every PHP#
+/// implementer proves it.
 #[test]
-fn a_law_is_a_member_of_a_class_or_an_enum_and_of_no_interface() {
+fn a_law_is_a_member_of_a_class_an_enum_or_an_interface() {
     let class = "namespace App.Shared;\n\npublic class Money\n{\n    law sameAmount(int a) => a == a;\n}\n";
     let r#enum = "namespace App.Shared;\n\npublic enum Status\n{\n    case Open;\n\n    law openIsOpen(Status s) => Status.Open == Status.Open;\n}\n";
-    let interface = "namespace App.Shared;\n\npublic interface Priced\n{\n    law positive(int a) => a >= 0;\n}\n";
+    let interface = "namespace App.Shared;\n\npublic interface Priced\n{\n    int price { get; }\n\n    law positive(Priced p) => p.price >= 0;\n}\n";
 
     assert_eq!(issues(class), Vec::<String>::new());
     assert_eq!(issues(r#enum), Vec::<String>::new());
-    assert_eq!(
-        issues(interface),
-        ["5:5 An interface has no laws: state `positive` in a class or an enum, whose values it is about."]
-    );
+    assert_eq!(issues(interface), Vec::<String>::new());
 }
 
 /// A law's parameters range over every value, so none has a default and none collects the rest of the arguments, in a
@@ -7165,12 +7163,12 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
 fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
     let pattern = leak(method("        const both = extra is int & Report;\n        return extra;\n"));
-    let interface = "namespace App;\n\npublic interface Sized\n{\n    law positive(int a) => a >= 0;\n}\n";
+    let interface = "namespace App;\n\npublic interface Sized\n{\n    case Open;\n}\n";
     let constant = "namespace App;\n\npublic class Limits\n{\n    final public const int MAX = 3;\n}\n";
     for (code, note) in [
         (
             interface,
-            "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, constants, methods, properties as in `int orderId { get; }` and `string label => …;`, and operators as in `static int operator <=>(Priced a, Priced b)`, with no other modifiers or `extends`.",
+            "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, constants, methods, properties as in `int orderId { get; }` and `string label => …;`, operators as in `static int operator <=>(Priced a, Priced b)`, and laws, which each PHP# class that implements it proves, with no other modifiers or `extends`.",
         ),
         (
             constant,

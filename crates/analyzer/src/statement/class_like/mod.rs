@@ -126,6 +126,7 @@ use crate::utils::names::display_sharp_accessor;
 use crate::utils::names::display_sharp_parameter_type;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
+use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_method_declaration;
 use crate::utils::template::find_broken_marker;
 use crate::utils::template::find_template_uses;
@@ -2680,6 +2681,39 @@ fn check_class_like_implements<'ctx, 'arena, A>(
                         .with_annotation(Annotation::secondary(implemented_class_span).with_message("This interface is marked with `@enum-interface` here"))
                         .with_note("An interface marked with `@enum-interface` can only be implemented by enums.")
                         .with_help(format!("To resolve this, either change `{using_name}` to be an enum, or implement a different, non-enum interface.")),
+                );
+            }
+
+            // Each implementer of an interface proves its laws, and of each interface it extends, spec sections 22 and 28,
+            // which plain PHP can't.
+            let stated = std::iter::once(implemented_metadata)
+                .chain(
+                    implemented_metadata
+                        .all_parent_interfaces
+                        .iter()
+                        .filter_map(|interface| context.codebase.get_class_like(*interface)),
+                )
+                .find_map(|interface| {
+                    interface.laws.values().min_by_key(|law| law.span.start.offset).map(|law| (interface, law))
+                });
+            if !class_like_metadata.flags.is_sharp()
+                && let Some((interface, law)) = stated
+            {
+                let interface_name =
+                    sharp_class_like_name(context.codebase, &WordMap::default(), interface.original_name);
+                context.collector.report_with_code(
+                    IssueCode::InterfaceLawImplementer,
+                    Issue::error(format!(
+                        "`{}` is plain PHP, which can't prove `{interface_name}.{}`. Write it in PHP#.",
+                        dotted(class_like_metadata.original_name.as_bytes()),
+                        law.original_name
+                    ))
+                    .with_annotation(
+                        Annotation::primary(implemented_type.span())
+                            .with_message(format!("`{interface_name}` states laws its implementers prove.")),
+                    )
+                    .with_annotation(Annotation::secondary(using_class_span).with_message("A plain PHP class."))
+                    .with_annotation(Annotation::secondary(law.span).with_message("A law it would prove.")),
                 );
             }
 

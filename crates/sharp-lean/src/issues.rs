@@ -138,7 +138,8 @@ pub(crate) fn untranslated(law: &Law, place: &str) -> Issue {
 pub(crate) fn unproven_case(law: &Law, case: &Case, split: &[String], goal: Option<&str>) -> Issue {
     let goal = goal.filter(|goal| *goal != "false").unwrap_or(&law.proof.claim);
     let conditions = [case.conditions.as_slice(), split].concat();
-    let issue = Issue::error(format!("law {} is not proven", law.name))
+    let message = law.broken.clone().unwrap_or_else(|| format!("law {} is not proven", law.name));
+    let issue = Issue::error(message)
         .with_code(IssueCode::LawUnproven.as_str())
         .with_annotation(Annotation::primary(law.span))
         .with_note(format!("{}still to show: {goal}", when(&conditions)));

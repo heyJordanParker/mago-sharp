@@ -15,6 +15,7 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::FileId;
+use mago_span::Span;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
@@ -26,6 +27,8 @@ pub(crate) struct ReachedClass {
     /// The class's fully qualified name as its declaration spells it.
     pub(crate) name: Word,
     pub(crate) file: FileId,
+    /// Where its declaration names it.
+    pub(crate) span: Span,
     /// Whether a `.sharp` file declares it, and not plain PHP.
     pub(crate) sharp: bool,
     /// Whether it finds its methods only by their exact names, spec section 24, as a PHP# class and every class below
@@ -87,6 +90,12 @@ pub struct Reach {
     /// its arguments, spec section 28, and a class-like that holds a value of one in a field, as [`valid_classes`]
     /// finds them.
     valid: HashSet<Word>,
+    /// The PHP# classes that prove the laws of each interface that states laws, spec sections 22 and 28, by the
+    /// interface's key: each one that implements it and is not abstract, by its full name, in name order.
+    law_implementers: HashMap<Word, Vec<Word>>,
+    /// The laws of each interface that states laws, by the interface's key: each law's name as written and the number
+    /// of its parameters, in the order the interface states them.
+    interface_laws: HashMap<Word, Vec<(Word, usize)>>,
 }
 
 impl Reach {
@@ -107,12 +116,45 @@ impl Reach {
         }
 
         let mut reach = Reach::default();
+        for interface in
+            codebase.class_likes.values().filter(|class| class.kind.is_interface() && !class.laws.is_empty())
+        {
+            let mut laws: Vec<(u32, Word, usize)> = interface
+                .laws
+                .values()
+                .map(|law| (law.span.start.offset, law.original_name, law.parameters.len()))
+                .collect();
+            laws.sort_unstable_by_key(|(offset, ..)| *offset);
+            reach.interface_laws.insert(
+                codebase.class_key(interface.name),
+                laws.into_iter().map(|(_, name, parameters)| (name, parameters)).collect(),
+            );
+        }
+        for class in codebase
+            .class_likes
+            .values()
+            .filter(|class| class.kind.is_class() && class.flags.is_sharp() && !class.flags.is_abstract())
+        {
+            for interface in &class.all_parent_interfaces {
+                let key = codebase.class_key(*interface);
+                if reach.interface_laws.contains_key(&key) {
+                    reach.law_implementers.entry(key).or_default().push(class.original_name);
+                }
+            }
+        }
+        for implementers in reach.law_implementers.values_mut() {
+            implementers.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        }
+
         for class in codebase.class_likes.values().filter(|class| !class.laws.is_empty()) {
             let law_file = class.span.file_id;
             let mut reached: HashSet<SymbolIdentifier> = HashSet::default();
             let mut pending: Vec<SymbolIdentifier> =
                 class.laws.keys().map(|law| keyed(codebase, (class.name, *law))).collect();
             pending.extend(class.machine.iter().flat_map(|machine| machine_steps(codebase, class, machine)));
+            // Each PHP# implementer of an interface proves the interface's laws, so they reach what it gives for each
+            // member of the interface they reach.
+            let implementers = reach.law_implementers.get(&codebase.class_key(class.name)).cloned().unwrap_or_default();
             while let Some(next) = pending.pop() {
                 if !reached.insert(next) {
                     continue;
@@ -123,7 +165,14 @@ impl Reach {
                     pending.push((next.0, empty_word()));
                     pending.extend(field_equalities(codebase, next));
                     pending.extend(sharp_declaration(codebase, next));
+                    if next.0 == codebase.class_key(class.name) {
+                        pending.extend(implementers.iter().map(|implementer| keyed(codebase, (*implementer, next.1))));
+                    }
                 } else if let Some(metadata) = codebase.get_class_like(next.0) {
+                    // A law over an interface's values takes the interface's laws as facts, spec section 28.
+                    if metadata.kind.is_interface() {
+                        pending.extend(metadata.laws.keys().map(|law| keyed(codebase, (next.0, *law))));
+                    }
                     pending.extend(metadata.properties.keys().map(|property| (next.0, *property)));
                     pending.extend(
                         metadata
@@ -179,6 +228,7 @@ impl Reach {
                 reach.classes.entry(class).or_insert(ReachedClass {
                     name: metadata.original_name,
                     file,
+                    span: metadata.name_span.unwrap_or(metadata.span),
                     sharp: metadata.flags.is_sharp(),
                     exact_names: metadata.exact_names,
                     parent: metadata
@@ -297,6 +347,33 @@ impl Reach {
     /// interface that is not sealed.
     pub(crate) fn implementers(&self, interface: &[u8]) -> Option<&[Word]> {
         self.implementers.get(&self.class_key(interface)).map(Vec::as_slice)
+    }
+
+    /// The PHP# classes that prove the laws of `interface`, spec sections 22 and 28, each by its full name, in name
+    /// order: none for an interface that states no law.
+    pub(crate) fn law_implementers(&self, interface: &[u8]) -> &[Word] {
+        self.law_implementers.get(&self.class_key(interface)).map_or(&[], Vec::as_slice)
+    }
+
+    /// The laws `interface` states, each by its name as written and the number of its parameters, in the order it
+    /// states them: none for any other class-like.
+    pub(crate) fn interface_laws(&self, interface: &[u8]) -> &[(Word, usize)] {
+        self.interface_laws.get(&self.class_key(interface)).map_or(&[], Vec::as_slice)
+    }
+
+    /// The full name of each interface whose laws `class` proves, in name order.
+    pub(crate) fn law_interfaces(&self, class: &[u8]) -> Vec<Word> {
+        let mut interfaces: Vec<Word> = self
+            .law_implementers
+            .iter()
+            .filter(|(_, implementers)| {
+                implementers.iter().any(|implementer| self.same_class(implementer.as_bytes(), class))
+            })
+            .filter_map(|(interface, _)| self.classes.get(interface).map(|reached| reached.name))
+            .collect();
+        interfaces.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+        interfaces
     }
 
     /// The full name of each reached sealed interface, spec section 20.1.

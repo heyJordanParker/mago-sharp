@@ -2137,8 +2137,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 ClassLikeMember::Method(method) => self.signature(method),
                 ClassLikeMember::Constant(constant) => self.constant(constant),
-                // An interface's indexer makes it PHP's `\ArrayAccess`, whose methods each class's indexer writes.
-                ClassLikeMember::Operator(_) | ClassLikeMember::Indexer(_) => continue,
+                // An interface's indexer makes it PHP's `\ArrayAccess`, whose methods each class's indexer writes. A law
+                // runs nowhere: each implementer proves it.
+                ClassLikeMember::Operator(_) | ClassLikeMember::Indexer(_) | ClassLikeMember::Law(_) => continue,
                 _ => unreachable!("check_slice refuses the interface member `{member}`"),
             });
         }

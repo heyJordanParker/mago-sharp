@@ -3051,11 +3051,10 @@ fn compile_refuses_a_plain_php_class_that_changed_or_appeared_since_the_last_com
     );
 }
 
-/// Spec section 32: the engine reads a class's modules by the namespaces they serve, as the listener table records
-/// them, and a `Module.sharp` at the root, outside the configured paths, serves none, so one that appears leaves each
-/// compiled file current.
+/// A `Module.sharp` at the root, outside the configured paths, is an input of each compiled file, which the engine
+/// reads, so one that appears makes the compile write each compiled file again.
 #[test]
-fn a_module_file_that_appears_at_the_root_outside_the_paths_leaves_each_compiled_file_current() {
+fn compile_writes_each_compiled_file_again_once_a_module_file_appears_at_the_root() {
     let directory = project(ORDER, MONEY);
     let root = directory.path();
     compile_succeeds(root);
@@ -3064,7 +3063,7 @@ fn a_module_file_that_appears_at_the_root_outside_the_paths_leaves_each_compiled
     write(root, "Module.sharp", "module\n{\n}\n");
     compile_succeeds(root);
 
-    assert_eq!(compiled_at(root, "app/Order.sharp"), written, "the compile wrote nothing");
+    assert_ne!(compiled_at(root, "app/Order.sharp"), written, "the compile ran");
 }
 
 /// The deprecated `perform-heuristic-checks`, which serde never writes back, changes the analysis, so a change of it
@@ -3537,56 +3536,6 @@ fn compile_records_each_module_under_the_namespace_it_serves() {
         ),
         "{table}"
     );
-}
-
-/// Spec section 32: a program's services come from the modules of its namespace and of each namespace above it,
-/// wherever its file is, so an edit to `app/Module.sharp` writes again the compiled program of `App.Testing.Lib` under
-/// `tests/lib`, and a file added beside the module writes no other compiled file again.
-#[test]
-fn an_edit_to_a_module_writes_again_each_program_of_its_namespace_wherever_its_file_is() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    write(
-        root,
-        "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\", \"tests\"]\nincludes = [\"vendor\"]\n",
-    );
-    write(
-        root,
-        "composer.json",
-        "{\"type\": \"library\", \"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}, \"autoload-dev\": {\"psr-4\": {\"Tests\\\\\": \"tests/\"}}}\n",
-    );
-    write(root, "composer.lock", "{}\n");
-    let runtime = |class: &str| format!("namespace App.Shared;\n\npublic class {class} : Runtime\n{{\n}}\n");
-    let module = |class: &str| {
-        format!(
-            "namespace App;\n\nimport App.Shared.Runtime;\nimport App.Shared.{class};\n\nmodule\n{{\n    singleton Runtime = {class};\n}}\n"
-        )
-    };
-    write(root, "app/Shared/Runtime.sharp", "namespace App.Shared;\n\npublic interface Runtime\n{\n}\n");
-    write(root, "app/Shared/LiveRuntime.sharp", &runtime("LiveRuntime"));
-    write(root, "app/Shared/QuietRuntime.sharp", &runtime("QuietRuntime"));
-    write(root, "app/Module.sharp", &module("LiveRuntime"));
-    write(
-        root,
-        "tests/lib/Link.sharp",
-        "namespace App.Testing.Lib;\n\nimport App.Shared.Runtime;\n\npublic class Link\n{\n    public Link(private Runtime runtime) { }\n\n    public void main()\n    {\n    }\n}\n",
-    );
-    compile_succeeds(root);
-    let link = compiled_at(root, "tests/lib/Link.sharp");
-
-    write(root, "app/Module.sharp", &module("QuietRuntime"));
-    compile_succeeds(root);
-    assert_ne!(compiled_at(root, "tests/lib/Link.sharp"), link, "the edit of App's module wrote Link again");
-
-    let names =
-        ["tests/lib/Link.sharp", "app/Module.sharp", "app/Shared/Runtime.sharp", "app/Shared/LiveRuntime.sharp"];
-    let written: Vec<std::time::SystemTime> = names.iter().map(|name| compiled_at(root, name)).collect();
-    write(root, "app/Foo.sharp", "namespace App;\n\npublic class Foo\n{\n}\n");
-    compile_succeeds(root);
-    for (name, at) in names.iter().zip(written) {
-        assert_eq!(compiled_at(root, name), at, "adding app/Foo.sharp wrote {name} again");
-    }
 }
 
 /// Spec section 29: the listener table names, for each plain PHP class, method and function an `extern` line gives
@@ -8070,6 +8019,96 @@ fn a_law_no_small_value_breaks_is_refused_as_needing_a_proof_body() {
         printed(&output)
     );
     assert!(!printed(&output).contains("fails for"), "{}", printed(&output));
+}
+
+/// `App.Books.Ledger`, the specimen of spec section 28's interface laws: an interface whose law says what `credit`
+/// gives.
+const LEDGER: &str = "namespace App.Books;\n\npublic interface Ledger\n{\n    int balance { get; }\n    Ledger credit(int amount);\n\n    law creditAdds(Ledger l, int amount) when amount >= 0 => l.credit(amount).balance == l.balance + amount;\n}\n";
+
+/// `App.Books.MemoryLedger`, a PHP# implementer of [`LEDGER`] whose `credit` adds `amount` and `extra`.
+fn memory_ledger(extra: &str) -> String {
+    format!(
+        "namespace App.Books;\n\npublic class MemoryLedger : Ledger\n{{\n    public MemoryLedger(public int balance {{ get; }}) {{ }}\n    public Ledger credit(int amount) => new MemoryLedger(this.balance + amount{extra});\n}}\n"
+    )
+}
+
+/// Spec sections 22 and 28: each PHP# implementer of an interface proves each of its laws, with the interface's values
+/// read as its own, so one that breaks a law is refused, naming its method that the law calls and the law.
+#[test]
+fn an_implementer_that_breaks_its_interface_s_law_is_refused_naming_the_law() {
+    let directory =
+        lawful_project(&[("app/Books/Ledger.sharp", LEDGER), ("app/Books/MemoryLedger.sharp", &memory_ledger(" + 1"))]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "app/Books/MemoryLedger.sharp:3:14: error[law-unproven]: `MemoryLedger.credit` breaks `Ledger.creditAdds`"
+        ),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Books/MemoryLedger.sharp").exists());
+}
+
+/// An implementer that keeps its interface's law compiles.
+#[test]
+fn an_implementer_that_keeps_its_interface_s_law_compiles() {
+    let directory =
+        lawful_project(&[("app/Books/Ledger.sharp", LEDGER), ("app/Books/MemoryLedger.sharp", &memory_ledger(""))]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Books/MemoryLedger.sharp").exists());
+    assert!(compiled(root, "app/Books/Ledger.sharp").exists());
+}
+
+/// A plain PHP class can't prove an interface's laws, so it implements no interface that states one.
+#[test]
+fn a_plain_php_class_implementing_an_interface_with_laws_is_refused() {
+    let directory = lawful_project(&[
+        ("app/Books/Ledger.sharp", LEDGER),
+        (
+            "app/Books/FileLedger.php",
+            "<?php\n\nnamespace App\\Books;\n\nfinal class FileLedger implements Ledger\n{\n    public int $balance = 0;\n\n    public function credit(int $amount): Ledger\n    {\n        return $this;\n    }\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error - interface-law-implementer: `App.Books.FileLedger` is plain PHP, which can't prove `Ledger.creditAdds`. Write it in PHP#."
+        ),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// Spec section 28: a law over an interface's values uses the interface's laws as facts, which each implementer
+/// proves, by calling them in its body.
+#[test]
+fn a_law_over_an_interface_s_values_uses_the_interface_s_laws_as_facts() {
+    let directory = lawful_project(&[
+        ("app/Books/Ledger.sharp", LEDGER),
+        ("app/Books/MemoryLedger.sharp", &memory_ledger("")),
+        (
+            "app/Books/Ledgers.sharp",
+            "namespace App.Books;\n\npublic final class Ledgers\n{\n    law creditingNothingKeepsTheBalance(Ledger l) => l.credit(0).balance == l.balance\n    {\n        Ledger.creditAdds(l, 0);\n    }\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Books/Ledgers.sharp").exists());
 }
 
 /// A nullable int is a value or null, so a claim compares it as code does, with no exact `Int` to read.

@@ -813,8 +813,15 @@ fn judged(law: &Law, judgment: Judgment, names: &Names<'_>) -> Vec<Issue> {
     }
 }
 
+/// Records `issue` on the file of its primary annotation: the file of `translation`, which states the law, or the file
+/// of the PHP# implementer whose proof of an interface's law it reports, spec sections 22 and 28.
 fn report(issues: &mut HashMap<FileId, IssueCollection>, translation: &Translation, issue: Issue) {
-    issues.entry(translation.file).or_default().push(issue);
+    let file = issue
+        .annotations
+        .iter()
+        .find(|annotation| annotation.is_primary())
+        .map_or(translation.file, |annotation| annotation.span.file_id);
+    issues.entry(file).or_default().push(issue);
 }
 
 /// The issues that refuse the laws of `translations` before any proof, as [`Lean::check`] reports them.
@@ -898,6 +905,7 @@ mod tests {
             span: Span::dummy(0, 0),
             proof: crate::translate::proof::Proof::default(),
             breaking: None,
+            broken: None,
         }
     }
 

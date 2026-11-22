@@ -371,6 +371,7 @@ final class AnalyzerCodeModuleGenerator
         'law-unproven',
         'law-recursion',
         'invalid-law',
+        'interface-law-implementer',
         'law-checker-unavailable',
         'unmodeled-construct',
         'missing-super-call',

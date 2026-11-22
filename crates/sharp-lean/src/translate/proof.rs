@@ -27,6 +27,7 @@ use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_word::Word;
 
 use crate::issues;
 use crate::reach::Reach;
@@ -95,6 +96,23 @@ impl Proof {
     }
 }
 
+/// A law of an interface that a law over the interface's values takes as a fact, spec section 28: each PHP# implementer
+/// proves it, so the law's statement assumes it, `(∀ «$a1» «$a2», App.Books.Ledger.«creditAdds» «$a1» «$a2») →`, and
+/// a call of it in the body is that hypothesis.
+#[derive(Debug, Clone)]
+pub(crate) struct Fact {
+    /// The hypothesis's name in the theorem: `«$h1»`.
+    pub(crate) name: String,
+    /// The interface law's statement.
+    pub(crate) statement: String,
+    /// The premise the law's statement states.
+    pub(crate) premise: String,
+    /// The file that states the interface law, when the analysis knows it.
+    pub(crate) file: Option<FileId>,
+    /// As messages name it: `Ledger.creditAdds`.
+    pub(crate) place: String,
+}
+
 /// One case of a law's proof: the end of the body, or a `return;`, on one path through its conditions.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Case {
@@ -144,6 +162,10 @@ pub(crate) struct Prover<'prover, 'program, 'ast, 'arena> {
     /// The parameter the body's first call of the law itself makes smaller, and how, which Lean's recursion on the
     /// theorem ends by.
     step: Option<(usize, Step)>,
+    /// The interface laws the statement assumes, in its order.
+    assumed: Vec<Fact>,
+    /// The interface whose values the proof reads as one implementer's, and the implementer, as [`Body::reads_as`] says.
+    reading: Option<(Word, Word)>,
 }
 
 impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
@@ -166,7 +188,21 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
             facts: 0,
             hypotheses: 0,
             step: None,
+            assumed: Vec::new(),
+            reading: None,
         }
+    }
+
+    /// Proves the law from the interface laws `facts` its statement assumes.
+    pub(crate) fn assuming(mut self, facts: Vec<Fact>) -> Self {
+        self.assumed = facts;
+        self
+    }
+
+    /// Proves the law with each value of `interface` read as one of `implementer`, as [`Body::reads_as`] says.
+    pub(crate) fn reading(mut self, interface: Word, implementer: Word) -> Self {
+        self.reading = Some((interface, implementer));
+        self
     }
 
     /// A translation of the law's code on the path `scope`, whose calls of the law's class pass the smaller values
@@ -174,6 +210,9 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     fn body(&self, scope: &Scope<'prover, 'program, 'ast, 'arena>) -> Body<'prover, 'program> {
         let mut body = Body::for_law(self.checked, self.reach, self.full, self.place.clone(), self.law);
         body.on_path(scope.path.clone());
+        if let Some((interface, implementer)) = self.reading {
+            body.reads_as(interface, implementer);
+        }
 
         body
     }
@@ -183,6 +222,10 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     /// precondition, and the proof takes those as facts before its body's first call, which passes them on.
     pub(crate) fn prove(mut self, binders: &[String], parameters: &[String], preconditions: bool) -> Proof {
         let mut lines = vec![format!("unfold {}", self.statement)];
+        if !self.assumed.is_empty() {
+            let names: Vec<&str> = self.assumed.iter().map(|fact| fact.name.as_str()).collect();
+            lines.push(format!("intro {}", names.join(" ")));
+        }
         let mut scope = Scope {
             locals: Vec::new(),
             hypotheses: Vec::new(),
@@ -438,6 +481,21 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         let Some((key, file, arguments)) = self.called(call) else {
             return;
         };
+        // A law of an interface the statement assumes is its hypothesis, and has no theorem of its own.
+        let assumed = self.assumed.iter().find(|fact| fact.statement == key).cloned();
+        let proved = match &assumed {
+            Some(fact) => {
+                self.proof.uses.push(Use {
+                    key: key.clone(),
+                    file: fact.file,
+                    place: fact.place.clone(),
+                    smaller: None,
+                    names_only: false,
+                });
+                fact.name.clone()
+            }
+            None => format!("{key}.proof"),
+        };
         // A call of the law itself passes the smaller value the path shows as its pure term, which Lean's recursion on
         // the theorem ends by, as a method's recursion does.
         let mut stepped = None;
@@ -450,8 +508,8 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
             if let Some((smaller, _)) = &stepped {
                 self.step.get_or_insert((smaller.parameter, smaller.step));
             }
-        } else if !self.proof.laws.iter().any(|(law, ..)| *law == key) {
-            self.proof.laws.push((key.clone(), call.span(), file));
+        } else if assumed.is_none() && !self.proof.laws.iter().any(|(law, ..)| *law == key) {
+            self.proof.laws.push((key, call.span(), file));
         }
 
         let values: Vec<&Expression> = arguments.iter().map(Argument::value).collect();
@@ -493,7 +551,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
                 .collect()
         };
         if computed.is_empty() {
-            lines.push(format!("have {fact} := sharp_call% {index} ({key}.proof {})", applied(false).join(" ")));
+            lines.push(format!("have {fact} := sharp_call% {index} ({proved} {})", applied(false).join(" ")));
             return;
         }
 
@@ -501,7 +559,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         lines.push(format!("have {fact} := fun {} (_ : ((do", binders.join(" ")));
         lines.extend(computed.iter().map(|line| format!("      {line}")));
         lines.push(format!("      return ({})) : M _) = pure ({})) =>", terms.join(", "), binders.join(", ")));
-        lines.push(format!("    sharp_call% {index} ({key}.proof {})", applied(true).join(" ")));
+        lines.push(format!("    sharp_call% {index} ({proved} {})", applied(true).join(" ")));
     }
 
     /// The Lean name of the law `call` calls, `Class.law(…)` a law of `Class`, the file that declares `Class`, when the
