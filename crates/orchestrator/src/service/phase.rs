@@ -3,10 +3,11 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
-/// One phase of a compile or an analysis: `inputs`, `load`, `scan`, `populate`, `analysis`, `lowering`, `laws`,
-/// `hosts`, `report` or `write`. `hosts` is the extension hosts' own part: the compile of their folder that runs before
-/// a run starts them, and the answers they give when they take an analysis over. It logs how long it ran at DEBUG once
-/// [`Phase::end`] ends it.
+/// One phase of a compile or an analysis, which logs how long it ran at DEBUG once [`Phase::end`] ends it.
+///
+/// A phase is `inputs`, `load`, `scan`, `populate`, `analysis`, `lowering`, `laws`, `hosts`, `report` or `write`.
+/// `hosts` is the extension hosts' own part: the compile of their folder that runs before a run starts them, and the
+/// answers they give when they take an analysis over.
 #[derive(Debug)]
 #[must_use = "a phase logs its time only when it ends"]
 pub struct Phase {
