@@ -72,6 +72,9 @@ pub struct Reach {
     files: HashMap<FileId, Vec<FileId>>,
     /// The implementers of each reached sealed interface, by the interface's key, each by its full name, in name order.
     implementers: HashMap<Word, Vec<Word>>,
+    /// The cases of each reached enum, spec section 20, by the enum's key, each by its name, in the order the enum
+    /// declares them.
+    cases: HashMap<Word, Vec<Word>>,
     /// The interfaces each reached class names in its own header, by the class's key, each by its full name, in name
     /// order.
     interfaces: HashMap<Word, Vec<Word>>,
@@ -133,6 +136,26 @@ impl Reach {
                             .collect();
                         implementers.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
                         reach.implementers.insert(next.0, implementers);
+                    }
+                    // An enum whose cases carry no data lists them itself, and the cases of one whose cases carry
+                    // data are the classes it permits, spec section 20.
+                    let mut cases: Vec<(u32, Word)> =
+                        metadata.enum_cases.values().map(|case| (case.span.start.offset, case.name)).collect();
+                    cases.extend(
+                        metadata
+                            .permitted_inheritors
+                            .iter()
+                            .flatten()
+                            .filter_map(|inheritor| codebase.get_class_like(*inheritor))
+                            .filter(|inheritor| inheritor.flags.is_enum_case_class())
+                            .filter_map(|case| {
+                                let name = case.original_name.as_bytes().rsplit(|&byte| byte == b'\\').next()?;
+                                Some((case.span.start.offset, word(name)))
+                            }),
+                    );
+                    if !cases.is_empty() {
+                        cases.sort_unstable_by_key(|(offset, _)| *offset);
+                        reach.cases.insert(next.0, cases.into_iter().map(|(_, name)| name).collect());
                     }
                 }
             }
@@ -245,6 +268,12 @@ impl Reach {
     /// interface that is not sealed.
     pub(crate) fn implementers(&self, interface: &[u8]) -> Option<&[Word]> {
         self.implementers.get(&self.class_key(interface)).map(Vec::as_slice)
+    }
+
+    /// The cases of the reached enum `r#enum`, each by its name, in the order it declares them. None for any other
+    /// class-like.
+    pub(crate) fn cases(&self, r#enum: &[u8]) -> &[Word] {
+        self.cases.get(&self.class_key(r#enum)).map_or(&[], Vec::as_slice)
     }
 
     /// The full names of the reached sealed interfaces `class` implements, spec section 20.1, in name order.

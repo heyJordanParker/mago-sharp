@@ -390,7 +390,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
 
     /// The tactics of `choice`, the case split of a `match`'s arms: a named `match` for each Lean pattern an arm tests,
     /// so the claim reads the value of each case, `by_cases` for each condition, and `obtain` for each name an arm gives
-    /// its value. A `_` after patterns that cover every value is left out, since Lean refuses an arm that never runs.
+    /// its value.
     fn tactics(&mut self, choice: &Choice) -> Vec<String> {
         self.hypotheses += 1;
         let index = self.hypotheses;
@@ -406,11 +406,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
             }
             Choice::Match(term, alternatives) => {
                 let mut lines = vec![format!("match «$m{index}» : {term} with")];
-                let patterns: Vec<&str> = alternatives.iter().map(|(pattern, _)| pattern.as_str()).collect();
-                for (place, (pattern, alternative)) in alternatives.iter().enumerate() {
-                    if pattern == "_" && covers(&patterns[..place]) {
-                        continue;
-                    }
+                for (pattern, alternative) in alternatives {
                     lines.push(format!("| {pattern} =>"));
                     let tactics = self.tactics(alternative);
                     lines.extend(tactics.into_iter().map(|line| format!("  {line}")));
@@ -605,17 +601,6 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
 
         String::from_utf8_lossy(text).into_owned()
     }
-}
-
-/// Whether the Lean patterns `patterns` of one term cover every value of it: `_` or a name, or a list's `[]` beside an
-/// element before a rest that is a name or `_`.
-fn covers(patterns: &[&str]) -> bool {
-    let name =
-        |pattern: &str| pattern.chars().all(|character| character.is_alphanumeric() || "_«»$'".contains(character));
-
-    patterns.iter().any(|pattern| name(pattern))
-        || (patterns.contains(&"[]")
-            && patterns.iter().any(|pattern| pattern.split_once(" :: ").is_some_and(|(_, tail)| name(tail))))
 }
 
 /// The patterns `pattern` joins with `or`, in their order, or `pattern` alone when it joins none. No pattern under `or`

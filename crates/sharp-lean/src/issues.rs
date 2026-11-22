@@ -133,10 +133,10 @@ pub(crate) fn untranslated(law: &Law, place: &str) -> Issue {
 
 /// A case of `law`'s proof that the automatic steps did not close, with its conditions, then the case of each enum value
 /// the proof split it on, `split`, and the goal still to show in PHP#, or the law's claim as written when the goal holds
-/// a part PHP# writes no other way, and the call of the law itself on a smaller value when the case knows one and makes
-/// no such call.
+/// a part PHP# writes no other way or is plain `false`, which shows nothing, and the call of the law itself on a smaller
+/// value when the case knows one and makes no such call.
 pub(crate) fn unproven_case(law: &Law, case: &Case, split: &[String], goal: Option<&str>) -> Issue {
-    let goal = goal.unwrap_or(&law.proof.claim);
+    let goal = goal.filter(|goal| *goal != "false").unwrap_or(&law.proof.claim);
     let conditions = [case.conditions.as_slice(), split].concat();
     let issue = Issue::error(format!("law {} is not proven", law.name))
         .with_code(IssueCode::LawUnproven.as_str())

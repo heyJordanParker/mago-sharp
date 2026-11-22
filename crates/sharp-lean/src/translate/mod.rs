@@ -363,8 +363,8 @@ impl Translator<'_, '_> {
 
         // Spec section 20.1: an implementer of a sealed interface is a value of the interface, which reads each of its
         // properties through the interface's accessor, and each property a PHP# parent declares through the accessor of
-        // the parent's value. Any other implementer gives the property's default, which no read sees, since the
-        // checker allows the read only where the value is the implementer.
+        // the parent's value. Each other value of the interface gives the property's default, which no read sees, since
+        // the checker allows the read only where the value is the implementer.
         let own =
             fields.iter().zip(&types).map(|(field, r#type)| (String::from_utf8_lossy(field.name), r#type.clone()));
         for (field, r#type) in parent_field.map(|(field, r#type)| (field.into(), r#type)).into_iter().chain(own) {
@@ -374,11 +374,11 @@ impl Translator<'_, '_> {
             };
             let key = names::member(&constructor, field.as_bytes());
             body.reads(full);
-            let lines = [
+            let mut lines = vec![
                 format!("def {key} : {interface} → {type}"),
                 format!("  | {constructor} held => held.{}", names::identifier(field.as_bytes())),
-                "  | _ => default".to_owned(),
             ];
+            lines.extend(default_arms(&body, full, &body.values(full, Some(&constructor))));
             self.translation.receivers.push((key.clone(), true));
             self.declare(body, key, name.span, lines.join("\n"), Role::Definition);
         }
@@ -560,7 +560,7 @@ impl Translator<'_, '_> {
         self.declare_type(body, lean.clone(), r#enum.name.span, lines, coercions);
 
         // Spec section 20: a field of a case that carries data reads as the constructor's field, where a test named the
-        // case. Any other case gives the field's default, which no such read sees. The value of an enum that implements
+        // case. Each other value gives the field's default, which no such read sees. The value of an enum that implements
         // a sealed interface is the interface's, spec section 20.1. A proof reads the field through `«$held»`, the
         // constructor's equation, rather than unfolding the read, which for a machine of one case is a projection the
         // automatic steps can't relate to the case that built the value.
@@ -576,10 +576,10 @@ impl Translator<'_, '_> {
                 body.held(r#enum.name.span, full, format!("(.{} {})", names::identifier(case), binders.join(" ")));
             let built =
                 body.held(r#enum.name.span, full, format!("(.{} {})", names::identifier(case), values.join(" ")));
-            let lines = [
-                format!("def {key} : {domain} → {type}"),
-                format!("  | {pattern} => held"),
-                "  | _ => default".to_owned(),
+            let covers = body.held(r#enum.name.span, full, format!("({} ..)", names::member(&lean, case)));
+            let mut lines = vec![format!("def {key} : {domain} → {type}"), format!("  | {pattern} => held")];
+            lines.extend(default_arms(&body, full, &[covers]));
+            lines.extend([
                 String::new(),
                 format!(
                     "@[simp, grind =] theorem {key}.«$held» : ∀ {}, {key} {built} = {} := fun {} => rfl",
@@ -587,7 +587,7 @@ impl Translator<'_, '_> {
                     values[place],
                     vec!["_"; count].join(" ")
                 ),
-            ];
+            ]);
             self.translation.receivers.push((key.clone(), true));
             self.declare(body, key, r#enum.name.span, lines.join("\n"), Role::Definition);
         }
@@ -597,12 +597,12 @@ impl Translator<'_, '_> {
             let r#type = body.r#type(&backing.hint);
             let domain = body.class_type(r#enum.name.span, full);
             let mut lines = vec![format!("def {} : {domain} → {type}", names::member(&lean, b"value"))];
+            let mut covers = Vec::new();
             for (case, value) in &values {
                 lines.push(format!("  | {} => {value}", body.held(r#enum.name.span, full, format!(".{case}"))));
+                covers.push(body.held(r#enum.name.span, full, format!("({lean}.{case} ..)")));
             }
-            if domain != lean {
-                lines.push("  | _ => default".to_owned());
-            }
+            lines.extend(default_arms(&body, full, &covers));
             self.translation.receivers.push((names::member(&lean, b"value"), true));
             self.declare(body, names::member(&lean, b"value"), r#enum.name.span, lines.join("\n"), Role::Definition);
 
@@ -1120,6 +1120,16 @@ enum FieldValue<'field, 'arena> {
     Parameter,
     Initial(&'field mago_syntax::cst::Expression<'arena>),
     Absent,
+}
+
+/// The arm of a definition over `class`'s Lean type that gives `default` for each value `covers` leaves out, one for
+/// each constructor, as [`Body::constructors`] gives them, so no value is left to a `_` arm.
+fn default_arms(body: &Body<'_, '_>, class: &[u8], covers: &[String]) -> Vec<String> {
+    body.constructors(class)
+        .into_iter()
+        .filter(|constructor| !covers.contains(constructor))
+        .map(|other| format!("  | {other} => default"))
+        .collect()
 }
 
 /// Whether each of the struct `full`'s `fields` holds equal values in `a` and `b`, by that field's own `==`, spec

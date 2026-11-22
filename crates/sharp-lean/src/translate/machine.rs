@@ -84,15 +84,16 @@ impl Translator<'_, '_> {
             let mut body = Body::new(self.checked, self.reach, full, place.clone());
             let mut uses = vec![self.own_use(&claim, place.clone())];
             let given = machine.pattern(case.as_bytes());
+            let others = machine.others(case.as_bytes());
             let check = |call: &str| {
-                [
+                let mut lines = vec![
                     "holds do".to_owned(),
                     format!("    let «$given» ← {call}"),
                     "    match «$given» with".to_owned(),
                     format!("    | {given} => {claim} «$given»"),
-                    "    | _ => pure true".to_owned(),
-                ]
-                .join("\n")
+                ];
+                lines.extend(others.iter().map(|other| format!("    | {other} => pure true")));
+                lines.join("\n")
             };
 
             let mut after = Vec::new();
@@ -114,10 +115,12 @@ impl Translator<'_, '_> {
                     {
                         let held_claim = claim_of(&names::member(lean, held.name.value));
                         uses.push(self.own_use(&held_claim, place.clone()));
-                        premises.push(format!(
-                            "holds (match {value} with | {} => {held_claim} {value} | _ => pure true) → ",
-                            machine.pattern(held_case.as_bytes())
-                        ));
+                        let held_pattern = machine.pattern(held_case.as_bytes());
+                        let mut arms = vec![format!("| {held_pattern} => {held_claim} {value}")];
+                        arms.extend(
+                            machine.others(held_case.as_bytes()).iter().map(|other| format!("| {other} => pure true")),
+                        );
+                        premises.push(format!("holds (match {value} with {}) → ", arms.join(" ")));
                     }
                 }
                 let premises = premises.concat();
@@ -165,9 +168,9 @@ impl Translator<'_, '_> {
             }
 
             let trace = format!("{key}.«$trace»");
-            let broken = format!(
-                "(fun «$given» => match «$given» with | {given} => Sharp.Machine.breaks ({claim} «$given») | _ => false)"
-            );
+            let mut arms = vec![format!("| {given} => Sharp.Machine.breaks ({claim} «$given»)")];
+            arms.extend(others.iter().map(|other| format!("| {other} => false")));
+            let broken = format!("(fun «$given» => match «$given» with {})", arms.join(" "));
             let trace_text = format!(
                 "def {trace} : Option (List String) :=\n  Sharp.Machine.search {moves} {shown} {broken} {DEPTH}\n    (Sharp.Machine.next {shown} [] ({}))",
                 self.entry_steps(&machine, &mut uses)
@@ -307,11 +310,9 @@ impl Translator<'_, '_> {
                 }
                 uses.push(self.own_use(&move_key, place_of(&move_key)));
             }
-            if !steps.is_empty() {
-                lines.push(format!("  | {} => {}", machine.pattern(case.item.name().value), steps.join(" ++ ")));
-            }
+            let steps = if steps.is_empty() { "[]".to_owned() } else { steps.join(" ++ ") };
+            lines.push(format!("  | {} => {steps}", machine.pattern(case.item.name().value)));
         }
-        lines.push("  | _ => []".to_owned());
         let (_, body_uses, unmodeled) = body.finish();
         self.translation.declarations.push(Declaration {
             key: key.clone(),
@@ -530,6 +531,16 @@ impl<'machine, 'ast, 'arena> Machine<'machine, 'ast, 'arena> {
             self.cases().any(|declared| declared.item.name().value == case && !case_fields(declared).is_empty());
 
         format!(".{}{}", names::identifier(case), if fields { " .." } else { "" })
+    }
+
+    /// The Lean pattern of each of its cases but `case`, in the order it declares them, as [`Machine::pattern`] gives
+    /// them, so a match that names `case` names each other case too.
+    fn others(&self, case: &[u8]) -> Vec<String> {
+        self.cases()
+            .map(|declared| declared.item.name().value)
+            .filter(|declared| *declared != case)
+            .map(|declared| self.pattern(declared))
+            .collect()
     }
 
     /// The method of its entry point `name`.

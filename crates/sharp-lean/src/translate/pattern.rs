@@ -1,6 +1,7 @@
 //! What a `match` arm or an `is` tests, as the Lean `match`es, `let`s and conditions that test it, and the choice of
 //! branch those tests make.
 
+use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
@@ -38,11 +39,10 @@ pub(super) struct Test {
 }
 
 impl Test {
-    /// The test that `subject`, of a type that takes `null` when `nullable`, is the case whose Lean constructor is
-    /// `case`, whatever fields the case holds.
-    pub(super) fn case(subject: &str, case: &str, nullable: bool) -> Test {
-        let pattern = format!("({case} ..)");
-        let destructure = Destructure::constructor(subject, None, pattern.clone(), pattern);
+    /// The test that `subject`, of a type that takes `null` when `nullable`, is a value of the case whose Lean pattern
+    /// is `case`, whatever fields the case holds, among `constructors`, the pattern of each value of the subject's type.
+    pub(super) fn case(subject: &str, case: String, constructors: Vec<String>, nullable: bool) -> Test {
+        let destructure = Destructure::constructor(subject, None, case.clone(), vec![case], constructors);
 
         Test { matches: vec![if nullable { destructure.some() } else { destructure }], ..Test::default() }
     }
@@ -63,22 +63,30 @@ impl Test {
     }
 }
 
-/// One Lean `match` of a test: the term, the pattern, the pattern of the values it holds for when it tests nothing inside
-/// them, and the pattern of each value it leaves out, one for each constructor, so each branch's hypotheses name the
-/// constructor that reached it. The translation does not know the other constructors of a class-like, so `_` leaves
-/// them out.
+/// One Lean `match` of a test: the term, the pattern, the pattern of each value it holds for when it tests nothing
+/// inside them, and the pattern of each value it leaves out, one for each constructor, so each branch's hypotheses
+/// name the constructor that reached it.
 struct Destructure {
     term: String,
     pattern: String,
-    covers: String,
+    covers: Vec<String>,
     others: Vec<String>,
 }
 
 impl Destructure {
     /// The match of `term` against `pattern`, a pattern of a class-like's constructor that holds for every value
-    /// `covers` does, which names the whole value `name` when a name is given.
-    fn constructor(term: &str, name: Option<&str>, pattern: String, covers: String) -> Destructure {
-        Destructure { term: term.to_owned(), pattern: named(name, pattern), covers, others: vec!["_".to_owned()] }
+    /// `covers` holds, which names the whole value `name` when a name is given. It leaves out each of `constructors`,
+    /// the pattern of each value of the term's type, that `covers` does not hold.
+    fn constructor(
+        term: &str,
+        name: Option<&str>,
+        pattern: String,
+        covers: Vec<String>,
+        constructors: Vec<String>,
+    ) -> Destructure {
+        let others = constructors.into_iter().filter(|constructor| !covers.contains(constructor)).collect();
+
+        Destructure { term: term.to_owned(), pattern: named(name, pattern), covers, others }
     }
 
     /// The match of `term` against `pattern`, a list pattern of `leading` elements, before a rest when `rest`. One with
@@ -92,15 +100,16 @@ impl Destructure {
         }
         let covers = if rest { at_least(leading) } else { exactly(leading) };
 
-        Destructure { term: term.to_owned(), pattern, covers, others }
+        Destructure { term: term.to_owned(), pattern, covers: vec![covers], others }
     }
 
     /// This match of a value that takes `null`: `some` of its pattern, which leaves out `none` too.
     fn some(self) -> Destructure {
-        let some = |pattern: &str| format!("some ({pattern})");
-        let others = std::iter::once("none".to_owned()).chain(self.others.iter().map(|other| some(other))).collect();
+        let some = |pattern: &String| format!("some ({pattern})");
+        let covers = self.covers.iter().map(some).collect();
+        let others = std::iter::once("none".to_owned()).chain(self.others.iter().map(some)).collect();
 
-        Destructure { term: self.term, pattern: some(&self.pattern), covers: some(&self.covers), others }
+        Destructure { term: self.term, pattern: some(&self.pattern), covers, others }
     }
 }
 
@@ -151,22 +160,20 @@ impl Body<'_, '_> {
         } else if pattern.fields.is_none() && self.names_type(&pattern.hint, atomic) {
             None
         } else if pattern.fields.is_none()
-            && let Some(implementer) = self.implementer(&pattern.hint, atomic)
+            && let Some((implementer, constructor)) = self.implementer(&pattern.hint, atomic)
         {
-            let pattern = format!("({implementer} _)");
-            Some(Destructure::constructor(subject, name.as_deref(), pattern.clone(), pattern))
+            let covers = self.values(implementer, Some(&constructor));
+            let constructors = self.type_constructors(atomic);
+            Some(Destructure::constructor(subject, name.as_deref(), format!("({constructor} _)"), covers, constructors))
         } else if let Some((held, case)) = self.case(&pattern.hint, atomic) {
             let arguments = self.fields(pattern, &mut parts)?;
             let (tested, covers) = (format!("({case} {arguments})"), format!("({case} ..)"));
-            Some(match held {
-                Some(constructor) => Destructure::constructor(
-                    subject,
-                    name.as_deref(),
-                    format!("({constructor} {tested})"),
-                    format!("({constructor} {covers})"),
-                ),
-                None => Destructure::constructor(subject, name.as_deref(), tested, covers),
-            })
+            let (tested, covers) = match held {
+                Some(constructor) => (format!("({constructor} {tested})"), format!("({constructor} {covers})")),
+                None => (tested, covers),
+            };
+            let constructors = self.type_constructors(atomic);
+            Some(Destructure::constructor(subject, name.as_deref(), tested, vec![covers], constructors))
         } else {
             return self.untested(pattern, atomic);
         };
@@ -177,7 +184,7 @@ impl Body<'_, '_> {
                 let whole = whole.unwrap_or_else(|| Destructure {
                     term: subject.to_owned(),
                     pattern: name.unwrap_or_else(|| "_".to_owned()),
-                    covers: "_".to_owned(),
+                    covers: vec!["_".to_owned()],
                     others: Vec::new(),
                 });
                 test.matches.push(whole.some());
@@ -191,6 +198,15 @@ impl Body<'_, '_> {
         test.conditions.extend(parts.conditions);
 
         Some(test)
+    }
+
+    /// The Lean pattern of each value of `atomic`, a class-like's type, as [`Body::constructors`] gives them.
+    fn type_constructors(&self, atomic: &TAtomic) -> Vec<String> {
+        match atomic {
+            TAtomic::Object(TObject::Named(object)) => self.constructors(object.name.as_bytes()),
+            TAtomic::Object(TObject::Enum(object)) => self.constructors(object.name.as_bytes()),
+            _ => unreachable!("an implementer or a case is tested on a class-like's value, not {}", atomic.get_id()),
+        }
     }
 
     /// The arguments of the Lean pattern of the case `pattern` names: `..` when it tests no field, and else each field's
@@ -341,7 +357,7 @@ fn named(name: Option<&str>, pattern: String) -> String {
 }
 
 /// Which branch runs: the first arm whose test holds, else `otherwise`. An arm whose test is one Lean pattern of the
-/// same term as the arm after it joins that arm's `match`, in place of the alternative its pattern holds for. An arm
+/// same term as the arm after it joins that arm's `match`, in place of the alternatives its pattern holds for. An arm
 /// whose test fails after a pattern of it matched runs the arms after it in each alternative its pattern leaves out.
 pub(super) fn choice(arms: Vec<(Test, Branch)>, otherwise: Branch) -> Choice {
     let mut next = Choice::Branch(otherwise);
@@ -359,7 +375,7 @@ pub(super) fn choice(arms: Vec<(Test, Branch)>, otherwise: Branch) -> Choice {
                 && let Choice::Match(term, alternatives) = &mut next
                 && *term == destructure.term
             {
-                alternatives.retain(|(pattern, _)| *pattern != destructure.covers);
+                alternatives.retain(|(pattern, _)| !destructure.covers.contains(pattern));
                 alternatives.insert(0, (destructure.pattern, inner));
                 inner = next.clone();
                 continue;

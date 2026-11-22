@@ -12,7 +12,6 @@ use foldhash::HashSet;
 use mago_analyzer::smaller::Path;
 use mago_analyzer::smaller::Smaller;
 use mago_analyzer::smaller::Step;
-use mago_codex::metadata::machine::MachineMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
@@ -1131,9 +1130,10 @@ impl<'body, 'program> Body<'body, 'program> {
         Some((held, names::member(&names::full_name(&self.reached_name(r#enum)), case)))
     }
 
-    /// The Lean constructor of the case `value` names, as `Counter.Counting`, when its enum's cases run as classes,
-    /// spec section 20.2.
-    fn case_constructor(&mut self, value: &Expression) -> Option<String> {
+    /// The enum whose case `value` names, when its cases run as classes, spec section 20.2, and the Lean pattern of
+    /// every value of the case, as `(Counter.Counting ..)`, held by the constructor of the sealed interface the enum
+    /// implements.
+    fn case_pattern(&mut self, value: &Expression) -> Option<(&'program [u8], String)> {
         let Expression::Access(Access::Property(access)) = value.unparenthesized() else {
             return None;
         };
@@ -1143,13 +1143,14 @@ impl<'body, 'program> Body<'body, 'program> {
         let r#enum = self.checked.names().get(&self.checked.names().static_property_class(access)?.name);
         self.checked.types().enum_case_class(word(r#enum), word(case.value))?;
         self.reads(r#enum);
+        let constructor = names::member(&names::full_name(&self.reached_name(r#enum)), case.value);
 
-        Some(names::member(&names::full_name(&self.reached_name(r#enum)), case.value))
+        Some((r#enum, self.held(value.span(), r#enum, format!("({constructor} ..)"))))
     }
 
-    /// The Lean constructor of the sealed interface `atomic` is that holds a value of the implementer `hint` names,
+    /// The implementer `hint` names, and the Lean constructor of the sealed interface `atomic` is that holds its value,
     /// spec section 20.1.
-    pub(super) fn implementer(&mut self, hint: &Hint, atomic: &TAtomic) -> Option<String> {
+    pub(super) fn implementer(&mut self, hint: &Hint, atomic: &TAtomic) -> Option<(&'program [u8], String)> {
         let (Hint::Identifier(identifier), TAtomic::Object(TObject::Named(interface))) = (hint, atomic) else {
             return None;
         };
@@ -1158,7 +1159,49 @@ impl<'body, 'program> Body<'body, 'program> {
             return None;
         }
 
-        self.sealed(hint.span(), class).map(|(_, constructor)| constructor)
+        self.sealed(hint.span(), class).map(|(_, constructor)| (class, constructor))
+    }
+
+    /// The Lean pattern of each value of `class`'s Lean type, one for each of the type's constructors, so a match that
+    /// writes each leaves no value to a `_` arm: each value of each implementer of the sealed interface `class` is or
+    /// implements, spec section 20.1, and else each value of `class`, as [`Body::values`] gives them.
+    pub(super) fn constructors(&self, class: &[u8]) -> Vec<String> {
+        let interface = match self.reach.implementers(class) {
+            Some(_) => self.reached_name(class),
+            None => match self.reach.sealed_interfaces(class).first() {
+                Some(interface) => interface.as_bytes().to_vec(),
+                None => return self.values(class, None),
+            },
+        };
+        let lean = names::full_name(&interface);
+
+        self.reach
+            .implementers(&interface)
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|implementer| {
+                let constructor = names::member(&lean, names::short_name(implementer.as_bytes()).as_bytes());
+                self.values(implementer.as_bytes(), Some(&constructor))
+            })
+            .collect()
+    }
+
+    /// The Lean pattern of each value of the class-like `class`'s own type, inside `constructor`, the constructor of
+    /// the sealed interface that holds it, when one does: each case of an enum, whatever fields it holds, as
+    /// `(Shop.OrderStatus.Paid ..)`, and else `_`, every value.
+    pub(super) fn values(&self, class: &[u8], constructor: Option<&str>) -> Vec<String> {
+        let lean = names::full_name(&self.reached_name(class));
+        let cases = self.reach.cases(class);
+        let values: Vec<String> = if cases.is_empty() {
+            vec!["_".to_owned()]
+        } else {
+            cases.iter().map(|case| format!("({} ..)", names::member(&lean, case.as_bytes()))).collect()
+        };
+
+        match constructor {
+            Some(constructor) => values.into_iter().map(|value| format!("({constructor} {value})")).collect(),
+            None => values,
+        }
     }
 
     /// Whether `class` implements the sealed interface `interface`, spec section 20.1.
@@ -1196,9 +1239,9 @@ impl<'body, 'program> Body<'body, 'program> {
             // subject is, whatever fields the case holds.
             Pattern::Value(value)
                 if kind == Kind::Enum
-                    && let Some(case) = self.case_constructor(value) =>
+                    && let Some((r#enum, case)) = self.case_pattern(value) =>
             {
-                Some(Test::case(subject, &case, r#type.is_nullable()).condition())
+                Some(Test::case(subject, case, self.constructors(r#enum), r#type.is_nullable()).condition())
             }
             // A value an object is compared with is `null`: a pattern takes constants, and an object's identity is
             // nothing a law reasons about.
@@ -1398,9 +1441,9 @@ impl<'body, 'program> Body<'body, 'program> {
         let checked = self.checked;
         let receiver = checked.types().expression_type(call.object);
         if let Some(r#enum) = self.joined_enum(receiver)
-            && let Some(machine) = checked.types().machine(word(r#enum))
+            && checked.types().machine(word(r#enum)).is_some()
         {
-            return self.case_call(expression, call, r#enum, machine, receiver);
+            return self.case_call(expression, call, r#enum, receiver);
         }
         let Some(class) = self.receiver_class(call.object) else {
             return "default".to_owned();
@@ -1421,18 +1464,12 @@ impl<'body, 'program> Body<'body, 'program> {
         self.call(expression, target.class.as_bytes(), class, method, Some(receiver), Some(&call.argument_list))
     }
 
-    /// `call` on a value of `r#type`, a union of the machine `machine`'s cases, spec section 20.2, as the case it holds
+    /// `call` on a value of `r#type`, a union of the machine `r#enum`'s cases, spec section 20.2, as the case it holds
     /// runs it: a `match` on the value whose arm for each case of the union calls the method the case's class declares
     /// or inherits. The checker refuses a move called on a union that holds a case it doesn't move from, so each case
-    /// of the union has the method. No other case reaches the call, so its arm is the default.
-    fn case_call(
-        &mut self,
-        expression: &Expression,
-        call: &MethodCall,
-        r#enum: &[u8],
-        machine: &MachineMetadata,
-        r#type: &TUnion,
-    ) -> String {
+    /// of the union has the method. No other value of the machine's Lean type reaches the call, so each one's arm is
+    /// the default.
+    fn case_call(&mut self, expression: &Expression, call: &MethodCall, r#enum: &[u8], r#type: &TUnion) -> String {
         let Some(method) = self.method_name(&call.method) else {
             return "default".to_owned();
         };
@@ -1440,7 +1477,7 @@ impl<'body, 'program> Body<'body, 'program> {
         self.reads(r#enum);
         let held = self.sealed(call.object.span(), r#enum).map(|(_, constructor)| constructor);
         let lean = names::full_name(&self.reached_name(r#enum));
-        let mut alternatives = Vec::new();
+        let mut alternatives: Vec<(String, Choice)> = Vec::new();
         for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
             let TAtomic::Object(TObject::Named(named)) = atomic else {
                 unreachable!("a union of a machine's cases names each case's class, not {}", atomic.get_id());
@@ -1464,8 +1501,10 @@ impl<'body, 'program> Body<'body, 'program> {
             let pattern = held.as_ref().map_or_else(|| pattern.clone(), |held| format!("({held} {pattern})"));
             alternatives.push((pattern, Choice::Branch(branch)));
         }
-        if alternatives.len() < machine.cases.len() {
-            alternatives.push(("_".to_owned(), Choice::Branch(vec!["pure default".to_owned()])));
+        for constructor in self.constructors(r#enum) {
+            if alternatives.iter().all(|(pattern, _)| *pattern != constructor) {
+                alternatives.push((constructor, Choice::Branch(vec!["pure default".to_owned()])));
+            }
         }
 
         self.choose(&Choice::Match(receiver, alternatives))
@@ -2306,8 +2345,9 @@ impl<'body, 'program> Body<'body, 'program> {
         "default".to_owned()
     }
 
-    /// What a value of `r#type` is in Lean. A machine's value, spec section 20.2, and a value of the class an enum's case
-    /// runs as are values of the enum's inductive type, the closed set of its cases, as any enum's are.
+    /// What a value of `r#type` is in Lean. A machine's value, spec section 20.2, a value of an enum whose cases carry
+    /// data, which runs as a class, and a value of the class an enum's case runs as are values of the enum's inductive
+    /// type, the closed set of its cases, as any enum's are.
     pub(super) fn kind(&self, r#type: &TUnion) -> Kind {
         let mut kinds = r#type.types.iter().filter(|atomic| !atomic.is_null()).map(|atomic| match atomic {
             TAtomic::Scalar(TScalar::Integer(_)) => Kind::Int,
@@ -2319,6 +2359,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 let types = self.checked.types();
                 if matches!(types.class_declaration(named.name).kind, DeclarationKind::Enum { .. })
                     || types.machine(named.name).is_some()
+                    || !self.reach.cases(named.name.as_bytes()).is_empty()
                     || self.case_enum(named.name.as_bytes()).is_some()
                 {
                     Kind::Enum

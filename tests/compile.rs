@@ -6350,6 +6350,62 @@ fn a_false_law_over_a_nullable_field_a_move_copies_is_not_proven() {
     assert!(!compiled(root, "app/Runs/Prepared.sharp").exists());
 }
 
+/// `App.Runs.Phase`, an enum of three cases, two of which carry data.
+const PHASE: &str = "namespace App.Runs;\n\npublic enum Phase\n{\n    case Idle;\n    case Busy(int job);\n    case Failed(string reason);\n}\n";
+
+/// `App.Runs.Slot`, a struct that holds a `Phase` beside an int.
+const SLOT: &str = "namespace App.Runs;\n\npublic struct Slot\n{\n    public Slot(public Phase phase { get; }, public int count { get; }) { }\n}\n";
+
+/// `App.Runs.Worker`, whose `Running` case holds a `Slot`, with `advance`, which builds a new slot from its phase and
+/// count, `keep`, which copies the slot, and `laws`.
+fn worker(laws: &str) -> String {
+    format!(
+        "namespace App.Runs;\n\npublic machine Worker\n{{\n    case Running(Slot slot, int position)\n    {{\n        public Worker.Running advance() => Worker.Running(new Slot(this.slot.phase, this.slot.count), this.position + 1);\n\n        public Worker.Running keep() => Worker.Running(this.slot, this.position);\n    }}\n\n    public static Worker.Running start(Slot slot) => Worker.Running(slot, 0);\n\n    {laws}\n}}\n"
+    )
+}
+
+/// A law follows an enum's case a move copies, through a test that names one case of three, as it follows each other
+/// case where the test fails, after a move that builds a new struct around the case and after one that copies it. A
+/// case that carries no data reads as a value pattern beside the cases that do.
+#[test]
+fn a_law_follows_an_enum_s_case_a_move_copies_through_a_test_that_names_one_case() {
+    let laws = "law advancingKeepsThePhase(Slot slot, int position) when position >= 0 => (Worker.Running(slot, position).advance().slot.phase is Phase.Busy(int at) ? (slot.phase is Phase.Busy(int was) ? at == was : false) : slot.phase is Phase.Idle || (slot.phase is Phase.Failed(string reason) ? true : false)) && Worker.Running(slot, position).advance().slot.count == slot.count && Worker.Running(slot, position).advance().position == position + 1;\n    law keepingKeepsThePhase(Slot slot, int position) => Worker.Running(slot, position).keep().slot.phase is Phase.Busy(int at) ? (slot.phase is Phase.Busy(int was) ? at == was : false) : slot.phase is Phase.Idle || (slot.phase is Phase.Failed(string reason) ? true : false);\n    law advancingKeepsIdle(Slot slot, int position) => (Worker.Running(slot, position).advance().slot.phase is Phase.Idle) == (slot.phase is Phase.Idle);";
+    let directory = library_project(&[
+        ("app/Runs/Phase.sharp", PHASE),
+        ("app/Runs/Slot.sharp", SLOT),
+        ("app/Runs/Worker.sharp", &worker(laws)),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Runs/Worker.sharp").exists());
+}
+
+/// A law that claims a move's copy of an enum's case changes the case's data is not proven, and the case's test is
+/// still to show.
+#[test]
+fn a_false_law_over_an_enum_s_case_a_move_copies_is_not_proven() {
+    let law = "law advancingMovesTheJob(Slot slot, int position) => Worker.Running(slot, position).advance().slot.phase is Phase.Busy(int at) ? (slot.phase is Phase.Busy(int was) ? at == was + 1 : false) : slot.phase is Phase.Idle || (slot.phase is Phase.Failed(string reason) ? true : false);";
+    let directory = library_project(&[
+        ("app/Runs/Phase.sharp", PHASE),
+        ("app/Runs/Slot.sharp", SLOT),
+        ("app/Runs/Worker.sharp", &worker(law)),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law advancingMovesTheJob is not proven\n = still to show: Worker.Running(slot, position).advance().slot.phase is Phase.Busy(int at) ? (slot.phase is Phase.Busy(int was) ? at == was + 1 : false) : slot.phase is Phase.Idle || (slot.phase is Phase.Failed(string reason) ? true : false)\n"),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Runs/Worker.sharp").exists());
+}
+
 /// A `List` is Lean's `List`, and its `map`, `filter` and `count` are Lean's `List.map`, `List.filter` and
 /// `List.length`, so Mago proves a law over them with the proof it creates.
 #[test]
