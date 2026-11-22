@@ -752,7 +752,7 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
             vec![issues::rejected_proof(law)]
         }
         // Spec section 20.2: an invariant of a machine is broken by the moves its trace search found, and else by each
-        // entry point or move whose part of its proof stays open.
+        // entry point or move whose part of its proof stays open, with the goal still to show.
         Judgment::Open(steps) if !law.proof.after.is_empty() => {
             let found = steps.iter().find(|step| step.index > law.proof.after.len()).and_then(|step| {
                 let Ok(serde_json::Value::Array(trace)) = serde_json::from_str(&step.goal) else {
@@ -767,8 +767,14 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
                 Some(trace) => vec![issues::broken_invariant(law, &trace)],
                 None => steps
                     .iter()
-                    .filter_map(|step| law.proof.after.get(step.index - 1))
-                    .map(|after| issues::broken_invariant(law, &format!("`{after}`")))
+                    .filter_map(|step| Some((step, law.proof.after.get(step.index - 1)?)))
+                    .map(|(step, after)| {
+                        let names = Names { receivers, declared, arguments: &[] };
+                        let (split, goal) = goal::case(&step.goal, &names);
+                        let issue = issues::unproven_invariant(law, after, &split, goal.as_deref());
+
+                        if step.out_of_time { issues::out_of_time(issue) } else { issue }
+                    })
                     .collect(),
             }
         }

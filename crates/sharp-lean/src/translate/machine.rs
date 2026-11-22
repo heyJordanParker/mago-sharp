@@ -46,7 +46,9 @@ impl Translator<'_, '_> {
     /// The invariants of the machine `r#enum`, spec section 20.2, each a law whose one parameter is one of its cases.
     /// Each one's claim is `<law>.«$claim»`, which computes whether it holds of a value, and its statement says that the
     /// claim holds of each value of its case an entry point gives, and of each one a move gives from a case whose own
-    /// invariants hold. Its theorem first runs `<law>.«$trace»`, the search for the moves that break it.
+    /// invariants hold. Only entry points and moves build a case, so each value of the machine an entry point takes
+    /// holds the invariants of its case too. Its theorem first runs `<law>.«$trace»`, the search for the moves that
+    /// break it.
     pub(super) fn invariants(
         &mut self,
         r#enum: &Enum,
@@ -111,10 +113,24 @@ impl Translator<'_, '_> {
                 uses.push(use_of(&entry_key, format!("{short}.{}", String::from_utf8_lossy(method.name.value))));
                 let binders: Vec<String> =
                     method.parameter_list.parameters.iter().map(|parameter| binder(&mut body, parameter)).collect();
+                let mut premises = Vec::new();
+                for parameter in method.parameter_list.parameters.iter() {
+                    let value = parameter_name(parameter);
+                    let cases = self.held_cases(&machine, parameter.hint.as_ref());
+                    for (held, held_case) in invariants.iter().filter(|(_, held_case)| cases.contains(held_case)) {
+                        let held_claim = claim_of(&names::member(lean, held.name.value));
+                        uses.push(use_of(&held_claim, place.clone()));
+                        premises.push(format!(
+                            "holds (match {value} with | {} => {held_claim} {value} | _ => pure true) → ",
+                            machine.pattern(held_case.as_bytes())
+                        ));
+                    }
+                }
+                let premises = premises.concat();
                 let arguments: Vec<String> = method.parameter_list.parameters.iter().map(parameter_name).collect();
                 after.push(written_call(method));
                 parts.push(format!(
-                    "({}{})",
+                    "({}{premises}{})",
                     quantified(&binders),
                     check(&std::iter::once(entry_key).chain(arguments).collect::<Vec<_>>().join(" "))
                 ));
@@ -412,6 +428,35 @@ impl Translator<'_, '_> {
                 ))
             })
             .collect()
+    }
+
+    /// The cases of `machine` a parameter of the type `hint` may hold, spec section 20.2: each of them for the machine
+    /// itself, the one it names for a case, and each one a union of its cases joins. None for any other type.
+    fn held_cases(&self, machine: &Machine<'_, '_, '_>, hint: Option<&Hint>) -> Vec<Word> {
+        match hint {
+            Some(Hint::Identifier(identifier)) => {
+                let class = self.checked.names().get(identifier);
+
+                machine
+                    .metadata
+                    .cases
+                    .iter()
+                    .map(|case| case.name)
+                    .filter(|case| class == machine.full || class == case_class(machine.full, case.as_bytes()))
+                    .collect()
+            }
+            Some(Hint::Parenthesized(parenthesized)) => self.held_cases(machine, Some(parenthesized.hint)),
+            Some(Hint::Union(union)) => {
+                let left = self.held_cases(machine, Some(union.left));
+                let right = self.held_cases(machine, Some(union.right));
+                if left.is_empty() || right.is_empty() {
+                    return Vec::new();
+                }
+
+                [left, right].concat()
+            }
+            _ => Vec::new(),
+        }
     }
 }
 
