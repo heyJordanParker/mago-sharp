@@ -1,5 +1,6 @@
 use foldhash::HashMap;
 use foldhash::HashSet;
+use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
 
 use mago_word::Word;
@@ -760,6 +761,30 @@ impl SymbolReferences {
             }
         }
         referencing_items
+    }
+
+    /// The symbols and members, and the logical names of the files, whose signatures reference a class-like
+    /// `names` holds, by its lowercase name, or a member of one.
+    #[must_use]
+    pub fn get_signature_references_to_class_likes(&self, names: &WordSet) -> (HashSet<SymbolIdentifier>, WordSet) {
+        let reaches_one = |references: &HashSet<SymbolIdentifier>| {
+            references.iter().any(|(class_like, _)| names.contains(&ascii_lowercase_word(class_like.as_bytes())))
+        };
+        let symbols = self
+            .symbol_references_to_symbols_in_signature
+            .iter()
+            .chain(&self.attribute_references_in_signature)
+            .filter(|(_, references)| reaches_one(references))
+            .map(|(referencing, _)| *referencing)
+            .collect();
+        let files = self
+            .file_references_to_symbols_in_signature
+            .iter()
+            .filter(|(_, references)| reaches_one(references))
+            .map(|(file, _)| *file)
+            .collect();
+
+        (symbols, files)
     }
 
     /// Returns whether a body or signature reference to a symbol originates from top-level file code.

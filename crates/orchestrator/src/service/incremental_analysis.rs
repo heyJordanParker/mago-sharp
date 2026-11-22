@@ -1164,28 +1164,39 @@ impl IncrementalAnalysisService {
         let namespace_classes = &self.namespace_classes;
         let extern_namespaces = &self.extern_namespaces;
         let reach = self.autoloader.is_some();
-        let (scanned_files, reached): (Vec<_>, Vec<WordSet>) = changed_files
-            .into_par_iter()
-            .map_init(LocalArena::new, |arena, file| {
-                let (metadata, codebase_scan, _, reached) = scan_file(
-                    arena,
-                    file,
-                    parser_settings,
-                    php_version,
-                    codebase_scan_plan.as_deref(),
-                    namespace_classes,
-                    extern_namespaces,
-                    reach,
-                )?;
+        let scan = |files: Vec<&Arc<File>>| {
+            files
+                .into_par_iter()
+                .map_init(LocalArena::new, |arena, file| {
+                    let (metadata, codebase_scan, _, reached) = scan_file(
+                        arena,
+                        file,
+                        parser_settings,
+                        php_version,
+                        codebase_scan_plan.as_deref(),
+                        namespace_classes,
+                        extern_namespaces,
+                        reach,
+                    )?;
 
-                arena.reset();
+                    arena.reset();
 
-                Ok(((file.id, metadata, codebase_scan), reached))
-            })
-            .collect::<Result<Vec<_>, mago_analyzer::external::ExternalAnalyzerError>>()
-            .map_err(mago_analyzer::error::AnalysisError::from)?
-            .into_iter()
-            .unzip();
+                    Ok(((file.id, metadata, codebase_scan), reached))
+                })
+                .collect::<Result<Vec<_>, mago_analyzer::external::ExternalAnalyzerError>>()
+                .map_err(mago_analyzer::error::AnalysisError::from)
+        };
+        let mut scans = scan(changed_files)?;
+        let (removed_class_likes, naming_removed) = self.removed_class_likes(
+            scans.iter().map(|((file_id, metadata, _), _)| (*file_id, metadata)),
+            &current_file_ids,
+            &unchanged_file_ids,
+        );
+        if !naming_removed.is_empty() {
+            unchanged_file_ids.retain(|file_id| !naming_removed.contains(file_id));
+            scans.extend(scan(source_files.iter().filter(|file| naming_removed.contains(&file.id)).collect())?);
+        }
+        let (scanned_files, reached): (Vec<_>, Vec<WordSet>) = scans.into_iter().unzip();
 
         // A changed file that reaches a class-like no file declares, whose file the autoloader serves, needs the
         // rounds of an analysis from scratch.
@@ -1305,6 +1316,26 @@ impl IncrementalAnalysisService {
             }
 
             diff.extend(CodebaseDiff::between(&old_sigs, &new_sigs));
+            // A removed class-like leaves the descendants of each class-like it extended, implemented or used, and the
+            // set a sealed interface permits, so each of those changes for what reads it, as an added one changes it.
+            diff.extend(
+                CodebaseDiff::new().with_changed(
+                    self.codebase
+                        .class_likes
+                        .iter()
+                        .filter(|(name, _)| {
+                            removed_class_likes.contains(&mago_word::ascii_lowercase_word(name.as_bytes()))
+                        })
+                        .flat_map(|(_, class_like)| {
+                            class_like
+                                .direct_parent_class
+                                .iter()
+                                .chain(&class_like.direct_parent_interfaces)
+                                .chain(&class_like.used_traits)
+                                .map(|parent| (*parent, mago_word::empty_word()))
+                        }),
+                ),
+            );
             diff
         };
 
@@ -1636,11 +1667,16 @@ impl IncrementalAnalysisService {
                 .map(|(end, _)| mago_word::ascii_lowercase_word(&name[..end]))
                 .collect::<Vec<_>>()
         };
+        // A class-like that is gone counts too, so its namespace and its name are checked as an added one's are.
         let scanned_class_likes: WordSet =
             new_file_scans.iter().flat_map(|(_, metadata)| metadata.class_likes.keys().copied()).collect();
-        let scanned_namespaces: WordSet = scanned_class_likes.iter().flat_map(namespaces_of).collect();
-        let scanned_lowercase_class_likes: WordSet =
-            scanned_class_likes.iter().map(|name| mago_word::ascii_lowercase_word(name.as_bytes())).collect();
+        let scanned_namespaces: WordSet =
+            scanned_class_likes.iter().chain(&removed_class_likes).flat_map(namespaces_of).collect();
+        let scanned_lowercase_class_likes: WordSet = scanned_class_likes
+            .iter()
+            .map(|name| mago_word::ascii_lowercase_word(name.as_bytes()))
+            .chain(removed_class_likes.iter().copied())
+            .collect();
 
         let mut merged_codebase = std::mem::take(&mut self.codebase);
 
@@ -1661,19 +1697,6 @@ impl IncrementalAnalysisService {
         }
         self.apply_scan_results(&mut merged_codebase, &new_file_scans);
 
-        // Population turns a class name into an object type only while the class-like exists, and
-        // never turns it back. An unchanged file would keep a type resolved against a class-like
-        // that is now gone, so a full analysis resolves every type again, as a cold run does.
-        let class_like_removed = new_file_scans
-            .iter()
-            .map(|(file_id, _)| file_id)
-            .chain(self.file_states.keys().filter(|file_id| !current_file_ids.contains(file_id)))
-            .filter_map(|file_id| self.file_states.get(file_id))
-            .flat_map(|state| &state.entry_keys.class_like_names)
-            .any(|&name| merged_codebase.symbols.get_kind(name).is_none());
-        if class_like_removed {
-            return self.analyze();
-        }
         // Population refuses a PHP# bound that names a missing type, and only a scan reads the bound again, so a
         // class-like declared under a name such a bound writes runs a full analysis too.
         if names_a_refused_bound_type(&merged_codebase, &scanned_class_likes) {
@@ -1910,6 +1933,79 @@ impl IncrementalAnalysisService {
     /// no read of their own, so only an analysis of every file finds what each file read again, as a cold run does.
     fn dropped_a_read(&self, held: &FileReads) -> bool {
         !extension_reads(&self.file_states, &self.before_analysis_reads).includes(held)
+    }
+
+    /// Each class-like, by its lowercase name, that the files `scanned` and the files no longer in `current` declared
+    /// before this run and that no file `scanned` declares now, and the files of `unchanged` whose declarations name
+    /// one. Population turns a class-like's name into an object type only while the class-like exists, and never turns
+    /// it back, so each such file is scanned again, as an edit of it is, and populated from its own scan: a declaration
+    /// that names the class-like, the class-like a class extends or implements, and a module's service binding.
+    fn removed_class_likes<'scan>(
+        &self,
+        scanned: impl Iterator<Item = (FileId, &'scan CodebaseMetadata)>,
+        current: &HashSet<FileId>,
+        unchanged: &[FileId],
+    ) -> (WordSet, HashSet<FileId>) {
+        let mut gone_from: Vec<FileId> =
+            self.file_states.keys().filter(|file_id| !current.contains(file_id)).copied().collect();
+        let mut declared = WordSet::default();
+        for (file_id, metadata) in scanned {
+            gone_from.push(file_id);
+            declared.extend(metadata.class_likes.keys().map(|name| mago_word::ascii_lowercase_word(name.as_bytes())));
+        }
+        let removed: WordSet = gone_from
+            .iter()
+            .filter_map(|file_id| self.file_states.get(file_id))
+            .flat_map(|state| &state.entry_keys.class_like_names)
+            .map(|name| mago_word::ascii_lowercase_word(name.as_bytes()))
+            .filter(|name| !declared.contains(name))
+            .collect();
+        if removed.is_empty() {
+            return (removed, HashSet::default());
+        }
+        let names_removed = |name: mago_word::Word| removed.contains(&mago_word::ascii_lowercase_word(name.as_bytes()));
+
+        // A member's references come from its class-like, a function's from its name, and a closure's from its key.
+        let (symbols, file_names) = self.native_symbol_references.get_signature_references_to_class_likes(&removed);
+        let owners: WordSet =
+            symbols.iter().map(|(symbol, member)| if symbol.is_empty() { *member } else { *symbol }).collect();
+        let owner = |(scope, name): &(mago_word::Word, mago_word::Word)| if scope.is_empty() { *name } else { *scope };
+        let binding_files: HashSet<FileId> = self
+            .codebase
+            .modules
+            .iter()
+            .filter(|module| {
+                module.bindings.iter().any(|binding| {
+                    binding
+                        .service
+                        .type_union
+                        .get_all_child_nodes()
+                        .into_iter()
+                        .filter_map(TypeRef::named_class_like)
+                        .any(names_removed)
+                })
+            })
+            .map(|module| module.span.file_id)
+            .collect();
+
+        let naming = unchanged
+            .iter()
+            .copied()
+            .filter(|file_id| {
+                binding_files.contains(file_id)
+                    || self.file_states.get(file_id).is_some_and(|state| {
+                        let keys = &state.entry_keys;
+                        keys.class_like_names.iter().chain(&keys.constant_names).any(|name| owners.contains(name))
+                            || keys.function_like_keys.iter().any(|key| owners.contains(&owner(key)))
+                    })
+                    || self
+                        .database
+                        .get_ref(file_id)
+                        .is_ok_and(|file| file_names.contains(&mago_word::word(file.name.as_ref())))
+            })
+            .collect();
+
+        (removed, naming)
     }
 
     /// Analyzes a single file and returns both its issues and the
@@ -6545,6 +6641,46 @@ mod tests {
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
         assert_matches_full(&service, &db, "the type-hinted class was added back");
+    }
+
+    /// A class-like that is renamed or deleted is read again by the files that name it alone: one whose signature names
+    /// it, one whose class extends it, and one whose body makes it. A file that never names it keeps its analysis, and
+    /// every file reports what a full analysis reports.
+    #[test]
+    fn test_watch_a_removed_class_analyzes_again_only_the_files_that_name_it() {
+        let class = |name: &str| format!("<?php\nnamespace Lib;\n\nclass {name}\n{{\n}}\n");
+        let hint = "<?php\nnamespace Lib;\n\nclass Hint\n{\n    public function f(?A $a = null): void {}\n}\n";
+        let child = "<?php\nnamespace Lib;\n\nclass Child extends A\n{\n}\n";
+        let make = "<?php\nnamespace Lib;\n\nfunction make(): object\n{\n    return new A();\n}\n";
+        let other = "<?php\nnamespace Lib;\n\nclass Other\n{\n    public function g(): int { return 1; }\n}\n";
+        let mut db = make_database(vec![
+            ("src/A.php", class("A").as_str()),
+            ("src/Hint.php", hint),
+            ("src/Child.php", child),
+            ("src/make.php", make),
+            ("src/Other.php", other),
+        ]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        let [a, hint, child, make] =
+            ["src/A.php", "src/Hint.php", "src/Child.php", "src/make.php"].map(|name| FileId::new(name.as_bytes()));
+
+        db.update(a, Cow::Owned(class("Renamed").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_eq!(service.analyzed_files, HashSet::from_iter([a, hint, child, make]), "the class was renamed");
+        assert_matches_full(&service, &db, "the class was renamed");
+
+        db.update(a, Cow::Owned(class("A").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "the class was named back");
+
+        db.delete(a);
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_eq!(service.analyzed_files, HashSet::from_iter([hint, child, make]), "the class was deleted");
+        assert_matches_full(&service, &db, "the class was deleted");
     }
 
     /// Every recorded reference names a class-like or function by the lowercase name its declaration has, however
