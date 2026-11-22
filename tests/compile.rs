@@ -4369,6 +4369,56 @@ fn a_trace_takes_only_values_of_a_machine_that_keep_its_invariants() {
     );
 }
 
+/// `App.Trail`, a machine whose `Open` case holds ids its invariant keeps non-empty, and whose move `finish` gives the
+/// `Done` that `finish` builds.
+fn trail(finish: &str) -> String {
+    format!(
+        "namespace App;\n\npublic machine Trail\n{{\n    case Open(List<int> ids)\n    {{\n        public Trail.Done finish() => {finish};\n    }}\n\n    final case Done(List<int> ids);\n\n    public static Trail.Open start(int id) => Trail.Open([id]);\n\n    law openHoldsOne(Trail.Open o) => o.ids.count() > 0;\n\n    law doneHoldsOne(Trail.Done d) => d.ids.count() > 0;\n}}\n"
+    )
+}
+
+/// Spec section 20.2: a move or an entry point that gives a case keeps its invariant from every invariant of the case
+/// it starts from, whichever case it gives and whichever invariant of its own case it needs. A move that breaks the
+/// invariant of the case it gives is still refused with the moves that break it.
+#[test]
+fn a_machine_s_invariant_holds_from_every_invariant_of_the_case_a_move_starts_from() {
+    let directory = library_project(&[
+        ("app/Trail.sharp", &trail("Trail.Done(this.ids)")),
+        (
+            "app/Tally.sharp",
+            "namespace App;\n\npublic machine Tally\n{\n    case Open(int n)\n    {\n        public Tally.Done finish() => Tally.Done(this.n);\n    }\n\n    final case Done(int n);\n\n    public static Tally.Open start() => Tally.Open(1);\n\n    law openIsPositive(Tally.Open o) => o.n > 0;\n\n    law doneIsPositive(Tally.Done d) => d.n > 0;\n}\n",
+        ),
+        (
+            "app/Ledger.sharp",
+            "namespace App;\n\npublic machine Ledger\n{\n    final case Open(List<int> ids);\n\n    final case Closed(List<int> ids);\n\n    public static Ledger.Open start(int id) => Ledger.Open([id]);\n\n    public static Ledger close(Ledger ledger) => ledger is Ledger.Open open ? Ledger.Closed(open.ids) : ledger;\n\n    law openHoldsOne(Ledger.Open open) => open.ids.count() > 0;\n\n    law closedHoldsOne(Ledger.Closed closed) => closed.ids.count() > 0;\n}\n",
+        ),
+        (
+            "app/Climb.sharp",
+            "namespace App;\n\npublic machine Climb\n{\n    case Counting(int n)\n    {\n        public Climb.Counting up() => Climb.Counting(this.n + 1);\n\n        public Climb.Done stop() => Climb.Done;\n    }\n\n    final case Done;\n\n    public static Climb.Counting start() => Climb.Counting(1);\n\n    law positive(Climb.Counting counting) => counting.n > 0;\n\n    law nonZero(Climb.Counting counting) => counting.n != 0;\n}\n",
+        ),
+    ]);
+
+    let output = compile(directory.path());
+
+    assert!(output.status.success(), "{}", printed(&output));
+    for file in ["app/Trail.sharp", "app/Tally.sharp", "app/Ledger.sharp", "app/Climb.sharp"] {
+        assert!(compiled(directory.path(), file).exists(), "{file}");
+    }
+
+    let directory = library_project(&[("app/Trail.sharp", &trail("Trail.Done([])"))]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: `doneHoldsOne` breaks after `start(id: 0) → Open(ids: …)`, `finish() → Done(ids: …)`\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// A machine whose second law names a parameter `until` and whose `Going` case holds a field `while`, two of Lean's
 /// own words.
 const SUBSCRIPTION_STATUS: &str = "namespace App.Repro;\n\nimport Sharp.Time.Instant;\n\npublic machine SubscriptionStatus\n{\n    case Waiting\n    {\n        public SubscriptionStatus.Going go(Instant at) => SubscriptionStatus.Going(at, 0);\n    }\n\n    case Going(Instant at, int @while)\n    {\n        public SubscriptionStatus.Paused pause() => SubscriptionStatus.Paused;\n        public SubscriptionStatus.Done finish() => SubscriptionStatus.Done;\n    }\n\n    case Paused\n    {\n        public SubscriptionStatus.Done end() => SubscriptionStatus.Done;\n    }\n\n    final case Done;\n\n    public static SubscriptionStatus.Waiting enter() => SubscriptionStatus.Waiting;\n\n    law goingHoldsTheTime(Instant at) => SubscriptionStatus.enter().go(at).at == at;\n    law pausingHoldsTheResume(Instant at, Instant until) => SubscriptionStatus.enter().go(at).pause() is SubscriptionStatus.Paused;\n}\n";

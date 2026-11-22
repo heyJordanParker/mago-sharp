@@ -4,7 +4,7 @@ import Sharp.Lean.Law
 /-!
 The steps of the proof Mago writes for a PHP# law, from its body or, for a law without one, from its claim alone.
 
-A law without a body is proven by `sharp_prove`, which unfolds every definition its claim reaches. Each case of a body
+A law without a body is proven by `sharp_prove`, which unfolds every definition its claim and its premises reach. Each case of a body
 ends in `sharp_close`, which closes the case with Lean's automatic steps and the facts in scope, on the claim as it
 stands, with each definition the claim calls unfolded once, or with those definitions as `simp` rewrites, and then with
 every definition they reach that does not recurse as one too. The facts
@@ -132,10 +132,11 @@ private def definedAs (name : Name) : MetaM (Option Expr) := do
     return some (← inferType (← mkConstWithLevelParams equation))
   return (← getEnv).find? name |>.bind (·.value?)
 
-/-- Each definition `e` names, and each one those definitions name, transitively. -/
-private partial def reached (e : Expr) : MetaM (Array Name) := do
+/-- Each definition one of `es` names, and each one those definitions name, transitively. -/
+private partial def reached (es : Array Expr) : MetaM (Array Name) := do
   let mut found := #[]
-  let mut pending ← definitionsIn e
+  let mut pending := #[]
+  for e in es do pending := pending ++ (← definitionsIn e)
   while !pending.isEmpty do
     let name := pending.back!
     pending := pending.pop
@@ -144,6 +145,14 @@ private partial def reached (e : Expr) : MetaM (Array Name) := do
     if let some body ← definedAs name then
       pending := pending ++ (← definitionsIn body)
   return found
+
+/-- The main goal and the type of each fact in its scope. -/
+private def goalAndFacts : TacticM (Array Expr) := do
+  (← getMainGoal).withContext do
+    let mut found := #[← getMainTarget]
+    for declaration in ← getLCtx do
+      unless declaration.isImplementationDetail do found := found.push (← instantiateMVars declaration.type)
+    return found
 
 /-- The statement of each law a fact in scope of the main goal is the theorem of. -/
 private def lawsInScope : TacticM (Array Name) := do
@@ -294,8 +303,9 @@ private def enumCases (enums : Array Name) : TacticM (Array (MVarId × Array (Na
     split := next
   return split
 
-/-- Proves a law without a body, whose case `index` is its whole claim: unfolds a recursive definition the claim reaches
-once, and every other one as `simp` rewrites, then runs the automatic steps. A claim over values the law writes out,
+/-- Proves a law without a body, whose case `index` is its whole claim: unfolds a recursive definition the claim or a
+fact in its scope reaches once, and every other one as `simp` rewrites, then runs the automatic steps, so a premise
+that names a definition, as an invariant of the case a move starts from, reads what it computes as the claim does. A claim over values the law writes out,
 as `Money.total([new Money(1, "EUR")])`, needs each recursion unfolded until it ends, so the steps then run with the
 recursive definitions as `simp` rewrites too. A claim over an enum or a sealed interface the law takes, as
 `retry.backoff()[index]` over a `Retry`, reads what each case computes, so the steps then run on each case of each enum, as a body's `match` on each
@@ -304,7 +314,7 @@ syntax "sharp_prove " num " [" ident,* "]" : tactic
 
 elab_rules : tactic
   | `(tactic| sharp_prove $index [$conditions,*]) => do
-    let definitions ← reached (← getMainTarget)
+    let definitions ← reached (← goalAndFacts)
     let recursive ← definitions.filterM fun definition => isRecursiveDefinition definition
     let laws ← lawsInScope
     let enums ← enumsInScope
@@ -334,7 +344,7 @@ syntax "sharp_close " num " [" ident,* "]" : tactic
 elab_rules : tactic
   | `(tactic| sharp_close $index [$conditions,*]) => do
     let definitions ← definitionsIn (← getMainTarget)
-    let reaching ← (← reached (← getMainTarget)).filterM fun definition => do
+    let reaching ← (← reached #[← getMainTarget]).filterM fun definition => do
       return !definitions.contains definition && !(← isRecursiveDefinition definition)
     let laws ← lawsInScope
     let unfolded : TacticM Unit := do
