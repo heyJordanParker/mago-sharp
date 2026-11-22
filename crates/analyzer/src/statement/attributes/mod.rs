@@ -47,6 +47,9 @@ pub enum AttributeTarget {
     ClassLike,
     Method,
     Property,
+    /// A property written `extern`, which its plain PHP parent's `__get` and `__set` serve, spec section 14.3. PHP
+    /// takes it as a property.
+    ExternProperty,
     Parameter,
     PromotedProperty,
     ClassLikeConstant,
@@ -59,7 +62,7 @@ impl AttributeTarget {
         match self {
             Self::ClassLike => "a class, interface, enum, or trait",
             Self::Method => "a method",
-            Self::Property => "a property",
+            Self::Property | Self::ExternProperty => "a property",
             Self::Parameter => "a parameter",
             Self::PromotedProperty => "a promoted property",
             Self::ClassLikeConstant => "a class constant",
@@ -380,7 +383,7 @@ where
             let is_valid_target = match target {
                 AttributeTarget::ClassLike => flags.targets_class(),
                 AttributeTarget::Method => flags.targets_method(),
-                AttributeTarget::Property => flags.targets_property(),
+                AttributeTarget::Property | AttributeTarget::ExternProperty => flags.targets_property(),
                 AttributeTarget::Parameter => flags.targets_parameter(),
                 AttributeTarget::PromotedProperty => flags.targets_property() || flags.targets_parameter(),
                 AttributeTarget::ClassLikeConstant => flags.targets_class_constant(),
@@ -414,11 +417,12 @@ fn list_target(list: &AttributeList, declared: AttributeTarget) -> AttributeTarg
 /// constructor of a type with the `parse` spec section 10 gives a struct or a PHP# class, the one place it renames the
 /// key that `parse` reads, or a class-like or a case of an enum marked `[Tag]` whose cases carry data, where it names
 /// a variant of a family. The family check refuses a `[Key]` on a class-like that is no variant. Such an enum runs as
-/// an abstract class, spec section 20, so its cases are what tell it apart.
+/// an abstract class, spec section 20, so its cases are what tell it apart. On an `extern` property it names the key
+/// the plain PHP parent's `__get` and `__set` receive, spec section 14.3.
 fn is_keyed_place(codebase: &CodebaseMetadata, block_context: &BlockContext<'_>, target: AttributeTarget) -> bool {
     let class = block_context.scope.get_class_like();
     match target {
-        AttributeTarget::ClassLike => true,
+        AttributeTarget::ClassLike | AttributeTarget::ExternProperty => true,
         AttributeTarget::ClassLikeConstant => {
             class.is_some_and(|class| class.tag_key().is_some() && !data_cases(codebase, class).is_empty())
         }

@@ -7776,6 +7776,36 @@ fn an_extern_property_states_the_type_of_what_a_plain_php_get_gives() {
     );
 }
 
+/// Spec sections 1 and 14.3: the attributes of an `extern` property are checked as any property's are, so each
+/// expression of their arguments has its type, the ones a `new` inside an argument holds included: a class constant a
+/// template reads, an enum case's `value` and a map literal. An argument its parameter doesn't take is an error.
+#[test]
+fn the_attributes_of_an_extern_property_are_checked_as_any_property_s_are() {
+    let model = "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return null;\n    }\n\n    public function __set(string $name, mixed $value): void\n    {\n    }\n}\n";
+    let config = "namespace Demo;\n\npublic final class Config\n{\n    public Config(string? help = null, Any? @default = null, Any? placeholder = null) { }\n}\n";
+    let field = "namespace Demo;\n\n[Attribute]\npublic final class Field\n{\n    public Field(string label, Config? config = null) { }\n}\n";
+    let visibility = "namespace Demo;\n\npublic enum Visibility : string { case Public = \"public\"; }\n";
+    let sheet = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Sheet : Model\n{\n    public const string LAYERS = \"reset, theme\";\n\n    [Field(label: \"Layer\", config: new Config(help: `Serves into ${Sheet.LAYERS}.`))]\n    public extern string? layer { get; set; }\n\n    [Field(label: \"Who\", config: new Config(@default: Visibility.Public.value))]\n    public extern Visibility visibility { get; set; }\n\n    [Field(label: \"Headers\", config: new Config(placeholder: [\"name\": \"Authorization\", \"value\": \"Bearer key\"]))]\n    public extern Map<string, string> headers { get; set; }\n\n    [Field(label: 5)]\n    public extern string? note { get; set; }\n}\n";
+    let library = [
+        ("src/Lib/Model.php", model),
+        ("src/Demo/Config.sharp", config),
+        ("src/Demo/Field.sharp", field),
+        ("src/Demo/Visibility.sharp", visibility),
+    ];
+
+    let (issues, artifacts) =
+        analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sheet.sharp", sheet), &library);
+    let typed = |read: &str| {
+        let start = sheet.find(read).unwrap() as u32;
+        artifacts.expression_types.contains_key(&(start, start + read.len() as u32))
+    };
+
+    for read in ["Sheet.LAYERS", "Visibility.Public", "[\"name\": \"Authorization\", \"value\": \"Bearer key\"]"] {
+        assert!(typed(read), "{read} has no type");
+    }
+    assert_eq!(issues.iter().map(|issue| located(sheet, issue)).collect::<Vec<_>>(), ["18:19 invalid-argument"]);
+}
+
 /// Spec section 14.3: a PHP# class reaches a property its plain PHP parent's `__get` and `__set` serve only through an
 /// `extern` property, which states its type and, with `set`, takes writes `__set` stores. A name no `extern` property
 /// and no line of the library declares is refused, read or written, and so is a property the class would keep in
@@ -7785,7 +7815,7 @@ fn a_property_a_plain_php_parent_stores_is_reached_through_an_extern_property() 
     let model = "<?php\n\nnamespace Lib;\n\n/** @property-read int $id */\nabstract class Model\n{\n    /** @var array<string, mixed> */\n    private array $attributes = [];\n\n    public function __get(string $key): mixed\n    {\n        return $this->attributes[$key] ?? null;\n    }\n\n    public function __set(string $key, mixed $value): void\n    {\n        $this->attributes[$key] = $value;\n    }\n}\n";
     let order = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public extern string email { get; set; }\n\n    [Key(\"total_cents\")]\n    public extern int totalCents { get; private set; }\n\n    public string name { get; set; } = \"\";\n\n    private int cached = 0;\n\n    public void fill()\n    {\n        this.email = 5;\n        this.emailAddress = \"x\";\n        this.email = \"a@b.co\";\n        this.totalCents = this.id + this.cached;\n    }\n}\n";
     let report = "namespace Demo;\n\npublic class Report\n{\n    public static string read(Order order) => order.email;\n\n    public static Any? anything(Order order) => order.anything;\n\n    public static void price(Order order) { order.totalCents = 3; }\n}\n";
-    let library = [("src/Lib/Model.php", model)];
+    let library = [("src/Lib/Model.php", model), KEY];
 
     assert_eq!(
         refusals(("src/Demo/Order.sharp", order), &library),

@@ -76,7 +76,6 @@ use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
-use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
@@ -1708,10 +1707,9 @@ where
 
                 class_like_constant.analyze(context, &mut block_context, artifacts)?;
             }
-            ClassLikeMember::Property(property)
-                if property.modifiers().iter().any(|modifier| matches!(modifier, Modifier::Extern(_))) =>
-            {
+            ClassLikeMember::Property(property) if property::is_extern(property) => {
                 property::check_extern_property(context, class_like_metadata, property);
+                property.analyze(context, &mut block_context, artifacts)?;
             }
             ClassLikeMember::Property(property) => {
                 if context.settings.diff {

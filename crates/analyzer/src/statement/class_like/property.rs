@@ -30,6 +30,7 @@ use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::HookedProperty;
+use mago_syntax::cst::Modifier;
 use mago_syntax::cst::PlainProperty;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyBehaviorList;
@@ -195,19 +196,29 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Property<'arena> {
         // An initial value that reads `Class.name` runs as code, though PHP would read it as a constant expression, as
         // `Property::initial_value_runs_as_code` decides for the checker and the engine too.
         let runs_as_code = self.initial_value_runs_as_code();
+        let target = if is_extern(self) { AttributeTarget::ExternProperty } else { AttributeTarget::Property };
         match self {
-            Property::Plain(plain) => analyze_plain_property(plain, runs_as_code, context, block_context, artifacts),
+            Property::Plain(plain) => {
+                analyze_plain_property(plain, runs_as_code, target, context, block_context, artifacts)
+            }
             Property::Hooked(hooked) => {
-                analyze_hooked_property(hooked, runs_as_code, context, block_context, artifacts)
+                analyze_hooked_property(hooked, runs_as_code, target, context, block_context, artifacts)
             }
             Property::Computed(computed) => computed.analyze(context, block_context, artifacts),
         }
     }
 }
 
+/// Whether `property` is written `extern`, the property its plain PHP parent's `__get` gives and `__set` stores, spec
+/// section 14.3.
+pub(crate) fn is_extern(property: &Property<'_>) -> bool {
+    property.modifiers().iter().any(|modifier| matches!(modifier, Modifier::Extern(_)))
+}
+
 fn analyze_plain_property<'ctx, 'arena, A>(
     property: &PlainProperty<'arena>,
     runs_as_code: bool,
+    target: AttributeTarget,
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
@@ -215,13 +226,7 @@ fn analyze_plain_property<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    analyze_attributes(
-        context,
-        block_context,
-        artifacts,
-        property.attribute_lists.as_slice(),
-        AttributeTarget::Property,
-    )?;
+    analyze_attributes(context, block_context, artifacts, property.attribute_lists.as_slice(), target)?;
 
     for item in &property.items {
         if let PropertyItem::Concrete(item) = item {
@@ -361,6 +366,7 @@ where
 fn analyze_hooked_property<'ctx, 'arena, A>(
     property: &HookedProperty<'arena>,
     runs_as_code: bool,
+    target: AttributeTarget,
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
@@ -368,13 +374,7 @@ fn analyze_hooked_property<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    analyze_attributes(
-        context,
-        block_context,
-        artifacts,
-        property.attribute_lists.as_slice(),
-        AttributeTarget::Property,
-    )?;
+    analyze_attributes(context, block_context, artifacts, property.attribute_lists.as_slice(), target)?;
     let name = property.item.variable().name;
     if let PropertyItem::Concrete(item) = &property.item {
         analyze_default_value(name, item.value, runs_as_code, context, block_context, artifacts)?;

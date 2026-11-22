@@ -2974,6 +2974,39 @@ fn compile_refuses_a_php_sharp_file_after_an_edit_of_the_vendor_file_it_calls() 
     assert!(!compiled(root, "app/Paced.sharp").exists());
 }
 
+/// Spec sections 1 and 14.3: an `extern` property of a database entity takes an attribute whose argument is a `new`
+/// of constants, as any property does, and its file compiles, whatever the `new` holds: a template that reads a class
+/// constant, an enum case's `value`, a map literal or a plain string, two properties of one shape in one file included.
+#[test]
+fn an_extern_property_whose_attribute_holds_a_new_of_constants_compiles() {
+    let directory = library_project(&[
+        (
+            "app/DatabaseEntity.php",
+            "<?php\n\nnamespace App;\n\nabstract class DatabaseEntity\n{\n    private array $stored = [];\n\n    public function __get(string $name): mixed { return $this->stored[$name] ?? null; }\n    public function __set(string $name, mixed $value): void { $this->stored[$name] = $value; }\n}\n",
+        ),
+        (
+            "app/Designer/Config.sharp",
+            "namespace App.Designer;\n\npublic final class Config\n{\n    public Config(string? help = null, string? @default = null, Map<string, string>? placeholder = null) { }\n}\n",
+        ),
+        (
+            "app/Designer/Field.sharp",
+            "namespace App.Designer;\n\n[Attribute]\npublic final class Field\n{\n    public Field(string label, Config? config = null) { }\n}\n",
+        ),
+        (
+            "app/Designer/Visibility.sharp",
+            "namespace App.Designer;\n\npublic enum Visibility : string { case Public = \"public\"; }\n",
+        ),
+        (
+            "app/Designer/Sheet.sharp",
+            "namespace App.Designer;\n\nimport App.DatabaseEntity;\n\npublic class Sheet : DatabaseEntity\n{\n    public const string LAYERS = \"reset, theme\";\n\n    [Field(label: \"Layer\", config: new Config(help: `Serves into ${Sheet.LAYERS}.`))]\n    public extern string? layer { get; set; }\n\n    [Field(label: \"Who\", config: new Config(@default: Visibility.Public.value))]\n    public extern Visibility visibility { get; set; }\n\n    [Field(label: \"Audience\", config: new Config(@default: Visibility.Public.value))]\n    public extern Visibility audience { get; set; }\n\n    [Field(label: \"Headers\", config: new Config(placeholder: [\"name\": \"Authorization\", \"value\": \"Bearer key\"]))]\n    public extern Map<string, string> headers { get; set; }\n\n    [Field(label: \"Plain\", config: new Config(help: \"x\"))]\n    public extern string? plain { get; set; }\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    compile_succeeds(root);
+    assert!(compiled(root, "app/Designer/Sheet.sharp").exists());
+}
+
 /// A plain PHP class that implements a PHP# interface is no input of any compiled file, so every compiled file stays
 /// current when the class changes or a new one appears, though the compile refuses it.
 #[test]
